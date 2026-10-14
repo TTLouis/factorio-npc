@@ -128,10 +128,13 @@ test('tools-disabled recovery cannot turn an unresolved identity into a craft mu
   assert.equal(result.blocker.code, 'unknown_recipe')
   assert.equal(rcon.mutations.length, 0)
 
+  // The terminal blocked end also pauses the run (guard class, blocked_<code>), so the stop is visible and no timer resumes it.
   const state = memory.currentPlan('npc:sgluna')
-  assert.equal(state.status, 'blocked')
+  assert.equal(state.status, 'paused')
+  assert.equal(state.pause_reason, 'blocked_unknown_recipe')
+  assert.equal(state.pause_class, 'guard')
   assert.equal(state.admission_status, 'admission_failed')
-  assert.equal(state.task_board.status, 'blocked')
+  assert.equal(state.task_board.status, 'paused')
   assert.equal(state.task_board.active_index, 0)
   assert.equal(memory.byNpc.get('npc:sgluna').recent.length, 1)
 })
@@ -153,7 +156,10 @@ test('gather_resource tree identity is rejected deterministically before mutatio
   assert.equal(result.blocker.expected_type, 'resource')
   assert.equal(result.blocker.observed_type, 'tree')
   assert.equal(rcon.mutations.length, 0)
-  assert.equal(memory.currentPlan('npc:sgluna').status, 'blocked')
+  const state = memory.currentPlan('npc:sgluna')
+  assert.equal(state.status, 'paused')
+  assert.equal(state.pause_reason, 'blocked_invalid_target_kind')
+  assert.equal(state.pause_class, 'guard')
 })
 
 for (const { label, operation, code } of [
@@ -380,12 +386,12 @@ test('a code nobody listed anywhere gets the correction turn because its produce
 })
 
 test('a world-class refusal gets the world-correction message, not the argument one, even when its code is one the model could once correct', async () => {
-  const { harness, traced, result } = await runWithMockRefusal({ code: 'unknown_prototype', refusal_class: 'world' })
+  const { harness, traced, result } = await runWithMockRefusal({ code: 'invalid_resource_count', refusal_class: 'world' })
   assert.equal(harness.filter(content => content.includes('naming/argument error')).length, 0)
-  assert.equal(harness.filter(content => content.includes('was refused before admission: unknown_prototype')).length, 1)
+  assert.equal(harness.filter(content => content.includes('was refused before admission: invalid_resource_count')).length, 1)
   const recoverable = traced.filter(row => row.event === 'operations.preflight_recoverable')
   assert.equal(recoverable.length, 1)
-  assert.equal(recoverable[0].data.failure_class, 'world_correction_unknown_prototype')
+  assert.equal(recoverable[0].data.failure_class, 'world_correction_invalid_resource_count')
   assert.equal(recoverable[0].data.refusal_class, 'world')
   assert.equal(traced.filter(row => row.event === 'operations.preflight_unclassified').length, 0)
   assert.equal(traced.filter(row => row.event === 'operations.preflight_rejected').length, 0, 'the correction turn did not end the request')

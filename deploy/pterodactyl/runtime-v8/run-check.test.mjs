@@ -788,4 +788,8 @@ test('run G trace: a blocked_preflight request that nothing follows is a silent_
   assert.equal(stallCount([rowOf('runtime.recovery_started', { reason: 'auto_resume' }, '2026-10-14T13:20:00.000Z')]), 0, 'a recovery start answers it, even with no request_id')
   assert.equal(stallCount([rowOf('goal.paused', { goal_id: 'goal_0iaqbdn_1', pause_class: 'model_recoverable' }, '2026-10-14T13:20:00.000Z')]), 0, 'a pause for the same goal answers it')
   assert.equal(stallCount([rowOf('goal.paused', { goal_id: 'goal_other', pause_class: 'model_recoverable' }, '2026-10-14T13:20:00.000Z')]), 1, 'a pause for another goal does not')
+  // The runtime writes goal.paused just before the terminal row of the same request: that pause answers the blocked end too.
+  const sameRequestPause = { ...rowOf('goal.paused', { goal_id: 'goal_0iaqbdn_1', pause_class: 'guard', pause_reason: 'blocked_supply_destination_conflict' }, '2026-10-14T13:17:35.617Z'), request_id: 'recovery_mv84w55d' }
+  assert.equal(stallCount([sameRequestPause]), 0, 'a goal.paused of the same request, written before its request.completed, answers it')
+  assert.equal(stallCount([{ ...sameRequestPause, request_id: 'other_request' }]), 1, 'an earlier pause of another request does not')
 })

@@ -463,6 +463,9 @@ export function formatTaskCondition(value, kind = 'blocker', evidence = undefine
     if (raw.startsWith('server_stop_')) {
       return { raw, summary: 'SGLuna paused because the server is stopping.' }
     }
+    if (raw.startsWith('blocked_')) {
+      return { raw, summary: 'Paused: the game refused the next operation and the plan is blocked. Revise or Cancel it in the Task Board, or say in chat what to change.' }
+    }
     const requestFailure = requestFailurePauseSummary(raw)
     if (requestFailure) return { raw, summary: requestFailure }
     return {

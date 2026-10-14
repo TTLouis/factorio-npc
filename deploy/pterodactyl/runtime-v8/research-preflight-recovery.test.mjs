@@ -298,10 +298,12 @@ test('permanent deterministic research errors remain real blockers without mutat
   const result = await agent.request('research an unavailable technology', { sender: 'tester' })
   const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(rcon.mutations.length, 0)
-  assert.equal(result.goalStatus, 'blocked')
-  assert.equal(state.status, 'blocked')
-  assert.match(state.blocker, /operation_preflight_failed:unknown_technology/)
-  assert.equal(state.task_board.evidence.some(item => item.kind === 'operation_preflight_blocker'), true)
+  // The blocked end also pauses the run (guard class): visible, and no timer resumes it.
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(state.status, 'paused')
+  assert.equal(state.pause_reason, 'blocked_unknown_technology')
+  assert.equal(state.pause_class, 'guard')
+  assert.equal(state.task_board.evidence.some(item => item.kind === 'operation_preflight_blocker' && item.summary.includes('unknown_technology')), true)
 })
 
 test('repeated refusal to follow deterministic next_actionable is bounded and pauses as provider/control failure', async () => {

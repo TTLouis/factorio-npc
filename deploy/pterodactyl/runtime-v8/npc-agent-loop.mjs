@@ -62,7 +62,7 @@ import {
   withoutRawLeafRecipes,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
-import { isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, transportFailureOf, transportTraceFields } from './pause-class.mjs'
+import { declarePauseClass, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
@@ -70,6 +70,7 @@ import {
   blockerWorldEvidence,
   buildPlanBlockedMessage,
   MAX_REPLACEMENTS_PER_GOAL,
+  NEVER_WAKE_PREFLIGHT_CODES,
   plainBlockerReason,
   playerObjectiveGrant,
   REPLACEMENT_WAKE_SKIP,
@@ -263,10 +264,10 @@ const AUTHORIZATION_REFUSAL_RETRY_BUDGET = 1
 // the step blocked and nothing to wake the NPC again.
 const WORLD_CORRECTION_RETRY_BUDGET = 1
 export const WORLD_REFUSAL_UNCORRECTED_REASON = 'preflight_world_refusal_uncorrected'
-// A refusal the harness already keeps as a terminal blocker with its own evidence and no recovery round. A locked recipe is answered
-// by the live requirements block (owner decision 2026-10-05), not by retries, so it keeps today's blocked end. That end still has no
-// automatic wake with zero humans; run-check reports it as silent_blocked_stall.
-const WORLD_REFUSAL_TERMINAL_CODES = new Set(['recipe_locked'])
+const PREFLIGHT_TRANSPORT_ERROR_CODE = 'preflight_transport_error'
+// A code in NEVER_WAKE_PREFLIGHT_CODES (replacement-wake.mjs) is one the harness never treats as correctable world change: a locked recipe
+// is answered by the live requirements block (owner decision 2026-10-05), a hold needs reconciliation, a missing actor is a lifecycle
+// event. Such a refusal gets no world-correction turn; it takes the terminal pause (endBlockedPreflightWithPause).
 // MW2b: an identical batch refused because an earlier one's effect is not proven absent, and a batch proven not to have reached the game.
 const DUPLICATE_EFFECT_CODE = 'duplicate_effect_suppressed'
 const DUPLICATE_EFFECT_RETRY_BUDGET = 1
@@ -10652,7 +10653,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
     }
     const supplyGuidance = supplyRecovery
-      ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} before this step blocks.`
+      ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget}; once these are spent the failure is recorded as the step blocker (the plan and step contract stay unchanged).`
       : ''
     const recoverableGuidance = recoverable
       ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
@@ -12661,7 +12662,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         const failure = new AgentLoopError(`Deterministic operation preflight failed to return valid JSON for operation ${index + 1}: ${error instanceof Error ? error.message : String(error)}`)
-        failure.preflight = { ok: false, code: 'preflight_transport_error', refusal_class: REFUSAL_CLASS.WORLD, operation_index: index }
+        failure.preflight = { ok: false, code: PREFLIGHT_TRANSPORT_ERROR_CODE, refusal_class: REFUSAL_CLASS.WORLD, operation_index: index }
+        // A harness or RCON fault, not a refusal by the game: the pause is transport (backoff and resume), declared where it is raised.
+        declarePauseClass(failure, PAUSE_CLASS.TRANSPORT, TRANSPORT_SUBKIND.TRANSPORT)
         throw failure
       }
       await assertPreflightCurrent()
@@ -13003,7 +13006,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const heldNow = Number.isFinite(conflict.current) ? ` The latest live read shows ${conflict.current}.` : ''
     this.messages.push({
       role: 'user',
-      content: `[HARNESS] Deterministic checkpoint guard refused operation ${conflict.operation_index + 1} (${cleanMemoryText(conflict.operation, 80)}) before admission; no operation from this batch ran. Step ${board?.active_step_id} is committed and its checkpoint is not met yet: ${checkpointConflictSentence(conflict)}.${heldNow} This is a recoverable result, not WORLD_BLOCKED: the plan, the step checkpoint and the requested result are unchanged, and tools remain enabled. The committed checkpoint still decides when this step completes. Refusal ${attempt} of ${CHECKPOINT_STOCK_REFUSAL_BUDGET} before this step blocks. Facts: ${JSON.stringify(facts)}`,
+      content: `[HARNESS] Deterministic checkpoint guard refused operation ${conflict.operation_index + 1} (${cleanMemoryText(conflict.operation, 80)}) before admission; no operation from this batch ran. Step ${board?.active_step_id} is committed and its checkpoint is not met yet: ${checkpointConflictSentence(conflict)}.${heldNow} This is a recoverable result, not WORLD_BLOCKED: the plan, the step checkpoint and the requested result are unchanged, and tools remain enabled. The committed checkpoint still decides when this step completes. Refusal ${attempt} of ${CHECKPOINT_STOCK_REFUSAL_BUDGET}; once these are spent the request pauses and the plan, step contract and requested result stay unchanged. Facts: ${JSON.stringify(facts)}`,
     })
     return { action: 'recovered', stateResult }
   }
@@ -13113,7 +13116,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     this.messages.push({
       role: 'user',
-      content: `[HARNESS] Deterministic transfer preflight proved operation ${index + 1} (${cleanMemoryText(operation.name, 80)}) cannot move anything right now (${preflight.code}: ${TRANSFER_SUPPLY_CODE_MEANING[preflight.code] ?? 'nothing would move'}); no operation from this batch ran. This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Choose how to acquire the missing amount, or submit a different valid transfer for this step. Recovery ${attempt} of ${TRANSFER_SUPPLY_RECOVERY_BUDGET} before this step blocks. Facts from the live game: ${JSON.stringify(facts)}`,
+      content: `[HARNESS] Deterministic transfer preflight proved operation ${index + 1} (${cleanMemoryText(operation.name, 80)}) cannot move anything right now (${preflight.code}: ${TRANSFER_SUPPLY_CODE_MEANING[preflight.code] ?? 'nothing would move'}); no operation from this batch ran. This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Choose how to acquire the missing amount, or submit a different valid transfer for this step. Recovery ${attempt} of ${TRANSFER_SUPPLY_RECOVERY_BUDGET}; once these are spent the request pauses and the plan, step contract and requested result stay unchanged. Facts from the live game: ${JSON.stringify(facts)}`,
     })
     return { action: 'recovered', stateResult }
   }
@@ -13214,6 +13217,67 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       chatMessage: '[Plan paused] Deterministic research correction was ignored repeatedly; planner/control recovery stopped without declaring a world blocker.',
       facts: this.researchPreflightFacts(preflight),
     })
+  }
+
+  // The one terminal end for a preflight refusal that leaves the board blocked (recipe_locked, a world-evidence refusal whose MW5 wake
+  // was skipped, an unclassified refusal, an authority/argument refusal after its own retry, a prerequisite refusal outside research).
+  // The step stays blocked and the plan frozen, exactly as before; what changes is that the run is also paused through the outcome
+  // authority, declared guard (a person or a later planning decision is needed; no timer resumes it), so the stop is durable, the
+  // goal.paused row exists and the supervisor sees it. The player gets the one blocked chat line the request already produced.
+  async endBlockedPreflightWithPause({ stateResult, plan, durablePlan, before, preflight }) {
+    const requestId = this.traceRequest?.id
+    const reason = `blocked_${cleanMemoryText(preflight?.code ?? 'unknown', 80)}`
+    if (this.requestInfo) {
+      const state = this.memory.pausePlan?.(this.requestInfo.memoryKey, reason, { pause_class: PAUSE_CLASS.GUARD })
+      if (state) stateResult = { ...(stateResult ?? {}), state }
+      await this.persistState()
+    }
+    const record = this.requestInfo ? this.memory.pauseRecord?.(this.requestInfo.memoryKey) : undefined
+    const chatMessage = planProgress(plan, stateResult)
+    await this.traceEvent('operations.blocked_end_paused', {
+      request_id: requestId,
+      reason,
+      code: preflight?.code,
+      refusal_class: refusalClassLabel(preflight),
+      pause_class: PAUSE_CLASS.GUARD,
+      paused: record?.paused === true,
+      task_board: visibleTaskBoard(stateResult?.state?.task_board),
+    })
+    if (record?.paused === true) {
+      // goalPausedTrace reads the legacy status, which stays 'blocked' for a frozen plan; name the pause here, once per request.
+      if (this.traceRequest) this.traceRequest.goal_paused_traced = record.pause_reason
+      await this.traceEvent('goal.paused', {
+        request_id: requestId,
+        cause: reason,
+        pause_reason: cleanMemoryText(record.pause_reason, 300),
+        pause_class: pauseClassLabel(record),
+        provider_failure: false,
+        source: 'blocked_preflight',
+        goal_id: record.goal_id,
+        active_step_id: stateResult?.state?.task_board?.active_step_id,
+        resume: 'Revise or Cancel the blocked plan, or say continue',
+      })
+    }
+    this.active = false
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'blocked_preflight',
+      task_board: visibleTaskBoard(stateResult?.state?.task_board),
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: stateResult?.state?.plan ?? durablePlan.plan,
+      currentStep: stateResult?.state?.current_step ?? durablePlan.currentStep,
+      operations: [],
+      epoch: before.epoch,
+      actorId: before.actor_id,
+      goalId: stateResult?.state?.goal_id,
+      goalStatus: stateResult?.state?.status,
+      taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
+      blocker: preflight,
+    }
   }
 
   // A world-class refusal that is not a harness-evidenced structural blocker. First one in a request: the facts go back to the
@@ -14399,10 +14463,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             throw failure
           }
         }
-        // Every refusal check that can raise a world-class refusal (preflight, admission, checkpoint stock guard, duplicate-effect hold)
-        // has passed: only now does the world-correction budget start over. Resetting it after the preflight alone would let the
-        // loop-raised guards below refuse the same batch forever.
-        this.worldCorrectionRetries = 0
         const planningBeforeCommit = this.requestInfo ? this.memory.planningState?.(this.requestInfo.memoryKey) : undefined
         const reducerPlanBeforeCommit = planningBeforeCommit ? getActivePlanningPlan(planningBeforeCommit) : undefined
         const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeCommit?.status)
@@ -14467,6 +14527,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           missing.failureClass = 'plan_category'
           missing.code = 'missing_active_step_checkpoint'
           throw missing
+        }
+        if (error.preflight.code === PREFLIGHT_TRANSPORT_ERROR_CODE && error.pause_class === PAUSE_CLASS.TRANSPORT) {
+          // The game never answered the preflight readably: nothing was refused, so there is nothing for the model to correct.
+          // The request fails with the declared transport class; the supervisor pauses it and backs off.
+          if (this.requestInfo) {
+            this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'preflight_rejected')
+            await this.persistState()
+          }
+          await this.traceEvent('operations.preflight_transport_fault', {
+            request_id: this.traceRequest?.id,
+            reason: 'preflight_response_unreadable',
+            code: error.preflight.code,
+            operation_index: error.preflight.operation_index,
+            pause_class: error.pause_class,
+            pause_subkind: error.pause_subkind,
+            tools_enabled: false,
+          })
+          throw error
         }
         if (error.preflight.code === CHECKPOINT_STOCK_EXTRACTION_CODE) {
           const guarded = await this.handleCheckpointStockExtraction(error, plan, before, stateResult)
@@ -14690,7 +14768,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // refusal with no valid declared class (reported above) still fails closed to the blocked end: only a producer's own
         // 'world' declaration earns the correction turn.
         if (refusal.classified && refusal.refusal_class === REFUSAL_CLASS.WORLD
-          && !WORLD_REFUSAL_TERMINAL_CODES.has(error?.preflight?.code)
+          && !NEVER_WAKE_PREFLIGHT_CODES.includes(error?.preflight?.code)
           && !blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: error?.preflight, existed: this.unitHadExisted(error?.preflight?.identity, error?.preflight) }).ok) {
           return this.handleWorldRefusal(error, plan, before, stateResult)
         }
@@ -14712,26 +14790,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           existed: this.unitHadExisted(error?.preflight?.identity, error?.preflight),
         })
         if (preflightWake !== undefined) return preflightWake
-        this.active = false
-        await this.traceEvent('request.completed', {
-          chat_message: planProgress(plan, stateResult),
-          outcome: 'blocked_preflight',
-          task_board: visibleTaskBoard(stateResult?.state?.task_board),
-          usage: this.traceRequest?.usage,
-        })
-        this.traceRequest = null
-        return {
-          chatMessage: planProgress(plan, stateResult),
-          plan: stateResult?.state?.plan ?? durablePlan.plan,
-          currentStep: stateResult?.state?.current_step ?? durablePlan.currentStep,
-          operations: [],
-          epoch: before.epoch,
-          actorId: before.actor_id,
-          goalId: stateResult?.state?.goal_id,
-          goalStatus: stateResult?.state?.status,
-          taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
-          blocker: error?.preflight,
-        }
+        return this.endBlockedPreflightWithPause({ stateResult, plan, durablePlan, before, preflight: error?.preflight })
       }
 
       const admitGeneration = this.generation
@@ -14756,6 +14815,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.noteWorldMutation({ sent: true }) // D2: observations taken before this send date from before the batch; the batch is in flight until its receipt is read
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
         this.batchInFlightBeforeSend = undefined // the game took it: it stays in flight until its receipt
+        // A batch actually reached the game: only now does the world-correction budget start over. Resetting it any earlier (after the
+        // preflight, or after the loop-raised guards) would let a guard refuse the same batch for ever.
+        this.worldCorrectionRetries = 0
         await this.traceEvent('operations.ack', {
           operations: operations.map((operation, index) => ({ ...operation, admission_result: acknowledgement.results[index] })),
         })
@@ -14782,6 +14844,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           // The game took the batch; only its receipt is outstanding. Carry on as acknowledged: nothing is sent again.
           reconciledAdmitted = true
           this.batchInFlightBeforeSend = undefined
+          this.worldCorrectionRetries = 0 // the game took the batch: it was sent
           await this.traceEvent('operations.ack', {
             operations: operations.map(operation => ({ ...operation, admission_result: 'reconciled_admitted' })),
             reconciled: true,

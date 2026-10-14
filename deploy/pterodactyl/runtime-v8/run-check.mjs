@@ -84,7 +84,7 @@ import { estimateTokensFromChars } from './restage-policy.mjs'
 //   reported as request_failed_unrecoverable; recovery.intake_retry_exhausted is the finding.
 
 // - silent_blocked_stall: a request.completed that left the board status blocked (outcome blocked_preflight, or any outcome whose
-//   task_board.status is blocked) after which the log holds no request.received, runtime.recovery_started or goal.paused for the same
+//   task_board.status is blocked) after which the log holds no request.received, runtime.recovery_started or goal.paused (the pause of the same request counts) for the same
 //   goal. With zero connected players nothing else wakes the NPC, so the goal sits idle and active with no pause and no resume.
 //   Run G (2026-10-14): a supply_destination_conflict preflight refusal ended the request exactly this way.
 
@@ -787,8 +787,11 @@ function detectSilentBlockedStalls(scopedRows) {
     const board = isPlainObject(row.data?.task_board) ? row.data.task_board : undefined
     if (row.data?.outcome !== 'blocked_preflight' && board?.status !== 'blocked') return
     const goalId = nonEmptyString(board?.goal_id)
-    const answered = scopedRows.slice(index + 1).some(next => SILENT_STALL_WAKE_EVENTS.has(next?.event)
-      || (next?.event === 'goal.paused' && (!goalId || !nonEmptyString(next.data?.goal_id) || next.data.goal_id === goalId)))
+    const pausesThisGoal = other => other?.event === 'goal.paused' && (!goalId || !nonEmptyString(other.data?.goal_id) || other.data.goal_id === goalId)
+    // The runtime writes goal.paused just before the terminal row of the same request, so a pause of this request counts too.
+    const requestId = nonEmptyString(row.request_id)
+    const answered = scopedRows.slice(index + 1).some(next => SILENT_STALL_WAKE_EVENTS.has(next?.event) || pausesThisGoal(next))
+      || (requestId !== undefined && scopedRows.slice(0, index).some(prior => pausesThisGoal(prior) && nonEmptyString(prior.request_id) === requestId))
     if (answered) last.delete(goalId ?? '')
     else last.set(goalId ?? '', { row, goalId })
   })
