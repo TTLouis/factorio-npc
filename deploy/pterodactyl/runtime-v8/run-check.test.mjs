@@ -769,3 +769,23 @@ test('run F trace: a transport failure at goal intake is a finding only until an
   const elsewhere = { ...scheduled, request_id: 'req_other_1' }
   assert.equal(findingsFor(analyzeBehaviorTrace([...other, elsewhere]), 'request_failed_unrecoverable').length, 1)
 })
+
+// Run G (2026-10-14): a supply_destination_conflict refusal ended the request with the step blocked and nothing woke the NPC again.
+test('run G trace: a blocked_preflight request that nothing follows is a silent_blocked_stall finding', async () => {
+  const text = await fsp.readFile(path.join(fixturesDir, 'luna-run-g-blocked-preflight-stall.jsonl'), 'utf8')
+  const { rows, errors } = parseJsonl(text)
+  assert.equal(errors.length, 0)
+  const result = analyzeBehaviorTrace(rows)
+  const stalls = result.findings.filter(finding => finding.signature === 'silent_blocked_stall')
+  assert.equal(stalls.length, 1)
+  assert.equal(stalls[0].request_id, 'recovery_mv84w55d')
+  assert.equal(stalls[0].first_ts, '2026-10-14T13:17:35.618Z')
+  assert.match(stalls[0].detail, /goal goal_0iaqbdn_1 ended request\.completed outcome=blocked_preflight with board status blocked, blocker=operation_preflight_failed:supply_destination_conflict/)
+
+  const rowOf = (event, data, ts) => ({ schema: 1, ts, seq: 0, event, data, ...(event === 'runtime.recovery_started' ? {} : { request_id: 'later' }) })
+  const stallCount = extra => analyzeBehaviorTrace([...rows, ...extra]).findings.filter(finding => finding.signature === 'silent_blocked_stall').length
+  assert.equal(stallCount([rowOf('request.received', { sender: 'Louis' }, '2026-10-14T13:20:00.000Z')]), 0, 'a later request answers it')
+  assert.equal(stallCount([rowOf('runtime.recovery_started', { reason: 'auto_resume' }, '2026-10-14T13:20:00.000Z')]), 0, 'a recovery start answers it, even with no request_id')
+  assert.equal(stallCount([rowOf('goal.paused', { goal_id: 'goal_0iaqbdn_1', pause_class: 'model_recoverable' }, '2026-10-14T13:20:00.000Z')]), 0, 'a pause for the same goal answers it')
+  assert.equal(stallCount([rowOf('goal.paused', { goal_id: 'goal_other', pause_class: 'model_recoverable' }, '2026-10-14T13:20:00.000Z')]), 1, 'a pause for another goal does not')
+})
