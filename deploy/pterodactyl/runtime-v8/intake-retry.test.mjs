@@ -34,11 +34,16 @@ function contextWindowFailure() {
 // --- the classifier and the trace fields --------------------------------------------------------------------------------------
 
 test('undici fetch failures classify as transport from the cause code, and only the code is read', () => {
-  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'EHOSTUNREACH']) {
+  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'EHOSTUNREACH']) {
     const error = fetchFailed(code)
     assert.deepEqual(transportFailureOf(error), { subkind: 'transport', source: 'structured' }, code)
     assert.equal(failureCauseCode(error), code)
     assert.deepEqual(transportTraceFields(error), { cause_code: code, pause_class: 'transport', transport_subkind: 'transport' })
+  }
+  // Undici's response timeouts stay on the timeout subkind, so unit 7's timeout handling is unchanged.
+  for (const code of ['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']) {
+    assert.deepEqual(transportFailureOf(fetchFailed(code)), { subkind: 'timeout', source: 'structured' }, code)
+    assert.deepEqual(transportTraceFields(fetchFailed(code)), { cause_code: code, pause_class: 'transport', transport_subkind: 'timeout' })
   }
   // The cause message names the host; it is never copied into the fields.
   assert.equal(JSON.stringify(transportTraceFields(fetchFailed())).includes(FAKE_HOST), false)
@@ -335,6 +340,9 @@ test('a restart onto another body drops the record with a reason and a chat line
     assert.equal(second.memory.intakeRetry(), undefined)
     assert.match(restarted.chat[0], new RegExp(`could not safely keep it \\(${reason}\\)`))
     assert.equal(second.state.calls, 0)
+    // The startup goal notice the cancel queued writes state too: let it settle before the next restart reuses the file.
+    await restarted.session.eventQueue
+    await second.agent.persistState()
   }
 })
 
@@ -461,4 +469,83 @@ test('the durable record is sanitized: an incomplete or foreign record is droppe
   restored.restore(JSON.parse(JSON.stringify(memory.snapshot())))
   assert.deepEqual(restored.intakeRetry(), memory.intakeRetry())
   assert.equal('intake_retry' in new CanonicalTaskBoardMemory().snapshot(), false)
+})
+
+test('a stop that lands during the retry own early awaits (ensureAuthorization) is not lost: no request, no goal, a cancelled row', async t => {
+  const run = await failedAtIntake(t)
+  run.state.failure = null
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let entered
+  const reached = new Promise(resolve => { entered = resolve })
+  let calls = 0
+  run.session.ensureAuthorization = async () => {
+    if (++calls === 1) { entered(); await gate } // the retry's own RCON round trip
+    return {}
+  }
+  const providerCalls = run.state.calls
+  const receivedBefore = rowsOf(run.trace, 'request.received').length
+  const firing = fire(run.session)
+  await reached
+  assert.equal(run.session.intakeRetry.running, true)
+  run.session.queuePlayerRequest('TTLouis', 'stop') // agent.cancel is a no-op here: nothing is in flight yet
+  release()
+  assert.equal(await firing, null)
+  await run.session.eventQueue
+  assert.equal(run.state.calls, providerCalls, 'the agent was never asked to plan')
+  assert.equal(rowsOf(run.trace, 'request.received').length, receivedBefore, 'agent.request was not called')
+  assert.equal(run.memory.planningState(KEY)?.plans?.length ?? 0, 0)
+  assert.equal(run.game.mutations.length, 0)
+  assert.equal(dataOf(run.trace, 'recovery.intake_retry_cancelled').at(-1).reason, 'player_request')
+  assert.equal(rowsOf(run.trace, 'recovery.intake_retry_scheduled').length, 1, 'nothing was rescheduled')
+  assert.equal(run.memory.intakeRetry(), undefined)
+})
+
+test('a stop that arrives while request A is in flight stands: the own transport failure of A schedules no retry', async t => {
+  for (const takeover of ['cancel_auto_resume', 'stop_word']) {
+    const world = makeWorld({ stateFile: await tempState(t), failure: null })
+    const { session, chat } = sessionFor(world.agent)
+    let release
+    const gate = new Promise(resolve => { release = resolve })
+    let entered
+    const reached = new Promise(resolve => { entered = resolve })
+    world.agent.provider = async () => { entered(); await gate; throw fetchFailed() } // A's first planner call, pending
+    session.queuePlayerRequest('TTLouis', OBJECTIVE)
+    await reached
+    assert.equal(session.intakeRetry, null, 'nothing pending yet for the stop to cancel')
+    if (takeover === 'stop_word') session.queuePlayerRequest('TTLouis', 'stop')
+    else session.cancelAutoResume('player_request')
+    release()
+    await session.eventQueue
+    assert.equal(session.intakeRetry, null, takeover)
+    assert.equal(world.memory.intakeRetry(), undefined, takeover)
+    assert.equal(rowsOf(world.trace, 'recovery.intake_retry_scheduled').length, 0, takeover)
+    if (takeover === 'cancel_auto_resume') {
+      assert.equal(dataOf(world.trace, 'recovery.intake_retry_cancelled').at(-1).reason, 'superseded_before_schedule')
+      assert.equal(dataOf(world.trace, 'recovery.intake_retry_cancelled').at(-1).cause_code, 'ENOTFOUND')
+      assert.equal(chat.some(line => /Retrying automatically/.test(line)), false)
+    }
+  }
+})
+
+test('exhaustion removes the plan-less goal: no restart notice, and no pending interrupted task for the next goal', async t => {
+  const run = await failedAtIntake(t)
+  assert.equal(run.memory.planningState(KEY).goal.status, 'active', 'the failed first attempt admitted a goal')
+  for (let attempt = 1; attempt <= autoResumeMaxAttempts('transport'); attempt++) await fire(run.session)
+  assert.equal(dataOf(run.trace, 'recovery.intake_retry_exhausted').length, 1)
+  assert.equal(run.memory.planningState(KEY)?.goal, undefined, 'no active goal left behind')
+  const [discarded] = dataOf(run.trace, 'planning.intake_goal_discarded')
+  assert.equal(discarded.reason, 'intake_retry_exhausted')
+  assert.ok(discarded.request_id)
+  assert.ok(discarded.goal_id)
+  assert.equal(run.session.startupGoalNoticeKind(), undefined, 'a restart would not announce a goal that never had a plan')
+
+  // The next goal does not find an orphan to displace into the task ledger.
+  run.state.failure = null
+  run.session.queuePlayerRequest('TTLouis', 'build me a stone furnace')
+  await run.session.eventQueue
+  assert.equal(run.memory.planningState(KEY).task_ledger?.tasks?.length ?? 0, 0)
+  assert.equal(run.memory.planningState(KEY).goal.objective, 'build me a stone furnace')
+  await run.agent.persistState()
+  assert.equal(JSON.parse(await fsp.readFile(run.stateFile, 'utf8')).planning_states.some(item => item.state?.goal?.objective === OBJECTIVE), false)
 })
