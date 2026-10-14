@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { create_placement_candidate_set, execute_placement_candidate, placement_candidates_for_actor } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor } from './placement_candidates'
 
 // Prototype shapes follow Factorio 2.0: fluidbox_prototypes[].pipe_connections[]
 // carry a base `direction` and four cardinal-relative `positions` (north, east,
@@ -256,6 +256,45 @@ describe('placement candidates that join a live fluid port', () => {
     delete world[100]
     expect(execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)).toEqual([false, 'placement candidate connection target is no longer available'])
     expect(submitted).toHaveLength(1)
+  })
+  it('refuses to execute a stored join once the target port was rotated away or got a pipe', () => {
+    const rebuild = (port: Partial<LivePort>) => {
+      world[100] = live_entity(100, 'offshore-pump', [{ filter: 'water', ports: [
+        { position: { x: 8.5, y: 20.5 }, target_position: { x: 9.5, y: 20.5 }, flow_direction: 'output', ...port },
+      ] }])
+    }
+    const submitted: any[] = []
+    const submit = (...args: any[]) => { submitted.push(args); return true }
+    const actor = actor_at(0, 0)
+    const fresh_set = () => {
+      rebuild({})
+      return create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } }) as any
+    }
+
+    // Rotated: the port now opens onto another tile, so the stored footprint no longer meets it.
+    let set = fresh_set()
+    rebuild({ target_position: { x: 7.5, y: 20.5 } })
+    const rotated = execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)
+    expect(rotated[0]).toBe(false)
+    expect(rotated[1]).toMatch(/^connects_to_port_changed: .*no longer lines up/)
+    expect(placement_candidate_preflight(actor, set.candidate_set_id, 'candidate-1')).toMatchObject({ ok: false, code: 'placement_candidate_unavailable', error: expect.stringMatching(/^connects_to_port_changed: /) })
+
+    // A pipe was added: the port is connected to something else now.
+    set = fresh_set()
+    rebuild({ connected: true })
+    const piped = execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)
+    expect(piped[0]).toBe(false)
+    expect(piped[1]).toMatch(/^connects_to_port_changed: .*already connected/)
+
+    // The port is gone from the listing.
+    set = fresh_set()
+    world[100] = live_entity(100, 'offshore-pump', [{ filter: 'water', ports: [] }])
+    expect(execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)[1]).toMatch(/^connects_to_port_changed: .*no longer exists/)
+
+    // Unchanged: still executes.
+    set = fresh_set()
+    expect(execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)[0]).toBe(true)
+    expect(submitted).toEqual([['boiler', 10.5, 20, 0]])
   })
 })
 

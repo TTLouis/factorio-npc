@@ -1,3 +1,4 @@
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
@@ -605,6 +606,27 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
   }
 }
 
+/**
+ * Why a stored connection candidate no longer joins its target, or undefined when it still does: the live
+ * port must still exist, be open, and sit where the footprint (recomputed from the prototype) puts its port.
+ */
+function join_change(target: LuaEntity, prototype: any, candidate: PlacementCandidate) {
+  const join = candidate.connects_to
+  if (join === undefined) return undefined
+  let live: LiveFluidPort | undefined
+  for (const port of live_fluid_ports(target)) {
+    if (port.storage_index === join.target_port.storage_index && port.connection_index === join.target_port.connection_index) live = port
+  }
+  if (live === undefined) return 'the target fluid port no longer exists'
+  if (live.connected) return 'the target fluid port is already connected'
+  let own: CandidateFluidPort | undefined
+  for (const port of candidate_fluid_ports(prototype, candidate.position, candidate.direction) ?? []) {
+    if (port.storage_index === join.candidate_port.storage_index && port.connection_index === join.candidate_port.connection_index) own = port
+  }
+  if (own === undefined || !fluid_ports_join(live, own)) return 'the target fluid port no longer lines up with the stored footprint'
+  return undefined
+}
+
 function resolve_placement_candidate(
   actor: ControlledActor,
   candidate_set_id: string,
@@ -632,6 +654,8 @@ function resolve_placement_candidate(
     if (!target || !target.valid || target.surface.index !== set.surface_index || target.force.index !== set.force_index) {
       return { ok: false as const, error: 'placement candidate connection target is no longer available' }
     }
+    const changed = join_change(target, prototype, candidate)
+    if (changed !== undefined) return { ok: false as const, code: 'connects_to_port_changed', error: `connects_to_port_changed: ${changed}` }
   }
   if (!actor.surface.can_place_entity({
     name: set.entity_name,
@@ -654,6 +678,7 @@ function resolve_placement_candidate(
 
 export function placement_candidate_preflight(actor: ControlledActor, candidate_set_id: string, candidate_id: string) {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
+  // A changed join keeps the stale-candidate class; its error text starts with connects_to_port_changed.
   if (!resolved.ok) return { ok: false, code: 'placement_candidate_unavailable', error: resolved.error }
   // Only the native registry supplies entity identity and geometry.
   return placement_item_preflight(actor, resolved.set.entity_name)
