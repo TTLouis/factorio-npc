@@ -209,8 +209,7 @@ test('restart with an outstanding operation: both identical and changed deliveri
   memory.restore(wire)
   assert.equal(memory.pendingOperation(KEY).operation_key, first.pending().operation_key, 'the outstanding operation survives the restart')
 
-  // The third delivery is refused after the hold's own recovery is spent: one world-correction turn, then a pause.
-  const second = harness({ memory, game: first.game, replies: [deliveryPlan(), deliveryPlan(3), deliveryPlan(3)] })
+  const second = harness({ memory, game: first.game, replies: [deliveryPlan(), deliveryPlan(3), planReply({operations:[]})] })
   await recoverInterruptedAgentPlan(second.agent, 'runtime_restart', {})
 
   const reconciled = second.named('operation.reconciled').filter(row => row.trigger === 'runtime_restart')
@@ -223,13 +222,22 @@ test('restart with an outstanding operation: both identical and changed deliveri
 
   // The model replays the identical delivery: refused before admission, nothing reaches the game.
   const suppressed = second.named('operation.duplicate_suppressed')
-  assert.equal(suppressed.length, 3)
+  assert.equal(suppressed.length, 2)
   assert.equal(suppressed[0].reason, 'unresolved_operation_scope_conflict')
   assert.equal(suppressed[0].effect, 'partial_unknown')
   assert.deepEqual(suppressed[0].effect_classes, ['delivery'])
   assert.match(second.calls[1], /conflicts with unresolved work/)
   assert.equal(first.game.deliveries.length, 1, 'changing the amount cannot bypass uncertainty')
   assert.equal(first.game.deliveries.filter(text => text.includes(',5,true')).length, 1)
+
+  // The hold's own recovery was spent by the first replay; the second ended the request. The end is a visible guard pause, never
+  // a blocked request with the run still marked running.
+  const record = memory.pauseRecord(KEY)
+  assert.equal(record.paused, true)
+  assert.equal(record.pause_reason, 'blocked_duplicate_effect_suppressed')
+  assert.equal(record.pause_class, 'guard')
+  assert.equal(second.named('goal.paused').filter(row => row.pause_reason === 'blocked_duplicate_effect_suppressed').length, 1)
+  assert.equal(second.named('operations.blocked_end_paused').length, 1)
 })
 
 test('an idle partial-cancellation receipt keeps the duplicate delivery guard across persistence', async () => {

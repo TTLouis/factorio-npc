@@ -3277,6 +3277,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       amendment: packetRole === PLANNER_ROLE ? this.currentPendingAmendment() ?? undefined : undefined,
       previousContextChars: conversationChars(this.messages),
       now: Date.now(),
+      sequence: this.agentContext.conversationSeq,
     })
   }
 
