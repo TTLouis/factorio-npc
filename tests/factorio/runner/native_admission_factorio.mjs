@@ -605,7 +605,15 @@ async function main() {
     assert.equal(sources.returned_count, 8)
     assert.equal(sources.samples.length, 8)
     assert.equal(sources.truncated, true)
-    assert.equal(sources.ordering, 'native_samples_not_nearest')
+    // The world may hold natural water beyond the declared 64 tiles, so the native scan can hit its cap; the label must say which.
+    assert.equal(sources.ordering, sources.scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first')
+    assert.equal(sources.scanned_tile_limit, 256)
+    assert.equal(sources.coverage_complete, true, 'every chunk of the declared search square was generated')
+    assert.equal(sources.ungenerated_chunk_count, 0)
+    assert.equal(sources.generated_chunk_count, sources.checked_chunks)
+    assert.equal(sources.empty_result_is_conclusive, !sources.scan_truncated)
+    const sampleDistances = sources.samples.map(row => row.distance)
+    assert.deepEqual(sampleDistances, [...sampleDistances].sort((a, b) => a - b), 'samples are ordered nearest the actor first')
     assert.equal(sources.surface_index, setup.surface_index)
     assert(sources.samples.every(row => row.fluid_name === 'water' && row.surface_index === setup.surface_index
       && Number.isInteger(row.position.x) && Number.isInteger(row.position.y)))

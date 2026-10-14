@@ -398,6 +398,27 @@ def run(client: Rcon, results: Path) -> None:
         require(distance < 9.5, {'message': 'layout falls outside the actor build reach', 'entity': entity, 'distance': distance})
 
     try:
+        # ---- PROTOTYPE_FACTS: electric and fluid-throughput facts exist in the real engine --------
+        def prototype_entity(name: str) -> dict:
+            details = json_command(lua_json(remote_call('autorio_prototypes', 'details', repr(name))), f'prototype details {name}')
+            require(details.get('found') is True and isinstance(details.get('entity'), dict), {'message': 'no entity details', 'name': name, 'details': details})
+            return details['entity']
+
+        pole_facts = prototype_entity('small-electric-pole').get('electric_pole') or {}
+        require(pole_facts.get('supply_area_distance') == 2.5 and pole_facts.get('max_wire_distance') == 7.5, {'message': 'pole reach missing or wrong in-engine', 'pole': pole_facts})
+        engine_facts = prototype_entity('steam-engine').get('power') or {}
+        require(engine_facts.get('production_watts') == 900000 and engine_facts.get('fluid_usage_per_second') == 30, {'message': 'steam engine power missing or wrong in-engine', 'engine': engine_facts})
+        boiler_entity = prototype_entity('boiler')
+        require((boiler_entity.get('power') or {}).get('consumption_watts') == 1800000, {'message': 'boiler consumption missing or wrong in-engine', 'boiler': boiler_entity})
+        require('chemical' in ((boiler_entity.get('burner') or {}).get('fuel_categories') or []), {'message': 'boiler fuel categories missing in-engine', 'boiler': boiler_entity})
+        lab_facts = prototype_entity('lab').get('power') or {}
+        require(lab_facts.get('consumption_watts') == 60000, {'message': 'lab consumption missing or wrong in-engine', 'lab': lab_facts})
+        pump_facts = prototype_entity('offshore-pump').get('pump') or {}
+        require(isinstance(pump_facts.get('pumping_speed_per_second'), (int, float)) and pump_facts['pumping_speed_per_second'] > 0, {'message': 'pump speed missing in-engine', 'pump': pump_facts})
+        evidence['prototype_facts'] = {'pole': pole_facts, 'engine': engine_facts, 'boiler': boiler_entity.get('power'), 'burner': boiler_entity.get('burner'), 'lab': lab_facts, 'pump': pump_facts}
+        flush()
+        print(f"PASS: PROTOTYPE_FACTS - pole reach {pole_facts}, engine {engine_facts}, boiler {boiler_entity.get('power')} burning {(boiler_entity.get('burner') or {}).get('fuel_categories')}, lab {lab_facts}, pump {pump_facts}", flush=True)
+
         # ---- WATER_EDGE -------------------------------------------------
         shore_center = (ox - 5.5, oy + 2.5)
         pump_set = candidates(
