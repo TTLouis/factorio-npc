@@ -1778,6 +1778,7 @@ export function estimateTokens(chars) {
  * @param {string} [args.note] optional annotation from the ending conversation
  * @param {number} [args.previousContextChars] size of the discarded context
  * @param {number} [args.now] timestamp for the event (never enters `text`)
+ * @param {number} [args.sequence] caller's monotonic conversation counter; keeps same-millisecond restages of unchanged state distinct
  * @param {object} [args.limits] overrides for HANDOFF_PACKET_LIMITS
  * @param {string} [args.budget] optional budget line (harness-computed)
  * @param {object[]} [args.shelfCandidates] shelfRefinementCandidates(state) for a planner restage at a shelf pickup
@@ -1788,7 +1789,7 @@ export function estimateTokens(chars) {
  * @param {object} [args.executorFacts] D2: harness-read facts for a fresh executor ({recipes, counts, machine, residual, historical_entities, fluid_source_hints}); each record is labelled fresh, stale or historical
  * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, previousContextChars, now, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, previousContextChars, now, sequence, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -1824,7 +1825,9 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
 
   const hash = sha256(text).slice(0, 16)
   const goalId = planningState.goal.goal_id
-  const handoffId = `ho_${sha256(`${goalId}|${plan?.plan_id ?? ''}|${role}|${checkpoint}|${now ?? ''}|${hash}`).slice(0, 12)}`
+  // `sequence` is the caller's monotonic conversation counter. Without it two restages of unchanged state at the same checkpoint in the
+  // same millisecond hash to one id, and the second is refused as a reused handoff id (restage_error).
+  const handoffId = `ho_${sha256(`${goalId}|${plan?.plan_id ?? ''}|${role}|${checkpoint}|${now ?? ''}|${hash}${Number.isSafeInteger(sequence) ? `|${sequence}` : ''}`).slice(0, 12)}`
   const event = buildContextRestagedEvent(planningState, {
     role,
     checkpoint,

@@ -83,6 +83,11 @@ import { estimateTokensFromChars } from './restage-policy.mjs'
 //   goal (supervisor.mjs handleIntakeFailure). While recovery.intake_retry_scheduled follows the request.failed, the failure is not
 //   reported as request_failed_unrecoverable; recovery.intake_retry_exhausted is the finding.
 
+// - silent_blocked_stall: a request.completed that left the board status blocked (outcome blocked_preflight, or any outcome whose
+//   task_board.status is blocked) after which the log holds no request.received, runtime.recovery_started or goal.paused (the pause of the same request counts) for the same
+//   goal. With zero connected players nothing else wakes the NPC, so the goal sits idle and active with no pause and no resume.
+//   Run G (2026-10-14): a supply_destination_conflict preflight refusal ended the request exactly this way.
+
 const LOOP_MIN_COUNT = 2
 
 /**
@@ -771,6 +776,33 @@ function detectJevDecidingSkipUnverified(rows) {
   }
 }
 
+// Trace-scoped over every in-scope row, including the ones without a request_id (runtime.recovery_started is written outside a request).
+// Only the last unanswered blocked completion per goal is reported: an earlier one that a later row answered is not a stall.
+const SILENT_STALL_WAKE_EVENTS = new Set(['request.received', 'runtime.recovery_started'])
+
+function detectSilentBlockedStalls(scopedRows) {
+  const last = new Map()
+  scopedRows.forEach((row, index) => {
+    if (row?.event !== 'request.completed') return
+    const board = isPlainObject(row.data?.task_board) ? row.data.task_board : undefined
+    if (row.data?.outcome !== 'blocked_preflight' && board?.status !== 'blocked') return
+    const goalId = nonEmptyString(board?.goal_id)
+    const pausesThisGoal = other => other?.event === 'goal.paused' && (!goalId || !nonEmptyString(other.data?.goal_id) || other.data.goal_id === goalId)
+    // The runtime writes goal.paused just before the terminal row of the same request, so a pause of this request counts too.
+    const requestId = nonEmptyString(row.request_id)
+    const answered = scopedRows.slice(index + 1).some(next => SILENT_STALL_WAKE_EVENTS.has(next?.event) || pausesThisGoal(next))
+      || (requestId !== undefined && scopedRows.slice(0, index).some(prior => pausesThisGoal(prior) && nonEmptyString(prior.request_id) === requestId))
+    if (answered) last.delete(goalId ?? '')
+    else last.set(goalId ?? '', { row, goalId })
+  })
+  return [...last.values()].map(({ row, goalId }) => ({
+    request_id: nonEmptyString(row.request_id) ?? '(none)',
+    count: 1,
+    first_ts: nonEmptyString(row.ts),
+    detail: `goal ${goalId ?? '(unknown)'} ended request.completed outcome=${row.data?.outcome ?? '(none)'} with board status ${row.data?.task_board?.status ?? '(none)'}, blocker=${nonEmptyString(row.data?.task_board?.blocker) ?? '(none)'}, and no request.received, runtime.recovery_started or goal.paused follows for it`,
+  }))
+}
+
 const SIGNATURES = [
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
@@ -950,6 +982,11 @@ const INFORMATIONAL_SIGNATURES = [
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
   {
+    id: 'silent_blocked_stall',
+    label: 'request ended with the step blocked and nothing woke the goal again',
+    detect: (all, inScope, scopedAll) => detectSilentBlockedStalls(scopedAll),
+  },
+  {
     id: 'restage_loop',
     label: 'restage loop (no step progress)',
     detect: (all, inScope) => detectRestageLoops(inScope),
@@ -997,7 +1034,7 @@ export function analyzeBehaviorTrace(rows, { since } = {}) {
   const allWithRequest = sorted.filter(withRequest)
   const scopedWithRequest = scoped.filter(withRequest)
   for (const signature of TRACE_SIGNATURES) {
-    for (const finding of signature.detect(allWithRequest, scopedWithRequest)) {
+    for (const finding of signature.detect(allWithRequest, scopedWithRequest, scoped)) {
       findings.push({
         signature: signature.id,
         label: signature.label,

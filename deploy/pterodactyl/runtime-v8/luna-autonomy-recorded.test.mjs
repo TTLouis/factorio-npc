@@ -702,9 +702,10 @@ test('shape 1 (commit time): the recorded turn-12 collection against the committ
   assert.equal(run.plan().condition_wait?.state, 'active')
 })
 
-test('shape 1 (truthful failure): a model that keeps re-sending the recorded collection ends in the existing blocker, not a silent success', async () => {
+test('shape 1 (truthful failure): a model that keeps re-sending the recorded collection ends in the bounded pause, not a silent success', async () => {
   const world = midRunFurnace()
-  const run = loop(world, [furnaceReads(), plannerCommit3(), turn12(), turn12(), turn12()])
+  // Two in-step refusals, one world-correction turn, then the request pauses.
+  const run = loop(world, [furnaceReads(), plannerCommit3(), turn12(), turn12(), turn12(), turn12()])
   await run.say(requestText.req_muw0yzan_3)
   world.finishBatch()
 
@@ -713,10 +714,10 @@ test('shape 1 (truthful failure): a model that keeps re-sending the recorded col
   assert.equal(world.mutations.length, 1, 'the collection was never admitted')
   assert.equal(world.totalInFurnace('iron-plate'), 38)
   assert.equal(result.operations.length, 0)
-  assert.equal(result.blocker?.code, 'checkpoint_stock_extraction')
+  assert.equal(result.recoverableFailure?.preflight?.code, 'checkpoint_stock_extraction')
   const state = run.plan()
-  assert.equal(state.status, 'blocked')
-  assert.equal(state.blocker, 'operation_preflight_failed:checkpoint_stock_extraction')
+  assert.equal(state.status, 'paused')
+  assert.equal(state.pause_reason, 'recoverable_provider_failure:preflight_world_refusal_uncorrected')
   assert.notEqual(state.status, 'completed')
   assert.equal(state.task_board.completed_count, 0)
   assert.deepEqual(run.named('checkpoint.stock_extraction_refused').map(row => data(row).attempt), [1, 2])

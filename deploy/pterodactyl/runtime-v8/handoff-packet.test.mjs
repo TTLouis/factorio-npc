@@ -340,6 +340,10 @@ test('same input gives the same text, hash and handoff id; the id moves with che
   assert.equal(later.hash, first.hash, 'time never enters the text')
   assert.notEqual(later.handoff_id, first.handoff_id, 'each restage gets its own id')
   assert.notEqual(fixed({ checkpoint: 'C4' }).packet.handoff_id, first.handoff_id)
+  // Same state, same checkpoint, same millisecond: the caller's conversation sequence keeps the ids apart.
+  assert.notEqual(fixed({ sequence: 3 }).packet.handoff_id, fixed({ sequence: 4 }).packet.handoff_id)
+  assert.equal(fixed({ sequence: 3 }).packet.handoff_id, fixed({ sequence: 3 }).packet.handoff_id)
+  assert.equal(fixed({ sequence: undefined }).packet.handoff_id, first.handoff_id, 'a caller without a sequence keeps the earlier ids')
 })
 
 test('the plan block is byte-stable across step restages, only the step block changes', () => {

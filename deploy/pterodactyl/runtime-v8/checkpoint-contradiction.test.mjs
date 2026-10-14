@@ -555,11 +555,12 @@ test('commit time: a later batch that would take the committed checkpoint stock 
   assert.equal(recoverable.length, 1)
 })
 
-test('commit time: the refusal is bounded at two per step, then the existing blocker path applies', async () => {
+test('commit time: the refusal is bounded at two per step, then one world-correction turn and a model_recoverable pause', async () => {
   const rcon = new Rcon()
   const world = harness(rcon, [
     observe(),
     planMessage([COAL_SUPPLY], { ...SMELT, checkpoint: furnaceCheckpoint() }),
+    planMessage([takePlates()], SMELT),
     planMessage([takePlates()], SMELT),
     planMessage([takePlates()], SMELT),
     planMessage([takePlates()], SMELT),
@@ -570,10 +571,11 @@ test('commit time: the refusal is bounded at two per step, then the existing blo
 
   assert.equal(rcon.mutations.length, 1, 'no extraction was ever admitted')
   assert.equal(result.operations.length, 0)
-  assert.equal(result.blocker?.code, CHECKPOINT_STOCK_EXTRACTION_CODE)
+  assert.equal(result.recoverableFailure?.preflight?.code, CHECKPOINT_STOCK_EXTRACTION_CODE)
   const state = world.plan()
-  assert.equal(state.status, 'blocked')
-  assert.equal(state.blocker, `operation_preflight_failed:${CHECKPOINT_STOCK_EXTRACTION_CODE}`)
+  assert.equal(state.status, 'paused')
+  assert.equal(state.pause_reason, 'recoverable_provider_failure:preflight_world_refusal_uncorrected')
+  assert.deepEqual(world.named('operations.preflight_recoverable').map(row => data(row).failure_class), [CHECKPOINT_STOCK_EXTRACTION_CODE, CHECKPOINT_STOCK_EXTRACTION_CODE, `world_correction_${CHECKPOINT_STOCK_EXTRACTION_CODE}`])
   assert.equal(checkpointStockRefusalCount(state.task_board), 2, 'the third refusal was not counted')
   assert.deepEqual(world.named('checkpoint.stock_extraction_refused').map(row => data(row).attempt), [1, 2])
   const [exhausted] = world.named('checkpoint.stock_extraction_exhausted')

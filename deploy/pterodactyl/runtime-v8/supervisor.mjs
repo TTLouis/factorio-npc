@@ -430,6 +430,7 @@ const UI_TASK_PAUSE_SUMMARIES = new Map([
   ['jev_refinement_budget_exhausted', 'SGLuna could not settle on a plan it could commit. Reply with more specific direction, or continue to retry.'],
   ['recoverable_provider_failure:requires_machine_retry_exhausted', 'Paused: the craft needs a machine and the retry limit was reached. Press Resume or say continue.'],
   ['recoverable_provider_failure:research_preflight_retry_exhausted', 'Paused: the research request was refused repeatedly and the retry limit was reached. Press Resume or say continue.'],
+  ['recoverable_provider_failure:preflight_world_refusal_uncorrected', 'Paused: the game refused the planned operation twice, so nothing ran. The run retries from a fresh observation; Resume or say continue to retry now.'],
 ])
 
 function requestFailurePauseSummary(raw) {
@@ -461,6 +462,9 @@ export function formatTaskCondition(value, kind = 'blocker', evidence = undefine
     }
     if (raw.startsWith('server_stop_')) {
       return { raw, summary: 'SGLuna paused because the server is stopping.' }
+    }
+    if (raw.startsWith('blocked_')) {
+      return { raw, summary: 'Paused: the game refused the next operation and the plan is blocked. Revise or Cancel it in the Task Board, or say in chat what to change.' }
     }
     const requestFailure = requestFailurePauseSummary(raw)
     if (requestFailure) return { raw, summary: requestFailure }

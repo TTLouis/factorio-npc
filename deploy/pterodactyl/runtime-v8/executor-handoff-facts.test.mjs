@@ -856,6 +856,28 @@ test('3b: an empty recipe cache and a lab root: the harness reads the recipe cha
   assert.equal(world.rows('context.recipe_closure_prefetched').length, 1)
 })
 
+// The flake this pins (about 1 run in 6): a handoff id hashed goal, plan, role, checkpoint, the millisecond clock and the packet text, so two
+// restages of unchanged state in one millisecond got one id and the second was refused as a reused id (restage_error). The clock is frozen here.
+test('two restages of unchanged state in the same millisecond get distinct handoff ids and both land', async () => {
+  const world = labWorld()
+  await world.say()
+  await world.agent.taskStatusReceipt()
+  const realNow = Date.now
+  const frozen = realNow.call(Date)
+  Date.now = () => frozen
+  try {
+    const first = await restageToFreshExecutor(world)
+    const second = await restageToFreshExecutor(world)
+    assert.equal(first.restaged, true, JSON.stringify(first))
+    assert.equal(second.restaged, true, JSON.stringify(second))
+    assert.notEqual(first.handoff_id, second.handoff_id)
+    assert.equal(world.rows('context.restage_error').length, 0)
+  }
+  finally {
+    Date.now = realNow
+  }
+})
+
 test('3b: a root recipe the model already read is not read again; only the missing links are', async () => {
   const world = labWorld({ script: [{ tool_calls: [{ ...read('getRecipeDetails', { item_or_recipe: 'lab', requested_count: 1 }, 'lab'), index: 0 }] }] })
   await world.say()

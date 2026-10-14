@@ -229,6 +229,15 @@ test('restart with an outstanding operation: both identical and changed deliveri
   assert.match(second.calls[1], /conflicts with unresolved work/)
   assert.equal(first.game.deliveries.length, 1, 'changing the amount cannot bypass uncertainty')
   assert.equal(first.game.deliveries.filter(text => text.includes(',5,true')).length, 1)
+
+  // The hold's own recovery was spent by the first replay; the second ended the request. The end is a visible guard pause, never
+  // a blocked request with the run still marked running.
+  const record = memory.pauseRecord(KEY)
+  assert.equal(record.paused, true)
+  assert.equal(record.pause_reason, 'blocked_duplicate_effect_suppressed')
+  assert.equal(record.pause_class, 'guard')
+  assert.equal(second.named('goal.paused').filter(row => row.pause_reason === 'blocked_duplicate_effect_suppressed').length, 1)
+  assert.equal(second.named('operations.blocked_end_paused').length, 1)
 })
 
 test('an idle partial-cancellation receipt keeps the duplicate delivery guard across persistence', async () => {
