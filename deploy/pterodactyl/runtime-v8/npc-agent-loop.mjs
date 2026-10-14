@@ -3431,7 +3431,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // A restage the guard will refuse anyway spends no reads.
       if (!args.packet && role === EXECUTOR_ROLE && !this.restageGuardRefusal(safePoint)) {
         const before = getActivePlanningPlan(state)
-        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime, requestId })
+        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime, requestId, checkpoint })
         if (gathered?.refusal) {
           await this.jev.afterRestage(prepared, { restaged: false, reason: gathered.refusal })
           await this.traceEvent('context.restage_refused', { role, checkpoint, reason: gathered.refusal, reads_attempted: gathered.meta?.reads_attempted, request_id: requestId }, { requestId })
@@ -5079,7 +5079,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the executor only sees the packet after the batch finishes: counts, the checkpoint machine and residual needs are then
   // NOT read (`counts_deferred`); recipe facts and history still ride. `mode: 'refresh'` is the later read, taken after
   // the receipt landed: counts, machine and residual only.
-  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet', refreshItems = [], requestId }) {
+  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet', refreshItems = [], requestId, checkpoint }) {
     try {
       const plan = getActivePlanningPlan(state)
       const step = plan?.steps?.[plan.active_step_index]
@@ -5099,6 +5099,31 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const inFlight = this.batchInFlight === true || runtime?.idle === false || (Number.isFinite(runtime?.queue_length) && runtime.queue_length > 0)
       if (inFlight && mode === 'refresh') return undefined
       const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: this.handoffRecipeFacts.size, counts_deferred: undefined }
+      // A process restart loses live entity observations. Rediscover bounded local crafting machines for C7 before
+      // deriving stock; old unit numbers or cached inventories must never substitute for a current native read.
+      if (checkpoint === 'C7' && this.planUpdateReason === 'recovery' && fence && !inFlight && ![...this.liveEntityObservations.values()].some(entity => CRAFTER_TYPES.has(entity?.type))) {
+        let discovered = []
+        let reason = 'fresh_local_scan'
+        try {
+          await this.handoffFenceCheck(fence, 'before')
+          meta.reads_attempted += 1
+          const raw = await this.rcon.command(this.observationToolCommand('getNearbyEntities', { radius: WAIT_FACT_RADIUS, limit: 40 }))
+          const parsed = JSON.parse(String(raw).trim())
+          await this.handoffFenceCheck(fence, 'during')
+          if (parsed?.ok === false || !Array.isArray(parsed?.entities)) throw new Error('local_scan_unavailable')
+          discovered = parsed.entities.filter(entity => CRAFTER_TYPES.has(entity?.type) && Number.isSafeInteger(entity.unit_number)).slice(0, limits.placedMachines)
+          this.recordLiveEntityToolResult('getNearbyEntities', JSON.stringify({ ...parsed, entities: discovered }))
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          meta.reads_failed += 1
+          reason = 'local_scan_unavailable'
+        }
+        await this.traceEvent('context.recovery_machines_discovered', {
+          request_id: requestId ?? this.traceRequest?.id, reason, radius: WAIT_FACT_RADIUS,
+          machine_count: discovered.length, actor_id: fence.actor_id, actor_epoch: fence.epoch,
+        }, { requestId })
+      }
       const research = []
       if (needs.technologies?.length) {
         try {
@@ -8789,7 +8814,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       actor = { actor_id: current.actor_id, epoch: current.epoch }
     }
     catch {}
-    const result = reconcilePendingOperation(pending, { status: await this.readTaskStatusRaw(), actor })
+    const rawStatus = await this.readTaskStatusRaw()
+    const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
     const admitted = [RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_CANCELLED].includes(result.verdict)
     let held = pending
     if ([RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)) {
@@ -8825,30 +8851,41 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         current_actor: actor ?? null,
       }, { requestId: rid })
     }
+    // A restart can find the exact completed receipt after losing both acknowledgement and completion notification.
+    // Settle through the ordinary idle-receipt gate before a fresh checkpoint is checked; retaining this completed
+    // operation as pending would suppress checkpoint settlement and provoke an unnecessary replay/empty transfer.
+    if (trigger === 'runtime_restart' && result.verdict === RECONCILE_VERDICT.ADMITTED_COMPLETED) {
+      await this.settleOutstandingOperation(rawStatus, pending.operation_key, { actor, requestId: rid })
+      if (!(this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation?.(key)].filter(Boolean)).some(record => record.operation_key === pending.operation_key)) {
+        await this.traceEvent('operation.recovery_settled', {
+          request_id: rid, operation_key: pending.operation_key, reason: 'restart_exact_completed_receipt',
+        }, { requestId: rid })
+      }
+    }
     await this.surfaceLegacyOperation(key, pending, result, rid)
     return { ...result, admitted, pending: held ?? pending, request_id: rid }
   }
 
   // An idle receipt settles a batch only when its effect is proven complete or absent. Cancellation may leave a partial
   // effect, and an acknowledgement before a mod reload cannot establish what survived: both keep the duplicate guard.
-  async settleOutstandingOperation(rawStatus, operationKey) {
+  async settleOutstandingOperation(rawStatus, operationKey, { actor: capturedActor, requestId } = {}) {
     try {
       if (typeof this.memory.pendingOperation !== 'function') return
       const key = this.activePlanKey()
       const records = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation(key)].filter(Boolean)
       if (!operationKey && records.length > 1) {
-        for (const record of records) await this.settleOutstandingOperation(rawStatus, record.operation_key)
+        for (const record of records) await this.settleOutstandingOperation(rawStatus, record.operation_key, { actor: capturedActor, requestId })
         return
       }
       const pending = operationKey ? records.find(record => record.operation_key === operationKey) : records.at(-1)
       if (!pending) return
       const watermark = batchWatermark(rawStatus)
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
-      const actor = this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined
+      const actor = capturedActor ?? (this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined)
       const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
       const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
       const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
-      const rid = this.traceRequest?.id ?? pending.operation_key.split('/')[0]
+      const rid = requestId ?? this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
       if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable || result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) {
