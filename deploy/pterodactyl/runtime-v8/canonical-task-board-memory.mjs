@@ -720,6 +720,15 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return { recorded: after !== before, allowance: autoResumeAllowance(after) }
   }
 
+  // The legacy board's active step must be the committed plan's active step (matched through the aligned step descriptions, since
+  // the board and the reducer name their steps differently). A board that cannot be aligned is a mismatch: fail closed.
+  resumeStepMismatch(key, board) {
+    const plan = getActivePlan(key ? this.planningByNpc.get(key) : undefined)
+    if (!plan) return false
+    const alignment = boardPlanAlignment(board, plan)
+    return alignment === undefined || board.active_index !== alignment + plan.active_step_index
+  }
+
   recordRunResume(key, state, reason) {
     if (this.#reducerHoldsGoal(key, state)) {
       this.#applyRunEvent(key, { type: PLANNING_EVENT.RUN_RESUMED, goal_id: state.goal_id, reason })

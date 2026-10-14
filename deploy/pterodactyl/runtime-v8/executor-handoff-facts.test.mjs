@@ -1694,3 +1694,118 @@ test('9 review G8: a disabled trigger technology is not credited either, read fr
   const enabled = await runEWorld()
   assert.doesNotMatch(stepLine(enabled, 'research_path'), /"enabled":false/)
 })
+
+// Unit 14 (run H, 2026-10-14). The restaged executor said "no furnace fuel is available" and "the furnace is configured for copper plates"
+// while stone furnace 26 held 9 coal, 5 copper ore and 4 copper plates. The packet carried the ACTOR's stock (fuel_held=false) and the
+// furnace only as a kind name in historical_entities, so a placed machine's own fuel, source and output were not facts the model had.
+const FURNACE_26 = { found: true, entity: { unit_number: 26, name: 'stone-furnace', type: 'furnace', recipe: 'copper-plate', inventories: [
+  { index: 1, items: [{ name: 'coal', count: 9 }] },
+  { index: 2, items: [{ name: 'copper-ore', count: 5 }] },
+  { index: 3, items: [{ name: 'copper-plate', count: 4 }] },
+  { index: 4, items: [] },
+] } }
+
+async function furnaceWorld({ statusRead = 'matched' } = {}) {
+  // The actor holds 42 iron ore, 8 iron plates and no coal (run H); the step contract is an inventory count, not a machine requirement.
+  const world = harness({
+    game: liveGame({ inventory: { 'iron-ore': 42, 'iron-plate': 8 } }),
+    script: [
+      { tool_calls: [read('getNearbyEntities', { radius: 16 }, 'nearby'), ...readsRound().tool_calls.slice(0, 3)].map((call, index) => ({ ...call, index })) },
+      planReply({ plan: ['Smelt 10 copper plates', 'Craft the lab'], currentStep: 0, operations: [gather('copper-ore', 10)], checkpoint: inventoryCheckpoint('copper-plate', 10), goal: GOAL, roadmap: SHELF }),
+    ],
+  })
+  const baseCommand = world.game.command
+  world.statusReads = 0
+  world.game.command = async (text) => {
+    if (text.includes('"evaluate_condition"') && text.includes('entity_state')) {
+      return JSON.stringify({ ok: true, kind: 'entity_state', satisfied: false, progressing: false, progress_known: true, entity_status: 8, unit_number: 26 })
+    }
+    if (text.includes('get_entity_status')) {
+      world.statusReads += 1
+      if (statusRead === 'fail') throw new Error('rcon transport closed')
+      return JSON.stringify(FURNACE_26)
+    }
+    return baseCommand(text)
+  }
+  world.game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: 26, position: { x: 3, y: 3 }, distance: 4.2, status: 8, working: false, last_user: 'TTLouis' }] }
+  await world.say()
+  await world.agent.taskStatusReceipt()
+  return world
+}
+
+test('unit 14: a placed furnace\'s own fuel, source and output are carried as fresh facts, labelled apart from the actor\'s held stock', async () => {
+  const world = await furnaceWorld()
+  const result = await restageToFreshExecutor(world)
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  const line = lineOf(world.agent.messages, 'placed_machines')
+  assert.match(line, /^placed_machines \(crafting machines seen in an earlier nearby scan or read, not necessarily built by SGLuna or still standing; machine_fuel, machine_source and machine_output are the MACHINE's own inventories, NOT the actor's held items in held_counts and fuel_needs; FRESH = live read now, STALE = earlier observation\): /)
+  assert.match(line, /stone-furnace unit=26 \[FRESH as_of=tick:\d+,epoch:3\] working=false machine_fuel=\{coal:9\} machine_source=\{copper-ore:5\} machine_output=\{copper-plate:4\} source_item_types=1 last_user=TTLouis$/)
+  assert.doesNotMatch(line, /iron-ore|iron-plate/, 'the actor\'s stock is a different record (held_counts)')
+  // The actor's own stock stays where it was: iron ore, no coal.
+  const held = lineOf(world.agent.messages, 'held_counts ')
+  assert.match(held, /iron-plate=8|copper-plate=0|iron-ore=42/)
+  assert.doesNotMatch(held, /coal=[1-9]/)
+
+  // Counted in the trace, with the request and handoff ids and a reason.
+  const [carried] = world.rows('context.placed_machines_carried')
+  assert.deepEqual({ candidates: carried.data.candidates, fresh: carried.data.fresh, stale: carried.data.stale, unread: carried.data.unread, carried: carried.data.carried, dropped: carried.data.dropped_for_size },
+    { candidates: 1, fresh: 1, stale: 0, unread: 0, carried: 1, dropped: false })
+  assert.equal(carried.data.request_id, world.requestId())
+  assert.equal(carried.data.handoff_id, result.handoff_id)
+  assert.equal(carried.data.reason, 'placed_machine_own_inventories_kept_distinct_from_actor_held_items')
+  const facts = world.rows('context.executor_facts_carried').at(-1)
+  assert.equal(facts.data.placed_machines, 1)
+  // The ambiguous actor-only flag now says whose it is.
+  for (const row of world.rows('context.machine_energy_carried')) assert.equal(row.data.fuel_held_scope, 'actor_inventory')
+})
+
+test('unit 14: a placed furnace the actor cannot read now is carried from its last observation, labelled stale, never as fresh', async () => {
+  const world = await furnaceWorld()
+  await restageToFreshExecutor(world) // the fresh read also records the inventories this observation will carry
+  const baseCommand = world.game.command
+  world.game.command = async (text) => {
+    if (text.includes('get_entity_status')) throw new Error('rcon transport closed')
+    return baseCommand(text)
+  }
+  const again = await world.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:again', actor: world.agent.epoch, requestId: world.requestId() })
+  assert.equal(again.restaged, true, JSON.stringify(again))
+  const line = lineOf(world.agent.messages, 'placed_machines')
+  assert.match(line, /stone-furnace unit=26 \[STALE observed tick:\d+,epoch:3, NOT current; inventory_read_failed\] working=false machine_fuel=\{coal:9\} machine_source=\{copper-ore:5\} machine_output=\{copper-plate:4\}/)
+  assert.doesNotMatch(line, /\[FRESH/)
+  const [, stale] = world.rows('context.placed_machines_carried')
+  assert.deepEqual({ fresh: stale.data.fresh, stale: stale.data.stale, carried: stale.data.carried }, { fresh: 0, stale: 1, carried: 1 })
+})
+
+test('unit 14: a placed machine whose inventories were never read is counted as unread and not invented', async () => {
+  const world = await furnaceWorld({ statusRead: 'fail' })
+  const result = await restageToFreshExecutor(world)
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  assert.equal(lineOf(world.agent.messages, 'placed_machines'), undefined)
+  const [carried] = world.rows('context.placed_machines_carried')
+  assert.deepEqual({ candidates: carried.data.candidates, fresh: carried.data.fresh, stale: carried.data.stale, unread: carried.data.unread, carried: carried.data.carried },
+    { candidates: 1, fresh: 0, stale: 0, unread: 1, carried: 0 })
+})
+
+test('unit 14: a read that fails to match a placed machine keeps the old observation\'s own tick, seq and epoch, and the stale label is dated by them', async () => {
+  const world = await furnaceWorld()
+  await restageToFreshExecutor(world) // a fresh read recorded the inventories and dated them
+  const unit = () => world.agent.liveEntityObservations.get('unit:26')
+  assert.equal(unit().observed_epoch, 3)
+  unit().observed_epoch = 2 // the observation was taken under an earlier epoch than the one the actor is in now
+  const dated = { observed_tick: unit().observed_tick, observed_seq: unit().observed_seq, observed_epoch: unit().observed_epoch }
+  // Time passes: a batch lands (the world moved on), the game tick advances, and the actor can no longer read the machine's inventories.
+  world.agent.worldMutationSeq += 5
+  world.agent.lastTaskStatusView = { ...(world.agent.lastTaskStatusView ?? {}), last_completed_batch: { ...(world.agent.lastTaskStatusView?.last_completed_batch ?? {}), tick: (dated.observed_tick ?? 0) + 3000 } }
+  const baseCommand = world.game.command
+  world.game.command = async (text) => {
+    if (text.includes('get_entity_status')) return JSON.stringify({ found: true, entity: { ...FURNACE_26.entity, unit_number: 99 } }) // the nearest furnace is another unit
+    return baseCommand(text)
+  }
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch })
+  assert.deepEqual({ tick: unit().observed_tick, seq: unit().observed_seq, epoch: unit().observed_epoch, inventories: JSON.stringify(unit().inventories) },
+    { tick: dated.observed_tick, seq: dated.observed_seq, epoch: dated.observed_epoch, inventories: JSON.stringify(FURNACE_26.entity.inventories) })
+  const [entry] = gathered.facts.placed_machines
+  assert.equal(entry.state, 'stale')
+  assert.equal(entry.reason, 'inventory_nearest_is_other_unit')
+  assert.deepEqual({ tick: entry.as_of.tick, epoch: entry.as_of.epoch }, { tick: dated.observed_tick, epoch: 2 }, 'dated by the observation, not by the current epoch 3')
+})
