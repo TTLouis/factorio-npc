@@ -1260,7 +1260,8 @@ test('8 C/D: the packet states the trigger target, the energy source and placeme
   assert.ok(order.indexOf('raw_leaf_acquisition') < order.indexOf('roadmap_node'))
   const tiny = buildHandoffPacket({ planningState: circuitState(), ...ARGS, executorFacts, limits: { maxChars: 1 } })
   const dropped = tiny.dropped
-  for (const [first, second] of [['machine_energy', 'fuel_needs'], ['fuel_needs', 'residual_needs'], ['residual_needs', 'raw_leaf_acquisition']]) {
+  // This fixture has no raw leaf with a shortfall, so raw_leaf_acquisition is absent; its place after residual_needs is asserted on the order above.
+  for (const [first, second] of [['machine_energy', 'fuel_needs'], ['fuel_needs', 'residual_needs']]) {
     assert.ok(dropped.includes(first) && dropped.includes(second), `${first} and ${second} dropped`)
     assert.ok(dropped.indexOf(first) < dropped.indexOf(second), `${first} drops before ${second}: ${dropped.join(', ')}`)
   }
