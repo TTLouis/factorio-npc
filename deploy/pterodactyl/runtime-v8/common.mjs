@@ -433,14 +433,16 @@ async function reserveBudgetTransaction(filename, maximum, now, options) {
   const emergency = options.emergency === true
   if (now - budget.since >= 3600000) { budget.since = now; budget.count = 0 }
   const limit = emergency ? maximum : maximum - reservedSlots
-  check(
-    budget.count < limit,
-    emergency
-      ? 'Hourly provider request budget reached, including recovery reserve'
-      : reservedSlots > 0
-        ? 'Hourly provider request budget reached; recovery reserve preserved'
-        : 'Hourly provider request budget reached',
-  )
+  if (budget.count >= limit) {
+    // Declared at the source (pause-class.mjs): waiting for the hourly window to refill clears it.
+    throw Object.assign(new DeploymentError(
+      emergency
+        ? 'Hourly provider request budget reached, including recovery reserve'
+        : reservedSlots > 0
+          ? 'Hourly provider request budget reached; recovery reserve preserved'
+          : 'Hourly provider request budget reached',
+    ), { transport_subkind: 'budget' })
+  }
   budget.count++
   await atomicWrite(filename, `${JSON.stringify(budget)}\n`)
   return budget.count
