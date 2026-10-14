@@ -416,6 +416,10 @@ def run(client: Rcon, results: Path) -> None:
                 candidate['position']['x'] == ox - 5.5 and candidate['direction'] == WEST,
                 {'message': 'a pump candidate is not on the shoreline facing the water', 'candidate': candidate},
             )
+        # Shoreline candidates are labelled and ordered nearest the actor first.
+        require(pump_set.get('ordering') == 'nearest_to_actor_first', {'message': 'pump candidates are not labelled nearest-first', 'ordering': pump_set.get('ordering')})
+        distances = [candidate['distance_from_actor'] for candidate in pump_set['candidates']]
+        require(distances == sorted(distances), {'message': 'pump candidates are not ordered by distance from the actor', 'distances': distances})
         dry = run_failed_operation(
             remote_call('autorio_operations', 'place_entity', repr('offshore-pump'), str(ox - 2.5), str(oy + 0.5), str(NORTH)),
             'pump on dry land refusal',
@@ -537,30 +541,29 @@ def run(client: Rcon, results: Path) -> None:
 
         # ---- steam engine: the steam port must meet the boiler's steam port
         engine_tile = target_tile(steam_port)
+        # connects_to: the harness solves the footprint from the boiler's live steam port, so every
+        # returned candidate is aligned and no port arithmetic is done here.
         engine_set = candidates(
-            f"{{entity_name='steam-engine',covers_position={{x={engine_tile[0]},y={engine_tile[1]}}},limit=8}}",
-            'engine candidates',
+            f"{{entity_name='steam-engine',connects_to={{unit_number={boiler_unit},storage_index={steam_port['storage_index']}}},limit=8}}",
+            'engine candidates via connects_to',
         )
         evidence['engine_candidates'] = {'legal': engine_set['legal_candidate_count'], 'returned': engine_set['returned_candidate_count']}
         aligned_engines = aligned_candidates(engine_set['candidates'], steam_port, 'steam')
-        if aligned_engines:
-            engine_path = 'candidate'
-            engine_receipt = run_operation(
-                remote_call('autorio_operations', 'place_candidate', repr(engine_set['candidate_set_id']), repr(aligned_engines[0]['candidate']['id'])),
-                'place engine from a candidate',
-                30.0,
-            )
-        else:
-            engine_path = 'solved'
-            solved = solve_aligned_placement(engine_set['candidates'], steam_port, 'steam')
-            require(solved is not None, {'message': 'cannot solve an aligned engine placement', 'steam_port': steam_port, 'set': engine_set})
-            assert solved is not None
-            engine_receipt = run_operation(
-                remote_call('autorio_operations', 'place_entity', repr('steam-engine'),
-                            str(solved['position']['x']), str(solved['position']['y']), str(solved['direction'])),
-                'place engine at the solved position',
-                30.0,
-            )
+        require(len(aligned_engines) == len(engine_set['candidates']), {
+            'message': 'connects_to returned a candidate that is not aligned with the boiler steam port', 'steam_port': steam_port, 'set': engine_set,
+        })
+        for engine_candidate in engine_set['candidates']:
+            joins = engine_candidate.get('connects_to') or {}
+            require(joins.get('unit_number') == boiler_unit and joins.get('entity_name') == 'boiler', {
+                'message': 'a connects_to candidate does not name the boiler port it joins', 'candidate': engine_candidate,
+            })
+        require((engine_set.get('connects_to') or {}).get('unit_number') == boiler_unit, {'message': 'connects_to is not echoed', 'set': engine_set})
+        engine_path = 'connects_to'
+        engine_receipt = run_operation(
+            remote_call('autorio_operations', 'place_candidate', repr(engine_set['candidate_set_id']), repr(aligned_engines[0]['candidate']['id'])),
+            'place engine from a connects_to candidate',
+            30.0,
+        )
         engine_unit = engine_receipt.get('placed_unit_number')
         require(isinstance(engine_unit, int), engine_receipt)
         engine_position = engine_receipt['placed_position']
