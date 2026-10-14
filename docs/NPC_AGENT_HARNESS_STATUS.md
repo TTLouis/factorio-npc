@@ -8,6 +8,14 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 14: unit 17 composed recovery regressions complete (static proof)
+
+- **Integrated locally.** Merge `14a03571` on `og-port-integration`; runtime fix `e1aaf952`, final tests `a9663f98`. Fourteen composed scenarios cover G→H→I through verified completion, disk restore, takeover/actor cancellation and completed/unknown operation effects without replay. No skipped tests or TODOs.
+- **Restart fixes.** C7 recovery rebuilds bounded fresh local machine observations before deriving available output. Exact completed restart evidence settles through the existing idle-receipt guard with current actor and recovery-request correlation. Clearing an operation never substitutes for world-state goal verification. Unknown effects, authority boundaries and retry limits are preserved.
+- **Validation.** Unit-worktree Docker gate: 2,352 runtime/staging and 1,142 mod tests passed, plus typecheck and Lua checks; independent review found no merge blockers. The same full gate passed on merged candidate `14a03571`, exit 0 (`unit17-integration-all.log`).
+- **Next.** Unit 18 native recovery-loop proof and frozen-candidate engine/deployment checks remain open. No live provider/Jev call, push or deployment in this unit.
+- **Evidence.** [Unit 17 checkpoint](validation/UNIT17_RECOVERY_LOOP_2026-10-14.md) and [reconciled pre-live plan](validation/RECOVERY_LOOP_RECONCILIATION_2026-10-14.md).
+
 ## October 14: port unit 13, pause class follows who can fix the refusal (static lane, not live-validated)
 
 - **One terminal decision.** `classifyBlockedEnd` (refusal-class.mjs) decides the pause class of a request that ends on a refusal, from the refusal class, which executor recoveries were spent and whether it is world evidence. An argument refusal after its retry, or a world refusal after a recovery it spent, ends as a `model_recoverable` pause (`preflight_executor_refusal_uncorrected`) with the step untouched, and unit 7 restages it. Everything else keeps the unit 12 guard pause. Both ends trace `operations.blocked_end_classified` with `request_id`, `recovery_spent`, `pause_class` and `reason`.

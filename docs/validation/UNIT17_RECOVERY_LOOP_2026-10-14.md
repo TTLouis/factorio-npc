@@ -34,6 +34,10 @@ Test completion commit **`a9663f98`** follows the runtime fix. Original composed
 
 Local logs in the unit worktree (not committed): `unit17-runtime-baseline.log` retains the original failing TODO, `unit17-focused3.log` records the 14 passing scenarios, and `unit17-all-final2.log` records the final full static gate. Earlier follow-up logs retain the intermediate failures that led to the final fixes.
 
+## Local integration
+
+Merged into `og-port-integration` at **`14a03571`** after independent review. The canonical full Docker static gate passed again on that merged candidate: 2,352 runtime/staging tests, 1,142 mod tests across 128 files, typecheck, Lua build and generated-Lua checks; exit 0. Integration log: `unit17-integration-all.log` in `peaceful-saha-a52c6f` (not committed). The status summary and pre-live checklist are updated. The working branches remain local; no push was attempted.
+
 ## Remaining before run J
 
 Unit 18's native recovery-loop lane remains open. The fake furnace does not prove real slot semantics or smelting. The affected native lanes, frozen candidate build/file verification and Louis's live-run go remain outstanding under the [reconciled integration plan](RECOVERY_LOOP_RECONCILIATION_2026-10-14.md). Do not treat this static checkpoint as permission for another live run.

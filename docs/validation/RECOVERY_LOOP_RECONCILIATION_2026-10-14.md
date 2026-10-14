@@ -39,8 +39,8 @@ This reviews the recovery consolidation proposal written on 2026-10-14, a scratc
 
 ## Entry criteria for run J
 
-- [ ] Unit 17 composed scenarios pass: G→H→I reaches verified completion, plus restart, cancellation and no-replay.
-- [ ] Any defect a composed scenario exposes is fixed in its own commit, with no change to authority or limits.
+- [x] Unit 17 composed scenarios pass: G→H→I reaches verified completion, plus restart, cancellation and no-replay.
+- [x] Any defect a composed scenario exposes is fixed in its own commit, with no change to authority or limits. Runtime fixes `e1aaf952`; completed tests `a9663f98`; reviewed and merged as `14a03571`.
 - [ ] Unit 18 native recovery-loop lane passes, or it is listed below as an open blocker with the owner's call.
 - [ ] `bash scripts/test-local.sh all` passes, and the production, craft-trigger, native-admission and steam-lab lanes pass on the frozen candidate.
 - [ ] The installer repin is current (needed only if `payload-src/installer.sh` changed).
@@ -49,4 +49,6 @@ This reviews the recovery consolidation proposal written on 2026-10-14, a scratc
 
 ## Candidate and open blockers
 
-To be filled in as the units land.
+Unit 17 is complete and locally integrated at `14a03571` (code/test checkpoint `a9663f98`). Fourteen composed scenarios pass without skips or TODOs. Runtime fixes preserve fresh machine-output facts after restart and settle exact completed operation evidence before checkpoint verification. Independent review passed. See [unit-17 checkpoint](UNIT17_RECOVERY_LOOP_2026-10-14.md).
+
+The unit worktree's complete Docker static gate passed: 2,352 runtime/staging and 1,142 mod tests, typecheck and Lua checks. The same full Docker gate passed on merged integration candidate `14a03571`, exit 0 (`unit17-integration-all.log`). Unit 18's native recovery-loop lane and the required real-engine gates remain open; run J is not authorized by this checkpoint. No push or deployment was performed.
