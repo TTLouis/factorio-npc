@@ -5471,8 +5471,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         residual = omittedResidual('too_many_items')
       }
       else {
-        const derived = deriveResidualNeeds({ roots: inventoryRoots, production: triggerRoots, recipes: cached, held: fresh })
-        if (derived.ok) residual = { rows: derived.rows, roots: inventoryRoots, production: triggerRoots, ...(buildBill.unresolved.length > 0 ? { unresolved_builds: buildBill.unresolved } : {}) }
+        // Unit 15: the output inventories of machines read FRESH in this handoff are collectable stock toward a shortfall. A stale
+        // observation is never credited, and a machine's source slot is not (a pending craft is not stock).
+        const machineStock = placedMachines.filter(entry => entry.state === 'fresh' && entry.inventories?.output && Object.keys(entry.inventories.output).length > 0)
+          .map(entry => ({ name: entry.name, unit_number: entry.unit_number, output: entry.inventories.output }))
+        const derived = deriveResidualNeeds({ roots: inventoryRoots, production: triggerRoots, recipes: cached, held: fresh, machineStock })
+        if (derived.ok) {
+          residual = { rows: derived.rows, roots: inventoryRoots, production: triggerRoots, ...(buildBill.unresolved.length > 0 ? { unresolved_builds: buildBill.unresolved } : {}) }
+          const credited = derived.rows.filter(row => !row.trigger && row.machine_stock?.length > 0)
+          if (credited.length > 0) {
+            meta.residual_machine_stock_credited = credited.map(row => ({
+              item: row.item, required: row.required, held: row.held, missing_before_machine: row.missing_before_machine, missing_after_machine: row.missing,
+              machines: row.machine_stock.map(entry => ({ name: entry.name, unit_number: entry.unit_number, count: entry.count })),
+            }))
+          }
+        }
         // An unread count is already carried as a stale or missing count (held_counts_STALE, `no value`): no residual is derived from it.
         else meta.residual_omitted = derived.reason
       }
@@ -5747,6 +5760,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         fresh_items: summary.fresh_items,
         stale_items: summary.stale_items,
         residual_needs: summary.residual_needs,
+        residual_machine_stock_credited: meta?.residual_machine_stock_credited?.length ?? 0,
         residual_omitted_reason: summary.residual_needs === 0 ? meta?.residual_omitted : undefined,
         machine_energy: summary.machine_energy,
         fuel_needs: summary.fuel_needs,
@@ -5759,6 +5773,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         dropped_for_size: (packet.dropped ?? []).filter(factRecord),
         reason: 'executor_context_rebuilt_without_the_prior_conversation_reads',
       }, { requestId })
+      if (meta?.residual_machine_stock_credited?.length > 0) {
+        await this.traceEvent('context.residual_machine_stock_credited', {
+          request_id: requestId,
+          handoff_id: restaged.handoff_id,
+          checkpoint,
+          items: meta.residual_machine_stock_credited,
+          carried: (summary.residual_needs ?? 0) > 0,
+          reason: 'fresh_machine_output_counted_toward_residual',
+        }, { requestId })
+      }
       if (meta?.machine_energy) {
         await this.traceEvent('context.machine_energy_carried', {
           request_id: requestId,

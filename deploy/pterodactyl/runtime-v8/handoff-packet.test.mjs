@@ -1396,3 +1396,58 @@ test('9: a build bill, a science residual and harvest sources with full raw-leaf
   for (const key of ['machine_energy', 'fuel_needs', 'recipe_fact_0', 'held_counts']) assert.ok(residualGone.dropped.includes(key), `${key} dropped before the residual`)
   assert.ok(!residualGone.dropped.includes('raw_leaf_acquisition'), 'the acquisition record outlives the residual')
 })
+
+// Unit 15: output stock in a machine read fresh is collectable stock toward a shortfall (run I: a furnace held 3 copper plates, the
+// actor 9 of the 10 the contract counted, and the residual still asked for one more ore).
+const SMELT_COPPER = recipeFact('copper-plate', [['copper-ore', 1]], [['copper-plate', 1]])
+const furnaceStock = (unit, output, name = 'stone-furnace') => ({ name, unit_number: unit, output })
+
+test('unit 15: machine output covers the shortfall, leaves no ore demand, and the row names the machine without changing the held count', () => {
+  const roots = [{ item: 'copper-plate', count: 10 }]
+  const result = deriveResidualNeeds({ roots, recipes: [SMELT_COPPER], held: heldOf({ 'copper-plate': 9, 'copper-ore': 0 }), machineStock: [furnaceStock(13, { 'copper-plate': 3 })] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.rows, [{ item: 'copper-plate', required: 10, held: 9, missing: 0, machine_stock: [{ name: 'stone-furnace', unit_number: 13, count: 3 }], missing_before_machine: 1, crafts: 0, recipe: 'copper-plate' }])
+  const packet = buildHandoffPacket({ planningState: circuitState(), ...ARGS, limits: { maxChars: 100000 }, executorFacts: {
+    recipes: [SMELT_COPPER], counts: { items: [{ item: 'copper-plate', count: 9, state: 'fresh' }, { item: 'copper-ore', count: 0, state: 'fresh' }], unavailable: [], as_of: TAG },
+    residual: { roots, rows: result.rows },
+  } })
+  const line = packet.text.split('\n').find(item => item.startsWith('residual_needs'))
+  assert.equal(line, 'residual_needs (derived from recipe_fact and fresh held_counts and FRESH placed_machines output reads for the step contract copper-plate>=10; shared stock counted once; in_machine_output is stock inside a machine, not held, and the step contract counts the actor inventory; it is counted from FRESH reads only, never from a STALE observation; move_items_exact to_entity=false transfers machine contents to the actor): copper-plate required=10 held=9 in_machine_output=3@stone-furnace unit=13 missing_after_machine=0 crafts=0 via copper-plate')
+  assert.ok(!packet.text.includes('copper-ore required'))
+})
+
+test('unit 15: machine output that covers part of the shortfall is netted once, across machines, and the rest still demands ingredients', () => {
+  const roots = [{ item: 'copper-plate', count: 10 }]
+  const partial = deriveResidualNeeds({ roots, recipes: [SMELT_COPPER], held: heldOf({ 'copper-plate': 5, 'copper-ore': 0 }), machineStock: [furnaceStock(13, { 'copper-plate': 3 })] })
+  const byItem = Object.fromEntries(partial.rows.map(row => [row.item, row]))
+  assert.deepEqual({ held: byItem['copper-plate'].held, missing: byItem['copper-plate'].missing, before: byItem['copper-plate'].missing_before_machine, crafts: byItem['copper-plate'].crafts }, { held: 5, missing: 2, before: 5, crafts: 2 })
+  assert.equal(byItem['copper-ore'].required, 2)
+  assert.equal(byItem['copper-ore'].missing, 2)
+  // Two machines add up; more stock than the shortfall never pushes missing below zero.
+  const two = deriveResidualNeeds({ roots, recipes: [SMELT_COPPER], held: heldOf({ 'copper-plate': 2, 'copper-ore': 0 }), machineStock: [furnaceStock(13, { 'copper-plate': 3 }), furnaceStock(14, { 'copper-plate': 9 })] })
+  assert.equal(two.rows.length, 1)
+  assert.deepEqual({ missing: two.rows[0].missing, before: two.rows[0].missing_before_machine, stock: two.rows[0].machine_stock.map(entry => `${entry.unit_number}:${entry.count}`) }, { missing: 0, before: 8, stock: ['14:9', '13:3'] })
+  // Stock for an item the actor already covers, a bad machine entry, and no stock at all leave the row exactly as it was.
+  const covered = deriveResidualNeeds({ roots, recipes: [SMELT_COPPER], held: heldOf({ 'copper-plate': 10 }), machineStock: [furnaceStock(13, { 'copper-plate': 3 })] })
+  assert.deepEqual(covered.rows, [{ item: 'copper-plate', required: 10, held: 10, missing: 0 }])
+  const without = deriveResidualNeeds({ roots, recipes: [SMELT_COPPER], held: heldOf({ 'copper-plate': 9, 'copper-ore': 0 }) })
+  const invalid = deriveResidualNeeds({ roots, recipes: [SMELT_COPPER], held: heldOf({ 'copper-plate': 9, 'copper-ore': 0 }), machineStock: [{ name: 'stone-furnace', output: { 'copper-plate': 3 } }, furnaceStock(15, { 'copper-plate': 0, 'iron-plate': 4 })] })
+  assert.deepEqual(invalid, without)
+  assert.equal(without.rows[0].missing_before_machine, undefined)
+})
+
+test('unit 15: a trigger production row never nets machine stock, while its ingredients net like any other need', () => {
+  const production = [{ item: 'copper-plate', count: 10, technology: 'electronics', held_counted: false, status: 'ready' }]
+  const held = heldOf({ 'copper-plate': 0, 'copper-ore': 4 })
+  const plain = deriveResidualNeeds({ roots: [], production, recipes: [SMELT_COPPER], held })
+  const stocked = deriveResidualNeeds({ roots: [], production, recipes: [SMELT_COPPER], held, machineStock: [furnaceStock(13, { 'copper-plate': 6, 'copper-ore': 3 })] })
+  const trigger = rows => rows.find(row => row.trigger)
+  assert.deepEqual(trigger(stocked.rows), trigger(plain.rows), 'the trigger row is unchanged')
+  assert.equal(trigger(stocked.rows).missing, 10)
+  assert.equal(trigger(stocked.rows).machine_stock, undefined)
+  // The ingredient (copper-ore) is an ordinary row: 10 needed, 4 held, 3 in the machine's output as collectable stock.
+  const ore = stocked.rows.find(row => row.item === 'copper-ore')
+  assert.deepEqual({ required: ore.required, held: ore.held, missing: ore.missing, before: ore.missing_before_machine }, { required: 10, held: 4, missing: 3, before: 6 })
+  const text = buildHandoffPacket({ planningState: circuitState(), ...ARGS, limits: { maxChars: 100000 }, executorFacts: { recipes: [SMELT_COPPER], counts: { items: [{ item: 'copper-ore', count: 4, state: 'fresh' }], unavailable: [], as_of: TAG }, residual: { roots: [], production, rows: stocked.rows } } }).text
+  assert.match(text.split('\n').find(line => line.startsWith('residual_needs')), /trigger craft-item copper-plate count=10 for electronics \(counts new crafts; held stock not counted\) held=0 crafts=10 via copper-plate \| copper-ore required=10 held=4 in_machine_output=3@stone-furnace unit=13 missing_after_machine=3$/)
+})

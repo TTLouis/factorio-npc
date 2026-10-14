@@ -871,8 +871,16 @@ export function neededItems(roots, recipes, limit = EXECUTOR_FACT_LIMITS.countIt
  * shared stock (an item two consumers need is accumulated once and the held amount is taken once) and recipe output
  * quantities (a recipe yielding two per craft needs half the crafts). Returns `{ ok: true, rows }`, or
  * `{ ok: false, reason }` when an input is unknown: it never guesses. `held` is a Map of fresh counts.
+ *
+ * Unit 15: `machineStock` is the OUTPUT inventories of placed machines read FRESH now (`[{ name, unit_number, output: { item: count } }]`;
+ * a stale observation is never passed). Stock in a machine's output is collectable, not held: the row keeps `held` as the actor's count,
+ * lists the machine stock with its identity (`machine_stock`), and `missing` is what remains after crediting it (`missing_before_machine`
+ * keeps the shortfall without it), so the crafts and the ingredient demand below follow. Production-trigger rows never credit it: they
+ * count NEW crafts only. Not credited (documented gap): items still in a machine's source slot that it will smelt or craft.
  */
-export function deriveResidualNeeds({ roots, recipes, held, production = [] }) {
+const MACHINE_STOCK_PER_ROW = 4
+
+export function deriveResidualNeeds({ roots, recipes, held, production = [], machineStock = [] }) {
   const rootList = Array.isArray(roots) ? roots : []
   const targets = Array.isArray(production) ? production : []
   if (rootList.length === 0 && targets.length === 0) return { ok: false, reason: 'no_contract_roots' }
@@ -940,16 +948,32 @@ export function deriveResidualNeeds({ roots, recipes, held, production = [] }) {
     demand.set(root.item, (demand.get(root.item) ?? 0) + root.count)
     if (root.build || root.science) purposes.set(root.item, { ...purposes.get(root.item), ...(root.build ? { build: root.build } : {}), ...(root.science ? { science: root.science } : {}) })
   }
+  const stockByItem = new Map()
+  for (const machine of asList(machineStock)) {
+    if (!factName(machine?.name) || !Number.isSafeInteger(machine.unit_number) || !machine.output || typeof machine.output !== 'object') continue
+    for (const [name, count] of Object.entries(machine.output)) {
+      if (!factName(name) || !Number.isSafeInteger(count) || count < 1) continue
+      stockByItem.set(name, [...(stockByItem.get(name) ?? []), { name: machine.name, unit_number: machine.unit_number, count }])
+    }
+  }
   const rows = []
   for (const item of order) {
     const required = demand.get(item) ?? 0
     if (required <= 0) continue
     const count = held instanceof Map ? held.get(item) : undefined
     if (!Number.isSafeInteger(count) || count < 0) return { ok: false, reason: `held_unknown:${item}` }
-    const missing = Math.max(0, required - count)
-    const row = { item, required, held: count, missing, ...purposes.get(item) }
+    const shortfall = Math.max(0, required - count)
+    // Only a shortfall is netted: stock in a machine does not change a row the actor already covers.
+    const stock = shortfall > 0 ? [...(stockByItem.get(item) ?? [])].sort((left, right) => right.count - left.count || left.unit_number - right.unit_number).slice(0, MACHINE_STOCK_PER_ROW) : []
+    const credit = Math.min(shortfall, stock.reduce((total, entry) => total + entry.count, 0))
+    const missing = shortfall - credit
+    const row = { item, required, held: count, missing, ...(stock.length > 0 ? { machine_stock: stock, missing_before_machine: shortfall } : {}), ...purposes.get(item) }
     const expansion = expansions.get(item)
-    if (expansion && missing > 0) {
+    if (expansion && stock.length > 0 && missing === 0) {
+      row.crafts = 0
+      row.recipe = expansion.recipe.name
+    }
+    else if (expansion && missing > 0) {
       const crafts = Math.ceil(missing / expansion.output)
       row.crafts = crafts
       row.recipe = expansion.recipe.name
@@ -1450,6 +1474,14 @@ function residualUnresolvedText(residual) {
   return unresolved.length > 0 ? ` | build_unresolved (no placing item derived, not in this bill): ${unresolved.map(entry => `${entry.prototype}:${entry.reason}`).join(',')}` : ''
 }
 
+// The shortfall of one residual row. A row credited with stock inside a machine (unit 15) names where it is, with the machine's identity,
+// and states what is still missing after counting it: the stock is collectable, it is not in the actor's inventory.
+function rowMissingText(row) {
+  const stock = asList(row.machine_stock)
+  if (stock.length === 0) return `missing=${row.missing}`
+  return `in_machine_output=${stock.map(entry => `${entry.count}@${entry.name} unit=${entry.unit_number}`).join('+')} missing_after_machine=${row.missing}`
+}
+
 function residualRecord(residual, limits) {
   // A residual that could not be derived because the closure outgrew the count-read bound is stated with what is unread, never silently absent.
   if (residual?.omitted) {
@@ -1468,14 +1500,15 @@ function residualRecord(residual, limits) {
   if (!residual?.rows || residual.rows.length === 0) return undefined
   const rows = residual.rows.slice(0, limits.residualRows).map(row => row.trigger
     ? triggerRowText(row)
-    : `${row.item} required=${row.required} held=${row.held} missing=${row.missing}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}${rowPurposeText(row)}`)
+    : `${row.item} required=${row.required} held=${row.held} ${rowMissingText(row)}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}${rowPurposeText(row)}`)
+  const machineStockRows = asList(residual.rows).some(row => !row.trigger && asList(row.machine_stock).length > 0)
   const rootLabel = root => root.build ? `build:${root.build.prototype}x${root.build.remaining}` : root.science ? `science:${root.item}x${root.count}` : `${root.item}>=${root.count}`
   const roots = [...asList(residual.roots).map(rootLabel), ...asList(residual.production).map(root => `trigger:${root.item}x${root.count}`)].join(',')
   return {
     key: 'residual_needs',
     block: 'step',
     drop: 'residual_needs',
-    text: `residual_needs (derived from recipe_fact and fresh held_counts for the step contract ${roots}; shared stock counted once): ${joinBounded(rows, ' | ', limits.residualChars)}${stateText}${residualUnresolvedText(residual)}`,
+    text: `residual_needs (derived from recipe_fact and fresh held_counts${machineStockRows ? ' and FRESH placed_machines output reads' : ''} for the step contract ${roots}; shared stock counted once${machineStockRows ? '; in_machine_output is stock inside a machine, not held, and the step contract counts the actor inventory; it is counted from FRESH reads only, never from a STALE observation; move_items_exact to_entity=false transfers machine contents to the actor' : ''}): ${joinBounded(rows, ' | ', limits.residualChars)}${stateText}${residualUnresolvedText(residual)}`,
   }
 }
 

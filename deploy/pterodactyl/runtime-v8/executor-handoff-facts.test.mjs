@@ -1705,10 +1705,10 @@ const FURNACE_26 = { found: true, entity: { unit_number: 26, name: 'stone-furnac
   { index: 4, items: [] },
 ] } }
 
-async function furnaceWorld({ statusRead = 'matched' } = {}) {
+async function furnaceWorld({ statusRead = 'matched', inventory = { 'iron-ore': 42, 'iron-plate': 8 }, recipes, furnace = FURNACE_26 } = {}) {
   // The actor holds 42 iron ore, 8 iron plates and no coal (run H); the step contract is an inventory count, not a machine requirement.
   const world = harness({
-    game: liveGame({ inventory: { 'iron-ore': 42, 'iron-plate': 8 } }),
+    game: liveGame({ inventory, recipes }),
     script: [
       { tool_calls: [read('getNearbyEntities', { radius: 16 }, 'nearby'), ...readsRound().tool_calls.slice(0, 3)].map((call, index) => ({ ...call, index })) },
       planReply({ plan: ['Smelt 10 copper plates', 'Craft the lab'], currentStep: 0, operations: [gather('copper-ore', 10)], checkpoint: inventoryCheckpoint('copper-plate', 10), goal: GOAL, roadmap: SHELF }),
@@ -1723,7 +1723,7 @@ async function furnaceWorld({ statusRead = 'matched' } = {}) {
     if (text.includes('get_entity_status')) {
       world.statusReads += 1
       if (statusRead === 'fail') throw new Error('rcon transport closed')
-      return JSON.stringify(FURNACE_26)
+      return JSON.stringify(furnace)
     }
     return baseCommand(text)
   }
@@ -1808,4 +1808,85 @@ test('unit 14: a read that fails to match a placed machine keeps the old observa
   assert.equal(entry.state, 'stale')
   assert.equal(entry.reason, 'inventory_nearest_is_other_unit')
   assert.deepEqual({ tick: entry.as_of.tick, epoch: entry.as_of.epoch }, { tick: dated.observed_tick, epoch: 2 }, 'dated by the observation, not by the current epoch 3')
+})
+
+// Unit 15 (run I, 2026-10-14). The step contract was `inventory_count copper-plate>=10`, the actor held 9 plates and stone furnace 13's OWN
+// output held 3. The residual ignored the machine stock, said one more copper ore had to be mined and smelted, and the executor looped on
+// "need one more ore" for six automatic resumes. Machine output read FRESH now is collectable stock toward the shortfall; the row keeps the
+// actor's held count and names the machine, because the contract counts the actor inventory.
+const furnaceEntity = ({ unit = 13, fuel = [{ name: 'coal', count: 9 }], source = [], output = [] } = {}) => ({ found: true, entity: { unit_number: unit, name: 'stone-furnace', type: 'furnace', recipe: 'copper-plate', inventories: [
+  { index: 1, items: fuel },
+  { index: 2, items: source },
+  { index: 3, items: output },
+  { index: 4, items: [] },
+] } })
+
+const runIWorld = ({ held = 9, output = 3, ...options } = {}) => furnaceWorld({
+  inventory: { 'copper-plate': held },
+  recipes: { 'copper-plate': copperPlateRecipe() },
+  furnace: furnaceEntity({ unit: 26, output: output > 0 ? [{ name: 'copper-plate', count: output }] : [] }),
+  ...options,
+})
+
+test('unit 15 run I: a fresh furnace output that covers the shortfall leaves no crafts, no ore demand and no raw-leaf row, and names the machine', async () => {
+  const world = await runIWorld({ held: 9, output: 3 })
+  const result = await restageToFreshExecutor(world)
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  const residual = stepLine(world, 'residual_needs')
+  assert.match(residual, /^residual_needs \(derived from recipe_fact and fresh held_counts and FRESH placed_machines output reads for the step contract copper-plate>=10; shared stock counted once; in_machine_output is stock inside a machine, not held, and the step contract counts the actor inventory; it is counted from FRESH reads only, never from a STALE observation; move_items_exact to_entity=false transfers machine contents to the actor\): /)
+  assert.match(residual, /copper-plate required=10 held=9 in_machine_output=3@stone-furnace unit=26 missing_after_machine=0 crafts=0 via copper-plate/)
+  assert.doesNotMatch(residual, /copper-ore required=/, 'no ore is demanded: the machine output covers the shortfall')
+  assert.equal(stepLine(world, 'raw_leaf_acquisition'), undefined, 'no copper-ore acquisition row')
+  // The actor's own count is unchanged: the plates in the furnace are not held.
+  assert.match(stepLine(world, 'held_counts'), /copper-plate=9/)
+  assert.match(stepLine(world, 'placed_machines'), /stone-furnace unit=26 \[FRESH as_of=tick:\d+,epoch:3\] .*machine_output=\{copper-plate:3\}/)
+
+  // Traced with the request and handoff ids, the rows credited and a reason.
+  const credited = world.rows('context.residual_machine_stock_credited')
+  assert.equal(credited.length, 1)
+  assert.equal(credited[0].data.request_id, world.requestId())
+  assert.equal(credited[0].data.handoff_id, result.handoff_id)
+  assert.equal(credited[0].data.reason, 'fresh_machine_output_counted_toward_residual')
+  assert.deepEqual(credited[0].data.items, [{ item: 'copper-plate', required: 10, held: 9, missing_before_machine: 1, missing_after_machine: 0, machines: [{ name: 'stone-furnace', unit_number: 26, count: 3 }] }])
+  const facts = world.rows('context.executor_facts_carried').at(-1)
+  assert.equal(facts.data.residual_machine_stock_credited, 1)
+})
+
+test('unit 15: a stale furnace observation is never credited toward the residual', async () => {
+  const world = await runIWorld({ held: 9, output: 3 })
+  await restageToFreshExecutor(world) // a fresh read records the furnace inventories
+  const baseCommand = world.game.command
+  world.game.command = async (text) => {
+    if (text.includes('get_entity_status')) throw new Error('rcon transport closed')
+    return baseCommand(text)
+  }
+  const again = await world.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:again', actor: world.agent.epoch, requestId: world.requestId() })
+  assert.equal(again.restaged, true, JSON.stringify(again))
+  assert.match(stepLine(world, 'placed_machines'), /\[STALE observed/)
+  const residual = stepLine(world, 'residual_needs')
+  assert.match(residual, /copper-plate required=10 held=9 missing=1 crafts=1 via copper-plate/)
+  assert.match(residual, /copper-ore required=1 held=0 missing=1/)
+  assert.doesNotMatch(residual, /in_machine_output|FRESH placed_machines/)
+  assert.match(stepLine(world, 'raw_leaf_acquisition'), /^raw_leaf_acquisition: copper-ore missing=1 raw: mined_from=copper-ore/)
+  assert.equal(world.rows('context.residual_machine_stock_credited').length, 1, 'only the fresh restage credited machine stock')
+  assert.equal(world.rows('context.executor_facts_carried').at(-1).data.residual_machine_stock_credited, 0)
+})
+
+test('unit 15: machine output that covers only part of the shortfall is credited and the rest is still demanded', async () => {
+  const world = await runIWorld({ held: 5, output: 3 })
+  const result = await restageToFreshExecutor(world)
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  const residual = stepLine(world, 'residual_needs')
+  assert.match(residual, /copper-plate required=10 held=5 in_machine_output=3@stone-furnace unit=26 missing_after_machine=2 crafts=2 via copper-plate/)
+  assert.match(residual, /copper-ore required=2 held=0 missing=2/)
+  assert.match(stepLine(world, 'raw_leaf_acquisition'), /^raw_leaf_acquisition: copper-ore missing=2 raw: mined_from=copper-ore/)
+  const [credited] = world.rows('context.residual_machine_stock_credited')
+  assert.deepEqual({ before: credited.data.items[0].missing_before_machine, after: credited.data.items[0].missing_after_machine }, { before: 5, after: 2 })
+})
+
+test('unit 15: a furnace with an empty output changes nothing and traces no credit', async () => {
+  const world = await runIWorld({ held: 9, output: 0 })
+  await restageToFreshExecutor(world)
+  assert.match(stepLine(world, 'residual_needs'), /copper-plate required=10 held=9 missing=1 crafts=1 via copper-plate/)
+  assert.equal(world.rows('context.residual_machine_stock_credited').length, 0)
 })
