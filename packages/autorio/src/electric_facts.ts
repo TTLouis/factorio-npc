@@ -27,6 +27,16 @@ function round_tenth(value: number) {
   return math.floor(value * 10 + 0.5) / 10
 }
 
+/** Run a read of a key that may raise for this prototype or entity type; undefined when it does. */
+export function protected_read<T>(read: () => T): T | undefined {
+  try {
+    return read()
+  }
+  catch {
+    return undefined
+  }
+}
+
 /** First finite number among the named attributes, then the named methods; undefined when the prototype defines none. */
 export function prototype_number(prototype: any, fields: string[], methods: string[]): number | undefined {
   if (!prototype) return undefined
@@ -119,11 +129,11 @@ export function electric_prototype_facts(prototype: any): Record<string, unknown
   }
   if (has_power) facts.power = power
 
-  const burner = prototype.burner_prototype
+  const burner: any = protected_read(() => prototype.burner_prototype)
   if (burner) {
     facts.burner = {
-      fuel_categories: sorted_true_keys(burner.fuel_categories),
-      effectivity: burner.effectivity,
+      fuel_categories: protected_read(() => sorted_true_keys(burner.fuel_categories)) ?? [],
+      effectivity: protected_read(() => burner.effectivity),
     }
   }
 
@@ -150,7 +160,7 @@ function pole_summary(pole: LuaEntity, distance: number) {
 }
 
 function has_electric_energy_source(entity: LuaEntity) {
-  return (entity.prototype as any).electric_energy_source_prototype !== undefined
+  return protected_read(() => (entity.prototype as any).electric_energy_source_prototype) !== undefined
 }
 
 /**
@@ -256,8 +266,8 @@ export function nearest_pole_for_unpowered(entity: LuaEntity) {
 
   const summary = pole_summary(nearest, math.sqrt(nearest_squared))
   const reach = pole_reach(nearest.prototype)
-  if (reach !== undefined) {
-    const box = (entity as any).bounding_box
+  const box: any = protected_read(() => (entity as any).bounding_box)
+  if (reach !== undefined && box !== undefined) {
     const half = reach.supply_area_distance
     const gap_x = math.max(0, box.left_top.x - (nearest.position.x + half), (nearest.position.x - half) - box.right_bottom.x)
     const gap_y = math.max(0, box.left_top.y - (nearest.position.y + half), (nearest.position.y - half) - box.right_bottom.y)

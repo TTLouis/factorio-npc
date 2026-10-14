@@ -161,4 +161,20 @@ describe('electric pole candidate facts and unpowered pole hints', () => {
     for (const name of ['no_power', 'low_power', 'not_plugged_in_electric_network']) expect(status_shows_no_power(name)).toBe(true)
     for (const name of ['working', 'normal', 'no_ingredients', undefined]) expect(status_shows_no_power(name as any)).toBe(false)
   })
+
+  it('treats a prototype or entity key that raises as absent instead of failing the read', () => {
+    const no_burner = raising({ name: 'strange', type: 'container' }, 'burner_prototype')
+    expect(electric_prototype_facts(no_burner)).toEqual({})
+    const burner_half = { name: 'boiler', type: 'boiler', burner_prototype: raising({}, 'fuel_categories', 'effectivity') }
+    expect(electric_prototype_facts(burner_half)).toEqual({ burner: { fuel_categories: [] } })
+
+    const lab = entity(30, lab_prototype, 20.5, 0.5, 1.5)
+    const pole = entity(31, small_pole, 10.5, 0.5, 0.5, 9)
+    ;(lab as any).surface = surface_of([lab, pole])
+    ;(lab as any).force = { index: 1 }
+    Object.defineProperty(lab, 'bounding_box', { get() { throw new Error('no bounding box') } })
+    const hint = nearest_pole_for_unpowered(lab as any) as any
+    expect(hint.nearest_pole).toMatchObject({ unit_number: 31, distance: 10 })
+    expect(hint.nearest_pole.supply_gap_tiles).toBeUndefined()
+  })
 })
