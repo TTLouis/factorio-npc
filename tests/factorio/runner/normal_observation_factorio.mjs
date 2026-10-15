@@ -25,11 +25,12 @@ const rcon = { command: async (command, options) => {
   return answer
 } }
 const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces["normal-observation"].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
-const snapshot = () => lua(`local o=remote.call("autorio_operations","status"); local f=game.get_entity_by_unit_number(${unit}); assert(f and f.valid);
+const snapshot = () => lua(`local o=remote.call("autorio_operations","status"); local f;
+  for _,e in pairs(a.surface.find_entities_filtered{force=a.force,name="stone-furnace"}) do if e.unit_number==${unit} then f=e; break end end; assert(f and f.valid,"declared furnace identity missing");
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end;
   rcon.print(helpers.table_to_json({actor_id=a.unit_number,humans=#game.connected_players,speed=game.speed,tick=game.tick,
     held=counts(a.get_main_inventory()),source=counts(f.get_inventory(defines.inventory.crafter_input)),output=counts(f.get_output_inventory()),fuel=counts(f.get_fuel_inventory()),
-    furnace={unit_number=f.unit_number,position=f.position},red=a.force.technologies["automation-science-pack"].researched,red_recipe=a.force.recipes["automation-science-pack"].enabled,
+    furnace={unit_number=f.unit_number,position=f.position,recipe=f.get_recipe() and f.get_recipe().name,crafting_progress=f.crafting_progress},red=a.force.technologies["automation-science-pack"].researched,red_recipe=a.force.recipes["automation-science-pack"].enabled,
     lab_recipe=a.force.recipes.lab.enabled,copper_produced=a.force.get_item_production_statistics(a.surface).get_input_count("copper-plate"),
     crafting_queue_length=#(a.crafting_queue or {}),walking=a.walking_state.walking,mining=a.mining_state.mining,
     crafting=remote.call("autorio_crafting","status"),follow=remote.call("autorio_follow","status"),navigation=remote.call("autorio_navigation","status"),
@@ -105,6 +106,12 @@ function assertNormal(messages, context, expectedCalls) {
 }
 const model = new ScriptedModel()
   .push('planner', 'sol:immutable-lab-and-red-slice', reply([], { goal }))
+  .push('planner', 'sol:confirm-native-lab-trigger-requirements', messages => {
+    const grounding = messages.findLast(row => String(row.content).startsWith('[HARNESS]')).content
+    assert.match(grounding, /requirements_grounding/)
+    assert.match(grounding, /trigger item lab/)
+    return reply([], { goal })
+  })
   .push('executor', 'luna:open-typed-research-read', async (messages, context) => {
     assert.equal(context.allowTools, true)
     // Declared historical harness policy, not gameplay: the original goal has
@@ -135,7 +142,7 @@ const model = new ScriptedModel()
     assert.equal(status.entity.unit_number, unit)
     const items = status.entity.inventories.flatMap(row => Array.isArray(row.items) ? row.items : [])
     assert.ok(items.some(row => row.name === 'iron-plate' && row.count === 52))
-    assert.ok(items.some(row => row.name === 'copper-ore' && row.count === 5))
+    assert.ok(items.some(row => row.name === 'copper-ore' && row.count === 4), 'one of the five setup ores is already reserved in the native copper craft')
     unit = status.entity.unit_number
     return reply([collect('iron-plate', 52)])
   })
@@ -176,7 +183,11 @@ try {
   assert.equal(setup.recipes.lab.enabled, true, 'the native lab recipe is enabled; the science recipe is the locked result')
   assert.deepEqual(setup.trigger, { type: 'craft-item', item: { name: 'lab' }, count: 1 })
   const before = await idle()
-  assert.equal(before.output['iron-plate'], 52); assert.equal(before.source['copper-ore'], 5)
+  assert.equal(before.output['iron-plate'], 52)
+  assert.equal(before.source['copper-ore'], 4, 'native furnace reserves one input before the obstructed output is cleared')
+  assert.equal(before.furnace.recipe, 'copper-plate')
+  assert.ok(before.furnace.crafting_progress > 0 && before.furnace.crafting_progress <= 1, 'reserved input is in a native craft already in progress')
+  assert.equal(before.copper_produced, 0, 'reserved ore is not yet a produced plate')
   assert.equal(before.red, false); assert.equal(before.red_recipe, false)
   assert.deepEqual(before.held, { 'iron-plate': 62, 'copper-plate': 10, 'iron-gear-wheel': 10 })
   const bridge = Object.create(Session.prototype)
@@ -253,8 +264,10 @@ try {
   assert.equal(world.memory.targetedObservationLedger?.has(KEY) ?? false, false)
   assert.deepEqual(world.named('recovery.auto_resume_started'), [])
   assert.deepEqual(world.named('recovery.fresh_context_started'), [])
-  assert.equal(wire[0].body.model, PLANNER_MODEL)
-  assert.ok(wire.slice(1).every(row => row.body.model === EXECUTOR_MODEL))
+  const plannerWire = wire.filter(row => row.role === 'planner')
+  assert.equal(plannerWire.length, 2, 'initial slice and mandatory live requirements grounding confirmation')
+  assert.ok(plannerWire.every(row => row.body.model === PLANNER_MODEL))
+  assert.ok(wire.filter(row => row.role === 'executor').every(row => row.body.model === EXECUTOR_MODEL))
   assert.ok(wire.every(row => row.actor_id === status.actor_id && row.epoch === status.epoch))
   assert.deepEqual(model.remaining, []); healthy()
   assert.deepEqual(jevContractLog.filter(row => !row.ok), [])
