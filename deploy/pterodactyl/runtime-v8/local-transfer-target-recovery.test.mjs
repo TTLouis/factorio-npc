@@ -59,7 +59,11 @@ class RemoteFurnaceGame extends FurnaceFactorio {
           assert.ok(match)
           return { name: operation.name, args: { item_name: match[1], entity_name: match[2], max_count: Number(match[3]), to_entity: match[4] === 'true' } }
         }
-        if (operation.name === 'walk_to_position') return structuredClone(WALK)
+        if (operation.name === 'walk_to_position') {
+          const match = /^(-?[\d.]+),(-?[\d.]+)/.exec(operation.args.raw)
+          assert.ok(match)
+          return { name: 'walk_to_position', args: { x: Number(match[1]), y: Number(match[2]) } }
+        }
         return operation
       })
       this.sent.at(-1).operations = this.pendingBatch.operations
@@ -75,6 +79,11 @@ class RemoteFurnaceGame extends FurnaceFactorio {
       // Native legacy lookup has no candidate within reach. No output or
       // inventory is assigned; the tail never executes.
       const failed = batch.operations.find(operation => operation.name === 'move_items')
+      for (const prefix of batch.operations.slice(0, batch.operations.indexOf(failed))) {
+        assert.equal(prefix.name, 'walk_to_position')
+        this.position = structuredClone(prefix.args)
+        this.effects.push({ batch_id: batch.batch_id, operation: prefix.name, position: this.position })
+      }
       this.failLastBatch({ type: 'moving_items', code: 'no_target', accepted: false, completed: false,
         entity_name: failed.args.entity_name, item_name: failed.args.item_name,
         requested_count: failed.args.max_count, to_entity: failed.args.to_entity })
@@ -84,7 +93,7 @@ class RemoteFurnaceGame extends FurnaceFactorio {
       this.pendingBatch = null
       return batch
     }
-    if (batch.operations[0].name === 'walk_to_position') this.position = { x: 11, y: -65 }
+    if (batch.operations[0].name === 'walk_to_position') this.position = structuredClone(batch.operations[0].args)
     return super.completeBatch()
   }
   smelt(count) {
@@ -111,12 +120,13 @@ function fixture(t, options = {}) {
   const ctx = { game, model, world, session, logs, wire }
   ctx.action = operations => planReply({ stepId: world.memory.currentPlan(KEY)?.task_board.active_step_id, operations })
   ctx.start = async () => {
+    const initial = game.prefix ? [{ name: 'walk_to_position', args: { x: 8.5390625, y: -101.4140625 } }, ...LEGACY] : LEGACY
     model.push('planner', 'sol:commit', planReply({ plan: [STEP], currentStep: 0, operations: [], checkpoint: CHECKPOINT, stepCompletions: [{ kind: 'deterministic', checkpoint: CHECKPOINT }], goal: GOAL }))
-      .push('executor', 'luna:actual-run-S-legacy-transfer', () => ctx.action(LEGACY))
+      .push('executor', 'luna:actual-run-S-legacy-transfer', () => ctx.action(initial))
     assert.equal(session.queuePlayerRequest('TTLouis', STEP), true)
     await settle(session)
     assert.equal(game.sent.length, 1)
-    assert.deepEqual(game.sent[0].operations, LEGACY)
+    assert.deepEqual(game.sent[0].operations, initial)
   }
   ctx.fail = async () => {
     game.completeBatch()
@@ -190,6 +200,11 @@ for (const mode of ['historical-unproved', 'completed-prefix']) test(`Run S ${mo
   await ctx.start()
   model.push('executor', 'luna:choose-travel', messages => { assertRecovery(ctx, messages); return ctx.action([WALK]) })
   await ctx.fail()
+  if (mode === 'completed-prefix') {
+    assert.equal(game.position.x, 8.5390625, 'the successful movement prefix changed the world before the failure')
+    assert.equal(game.effects[0].operation, 'walk_to_position')
+    assert.equal(game.cancelledBatch.started_count, 2)
+  }
   const pending = world.memory.pendingOperations(KEY).find(row => row.operations.some(operation => operation.name === 'move_items'))
   assert.equal(pending.effect, 'partial_unknown'); assert.equal(pending.verdict, 'admitted_cancelled')
   const restored = new CanonicalTaskBoardMemory(); restored.restore(JSON.parse(JSON.stringify(world.memory.snapshot())))
