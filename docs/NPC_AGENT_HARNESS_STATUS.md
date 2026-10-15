@@ -8,6 +8,11 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run U verifies normal reads and stop fence; generic closed provider wire hits size guard
+
+- **Trial.** Frozen `6ceaa2ae`, nine minutes including shutdown, 33 requests (four Sol/29 Luna), 32 responses and one response-size error. Jev23/23, one resume used. Native ten copper plates and 100 mined iron ore, but zero iron/red production and only the furnace placed; its copper output obstructed iron smelting. Full-chain measurement never started.
+- **Verified fixes.** Actual provider wire exercises normal typed inventory observation once without consuming the closed allowance. The repaired paired cancellation/operator-pause stop fence passes live despite retained pause timestamp, before the 951,850-byte save. Exact evidence and save are retained; isolated stack is down.
+- **Next boundary.** The final closed Luna request used the legacy generic profile and serialized only model/messages/max_tokens4000, without tools/tool_choice. Its response exceeded the unchanged256KiB guard (270,557 bytes). The failed body was canceled before parse; its contents are unknown. Empty AI_API_METHOD retained legacy auto/generic selection despite routing through CLI proxy. Next explicitly select existing local mode for this harness and validate both role-resolved closed wire contracts before readiness; preserve generic/direct/router behavior and every size/call/recovery limit. No blind retry, push or deployment. [Run U evidence](validation/RED_AUTOMATION_LIVE_RUN_U_2026-10-15.md).
 ## October 15: Run T observation channel reviewed and integrated locally
 
 - **Fix.** A validated typed observation request while ordinary tools are open becomes the same ordinary tool call, using existing budget, cache, duplicate handling and actor fences. It cannot consume the closed one-fact ledger or force tools closed. Guidance advertises the separate targeted allowance only on closed decisions. Strict identity/no-edit validation and existing recovery/resume limits remain.
