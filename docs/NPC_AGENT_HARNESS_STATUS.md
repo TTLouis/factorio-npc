@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run N observation-baseline recovery verified and integrated locally
+
+- **Fix.** Compact entity/nearby responses require a complete baseline delivered in the current conversation and actor/epoch scope. Rebuilt contexts without that evidence receive full native snapshots; normal explicitly carried baselines still support diffs. Compaction repair settles dependent observations before provider dispatch, including secondary folds after large expansions. Existing observation/recovery caps and mutation authority remain intact.
+- **Full-loop proof.** Exact Run N blocker/recipe data drives closed C5 correction, the production Session timer/C7, fresh machine observations, furnace output clearing, copper processing and a verified crafted lab. Stop/epoch replies admit nothing. The native lane performs copper→iron→copper switching, crafts/places a real lab and unlocks the red-science trigger: eight intended batches, one resume, no replay or post-setup corrective gameplay. Scripted Sol/Luna/Jev only.
+- **Gates.** Frozen code/tests `cd717daa`; 2,390 runtime/staging and 1,142 mod tests plus typecheck/Lua checks pass. All nine native lanes pass, including connected steam/powered lab and assembler/inserter production canaries. All ten new static cases fail with the original production modules; the original native control fails at C7 (`unchanged` instead of `full`). Independent review passed after its secondary-compaction finding was reproduced and fixed.
+- **Local integration.** No-ff merge `9f9723b6` in the existing integration checkout for `experiment/jev-agent-architecture`; the merged canonical gate also passes. Root checkout's unrelated edits preserved. No push, server build or live provider run. Full-factory red output at 1/game minute and the five-minute peaceful, AI-paused, speed-2 benchmark remain pending. [Recovery checkpoint and evidence](validation/OBSERVATION_BASELINE_RECOVERY_2026-10-15.md).
+
 ## October 15: Run N red-automation construction stopped before throughput measurement
 
 - **One authorized delegated trial.** Local candidate `77e65f4b`; shipped runtime/prompt/manifest and all 31 active/native-tested mod files match. Sol planner / Luna executor produced 5 / 56 replies, zero provider errors; Jev 38 requests/responses. Fresh world, zero humans, unchanged declared starter and no corrective gameplay. No push.
