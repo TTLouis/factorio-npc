@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run L recovery fixed; delegated trial authorized
+
+- **Unit 21.** Reviewed code/tests `b9d25643` classify the exact invalid `unit_number` boundary into the existing tool-capable bounded correction loop. No malformed batch is admitted. Bounded rejection traces preserve replayable numeric/type facts. Same-request preflight correction cannot substitute ingredient stock or a semantic assessment for the retained result checkpoint.
+- **Proof.** Eight new static scenarios include Sol planner/Luna executor resolution, placement receipt followed by fresh discovery, verified output, existing-cap exhaustion, stop/epoch fencing and lost-ack restart without replay. Original implementations fail the intended regressions. Canonical gates pass 2,373 runtime/staging and 1,142 mod tests, typecheck/Lua checks; all seven frozen native lanes pass, including the new real-engine delegated recovery chain and existing production canaries.
+- **Next trial.** Louis authorized one fresh CLI-proxy run with `gpt-6.1-sol` planning and `gpt-6-luna` execution after integration/deployment checks. Actual model traces and planner/executor handoff must establish live delegation; scripted role coverage alone does not establish provider compatibility. Red/green automation remains the next milestone after the research unlock/reliability gate. [Unit 21 evidence and checklist](validation/UNIT21_RUN_L_DELEGATION_RECOVERY_2026-10-15.md).
+
 ## October 15: Run L stopped at invalid-reference recovery before smelting
 
 - **One authorized trial.** Pushed candidate `0fbc4bff`; deployment/prompt/manifest and all 31 active/packaged mod files verified. Fresh actor 24, zero humans, speed 1, unchanged starter. Actual CLI-proxy model `gpt-6-luna`; 11 provider responses, no provider errors, Jev 17/17. No operator corrections or retry.
