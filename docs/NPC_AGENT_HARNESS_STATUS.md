@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Unit 22 shoreline recovery and powered-lab loop verified locally
+
+- **Recovery.** Reviewed code/tests `adc0821a` reject an unsupported world-blocker claim backed only by local pump absence and inconclusive water coverage. The existing category-correction allowance supplies bounded native exploration facts; the model chooses an action under the same goal/checkpoint. No observation/resume cap increase or automatic gameplay action. Facts are request/goal/step/actor/epoch scoped, expire and clear on mutation/restart.
+- **Completion gap.** The native loop exposed missing `place_candidate` strict receipt mapping. Clean correlated placement receipts now reach the existing world checkpoint evaluation; an unpowered placed lab still cannot close the powered-lab result.
+- **Proof.** Exact sanitized Run M static replay with its fresh-context allowance already spent reaches verified output, plus cancellation/epoch, existing-cap exhaustion, restart/no-replay and invalid-receipt negatives. Frozen gates pass 2,380 runtime/staging and 1,142 mod tests, typecheck/Lua checks; all eight native lanes pass. Native exploration discovers a distant shoreline, builds connected steam power, powers a real lab and consumes science. Independent original-code controls fail at both repaired boundaries.
+- **Local integration only.** Work uses the existing `og-port-integration` checkout for the `experiment/jev-agent-architecture` line. The root checkout's old checked-out branch and pre-existing document changes remain untouched. No push, server build or live provider run. This engine fixture proves the recovery path; live green unlock and red/green automation remain unproved. [Unit 22 checkpoint](validation/UNIT22_RUN_M_SHORELINE_RECOVERY_2026-10-15.md).
+
 ## October 15: Run M confirms Sol/Luna delegation; shoreline recovery remains blocked
 
 - **Reviewed fix integrated.** Unit 21 code/tests `b9d25643`, merge `c07f506a`, pushed/deployed source `517fcdc1`. Frozen and merged gates pass 2,373 runtime/staging and 1,142 mod tests plus typecheck/Lua checks; seven frozen native lanes green. Deployment/prompt/manifest and all 31 active/native-tested mod files match.
