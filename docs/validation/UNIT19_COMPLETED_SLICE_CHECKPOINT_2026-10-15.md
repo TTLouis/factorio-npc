@@ -27,7 +27,7 @@ The first test failed on unchanged production code with **exactly `checkpoint_re
 - [x] Canonical `bash scripts/test-local.sh all` in Docker: **2,358 runtime/staging tests and 1,142 mod tests across 128 files**, typecheck, Lua build and generated-Lua checks; exit 0 (`unit19-all.log`). No failed/skipped/TODO runtime tests.
 - [x] Independent final review; no concrete merge blockers. `git diff --check` passed. Installer payload source/copy list is unchanged, so its bootstrap pin remains valid.
 - [x] Frozen-candidate native recovery-loop, production, craft-trigger, native-admission and steam-lab lanes: all passed, exit 0 (`unit19-engine.log`). Official test image `sha256:3ac031fda37ff372f82fcf64544284aa01aee18cdb50fb707f41a81e0d2e3a51`, no runtime overlay, engine container network mode `none`.
-- [ ] Local no-ff integration and canonical full Docker gate on the merged candidate.
+- [x] Local no-ff integration at **`01424bcd95e4c878364cc01077de36f93c50f981`** and canonical full Docker gate on that merged candidate: 2,358 runtime/staging and 1,142 mod tests, typecheck/Lua checks; exit 0 (`unit19-integration-all.log` in `peaceful-saha-a52c6f`).
 - [ ] Push, required local server build and actual deployed-file/cold-world preflight before the newly authorized trial.
 
 Local evidence is retained in `.claude/worktrees/unit19-completed-slice-checkpoint/`. Earlier logs preserve the original red replay and intermediate assertion/implementation corrections. This fake-world regression proves orchestration, not Factorio physics or autonomous green science.

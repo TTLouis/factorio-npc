@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run J completed-slice fix integrated; next trial authorized
+
+- **Unit 19.** Reviewed fix `2e24b74f`, merged at `01424bcd`. Completed-slice planner blockers enter existing bounded outcome/recovery handling before checkpoint persistence. Corrected batch-bearing and planner-only successors retain separate identity and a spent durable recovery allowance; the active-step guard is unchanged.
+- **Full-loop proof.** Exact Run J reply reproduces the old fault. Five passing Session/receipt scenarios cover both successor routes through verified goal completion, exhaustion, stop and epoch fencing. Completed history and goal identity are preserved; no fake stock/research completion.
+- **Gates.** Unit and merged canonical Docker gates passed: 2,358 runtime/staging, 1,142 mod tests, typecheck/Lua checks. Frozen-candidate recovery-loop, production, craft-trigger, native-admission and steam-lab lanes passed. Independent review found no concrete merge blockers.
+- **Next.** Louis authorized one further longer CLI-proxy trial toward green science after these checks. It starts after the pushed candidate's server build and deployed-file/cold-world verification. No preset duration cutoff or corrective gameplay; existing controller bounds and the 50% usage floor stand. [Unit 19 checkpoint](validation/UNIT19_COMPLETED_SLICE_CHECKPOINT_2026-10-15.md).
+
 ## October 15: CLI-proxy run J progressed, then hit a completed-slice harness fault
 
 - **One authorized trial.** Candidate `9550ecc9`; deployed runtime/prompt/mod files matched, fresh actor 14, zero humans, speed 1 and the unchanged starter. Actual model `gpt-6-luna`; 40 provider requests/responses, zero provider errors; Jev 43 requests/responses. No operator corrections or retry.
