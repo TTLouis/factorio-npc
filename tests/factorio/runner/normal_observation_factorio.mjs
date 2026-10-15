@@ -5,18 +5,20 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
+import { DeploymentError, Rcon } from '../pterodactyl/runtime-v8/common.mjs'
 import { configureNpcSession, deploymentStatus } from '../pterodactyl/staging/supervisor-adapter.mjs'
 import { recoveryWorld, recoverySession, ScriptedModel, settle, KEY } from '../pterodactyl/runtime-v8/recovery-loop-fixtures.mjs'
 import { PLANNER_MODEL, EXECUTOR_MODEL } from '../pterodactyl/runtime-v8/invalid-reference-fixtures.mjs'
 import { configuration, Session } from '../pterodactyl/runtime-v8/supervisor.mjs'
-import { providerRequest } from '../pterodactyl/runtime-v8/provider.mjs'
+import { providerRequest, verifyCliProxyProviderContracts } from '../pterodactyl/runtime-v8/provider.mjs'
 import { planReply, jevContractLog } from '../pterodactyl/runtime-v8/task-loop-fixtures.mjs'
 
-globalThis.fetch = async () => { throw new Error('uninjected inference forbidden in normal-observation fixture') }
+let forbiddenFetchCalls = 0
+globalThis.fetch = async () => { forbiddenFetchCalls++; throw new Error('uninjected inference forbidden in normal-observation fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
 const transcript = [], sent = [], wire = [], wireFaults = [], seen = {}
+const preflight = {}
 let connection, ctx, unit, initialNativeReads
 const rcon = { command: async (command, options) => {
   const answer = await connection.command(command, options)
@@ -159,6 +161,52 @@ const model = new ScriptedModel()
 
 try {
   await fsp.mkdir(results, { recursive: true })
+  // Run U configuration gate: offline serializer probes precede this runner's
+  // RCON connection, world fixture, Session and scripted gameplay provider.
+  // Probe transport is owned by production preflight, never model inference.
+  const providerEnv = { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only-not-a-real-key',
+    OPENAI_API_BASEURL: 'https://provider.example.test/v1', OPENAI_MODEL: `${PLANNER_MODEL},${EXECUTOR_MODEL}` }
+  const emptyMethod = configuration({}, { ...providerEnv, AI_API_METHOD: '' })
+  assert.equal(emptyMethod.aiApiMethod, undefined)
+  await assert.rejects(() => verifyCliProxyProviderContracts(emptyMethod, { requestId: 'native_run_u_missing_method' }), error => {
+    assert.ok(error instanceof DeploymentError)
+    assert.equal(error.message, 'CLI-proxy preflight requires AI_API_METHOD=cli-proxy')
+    preflight.rejected = { status: 'rejected', request_id: 'native_run_u_missing_method', reason: error.message }
+    return true
+  })
+  assert.equal(connection, undefined)
+  assert.equal(ctx, undefined)
+  assert.equal(transcript.length, 0)
+  assert.equal(wire.length, 0)
+  assert.equal(sent.length, 0)
+  assert.deepEqual(model.labels, [])
+  assert.equal(forbiddenFetchCalls, 0)
+  const providerConfig = configuration({}, { ...providerEnv, AI_API_METHOD: 'cli-proxy' })
+  preflight.verified = await verifyCliProxyProviderContracts(providerConfig, { requestId: 'native_cli_proxy_profile' })
+  assert.equal(preflight.verified.event, 'provider.cli_proxy_contract_verified')
+  assert.equal(preflight.verified.request_id, 'native_cli_proxy_profile')
+  assert.equal(preflight.verified.reason, 'explicit_cli_proxy_method_and_role_closed_wire_verified')
+  assert.equal(preflight.verified.status, 'pass')
+  assert.equal(preflight.verified.ai_api_method, 'cli-proxy')
+  assert.equal(preflight.verified.external_inference_calls, 0)
+  assert.deepEqual(preflight.verified.roles.map(row => [row.role, row.model]), [['planner', PLANNER_MODEL], ['executor', EXECUTOR_MODEL]])
+  for (const role of preflight.verified.roles) {
+    assert.equal(role.profile, 'cli-proxy')
+    assert.deepEqual(role.capabilities, { id: 'cli-proxy', model_family: 'openai-gpt', tools_kept_when_closed: true, tool_support: true })
+    assert.equal(role.body.model, role.model)
+    assert.equal(role.body.tool_choice, 'none')
+    assert.equal(role.body.max_tokens, 4000, 'neutral offline probe cap is separate from gameplay budgets')
+    assert.ok(role.body.tools.length > 0)
+    assert.ok(role.body.tools.every(tool => tool.type === 'function'))
+    assert.ok(role.body.tools.some(tool => tool.function.name === 'submitPlan'))
+  }
+  assert.equal(connection, undefined)
+  assert.equal(transcript.length, 0)
+  assert.equal(wire.length, 0, 'two offline serializer probes are not scripted game-provider calls')
+  assert.equal(sent.length, 0)
+  assert.deepEqual(model.labels, [])
+  assert.equal(forbiddenFetchCalls, 0)
+  await fsp.writeFile(path.join(results, 'cli-proxy-preflight-proof.json'), JSON.stringify(preflight, null, 2))
   await until('RCON ready', async () => {
     connection?.close(); connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') })
     try { await connection.connect(); return true } catch { return false }
@@ -191,7 +239,7 @@ try {
   assert.equal(before.red, false); assert.equal(before.red_recipe, false)
   assert.deepEqual(before.held, { 'iron-plate': 62, 'copper-plate': 10, 'iron-gear-wheel': 10 })
   const bridge = Object.create(Session.prototype)
-  bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only-not-a-real-key', OPENAI_API_BASEURL: 'https://provider.example.test/v1', AI_API_METHOD: 'local', OPENAI_MODEL: `${PLANNER_MODEL},${EXECUTOR_MODEL}` })
+  bridge.config = providerConfig
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context,
     promptTraceFile: path.join(results, 'normal-observation-provider.jsonl'), fetchImpl: async (_url, options) => {
       const body = JSON.parse(options.body)
@@ -265,17 +313,19 @@ try {
   assert.deepEqual(world.named('recovery.auto_resume_started'), [])
   assert.deepEqual(world.named('recovery.fresh_context_started'), [])
   const plannerWire = wire.filter(row => row.role === 'planner')
+  assert.equal(wire.length, 9, 'preflight must not add gameplay-provider calls')
   assert.equal(plannerWire.length, 2, 'initial slice and mandatory live requirements grounding confirmation')
   assert.ok(plannerWire.every(row => row.body.model === PLANNER_MODEL))
   assert.ok(wire.filter(row => row.role === 'executor').every(row => row.body.model === EXECUTOR_MODEL))
   assert.ok(wire.every(row => row.actor_id === status.actor_id && row.epoch === status.epoch))
   assert.deepEqual(model.remaining, []); healthy()
+  assert.equal(forbiddenFetchCalls, 0)
   assert.deepEqual(jevContractLog.filter(row => !row.ok), [])
   await fsp.writeFile(path.join(results, 'normal-observation-proof.json'), JSON.stringify({ status: 'pass', candidate: process.env.NPC_TEST_CANDIDATE_SHA ?? null,
     setup, before, seen, after, wire, trace: world.trace }, null, 2))
   process.stdout.write('normal-observation native delegation PASS\n')
 } catch (error) {
-  await fsp.writeFile(path.join(results, 'normal-observation-error.txt'), `${error.stack}\n${JSON.stringify({ wireFaults, wire, seen, labels: model.labels, logs: ctx?.logs, transcript }, null, 2)}`)
+  await fsp.writeFile(path.join(results, 'normal-observation-error.txt'), `${error.stack}\n${JSON.stringify({ preflight, forbiddenFetchCalls, wireFaults, wire, seen, labels: model.labels, logs: ctx?.logs, transcript }, null, 2)}`)
   throw error
 } finally {
   if (ctx) { ctx.session.stopping = true; ctx.session.clearAutoResume(); if (ctx.session.modelResume?.timer) clearTimeout(ctx.session.modelResume.timer) }

@@ -16,13 +16,13 @@ const COMPLETION_MAX_TOKENS = 3000
 const FALLBACK_CONTINUATION_MAX_TOKENS = 8000
 const DEFAULT_MAX_TOKENS = 4000
 const MAX_PROVIDER_OUTPUT_CAP = 65536
-const PROVIDER_PROFILE_IDS = new Set(['auto', 'generic', 'deepseek', 'openai-reasoning', 'openrouter', 'local'])
+const PROVIDER_PROFILE_IDS = new Set(['auto', 'generic', 'deepseek', 'openai-reasoning', 'openrouter', 'local', 'cli-proxy'])
 // AI_API_METHOD (plan 1.10) is the user-facing setting that replaces a
 // hand-picked PROVIDER_PROFILE: each method names exactly one existing
 // capability profile below. 'direct' keeps today's hostname-detected 'auto'
 // resolution, so it needs no new capability logic of its own.
-export const AI_API_METHOD_IDS = Object.freeze(['direct', 'router', 'local'])
-const AI_API_METHOD_PROFILE = Object.freeze({ direct: 'auto', router: 'openrouter', local: 'local' })
+export const AI_API_METHOD_IDS = Object.freeze(['direct', 'router', 'local', 'cli-proxy'])
+const AI_API_METHOD_PROFILE = Object.freeze({ direct: 'auto', router: 'openrouter', local: 'local', 'cli-proxy': 'cli-proxy' })
 
 export function profileForApiMethod(method) {
   check(Object.hasOwn(AI_API_METHOD_PROFILE, method), 'Invalid AI_API_METHOD')
@@ -112,6 +112,26 @@ function openRouterCapability(config, requested) {
     tools_kept_when_closed: family === 'deepseek',
     cached_input_pricing: family === 'anthropic',
     upstream_provider: upstreamProvider,
+    requested_profile: requested,
+    auto_resolved: requested === 'auto',
+  }
+}
+function cliProxyCapability(config, requested) {
+  // Verified proxy wire behavior for GPT-6, resolved independently per role.
+  // Other upstream families remain conservative until their own validation.
+  const family = /^gpt-6(?:[.-]|$)/i.test(String(config.model ?? '')) ? 'openai-gpt' : 'generic'
+  return {
+    id: 'cli-proxy',
+    token_field: 'max_tokens',
+    reasoning_effort: family === 'openai-gpt',
+    ...(family === 'openai-gpt' ? { reasoning_effort_range: 'low_to_high' } : {}),
+    tools_kept_when_closed: family === 'openai-gpt',
+    thinking_control: 'none',
+    tool_support: true,
+    structured_output: 'tools_or_json',
+    model_family: family,
+    // No LM Studio context floor or pricing assumption: inference is upstream.
+    ...(Number.isSafeInteger(config.contextWindow) && config.contextWindow > 0 ? { context_window: config.contextWindow } : {}),
     requested_profile: requested,
     auto_resolved: requested === 'auto',
   }
@@ -599,11 +619,12 @@ function resolveProviderCapability(config = {}) {
         ? 'openrouter'
         : 'generic'
   }
-  // openrouter/local are resolved per call from the model config (model
+  // openrouter/local/cli-proxy are resolved per call from the model config (model
   // family, explicit overrides), not from a single process-wide profile, so
   // several role configs in the same process can each resolve correctly.
   if (resolved === 'openrouter') return openRouterCapability(config, requested)
   if (resolved === 'local') return localCapability(config, requested)
+  if (resolved === 'cli-proxy') return cliProxyCapability(config, requested)
   const profile = PROVIDER_PROFILES[resolved]
   return {
     ...profile,
@@ -1351,13 +1372,14 @@ export function providerEndpoint(base) {
 }
 
 // providerEndpoint above restricts plain http to local hosts and Tailscale
-// .ts.net hosts for every profile; that is the 'local' method's
-// rule (plan 1.10). 'direct'/'router' are stricter still: they need https
+// .ts.net hosts for every profile; local and cli-proxy retain this
+// transport rule. Neither method implies a particular host or network.
+// 'direct'/'router' are stricter still: they need https
 // even to one of those same local hostnames, since they mean a real
 // (potentially remote) OpenAI-compatible or OpenRouter endpoint. This check
 // layers in front of providerEndpoint's own check, it does not replace it.
 export function checkApiMethodUrlRule(method, base) {
-  if (!method || method === 'local') return
+  if (!method || method === 'local' || method === 'cli-proxy') return
   let url
   try { url = new URL(base) }
   catch { throw new DeploymentError('Invalid provider URL') }
@@ -1486,9 +1508,9 @@ export async function providerRequest(config, messages, {
       allowed_completion_fields: ['checkpoint', 'semanticCompletion', 'stepCompletions'],
     }, traceOptions)
   }
-  if (keepClosedTools && capability.id === 'local' && capability.model_family === 'openai-gpt') {
+  if (keepClosedTools && ['local', 'cli-proxy'].includes(capability.id) && capability.model_family === 'openai-gpt') {
     await traceProviderResult('provider.closed_tool_contract', {
-      reason: 'local_openai_explicit_tool_choice_none',
+      reason: capability.id === 'cli-proxy' ? 'cli_proxy_openai_explicit_tool_choice_none' : 'local_openai_explicit_tool_choice_none',
       tool_choice: body.tool_choice,
       tool_count: body.tools.length,
     }, traceOptions)

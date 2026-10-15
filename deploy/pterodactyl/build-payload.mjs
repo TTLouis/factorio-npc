@@ -16,7 +16,7 @@ const LEGACY_SOURCE_PIN = '78ef2acf788189981d82aa9e15e9c33b3dedb29c'
 // payload bytes; otherwise the bootstrap checksum and immutable source can diverge.
 // Channel eggs keep this bootstrap immutable, then resolve SGLUNA_SOURCE_REF to an exact
 // commit at reinstall time and patch only the payload's SGLUNA_REF/revision assignments.
-const PAYLOAD_REF = '89eb30a5a7a34f4810e43c8e3a8c32d03d1e6229'
+const PAYLOAD_REF = '1f0efe63a77c5af9678125e0e29ca80be3763d4e'
 const CHANNELS = Object.freeze({
   main: {
     name: 'SGLuna Factorio Server (Main)',
@@ -200,7 +200,7 @@ function egg(installScript, channel) {
       variable('OpenAI API Key', 'Provider credential. Kept environment-only and never written to sgluna-config.json.', 'OPENAI_API_KEY', '', 'required|string|max:512', { viewable: false }),
       variable('AI Model', 'Comma-separated OpenAI-compatible model identifiers. The first entry is the main agent model, used exactly as a single model always was. A second entry names the subagent/plan-agent model for later use; extra entries are validated but otherwise unused today.', 'OPENAI_MODEL', 'replace-me', 'required|string|max:200'),
       variable('Provider Base URL', 'OpenAI-compatible API base URL. Replace the non-routable placeholder. The direct and router AI API methods require HTTPS; the local method also allows plain http to localhost/127.0.0.1/[::1]/host.docker.internal.', 'OPENAI_API_BASEURL', 'https://provider.invalid/v1', 'required|string|url|max:255'),
-      variable('AI API Method', 'Wire contract for the AI Model endpoint: direct detects the format from the URL and model; router uses the OpenRouter capability profile; local uses the LM Studio-style local capability profile and allows plain http to localhost/host.docker.internal only. direct and router require HTTPS. Leave blank to keep this server’s existing behaviour unchanged (the legacy Provider Capability Profile, if any was set, keeps working exactly as before).', 'AI_API_METHOD', '', 'nullable|string|in:direct,router,local'),
+      variable('AI API Method', 'Wire contract for the AI Model endpoint: direct detects the format from the URL and model; router uses the OpenRouter capability profile; local uses the LM Studio-style capability profile; cli-proxy uses upstream provider inference through CLIProxyAPI at any HTTPS endpoint, independently of hosting or tunneling. local and cli-proxy allow plain http only to loopback, host.docker.internal, or .ts.net Tailscale hosts. direct and router require HTTPS. Leave blank to keep this server’s existing behaviour unchanged (the legacy Provider Capability Profile, if any was set, keeps working exactly as before).', 'AI_API_METHOD', '', 'nullable|string|in:direct,router,local,cli-proxy'),
       variable('Provider Timeout (ms)', 'Maximum time for one provider response before the SGLuna turn is cancelled and reported in game.', 'PROVIDER_TIMEOUT_MS', '300000', 'required|numeric|between:1000,600000'),
       ...decisionProviderVariables,
       variable('Save File Name', 'Save under /saves. Leave blank to use the newest existing save or create sgluna-world.zip.', 'SAVE_NAME', '', 'nullable|string|max:160'),

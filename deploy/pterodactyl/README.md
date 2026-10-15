@@ -99,7 +99,7 @@ Fresh eggs expose these preferred deployment controls:
 | Source channel | `SGLUNA_SOURCE_REF` | branch, tag, or exact commit resolved on reinstall |
 | Actor ownership | `SGLUNA_ACTOR_MODE` | currently fixed to `npc` |
 | Chat authorization | `SGLUNA_CHAT_PLAYERS` | blank/`*` = everyone, `none` = nobody, otherwise comma-separated exact names |
-| AI API method | `AI_API_METHOD` | `direct` / `router` / `local`; see "AI provider method" below |
+| AI API method | `AI_API_METHOD` | `direct` / `router` / `local` / `cli-proxy`; see "AI provider method" below |
 | Provider URL | `OPENAI_API_BASEURL` | OpenAI-compatible endpoint; `direct`/`router` require HTTPS |
 | Model list | `OPENAI_MODEL` | comma-separated model identifiers: `[0]` main agent, `[1]` subagent (reserved, not yet used) |
 | Provider credential | `OPENAI_API_KEY` | required; environment-only |
@@ -120,10 +120,13 @@ No separate `PRIVATE_SERVER` flag exists.
 - `direct` — the wire format is detected from `OPENAI_API_BASEURL`'s host and the model, the same as today's default (`auto`) behaviour. Requires HTTPS.
 - `router` — the OpenRouter capability profile (reasoning field, style block, cache breakpoints, usage parsing resolved per model). Requires HTTPS.
 - `local` — the LM Studio-style local capability profile. Plain `http` is allowed to `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal`, or a hostname ending in `.ts.net` for a Tailscale tunnel.
+- `cli-proxy` — CLIProxyAPI forwarding to upstream provider inference, independently of where the proxy is hosted. Supports ordinary HTTPS endpoints; local or Tailscale HTTP is optional and follows the existing URL safety rules. No LM Studio 64K context default or no-cache pricing assumption. Verified GPT-6 models retain function schemas with `tool_choice: "none"` on closed decisions and use flat `reasoning_effort` limited to low/medium/high. Other model families retain conservative capabilities and do not pass the GPT trial preflight.
 
-For CLIProxyAPI over Tailscale, set `AI_API_METHOD=local`, `OPENAI_API_BASEURL=http://<machine>.<tailnet>.ts.net:18317/v1`, and the exact proxy model ID (for example, `OPENAI_MODEL=gpt-6-luna`). `OPENAI_API_KEY` is the proxy's client API key; upstream OAuth credentials stay in CLIProxyAPI. A credential priority prefers an account but does not guarantee exclusive routing if the proxy falls back. Use account-specific routing or disable competing credentials for an account-isolated test.
+For CLIProxyAPI, set `AI_API_METHOD=cli-proxy`, `OPENAI_API_BASEURL` to your proxy endpoint (for example, `https://proxy.example.com/v1`), and the exact proxy model ID (for example, `OPENAI_MODEL=gpt-6-luna`). Tailscale is optional; an existing tunnel can use `http://<machine>.<tailnet>.ts.net:18317/v1`. `OPENAI_API_KEY` is the proxy's client API key; upstream OAuth credentials stay in CLIProxyAPI. A credential priority prefers an account but does not guarantee exclusive routing if the proxy falls back. Use account-specific routing or disable competing credentials for an account-isolated test.
 
 Leaving `AI_API_METHOD` unset keeps the legacy `PROVIDER_PROFILE`-driven behaviour exactly as before, including an explicit `PROVIDER_PROFILE` value. If both are set, `AI_API_METHOD` wins and the startup log says so. The startup log and the in-game Debug window both show one line, e.g. `AI: method=router host=openrouter.ai main=<model[0]> subagent=<model[1]|none>` — never a key.
+
+Existing CLI-proxy configurations using `local` must explicitly change to `cli-proxy`; endpoint and model names never migrate the method automatically. The deterministic CLI-proxy trial preflight verifies both role serializers without inference and rejects unset, direct, router, and local methods. Existing local deployments keep their prior behavior. The response byte cap and campaign allowances are unchanged.
 
 ### Legacy environment compatibility
 

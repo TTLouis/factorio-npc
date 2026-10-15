@@ -90,12 +90,12 @@
         },
         {
             "name": "AI API Method",
-            "description": "Wire contract for the AI Model endpoint: direct detects the format from the URL and model; router uses the OpenRouter capability profile; local uses the LM Studio-style local capability profile and allows plain http to localhost/host.docker.internal only. direct and router require HTTPS. Leave blank to keep this server’s existing behaviour unchanged (the legacy Provider Capability Profile, if any was set, keeps working exactly as before).",
+            "description": "Wire contract for the AI Model endpoint: direct detects the format from the URL and model; router uses the OpenRouter capability profile; local uses the LM Studio-style capability profile; cli-proxy uses upstream provider inference through CLIProxyAPI at any HTTPS endpoint, independently of hosting or tunneling. local and cli-proxy allow plain http only to loopback, host.docker.internal, or .ts.net Tailscale hosts. direct and router require HTTPS. Leave blank to keep this server’s existing behaviour unchanged (the legacy Provider Capability Profile, if any was set, keeps working exactly as before).",
             "env_variable": "AI_API_METHOD",
             "default_value": "",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "nullable|string|in:direct,router,local",
+            "rules": "nullable|string|in:direct,router,local,cli-proxy",
             "field_type": "text"
         },
         {

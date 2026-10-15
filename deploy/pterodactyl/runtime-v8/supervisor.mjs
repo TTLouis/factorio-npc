@@ -132,7 +132,7 @@ function providerProfileValue(env, raw = {}, fallback = 'auto', { validate = tru
 function aiApiMethodValue(env) {
   const raw = String(env.AI_API_METHOD ?? '').trim().toLowerCase()
   if (!raw) return undefined
-  check(AI_API_METHOD_IDS.includes(raw), 'AI_API_METHOD must be direct, router, or local')
+  check(AI_API_METHOD_IDS.includes(raw), 'AI_API_METHOD must be direct, router, local, or cli-proxy')
   return raw
 }
 
