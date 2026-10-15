@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run O transport failure isolated; CLI-proxy connection restored
+
+- **Run O.** Candidate `c0bad249` passed deployment/native-mod and cold-world checks, but all three CLI-proxy connection attempts failed with `ECONNREFUSED`; no Sol/Luna reply, gameplay production or baseline recovery occurred. Jev completed 12/12 requests. Save/evidence preserved and isolated stack down. [Run O checkpoint](validation/RED_AUTOMATION_LIVE_RUN_O_2026-10-15.md).
+- **Transport repair.** The Docker VM was online over Tailscale and its existing CLIProxyAPI container was healthy. The local forwarding listener was missing. Restored a loopback-only SSH tunnel over Tailscale, preserving strict verification of the existing VM host key. The game image then received HTTP 200 from an authenticated models-list request, with Sol 6.1 and Luna available. No inference, VM service restart, provider configuration change or production code change was needed. The tunnel is a running helper process, not a boot-persistent task. [Recovery evidence](validation/CLI_PROXY_RECOVERY_2026-10-15.md).
+- **Active goal.** The owner authorizes successive local, supervised trials toward the complete automated natural-resource red-science chain. Each trial uses a fresh isolated world, a frozen tested candidate, Sol planning/Luna execution, unchanged limits and at most 45 construction minutes. Success still requires the five-wall-minute speed-2 window with AI mutations paused, enemies suppressed, at least ten new red packs, upstream production and physical logistics proof. No push, release or Pterodactyl deployment is authorized.
+
 ## October 15: Run N observation-baseline recovery verified and integrated locally
 
 - **Fix.** Compact entity/nearby responses require a complete baseline delivered in the current conversation and actor/epoch scope. Rebuilt contexts without that evidence receive full native snapshots; normal explicitly carried baselines still support diffs. Compaction repair settles dependent observations before provider dispatch, including secondary folds after large expansions. Existing observation/recovery caps and mutation authority remain intact.
