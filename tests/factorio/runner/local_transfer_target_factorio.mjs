@@ -106,6 +106,12 @@ if (mode === 'destroyed') {
       return reply([{ name: 'mine_entity_exact', args: { unit_number: freshUnit } },
         { name: 'move_items_exact', args: { item_name: 'copper-ore', unit_number: freshUnit, max_count: 10, to_entity: true } }])
     })
+    .push('executor', 'luna:report-real-exact-target-destruction', () => {
+      assert.equal(ctx.world.memory.currentPlan(KEY).status, 'blocked')
+      assert.equal(transferSupplyRecoveryCount(ctx.world.memory.currentPlan(KEY).task_board), 0)
+      assert.equal(sent.length, 1)
+      return reply([], { chatMessage: 'BLOCKED: The native exact transfer receipt reports target_gone after actual removal of the observed intended furnace; no transfer recovery or replay is authorized.' })
+    })
 } else {
   model.push('executor', 'luna:legacy-local-transfer-batch', reply(initial))
   if (mode === 'recovery') model
