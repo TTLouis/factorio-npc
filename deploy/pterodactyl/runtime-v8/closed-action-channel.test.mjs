@@ -215,16 +215,19 @@ test('Run Q exact blocker remains rejected and two step resumes cannot create a 
 
 for (const boundary of ['stop', 'epoch']) test(`Run Q closed proposal after ${boundary} cannot reach admission`, async t => {
   const ctx = fixture(t), { model, world, game } = ctx
+  let boundaryReached = false
   model.push('planner', 'sol:commit', ctx.planner)
     .push('executor', 'luna:targeted', ctx.targeted)
     .push('executor', 'luna:stale-closed-placement', async messages => {
       assertClosed(ctx, messages)
+      boundaryReached = true
       const reply = ctx.action([{ name: 'place_entity', args: { entity_name: 'stone-furnace' } }])
       if (boundary === 'stop') world.agent.cancel('fixture_stop')
       else game.status.epoch++
       return reply
     })
   await ctx.start()
+  assert.equal(boundaryReached, true, 'the cancellation fence must be exercised after a valid closed wire request')
   assert.equal(game.sent.length, 0)
   assert.equal(game.placed, false)
   assert.equal(game.inventory['stone-furnace'], 1)

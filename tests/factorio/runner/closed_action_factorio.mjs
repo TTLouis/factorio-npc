@@ -86,6 +86,10 @@ function control(messages) {
 const descriptor = { channel: 'assistant_json', validation: 'required', grantsAuthority: false }
 const model = new ScriptedModel()
   .push('planner', 'sol:immutable-electronics-checkpoint', reply([], { goal }))
+  .push('planner', 'sol:confirm-live-trigger-requirements', messages => {
+    assert.match(messages.findLast(row => String(row.content).startsWith('[HARNESS]')).content, /requirements_grounding/)
+    return reply([], { goal })
+  })
   .push('executor', 'luna:one-targeted-inventory-request', messages => {
     const state = control(messages)
     assert.equal(state.phase, 'committed'); assert.equal(state.targetedReadEligible, true)
@@ -213,8 +217,8 @@ try {
   assert.ok(world.named('control.decision_state').some(row => row.request_id
     && row.reason === 'guidance_matches_effective_tools_and_canonical_phase'
     && JSON.stringify(row.operation_submission) === JSON.stringify(descriptor)))
-  assert.deepEqual(wire.map(row => row.body.model), [PLANNER_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL])
-  assert.equal(wire[2].allowTools, false)
+  assert.deepEqual(wire.map(row => row.body.model), [PLANNER_MODEL, PLANNER_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL])
+  assert.equal(wire[3].allowTools, false)
   assert.ok(wire.every(row => row.actor_id === status.actor_id && row.epoch === status.epoch))
   assert.deepEqual(model.remaining, []); healthy()
   assert.deepEqual(jevContractLog.filter(row => !row.ok), [])
