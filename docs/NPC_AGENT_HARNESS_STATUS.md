@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run Q stopped before first furnace placement
+
+- **Trial.** Frozen `e77ed843`, one supervised local CLI-proxy run: 18/18 provider responses (3 Sol / 15 Luna), zero errors, Jev 9/9. Gathered ten coal and ten copper ore; held starter furnace remained unplaced. No power, smelting, automated red production or benchmark. Isolated stack down; save and exact request/reply evidence preserved.
+- **Diagnosis.** After one targeted inventory read, Luna claimed closed tools prevented placing the held furnace. Ordinary placement was already supported through JSON operations with no existing entity ID or coordinates. The outcome authority correctly rejected the unsupported blocker and retained the two-step/six-goal resume limits. Independent review corroborated a model mistake amplified by unclear distinction between observation-tool closure and structured operation proposals.
+- **Next.** Clarify that proposal channel while retaining all validation, admission and identity fences. Static/native regressions must cover consumed inventory read, held furnace placement, receipt, fresh entity identity, real fuel/ore supply, ten newly smelted copper plates and the electronics trigger before the next supervised trial. The prior step-contract fix was not reached in this run. [Run Q evidence](validation/RED_AUTOMATION_LIVE_RUN_Q_2026-10-15.md).
+
 ## October 15: Run P checkpoint provider fix reviewed and integrated locally
 
 - **Fix.** Just-in-time checkpoint calls now receive their exclusive target-only JSON contract and canonical predicate schema, without normal gameplay steering/control/style or a gameplay tool catalog. The CLI proxy's explicit disabled-tool guard remains, using only a non-executable checkpoint schema. Strict parsing, two attempts, reserves, planner/executor ownership, native admission and stop/actor/epoch fences remain unchanged. The new provider trace identifies the request and reason.
