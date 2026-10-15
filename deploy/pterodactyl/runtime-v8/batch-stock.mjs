@@ -4,6 +4,8 @@
 // 20 of the 25 iron plates held both pass; the first one runs, the second fails at execution and cancels the batch with
 // partial effects. This module is the batch-wide check: it replays the ORDERED operations over the stock the harness
 // observed, so an operation earlier in the same batch both uses up stock and supplies stock for the later ones.
+// These are execution-time effects. Native craft admission calls get_craftable_count synchronously, before any
+// queued effect runs: a failed native craft preflight cannot be overturned by this future-stock ledger.
 //
 // It is a pure function of facts the harness already holds: the operations, the per-operation mod preflight results, the
 // observed main inventory, and the recipe facts of the handoff cache (handoff-packet.mjs). Nothing here reads the game.
@@ -521,6 +523,15 @@ export function batchStockDecision(report, held = new Set()) {
   for (const index of [...held].sort((a, b) => a - b)) {
     const verdict = report.verdicts[index]
     const shortage = report.short.find(entry => entry.operation_index === index)
+    if (verdict?.operation === 'craft_item' && [STOCK_STATUS.COVERED, STOCK_STATUS.COVERED_BY_EARLIER_OP].includes(verdict.status)) {
+      return { action: 'refuse', reason: 'craft_requires_settled_inventory', refusal: {
+        ok: false, code: BATCH_STOCK_UNVERIFIED_CODE, refusal_class: REFUSAL_CLASS.ARGUMENT,
+        operation: verdict.operation, operation_index: index,
+        detail: 'Native crafting checks current ingredients at admission; queued supply is not held inventory.',
+        correction_message: '[HARNESS] No operation from this batch ran. The craft requires ingredients in inventory at admission, before queued withdrawal, harvest or crafting effects execute. Keep the same plan and step: submit only the acquisition that can run now, wait for its receipt, then read the settled inventory before submitting the craft. Do not repeat the mixed batch or claim a world blocker.',
+        batch_stock: { dependencies: verdict.dependencies.slice(0, MAX_REPORTED_ITEMS) },
+      } }
+    }
     if (verdict?.status !== STOCK_STATUS.UNACCOUNTED && verdict?.proven !== false && shortage?.proven !== false) continue
     return { action: 'refuse', reason: 'earlier_supply_not_deterministically_known', refusal: {
       ok: false, code: BATCH_STOCK_UNVERIFIED_CODE, refusal_class: REFUSAL_CLASS.ARGUMENT,

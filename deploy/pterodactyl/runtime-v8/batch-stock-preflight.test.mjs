@@ -369,7 +369,7 @@ test('mining an entity cannot overturn the native placement shortage', async () 
   assert.equal(world.named('placement.preflight_item_deferred').length, 0)
 })
 
-test('two withdrawals from one machine share its stock; a withdrawal that finds plates supplies the craft behind it', async () => {
+test('two withdrawals share stock; a queued withdrawal cannot overturn native craft admission', async () => {
   const plan = ['Take plates']
   const rcon = new StockRcon({ entities: { 77: { name: 'wooden-chest', stock: { 'iron-plate': 5 } } } })
   const refused = harness(rcon, [observe(), planMessage([take(77, 'iron-plate', 5), take(77, 'iron-plate', 5)], plan), planMessage([take(77, 'iron-plate', 5)], plan)])
@@ -381,14 +381,15 @@ test('two withdrawals from one machine share its stock; a withdrawal that finds 
   assert.equal(rcon.mutations.length, 1)
 
   const chain = new StockRcon({ entities: { 77: { name: 'wooden-chest', stock: { 'iron-plate': 8 } } } })
-  const chained = harness(chain, [observe(), planMessage([take(77, 'iron-plate', 20), craft('iron-gear-wheel', 4)], ['Take plates and craft gears'])])
+  const chained = harness(chain, [observe(), planMessage([take(77, 'iron-plate', 20), craft('iron-gear-wheel', 4)], ['Take plates and craft gears']), planMessage([take(77, 'iron-plate', 20)], ['Take plates and craft gears'])])
   await chained.agent.request('take plates and craft gears', { sender: 'tester' })
-  assert.equal(chain.mutations.length, 1, 'a partial positive withdrawal is allowed and its plates are supply')
+  assert.equal(chain.mutations.length, 1, 'only the corrected withdrawal is admitted')
+  assert.equal(chain.mutations[0].includes("'craft_item'"), false)
   assert.deepEqual(data(chained.named('operations.batch_stock_checked')[0]).deferred_by_earlier_op[0].dependencies, [{ item_name: 'iron-plate', operation_index: 0, operation: 'move_items_exact' }])
-  const craftDeferred = data(chained.named('craft.preflight_stock_deferred')[0])
-  assert.equal(craftDeferred.code, 'bootstrap_dependency_unresolved')
-  assert.equal(craftDeferred.reason, 'earlier_operation_in_batch_supplies_item')
-  assert.ok(craftDeferred.request_id)
+  assert.equal(chained.named('craft.preflight_stock_deferred').length, 0)
+  const receiptRequired = data(chained.named('craft.preflight_receipt_required')[0])
+  assert.equal(receiptRequired.reason, 'craft_requires_settled_inventory')
+  assert.ok(receiptRequired.request_id)
 })
 
 test('a held multi-item shortage never conceals another item destination refusal', async () => {
