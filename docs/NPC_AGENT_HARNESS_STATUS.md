@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run R verifies both repaired provider boundaries; shoreline fact recovery remains open
+
+- **Live progress.** Candidate `8bf6fc15`, one supervised local trial, 16m31s: 71/71 provider responses (6 Sol/65 Luna), Jev 42/42, zero errors. Actual closed JSON placement created furnace 29; native production reached ten copper and fifty iron plates. The NPC collected the plates and acquired pump/boiler/engine/two poles. Two JIT checkpoint calls succeeded, including the transition into the power-placement step. No operator corrections.
+- **Terminal.** Only the furnace was placed. An empty offshore-pump candidate search covered radius 24; normal observations then closed. Luna also redeclared a malformed checkpoint, correctly refused before placement, then claimed a world blocker. The six-goal-resume guard stopped the run. No connected power, automated mining/fuel/science chain or five-minute benchmark. Save/manifest/exact wire retained; isolated stack down.
+- **Independent diagnosis.** The remaining targeted fact allowance was unused, but its grammar cannot request water coverage. Unit 22 needs that native coverage evidence before offering unexplored centers; pump-only absence cannot establish a world blocker or justify invented destinations. Next narrow fix: one bounded actor-centered water read through the existing targeted allowance, gated by fresh same-scope empty pump-search evidence. Preserve strict checkpoint parsing, all read/provider/resume limits and actor/epoch fences; prove actual exploration-to-native-connected-power continuation in full-loop static/native tests before another trial. [Run R evidence](validation/RED_AUTOMATION_LIVE_RUN_R_2026-10-15.md).
+
 ## October 15: Run Q operation-channel clarification reviewed and integrated locally
 
 - **Fix.** Fresh control state now distinguishes closed observations from strict-JSON operation proposals awaiting validation/admission. The closed prompt includes canonical operation arguments and the held-placement/new-identity dependency boundary. This grants no gameplay authority, adds no automatic actions/reads/retries and preserves all budgets and actor/epoch/stop fences.
