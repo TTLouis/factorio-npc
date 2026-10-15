@@ -87,12 +87,16 @@ const reply = (operations = [], extra = {}) => planReply({ plan: [STEP], current
   stepCompletions: [{ kind: 'deterministic', checkpoint }], ...extra })
 const legacy = [
   { name: 'move_items', args: { item_name: 'copper-ore', entity_name: 'stone-furnace', max_count: 10, to_entity: true } },
-  { name: 'move_items', args: { item_name: 'coal', entity_name: 'stone-furnace', max_count: 5, to_entity: true } },
+  { name: 'move_items', args: { item_name: 'coal', entity_name: 'stone-furnace', max_count: 10, to_entity: true } },
 ]
 const initial = mode === 'prefix' ? [{ name: 'walk_to_position', args: { x: 8.539, y: -101.414, reach_distance: 0.5 } }, ...legacy] : legacy
 let readCall = 0
 const reads = tools => ({ content: null, tool_calls: tools.map(([name, args]) => ({ id: `local-transfer-${++readCall}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) })
 const model = new ScriptedModel().push('planner', 'sol:immutable-electronics-goal', reply([], { goal }))
+  .push('planner', 'sol:confirm-native-trigger-requirements', messages => {
+    assert.match(messages.findLast(row => String(row.content).startsWith('[HARNESS]')).content, /requirements_grounding/)
+    return reply([], { goal })
+  })
 if (mode === 'destroyed') {
   model.push('executor', 'luna:observe-before-native-removal', reads([['getEntityStatus', { name: 'stone-furnace', radius: 32 }]]))
     .push('executor', 'luna:native-removal-before-exact-transfer', messages => {
@@ -151,7 +155,7 @@ if (mode === 'destroyed') {
       assert.equal(control.targetedAllowanceUsed, true); assert.equal(control.targetedReadEligible, false)
       assert.ok(ctx.world.memory.targetedObservationLedger.has(KEY))
       return reply([{ name: 'move_items_exact', args: { item_name: 'copper-ore', unit_number: freshUnit, max_count: 10, to_entity: true } },
-        { name: 'move_items_exact', args: { item_name: 'coal', unit_number: freshUnit, max_count: 5, to_entity: true } }])
+        { name: 'move_items_exact', args: { item_name: 'coal', unit_number: freshUnit, max_count: 10, to_entity: true } }])
     })
   if (mode === 'prefix') model.push('executor', 'luna:nonconflicting-travel-keeps-prefix-uncertainty', messages => {
     assert.match(messages.map(row => String(row.content)).join('\n'), /within interaction reach/)
