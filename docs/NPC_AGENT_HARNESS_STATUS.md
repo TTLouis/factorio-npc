@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run T reaches lab prerequisites, exhausts bounded recovery
+
+- **Trial.** Frozen `4da208b6`, 19m11s to terminal: 88/88 provider responses (5 Sol/83 Luna), Jev 61/61, zero transport errors. Native production reached 74 iron and 20 copper plates, with ten hand-crafted gears held. Only the furnace was placed; no lab, power, automatic mining/fuel, science assembler or red output. Measurement never started. Two full observation baselines and one accepted Sol JIT checkpoint are verified in actual provider wire.
+- **Boundary.** Six goal resumes exhausted after valid JSON action omissions and unsupported blockers around lab prerequisites. The one malformed reply was repaired and gathering resumed. Current wire retains correct action permissions/baselines. An open-round `observationRequest` can nevertheless consume the dedicated missing-fact allowance and force normal tools closed; Luna chose a redundant research read, then claimed furnace facts unavailable. Next inspect/consolidate this channel with the ordinary observation budget/cache/fences while preserving every limit. [Run T evidence](validation/RED_AUTOMATION_LIVE_RUN_T_2026-10-15.md).
+- **Shutdown.** The observer rejected an old durable pause timestamp despite fresh operator cancellation/pause traces and native idle. It correctly left an incomplete result. An independently verified outer shutdown saved 901,989 bytes and removed the isolated stack. The next observer must recognize the actual already-paused-goal stop receipt shape. No second trial, push or deployment.
+
 ## October 15: Run S local target recovery reviewed and integrated
 
 - **Fix.** A native legacy name-transfer miss within reach can recover inside the unchanged semantic step only with matching admitted journal/batch/signature, active plan/step and fresh actor/epoch. It uses the existing persistent two-attempt transfer allowance. The model chooses travel and obtains fresh spatial identity/counts before exact delivery; no automatic walk, substitution, cached-ID authority or extra budget.

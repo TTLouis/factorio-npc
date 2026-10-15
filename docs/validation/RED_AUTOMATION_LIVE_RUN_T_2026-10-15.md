@@ -1,0 +1,48 @@
+# CLI-proxy Run T: bootstrap production advanced, lab prerequisite recovery exhausted
+
+One bounded local trial under the owner's active red-science goal. The supervising subagent preserved the terminal case, confirmed AI cancellation, saved and shut down the isolated stack. No gameplay correction, extra resources beyond the declared starter, second campaign, provider retry outside the existing bounded recoveries, source change, push or deployment occurred.
+
+## Target and preflight
+
+- Complete natural-resource steam power, automatic iron/copper/coal mining and fuel delivery, smelting, gear and red-science assembly, and native logistics. Construction may hand craft/feed. Acceptance remains **one new red pack per game minute**, five wall minutes at speed 2, at least ten game minutes and ten new packs, with AI mutations paused and generated enemies removed/expansion disabled during measurement.
+- Native upstream/machine/steam/fluid/network evidence and physical supply/fuel topology must pass an immutable SHA/source/goal/actor-bound packet reviewed explicitly by parent before measurement. **No measurement or measurement world changes occurred.**
+- Frozen clean source **`4da208b654ea258f9b0c1654643be91e2bc6e8ac`**, production/tests identical to reviewed local-transfer fix **`6b374d2c1c52b8c9bb453db89c4cdc4837460478`**. Merged canonical gates passed **2,431 runtime/staging tests, 1,144 mod tests, typecheck/Lua checks**. Native gates comprise **13 named lanes / 15 scenarios**: three pristine-world modes in the new lane plus twelve older canaries, with original-code controls and independent review.
+- Official `scripts/build-docker-local.ps1 -NoEnvUpdate` image **`sha256:71a5c7f2b37926172e5dce7ea95a42c33e5ea651c67af79ba5002dbb9ca67a1f`**. Exact **50 runtime/staging modules**, prompt and manifest match frozen source. All **31 active/release/native-tested mod files** match the authoritative native artifact image **`sha256:888261dd5c0a4867bb20c73931d785e59d003dec39b116fec6de431af67c7259`**. The updated native mod comparison includes the changed transfer implementation; older Run S mod hashes were not reused.
+- Resolver: **Sol6.1 planner / Luna6 executor**, dedicated Jev present. Elevated checks verified the existing loopback SSH tunnel; it was left unchanged. Actual game-container authenticated model discovery returned HTTP 200 / 33 models with both roles available. **21/21 Docker-only observer checks** and syntax passed; zero pre-release provider calls.
+- Cold seed **2237730553**, standalone actor **1**, empty inventory/board, zero machines/humans, speed 1 and idle queues. Starter applied once by the released harness: burner drill 1, furnace 1, iron plates 8, pistol 1 and ammunition 10. Goal **`goal_0dxyjsr_1`**, initial admission request **`req_mva3i4s0_1`**.
+
+## Result and native progress
+
+Started **22:13:28.594 UTC**; actual gameplay terminal **22:32:40.181 UTC**, **19m11.587s** after start. Final recovery **`recovery_mva45tlq`** paused with **`provider_action_omission_repair_failed` / `unverified_blocker_recovery_exhausted`**, and the **6/6 goal automatic-resume cap** was exhausted. No authoritative world impossibility was established.
+
+**88 provider requests / 88 responses / zero provider errors**, comprising **5 Sol / 83 Luna**; **61 Jev requests / 61 responses / zero errors**. Two planner-parking handoffs, ten context restages, six automatic resumes, two baseline rebases and one accepted just-in-time checkpoint call demonstrate actual delegation and bounded recovery. Native operation history contains 26 completed batches.
+
+Native force counters at final preservation show **74 iron plates and 20 copper plates produced**, 82 iron ore and 20 copper ore gathered, and zero red science. Actor inventory contains **62 iron plates, ten copper plates, ten hand-crafted gears, eight iron ore and the original burner drill**. Furnace **3** at **(25, -100)** contains another ten copper plates and seven coal; its **94 products finished** agree with 74 iron plus 20 copper. The gear force-production statistic is zero despite ten held hand-crafted gears; this does not prove gear-assembler production.
+
+Only the furnace was placed. **No lab, steam kit, connected power, automatic mining/fuel chain, gear/science assembler or red output existed.** Humans remained zero and speed 1. Earlier bootstrap milestones closed, including electronics and the iron/steam-power research checkpoint; the active slice then required a lab and automation-science-pack research. No full-chain readiness packet was produced and the five-minute benchmark did not start.
+
+## Exact recovery boundary
+
+The settled **`run-t-action-omission-case.json`** retains the last three recovery requests, exact provider payloads through a deduplicated message pool, complete response content, control and tool-budget events, immutable active contract, all six resume causes, native operation/production evidence and terminal canonical state. Every retained nonempty reply's preview length equals its complete content length.
+
+The repeated failures occurred around the lab prerequisite step while material gathering, collection, smelting and crafting still made partial progress. Repeated research/recipe observations consumed or closed the current observation window. The model then omitted mutations and asserted that closed observations prevented safe progress. Targeted one-fact observation requests and subsequent control states are preserved for diagnosis; a closed observation window alone did not establish that executable operations were unavailable.
+
+In the final recovery, Luna successfully submitted legacy `move_items` to supply five copper ore to the furnace. Native receipt confirms five moved and completed. Its next final reply claimed a material/observation blocker, submitted `operations:[]`, and cited the lab/research checkpoint. The authoritative controller rejected the unsupported world claim and bounded recovery exhausted. Parent and the independent reviewer own classification of the model behavior and any harness contract defect; this report does not equate the exhaustion cap or every diagnostic signature with a separate bug.
+
+There was **one malformed JSON reply**, at **22:25:04.740 UTC**, Luna request `recovery_mva3qkl8`, round 3. Its complete 442-character content has a misplaced closing bracket in the checkpoint requirements. The parser reported `Expected ',' or ']' after array element in JSON at position 439 (line 1 column 440)`. The next round repaired JSON and admitted ore gathering. **This repaired parse error was not the terminal root boundary.** Its separate exact-wire record is `run-t-invalid-json-case.json`.
+
+The prior contract-only JIT path was exercised successfully: one Sol checkpoint call accepted `research_completed:steam-power` without repair. Both baseline rebases are corroborated by actual subsequent provider payloads containing full live furnace entity status, not trace events alone; `jit-baseline-live-proof.json` retains these payloads. Legacy transfers succeeded, but this trial does not independently establish that the particular distant missing-local-target recovery branch from Run S was exercised. The shoreline path and the new structural-BLOCKED observer branch were not exercised live.
+
+## Separate stop-confirmation failure and safe preservation
+
+The reviewed observer detected automatic-resume exhaustion and submitted `!luna stop` at **22:33:00.136 UTC**. Supervisor trace records fresh cancellation at **22:33:00.139 UTC** and fresh operator pause at **22:33:00.153 UTC**. Durable state changed to operator/user_stop, cleared intake, and native actor 1 was idle with an empty queue and no crafting/mining/follow work.
+
+However, durable **`run.paused_at` retained the previous model pause timestamp, 22:32:40.172 UTC**. The new observer required that timestamp to be at or after stop submission. It therefore timed out after 30 seconds, wrote **`e2e-incomplete.json`**, threw, and correctly withheld its ordinary success/result/save path. The original runner error and incomplete artifact remain untouched. This timestamp assumption is a separate observer defect, not proof that AI failed to cancel.
+
+The outer supervisor independently required the fresh isolated-run cancellation **and** same-goal operator-pause trace, matching durable operator pause, absent intake retry and matching idle native actor. Only after those read-only checks passed did it issue the checkpoint save. **`outer-stop-confirmation.json`** preserves the exact boundary and original observer result separately. No provider call, gameplay correction or helper modification occurred during this recovery. The saved checkpoint is **901,989 bytes**.
+
+## Evidence and shutdown
+
+Ignored **`test-results/red-automation-live-2026-10-15t/`** retains build/deployment/native-image mappings, model/tunnel/pre-release proofs, approved helper hashes and 21-check logs, original live logs and provider/Jev traces, exact settled omission and repaired-JSON cases, native snapshots/canonical state, JIT/baseline wire proof, untouched observer incomplete error, outer stop/save confirmation, diagnostic analyzer output, final summary and SHA256 evidence manifest. Save: `data/saves/red-automation-t-checkpoint.zip`.
+
+Offline Docker run-check exits 1 and reports stale-step/restage-loop and exhausted-resume signatures; those are diagnostic observations rather than independent defect proofs. The isolated Run T container/network were removed. Only the unrelated Endfield container remained running; the existing tunnel, VM services and prior run evidence were untouched. **No second trial followed.** Parent owns diagnosis, any follow-up fixes and integration.
