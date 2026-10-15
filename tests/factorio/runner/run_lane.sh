@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  closed-action)
+    run_node closed_action_factorio.mjs
+    ;;
   step-contract)
     run_node step_contract_factorio.mjs
     ;;

@@ -1,0 +1,335 @@
+{
+  "goal_id": "goal_0903mkl_1",
+  "case": "held_furnace_no_placement_before_tools_closed_then_unsupported_world_claim",
+  "responses": [
+    {
+      "content_chars": 0,
+      "preview": "",
+      "round": 0,
+      "preview_chars": 0,
+      "ts": "2026-10-15T20:07:00.767Z"
+    },
+    {
+      "content_chars": 407,
+      "preview": "{\"chatMessage\":\"BLOCKED: Electronics requires producing 10 new copper plates, but copper-plate smelting requires a placed stone furnace; I only have the furnace item, and tools are closed so I cannot place it or observe a live furnace identity.\",\"stepId\":\"goal_0903mkl_1_p3_v1_s1_047manh\",\"operations\":[],\"checkpoint\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"research_completed\",\"technology\":\"electronics\"}]}}",
+      "round": 0,
+      "preview_chars": 407,
+      "ts": "2026-10-15T20:07:05.027Z"
+    }
+  ],
+  "committed_steps": [
+    {
+      "step_id": "goal_0903mkl_1_p3_v1_s1_047manh",
+      "description": "Smelt ten copper plates and verify electronics is researched.",
+      "completion_contract": {
+        "mode": "all",
+        "requirements": [
+          {
+            "id": "requirement_1",
+            "kind": "research_completed",
+            "technology": "electronics"
+          }
+        ],
+        "confidence": 0
+      },
+      "completion_mode": "deterministic",
+      "contract_status": "bound",
+      "completion_confidence": "grounded",
+      "reduced_confidence": false
+    },
+    {
+      "step_id": "goal_0903mkl_1_p3_v1_s2_1l9lw8p",
+      "description": "Smelt fifty iron plates and verify steam-power is researched.",
+      "completion_contract": null,
+      "completion_mode": "deterministic",
+      "contract_status": "pending",
+      "completion_confidence": "pending",
+      "reduced_confidence": false
+    }
+  ],
+  "provider_requests": [
+    {
+      "tool_choice": "auto",
+      "messages": [
+        {
+          "content_sha256": "1cabf57be6fc94b57812f34f4aa411301dc959eff7d318d7c38b439b66c3cd63",
+          "role": "system",
+          "content_chars": 62614,
+          "suffix": "se the plan: do not change, reorder, reword, add or drop steps, and do not send a goal definition (scope, doneWhen), a roadmap or a development mode. In submitPlan send stepId as the active step id from [CONTROL_DECISION_STATE]; plan and currentStep are not needed. The harness ignores plan changes from you and records that it did.\nWhen tool calls are disabled, return that same control decision as ONE strict JSON object in assistant content; checkpoint and semanticCompletion are still accepted. Preserve committed stepCompletions if restating them. A grounded semanticCompletion for the final prose-only step may have operations: []; the harness checks the goal and returns the next slice to the planner. Never add an unrelated action merely to close a completed step.\nIf the active step cannot be completed, say so with an explicit BLOCKED reason and do not improvise a different plan; the harness decides what happens next. Goal completion is decided by the harness from the game, never by you.",
+          "prefix": "You are SGLuna, an autonomous in-world NPC in the game \"Factorio\".\r\n\r\nYou control SGLuna's own stand"
+        },
+        {
+          "role": "user",
+          "content": "[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.\n--- plan block (stable while this plan runs) ---\ngoal_id: goal_0903mkl_1\ngoal: Build a fully automated factory producing at least 1 automation-science-pack per game minute from natural resources. Build real steam power generation, automatic iron/copper/coal mining, automatic ore smelting, iron-gear-wheel assembly and red science assembly, with native belts/inserters feeding every required stage and fuel supply. Hand crafting and feeding are allowed during construction and b…\nscope: long_horizon; Build a fully automatic steam-powered red-science factory from natural resources, including mining, smelting, gears, material and fuel routing, and verify at least ten new packs over ten unattended game minutes.\ndone_when done_1: machines produce 1 × automation-science-pack per minute (last 10 min, hand work excluded)\ndone_when done_2: 10 × automation-science-pack produced from now on (all surfaces)\ndone_when done_3: 1 × steam-engine working now\ndone_when done_4: 2 × assembling-machine-1 powered by a running electric network\nroadmap_node: n1: Unlock electronics and steam power\nplan: goal_0903mkl_1_p3 v1\nstep 1: goal_0903mkl_1_p3_v1_s1_047manh | Smelt ten copper plates and verify electronics is researched.\nstep 2: goal_0903mkl_1_p3_v1_s2_1l9lw8p | Smelt fifty iron plates and verify steam-power is researched."
+        },
+        {
+          "role": "user",
+          "content": "--- step block ---\nrestage: role=executor checkpoint=C7 reason=recovery:auto_resume_after_model_recoverable_pause\nactor: actor_id=13 actor_kind=standalone_character epoch=1 connected_players=0\nplan_status: COMMITTED; steps 1:active 2:pending\nactive_step: 1 of 2 goal_0903mkl_1_p3_v1_s1_047manh | Smelt ten copper plates and verify electronics is researched. | batches=0 accepted_for_close=0\nactive_step_contract: all: research_completed\nreceipt #4 operation_receipt batch-g1-2: outcome=completed; task_state=idle; task_count=2; types=walking_to_entity,mining\nreceipt #5 deterministic_verification batch_2: verdict=verified_complete; types=walking_to_entity,mining\nreceipt #6 operation_preflight_recoverable recovery_mv9yymvt/requires_machine_1: {\"code\":\"requires_machine\",\"operation_index\":1,\"operation\":\"craft_item\",\"item_name\":\"copper-plate\",\"recipe_name\":\"copper-plate\",\"categories\":[\"smelting\"],\"compatible_machines\":[\"stone-furnace\",\"electric-furnace\",\"steel-furnace\"],\"held\":[{\"n\nauthority: active_step=goal_0903mkl_1_p3_v1_s1_047manh (committed plan) contract=all (committed) latest_receipt=#6 operation_preflight_recoverable recovery_mv9yymvt/requires_machine_1 (this step) entity_ids_in_receipts_and_snapshots=historical_observations\nresearch_path (authoritative getResearchPath; current read or explicit missing fact; trigger_crafting is cached/historical, not current admission proof): {\"target\":\"electronics\",\"state\":\"fresh\",\"as_of\":{\"tick\":10667,\"epoch\":1,\"actor_id\":13,\"at_ms\":1792094816035},\"nodes\":[{\"name\":\"electronics\",\"researched\":false,\"mode\":\"trigger\",\"status\":\"ready\",\"prerequisites\":{},\"unresolved_prerequisites\":{},\"research_trigger\":{\"type\":\"craft-item\",\"item\":\"copper-plate\",\"count\":10},\"trigger_crafting\":{\"technology\":\"electronics\",\"item\":\"copper-plate\",\"source\":\"goal_requirements\",\"state\":\"historical\",\"as_of\":{\"tick\":5174,\"epoch\":1,\"actor_id\":13,\"at_ms\":1792094652812},\"recipes_status\":\"available\",\"recipes\":[{\"recipe\":\"copper-plate\",\"enabled\":true,\"categories\":[\"smelting\"],\"categories_truncated\":false,\"hand_craftable\":false,\"hand_craftable_reason\":\"category_unsupported\",\"machines\":[{\"entity\":\"stone-furnace\",\"item\":\"stone-furnace\",\"status\":\"craftable\"},{\"entity\":\"steel-furnace\",\"item\":\"steel-furnace\",\"status\":\"locked\",\"unlocked_by\":\"advanced-material-processing\"},{\"entity\":\"electric-furnace\",\"item\":\"electric-furnace\",\"status\":\"locked\",\"unlocked_by\":\"advanced-material-processing-2\"}],\"machines_truncated\":false},{\"recipe\":\"casting-copper\",\"enabled\":false,\"categories\":[\"metallurgy\"],\"categories_truncated\":false,\"hand_craftable\":false,\"hand_craftable_reason\":\"recipe_locked\",\"machines\":[{\"entity\":\"foundry\",\"item\":\"foundry\",\"status\":\"locked\",\"unlocked_by\":\"foundry\"}],\"machines_truncated\":false}],\"truncated\":false}}]}\nheld_counts (fresh live read of the actor inventory, as_of=tick:10667,epoch:1): copper-plate=0 copper-ore=10 coal=10 stone-furnace=1 carbon=0 pentapod-egg=0 spoilage=0 wood=0 biter-egg=0 burner-mining-drill=1 iron-plate=8\nresidual_needs (derived from recipe_fact and fresh held_counts for the step contract trigger:copper-platex10; shared stock counted once): trigger craft-item copper-plate count=10 for electronics (counts new crafts; held stock not counted) held=0 crafts=10 via copper-plate | copper-ore required=10 held=10 missing=0\nmachine_energy (native prototype energy source; held = fresh live count of the machine item; placed = whether this harness observed an instance via historical_entities or checkpoint_machine, history and not a current exact target): stone-furnace energy=burner(fuel_categories=chemical, 90kW) status=craftable held=1 placed=not_observed | not_listed: locked=2\nfuel_needs (burner stone-furnace burn fuel_categories=chemical; candidates from item prototypes, held from the fresh read; amount needed not derived; sources derived from prototypes: resources that mine into the item (mined_from) and the natural trees and rocks the harvest operation mines for it (harvested_from), no_derived_source = neither yields it): held_fuel=coal=10 (acquisition not searched) | carbon fuel_value=2MJ held=0 | coal fuel_value=4MJ held=10 | pentapod-egg fuel_value=5MJ held=0 | spoilage fuel_value=0.25MJ held=0 | wood fuel_value=2MJ held=0 | biter-egg fuel_value=6MJ held=0\nrecipe_fact copper-plate (stable recipe data, source=requires_machine, as_of=tick:10667,epoch:1): categories=smelting | energy=3.2 | ingredients=1 copper-ore | products=1 copper-plate | machines=stone-furnace,electric-furnace,steel-furnace\nruntime: task_state=idle queue_length=0"
+        },
+        {
+          "role": "user",
+          "content": "[CONTROL_DECISION_STATE] {\"toolsEnabled\":true,\"phase\":\"committed\",\"role\":\"executor\",\"targetedReadEligible\":true,\"targetedAllowanceUsed\":false,\"resourceSearchNames\":[\"ashland-lichen-tree\",\"ashland-lichen-tree-flaming\",\"big-stomper-shell\",\"big-volcanic-rock\",\"boompuff\",\"coal\",\"copper-ore\",\"copper-stromatolite\",\"cuttlepop\",\"dead-dry-hairy-tree\",\"dead-grey-trunk\",\"funneltrunk\",\"huge-rock\",\"huge-volcanic-rock\",\"medium-stomper-shell\",\"small-stomper-shell\"],\"goalId\":\"goal_0903mkl_1\",\"planId\":\"goal_0903mkl_1_p3\",\"planVersion\":1,\"stepId\":\"goal_0903mkl_1_p3_v1_s1_047manh\",\"currentStep\":0}\nPreserve committed semantics and grounded completion authority."
+        },
+        {
+          "role": "user",
+          "content": "[STEERING] Harness-generated decision guidance; this is not Factorio world state.\ndomain=general\ndecision_order=exact observed identity > nearest-name lookup; deterministic validator > trial-and-error action; small fully-parameterized batch > one-operation-per-turn; runtime fact > prototype fact > remembered game knowledge\nbatch_boundary=stop before an operation that needs a new unit_number, mutable result, or other observation that does not exist yet\nlocality=before intentionally crossing to another area, finish other already-decided operations on known current-area targets when their order is independent; do not invent targets or reorder user constraints, prerequisites, or observation-dependent work just to save walking\nsuccess_evidence=never claim a world-changing action succeeded from intent alone; require an operation receipt or subsequent observation"
+        },
+        {
+          "role": "user",
+          "content": "[HARNESS] Runtime recovery after auto_resume_after_model_recoverable_pause. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations. Recovery details: {\"attempt\":2,\"pause_class\":\"model_recoverable\"}"
+        }
+      ],
+      "request_id": "recovery_mv9yzdqs",
+      "trigger": "recovery",
+      "effective_tools": [
+        "getActorStatus",
+        "getTaskStatus",
+        "getInventoryItems",
+        "getEquipmentStatus",
+        "getRecipe",
+        "getRecipeDetails",
+        "discoverPrototypes",
+        "getPrototypeDetails",
+        "findSkills",
+        "getSkillDetails",
+        "getPlayerStatus",
+        "getNearbyEntities",
+        "findLongRangeEntities",
+        "findNearestEnemy",
+        "getEntityStatus",
+        "getEntityGeometry",
+        "getLogisticsTopology",
+        "measureTransportThroughput",
+        "getNavigationStatus",
+        "getFollowStatus",
+        "getDefenseStatus",
+        "getCraftingStatus",
+        "getResearchStatus",
+        "getResearchRequest",
+        "getTechnology",
+        "getCombatStatus",
+        "getPlacementCandidates",
+        "getFluidSourceTiles",
+        "getProductionScope",
+        "solveProduction",
+        "getMiningDetails",
+        "estimateProductionTime",
+        "getTransportCapacity",
+        "getLocalSpatialObservation",
+        "planPlacement",
+        "findConstructionSites",
+        "validateConstructionPlan",
+        "inspectConstructionIntent",
+        "getResearchPath",
+        "submitPlan"
+      ],
+      "ts": "2026-10-15T20:06:56.375Z",
+      "model": "gpt-6-luna",
+      "allow_tools": true,
+      "round": 0,
+      "actor_id": 13,
+      "epoch": 1
+    },
+    {
+      "tool_choice": null,
+      "messages": [
+        {
+          "content_sha256": "1cabf57be6fc94b57812f34f4aa411301dc959eff7d318d7c38b439b66c3cd63",
+          "role": "system",
+          "content_chars": 62614,
+          "suffix": "se the plan: do not change, reorder, reword, add or drop steps, and do not send a goal definition (scope, doneWhen), a roadmap or a development mode. In submitPlan send stepId as the active step id from [CONTROL_DECISION_STATE]; plan and currentStep are not needed. The harness ignores plan changes from you and records that it did.\nWhen tool calls are disabled, return that same control decision as ONE strict JSON object in assistant content; checkpoint and semanticCompletion are still accepted. Preserve committed stepCompletions if restating them. A grounded semanticCompletion for the final prose-only step may have operations: []; the harness checks the goal and returns the next slice to the planner. Never add an unrelated action merely to close a completed step.\nIf the active step cannot be completed, say so with an explicit BLOCKED reason and do not improvise a different plan; the harness decides what happens next. Goal completion is decided by the harness from the game, never by you.",
+          "prefix": "You are SGLuna, an autonomous in-world NPC in the game \"Factorio\".\r\n\r\nYou control SGLuna's own stand"
+        },
+        {
+          "role": "user",
+          "content": "[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.\n--- plan block (stable while this plan runs) ---\ngoal_id: goal_0903mkl_1\ngoal: Build a fully automated factory producing at least 1 automation-science-pack per game minute from natural resources. Build real steam power generation, automatic iron/copper/coal mining, automatic ore smelting, iron-gear-wheel assembly and red science assembly, with native belts/inserters feeding every required stage and fuel supply. Hand crafting and feeding are allowed during construction and b…\nscope: long_horizon; Build a fully automatic steam-powered red-science factory from natural resources, including mining, smelting, gears, material and fuel routing, and verify at least ten new packs over ten unattended game minutes.\ndone_when done_1: machines produce 1 × automation-science-pack per minute (last 10 min, hand work excluded)\ndone_when done_2: 10 × automation-science-pack produced from now on (all surfaces)\ndone_when done_3: 1 × steam-engine working now\ndone_when done_4: 2 × assembling-machine-1 powered by a running electric network\nroadmap_node: n1: Unlock electronics and steam power\nplan: goal_0903mkl_1_p3 v1\nstep 1: goal_0903mkl_1_p3_v1_s1_047manh | Smelt ten copper plates and verify electronics is researched.\nstep 2: goal_0903mkl_1_p3_v1_s2_1l9lw8p | Smelt fifty iron plates and verify steam-power is researched."
+        },
+        {
+          "role": "user",
+          "content": "--- step block ---\nrestage: role=executor checkpoint=C7 reason=recovery:auto_resume_after_model_recoverable_pause\nactor: actor_id=13 actor_kind=standalone_character epoch=1 connected_players=0\nplan_status: COMMITTED; steps 1:active 2:pending\nactive_step: 1 of 2 goal_0903mkl_1_p3_v1_s1_047manh | Smelt ten copper plates and verify electronics is researched. | batches=0 accepted_for_close=0\nactive_step_contract: all: research_completed\nreceipt #4 operation_receipt batch-g1-2: outcome=completed; task_state=idle; task_count=2; types=walking_to_entity,mining\nreceipt #5 deterministic_verification batch_2: verdict=verified_complete; types=walking_to_entity,mining\nreceipt #6 operation_preflight_recoverable recovery_mv9yymvt/requires_machine_1: {\"code\":\"requires_machine\",\"operation_index\":1,\"operation\":\"craft_item\",\"item_name\":\"copper-plate\",\"recipe_name\":\"copper-plate\",\"categories\":[\"smelting\"],\"compatible_machines\":[\"stone-furnace\",\"electric-furnace\",\"steel-furnace\"],\"held\":[{\"n\nauthority: active_step=goal_0903mkl_1_p3_v1_s1_047manh (committed plan) contract=all (committed) latest_receipt=#6 operation_preflight_recoverable recovery_mv9yymvt/requires_machine_1 (this step) entity_ids_in_receipts_and_snapshots=historical_observations\nresearch_path (authoritative getResearchPath; current read or explicit missing fact; trigger_crafting is cached/historical, not current admission proof): {\"target\":\"electronics\",\"state\":\"fresh\",\"as_of\":{\"tick\":10667,\"epoch\":1,\"actor_id\":13,\"at_ms\":1792094816035},\"nodes\":[{\"name\":\"electronics\",\"researched\":false,\"mode\":\"trigger\",\"status\":\"ready\",\"prerequisites\":{},\"unresolved_prerequisites\":{},\"research_trigger\":{\"type\":\"craft-item\",\"item\":\"copper-plate\",\"count\":10},\"trigger_crafting\":{\"technology\":\"electronics\",\"item\":\"copper-plate\",\"source\":\"goal_requirements\",\"state\":\"historical\",\"as_of\":{\"tick\":5174,\"epoch\":1,\"actor_id\":13,\"at_ms\":1792094652812},\"recipes_status\":\"available\",\"recipes\":[{\"recipe\":\"copper-plate\",\"enabled\":true,\"categories\":[\"smelting\"],\"categories_truncated\":false,\"hand_craftable\":false,\"hand_craftable_reason\":\"category_unsupported\",\"machines\":[{\"entity\":\"stone-furnace\",\"item\":\"stone-furnace\",\"status\":\"craftable\"},{\"entity\":\"steel-furnace\",\"item\":\"steel-furnace\",\"status\":\"locked\",\"unlocked_by\":\"advanced-material-processing\"},{\"entity\":\"electric-furnace\",\"item\":\"electric-furnace\",\"status\":\"locked\",\"unlocked_by\":\"advanced-material-processing-2\"}],\"machines_truncated\":false},{\"recipe\":\"casting-copper\",\"enabled\":false,\"categories\":[\"metallurgy\"],\"categories_truncated\":false,\"hand_craftable\":false,\"hand_craftable_reason\":\"recipe_locked\",\"machines\":[{\"entity\":\"foundry\",\"item\":\"foundry\",\"status\":\"locked\",\"unlocked_by\":\"foundry\"}],\"machines_truncated\":false}],\"truncated\":false}}]}\nheld_counts (fresh live read of the actor inventory, as_of=tick:10667,epoch:1): copper-plate=0 copper-ore=10 coal=10 stone-furnace=1 carbon=0 pentapod-egg=0 spoilage=0 wood=0 biter-egg=0 burner-mining-drill=1 iron-plate=8\nresidual_needs (derived from recipe_fact and fresh held_counts for the step contract trigger:copper-platex10; shared stock counted once): trigger craft-item copper-plate count=10 for electronics (counts new crafts; held stock not counted) held=0 crafts=10 via copper-plate | copper-ore required=10 held=10 missing=0\nmachine_energy (native prototype energy source; held = fresh live count of the machine item; placed = whether this harness observed an instance via historical_entities or checkpoint_machine, history and not a current exact target): stone-furnace energy=burner(fuel_categories=chemical, 90kW) status=craftable held=1 placed=not_observed | not_listed: locked=2\nfuel_needs (burner stone-furnace burn fuel_categories=chemical; candidates from item prototypes, held from the fresh read; amount needed not derived; sources derived from prototypes: resources that mine into the item (mined_from) and the natural trees and rocks the harvest operation mines for it (harvested_from), no_derived_source = neither yields it): held_fuel=coal=10 (acquisition not searched) | carbon fuel_value=2MJ held=0 | coal fuel_value=4MJ held=10 | pentapod-egg fuel_value=5MJ held=0 | spoilage fuel_value=0.25MJ held=0 | wood fuel_value=2MJ held=0 | biter-egg fuel_value=6MJ held=0\nrecipe_fact copper-plate (stable recipe data, source=requires_machine, as_of=tick:10667,epoch:1): categories=smelting | energy=3.2 | ingredients=1 copper-ore | products=1 copper-plate | machines=stone-furnace,electric-furnace,steel-furnace\nruntime: task_state=idle queue_length=0"
+        },
+        {
+          "role": "user",
+          "content": "[HARNESS] Runtime recovery after auto_resume_after_model_recoverable_pause. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations. Recovery details: {\"attempt\":2,\"pause_class\":\"model_recoverable\"}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "targeted_0",
+              "type": "function",
+              "function": {
+                "name": "getInventoryItems",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "targeted_0",
+          "content": "{\n  {\n    count = 1,\n    name = \"burner-mining-drill\"\n  },\n  {\n    count = 1,\n    name = \"stone-furnace\"\n  },\n  {\n    count = 10,\n    name = \"coal\"\n  },\n  {\n    count = 10,\n    name = \"copper-ore\"\n  },\n  {\n    count = 8,\n    name = \"iron-plate\"\n  }\n}\n"
+        },
+        {
+          "role": "user",
+          "content": "[CONTROL_DECISION_STATE] {\"toolsEnabled\":false,\"phase\":\"committed\",\"role\":\"executor\",\"targetedReadEligible\":false,\"targetedAllowanceUsed\":true,\"resourceSearchNames\":[\"ashland-lichen-tree\",\"ashland-lichen-tree-flaming\",\"big-stomper-shell\",\"big-volcanic-rock\",\"boompuff\",\"coal\",\"copper-ore\",\"copper-stromatolite\",\"cuttlepop\",\"dead-dry-hairy-tree\",\"dead-grey-trunk\",\"funneltrunk\",\"huge-rock\",\"huge-volcanic-rock\",\"medium-stomper-shell\",\"small-stomper-shell\"],\"goalId\":\"goal_0903mkl_1\",\"planId\":\"goal_0903mkl_1_p3\",\"planVersion\":1,\"stepId\":\"goal_0903mkl_1_p3_v1_s1_047manh\",\"currentStep\":0}\nPreserve committed semantics and grounded completion authority."
+        },
+        {
+          "role": "user",
+          "content": "[STEERING] Harness-generated decision guidance; this is not Factorio world state.\ndomain=general\ndecision_order=exact observed identity > nearest-name lookup; deterministic validator > trial-and-error action; small fully-parameterized batch > one-operation-per-turn; runtime fact > prototype fact > remembered game knowledge\nbatch_boundary=stop before an operation that needs a new unit_number, mutable result, or other observation that does not exist yet\nlocality=before intentionally crossing to another area, finish other already-decided operations on known current-area targets when their order is independent; do not invent targets or reorder user constraints, prerequisites, or observation-dependent work just to save walking\nsuccess_evidence=never claim a world-changing action succeeded from intent alone; require an operation receipt or subsequent observation\n\n[CONTROL_OUTPUT] Tool invocations are disabled for this round (tool_choice none). Normal observations are closed; the harness still accepts your control decision as ONE strict JSON object in assistant content. Follow the current [CONTROL_DECISION_STATE] for eligible bounded missing-fact reads and draft versus committed-step authority. Do not call submitPlan or another tool, and do not omit completion fields merely because tools are closed.\nUse chatMessage, stepId and operations, plus the applicable checkpoint, semanticCompletion or timeReview. Research completion uses research_completed {technology}, including mode:\"all\" for multiple technologies; an unmet result is a valid future checkpoint, not an assessment. Root checkpoint remains the active-step compatibility form.\nAn executor may close the exact active prose-only step with a grounded semanticCompletion. For the final step of a slice, operations:[] is valid; the harness checks the user goal and returns control to the planner if more work remains. Example shape (replace placeholders): {\"chatMessage\":\"\",\"stepId\":\"<exact active step id>\",\"operations\":[],\"semanticCompletion\":{\"stepId\":\"<exact active step id>\",\"rationale\":\"<grounded judgment>\"}}. Never bypass an unmet deterministic checkpoint or invent another gameplay action just to close a completed step. If genuinely blocked, start chatMessage with \"BLOCKED: \" and state the exact blocker."
+        },
+        {
+          "role": "user",
+          "content": "[HARNESS] The requested targeted live fact is above. The targeted allowance is consumed until native operation receipt or step progress; normal tools remain closed. Return one JSON action, grounded completion, or truthful blocker. Keep the committed plan unchanged."
+        }
+      ],
+      "request_id": "recovery_mv9yzdqs",
+      "trigger": "recovery",
+      "effective_tools": [
+        null
+      ],
+      "ts": "2026-10-15T20:07:01.085Z",
+      "model": "gpt-6-luna",
+      "allow_tools": false,
+      "round": 0,
+      "actor_id": 13,
+      "epoch": 1
+    }
+  ],
+  "active_plan_id": "goal_0903mkl_1_p3",
+  "events": [
+    {
+      "event": "context.restaged",
+      "ts": "2026-10-15T20:06:56.269Z",
+      "data": {
+        "role": "executor",
+        "checkpoint": "C7",
+        "handoff_id": "ho_0736718dfc91",
+        "packet_hash": "4b08a8a298e57295",
+        "packet_chars": 5973,
+        "packet_estimated_tokens": "[REDACTED]",
+        "previous_context_chars": 82896,
+        "reason": "recovery:auto_resume_after_model_recoverable_pause",
+        "plan_id": "goal_0903mkl_1_p3",
+        "step_id": "goal_0903mkl_1_p3_v1_s1_047manh"
+      }
+    },
+    {
+      "event": "control.decision_state",
+      "ts": "2026-10-15T20:06:56.339Z",
+      "data": {
+        "request_id": "recovery_mv9yzdqs",
+        "reason": "guidance_matches_effective_tools_and_canonical_phase",
+        "tools_enabled": true,
+        "phase": "committed",
+        "targeted_read_eligible": true
+      }
+    },
+    {
+      "event": "tool.call",
+      "ts": "2026-10-15T20:07:00.884Z",
+      "data": {
+        "phase": "call",
+        "tool_call_id": "targeted_0",
+        "name": "getInventoryItems",
+        "args": {},
+        "cached": false
+      }
+    },
+    {
+      "event": "tool.result",
+      "ts": "2026-10-15T20:07:00.984Z",
+      "data": {
+        "phase": "result",
+        "tool_call_id": "targeted_0",
+        "name": "getInventoryItems",
+        "cached": false,
+        "original_output_chars": 251,
+        "output_chars": 251,
+        "output": "{\n  {\n    count = 1,\n    name = \"burner-mining-drill\"\n  },\n  {\n    count = 1,\n    name = \"stone-furnace\"\n  },\n  {\n    count = 10,\n    name = \"coal\"\n  },\n  {\n    count = 10,\n    name = \"copper-ore\"\n  },\n  {\n    count = 8,\n    name = \"iron-plate\"\n  }\n}\n"
+      }
+    },
+    {
+      "event": "control.decision_state",
+      "ts": "2026-10-15T20:07:01.055Z",
+      "data": {
+        "request_id": "recovery_mv9yzdqs",
+        "reason": "guidance_matches_effective_tools_and_canonical_phase",
+        "tools_enabled": false,
+        "phase": "committed",
+        "targeted_read_eligible": false
+      }
+    },
+    {
+      "event": "plan.accepted",
+      "ts": "2026-10-15T20:07:05.056Z",
+      "data": {
+        "trigger_source": "recovery",
+        "chat_message": "BLOCKED: Electronics requires producing 10 new copper plates, but copper-plate smelting requires a placed stone furnace; I only have the furnace item, and tools are closed so I cannot place it or observe a live furnace identity.",
+        "plan": [],
+        "current_step": 0,
+        "operations": [],
+        "checkpoint": {
+          "mode": "all",
+          "requirements": [
+            {
+              "id": "requirement_1",
+              "kind": "research_completed",
+              "technology": "electronics"
+            }
+          ],
+          "confidence": 0,
+          "source": "planner_semantic_checkpoint"
+        }
+      }
+    },
+    {
+      "event": "outcome.rejected",
+      "ts": "2026-10-15T20:07:05.143Z",
+      "data": {
+        "kind": "world_blocked",
+        "source": "main_planner",
+        "reason_code": "provider_reported_blocker",
+        "runtime": {
+          "active": "",
+          "idle": false,
+          "persistent_runtime_healthy": false,
+          "condition_wait_active": false
+        },
+        "accepted": false,
+        "rejection_reason": "world_blocked_without_authoritative_evidence",
+        "candidate_blocker": "provider_reported_blocker"
+      }
+    },
+    {
+      "event": "recovery.unverified_blocker",
+      "ts": "2026-10-15T20:07:05.152Z",
+      "data": {
+        "request_id": "recovery_mv9yzdqs",
+        "reason": "rejected_world_claim_requires_grounded_action_recovery",
+        "rejection_reason": "world_blocked_without_authoritative_evidence",
+        "goal_id": "goal_0903mkl_1"
+      }
+    },
+    {
+      "event": "recovery.auto_resume_exhausted",
+      "ts": "2026-10-15T20:07:05.217Z",
+      "data": {
+        "pause_class": "model_recoverable",
+        "limit_kind": "step",
+        "step_attempts": 2,
+        "step_limit": 2,
+        "goal_attempts": 2,
+        "goal_limit": 6,
+        "reason": "step_limit_reached_without_verified_progress",
+        "goal_id": "goal_0903mkl_1",
+        "plan_id": "goal_0903mkl_1_p3",
+        "plan_version": 1,
+        "step_id": "goal_0903mkl_1_p3_v1_s1_047manh"
+      }
+    }
+  ],
+  "source": "e77ed843c0a60453d1f5e5b476808e073741d89d",
+  "request_id": "recovery_mv9yzdqs"
+}
