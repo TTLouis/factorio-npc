@@ -104,6 +104,21 @@ test('crafting gears and then a belt from those gears is covered by the earlier 
   assert.equal(batchStockDecision(tight).refusal.code, BATCH_STOCK_INSUFFICIENT_CODE)
 })
 
+test('execution-time supply cannot overturn a native craft rejection at admission', () => {
+  const report = run([withdraw(77, 'iron-plate', 8), craft('iron-gear-wheel', 4)], {}, [withdrawFacts(77, 'iron-plate', 8, 8), { ok: false, code: 'bootstrap_dependency_unresolved' }])
+  assert.equal(report.verdicts[1].status, STOCK_STATUS.COVERED_BY_EARLIER_OP)
+  const decision = batchStockDecision(report, new Set([1]))
+  assert.equal(decision.action, 'refuse')
+  assert.equal(decision.reason, 'craft_requires_settled_inventory')
+  assert.equal(decision.refusal.code, BATCH_STOCK_UNVERIFIED_CODE)
+  assert.equal(decision.refusal.refusal_class, REFUSAL_CLASS.ARGUMENT)
+  assert.match(decision.refusal.correction_message, /wait for its receipt/)
+  // A different consumer with execution-time validation keeps the existing
+  // craft -> place contract; this rule belongs to craft admission specifically.
+  const placement = run([craft('stone-furnace'), placeFurnace], { stone: 5 }, [{ ok: true }, FURNACE_ITEM(0)])
+  assert.equal(batchStockDecision(placement, new Set([1])).action, 'proceed')
+})
+
 test('a hand craft takes held intermediates first and crafts the missing ones from raw stock, keeping the surplus', () => {
   // Five belt crafts: five plates, and five gears that are crafted from ten more plates because none are held.
   assert.deepEqual(statuses(run([craft('transport-belt', 5)], { 'iron-plate': 15 })), [STOCK_STATUS.COVERED])

@@ -12964,7 +12964,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // each fit the plates held both passed and the second failed at execution with the first one's effects already in the world.
   // This replays the ordered batch over the inventory read now, with the recipe facts of the handoff cache, so an earlier
   // operation both uses stock and supplies it for the later ones. It is the one place a held stock rejection is settled:
-  // supplied by an earlier operation of the batch (accepted, dependency traced), proven short because of the batch (refused
+  // supplied by an earlier operation of the batch (accepted for execution-time consumers, dependency traced), proven short because of the batch (refused
   // before admission, class argument), or short with nothing in the batch bearing on it (the mod's own rejection stands).
   // Only a shortage the ledger can prove is refused; anything it cannot account for leaves the execution-time checks authoritative.
   async settleBatchStock(operations, results, heldIndexes, assertPreflightCurrent) {
@@ -13022,6 +13022,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     if (decision.action === 'standalone') throw reject(decision.operation_index)
     if (decision.action === 'refuse') {
+      if (decision.reason === 'craft_requires_settled_inventory') {
+        await trace('craft.preflight_receipt_required', {
+          reason: decision.reason, operation_index: decision.refusal.operation_index,
+          operation: decision.refusal.operation, code: decision.refusal.code,
+          dependencies: decision.refusal.batch_stock.dependencies,
+        })
+      }
       const failure = new AgentLoopError(`Batch stock check refused operation ${decision.refusal.operation_index + 1} (${decision.refusal.operation}): ${decision.refusal.code}`)
       failure.preflight = decision.refusal
       failure.preflightResults = results.slice()
