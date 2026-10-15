@@ -121,6 +121,7 @@ lane_offset() {
     step-contract) printf '17' ;;
     closed-action) printf '18' ;;
     targeted-water) printf '19' ;;
+    local-transfer-target) printf '20' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

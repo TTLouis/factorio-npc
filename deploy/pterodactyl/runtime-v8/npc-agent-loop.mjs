@@ -1118,6 +1118,7 @@ export function receiptEvidence(raw, outcome, context = {}) {
           actor_id: context.actor_id,
           actor_epoch: context.actor_epoch,
         },
+        admitted_batch: context.admitted_batch,
       }),
     }
   }
@@ -10290,6 +10291,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.batchInFlightBeforeSend = undefined
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
+      // Retain admission identity before normal settlement can clear a proved
+      // refusal. This witness permits recovery classification, never replay or
+      // settlement of the original batch's possibly partial effects.
+      const key = this.activePlanKey()
+      const outstanding = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation?.(key)].filter(Boolean)
+      const admission = this.memory.admissionStamp?.(key)
+      const status = JSON.parse(raw)
+      const cancelled = status.last_cancelled_batch
+      const basic = status.basic_operation?.last_result
+      const currentActor = basic?.type === 'moving_items' && basic.code === 'no_target'
+        ? await super.captureEpoch() : undefined
+      const admitted = basic?.type === 'moving_items' && basic.code === 'no_target'
+        && basic.accepted === false && basic.completed === false && cancelled && outstanding.find(pending => {
+        if (pending.protocol_version !== 2 || pending.actor?.actor_id !== this.epoch?.actor_id
+          || pending.actor?.epoch !== this.epoch?.epoch || pending.plan_id !== admission?.plan_id
+          || pending.step_id !== admission?.step_id || currentActor?.actor_id !== pending.actor.actor_id
+          || currentActor?.epoch !== pending.actor.epoch) return false
+        const journal = status.admission_journal?.records ?? status.admission_journal
+        const record = Array.isArray(journal) ? journal.find(row => row.operation_key === pending.operation_key) : undefined
+        const matches = record?.slots?.some(slot => slot?.ok === true && slot.batch_refs?.some(ref =>
+          ref.batch_id === cancelled.batch_id && ref.batch_generation === cancelled.batch_generation
+          && ref.batch_ref === cancelled.batch_ref))
+        if (!matches) return false
+        const result = reconcilePendingOperation(pending, { status, actor: { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } })
+        return [RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
+      })
       await this.settleOutstandingOperation(raw)
       this.recordPlacementReceipt(raw)
       const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
@@ -10298,11 +10325,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         step_id: currentPlan?.task_board?.active_step_id,
         actor_id: this.epoch?.actor_id,
         actor_epoch: this.epoch?.epoch,
+        admitted_batch: admitted ? {
+          operation_key: admitted.operation_key, signature: admitted.signature,
+          goal_id: admitted.goal_id, plan_id: admitted.plan_id, step_id: admitted.step_id,
+          actor_id: admitted.actor.actor_id, actor_epoch: admitted.actor.epoch,
+          batch_id: cancelled.batch_id, batch_generation: cancelled.batch_generation,
+        } : undefined,
       })
       // The plan and step this batch was admitted under, when the memory
       // recorded one: lets the receipt ledger refuse a receipt whose plan has
       // since been superseded. Without a stamp the receipt binds as before.
-      const admission = this.memory.admissionStamp?.(this.activePlanKey())
       const taskBoard = this.memory.recordBoardEvidence?.(this.activePlanKey(), admission ? { ...evidence, ...admission } : evidence)
       if (taskBoard) await this.persistState()
       const view = taskStatusDecisionView(raw)
@@ -10870,7 +10902,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const supplyState = this.memory.currentPlan?.(this.activePlanKey())
     const supplyRecovery = latestTransferSupplyExecutionRecovery(supplyState)
+    const targetRecovery = supplyRecovery?.recovery === 'local_target_reacquisition'
     if (supplyRecovery) {
+      if (targetRecovery) await this.traceEvent('transfer.target_recovery', {
+        request_id: this.traceRequest?.id,
+        step_id: supplyState?.task_board?.active_step_id,
+        operation_key: supplyRecovery.operation_key,
+        entity_name: supplyRecovery.entity_name,
+        attempt: supplyRecovery.attempt, retry_budget: supplyRecovery.retry_budget,
+        reason: 'correlated_legacy_transfer_local_target_absent',
+      })
       await this.traceEvent('transfer.supply_recovery', {
         request_id: this.traceRequest?.id,
         step_id: supplyState?.task_board?.active_step_id,
@@ -10888,7 +10929,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
     }
     else if (supplyState?.status === 'blocked'
-      && /^transfer_failed:(?:item_missing|nothing_moved)$/.test(String(supplyState.blocker ?? ''))
+      && /^transfer_failed:(?:item_missing|nothing_moved|no_target)$/.test(String(supplyState.blocker ?? ''))
       && transferSupplyRecoveryCount(supplyState.task_board) >= TRANSFER_SUPPLY_RECOVERY_BUDGET) {
       await this.traceEvent('transfer.supply_recovery_exhausted', {
         request_id: this.traceRequest?.id,
@@ -10900,7 +10941,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
       })
     }
-    const supplyGuidance = supplyRecovery
+    const supplyGuidance = targetRecovery
+      ? ` [HARNESS] The legacy name-based transfer found no ${cleanMemoryText(supplyRecovery.entity_name, 200)} within interaction reach (no_target). This is a bounded local target-reacquisition dependency inside the same committed step, not evidence that a historical machine was destroyed or WORLD_BLOCKED. The plan, step contract and requested result are unchanged. Historical coordinates are travel guidance only: choose travel if appropriate, wait for its receipt, then re-observe the actual spatial target and current inventories before proposing an exact transfer. Do not substitute a same-name machine or use a cached unit number as execution authority. The original batch may have a successful prefix; its uncertainty and duplicate-effect guard remain authoritative. Do not replay that batch or its cancelled tail; propose only effects justified by fresh counts. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer recovery allowance; all other limits and authority checks remain unchanged.`
+      : supplyRecovery
       ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget}; once these are spent the failure is recorded as the step blocker (the plan and step contract stay unchanged).`
       : ''
     const recoverableGuidance = recoverable

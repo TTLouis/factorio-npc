@@ -91,6 +91,35 @@ beforeEach(() => {
 })
 
 describe('exact entity item transfers', () => {
+  it('proves a first legacy local miss changed no inventory and cancels its queued tail', () => {
+    const c = context()
+    ;(globalThis as any).prototypes.entity['gun-turret'] = { name: 'gun-turret' }
+    expect(c.controller.submit_move('firearm-magazine', 'gun-turret', 7, true)[0]).toBe(true)
+    expect(c.controller.submit_move('firearm-magazine', 'gun-turret', 5, true)[0]).toBe(true)
+    expect(c.runtime.state_moving_items(c.actor)).toBe(0)
+    expect(c.actorInventory.counts['firearm-magazine']).toBe(20)
+    expect(c.actorInventory.remove).not.toHaveBeenCalled()
+    expect(c.controller.status().last_result).toMatchObject({ type: 'moving_items', code: 'no_target', accepted: false, completed: false })
+    expect(c.manager.get_status_snapshot()).toMatchObject({ task_state: TaskStates.IDLE, queue_empty: true,
+      last_cancelled_batch: { started_count: 1, task_count: 2, reason: 'moving_items:no_target', failed_before_mutation: true } })
+  })
+
+  it('retains the completed prefix count when a later legacy transfer misses locally', () => {
+    const c = context()
+    ;(globalThis as any).prototypes.entity['gun-turret'] = { name: 'gun-turret' }
+    c.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 1, requested_ticks: 1 })
+    c.controller.submit_move('firearm-magazine', 'gun-turret', 7, true)
+    c.manager.reset_task_state()
+    c.manager.next_task()
+    c.runtime.state_moving_items(c.actor)
+    expect(c.actorInventory.remove).not.toHaveBeenCalled()
+    expect(c.manager.get_status_snapshot().last_cancelled_batch).toMatchObject({
+      started_count: 2, task_count: 2, reason: 'moving_items:no_target', failed_before_mutation: true,
+    })
+    // failed_before_mutation describes the failed task, not the earlier prefix.
+    expect(c.manager.get_status_snapshot().last_cancelled_batch?.started_count).not.toBe(1)
+  })
+
   it('loads only the requested unit number and never scans same-name neighbors', () => {
     const c = context()
     const selectedInventory = inventory()
