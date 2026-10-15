@@ -8,12 +8,19 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
-## October 15: Run K admission fix and full-loop regressions integrated locally
+## October 15: Run L stopped at invalid-reference recovery before smelting
+
+- **One authorized trial.** Pushed candidate `0fbc4bff`; deployment/prompt/manifest and all 31 active/packaged mod files verified. Fresh actor 24, zero humans, speed 1, unchanged starter. Actual CLI-proxy model `gpt-6-luna`; 11 provider responses, no provider errors, Jev 17/17. No operator corrections or retry.
+- **Progress/stop.** Gathered 10 copper ore, 50 iron ore and 5 stone. A two-operation submission then failed `unit_number` validation before admission. Recovery classified it `unknown` and chose `wake_planner` with observations disabled. Two unsupported blocker replies exhausted the existing allowance, producing a guard pause after 4m30s. No red packs or green unlock; Unit 19/20 failure conditions were not reached.
+- **Next boundary.** Add a full-loop invalid-reference correction that can discover current entity facts, preserve committed result checkpoints and finish through native receipts without raising limits. Run L also captured an acquisition-checkpoint/result-scope discrepancy. Exact invalid tool arguments were not logged; do not invent them. [Run L evidence and concrete follow-up](validation/LUNA_GREEN_LIVE_RUN_L_2026-10-15.md).
+- **Preserved.** Checkpoint save and traces retained; stack down. Offline run-check has zero flagged signatures/parse errors, which does not establish gameplay success. Red/green automation remains the next production milestone after the recovery gate and research unlock.
+
+## October 15: Run K admission fix and full-loop regressions pushed
 
 - **Unit 20.** Reviewed source/tests `da8d3bdb`, no-ff integration `d16a15db`. A native craft rejection can no longer be overwritten by queued future supply. Existing bounded correction requests acquisition, its receipt and settled inventory before the craft; canonical goal/step, native validation and retry limits remain intact.
 - **Proof.** Six new static full-loop scenarios cover receipt sequencing through verified science output, held-stock admission, bounded repeated refusal, stop/epoch fencing and lost-ack restart without replay. Final tests reproduce Run K's exact failure on original modules. The new native queued-craft lane proves the accepted unsafe prefix on an independent control map, then refuses before mutation and crafts/verifies one real red pack on a pristine proof map.
-- **Gates.** Frozen and merged candidates pass 2,365 runtime/staging and 1,142 mod tests, typecheck/Lua checks; frozen code passes six real-engine lanes including the existing recovery/production canaries. Reviewed integration is ready to push.
-- **Next.** One owner-authorized CLI-proxy trial toward green research follows the pushed-candidate build and cold/deployed verification. Red/green assembler/inserter automation is the next production milestone, with native output and research-continuity evidence. [Unit 20 checkpoint and next milestone](validation/UNIT20_QUEUED_CRAFT_ADMISSION_2026-10-15.md).
+- **Gates.** Frozen and merged candidates pass 2,365 runtime/staging and 1,142 mod tests, typecheck/Lua checks; frozen code passes six real-engine lanes including the existing recovery/production canaries. Reviewed integration pushed at `0fbc4bff`.
+- **Trial/next.** The authorized CLI-proxy Run L concluded at a different boundary before smelting. Red/green assembler/inserter automation remains the next production milestone, with native output and research-continuity evidence. [Unit 20 checkpoint and next milestone](validation/UNIT20_QUEUED_CRAFT_ADMISSION_2026-10-15.md).
 
 ## October 15: longer Run K reached red science, stopped at queued-stock admission mismatch
 
