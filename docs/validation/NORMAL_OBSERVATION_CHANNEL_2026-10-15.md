@@ -1,7 +1,9 @@
 # Normal observation channel — 2026-10-15
 
-Status: static gates pass; frozen real-engine verification and final review pending; no live trial yet.
+Status: frozen static/native checks and independent review pass; local integration gate pending; no live trial yet.
 Source: `08e35a6a52c12434141ba43e442ad745067ad689` on `fix/normal-observation-channel`.
+
+Frozen reviewed candidate: `339c0cc6601345d078c00e67f1f14346a2930468`. Final official native image: `sha256:547814b73f728ceec186daacec9a2ae31d5de2682b5284e2261bfc9911314c8b`.
 
 ## Problem and resulting behavior
 
@@ -18,10 +20,14 @@ This fixes the channel mismatch. It does not establish that Luna will stop makin
 - [x] Canonical Docker runtime/mod/typecheck/Lua gates: 2,452 runtime and 1,144 mod tests, typecheck and generated Lua; actual exit 0.
 - [x] Twenty-one static full-loop and focused regressions pass, including repeated Jev observation requests across C6, with ordinary cache/budget and actor/epoch/cancellation fences. The recorded fixture explicitly labels its reconstructed typed reply.
 - [x] Final 21-case original-runtime control: 14 behavior failures and seven captured-evidence/strict-negative passes; actual exit 1 as expected, with no import failures.
-- [ ] Real-engine full loop: actual native furnace output obstruction, model-selected extraction, new copper production, native lab crafting and red-science trigger.
-- [ ] Relevant existing native canaries.
-- [ ] Independent frozen-candidate review.
+- [x] Final official real-engine full loop passes, actual exit 0: model clears 52 iron output, collects five NEW copper plates, natively crafts a lab and unlocks red science. Three admitted batches, nine serialized provider calls (two Sol/seven Luna), same actor/plan/checkpoint, unchanged six prior resumes, zero humans, speed 1 and fully idle operation/crafting/movement/mining/follow state.
+- [x] All thirteen existing native canaries pass individually, including the changed closed-action and three-mode local-transfer fixtures. All 31 compiled mod files and production runtime are unchanged from that canary image to the final image. The initial fourteen-lane aggregate failed only the subsequently corrected new fixture; it is not reported as an all-fourteen aggregate pass.
+- [x] Separate read-only reviewer APPROVED frozen `339c0cc6`, including final engine proof, original-code controls, hash manifests and official-image byte checks.
 - [ ] Local no-ff integration and merged canonical gate.
+
+The original two runtime modules overlaid on the same final official image fail at the intended behavior boundary: the open typed research request consumes the targeted ledger and continues with tools closed. Both runtime modules and the final runner were independently verified against their exact official-image bytes. The evidence manifest, final proof and original failure are retained locally.
+
+Initial native fixture failures are preserved. Corrections use the actual prototype trigger shape (`item: {name: "lab"}`), an exact unit scan on the actor surface/force, native input reservation (four visible ores plus one pending copper craft from five inserted), and the mandatory planner grounding confirmation. Final assertions still require five new copper, native ingredient costs, immutable checkpoint and idle state; the positive native progress assertion is stronger. No production shortcut or post-setup correction was added.
 
 The engine fixture declares the captured bootstrap supplies, furnace state and already-completed steam-power/electronics prerequisites. Fixture setup is test evidence for the recovery path, not proof of a naturally built factory. Only the eventual fresh live trial can prove the complete goal.
 
