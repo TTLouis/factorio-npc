@@ -190,8 +190,43 @@ export function parsePlan(value) {
     chatMessage: value.chatMessage,
     plan: [...value.plan],
     currentStep: value.currentStep,
-    operations: value.operations.map(parseOperation),
+    operations: value.operations.map((operation, index) => {
+      try { return parseOperation(operation) }
+      catch (cause) {
+        // Run L's exact-reference validator is deterministic. Keep this narrow:
+        // unknown operation/argument keys and other format refusals retain
+        // their existing fail-closed recovery contracts.
+        if (!(cause instanceof base.PolicyError) || !Object.hasOwn(RUNTIME_OPERATION_METADATA, operation?.name ?? '')
+          || !/^unit_number must be an integer from 1 to 9007199254740991$/.test(cause.message)) throw cause
+        const error = new base.PolicyError(`${cause.message}. No operation from this batch ran. Correct this operation within the same semantic step; use fresh nearby discovery for exact entity references. A newly placed entity needs a placement receipt and observation before dependent supply. Never invent its unit_number.`)
+        error.failureClass = 'plan_category'
+        error.code = 'invalid_operation_arguments'
+        error.details = {
+          operation_index: index, operation: operation.name,
+          arguments: operationArgumentFacts(operation),
+          batch_operations: value.operations.map(op => Object.hasOwn(RUNTIME_OPERATION_METADATA, op?.name ?? '') ? op.name : 'unapproved'),
+        }
+        throw error
+      }
+    }),
   }
+}
+
+// Diagnostic values are schema-bounded; arbitrary strings/unknown keys are
+// represented by type/length, never copied into traces or corrective prompts.
+function operationArgumentFacts(operation) {
+  const summarize = (value, depth = 0) => {
+    if (value === null || typeof value === 'boolean') return value
+    if (typeof value === 'number') return Number.isFinite(value) ? value : { type: 'number' }
+    if (typeof value === 'string') return /^-?\d{1,16}$/.test(value) ? value : { type: 'string', length: value.length }
+    if (depth >= 2) return { type: Array.isArray(value) ? 'array' : typeof value }
+    if (Array.isArray(value)) return value.slice(0, 8).map(entry => summarize(entry, depth + 1))
+    if (value && typeof value === 'object') return Object.fromEntries(['unit_number', 'item_name', 'count', 'x', 'y', 'storage_index', 'connection_index']
+      .filter(key => Object.hasOwn(value, key)).map(key => [key, summarize(value[key], depth + 1)]))
+    return { type: typeof value }
+  }
+  return Object.fromEntries(operationArgumentKeys(operation.name).slice(0, 16)
+    .filter(key => Object.hasOwn(operation.args ?? {}, key)).map(key => [key, summarize(operation.args[key])]))
 }
 
 function parsePlacementCandidates(args) {

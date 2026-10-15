@@ -471,7 +471,7 @@ export class ScriptedModel {
 
 // --- the agent, the session ----------------------------------------------------------------------------------------------------
 
-export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory() } = {}) {
+export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory(), agentRoleConfig, roleProvider } = {}) {
   const trace = []
   let lastTraceAt = 0
   const agentLogs = []
@@ -481,7 +481,8 @@ export function recoveryWorld({ game, model, stateFile = null, memory = new Cano
     memory,
     completionProtocolVersion: 2,
     replacementWake: true,
-    provider: answersStepContract((messages, context) => model.provide(messages, context)),
+    provider: answersStepContract((messages, context) => roleProvider ? roleProvider(messages, context, model) : model.provide(messages, context)),
+    ...(agentRoleConfig ? { agentRoleConfig } : {}),
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     interactionDecisionProvider: jev,
     steeringDecisionProvider: jev,
