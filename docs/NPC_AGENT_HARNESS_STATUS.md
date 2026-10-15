@@ -8,6 +8,14 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: unit 18 native recovery regressions complete (local)
+
+- **Integrated locally.** Merge `e39eea27` on `og-port-integration`; runtime fix `7b8fe59`, frozen code/test candidate `4783226c`. The native G/H/I chain reaches verified completion across two Factorio/Node restarts, with lost-acknowledgement settlement, zero replay dispatches and pending-timer cancellation. Scripted main-model/Jev only; no network inference.
+- **Real-timer fix.** A supervisor event detaches from a completed inherited provider-turn scope before entering the queue. The native lane exposed the stale-generation rejection; the new `R-scope` regression asserts verified completion and the correlated `recovery.queue_scope_detached` trace. Existing stale-work/cancellation guards and retry limits remain intact. Fifteen composed recovery scenarios now pass.
+- **Validation.** Frozen-image recovery-loop, production, craft-trigger, native-admission and steam-lab lanes all passed, exit 0. Merged canonical Docker gate: 2,353 runtime/staging and 1,142 mod tests across 128 files, plus typecheck and Lua checks; exit 0. Independent reviews found no merge blockers.
+- **Limits/next.** Recovery runs at speed 1 with zero humans and one declared seeded furnace fixture; nearby native reads revalidate target and current output after restart. This proves mechanics/recovery, not autonomous green science. No push, live provider run or deployment. Pushed-candidate deployment verification and Louis's go remain required before run J.
+- **Evidence.** [Unit 18 checkpoint](validation/UNIT18_RECOVERY_ENGINE_2026-10-15.md) and [updated pre-live plan](validation/RECOVERY_LOOP_RECONCILIATION_2026-10-14.md).
+
 ## October 14: unit 17 composed recovery regressions complete (static proof)
 
 - **Integrated locally.** Merge `14a03571` on `og-port-integration`; runtime fix `e1aaf952`, final tests `a9663f98`. Fourteen composed scenarios cover G→H→I through verified completion, disk restore, takeover/actor cancellation and completed/unknown operation effects without replay. No skipped tests or TODOs.

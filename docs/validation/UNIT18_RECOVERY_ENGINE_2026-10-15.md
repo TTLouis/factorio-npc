@@ -32,10 +32,14 @@ Independent read-only reviews of the runtime fix and final engine runner found n
 - Final image build: exit 0, including mod tests/typecheck/Lua build.
 - Post-fix canonical Docker runtime gate: **2,353 passed**, zero failed/skipped/todo; exit 0 (`unit18-runtime-scope.log`).
 - Native attempt 5: all four recovery phases passed, exit 0. This diagnostic run used read-only runner/runtime overlays; it is retained separately from the frozen-image proof.
-- Frozen-image recovery lane: passed. Production, craft-trigger, native-admission and steam-lab gates and the merged full static gate are being recorded below when complete.
+- Frozen-image engine pool: **recovery-loop, production, craft-trigger, native-admission and steam-lab all passed**, exit 0 (`unit18-engine-final.log`). Container inspection confirms network mode `none`, no mounts/overlays and no OOM. The recovery result records the frozen candidate SHA, zero humans, speed 1, 12 held plates, empty output and zero replay dispatches.
+- The actual tested image's `supervisor.mjs`, recovery runner and lane shell script match frozen source after CR normalization; copies are retained under `test-results/unit18-final/source-check/`.
+- Merged canonical `bash scripts/test-local.sh all`: **2,353 runtime/staging tests; 1,142 mod tests across 128 files passed**, plus typecheck, Lua build and generated-Lua checks; exit 0 (`unit18-integration-all.log` in the integration worktree).
 
 Uncommitted evidence stays in `.claude/worktrees/unit18-recovery-engine/`: `unit18-build-final.log`, `unit18-engine-final.log`, and `test-results/unit18-final/` for the final image; `test-results/unit18-attempt3/` retains the actual stale-turn failure. Earlier logs/artifacts retain fixture lookup, scenario and reconnect failures rather than erasing them. Each recovery phase writes behavior JSONL and an RCON transcript; the lane also preserves manifests, durable state and native saves. `recovery-complete.json` records the frozen candidate SHA, native inventory and zero replay dispatches; `recovery-cancel.json` records the cancellation comparison.
 
 ## Integration and remaining promotion gates
 
-Local integration and final gate results are pending at this documentation commit. No push, live provider run, server deployment or release promotion is part of unit 18. A later live run still requires the pushed/frozen deployment to be verified file by file and Louis's explicit go under the [reconciled plan](RECOVERY_LOOP_RECONCILIATION_2026-10-14.md).
+Reviewed changes merged locally into `og-port-integration` at **`e39eea278f1a0fbf319043f82f9694c4d033d893`**. The merged runtime/mod/engine sources match frozen candidate `4783226c`; only documentation differs. The full static gate passed after this merge. The installer bootstrap pin remains valid because its payload source did not change; its existing tests are included in the runtime gate.
+
+No push, live provider run, server deployment or release promotion occurred. A later live run still requires the pushed/frozen deployment to be verified file by file and Louis's explicit go under the [reconciled plan](RECOVERY_LOOP_RECONCILIATION_2026-10-14.md).

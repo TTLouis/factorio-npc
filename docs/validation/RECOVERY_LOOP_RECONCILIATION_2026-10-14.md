@@ -35,15 +35,15 @@ This reviews the recovery consolidation proposal written on 2026-10-14, a scratc
 | C2 / C3: shared activation and scheduling refactor | **Deferred.** Unit 14 already sends model, transport and restart-lifecycle resumes through one fenced `resumePausedPlan`. A scheduling refactor goes ahead only if a composed scenario shows a divergent path. | A refactor without a failing test is risk without evidence. |
 | Persisting transport attempt counts | **Not changed.** Transport attempts stay in memory, as documented. | This is a policy decision, not part of this work. |
 | Retry limits, pause-class allowlists, authority | **Unchanged.** | The owner's limits stand. Raising the cap is not a fix. |
-| Native `recovery-loop` lane | **Planned as unit 18**, after unit 17 is green. It runs the furnace G+H+I chain on the real engine with scripted provider replies. | The fake furnace in unit 17 is invented physics. The engine proves the slots, smelting and transfer. |
+| Native `recovery-loop` lane | **Completed as unit 18**, locally merged at `e39eea27`. It runs the furnace G+H+I chain on the real engine with scripted provider replies, two process restarts, exact completion/no replay and pending-timer cancellation. | The engine proves the slots, smelting and transfer. Real timers also exposed the inherited completed-turn scope defect, fixed in `7b8fe59`. |
 
 ## Entry criteria for run J
 
 - [x] Unit 17 composed scenarios pass: G→H→I reaches verified completion, plus restart, cancellation and no-replay.
 - [x] Any defect a composed scenario exposes is fixed in its own commit, with no change to authority or limits. Runtime fixes `e1aaf952`; completed tests `a9663f98`; reviewed and merged as `14a03571`.
-- [ ] Unit 18 native recovery-loop lane passes, or it is listed below as an open blocker with the owner's call.
-- [ ] `bash scripts/test-local.sh all` passes, and the production, craft-trigger, native-admission and steam-lab lanes pass on the frozen candidate.
-- [ ] The installer repin is current (needed only if `payload-src/installer.sh` changed).
+- [x] Unit 18 native recovery-loop lane passes on frozen code/test candidate `4783226c`, independently reviewed and locally merged at `e39eea27`.
+- [x] `bash scripts/test-local.sh all` passes on merged candidate `e39eea27`, and the production, craft-trigger, native-admission and steam-lab lanes pass alongside recovery-loop on frozen candidate `4783226c` (identical code).
+- [x] The installer repin is current: `payload-src/installer.sh` is unchanged; bootstrap tests pass in the static gate.
 - [ ] The image is built from the pushed candidate, and the deployment is verified file by file.
 - [ ] The owner says go for run J.
 
@@ -51,4 +51,6 @@ This reviews the recovery consolidation proposal written on 2026-10-14, a scratc
 
 Unit 17 is complete and locally integrated at `14a03571` (code/test checkpoint `a9663f98`). Fourteen composed scenarios pass without skips or TODOs. Runtime fixes preserve fresh machine-output facts after restart and settle exact completed operation evidence before checkpoint verification. Independent review passed. See [unit-17 checkpoint](UNIT17_RECOVERY_LOOP_2026-10-14.md).
 
-The unit worktree's complete Docker static gate passed: 2,352 runtime/staging and 1,142 mod tests, typecheck and Lua checks. The same full Docker gate passed on merged integration candidate `14a03571`, exit 0 (`unit17-integration-all.log`). Unit 18's native recovery-loop lane and the required real-engine gates remain open; run J is not authorized by this checkpoint. No push or deployment was performed.
+Unit 18 is now complete and locally integrated at `e39eea27`. Its real-timer fix adds one composed regression (15 total). The final offline image on frozen candidate `4783226c` passed recovery-loop, production, craft-trigger, native-admission and steam-lab; the merged full Docker gate passed with 2,353 runtime/staging and 1,142 mod tests, typecheck and Lua checks, exit 0. Native restart completion holds 12 copper plates with zero replay dispatches. Pending-timer cancellation also passes. See [unit-18 checkpoint](UNIT18_RECOVERY_ENGINE_2026-10-15.md) for fixture limits, source/image identity and evidence paths.
+
+Run J remains unauthorized. No push or deployment was performed; pushed-candidate image/deployment verification and the owner's go remain open. These scripted native fixtures do not prove autonomous green science.
