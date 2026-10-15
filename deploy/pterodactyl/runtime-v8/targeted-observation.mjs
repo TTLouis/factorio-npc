@@ -39,6 +39,37 @@ export function observationRecoveryBasis({ goalId, planId, stepId, receiptRef, a
   return JSON.stringify([goalId, planId, stepId, receiptRef ?? null, actorId, epoch])
 }
 
+// Native search facts only. An empty local search is not evidence that the
+// world cannot supply water. Never turn an unexplored center into a placement
+// or reachability claim; it is a bounded location the model may explore.
+export function localFluidSearchFact(raw, args) {
+  if (typeof raw !== 'string' || raw.length > 4096 || args?.fluid_name !== 'water') return undefined
+  let value
+  try { value = JSON.parse(raw) } catch { return undefined }
+  const radius = args.search_radius ?? 128
+  const empty = table => (Array.isArray(table) && table.length === 0)
+    || (table && typeof table === 'object' && Object.keys(table).length === 0)
+  const point = p => p && Number.isFinite(p.x) && Number.isFinite(p.y) && Math.abs(p.x) <= 10000256 && Math.abs(p.y) <= 10000256
+  if (value?.ok !== true || value.fluid_name !== 'water' || value.coverage !== 'generated_bounding_square'
+    || !Number.isSafeInteger(radius) || radius < 1 || radius > 256 || value.search_radius !== radius
+    || !Number.isSafeInteger(value.surface_index) || value.surface_index < 1
+    || !Number.isSafeInteger(value.observed_tick) || value.observed_tick < 0 || !point(value.actor_position)
+    || value.returned_count !== 0 || !empty(value.samples) || value.empty_result_is_conclusive !== false
+    || value.coverage_complete !== false || !Number.isSafeInteger(value.ungenerated_chunk_count) || value.ungenerated_chunk_count < 1
+    || !Array.isArray(value.ungenerated_chunks) || value.ungenerated_chunks.length > 8) return undefined
+  if (![value.checked_chunks, value.generated_chunk_count, value.ungenerated_chunk_count].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 289)
+    || value.generated_chunk_count < 1 || value.generated_chunk_count + value.ungenerated_chunk_count !== value.checked_chunks) return undefined
+  if (value.ungenerated_chunks.some(c => !Number.isSafeInteger(c?.x) || !Number.isSafeInteger(c?.y)
+    || c.center?.x !== c.x * 32 + 16 || c.center?.y !== c.y * 32 + 16)) return undefined
+  const centers = value.ungenerated_chunks.map(chunk => chunk?.center)
+  if (centers.length === 0 || centers.some(p => !point(p)
+    || Math.abs(p.x - value.actor_position.x) > radius + 32 || Math.abs(p.y - value.actor_position.y) > radius + 32)) return undefined
+  return { fluid_name: 'water', surface_index: value.surface_index, observed_tick: value.observed_tick,
+    actor_position: { x: value.actor_position.x, y: value.actor_position.y }, search_radius: radius,
+    coverage_complete: false, empty_result_is_conclusive: false, ungenerated_chunk_count: value.ungenerated_chunk_count,
+    exploration_centers: centers.map(p => ({ x: p.x, y: p.y })) }
+}
+
 export function restoreObservationLedger(rows) {
   const ledger = new Map()
   for (const row of Array.isArray(rows) ? rows.slice(0, 128) : []) {

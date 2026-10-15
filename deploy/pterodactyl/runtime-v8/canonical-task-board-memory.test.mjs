@@ -76,6 +76,17 @@ function completedReceipt({ batchId = 7, taskTypes = ['crafting'], taskCount = t
   }
 }
 
+test('candidate placement completion requires a clean correlated placing receipt and still supplies no world-state completion', () => {
+  const state = planState({ last_operations: ['place_candidate {"candidate_set_id":"placement-2","candidate_id":"1"}'] })
+  const receipt = completedReceipt({ taskTypes: ['placing'] })
+  assert.equal(verifyDeterministicReceipt(state, receipt).verified, true)
+  for (const patch of [{ outcome: 'failed' }, { task_state: 'placing' }, { queue_length: 1 },
+    { task_count: 2 }, { task_types: ['crafting'] }, { correlation: { goal_id: 'other-goal' } }, { correlation: { step_id: 'other-step' } }]) {
+    assert.equal(verifyDeterministicReceipt(state, { ...receipt, summary: JSON.stringify({ ...JSON.parse(receipt.summary), ...patch }) }).verified, false)
+  }
+  assert.equal(state.task_board.steps[state.current_step].status, 'active')
+})
+
 test('ordinary continuation cannot shrink a canonical five-step board to three steps', () => {
   const guarded = canonicalContinuationPlan(board(), {
     chatMessage: 'Still on the furnace step',

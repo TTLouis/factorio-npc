@@ -471,11 +471,12 @@ export class ScriptedModel {
 
 // --- the agent, the session ----------------------------------------------------------------------------------------------------
 
-export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory(), agentRoleConfig, roleProvider } = {}) {
+export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory(), agentRoleConfig, roleProvider, decisionScript } = {}) {
   const trace = []
   let lastTraceAt = 0
   const agentLogs = []
-  const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
+  const jev = recordingJev(async (state, questions) => decisionScript ? decisionScript(state, questions)
+    : (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,

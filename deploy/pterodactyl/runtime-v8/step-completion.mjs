@@ -8,6 +8,7 @@ const STRICT_TASKS_BY_OPERATION = new Map([
   ['harvest_product', ['harvesting']],
   ['clear_construction_area', ['clearing_area']],
   ['place_entity', ['placing']],
+  ['place_candidate', ['placing']],
   ['move_items', ['moving_items']],
   ['move_items_exact', ['moving_items']],
   ['move_items_with_player', ['moving_items']],

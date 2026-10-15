@@ -116,6 +116,7 @@ lane_offset() {
     recovery-loop) printf '12' ;;
     queued-craft) printf '13' ;;
     invalid-reference) printf '14' ;;
+    shoreline-recovery) printf '15' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

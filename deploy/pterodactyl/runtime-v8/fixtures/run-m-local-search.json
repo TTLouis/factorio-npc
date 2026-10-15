@@ -1,0 +1,145 @@
+[
+  {
+    "tool": "getFluidSourceTiles",
+    "result": {
+      "ok": true,
+      "fluid_name": "water",
+      "actor_position": {
+        "x": 36.6328125,
+        "y": -81.1796875
+      },
+      "surface_index": 1,
+      "observed_tick": 141398,
+      "search_radius": 128,
+      "coverage": "generated_bounding_square",
+      "coverage_complete": true,
+      "checked_chunks": 81,
+      "generated_chunk_count": 81,
+      "ungenerated_chunk_count": 0,
+      "ungenerated_chunks": {},
+      "ungenerated_chunks_truncated": false,
+      "empty_result_is_conclusive": true,
+      "matching_tile_prototypes": 16,
+      "samples": {},
+      "returned_count": 0,
+      "truncated": false,
+      "scanned_tile_limit": 256,
+      "scan_truncated": false,
+      "ordering": "nearest_first"
+    }
+  },
+  {
+    "tool": "getPlacementCandidates",
+    "result": {
+      "ok": true,
+      "entity_name": "offshore-pump",
+      "center": {
+        "x": 36.63,
+        "y": -81.18
+      },
+      "radius": 24,
+      "ordering": "nearest_to_actor_first",
+      "scanned": 9604,
+      "legal_candidate_count": 0,
+      "returned_candidate_count": 0,
+      "candidates": {},
+      "candidate_set_id": "placement-2",
+      "generated_tick": 142386,
+      "expires_tick": 145986
+    }
+  },
+  {
+    "tool": "getFluidSourceTiles",
+    "result": {
+      "ok": true,
+      "fluid_name": "water",
+      "actor_position": {
+        "x": 36.6328125,
+        "y": -81.1796875
+      },
+      "surface_index": 1,
+      "observed_tick": 142938,
+      "search_radius": 256,
+      "coverage": "generated_bounding_square",
+      "coverage_complete": false,
+      "checked_chunks": 289,
+      "generated_chunk_count": 182,
+      "ungenerated_chunk_count": 107,
+      "ungenerated_chunks": [
+        {
+          "x": 1,
+          "y": -8,
+          "center": {
+            "x": 48,
+            "y": -240
+          }
+        },
+        {
+          "x": 0,
+          "y": -8,
+          "center": {
+            "x": 16,
+            "y": -240
+          }
+        },
+        {
+          "x": 2,
+          "y": -8,
+          "center": {
+            "x": 80,
+            "y": -240
+          }
+        },
+        {
+          "x": -1,
+          "y": -8,
+          "center": {
+            "x": -16,
+            "y": -240
+          }
+        },
+        {
+          "x": 3,
+          "y": -8,
+          "center": {
+            "x": 112,
+            "y": -240
+          }
+        },
+        {
+          "x": -2,
+          "y": -8,
+          "center": {
+            "x": -48,
+            "y": -240
+          }
+        },
+        {
+          "x": 1,
+          "y": -9,
+          "center": {
+            "x": 48,
+            "y": -272
+          }
+        },
+        {
+          "x": 4,
+          "y": -8,
+          "center": {
+            "x": 144,
+            "y": -240
+          }
+        }
+      ],
+      "ungenerated_chunks_truncated": true,
+      "empty_result_is_conclusive": false,
+      "matching_tile_prototypes": 16,
+      "samples": {},
+      "returned_count": 0,
+      "truncated": true,
+      "scanned_tile_limit": 256,
+      "scan_truncated": true,
+      "ordering": "nearest_first_among_scanned_tiles"
+    }
+  }
+]
