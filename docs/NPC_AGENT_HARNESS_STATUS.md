@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: longer Run K reached red science, stopped at queued-stock admission mismatch
+
+- **Unit 19 integrated.** Code `2e24b74f`, merge `01424bcd`, pushed candidate `bcc4e843`. Five full-loop regressions pass; full unit/merged static gates and five native lanes are green. The Run J completed-slice checkpoint guard remains intact and its fault did not recur.
+- **Longer live result.** One authorized CLI-proxy run lasted 40m36s, with 112 successful main-provider responses, no provider errors and 94 Jev responses. Luna autonomously crafted a lab, unlocked red science and hand-crafted 21 red packs. Three actual auto-resumes continued their plans. Zero humans, speed 1 and unchanged starter; no operator corrections.
+- **New stop.** Batch stock credited a queued one-plate withdrawal toward a craft in the same admission call. Native crafting validates current ingredients before queueing, so operation 2 refused; operation 1 later completed. Its uncertain partial admission/receipt is preserved. Green research and recipe unlock remain false; no powered lab was reached.
+- **Next.** Separate admission-time versus queued-effect stock fix and static/native full-loop regression remain open. No blind prefix replay or new live run. Save/full rotated traces preserved and the isolated stack is down. [Run K checkpoint and proposed regression](validation/LUNA_GREEN_LIVE_RUN_K_2026-10-15.md).
+
 ## October 15: Run J completed-slice fix integrated; next trial authorized
 
 - **Unit 19.** Reviewed fix `2e24b74f`, merged at `01424bcd`. Completed-slice planner blockers enter existing bounded outcome/recovery handling before checkpoint persistence. Corrected batch-bearing and planner-only successors retain separate identity and a spent durable recovery allowance; the active-step guard is unchanged.
