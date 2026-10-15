@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run Q operation-channel clarification reviewed and integrated locally
+
+- **Fix.** Fresh control state now distinguishes closed observations from strict-JSON operation proposals awaiting validation/admission. The closed prompt includes canonical operation arguments and the held-placement/new-identity dependency boundary. This grants no gameplay authority, adds no automatic actions/reads/retries and preserves all budgets and actor/epoch/stop fences.
+- **Proof.** Frozen `825548ce` passes 2,402 runtime/staging tests and 1,142 mod tests plus typecheck/Lua. Four new full-loop cases cover C7 recovery, the consumed targeted read, unchanged checkpoint, exact blocker rejection and meaningful stop/epoch boundaries. Native held-furnace placement, fresh identity and admitted supply produce ten new copper plates and unlock electronics, in two batches with zero humans. All ten existing native canaries pass. Original-code static/native controls detect the missing channel contract; the initial native fixture error and its test-only correction are preserved.
+- **Integration.** Independent frozen review approved; local no-ff merge `fd791448` has identical production/test files. Merged canonical checks pass: 2,402 runtime/1,142 mod, typecheck and Lua. No push or deployment. Full-chain automated red production and its five-minute benchmark remain unproven. [Validation/evidence](validation/CLOSED_ACTION_RECOVERY_2026-10-15.md).
+
 ## October 15: Run Q stopped before first furnace placement
 
 - **Trial.** Frozen `e77ed843`, one supervised local CLI-proxy run: 18/18 provider responses (3 Sol / 15 Luna), zero errors, Jev 9/9. Gathered ten coal and ten copper ore; held starter furnace remained unplaced. No power, smelting, automated red production or benchmark. Isolated stack down; save and exact request/reply evidence preserved.

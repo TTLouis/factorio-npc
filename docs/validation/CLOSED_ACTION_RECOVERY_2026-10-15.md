@@ -46,6 +46,6 @@ Ignored evidence under `test-results/closed-action/` includes canonical logs, na
 - [x] Native physical continuation and original-code control.
 - [x] Ten existing native canaries.
 - [x] Independent frozen review approved `825548ce`; no corroborated merge blockers.
-- [ ] Local no-ff integration and merged canonical gate.
+- [x] Local no-ff merge `fd791448`; merged canonical gate PASS 2,402 runtime/1,142 mod, typecheck and Lua checks; production/tests identical to frozen `825548ce`.
 
 The full unattended natural-resource red-science chain and five-wall-minute speed-2 rate measurement remain unproven. Another supervised live trial requires the clean frozen integrated candidate, exact deployed bytes, working proxy and fresh isolated world. No success criteria or construction/provider/recovery limits change.
