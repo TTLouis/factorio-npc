@@ -74,6 +74,31 @@ export const STEP_CONTRACT_SCHEMA = Object.freeze({
   },
 })
 
+// A contract side call has no gameplay authority. The provider must deliver this
+// schema directly: its ordinary closed-round submitPlan instructions describe a
+// different reply and must never be appended to this exchange.
+export const STEP_CONTRACT_OUTPUT_PROMPT = `[STEP_CONTRACT_OUTPUT] This is a completion-checkpoint authoring call for ONE target step, not a gameplay control turn. Return exactly one JSON object with only stepId and checkpoint. stepId must equal target.step_id in [STEP_CONTRACT_REQUEST]. Do not return a plan, operations, chatMessage, semanticCompletion or tool invocation. Use the supported requirement kinds and fields in the following canonical reply schema. entity_count names future placed prototypes; entity_exists and entity_state require a real observed unit_number and cannot use entity_name or minimum instead. The harness validates the checkpoint against current native facts; this call neither executes actions nor declares the step complete. Reply schema: ${JSON.stringify(STEP_CONTRACT_SCHEMA)}`
+
+// Some CLI-proxy profiles require an explicit tool_choice:none with a schema to
+// suppress implicit tools. Keep that wire guard, with only this non-executable
+// declaration instead of the gameplay/observation tool catalog.
+export const STEP_CONTRACT_TOOL_DEFINITIONS = Object.freeze([{
+  type: 'function',
+  function: {
+    name: 'defineStepContract',
+    description: 'Schema reference for the target-only checkpoint JSON response. Tool calls are disabled; return this object in assistant content.',
+    parameters: STEP_CONTRACT_SCHEMA,
+  },
+}])
+
+export function stepContractMessages(messages) {
+  const result = messages.filter(message => !(message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith('[STEERING]')))
+  let prefixEnd = 0
+  while (result[prefixEnd]?.role === 'system') prefixEnd++
+  result.splice(prefixEnd, 0, { role: 'system', content: STEP_CONTRACT_OUTPUT_PROMPT })
+  return result
+}
+
 function clip(value, max) {
   return sanitizeDurableModelText(value, max)
 }

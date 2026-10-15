@@ -5,6 +5,7 @@ import { check, DeploymentError } from './common.mjs'
 import { diagnoseDsmlRejection, parseDsmlToolCalls } from './dsml-tool-calls.mjs'
 import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
 import { EXECUTOR_ROLE } from './agent-roles.mjs'
+import { stepContractMessages, STEP_CONTRACT_TOOL_DEFINITIONS, STEP_CONTRACT_TRIGGER } from './luna-step-contracts.mjs'
 import { approvedOperationListText, executorProviderToolDefinitions, parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
 
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
@@ -1383,6 +1384,8 @@ export async function providerRequest(config, messages, {
   check(typeof config.model === 'string' && /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model), 'Invalid model identifier')
   check(Array.isArray(messages) && messages.length > 0 && messages.length <= 50, 'Invalid provider message history')
   check(typeof allowTools === 'boolean', 'Invalid tool availability flag')
+  const stepContractRound = triggerSource === STEP_CONTRACT_TRIGGER
+  check(!stepContractRound || (!allowTools && !interactionRouter), 'Step contract calls require tools disabled and their own reply contract')
   check(typeof forceFullPlanner === 'boolean', 'Invalid full-planner override')
   check(Number.isSafeInteger(recoveryAttempt) && recoveryAttempt >= 0 && recoveryAttempt <= 100, 'Invalid provider recovery attempt')
   check(recoveryKind === undefined || recoveryKind === 'output_budget_exhaustion', 'Invalid provider recovery kind')
@@ -1402,17 +1405,19 @@ export async function providerRequest(config, messages, {
   check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
   const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
   const compactReasoningDisabled = outputBudgetRecovery && capability.reasoning_effort === true
-  const steeredMessages = interactionRouter ? compactedMessages : applySteeringMessages(compactedMessages, messages)
+  const steeredMessages = stepContractRound
+    ? stepContractMessages(compactedMessages)
+    : interactionRouter ? compactedMessages : applySteeringMessages(compactedMessages, messages)
   // Keep the role-stable prefix and tool schemas unchanged. The closed-round
   // control contract is dynamic guidance beside steering, before the receipt.
-  const controlledMessages = !interactionRouter && !allowTools
+  const controlledMessages = !stepContractRound && !interactionRouter && !allowTools
     ? steeredMessages.map(message => message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith(STEERING_MARKER)
       ? { ...message, content: `${message.content}\n\n${executorRound ? EXECUTOR_CLOSED_CONTROL_PROMPT : CLOSED_CONTROL_PROMPT}` }
       : message)
     : steeredMessages
   // The interaction router answers in JSON content, so it keeps its own
   // prompt untouched by either the style block or a cache breakpoint.
-  const styledMessages = interactionRouter
+  const styledMessages = interactionRouter || stepContractRound
     ? controlledMessages
     : applyProviderStylePrompt(controlledMessages, capability.style_profile ?? capability.id)
   const cacheBreakpoints = interactionRouter
@@ -1437,7 +1442,7 @@ export async function providerRequest(config, messages, {
   // from its first token, so the whole cached history is lost.
   const keepClosedTools = !allowTools && !interactionRouter && capability.tools_kept_when_closed === true && capability.tool_support === true
   if (allowTools || keepClosedTools) {
-    body.tools = compactContinuation ? compactCompletionTools(roleToolDefinitions) : roleToolDefinitions
+    body.tools = stepContractRound ? STEP_CONTRACT_TOOL_DEFINITIONS : compactContinuation ? compactCompletionTools(roleToolDefinitions) : roleToolDefinitions
     body.tool_choice = allowTools ? 'auto' : 'none'
   }
   applyRequestBodyPatch(body, requestBodyPatch, capability)
@@ -1465,7 +1470,15 @@ export async function providerRequest(config, messages, {
       prompt_variant: !allowTools ? 'executor_closed_control' : compactContinuation ? 'executor_compact_continuation' : 'executor_full',
     }, traceOptions)
   }
-  if (!interactionRouter && !allowTools) {
+  if (stepContractRound) {
+    await traceProviderResult('provider.step_contract_output_contract', {
+      reason: 'step_contract_requires_target_checkpoint_json',
+      allowed_fields: ['stepId', 'checkpoint'],
+      tool_choice: body.tool_choice ?? 'not_offered',
+      tool_count: body.tools?.length ?? 0,
+    }, traceOptions)
+  }
+  if (!stepContractRound && !interactionRouter && !allowTools) {
     await traceProviderResult('provider.control_output_contract', {
       reason: 'observations_closed_control_json_allowed',
       allowed_completion_fields: ['checkpoint', 'semanticCompletion', 'stepCompletions'],
@@ -1596,7 +1609,7 @@ export async function providerRequest(config, messages, {
     let closedRoundCalls
     if (!allowTools && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
       const calls = message.tool_calls
-      const sole = calls.length === 1 && calls[0]?.function?.name === 'submitPlan' && typeof calls[0].function.arguments === 'string'
+      const sole = !stepContractRound && calls.length === 1 && calls[0]?.function?.name === 'submitPlan' && typeof calls[0].function.arguments === 'string'
       if (sole) {
         message.content = calls[0].function.arguments
         structuredToolsDropped = 'submit_plan_content'
@@ -1618,7 +1631,7 @@ export async function providerRequest(config, messages, {
     if (dsml && !allowTools) {
       // No tools were offered, so only a leaked submitPlan is usable: its
       // arguments are the plan object the content was supposed to hold.
-      const sole = dsml.tool_calls.length === 1 && dsml.tool_calls[0].function.name === 'submitPlan'
+      const sole = !stepContractRound && dsml.tool_calls.length === 1 && dsml.tool_calls[0].function.name === 'submitPlan'
       if (sole) {
         message.content = dsml.tool_calls[0].function.arguments
         dsmlRecovered = 'submit_plan_content'
@@ -1642,7 +1655,7 @@ export async function providerRequest(config, messages, {
     }
     const toolCallCount = Array.isArray(message.tool_calls) ? message.tool_calls.length : 0
     let contentNormalization
-    if (message.tool_calls === undefined && typeof message.content === 'string') {
+    if (!stepContractRound && message.tool_calls === undefined && typeof message.content === 'string') {
       contentNormalization = normalizeProviderPlanContentDetailed(message.content)
       message.content = contentNormalization.content
     }

@@ -1,0 +1,477 @@
+{
+  "source": "369587144a09d785063acffbc822573fcc0ce078",
+  "goal_id": "goal_1xljrcg_1",
+  "request_id": "recovery_mv9xjahe",
+  "case": "step_contract_side_call_unavailable_before_shoreline_placement",
+  "packet": {
+    "goal": {
+      "objective": "Build a fully automated factory producing at least 1 automation-science-pack per game minute from natural resources. Build real steam power generation, automatic iron/copper/coal mining, automatic ore smelting, iron-gear-wheel assembly and red science assembly, with native belts/inserters feeding e…",
+      "summary": "Build and verify a fully automatic steam-powered red-science factory, including mining, smelting, fuel routing and gear assembly, sustaining at least one pack per game minute during an unattended ten-game-minute test."
+    },
+    "done_when": [
+      "machines produce 1 × automation-science-pack per minute (last 10 min, hand work excluded)",
+      "10 × automation-science-pack produced from now on (all surfaces)",
+      "3 × electric-mining-drill working now",
+      "3 × electric-mining-drill powered by a running electric network",
+      "1 × boiler working now",
+      "1 × steam-engine working now"
+    ],
+    "slice": {
+      "plan_id": "goal_1xljrcg_1_p4",
+      "steps": [
+        {
+          "step_id": "goal_1xljrcg_1_p4_v1_s1_08tz6g9",
+          "index": 0,
+          "description": "Collect the smelted iron plates for steam-power equipment.",
+          "status": "completed",
+          "contract": "bound"
+        },
+        {
+          "step_id": "goal_1xljrcg_1_p4_v1_s2_0nfo188",
+          "index": 1,
+          "description": "Acquire missing stone, wood and startup coal for the power plant.",
+          "status": "completed",
+          "contract": "bound"
+        },
+        {
+          "step_id": "goal_1xljrcg_1_p4_v1_s3_19zbbsb",
+          "index": 2,
+          "description": "Craft one offshore pump, one boiler, one steam engine, and starter pipes and electric poles.",
+          "status": "completed",
+          "contract": "bound"
+        },
+        {
+          "step_id": "goal_1xljrcg_1_p4_v1_s4_0kpgj2t",
+          "index": 3,
+          "description": "Place the water intake on a legal shoreline and connect the boiler using verified fluid ports.",
+          "status": "active",
+          "contract": "pending"
+        },
+        {
+          "step_id": "goal_1xljrcg_1_p4_v1_s5_1w85rvi",
+          "index": 4,
+          "description": "Connect the steam engine and electric distribution, then supply startup fuel.",
+          "status": "pending",
+          "contract": "pending"
+        },
+        {
+          "step_id": "goal_1xljrcg_1_p4_v1_s6_0767pa0",
+          "index": 5,
+          "description": "Verify water and steam connectivity and the installed starter electrical network.",
+          "status": "pending",
+          "contract": "pending"
+        }
+      ]
+    },
+    "verified_results": [
+      {
+        "step_id": "goal_1xljrcg_1_p4_v1_s1_08tz6g9",
+        "description": "Collect the smelted iron plates for steam-power equipment.",
+        "evidence_refs": [
+          "batch_10"
+        ],
+        "receipts": [
+          {
+            "kind": "deterministic_verification",
+            "summary": "verdict=verified_complete; types=moving_items"
+          },
+          {
+            "kind": "verified_world_state",
+            "summary": "{\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"iron-plate\",\"minimum\":58}],\"confidence\":0},\"results\":[{\"i…"
+          }
+        ]
+      },
+      {
+        "step_id": "goal_1xljrcg_1_p4_v1_s2_0nfo188",
+        "description": "Acquire missing stone, wood and startup coal for the power plant.",
+        "evidence_refs": [
+          "batch_11"
+        ],
+        "receipts": [
+          {
+            "kind": "deterministic_verification",
+            "summary": "verdict=verified_complete; types=walking_to_entity,mining,harvesting,walking_to_entity,mining"
+          },
+          {
+            "kind": "verified_world_state",
+            "summary": "{\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"stone\",\"minimum\":5},{\"id\":\"requirement_2\",\"kind\":\"invento…"
+          }
+        ]
+      },
+      {
+        "step_id": "goal_1xljrcg_1_p4_v1_s3_19zbbsb",
+        "description": "Craft one offshore pump, one boiler, one steam engine, and starter pipes and electric poles.",
+        "evidence_refs": [
+          "batch_17"
+        ],
+        "receipts": [
+          {
+            "kind": "deterministic_verification",
+            "summary": "verdict=verified_complete; types=crafting,crafting,crafting,crafting"
+          },
+          {
+            "kind": "verified_world_state",
+            "summary": "{\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"offshore-pump\",\"minimum\":1},{\"id\":\"requirement_2\",\"kind\":…"
+          }
+        ]
+      }
+    ],
+    "target": {
+      "step_id": "goal_1xljrcg_1_p4_v1_s4_0kpgj2t",
+      "index": 3,
+      "description": "Place the water intake on a legal shoreline and connect the boiler using verified fluid ports."
+    },
+    "facts": {
+      "as_of": {
+        "tick": 59376,
+        "epoch": 1,
+        "actor_id": 7,
+        "at_ms": 1792092402122
+      },
+      "inventory": {
+        "small-electric-pole": 4,
+        "pipe": 10,
+        "boiler": 1,
+        "steam-engine": 1,
+        "burner-mining-drill": 1,
+        "offshore-pump": 1,
+        "wood": 4,
+        "coal": 20,
+        "iron-ore": 50,
+        "copper-ore": 10,
+        "iron-plate": 6,
+        "copper-plate": 8
+      },
+      "observed_entities": [
+        {
+          "name": "stone-furnace",
+          "unit_number": 15,
+          "type": "furnace",
+          "observed_tick": 47148
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "iron-ore",
+          "type": "resource",
+          "observed_tick": 33791
+        },
+        {
+          "name": "character",
+          "unit_number": 7,
+          "type": "character",
+          "observed_tick": 33791
+        }
+      ],
+      "recipes": [
+        "recipe_fact steam-engine (stable recipe data, source=getRecipeDetails, as_of=tick:56923,epoch:1): applicability=available | categories=crafting | energy=0.5 | ingredients=10 iron-plate + 8 iron-gear-wheel + 5 pipe | products=1 steam-engine | machines=assembling-machine-1,assembling-machine-2,assembling-machine-3",
+        "recipe_fact small-electric-pole (stable recipe data, source=getRecipeDetails, as_of=tick:56923,epoch:1): applicability=available | categories=electronics | energy=0.5 | ingredients=1 wood + 2 copper-cable | products=2 small-electric-pole | machines=assembling-machine-1,assembling-machine-2,assembling-machine-3,electromagnetic-plant",
+        "recipe_fact pipe (stable recipe data, source=getRecipeDetails, as_of=tick:56923,epoch:1): applicability=available | categories=crafting | energy=0.5 | ingredients=1 iron-plate | products=1 pipe | machines=assembling-machine-1,assembling-machine-2,assembling-machine-3",
+        "recipe_fact iron-plate (stable recipe data, source=getRecipeDetails, as_of=tick:56923,epoch:1): applicability=available | categories=smelting | energy=3.2 | ingredients=1 iron-ore | products=1 iron-plate | machines=electric-furnace,steel-furnace,stone-furnace"
+      ]
+    }
+  },
+  "committed_steps": [
+    {
+      "step_id": "goal_1xljrcg_1_p4_v1_s1_08tz6g9",
+      "description": "Collect the smelted iron plates for steam-power equipment.",
+      "completion_contract": {
+        "mode": "all",
+        "requirements": [
+          {
+            "id": "requirement_1",
+            "kind": "inventory_count",
+            "item_name": "iron-plate",
+            "minimum": 58
+          }
+        ],
+        "confidence": 0
+      },
+      "completion_mode": "deterministic",
+      "contract_status": "bound",
+      "completion_confidence": "grounded",
+      "reduced_confidence": false
+    },
+    {
+      "step_id": "goal_1xljrcg_1_p4_v1_s2_0nfo188",
+      "description": "Acquire missing stone, wood and startup coal for the power plant.",
+      "completion_contract": {
+        "mode": "all",
+        "requirements": [
+          {
+            "id": "requirement_1",
+            "kind": "inventory_count",
+            "item_name": "stone",
+            "minimum": 5
+          },
+          {
+            "id": "requirement_2",
+            "kind": "inventory_count",
+            "item_name": "wood",
+            "minimum": 5
+          },
+          {
+            "id": "requirement_3",
+            "kind": "inventory_count",
+            "item_name": "coal",
+            "minimum": 20
+          }
+        ],
+        "confidence": 0
+      },
+      "completion_mode": "deterministic",
+      "contract_status": "bound",
+      "completion_confidence": "grounded",
+      "reduced_confidence": false,
+      "contract_binding": {
+        "binding": "just_in_time",
+        "request_id": "recovery_mv9xbqk8",
+        "bound_at": 1792092204268
+      }
+    },
+    {
+      "step_id": "goal_1xljrcg_1_p4_v1_s3_19zbbsb",
+      "description": "Craft one offshore pump, one boiler, one steam engine, and starter pipes and electric poles.",
+      "completion_contract": {
+        "mode": "all",
+        "requirements": [
+          {
+            "id": "requirement_1",
+            "kind": "inventory_count",
+            "item_name": "offshore-pump",
+            "minimum": 1
+          },
+          {
+            "id": "requirement_2",
+            "kind": "inventory_count",
+            "item_name": "boiler",
+            "minimum": 1
+          },
+          {
+            "id": "requirement_3",
+            "kind": "inventory_count",
+            "item_name": "steam-engine",
+            "minimum": 1
+          },
+          {
+            "id": "requirement_4",
+            "kind": "inventory_count",
+            "item_name": "pipe",
+            "minimum": 10
+          },
+          {
+            "id": "requirement_5",
+            "kind": "inventory_count",
+            "item_name": "small-electric-pole",
+            "minimum": 4
+          }
+        ],
+        "confidence": 0
+      },
+      "completion_mode": "deterministic",
+      "contract_status": "bound",
+      "completion_confidence": "grounded",
+      "reduced_confidence": false,
+      "contract_binding": {
+        "binding": "just_in_time",
+        "request_id": "recovery_mv9xbqk8",
+        "bound_at": 1792092282861
+      }
+    },
+    {
+      "step_id": "goal_1xljrcg_1_p4_v1_s4_0kpgj2t",
+      "description": "Place the water intake on a legal shoreline and connect the boiler using verified fluid ports.",
+      "completion_contract": null,
+      "completion_mode": "deterministic",
+      "contract_status": "pending",
+      "completion_confidence": "pending",
+      "reduced_confidence": false
+    },
+    {
+      "step_id": "goal_1xljrcg_1_p4_v1_s5_1w85rvi",
+      "description": "Connect the steam engine and electric distribution, then supply startup fuel.",
+      "completion_contract": null,
+      "completion_mode": "deterministic",
+      "contract_status": "pending",
+      "completion_confidence": "pending",
+      "reduced_confidence": false
+    },
+    {
+      "step_id": "goal_1xljrcg_1_p4_v1_s6_0767pa0",
+      "description": "Verify water and steam connectivity and the installed starter electrical network.",
+      "completion_contract": null,
+      "completion_mode": "deterministic",
+      "contract_status": "pending",
+      "completion_confidence": "pending",
+      "reduced_confidence": false
+    }
+  ],
+  "attempts": [
+    {
+      "request_id": "recovery_mv9xjahe",
+      "model": "gpt-6.1-sol",
+      "actor_id": 7,
+      "epoch": 1,
+      "raw_reply": {
+        "stepId": "goal_1xljrcg_1_p4_v1_s4_0kpgj2t",
+        "checkpoint": {
+          "mode": "all",
+          "requirements": [
+            {
+              "kind": "entity_exists",
+              "entity_name": "offshore-pump",
+              "minimum": 1
+            },
+            {
+              "kind": "entity_exists",
+              "entity_name": "boiler",
+              "minimum": 1
+            }
+          ]
+        }
+      },
+      "raw_reply_text": "{\"stepId\":\"goal_1xljrcg_1_p4_v1_s4_0kpgj2t\",\"checkpoint\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"entity_exists\",\"entity_name\":\"offshore-pump\",\"minimum\":1},{\"kind\":\"entity_exists\",\"entity_name\":\"boiler\",\"minimum\":1}]}}",
+      "validation": {
+        "request_id": "recovery_mv9xjahe",
+        "step_id": "goal_1xljrcg_1_p4_v1_s4_0kpgj2t",
+        "attempt": 1,
+        "outcome": "rejected",
+        "reason": "checkpoint_not_supported:stepCompletions[0] requires a supported checkpoint",
+        "latency_ms": 6899,
+        "usage": {
+          "input_units": 15033,
+          "cached_input_units": 0,
+          "cache_miss_input_units": 15033,
+          "output_units": 207,
+          "visible_output_units": 75,
+          "reasoning_output_units": 132,
+          "total_units": 15240,
+          "usage_complete": true
+        }
+      },
+      "gameplay_control_injected": true
+    },
+    {
+      "request_id": "recovery_mv9xjahe",
+      "model": "gpt-6.1-sol",
+      "actor_id": 7,
+      "epoch": 1,
+      "raw_reply": {
+        "chatMessage": "BLOCKED: The checkpoint validator rejected the proposed contract, so no checkpoint was bound. I need the accepted entity_exists/entity_state requirement schema to express placement and verified pump-to-boiler water connectivity without weakening this step to mere entity presence.",
+        "plan": [
+          "Collect the smelted iron plates for steam-power equipment.",
+          "Acquire missing stone, wood and startup coal for the power plant.",
+          "Craft one offshore pump, one boiler, one steam engine, and starter pipes and electric poles.",
+          "Place the water intake on a legal shoreline and connect the boiler using verified fluid ports.",
+          "Connect the steam engine and electric distribution, then supply startup fuel.",
+          "Verify water and steam connectivity and the installed starter electrical network."
+        ],
+        "currentStep": 3,
+        "operations": []
+      },
+      "raw_reply_text": "{\"chatMessage\":\"BLOCKED: The checkpoint validator rejected the proposed contract, so no checkpoint was bound. I need the accepted entity_exists/entity_state requirement schema to express placement and verified pump-to-boiler water connectivity without weakening this step to mere entity presence.\",\"plan\":[\"Collect the smelted iron plates for steam-power equipment.\",\"Acquire missing stone, wood and startup coal for the power plant.\",\"Craft one offshore pump, one boiler, one steam engine, and starter pipes and electric poles.\",\"Place the water intake on a legal shoreline and connect the boiler using verified fluid ports.\",\"Connect the steam engine and electric distribution, then supply startup fuel.\",\"Verify water and steam connectivity and the installed starter electrical network.\"],\"currentStep\":3,\"operations\":[]}",
+      "validation": {
+        "request_id": "recovery_mv9xjahe",
+        "step_id": "goal_1xljrcg_1_p4_v1_s4_0kpgj2t",
+        "attempt": 2,
+        "outcome": "rejected",
+        "reason": "reply_has_unexpected_fields:chatMessage,plan,currentStep,operations",
+        "latency_ms": 13153,
+        "usage": {
+          "input_units": 15136,
+          "cached_input_units": 12544,
+          "cache_miss_input_units": 2592,
+          "output_units": 287,
+          "visible_output_units": 154,
+          "reasoning_output_units": 133,
+          "total_units": 15423,
+          "usage_complete": true
+        }
+      },
+      "gameplay_control_injected": true
+    }
+  ]
+}
