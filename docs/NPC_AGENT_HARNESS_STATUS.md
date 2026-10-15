@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run K admission fix and full-loop regressions integrated locally
+
+- **Unit 20.** Reviewed source/tests `da8d3bdb`, no-ff integration `d16a15db`. A native craft rejection can no longer be overwritten by queued future supply. Existing bounded correction requests acquisition, its receipt and settled inventory before the craft; canonical goal/step, native validation and retry limits remain intact.
+- **Proof.** Six new static full-loop scenarios cover receipt sequencing through verified science output, held-stock admission, bounded repeated refusal, stop/epoch fencing and lost-ack restart without replay. Final tests reproduce Run K's exact failure on original modules. The new native queued-craft lane proves the accepted unsafe prefix on an independent control map, then refuses before mutation and crafts/verifies one real red pack on a pristine proof map.
+- **Gates.** Frozen and merged candidates pass 2,365 runtime/staging and 1,142 mod tests, typecheck/Lua checks; frozen code passes six real-engine lanes including the existing recovery/production canaries. Reviewed integration is ready to push.
+- **Next.** One owner-authorized CLI-proxy trial toward green research follows the pushed-candidate build and cold/deployed verification. Red/green assembler/inserter automation is the next production milestone, with native output and research-continuity evidence. [Unit 20 checkpoint and next milestone](validation/UNIT20_QUEUED_CRAFT_ADMISSION_2026-10-15.md).
+
 ## October 15: longer Run K reached red science, stopped at queued-stock admission mismatch
 
 - **Unit 19 integrated.** Code `2e24b74f`, merge `01424bcd`, pushed candidate `bcc4e843`. Five full-loop regressions pass; full unit/merged static gates and five native lanes are green. The Run J completed-slice checkpoint guard remains intact and its fault did not recur.
