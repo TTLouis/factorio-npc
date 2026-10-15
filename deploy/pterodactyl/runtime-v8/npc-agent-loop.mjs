@@ -11285,6 +11285,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const used = Boolean(this.closedRoundObservationUsed || this.actionOmissionObservationUsed
       || this.memory.targetedObservationLedger?.get(identity.ledgerKey) === identity.basis)
     return { toolsEnabled: allowTools, phase: identity.draft ? 'draft' : FROZEN_PLAN_STATUSES.has(identity.plan?.status) ? 'committed' : 'no_plan',
+      // This describes a proposal transport, never permission to execute. Tool
+      // closure limits observations; normal parsing/preflight/admission still
+      // validate operations supplied in assistant JSON.
+      operationSubmission: { channel: allowTools ? 'submitPlan_or_assistant_json' : 'assistant_json',
+        validation: 'required', grantsAuthority: false },
       role: this.agentContext.role, targetedReadEligible: eligible && !used, targetedAllowanceUsed: used,
       resourceSearchNames: this.targetedResourceSearchNames(),
       goalId: identity.data.goalId, planId: identity.data.planId, planVersion: identity.plan?.plan_version,
@@ -11390,7 +11395,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await fence()
     this.messages.push({ role: 'user', content: initial.draft
       ? '[HARNESS] The requested draft fact is above. The draft allowance is consumed for this goal; normal tools remain closed. As planner, correct the draft and its completion declarations. You may submit a valid plan with operations: [] for executor delegation, or correct the optional first action. No plan or operation was committed by this read.'
-      : '[HARNESS] The requested targeted live fact is above. The targeted allowance is consumed until native operation receipt or step progress; normal tools remain closed. Return one JSON action, grounded completion, or truthful blocker. Keep the committed plan unchanged.' })
+      : '[HARNESS] The requested targeted live fact is above. The targeted allowance is consumed until native operation receipt or step progress; normal observation tools remain closed. Gameplay operations can still be proposed in the operations array of one strict assistant JSON object, subject to normal validation and admission. Keep the committed plan and checkpoint unchanged; choose a grounded action, completion, or truthful blocker.' })
     return this.callProvider(current, generation, { round, allowTools: false, recoveryAttempt, recoveryKind })
   }
 
@@ -11605,6 +11610,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       { role: 'user', content: controlText })
     await this.traceEvent('control.decision_state', { request_id: this.traceRequest?.id,
       reason: 'guidance_matches_effective_tools_and_canonical_phase', tools_enabled: effectiveAllowTools,
+      operation_submission: controlState.operationSubmission,
       phase: controlState.phase, targeted_read_eligible: controlState.targetedReadEligible })
     await this.assertCurrent()
     await this.dropIfStale(controlAttribution)

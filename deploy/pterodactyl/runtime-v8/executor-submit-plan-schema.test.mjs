@@ -306,7 +306,7 @@ test('the executor prompt variants name only fields the executor schema has; the
 
 // Owner decision 2026-10-08: execution slices declare only deterministic checkpoints; semantic declarations belong to an
 // assessmentOnly slice. The planner wording says so; the executor variants are byte-identical to before the change.
-test('planner prompts and the stepCompletions schema say execution plans declare only deterministic checkpoints; executor variants are unchanged', () => {
+test('planner prompts and the stepCompletions schema say execution plans declare only deterministic checkpoints; executor action channel is explicit', () => {
   const stepCompletions = plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions
   // Step contracts are bound when each step is about to start (2026-10-09): the currentStep entry carries its checkpoint, later entries do not.
   assert.match(stepCompletions.description, /In an execution plan the entry at currentStep carries its deterministic checkpoint; later entries are \{kind:"deterministic"\} and their checkpoints are requested when each step is about to start\. Semantic declarations are accepted only with assessmentOnly:true\.$/)
@@ -318,9 +318,10 @@ test('planner prompts and the stepCompletions schema say execution plans declare
   assert.doesNotMatch(COMPACT_CONTINUATION_PROMPT, /\} or \{kind:"semantic"/)
   assert.doesNotMatch(CLOSED_CONTROL_PROMPT, /\} or \{kind:"semantic"|at least one deterministic step and stepCompletions/)
   const sha = text => createHash('sha256').update(text).digest('hex')
-  // Hashes recorded from the executor variants immediately before the wording change.
+  // The compact variant is unchanged. The closed variant now explicitly
+  // distinguishes operation proposals from closed observation tools (Run Q).
   assert.equal(sha(EXECUTOR_COMPACT_CONTINUATION_PROMPT), 'cf609a119e5907e504ab0db36a355e415b8b0a3c940e28a8055ac363ac9b6028')
-  assert.equal(sha(EXECUTOR_CLOSED_CONTROL_PROMPT), 'c16eaa752f1089668448e47be9ac44aed134ae1f5768f98d06d658fa06d4cbdc')
+  assert.equal(sha(EXECUTOR_CLOSED_CONTROL_PROMPT), 'a04212a64b2881ec78798f832fba65e6960baf8a008a5794e5abf656f20d0dcc')
 })
 
 test('a submitPlan wrapper in content whose nested object names the step (no plan array) unwraps and binds like a bare stepId reply', async () => {
