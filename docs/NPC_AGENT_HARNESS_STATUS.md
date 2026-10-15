@@ -8,11 +8,18 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
-## October 15: Run L recovery fixed; delegated trial authorized
+## October 15: Run M confirms Sol/Luna delegation; shoreline recovery remains blocked
+
+- **Reviewed fix integrated.** Unit 21 code/tests `b9d25643`, merge `c07f506a`, pushed/deployed source `517fcdc1`. Frozen and merged gates pass 2,373 runtime/staging and 1,142 mod tests plus typecheck/Lua checks; seven frozen native lanes green. Deployment/prompt/manifest and all 31 active/native-tested mod files match.
+- **Real delegation.** One authorized fresh CLI-proxy trial: 7 Sol planner and 134 Luna executor responses, no main-provider errors. Three C3 commitments parked the planner and created executor contexts; Sol returned at later slice boundaries via fresh C2 contexts after recovery discarded the parked context. Jev 91 requests / 90 successful responses / one HTTP-499 runtime fallback.
+- **Result.** 40m36s, six auto-resumes, then `goal_limit_reached`. Native lab, pump, boiler and steam engine crafted; red recipe unlocked. Power chain/lab were not placed, red produced/consumed stayed zero, green remained locked. Zero humans, speed 1, no operator corrections; save/traces preserved and stack down.
+- **Next regression.** A radius-24 pump search and radius-128 local water absence were followed by an explicitly inconclusive radius-256 scan. Luna declared an unsupported blocker instead of bounded exploration; authority rejected it and the goal recovery allowance exhausted. Add static/native exploration-to-powered-lab full-loop coverage without raising limits. Unit 21's invalid-reference/scope conditions did not fire live. [Run M evidence and next local unit](validation/LUNA_GREEN_LIVE_RUN_M_2026-10-15.md).
+
+## October 15: Run L recovery fixed; delegated trial concluded
 
 - **Unit 21.** Reviewed code/tests `b9d25643` classify the exact invalid `unit_number` boundary into the existing tool-capable bounded correction loop. No malformed batch is admitted. Bounded rejection traces preserve replayable numeric/type facts. Same-request preflight correction cannot substitute ingredient stock or a semantic assessment for the retained result checkpoint.
 - **Proof.** Eight new static scenarios include Sol planner/Luna executor resolution, placement receipt followed by fresh discovery, verified output, existing-cap exhaustion, stop/epoch fencing and lost-ack restart without replay. Original implementations fail the intended regressions. Canonical gates pass 2,373 runtime/staging and 1,142 mod tests, typecheck/Lua checks; all seven frozen native lanes pass, including the new real-engine delegated recovery chain and existing production canaries.
-- **Next trial.** Louis authorized one fresh CLI-proxy run with `gpt-6.1-sol` planning and `gpt-6-luna` execution after integration/deployment checks. Actual model traces and planner/executor handoff must establish live delegation; scripted role coverage alone does not establish provider compatibility. Red/green automation remains the next milestone after the research unlock/reliability gate. [Unit 21 evidence and checklist](validation/UNIT21_RUN_L_DELEGATION_RECOVERY_2026-10-15.md).
+- **Trial.** The authorized Sol-planner/Luna-executor Run M concluded at a separate shoreline/exploration recovery boundary, with actual models and handoffs verified. Red/green automation remains the next milestone after the research unlock/reliability gate. [Unit 21 evidence and checklist](validation/UNIT21_RUN_L_DELEGATION_RECOVERY_2026-10-15.md).
 
 ## October 15: Run L stopped at invalid-reference recovery before smelting
 
