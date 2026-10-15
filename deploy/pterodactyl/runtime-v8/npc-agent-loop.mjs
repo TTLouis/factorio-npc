@@ -2,7 +2,7 @@ import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { normalizeObservationRequest, observationRecoveryBasis } from './targeted-observation.mjs'
+import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
 import {
@@ -4832,6 +4832,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // under an earlier sequence number date from before that change.
   noteWorldMutation({ sent = false } = {}) {
     this.worldMutationSeq = (this.worldMutationSeq ?? 0) + 1
+    this.localFluidSearchObservation = undefined
+    this.localPumpSearchObservation = undefined
     if (sent) this.batchInFlight = true
   }
 
@@ -4906,6 +4908,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // Only a well-formed answer to the request that was made adds anchors; an empty, failed or mismatched read changes nothing.
         const learned = fluidSourceHintsFromRead(raw, args, this.observationTag())
         if (learned.anchors) rememberFluidHints(this.handoffFluidHints, learned.anchors)
+        const fact = localFluidSearchFact(raw, args)
+        this.localFluidSearchObservation = fact ? { fact, scope: this.localSearchScope() } : undefined
+      }
+      else if (toolName === 'getPlacementCandidates' && args?.entity_name === 'offshore-pump') {
+        this.localPumpSearchObservation = undefined
+        let result
+        try { if (typeof raw === 'string' && raw.length <= 4096) result = JSON.parse(raw) } catch { return }
+        if (result?.ok === true && result.entity_name === 'offshore-pump' && result.legal_candidate_count === 0
+          && result.returned_candidate_count === 0 && Number.isSafeInteger(args.radius) && args.radius >= 1 && args.radius <= 24
+          && result.candidates && typeof result.candidates === 'object' && Object.keys(result.candidates).length === 0
+          && result.radius === args.radius && Number.isFinite(result.center?.x) && Number.isFinite(result.center?.y)
+          && Math.abs(result.center.x) <= 10000256 && Math.abs(result.center.y) <= 10000256) {
+          this.localPumpSearchObservation = { fact: { entity_name: 'offshore-pump', radius: args.radius,
+            center: { x: result.center.x, y: result.center.y }, legal_candidate_count: 0 }, scope: this.localSearchScope() }
+        }
       }
       else if (toolName === 'getInventoryItems') {
         const counts = parseInventoryCounts(raw)
@@ -8130,6 +8147,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       return { verified: false, reason: 'no_authoritative_operation_receipt', state: planState }
     }
+
+    if (planState.last_operations?.some(value => typeof value === 'string' && value.startsWith('place_candidate '))) await this.traceEvent('step.candidate_placement_receipt_checked', {
+      request_id: this.traceRequest?.id, reason: 'strict_native_placement_receipt_requires_world_checkpoint',
+      batch_id: batchId, step_id: step.id,
+    })
 
     const checkpoint = persistedStepCheckpoint(board, step.id)
     if (!checkpoint?.contract) {
@@ -12384,6 +12406,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     await this.validatePreflightCorrectionScope(plan)
+    await this.validateLocalFluidSearchBlocker(plan)
     const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
       const error = new AgentLoopError(grounding.message)
@@ -12401,6 +12424,35 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw await this.checkpointRejectionError({ accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) })
     }
     return plan
+  }
+
+  localSearchScope() {
+    const { data } = this.targetedObservationIdentity()
+    return { ...data, requestId: this.traceRequest?.id, seq: this.worldMutationSeq, at: Date.now() }
+  }
+
+  async validateLocalFluidSearchBlocker(plan) {
+    if (plan.operations.length > 0 || !providerBlockerReason(plan) || this.batchInFlight) return
+    const identity = this.targetedObservationIdentity()
+    if (!FROZEN_PLAN_STATUSES.has(identity.plan?.status) || !identity.step || !this.traceRequest?.id
+      || this.memory.pendingOperation?.(identity.key) || identity.state?.admission_status === 'admission_failed') return
+    const current = this.localSearchScope()
+    const matches = row => row && ['goalId', 'planId', 'stepId', 'actorId', 'epoch', 'requestId', 'seq']
+      .every(key => current[key] !== undefined && row.scope[key] === current[key])
+      && Date.now() - row.scope.at >= 0 && Date.now() - row.scope.at <= 120000
+    const water = this.localFluidSearchObservation, pump = this.localPumpSearchObservation
+    if (!matches(water) || !matches(pump)
+      || Math.abs(water.fact.actor_position.x - pump.fact.center.x) > 0.01
+      || Math.abs(water.fact.actor_position.y - pump.fact.center.y) > 0.01) return
+    const facts = { water_search: water.fact, pump_search: pump.fact }
+    await this.traceEvent('recovery.local_fluid_search_blocker_rejected', {
+      request_id: this.traceRequest.id, reason: 'local_fluid_search_is_not_world_blocker',
+      goal_id: current.goalId, plan_id: current.planId, step_id: current.stepId, ...facts,
+    })
+    const error = new AgentLoopError(`[LOCAL_FLUID_SEARCH_RECOVERY] These native observations establish local absence and incomplete coverage, not a world blocker: ${JSON.stringify(facts)}. Keep the committed goal, active step and result checkpoint. Choose a bounded exploratory walk_to_position using the observed unexplored centers (they are not known reachable, water or legal placements), or another action supported by current evidence. The harness has not chosen a destination or run an operation. After a movement receipt, use fresh water and placement discovery before placing a pump. No additional observation or retry allowance is granted.`)
+    error.failureClass = 'plan_category'
+    error.code = 'local_fluid_search_not_world_blocker'
+    throw error
   }
 
   async validatePreflightCorrectionScope(plan) {
