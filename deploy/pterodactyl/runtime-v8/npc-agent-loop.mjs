@@ -7173,7 +7173,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   plannerOnlyDraftCandidate(plan) {
-    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const held = getActivePlanningPlan(planning)
+    // The one bounded planner recovery may author the next slice without an
+    // initial batch. Revalidation sees its DRAFT after recordPlan, so retain
+    // the same exception only while its immediate predecessor is completed.
+    const completedSliceRecovery = this.freshContextRecoveryInProgress
+      && planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && (held?.status === PLAN_STATUS.COMPLETED
+        || (held?.status === PLAN_STATUS.DRAFT && planning.plans.at(-2)?.status === PLAN_STATUS.COMPLETED))
     return this.completionProtocolVersion >= 2 && this.executorHandoffEnabled
       && this.agentContext.role === PLANNER_ROLE && !!this.requestInfo
       && plan.operations.length === 0 && plan.plan.length > 0 && plan.currentStep === 0
@@ -7182,8 +7190,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && !plan.semanticCompletion && !providerBlockerReason(plan)
       && !this.currentPendingAmendment() && !held?.replacement
       && (!held || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED].includes(held.status))
-      && !this.actionOmissionRepairActive && !this.genericRecoveryDecisionActive
-      && !this.freshContextRecoveryInProgress
+      && !this.genericRecoveryDecisionActive
+      && (completedSliceRecovery || (!this.actionOmissionRepairActive && !this.freshContextRecoveryInProgress))
   }
 
   async validateStepCompletionDeclarations(plan) {
@@ -14412,6 +14420,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || (!previousState && Array.isArray(plan.plan) && plan.plan.length > 0)
     )
     const explicitBlocker = providerBlockerReason(plan)
+    // Run J: a completed slice has no active checkpoint target. A planner's
+    // unsupported BLOCKED answer is still a model claim, not a successor draft
+    // or permission to overwrite completed history in the compatibility board.
+    if (commands.length === 0 && explicitBlocker && this.agentContext.role === PLANNER_ROLE
+      && heldForSemanticAdmission?.status === PLAN_STATUS.COMPLETED
+      && this.memory.planningState?.(this.activePlanKey())?.goal?.status === GOAL_STATUS.ACTIVE) {
+      await this.traceEvent('planning.completed_slice_blocker_routed', {
+        request_id: this.traceRequest?.id,
+        goal_id: previousState?.goal_id,
+        plan_id: heldForSemanticAdmission.plan_id,
+        reason: 'completed_slice_has_no_active_checkpoint_target',
+      })
+      return this.finishNoOperationBlock(plan, before, 'provider_reported_blocker', explicitBlocker, 'provider_blocker')
+    }
     if (commands.length === 0 && plan.plan.length === 0 && remainingCanonicalWork && !runtimeHealthy && !explicitBlocker) {
       const finished = await this.finishIfGoalMet(plan, previousState)
       if (finished) return finished
@@ -14687,6 +14709,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_id: committed.plan_id, step_id: committed.steps[0].step_id,
         reason: 'validated_observation_only_empty_batch',
       })
+      // A committed successor ends the planner's corrective decision; the
+      // executor gets its normal tools. The durable per-goal claim stays spent.
+      if (this.freshContextRecoveryInProgress) this.clearActionOmissionRecovery()
       const handoff = await this.startExecutorAtCommit({ planId: committed.plan_id, requestId: this.traceRequest?.id })
       if (handoff.restaged) return this.runTurn()
       await this.assertCurrent()
