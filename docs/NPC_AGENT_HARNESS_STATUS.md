@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run S local target recovery reviewed and integrated
+
+- **Fix.** A native legacy name-transfer miss within reach can recover inside the unchanged semantic step only with matching admitted journal/batch/signature, active plan/step and fresh actor/epoch. It uses the existing persistent two-attempt transfer allowance. The model chooses travel and obtains fresh spatial identity/counts before exact delivery; no automatic walk, substitution, cached-ID authority or extra budget.
+- **Effect proof.** Native local `no_target` now proves the failed task touched no inventory. Existing reconciliation permits whole-batch absence only for `started_count:1`. Completed prefixes and old unproved Run S receipts retain uncertain effects and replay protection. Exact destruction and authority failures remain closed.
+- **Proof/integration.** Reviewed `6b374d2c`, local no-ff merge `162e73ce`; merged Docker checks pass 2,431 runtime/1,144 mod tests, typecheck and Lua. Final native lane passes all three isolated worlds: remote intended furnace/decoy recovery produces ten new copper plates and unlocks electronics; actual completed movement-prefix uncertainty and actual mined-target destruction both preserve replay guards. All twelve existing native canaries pass. Original-code controls detect both missing recovery guidance and missing native absence proof. The separate Run T observer passes independent review and 21 offline checks, including confirmed stop before save. No push, release or deployment; full automated red throughput remains unproven. [Validation](validation/LOCAL_TRANSFER_TARGET_RECOVERY_2026-10-15.md).
+
 ## October 15: Run S exposes local transfer target recovery
 
 - **Trial.** Frozen `7ca69aed`, 17/17 provider responses (3 Sol/14 Luna), Jev 13/13, zero transport errors. The NPC gathered ten copper ore and ten coal and placed furnace 10. No plates, power or red science; measurement never started. Parent verified the isolated stack is down and the 860,822-byte save is retained.
