@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run N red-automation construction stopped before throughput measurement
+
+- **One authorized delegated trial.** Local candidate `77e65f4b`; shipped runtime/prompt/manifest and all 31 active/native-tested mod files match. Sol planner / Luna executor produced 5 / 56 replies, zero provider errors; Jev 38 requests/responses. Fresh world, zero humans, unchanged declared starter and no corrective gameplay. No push.
+- **Progress/result.** 22m32s: electronics/steam-power triggers, 72 iron plates, 10 copper plates, gears/cable and one furnace. No lab, connected steam power, automated supply chain or red science. The lab step exhausted two resumes (goal 4/6).
+- **Concrete boundary.** The rebuilt executor received `getEntityStatus` as `unchanged` with no full entity-status baseline in its actual provider payload. It declined to process available copper ore without current furnace facts. Bind diff eligibility to delivered conversation continuity and add static/native full-loop recovery regressions before another live trial; preserve existing caps and completion authority.
+- **Benchmark pending.** Owner selected five wall minutes at speed 2, AI mutations paused, enemies removed and expansion disabled, with at least ten new red packs and verified upstream production. Construction never reached readiness, so none of those measurement controls were applied. Save/traces preserved, isolated stack down; no live retry. [Run N checkpoint and regression plan](validation/RED_AUTOMATION_LIVE_RUN_N_2026-10-15.md).
+
 ## October 15: Unit 22 shoreline recovery and powered-lab loop verified locally
 
 - **Recovery.** Reviewed code/tests `adc0821a` reject an unsupported world-blocker claim backed only by local pump absence and inconclusive water coverage. The existing category-correction allowance supplies bounded native exploration facts; the model chooses an action under the same goal/checkpoint. No observation/resume cap increase or automatic gameplay action. Facts are request/goal/step/actor/epoch scoped, expire and clear on mutation/restart.
