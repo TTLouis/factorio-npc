@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  normal-observation)
+    run_node normal_observation_factorio.mjs
+    ;;
   local-transfer-target)
     run_node local_transfer_target_factorio.mjs --mode recovery
     stop_factorio

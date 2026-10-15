@@ -11334,9 +11334,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // validate operations supplied in assistant JSON.
       operationSubmission: { channel: allowTools ? 'submitPlan_or_assistant_json' : 'assistant_json',
         validation: 'required', grantsAuthority: false },
-      role: this.agentContext.role, targetedReadEligible: eligible && !used, targetedAllowanceUsed: used,
+      role: this.agentContext.role, targetedReadEligible: allowTools === false && eligible && !used, targetedAllowanceUsed: used,
       resourceSearchNames: this.targetedResourceSearchNames(),
-      ...(eligible && !used && this.targetedWaterSearchBasis(identity) ? {
+      ...(allowTools === false && eligible && !used && this.targetedWaterSearchBasis(identity) ? {
         targetedWaterSearch: { tool: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 256, limit: 8 } },
       } : {}),
       goalId: identity.data.goalId, planId: identity.data.planId, planVersion: identity.plan?.plan_version,
@@ -11349,7 +11349,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair }) {
+  async handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair, allowTools = false }) {
     let intent
     try { intent = JSON.parse(message.content) } catch { return undefined }
     if (!intent || !Object.hasOwn(intent, 'observationRequest')) return undefined
@@ -11360,12 +11360,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Preserve exactly what Luna authored. The ordinary bounded category
       // correction handles this control refusal; it is not a world blocker.
       return providerMessageWith(message, { tool_calls: undefined, _sglunaObservationRefusal: {
-        reason, controlState: this.controlDecisionState(false),
+        reason, controlState: this.controlDecisionState(allowTools),
       } })
     }
     let request
     try { request = normalizeObservationRequest(intent.observationRequest) } catch (error) { return reject(error.message) }
-    if (this.closedRoundObservationUsed || this.actionOmissionObservationUsed) return reject('targeted_allowance_already_used')
     if (!this.requestInfo || !initial.step || initial.planning?.goal?.status !== GOAL_STATUS.ACTIVE
       || !(initial.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(initial.plan?.status))
       || initial.state?.status !== 'active' || this.currentPendingAmendment()) return reject('no_eligible_active_step')
@@ -11394,6 +11393,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (request.tool === 'getEntityStatus' && !this.liveObservedExactTarget(request.args.unit_number)
       && !initial.step.completion_contract?.requirements?.some(row => row.unit_number === request.args.unit_number)) return reject('entity_not_grounded')
     if (request.tool === 'findLongRangeEntities' && !this.targetedResourceSearchNames().includes(request.args.name)) return reject('resource_source_not_grounded')
+    // The typed control form names the model's requested fact, not a separate
+    // admission allowance. While tools are open, return that same call to the
+    // ordinary turn/recovery loop, which owns cache, budget and actor fences.
+    // Do not consume the closed ledger, evict a cached result, or close tools.
+    if (allowTools === true) {
+      await this.assertCurrent()
+      await this.dropIfStale(attribution)
+      if (this.generation !== generation || this.targetedObservationIdentity().fenceIdentity !== initial.fenceIdentity) {
+        throw new AgentLoopError('Observation was cancelled or superseded')
+      }
+      await this.traceEvent('observation.normal_from_control', { request_id: this.traceRequest?.id,
+        reason: 'normal_tools_available_use_existing_observation_budget', tool: request.tool,
+        goal_id: initial.data.goalId, step_id: initial.data.stepId })
+      await this.dropIfStale(attribution)
+      return providerMessageWith(message, { content: '', tool_calls: [{ id: `normal_observation_${round}`,
+        type: 'function', function: { name: request.tool, arguments: JSON.stringify(request.args) } }] })
+    }
+    if (this.closedRoundObservationUsed || this.actionOmissionObservationUsed) return reject('targeted_allowance_already_used')
     const ledger = this.memory.targetedObservationLedger ??= new Map()
     if (ledger.get(initial.ledgerKey) === initial.basis) return reject('targeted_allowance_already_used')
     const waterBasis = request.tool === 'getFluidSourceTiles' ? this.targetedWaterSearchBasis(initial) : undefined
@@ -11989,7 +12006,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (salvaged) return salvaged
     }
 
-    const observed = await this.handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair })
+    const observed = await this.handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair, allowTools: effectiveAllowTools })
     if (observed) return observed
 
     if (omissionRepair && !effectiveAllowTools && message.tool_calls !== undefined) {

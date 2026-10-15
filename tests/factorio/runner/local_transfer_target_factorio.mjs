@@ -131,9 +131,16 @@ if (mode === 'destroyed') {
       // A remembered position is a model-selected travel hint, not current identity.
       return reply([{ name: 'walk_to_position', args: { x: historical.x, y: historical.y - 4, reach_distance: 1 } }])
     })
-    .push('executor', 'luna:fresh-target-after-walk', reads([['getEntityStatus', { name: 'stone-furnace', radius: 32 }]]))
-    .push('executor', 'luna:one-targeted-held-count-read', messages => {
-      const status = JSON.parse([...messages].reverse().find(row => row.role === 'tool').content)
+    .push('executor', 'luna:fresh-target-and-spend-normal-budget-after-walk', reads([
+      ['getEntityStatus', { name: 'stone-furnace', radius: 32 }], ['getActorStatus', {}], ['getTaskStatus', {}], ['getNavigationStatus', {}],
+    ]))
+    .push('executor', 'luna:one-targeted-held-count-read', (messages, context) => {
+      // The unchanged normal cap admits its useful subset. Entity status is
+      // first; any remaining normal slots are consumed by native runtime facts.
+      const ids = new Set(messages.flatMap(row => row.tool_calls ?? []).filter(call => call.function?.name === 'getEntityStatus').map(call => call.id))
+      const entityMessage = [...messages].reverse().find(row => row.role === 'tool' && ids.has(row.tool_call_id))
+      assert.ok(entityMessage)
+      const status = JSON.parse(entityMessage.content)
       assert.equal(status.observation_mode, 'full')
       assert.equal(status.entity.unit_number, intended)
       assert.deepEqual(status.entity.position, historical)
@@ -142,6 +149,8 @@ if (mode === 'destroyed') {
       const row = [...messages].reverse().find(message => String(message.content).startsWith('[CONTROL_DECISION_STATE]'))
       assert.ok(row)
       const control = JSON.parse(row.content.split('\n')[0].slice('[CONTROL_DECISION_STATE] '.length))
+      assert.equal(context.allowTools, false, 'targeted inventory proof begins only after normal tools actually close')
+      assert.equal(control.toolsEnabled, false)
       assert.equal(control.targetedReadEligible, true)
       return { content: JSON.stringify({ plan: [STEP], currentStep: 0, stepId: control.stepId, operations: [],
         observationRequest: { stepId: control.stepId, tool: 'getInventoryItems', args: {},

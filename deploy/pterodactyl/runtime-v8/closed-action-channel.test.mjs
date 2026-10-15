@@ -92,6 +92,12 @@ function fixture(t) {
   }
   ctx.planner = () => planReply({ plan: [STEP], currentStep: 0, operations: [], checkpoint: CHECKPOINT,
     stepCompletions: [{ kind: 'deterministic', checkpoint: CHECKPOINT }], goal: GOAL })
+  // Close the ordinary phase through its real four-read budget before testing
+  // the separate closed-round allowance. An open typed read now stays normal.
+  ctx.normalReads = () => ({ content: null, tool_calls: [
+    ['getActorStatus', {}], ['getInventoryItems', {}],
+    ['getNearbyEntities', { radius: 16, limit: 40 }], ['getResearchStatus', {}],
+  ].map(([name, args], index) => ({ id: `q-normal-${index}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) })
   ctx.targeted = () => planReply({ stepId: ctx.stepId(), operations: [], observationRequest: {
     stepId: ctx.stepId(), tool: 'getInventoryItems', args: {}, rationale: 'Need held furnace, ore and fuel before choosing the next operation.',
   } })
@@ -118,18 +124,32 @@ function assertClosed(ctx, messages) {
   assert.match(text, /normal parsing, preflight and admission still apply/)
 }
 
-test('Run Q: C7 resume, consumed inventory read, closed JSON placement, fresh identity and smelting finish the unchanged goal', async t => {
+test('Run Q: C7 resume, one ordinary typed inventory read, closed JSON placement, fresh identity and smelting finish the unchanged goal', async t => {
   const ctx = fixture(t), { model, world, game } = ctx
-  let beforeTargeted, unit
+  let beforeInventory, unit
   model.push('planner', 'sol:commit', ctx.planner)
     .push('executor', 'luna:captured-unverified-blocker', ctx.bad, 2)
-    .push('executor', 'luna:C7-targeted-inventory', () => {
-      beforeTargeted = game.inventoryReads
+    // A genuine no-action reply enters the existing bounded omission repair;
+    // C7 itself starts an ordinary open observation phase.
+    .push('executor', 'luna:C7-no-action-enters-repair', () => ctx.action([]))
+    .push('executor', 'luna:C7-ordinary-typed-inventory', messages => {
+      const state = control(messages)
+      assert.equal(state.toolsEnabled, true)
+      assert.equal(state.targetedReadEligible, false)
+      assert.equal(state.targetedAllowanceUsed, false)
+      beforeInventory = game.inventoryReads
       return ctx.targeted()
     })
     .push('executor', 'luna:closed-place-held-furnace', messages => {
       assertClosed(ctx, messages)
-      assert.equal(game.inventoryReads, beforeTargeted + 1)
+      assert.equal(game.inventoryReads, beforeInventory + 1)
+      // C7's existing action-omission repair closes after exactly one ordinary
+      // read. Its used flag is shared guidance; the closed-read ledger is not
+      // consumed by the open JSON observationRequest transport.
+      assert.equal(world.agent.actionOmissionObservationUsed, true)
+      assert.equal(world.agent.actionOmissionForceNoTools, true)
+      assert.equal(world.agent.closedRoundObservationUsed, false)
+      assert.equal(world.memory.targetedObservationLedger?.size ?? 0, 0)
       assert.equal(game.placed, false)
       assert.equal(world.memory.planningState(KEY).goal.status, 'active')
       return ctx.action([{ name: 'place_entity', args: { entity_name: 'stone-furnace' } }])
@@ -151,7 +171,8 @@ test('Run Q: C7 resume, consumed inventory read, closed JSON placement, fresh id
   const identity = { planId: committed.plan_id, version: committed.plan_version, stepId: committed.steps[0].step_id, contract: structuredClone(committed.steps[0].completion_contract) }
   await fireResumeTimer(ctx)
   assert.ok(world.trace.some(row => row.event === 'context.restaged' && row.data.checkpoint === 'C7'))
-  assert.equal(game.sent.length, 1)
+  assert.equal(game.sent.length, 1, JSON.stringify({ violations: model.violations, remaining: model.remaining,
+    logs: world.agentLogs.slice(-8), observations: world.trace.filter(row => /observation|action_omission|provider.error/.test(row.event)).slice(-8) }))
   assert.equal(game.placed, false, 'admission alone is not native completion')
   await completeAndReport(ctx)
   assert.equal(game.placed, true)
@@ -175,7 +196,17 @@ test('Run Q: C7 resume, consumed inventory read, closed JSON placement, fresh id
   assert.equal(world.named('step.verified').at(-1).task_board.status, 'completed')
   assert.equal(world.memory.currentPlan(KEY), undefined, 'verified final goal is finalized')
   assert.equal(world.memory.planningState(KEY).goal, null)
-  assert.equal(world.named('observation.targeted_granted').length, 1)
+  assert.equal(world.named('observation.targeted_granted').length, 0)
+  assert.equal(world.memory.targetedObservationLedger?.size ?? 0, 0)
+  const ordinaryRead = world.named('observation.normal_from_control')
+  assert.equal(ordinaryRead.length, 1)
+  assert.ok(ordinaryRead[0].request_id)
+  assert.equal(ordinaryRead[0].reason, 'normal_tools_available_use_existing_observation_budget')
+  assert.equal(ordinaryRead[0].tool, 'getInventoryItems')
+  const repairRead = world.named('recovery.action_omission_observation_complete')
+  assert.equal(repairRead.length, 1)
+  assert.equal(repairRead[0].observation, 'getInventoryItems')
+  assert.equal(repairRead[0].tools_enabled_next_round, false)
   assert.equal(world.named('recovery.auto_resume_started').length, 1)
   const closed = world.named('control.decision_state').filter(row => !row.tools_enabled && row.operation_submission?.channel === 'assistant_json')
   assert.ok(closed.length > 0)
@@ -217,6 +248,7 @@ for (const boundary of ['stop', 'epoch']) test(`Run Q closed proposal after ${bo
   const ctx = fixture(t), { model, world, game } = ctx
   let boundaryReached = false
   model.push('planner', 'sol:commit', ctx.planner)
+    .push('executor', 'luna:close-normal-budget', ctx.normalReads)
     .push('executor', 'luna:targeted', ctx.targeted)
     .push('executor', 'luna:stale-closed-placement', async messages => {
       assertClosed(ctx, messages)
