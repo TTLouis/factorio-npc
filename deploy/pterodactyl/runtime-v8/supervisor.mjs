@@ -3557,6 +3557,19 @@ export class Session {
   }
 
   queueEvent(fn, { reportError = false } = {}) {
+    // Activity hooks and real timers can inherit the completed agent turn's AsyncLocalStorage scope.
+    // A supervised event starts its own turn; retaining that old generation makes a valid recovery stale.
+    const inherited = this.agent?.turnScope?.getStore?.()
+    if (inherited) {
+      return this.agent.turnScope.exit(() => {
+        void this.traceRecovery('recovery.queue_scope_detached', {
+          request_id: this.agent?.traceRequest?.id ?? inherited.requestId,
+          origin_request_id: inherited.requestId,
+          reason: 'supervisor_event_starts_fresh_turn',
+        })
+        return this.queueEvent(fn, { reportError })
+      })
+    }
     this.eventQueue = this.eventQueue.then(fn).catch(async error => {
       const message = error instanceof Error ? error.message : String(error)
       this.log(message)
