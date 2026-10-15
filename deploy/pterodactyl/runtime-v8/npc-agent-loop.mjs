@@ -11590,6 +11590,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.providerAbort = controller
     const controlAttribution = { lineage: this.agentContext.lineageSequence, seq: this.agentContext.conversationSeq,
       role: this.agentContext.role, handoffId: this.agentContext.handoffId }
+    if (providerMessagesOverride === undefined) {
+      this.compactWorkingContext()
+      await this.repairObservationBaselines()
+    }
     let providerMessages = providerMessagesOverride ?? this.providerMessages()
     const controlState = this.controlDecisionState(effectiveAllowTools)
     const controlText = `[CONTROL_DECISION_STATE] ${JSON.stringify(controlState)}\n${controlState.phase === 'draft'
@@ -12775,6 +12779,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (readFence) await readFence()
     }
     this.compactWorkingContext()
+    await this.repairObservationBaselines()
     if (this.actionOmissionRepairActive) {
       this.actionOmissionObservationUsed = true
       this.actionOmissionForceNoTools = true

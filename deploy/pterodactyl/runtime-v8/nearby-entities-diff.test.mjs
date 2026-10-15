@@ -242,3 +242,27 @@ test('getNearbyEntities refuses to diff truncated scans', async () => {
   assert.equal(second.matched_count, 7)
   assert.equal(second.entities.length, 1)
 })
+
+for (const boundary of ['discarded_exchange', 'compacted_exchange']) {
+  test(`getNearbyEntities re-expands the current native snapshot after ${boundary}`, async () => {
+    const rcon = new FakeRcon([nearbySnapshot([entity(101, 'assembling-machine-1', 4, 2)]), nearbySnapshot([entity(101, 'assembling-machine-1', 4, 2)])])
+    let agent, calls = 0
+    agent = new NpcAgentLoop({ rcon, systemPrompt: 'nearby baseline delivery boundary', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
+      provider: async messages => {
+        if (++calls === 1) return nearbyTool('before-boundary')
+        if (calls === 2) {
+          assert.equal(JSON.parse(toolResult(messages, 'before-boundary').content).observation_mode, 'full')
+          if (boundary === 'discarded_exchange') agent.messages = agent.baseMessages.map(m => ({ ...m }))
+          else agent.maxWorkingMessages = 4
+          return { content: null, tool_calls: [{ id: 'after-boundary', type: 'function', function: { name: 'getNearbyEntities', arguments: JSON.stringify({ limit: 20 }) } }] }
+        }
+        const result = JSON.parse(toolResult(messages, 'after-boundary').content)
+        assert.equal(result.observation_mode, 'full')
+        assert.equal(result.entities[0].unit_number, 101)
+        return planMessage([], 'Done.')
+      },
+    })
+    await agent.request('Observe this area across a context boundary', { sender: 'TTLouis' })
+    assert.equal(calls, 3); assert.equal(rcon.nearbyReads, 2, 're-expansion never spends an extra native read')
+  })
+}
