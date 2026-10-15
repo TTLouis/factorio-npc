@@ -218,6 +218,23 @@ test('one water fact consumes the same durable ledger; restaging and restart can
   assert.equal(restarted.game.waterReads, 0)
 })
 
+test('existing fresh incomplete water coverage needs no targeted read; stale coverage cannot suppress the missing fact', async () => {
+  const world = boundary()
+  world.agent.recordHandoffToolFacts('getFluidSourceTiles', JSON.stringify(RUN_M_SEARCHES[2].result), WATER.args)
+  assert.ok(world.agent.localFluidSearchObservation)
+  assert.equal(world.agent.controlDecisionState(false).targetedWaterSearch, undefined)
+  const refused = await world.agent.handleObservationRequest(world.request(), world.context)
+  assert.equal(refused._sglunaObservationRefusal.reason, 'water_search_requires_fresh_empty_actor_centered_pump_search')
+  assert.equal(world.game.waterReads, 0); assert.equal(world.calls(), 0)
+  assert.equal(world.memory.targetedObservationLedger.size, 0, 'no claim is spent for an already available fact')
+  world.agent.localFluidSearchObservation.scope.at -= 120001
+  assert.deepEqual(world.agent.controlDecisionState(false).targetedWaterSearch, WATER)
+  const accepted = await world.agent.handleObservationRequest(world.request(), world.context)
+  assert.equal(accepted._sglunaObservationRefusal, undefined)
+  assert.equal(world.game.waterReads, 1)
+  assert.equal(world.memory.targetedObservationLedger.size, 1)
+})
+
 for (const change of ['stop', 'epoch', 'request', 'mutation']) test(`water read ${change} fence consumes its allowance and publishes no stale result`, async () => {
   const world = boundary()
   world.game.duringWater = () => {
