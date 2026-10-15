@@ -292,13 +292,13 @@ export async function providerRequest(config, messages, options = {}) {
 // this function cannot call a provider, log credentials, or grant game authority.
 export async function verifyCliProxyProviderContracts(config, { requestId = 'cli_proxy_preflight' } = {}) {
   check(typeof requestId === 'string' && /^[a-zA-Z0-9_.:-]{1,240}$/.test(requestId), 'Invalid CLI-proxy preflight request id')
-  check(config?.aiApiMethod === 'local', 'CLI-proxy preflight requires AI_API_METHOD=local')
+  check(config?.aiApiMethod === 'cli-proxy', 'CLI-proxy preflight requires AI_API_METHOD=cli-proxy')
   const roles = AGENT_ROLES.map(role => {
     const resolved = resolveAgentRole(config, role)
     const capabilities = providerCapabilityProfile(resolved)
-    check(resolved.profile === 'local' && capabilities.id === 'local'
+    check(resolved.profile === 'cli-proxy' && capabilities.id === 'cli-proxy'
       && capabilities.model_family === 'openai-gpt' && capabilities.tools_kept_when_closed === true
-      && capabilities.tool_support === true, `CLI-proxy ${role} requires the local GPT closed-tool contract`)
+      && capabilities.tool_support === true, `CLI-proxy ${role} requires the CLI-proxy GPT closed-tool contract`)
     return { role, resolved, capabilities }
   })
   const proofs = []
@@ -324,7 +324,7 @@ export async function verifyCliProxyProviderContracts(config, { requestId = 'cli
         tools_kept_when_closed: capabilities.tools_kept_when_closed, tool_support: capabilities.tool_support }, body })
   }
   return { event: 'provider.cli_proxy_contract_verified', request_id: requestId,
-    reason: 'explicit_local_method_and_role_closed_wire_verified', status: 'pass',
+    reason: 'explicit_cli_proxy_method_and_role_closed_wire_verified', status: 'pass',
     ai_api_method: config.aiApiMethod, external_inference_calls: 0, roles: proofs }
 }
 

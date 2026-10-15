@@ -43,13 +43,13 @@ test('selected Run U evidence retains the actual generic closed request and reje
   assert.equal(captured.native_final.red_produced_count, 0)
 })
 
-test('configuration through Session.roleProvider reproduces generic Run U shape; explicit local keeps both role schemas while closed', async () => {
+test('configuration through Session.roleProvider reproduces generic Run U shape; explicit CLI-proxy keeps both role schemas while closed', async () => {
   const generic = configuration({}, env())
-  const local = configuration({}, env({ AI_API_METHOD: 'local' }))
+  const proxy = configuration({}, env({ AI_API_METHOD: 'cli-proxy' }))
   assert.equal(generic.aiApiMethod, undefined)
   assert.equal(generic.profile, 'auto')
   const wires = []
-  for (const config of [generic, local]) {
+  for (const config of [generic, proxy]) {
     const session = bridge(config, async (_url, options) => { wires.push({ config, body: JSON.parse(options.body) }); return reply({ content: '{}' }) })
     for (const role of ['planner', 'executor']) {
       await session.roleProvider(history, { role, allowTools: false, requestId: captured.closed_request.request_id, triggerSource: 'recovery', recoveryAttempt: 0 })
@@ -69,20 +69,20 @@ test('configuration through Session.roleProvider reproduces generic Run U shape;
   }
 })
 
-test('local method is an explicit configuration choice; model/gateway names and stored mirror cannot infer it', () => {
-  for (const raw of [{}, { aiApiMethod: 'local' }, { providerUrl: 'https://proxy.example.test/v1', model: 'gpt-6.1-sol,gpt-6-luna' }]) {
+test('CLI-proxy method is an explicit configuration choice; model/gateway names and stored mirror cannot infer it', () => {
+  for (const raw of [{}, { aiApiMethod: 'cli-proxy' }, { providerUrl: 'https://proxy.example.test/v1', model: 'gpt-6.1-sol,gpt-6-luna' }]) {
     const config = configuration(raw, env())
     assert.equal(config.aiApiMethod, undefined)
     assert.equal(provider.providerCapabilityProfile(resolveAgentRole(config, 'executor')).id, 'generic')
   }
-  const explicit = configuration({ providerProfile: 'generic' }, env({ AI_API_METHOD: 'local', PROVIDER_PROFILE: 'generic' }))
-  assert.equal(explicit.aiApiMethod, 'local')
-  assert.equal(explicit.profile, 'local')
+  const explicit = configuration({ providerProfile: 'generic' }, env({ AI_API_METHOD: 'cli-proxy', PROVIDER_PROFILE: 'generic' }))
+  assert.equal(explicit.aiApiMethod, 'cli-proxy')
+  assert.equal(explicit.profile, 'cli-proxy')
   assert.equal(explicit.aiApiMethodOverridesProfile, true)
 })
 
 test('explicit CLI-proxy preflight verifies two actual closed wire bodies without external fetches or mutable budget changes', async t => {
-  const config = configuration({}, env({ AI_API_METHOD: 'local' }))
+  const config = configuration({}, env({ AI_API_METHOD: 'cli-proxy' }))
   const before = structuredClone(config)
   let externalFetches = 0
   t.mock.method(globalThis, 'fetch', async () => { externalFetches++; throw new Error('external inference forbidden in deterministic preflight') })
@@ -92,16 +92,16 @@ test('explicit CLI-proxy preflight verifies two actual closed wire bodies withou
   assert.deepEqual(config, before)
   assert.equal(proof.event, 'provider.cli_proxy_contract_verified')
   assert.equal(proof.request_id, 'fixture_cli_proxy_preflight')
-  assert.equal(proof.reason, 'explicit_local_method_and_role_closed_wire_verified')
+  assert.equal(proof.reason, 'explicit_cli_proxy_method_and_role_closed_wire_verified')
   assert.equal(proof.status, 'pass')
-  assert.equal(proof.ai_api_method, 'local')
+  assert.equal(proof.ai_api_method, 'cli-proxy')
   assert.equal(proof.external_inference_calls, 0)
   assert.deepEqual(proof.roles.map(row => row.role), ['planner', 'executor'])
   for (const row of proof.roles) {
     assert.equal(row.body.model, row.role === 'planner' ? 'gpt-6.1-sol' : 'gpt-6-luna')
     assert.equal(row.body.tool_choice, 'none')
     assert.ok(row.body.tools.some(tool => tool.function.name === 'submitPlan'))
-    assert.equal(row.profile, 'local')
+    assert.equal(row.profile, 'cli-proxy')
     assert.equal(row.capabilities.model_family, 'openai-gpt')
     assert.equal(row.capabilities.tools_kept_when_closed, true)
     const schema = row.body.tools.find(tool => tool.function.name === 'submitPlan').function.parameters
@@ -117,10 +117,11 @@ test('deterministic CLI-proxy preflight rejects ambiguous methods and non-GPT ro
   for (const config of [
     configuration({}, env()),
     configuration({}, env({ AI_API_METHOD: 'direct' })),
+    configuration({}, env({ AI_API_METHOD: 'local' })),
     configuration({}, env({ AI_API_METHOD: 'router', OPENAI_API_BASEURL: 'https://openrouter.ai/api/v1' })),
-    configuration({}, env({ AI_API_METHOD: 'local', OPENAI_MODEL: 'gpt-6.1-sol,qwen3-coder-30b-a3b-instruct' })),
-    configuration({}, env({ AI_API_METHOD: 'local', OPENAI_MODEL: 'qwen3-coder-30b-a3b-instruct,gpt-6-luna' })),
-    { ...configuration({}, env({ AI_API_METHOD: 'local' })), profile: 'generic' },
+    configuration({}, env({ AI_API_METHOD: 'cli-proxy', OPENAI_MODEL: 'gpt-6.1-sol,qwen3-coder-30b-a3b-instruct' })),
+    configuration({}, env({ AI_API_METHOD: 'cli-proxy', OPENAI_MODEL: 'qwen3-coder-30b-a3b-instruct,gpt-6-luna' })),
+    { ...configuration({}, env({ AI_API_METHOD: 'cli-proxy' })), profile: 'generic' },
   ]) await assert.rejects(provider.verifyCliProxyProviderContracts(config, { requestId: 'fixture_bad_proxy_configuration' }), /CLI.proxy|local|GPT|closed/i)
   assert.equal(externalFetches, 0)
 })
@@ -136,9 +137,9 @@ test('generic, direct and router GPT requests retain conservative existing close
   }
 })
 
-test('local contract applies to closed planner/executor decisions; ordinary observations remain available and scoped JSON-only calls remain distinct', async () => {
+test('CLI-proxy contract applies to closed planner/executor decisions; ordinary observations remain available and scoped JSON-only calls remain distinct', async () => {
   const wires = []
-  const session = bridge(configuration({}, env({ AI_API_METHOD: 'local' })), async (_url, options) => { wires.push(JSON.parse(options.body)); return reply({ content: '{}' }) })
+  const session = bridge(configuration({}, env({ AI_API_METHOD: 'cli-proxy' })), async (_url, options) => { wires.push(JSON.parse(options.body)); return reply({ content: '{}' }) })
   await session.roleProvider(history, { role: 'executor', allowTools: true, triggerSource: 'recovery' })
   assert.equal(wires[0].tool_choice, 'auto')
   assert.ok(wires[0].tools.some(row => row.function.name === 'getEntityStatus'))
@@ -148,9 +149,9 @@ test('local contract applies to closed planner/executor decisions; ordinary obse
   assert.equal(wires[1].max_tokens, 180)
 })
 
-test('256 KiB guard still rejects oversized synthetic text even with a correct local closed contract', async () => {
+test('256 KiB guard still rejects oversized synthetic text even with a correct CLI-proxy closed contract', async () => {
   let called = 0
-  const config = configuration({}, env({ AI_API_METHOD: 'local' }))
+  const config = configuration({}, env({ AI_API_METHOD: 'cli-proxy' }))
   const session = bridge(config, async (_url, options) => {
     called++
     const body = JSON.parse(options.body)
@@ -170,9 +171,9 @@ class IronBootstrapGame extends FurnaceFactorio {
   }
 }
 
-test('configured local full loop clears copper output, smelts and collects fifty iron on one immutable step with unchanged limits', async t => {
+test('configured CLI-proxy full loop clears copper output, smelts and collects fifty iron on one immutable step with unchanged limits', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const config = configuration({}, env({ AI_API_METHOD: 'local' }))
+  const config = configuration({}, env({ AI_API_METHOD: 'cli-proxy' }))
   const budgets = { hourly: config.budget, output: config.maxProviderOutputUnits }
   const proof = await provider.verifyCliProxyProviderContracts(config, { requestId: 'fixture_full_loop_preflight' })
   assert.equal(proof.event, 'provider.cli_proxy_contract_verified')

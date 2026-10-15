@@ -23,6 +23,7 @@ test('profileForApiMethod maps each method to exactly one existing capability pr
   assert.equal(profileForApiMethod('direct'), 'auto')
   assert.equal(profileForApiMethod('router'), 'openrouter')
   assert.equal(profileForApiMethod('local'), 'local')
+  assert.equal(profileForApiMethod('cli-proxy'), 'cli-proxy')
   assert.throws(() => profileForApiMethod('guess'), /Invalid AI_API_METHOD/)
   assert.throws(() => profileForApiMethod(undefined), /Invalid AI_API_METHOD/)
 })
@@ -45,12 +46,16 @@ test('each method resolves the effective provider profile configuration expects'
   }))
   assert.equal(local.aiApiMethod, 'local')
   assert.equal(local.profile, 'local')
+
+  const proxy = configuration({}, baseEnv({ AI_API_METHOD: ' CLI-PROXY ' }))
+  assert.equal(proxy.aiApiMethod, 'cli-proxy')
+  assert.equal(proxy.profile, 'cli-proxy')
 })
 
 test('AI_API_METHOD is case-insensitive and trims whitespace; an unknown value is rejected', () => {
   const config = configuration({}, baseEnv({ AI_API_METHOD: ' Router ' }))
   assert.equal(config.aiApiMethod, 'router')
-  assert.throws(() => configuration({}, baseEnv({ AI_API_METHOD: 'openai' })), /AI_API_METHOD must be direct, router, or local/)
+  assert.throws(() => configuration({}, baseEnv({ AI_API_METHOD: 'openai' })), /AI_API_METHOD must be direct, router, local, or cli-proxy/)
 })
 
 test('direct and router require https even to an otherwise-allowed local hostname', () => {
@@ -88,13 +93,26 @@ test('local allows plain http to local or Tailscale hosts, https elsewhere', () 
   )
 })
 
-test('Tailscale proxy configuration permits local HTTP while direct/router still require HTTPS', () => {
+test('CLI-proxy accepts ordinary HTTPS independently of hosting or tunneling', () => {
+  for (const base of ['https://proxy.example.test/v1', 'https://api.example.test/v1']) {
+    const config = configuration({}, baseEnv({ AI_API_METHOD: 'cli-proxy', OPENAI_API_BASEURL: base, OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' }))
+    assert.equal(config.base, base)
+    assert.equal(config.aiApiMethod, 'cli-proxy')
+    assert.equal(config.profile, 'cli-proxy')
+  }
+})
+
+test('CLI-proxy also permits existing local/tunnel HTTP transports while direct/router still require HTTPS', () => {
   const base = 'http://proxy.example-tailnet.ts.net:18317/v1'
-  const config = configuration({}, baseEnv({ AI_API_METHOD: 'local', OPENAI_API_BASEURL: base, OPENAI_MODEL: 'gpt-6-luna' }))
+  const config = configuration({}, baseEnv({ AI_API_METHOD: 'cli-proxy', OPENAI_API_BASEURL: base, OPENAI_MODEL: 'gpt-6-luna' }))
   assert.equal(config.base, base)
   assert.equal(config.model, 'gpt-6-luna')
   assert.equal(config.models.length, 1)
-  assert.equal(config.aiApiMethod, 'local')
+  assert.equal(config.aiApiMethod, 'cli-proxy')
+  for (const base of ['http://localhost:8317/v1', 'http://127.0.0.1:8317/v1', 'http://host.docker.internal:8317/v1']) {
+    assert.equal(configuration({}, baseEnv({ AI_API_METHOD: 'cli-proxy', OPENAI_API_BASEURL: base })).profile, 'cli-proxy')
+  }
+  assert.throws(() => configuration({}, baseEnv({ AI_API_METHOD: 'cli-proxy', OPENAI_API_BASEURL: 'http://public.example.test/v1' })), /Remote provider URL requires HTTPS/)
   for (const method of ['direct', 'router']) {
     assert.throws(() => configuration({}, baseEnv({ AI_API_METHOD: method, OPENAI_API_BASEURL: base })), /requires an https OPENAI_API_BASEURL/)
   }
