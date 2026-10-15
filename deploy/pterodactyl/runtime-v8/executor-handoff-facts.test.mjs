@@ -1227,10 +1227,11 @@ test('8 run E: a trigger step carries its production target, the burner fuel req
 
   // A: the executor submitPlan (stepId, operations [], observationRequest, no plan/currentStep) reached the read path.
   assert.equal(world.rows('observation.targeted_refused').length, 0)
-  const grant = world.rows('observation.targeted_granted')[0]
+  const grant = world.rows('observation.normal_from_control')[0]
   assert.equal(grant.data.request_id, requestId)
   assert.equal(grant.data.tool, 'findLongRangeEntities')
-  assert.equal(world.rows('observation.targeted_resource_search')[0].data.resource, 'coal')
+  assert.equal(grant.data.reason, 'normal_tools_available_use_existing_observation_budget')
+  assert.equal(world.rows('observation.targeted_granted').length, 0, 'open executor read uses ordinary admission')
   assert.deepEqual(world.game.sourceReads, ['coal', 'coal'])
   assert.equal(world.game.mutations.length, 1, 'only the scripted gather ran; the read changed nothing')
 })

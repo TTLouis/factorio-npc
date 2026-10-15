@@ -90,8 +90,17 @@ const model = new ScriptedModel()
     assert.match(messages.findLast(row => String(row.content).startsWith('[HARNESS]')).content, /requirements_grounding/)
     return reply([], { goal })
   })
-  .push('executor', 'luna:one-targeted-inventory-request', messages => {
+  .push('executor', 'luna:spend-four-normal-observations-before-targeted-read', (_messages, context) => {
+    assert.equal(context.allowTools, true)
+    return { content: null, tool_calls: [
+      ['getActorStatus', {}], ['getTaskStatus', {}], ['getNavigationStatus', {}],
+      ['getNearbyEntities', { name: 'stone-furnace', radius: 32, limit: 3 }],
+    ].map(([name, args], index) => ({ id: `closed-proof-normal-${index}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) }
+  })
+  .push('executor', 'luna:one-targeted-inventory-request', (messages, context) => {
     const state = control(messages)
+    assert.equal(context.allowTools, false, 'ordinary observations must actually close before the one-fact request')
+    assert.equal(state.toolsEnabled, false)
     assert.equal(state.phase, 'committed'); assert.equal(state.targetedReadEligible, true)
     return { content: JSON.stringify({ plan: [STEP], currentStep: 0, stepId: state.stepId, operations: [],
       observationRequest: { stepId: state.stepId, tool: 'getInventoryItems', args: {},
@@ -217,8 +226,10 @@ try {
   assert.ok(world.named('control.decision_state').some(row => row.request_id
     && row.reason === 'guidance_matches_effective_tools_and_canonical_phase'
     && JSON.stringify(row.operation_submission) === JSON.stringify(descriptor)))
-  assert.deepEqual(wire.map(row => row.body.model), [PLANNER_MODEL, PLANNER_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL])
+  assert.deepEqual(wire.map(row => row.body.model), [PLANNER_MODEL, PLANNER_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL, EXECUTOR_MODEL])
   assert.equal(wire[3].allowTools, false)
+  assert.equal(wire[4].allowTools, false)
+  assert.equal(world.named('tool.call').filter(row => String(row.tool_call_id).startsWith('closed-proof-normal-')).length, 4)
   assert.ok(wire.every(row => row.actor_id === status.actor_id && row.epoch === status.epoch))
   assert.deepEqual(model.remaining, []); healthy()
   assert.deepEqual(jevContractLog.filter(row => !row.ok), [])
