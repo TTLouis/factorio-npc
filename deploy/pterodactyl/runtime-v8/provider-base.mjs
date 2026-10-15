@@ -1373,7 +1373,8 @@ export function providerEndpoint(base) {
 
 // providerEndpoint above restricts plain http to local hosts and Tailscale
 // .ts.net hosts for every profile; local and cli-proxy retain this
-// transport rule. Neither method implies a particular host or network.\n// 'direct'/'router' are stricter still: they need https
+// transport rule. Neither method implies a particular host or network.
+// 'direct'/'router' are stricter still: they need https
 // even to one of those same local hostnames, since they mean a real
 // (potentially remote) OpenAI-compatible or OpenRouter endpoint. This check
 // layers in front of providerEndpoint's own check, it does not replace it.
