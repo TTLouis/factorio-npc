@@ -513,8 +513,13 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     suppress_cancel_receipt = true
     // A placement is only created after every check below passes, so each
     // placing failure (including create_failed, which creates nothing) changed
-    // nothing in the world. No other task type claims that here.
-    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING })
+    // nothing in the world.
+    // entity_targets refuses a legacy move with no local match before touching
+    // any inventory. This proves only this task changed nothing; the admission
+    // journal still requires started_count === 1 to settle a whole batch.
+    const local_transfer_miss = task.type === TaskStates.MOVING_ITEMS && code === 'no_target'
+      && task.target_unit_number === undefined && task.player_name === undefined && task.entity_name !== undefined
+    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING || local_transfer_miss })
     suppress_cancel_receipt = false
     result_for(actor, task, false, false, code, details)
     log(`[AUTORIO] [ERROR] ${task.type} failed: ${code}; dependent operations cancelled`)

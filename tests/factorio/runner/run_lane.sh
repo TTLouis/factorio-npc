@@ -22,7 +22,7 @@ PRISTINE_SAVE="$LANE_ROOT/pristine-planning-live.zip"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "$RESULTS" "$WRITE_DATA" "$MODS"
-if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft ]]; then
+if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft || "$LANE" == local-transfer-target ]]; then
   # Independent controllers cannot share a persisted operation-ordinal journal.
   # Capture the untouched generated world before either controller runs.
   cp "$SAVE" "$PRISTINE_SAVE"
@@ -142,6 +142,21 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  local-transfer-target)
+    run_node local_transfer_target_factorio.mjs --mode recovery
+    stop_factorio
+    # Factorio saves back to --start-server's path on shutdown. Never start
+    # either control directly from the immutable pristine fixture.
+    SAVE="$LANE_ROOT/local-transfer-prefix.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node local_transfer_target_factorio.mjs --mode prefix
+    stop_factorio
+    SAVE="$LANE_ROOT/local-transfer-destroyed.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node local_transfer_target_factorio.mjs --mode destroyed
+    ;;
   targeted-water)
     run_node targeted_water_factorio.mjs
     ;;

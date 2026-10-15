@@ -29,7 +29,7 @@ import {
   STEP_CONTRACT_PENDING_CODE,
   STEP_CONTRACT_STATUS,
 } from './planning-state.mjs'
-import { duplicateEffectGuard } from './operation-reconciliation.mjs'
+import { duplicateEffectGuard, operationSignature } from './operation-reconciliation.mjs'
 import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
 import {
   mostRecentResumable,
@@ -314,6 +314,43 @@ function correctableTransferShortage(evidence) {
     to_entity: typeof basic.to_entity === 'boolean' ? basic.to_entity : undefined,
     target_unit_number: Number.isSafeInteger(basic.target_unit_number) ? basic.target_unit_number : undefined,
     entity_name: typeof basic.entity_name === 'string' ? basic.entity_name.slice(0, 100) : undefined,
+  }
+}
+
+// Legacy name-based moves search only within interaction reach. A correlated
+// local miss does not prove destruction or a world blocker. Exact-target and
+// player moves retain their ordinary failure path. The batch may have a
+// successful prefix: classification grants neither replay nor effect settlement.
+function correctableTransferTarget(evidence, state, plan) {
+  const receipt = parseReceiptSummary(evidence)
+  const basic = receipt?.basic_operation
+  const admitted = receipt?.admitted_batch
+  const correlation = receipt?.correlation
+  if (evidence?.kind !== 'operation_error_receipt' || basic?.type !== 'moving_items'
+    || basic.code !== 'no_target' || basic.accepted !== false || basic.completed !== false
+    || basic.target_unit_number !== undefined || basic.player_name !== undefined
+    || basic.to_player === true || !/^[a-z0-9][a-z0-9_-]{0,199}$/.test(basic.entity_name ?? '')
+    || receipt.reason !== 'moving_items:no_target' || !Number.isFinite(receipt.tick)
+    || receipt.tick !== basic.tick || !Array.isArray(receipt.task_types) || !receipt.task_types.includes('moving_items')) return undefined
+  if (!admitted || !Number.isSafeInteger(admitted.actor_id) || !Number.isSafeInteger(admitted.actor_epoch)
+    || admitted.actor_id !== basic.actor_id || admitted.actor_id !== correlation?.actor_id
+    || admitted.actor_epoch !== correlation?.actor_epoch || admitted.goal_id !== state.goal_id
+    || correlation.goal_id !== state.goal_id || correlation.step_id !== state.task_board?.active_step_id
+    || admitted.plan_id !== evidence.plan_id || admitted.step_id !== evidence.step_id
+    || admitted.plan_id !== plan?.plan_id || admitted.step_id !== plan.steps?.[plan.active_step_index]?.step_id
+    || admitted.batch_id !== receipt.batch_id || admitted.batch_generation !== receipt.batch_generation
+    || !Number.isSafeInteger(admitted.batch_id) || !Number.isSafeInteger(admitted.batch_generation)) return undefined
+  const operations = (state.last_operations ?? []).map(parseStoredOperation)
+  if (!operations.length || operations.some(operation => !operation)
+    || operationSignature(operations) !== admitted.signature) return undefined
+  const intent = operations.find(operation => operation.name === 'move_items'
+    && operation.args.entity_name === basic.entity_name && operation.args.item_name === basic.item_name
+    && operation.args.max_count === basic.requested_count && operation.args.to_entity === basic.to_entity)
+  if (!intent) return undefined
+  return {
+    task_type: 'moving_items', code: 'no_target', entity_name: basic.entity_name,
+    item_name: basic.item_name, requested_count: basic.requested_count, to_entity: basic.to_entity,
+    recovery: 'local_target_reacquisition', operation_key: admitted.operation_key,
   }
 }
 
@@ -3170,7 +3207,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }) ?? boardAfterReceipt
     }
 
-    const shortage = state.status === 'active' ? correctableTransferShortage(evidence) : undefined
+    const shortage = state.status === 'active'
+      ? correctableTransferTarget(evidence, state, getActivePlan(this.planningByNpc.get(key))) ?? correctableTransferShortage(evidence)
+      : undefined
     if (shortage) {
       // A re-reported failure of the same batch is not another recovery.
       if (taskBoardTransferSupplyRefSeen(boardAfterReceipt, evidence.ref)) return boardAfterReceipt
