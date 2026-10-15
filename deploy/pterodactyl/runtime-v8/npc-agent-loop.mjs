@@ -12775,6 +12775,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (readFence) await readFence()
     }
     this.compactWorkingContext()
+    await this.repairObservationBaselines()
     if (this.actionOmissionRepairActive) {
       this.actionOmissionObservationUsed = true
       this.actionOmissionForceNoTools = true

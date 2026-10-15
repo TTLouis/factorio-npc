@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  observation-baseline)
+    run_node observation_baseline_factorio.mjs
+    ;;
   shoreline-recovery)
     run_node shoreline_recovery_factorio.mjs
     ;;

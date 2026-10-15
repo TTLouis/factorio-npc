@@ -226,3 +226,30 @@ test('getEntityStatus emits a new full snapshot instead of diffing different nea
   assert.equal(second.entity.unit_number, 202)
   assert.equal(second.entity.inventories[0].items[0].count, 3)
 })
+
+for (const boundary of ['discarded_exchange', 'compacted_exchange', 'edited_baseline', 'changed_surface']) {
+  test(`getEntityStatus re-expands the current native snapshot after ${boundary}`, async () => {
+    const statuses = [entityStatus(101, 10), entityStatus(101, boundary === 'compacted_exchange' ? 12 : 10)]
+    if (boundary === 'changed_surface') { statuses[0].surface_index = 1; statuses[1].surface_index = 2 }
+    const rcon = new FakeRcon(statuses)
+    let agent, calls = 0
+    agent = new NpcAgentLoop({ rcon, systemPrompt: 'baseline delivery boundary', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
+      provider: async messages => {
+        if (++calls === 1) return entityTool('before-boundary')
+        if (calls === 2) {
+          assert.equal(JSON.parse(toolResult(messages, 'before-boundary').content).observation_mode, 'full')
+          if (boundary === 'discarded_exchange') agent.messages = agent.baseMessages.map(m => ({ ...m }))
+          if (boundary === 'compacted_exchange') agent.maxWorkingMessages = 4
+          if (boundary === 'edited_baseline') toolResult(agent.messages, 'before-boundary').content = '[OBSERVATIONS COMPACTED] furnace seen'
+          return { content: null, tool_calls: [{ id: 'after-boundary', type: 'function', function: { name: 'getEntityStatus', arguments: JSON.stringify({ name: 'assembling-machine-1' }) } }] }
+        }
+        const result = JSON.parse(toolResult(messages, 'after-boundary').content)
+        assert.equal(result.observation_mode, 'full', 'compact output cannot depend on missing or different native baseline evidence')
+        assert.equal(result.entity.inventories[0].items[0].count, statuses[1].entity.inventories[0].items[0].count)
+        return planMessage([], 'Done.')
+      },
+    })
+    await agent.request('Observe this machine across a context boundary', { sender: 'TTLouis' })
+    assert.equal(calls, 3); assert.equal(rcon.entityReads, 2, 're-expansion never spends an extra native read')
+  })
+}

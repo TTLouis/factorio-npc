@@ -21,6 +21,65 @@ function queryFor(args = {}) {
   return {
     name: String(args.name ?? '').slice(0, 200),
     radius: boundedRadius(args.radius),
+    ...(Number.isSafeInteger(args.unit_number) ? { unit_number: args.unit_number } : {}),
+  }
+}
+
+// A native read is fresh, but its compressed representation is usable only
+// with the exact baseline/diff chain still visible in this conversation.
+// Neither retained IDs nor a lossy compacted summary establish that chain.
+function observationScope(loop) {
+  return JSON.stringify([
+    loop.agentContext?.lineageSequence ?? null, loop.agentContext?.conversationSeq ?? null,
+    observationActorScope(loop),
+  ])
+}
+
+function observationActorScope(loop) {
+  return JSON.stringify([loop.epoch?.session ?? null,
+    loop.epoch?.actor_id ?? null, loop.epoch?.epoch ?? null,
+    loop.epoch?.surface_index ?? loop.epoch?.surface ?? null,
+  ])
+}
+
+function observationSurface(status) {
+  return JSON.stringify([status.surface_index ?? status.entity?.surface_index ?? null,
+    status.surface ?? status.entity?.surface ?? null])
+}
+
+function evidence(message) {
+  return { message, content: message.content }
+}
+
+function baselineVisible(loop, entry) {
+  return entry?.scope === observationScope(loop) && entry.evidence?.length > 0
+    && entry.evidence.every(item => loop.messages.includes(item.message) && item.message.content === item.content)
+}
+
+function rememberDelivery(loop, previous, resultMessage, surface) {
+  const mode = JSON.parse(resultMessage.content).observation_mode
+  return {
+    scope: observationScope(loop), actorScope: observationActorScope(loop), surface,
+    evidence: mode === 'full' ? [evidence(resultMessage)]
+      : mode === 'unchanged' ? previous.evidence : [...previous.evidence, evidence(resultMessage)],
+  }
+}
+
+async function traceRebase(loop, tool, query) {
+  if (typeof loop.traceEvent !== 'function') return
+  await loop.traceEvent('observation.baseline_rebased', {
+    request_id: loop.traceRequest?.id, reason: 'current_conversation_has_no_delivered_baseline',
+    tool, query, conversation_seq: loop.agentContext?.conversationSeq, observation_mode: 'full',
+  })
+}
+
+function appendBaselineContext(loop, context) {
+  if (!context) return
+  const message = { role: 'user', content: context.content }
+  loop.messages.push(message)
+  for (const entry of context.entries) {
+    entry.scope = observationScope(loop)
+    entry.evidence = [evidence(message)]
   }
 }
 
@@ -121,10 +180,11 @@ function rememberBaseline(loop, key, entry) {
 function baselineContext(loop) {
   ensureState(loop)
   const selected = []
+  const entries = []
   let chars = 0
   for (let index = loop.entityStatusBaselineOrder.length - 1; index >= 0; index--) {
     const entry = loop.entityStatusBaselines.get(loop.entityStatusBaselineOrder[index])
-    if (!entry) continue
+    if (!entry || entry.actorScope !== observationActorScope(loop)) continue
     const visible = {
       reference: entry.reference,
       query: entry.query,
@@ -133,15 +193,16 @@ function baselineContext(loop) {
     const candidateChars = JSON.stringify(visible).length
     if (selected.length > 0 && chars + candidateChars > ENTITY_STATUS_CONTEXT_CHARS) break
     selected.push(visible)
+    entries.push(entry)
     chars += candidateChars
     if (selected.length >= ENTITY_STATUS_BASELINE_LIMIT) break
   }
   if (selected.length === 0) return ''
   selected.reverse()
-  return `[ENTITY_STATUS_BASELINE] Last live mutable entity-status snapshots for this request. These snapshots may now be stale; use them only to interpret later getEntityStatus diff/unchanged responses. Re-observe live mutable state before depending on it.\n${JSON.stringify(selected)}`
+  return { entries, content: `[ENTITY_STATUS_BASELINE] Last live mutable entity-status snapshots for this request. These snapshots may now be stale; use them only to interpret later getEntityStatus diff/unchanged responses. Re-observe live mutable state before depending on it.\n${JSON.stringify(selected)}` }
 }
 
-function transformEntityStatus(loop, entry, resultMessage) {
+async function transformEntityStatus(loop, entry, resultMessage) {
   if (entry?.tool?.function?.name !== ENTITY_STATUS_TOOL) return
   const raw = String(resultMessage?.content ?? '')
   if (!raw || raw.startsWith('[HARNESS]')) return
@@ -154,11 +215,24 @@ function transformEntityStatus(loop, entry, resultMessage) {
   const key = queryKey(entry.args)
   ensureState(loop)
   const previous = loop.entityStatusBaselines.get(key)
+  const surface = observationSurface(status)
+  const usable = baselineVisible(loop, previous) && previous.surface === surface
   const reference = entityReference(status, query)
-  const providerObservation = diffObservation(previous, status, query, reference)
+  const providerObservation = diffObservation(usable ? previous : undefined, status, query, reference)
   if (!providerObservation) return
-  rememberBaseline(loop, key, { query, reference, view })
   resultMessage.content = JSON.stringify(providerObservation)
+  const saved = { query, reference, view, ...rememberDelivery(loop, previous, resultMessage, surface) }
+  rememberBaseline(loop, key, saved)
+  if (previous && !usable) await traceRebase(loop, ENTITY_STATUS_TOOL, query)
+  return async () => {
+    if (!loop.messages.includes(resultMessage) || baselineVisible(loop, saved)) return
+    // Working-context compaction can remove the old full read while keeping
+    // this newest diff. Re-expand the already-obtained native result, not an
+    // extra observation or an authoritative cached machine fact.
+    resultMessage.content = JSON.stringify(fullObservation(status, query, reference, false))
+    saved.evidence = [evidence(resultMessage)]
+    await traceRebase(loop, ENTITY_STATUS_TOOL, query)
+  }
 }
 
 function boundedNearbyRadius(value) {
@@ -302,23 +376,25 @@ function rememberNearbyBaseline(loop, key, entry) {
 function nearbyBaselineContext(loop) {
   ensureNearbyState(loop)
   const selected = []
+  const entries = []
   let chars = 0
   for (let index = loop.nearbyEntitiesBaselineOrder.length - 1; index >= 0; index--) {
     const entry = loop.nearbyEntitiesBaselines.get(loop.nearbyEntitiesBaselineOrder[index])
-    if (!entry) continue
+    if (!entry || entry.actorScope !== observationActorScope(loop)) continue
     const visible = { query: entry.query, ...entry.view }
     const candidateChars = JSON.stringify(visible).length
     if (selected.length > 0 && chars + candidateChars > NEARBY_ENTITIES_CONTEXT_CHARS) break
     selected.push(visible)
+    entries.push(entry)
     chars += candidateChars
     if (selected.length >= NEARBY_ENTITIES_BASELINE_LIMIT) break
   }
   if (selected.length === 0) return ''
   selected.reverse()
-  return `[NEARBY_ENTITIES_BASELINE] Last live nearby-entity snapshots for this request. These snapshots may now be stale; use them only to interpret later getNearbyEntities diff/unchanged responses. Re-observe live mutable state before depending on it.\n${JSON.stringify(selected)}`
+  return { entries, content: `[NEARBY_ENTITIES_BASELINE] Last live nearby-entity snapshots for this request. These snapshots may now be stale; use them only to interpret later getNearbyEntities diff/unchanged responses. Re-observe live mutable state before depending on it.\n${JSON.stringify(selected)}` }
 }
 
-function transformNearbyEntities(loop, entry, resultMessage) {
+async function transformNearbyEntities(loop, entry, resultMessage) {
   if (entry?.tool?.function?.name !== NEARBY_ENTITIES_TOOL) return
   const raw = String(resultMessage?.content ?? '')
   if (!raw || raw.startsWith('[HARNESS]')) return
@@ -334,15 +410,31 @@ function transformNearbyEntities(loop, entry, resultMessage) {
   const key = nearbyQueryKey(entry.args)
   ensureNearbyState(loop)
   const previous = loop.nearbyEntitiesBaselines.get(key)
-  const providerObservation = nearbyDiffObservation(previous, view, query)
-  rememberNearbyBaseline(loop, key, { query, view })
+  const surface = observationSurface(status)
+  const usable = baselineVisible(loop, previous) && previous.surface === surface
+  const providerObservation = nearbyDiffObservation(usable ? previous : undefined, view, query)
   resultMessage.content = JSON.stringify(providerObservation)
+  const saved = { query, view, ...rememberDelivery(loop, previous, resultMessage, surface) }
+  rememberNearbyBaseline(loop, key, saved)
+  if (previous && !usable) await traceRebase(loop, NEARBY_ENTITIES_TOOL, query)
+  return async () => {
+    if (!loop.messages.includes(resultMessage) || baselineVisible(loop, saved)) return
+    resultMessage.content = JSON.stringify(nearbyFullObservation(view, query, view.truncated ? 'truncated_scan' : undefined))
+    saved.evidence = [evidence(resultMessage)]
+    await traceRebase(loop, NEARBY_ENTITIES_TOOL, query)
+  }
 }
 
 function installObservationDiffs(Base) {
   const prototype = Base.prototype
   if (prototype[INSTALL_MARK]) return
   Object.defineProperty(prototype, INSTALL_MARK, { value: true })
+
+  prototype.repairObservationBaselines = async function () {
+    const repairs = this.observationBaselineRepairs ?? []
+    this.observationBaselineRepairs = undefined
+    for (const repair of repairs) if (repair) await repair()
+  }
 
   const originalRequest = prototype.request
   prototype.request = async function (...args) {
@@ -356,25 +448,26 @@ function installObservationDiffs(Base) {
   const originalPrepareContinuationContext = prototype.prepareContinuationContext
   prototype.prepareContinuationContext = function (...args) {
     const result = originalPrepareContinuationContext.apply(this, args)
-    const entityContext = baselineContext(this)
-    if (entityContext) this.messages.push({ role: 'user', content: entityContext })
-    const nearbyContext = nearbyBaselineContext(this)
-    if (nearbyContext) this.messages.push({ role: 'user', content: nearbyContext })
+    appendBaselineContext(this, baselineContext(this))
+    appendBaselineContext(this, nearbyBaselineContext(this))
     return result
   }
 
   const originalHandleToolBatch = prototype.handleToolBatch
   prototype.handleToolBatch = async function (message, prepared = this.prepareToolBatch(message)) {
-    const beforeCount = this.messages.length
     await originalHandleToolBatch.call(this, message, prepared)
-    const results = this.messages.slice(beforeCount + 1).filter(item => item.role === 'tool')
+    // The inner handler can compact earlier exchanges, changing their indices.
+    const results = this.messages.filter(item => item.role === 'tool')
+    const repairs = []
     for (let index = 0; index < prepared.length; index++) {
-      const result = results.find(item => item.tool_call_id === prepared[index]?.tool?.id)
+      const result = results.findLast(item => item.tool_call_id === prepared[index]?.tool?.id)
       if (!result) continue
-      transformEntityStatus(this, prepared[index], result)
-      transformNearbyEntities(this, prepared[index], result)
+      repairs.push(await transformEntityStatus(this, prepared[index], result))
+      repairs.push(await transformNearbyEntities(this, prepared[index], result))
     }
+    this.observationBaselineRepairs = repairs
     this.compactWorkingContext()
+    if (!this.compactionDeferred) await this.repairObservationBaselines()
   }
 }
 
