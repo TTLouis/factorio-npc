@@ -174,7 +174,7 @@ try {
   // teleport, terrain/research edit, forced craft or corrective gameplay.
   assert.deepEqual(setup.prerequisites, { 'steam-power': true, electronics: true })
   assert.equal(setup.recipes.lab.enabled, true, 'the native lab recipe is enabled; the science recipe is the locked result')
-  assert.deepEqual(setup.trigger, { type: 'craft-item', item: 'lab', count: 1 })
+  assert.deepEqual(setup.trigger, { type: 'craft-item', item: { name: 'lab' }, count: 1 })
   const before = await idle()
   assert.equal(before.output['iron-plate'], 52); assert.equal(before.source['copper-ore'], 5)
   assert.equal(before.red, false); assert.equal(before.red_recipe, false)
