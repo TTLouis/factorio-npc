@@ -42,6 +42,6 @@ The lane uses exactly four normal reads, with no earlier water query. The closed
 - [x] Native targeted-water connected-power lane and original-code control.
 - [x] Eleven existing native canaries; all twelve selected network-disabled lanes pass in one aggregate run.
 - [x] Independent final frozen review approved `41642d05`; no corroborated merge blockers.
-- [ ] Local no-ff integration and merged canonical gate.
+- [x] Local no-ff merge `7252e412`; merged canonical gate PASS 2,414 runtime/1,142 mod, typecheck and Lua; production/tests identical to frozen `41642d05`.
 
 Ignored evidence lives under `test-results/targeted-water/`: canonical runtime/mod logs, native build/results/proof, original-code controls and initial fixture diagnostics. The full natural-resource automated red-science chain and five-wall-minute speed-2 measurement remain unproven. Run S requires a clean frozen integrated candidate, exact deployment, verified proxy and fresh isolated world; no success criteria or limits change.

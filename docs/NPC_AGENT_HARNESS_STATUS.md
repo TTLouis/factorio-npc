@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run R targeted water recovery reviewed and integrated locally
+
+- **Fix.** An unused targeted fact allowance can request actor-centered native water coverage after a fresh same-scope empty offshore-pump search. Strict water/radius/limit arguments, scope/freshness and actor/epoch/cancellation fences apply. The same durable ledger is consumed before transport; no observation-count, provider, category or resume cap increases. Existing native coverage suppresses redundant reads. The model still chooses exploration; strict checkpoint parsing and admission remain unchanged.
+- **Proof.** Frozen `41642d05` passes 2,414 runtime tests. Mod/typecheck/Lua gates pass with identical production code. Twelve new cases cover the actual closed wire, malformed-checkpoint refusal, persisted six-resume history, one-fact ledger/restart, stale/forged facts and cancelled reads/actions. All twelve network-disabled native lanes pass. The new lane uses one targeted read, eight admitted batches and fresh native exploration/candidates to connect water/steam and power a lab that consumes science; prior goal resumes remain six. Original-code static/native controls detect the missing contract. Independent frozen review approved.
+- **Integration.** Local no-ff merge `7252e412`; production/tests match frozen `41642d05`. Merged canonical checks pass: 2,414 runtime/1,142 mod, typecheck and Lua. No push, release or Pterodactyl deployment. Full-chain red throughput remains unproven. [Validation/evidence](validation/TARGETED_WATER_RECOVERY_2026-10-15.md).
+
 ## October 15: Run R verifies both repaired provider boundaries; shoreline fact recovery remains open
 
 - **Live progress.** Candidate `8bf6fc15`, one supervised local trial, 16m31s: 71/71 provider responses (6 Sol/65 Luna), Jev 42/42, zero errors. Actual closed JSON placement created furnace 29; native production reached ten copper and fifty iron plates. The NPC collected the plates and acquired pump/boiler/engine/two poles. Two JIT checkpoint calls succeeded, including the transition into the power-placement step. No operator corrections.
