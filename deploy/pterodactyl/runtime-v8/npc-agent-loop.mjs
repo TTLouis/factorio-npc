@@ -4920,7 +4920,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           && result.candidates && typeof result.candidates === 'object' && Object.keys(result.candidates).length === 0
           && result.radius === args.radius && Number.isFinite(result.center?.x) && Number.isFinite(result.center?.y)
           && Math.abs(result.center.x) <= 10000256 && Math.abs(result.center.y) <= 10000256) {
-          this.localPumpSearchObservation = { fact: { entity_name: 'offshore-pump', radius: args.radius,
+          this.localPumpSearchObservation = { actorCentered: args.center === undefined && args.connects_to === undefined,
+            fact: { entity_name: 'offshore-pump', radius: args.radius,
             center: { x: result.center.x, y: result.center.y }, legal_candidate_count: 0 }, scope: this.localSearchScope() }
         }
       }
@@ -11292,6 +11293,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         validation: 'required', grantsAuthority: false },
       role: this.agentContext.role, targetedReadEligible: eligible && !used, targetedAllowanceUsed: used,
       resourceSearchNames: this.targetedResourceSearchNames(),
+      ...(eligible && !used && this.targetedWaterSearchBasis(identity) ? {
+        targetedWaterSearch: { tool: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 256, limit: 8 } },
+      } : {}),
       goalId: identity.data.goalId, planId: identity.data.planId, planVersion: identity.plan?.plan_version,
       draftRevision: identity.draft ? identity.plan?.updated_at : undefined, stepId: identity.data.stepId,
       currentStep: identity.state?.current_step, plan: identity.draft ? identity.state?.plan : undefined,
@@ -11349,6 +11353,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (request.tool === 'findLongRangeEntities' && !this.targetedResourceSearchNames().includes(request.args.name)) return reject('resource_source_not_grounded')
     const ledger = this.memory.targetedObservationLedger ??= new Map()
     if (ledger.get(initial.ledgerKey) === initial.basis) return reject('targeted_allowance_already_used')
+    const waterBasis = request.tool === 'getFluidSourceTiles' ? this.targetedWaterSearchBasis(initial) : undefined
+    if (request.tool === 'getFluidSourceTiles' && !waterBasis) return reject('water_search_requires_fresh_empty_actor_centered_pump_search')
     const fence = async () => {
       await this.assertCurrent()
       await this.dropIfStale(attribution)
@@ -11357,6 +11363,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         || now.planning?.goal?.status !== GOAL_STATUS.ACTIVE
         || !(now.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(now.plan?.status))
         || now.state?.status !== 'active' || this.currentPendingAmendment()) throw new AgentLoopError('Targeted observation was cancelled or superseded')
+      if (waterBasis && this.targetedWaterSearchBasis(now, { requireMissing: false }) !== waterBasis) throw new AgentLoopError('Targeted water search evidence was cancelled or superseded')
     }
     await fence()
     const raw = await this.readTaskStatusRaw()
@@ -11380,6 +11387,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('observation.targeted_resource_search', { request_id: this.traceRequest?.id,
         reason: 'native_source_location_missing_with_normal_observations_closed', resource: request.args.name,
         max_radius: request.args.max_radius, limit: request.args.limit, goal_id: initial.data.goalId, step_id: initial.data.stepId })
+      await fence()
+    }
+    if (waterBasis) {
+      await this.traceEvent('observation.targeted_water_search', { request_id: this.traceRequest?.id,
+        reason: 'fresh_empty_pump_search_needs_water_coverage', goal_id: initial.data.goalId, step_id: initial.data.stepId,
+        search_radius: request.args.search_radius, limit: request.args.limit, pump_search: waterBasis.fact })
       await fence()
     }
     await this.traceEvent('observation.targeted_granted', { request_id: this.traceRequest?.id,
@@ -12441,15 +12454,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { ...data, requestId: this.traceRequest?.id, seq: this.worldMutationSeq, at: Date.now() }
   }
 
+  currentLocalSearchObservation(row, current = this.localSearchScope()) {
+    return Boolean(row && ['goalId', 'planId', 'stepId', 'actorId', 'epoch', 'requestId', 'seq']
+      .every(key => current[key] !== undefined && row.scope?.[key] === current[key])
+      && Date.now() - row.scope.at >= 0 && Date.now() - row.scope.at <= 120000)
+  }
+
+  targetedWaterSearchBasis(identity = this.targetedObservationIdentity(), { requireMissing = true } = {}) {
+    const pump = this.localPumpSearchObservation
+    if (identity.draft || !FROZEN_PLAN_STATUSES.has(identity.plan?.status) || pump?.actorCentered !== true
+      || !this.currentLocalSearchObservation(pump)) return undefined
+    // An existing incomplete water observation already supplies native
+    // exploration centers; asking for it again would waste the one fact.
+    if (requireMissing && this.currentLocalSearchObservation(this.localFluidSearchObservation)) return undefined
+    return pump
+  }
+
   async validateLocalFluidSearchBlocker(plan) {
     if (plan.operations.length > 0 || !providerBlockerReason(plan) || this.batchInFlight) return
     const identity = this.targetedObservationIdentity()
     if (!FROZEN_PLAN_STATUSES.has(identity.plan?.status) || !identity.step || !this.traceRequest?.id
       || this.memory.pendingOperation?.(identity.key) || identity.state?.admission_status === 'admission_failed') return
     const current = this.localSearchScope()
-    const matches = row => row && ['goalId', 'planId', 'stepId', 'actorId', 'epoch', 'requestId', 'seq']
-      .every(key => current[key] !== undefined && row.scope[key] === current[key])
-      && Date.now() - row.scope.at >= 0 && Date.now() - row.scope.at <= 120000
+    const matches = row => this.currentLocalSearchObservation(row, current)
     const water = this.localFluidSearchObservation, pump = this.localPumpSearchObservation
     if (!matches(water) || !matches(pump)
       || Math.abs(water.fact.actor_position.x - pump.fact.center.x) > 0.01

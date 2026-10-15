@@ -804,7 +804,7 @@ export const plannerControlToolDefinitions = [{
             planVersion: { type: 'integer', minimum: 1 },
             draftRevision: { type: 'integer', minimum: 0 },
             stepId: { type: 'string', minLength: 1, maxLength: 240 },
-            tool: { type: 'string', enum: ['getEntityStatus', 'getInventoryItems', 'getResearchStatus'] },
+            tool: { type: 'string', enum: ['getEntityStatus', 'getInventoryItems', 'getResearchStatus', 'getFluidSourceTiles'] },
             args: { type: 'object' }, rationale: { type: 'string', minLength: 1, maxLength: 500 },
           },
         },
