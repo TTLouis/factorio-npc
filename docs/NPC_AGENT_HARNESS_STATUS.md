@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run S exposes local transfer target recovery
+
+- **Trial.** Frozen `7ca69aed`, 17/17 provider responses (3 Sol/14 Luna), Jev 13/13, zero transport errors. The NPC gathered ten copper ore and ten coal and placed furnace 10. No plates, power or red science; measurement never started. Parent verified the isolated stack is down and the 860,822-byte save is retained.
+- **Blocker.** Legacy name-based `move_items` searched within interaction reach and returned `moving_items:no_target`; the furnace still existed 39.67 tiles away. The harness promoted this local absence into a structural blocker before the final model reply. Exact-identity resolution was not exercised. Next fix: bounded, correlated target-location recovery within the same committed step and existing recovery allowance, preserving pending-effect uncertainty and fresh observation requirements.
+- **Supervision.** The canonical plan became `BLOCKED` while `run.paused` stayed false. The runner missed that terminal state; parent stopped the trial through its existing safe save path. The next runner must recognize this state explicitly. No usage-floor condition occurred. [Run S evidence](validation/RED_AUTOMATION_LIVE_RUN_S_2026-10-15.md).
+
 ## October 15: Run R targeted water recovery reviewed and integrated locally
 
 - **Fix.** An unused targeted fact allowance can request actor-centered native water coverage after a fresh same-scope empty offshore-pump search. Strict water/radius/limit arguments, scope/freshness and actor/epoch/cancellation fences apply. The same durable ledger is consumed before transport; no observation-count, provider, category or resume cap increases. Existing native coverage suppresses redundant reads. The model still chooses exploration; strict checkpoint parsing and admission remain unchanged.
