@@ -1,6 +1,6 @@
 # Normal observation channel — 2026-10-15
 
-Status: frozen static/native checks and independent review pass; local integration gate pending; no live trial yet.
+Status: reviewed and integrated locally; merged canonical gate passes; no live trial yet.
 Source: `08e35a6a52c12434141ba43e442ad745067ad689` on `fix/normal-observation-channel`.
 
 Frozen reviewed candidate: `339c0cc6601345d078c00e67f1f14346a2930468`. Final official native image: `sha256:547814b73f728ceec186daacec9a2ae31d5de2682b5284e2261bfc9911314c8b`.
@@ -23,7 +23,7 @@ This fixes the channel mismatch. It does not establish that Luna will stop makin
 - [x] Final official real-engine full loop passes, actual exit 0: model clears 52 iron output, collects five NEW copper plates, natively crafts a lab and unlocks red science. Three admitted batches, nine serialized provider calls (two Sol/seven Luna), same actor/plan/checkpoint, unchanged six prior resumes, zero humans, speed 1 and fully idle operation/crafting/movement/mining/follow state.
 - [x] All thirteen existing native canaries pass individually, including the changed closed-action and three-mode local-transfer fixtures. All 31 compiled mod files and production runtime are unchanged from that canary image to the final image. The initial fourteen-lane aggregate failed only the subsequently corrected new fixture; it is not reported as an all-fourteen aggregate pass.
 - [x] Separate read-only reviewer APPROVED frozen `339c0cc6`, including final engine proof, original-code controls, hash manifests and official-image byte checks.
-- [ ] Local no-ff integration and merged canonical gate.
+- [x] Local no-ff integration `785071f47d5ed089509a4a998e2c4a50238cd731`; merged canonical gate passes 2,452 runtime/1,144 mod tests, typecheck and generated Lua, actual exit 0. Runtime/tests/native fixtures match reviewed `339c0cc6`.
 
 The original two runtime modules overlaid on the same final official image fail at the intended behavior boundary: the open typed research request consumes the targeted ledger and continues with tools closed. Both runtime modules and the final runner were independently verified against their exact official-image bytes. The evidence manifest, final proof and original failure are retained locally.
 

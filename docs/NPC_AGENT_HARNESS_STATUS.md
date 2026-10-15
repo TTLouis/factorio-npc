@@ -8,6 +8,11 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run T observation channel reviewed and integrated locally
+
+- **Fix.** A validated typed observation request while ordinary tools are open becomes the same ordinary tool call, using existing budget, cache, duplicate handling and actor fences. It cannot consume the closed one-fact ledger or force tools closed. Guidance advertises the separate targeted allowance only on closed decisions. Strict identity/no-edit validation and existing recovery/resume limits remain.
+- **Proof.** Reviewed `339c0cc6`; 21 new static regressions include the actual serialized Sol/Luna Session loop, ordinary cache/budget parity, repeated Jev observation routing, closed-ledger preservation and actor/epoch/cancellation controls. The final official native image proves iron-output clearing → five NEW copper plates → native lab craft → red-science unlock, preserving the checkpoint and six prior resumes. Nine wire calls (two Sol/seven Luna), three admitted batches, zero humans and fully idle native state. Original-runtime controls reproduce premature closed-tool behavior. All thirteen prior native canaries pass; all 31 compiled mod files match the final image.
+- **Integration/supervision.** Local no-ff merge `785071f4`; merged Docker gate passes 2,452 runtime/1,144 mod, typecheck and Lua. The independently reviewed Run U observer passes 26 offline tests for fresh cancellation/pause proof despite retained pause timestamps. No push, release or deployment. A fresh live trial and the complete unattended natural-resource chain/throughput remain unproven. [Validation](validation/NORMAL_OBSERVATION_CHANNEL_2026-10-15.md).
 ## October 15: Run T reaches lab prerequisites, exhausts bounded recovery
 
 - **Trial.** Frozen `4da208b6`, 19m11s to terminal: 88/88 provider responses (5 Sol/83 Luna), Jev 61/61, zero transport errors. Native production reached 74 iron and 20 copper plates, with ten hand-crafted gears held. Only the furnace was placed; no lab, power, automatic mining/fuel, science assembler or red output. Measurement never started. Two full observation baselines and one accepted Sol JIT checkpoint are verified in actual provider wire.
