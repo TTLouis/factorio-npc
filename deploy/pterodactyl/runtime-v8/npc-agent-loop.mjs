@@ -12046,7 +12046,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const second = this.tryStrictParse(providerMessageWith(message, { content: repair.text }))
     this.traceControlRepair({ request_id: this.traceRequest?.id, round: this.lastProviderRound, source: 'content', repairs: repair.repairs }, second)
     if (second.plan) return second.plan
-    throw second.shapeValid ? second.error : first.error
+    throw second.shapeValid || second.error?.code === 'invalid_operation_arguments' ? second.error : first.error
   }
 
   // { plan } on success, else { error, shapeValid }: shapeValid is false only for a pure shape error (the failure
@@ -12059,7 +12059,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { plan: this.parsePlanMessageStrict(message), shapeValid: true }
     }
     catch (error) {
-      return { error, shapeValid: this.parseStatefulReached === true || !controlRepairEligibleError(error) }
+      return { error, shapeValid: this.parseStatefulReached === true || (error?.code !== 'invalid_operation_arguments' && !controlRepairEligibleError(error)) }
     }
   }
 
@@ -12373,9 +12373,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       plan = this.parsePlanMessage(message)
     }
     catch (error) {
+      if (error?.code === 'invalid_operation_arguments') {
+        await this.traceEvent('operations.arguments_rejected', {
+          request_id: this.traceRequest?.id,
+          reason: 'deterministic_operation_argument_validation',
+          code: error.code, ...error.details,
+        })
+      }
       if (error?.code === 'goal_reading_disagreement') await combineGroundingWithChallenge(this, error, options)
       throw error
     }
+    await this.validatePreflightCorrectionScope(plan)
     const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
       const error = new AgentLoopError(grounding.message)
@@ -12393,6 +12401,33 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw await this.checkpointRejectionError({ accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) })
     }
     return plan
+  }
+
+  async validatePreflightCorrectionScope(plan) {
+    const key = this.activePlanKey()
+    const state = this.memory.currentPlan?.(key)
+    const held = getActivePlanningPlan(this.memory.planningState?.(key))
+    // Preflight has not committed this draft yet, but a correction still owns
+    // its original semantic result. Ingredient acquisition is supporting work,
+    // not permission to replace the result checkpoint on the retained step.
+    const requestId = this.traceRequest?.id
+    const correction = state?.admission_status === 'preflight_rejected' && requestId
+      && state.task_board?.evidence?.some(item => item.kind === 'operation_preflight_recoverable' && item.ref?.startsWith(`${requestId}/`))
+    if (!correction || ![PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(held?.status)) return
+    const step = state.task_board?.steps?.[state.task_board?.active_index]
+    const retained = step?.completion_contract
+    const modeChanged = plan.assessmentOnly === true || plan.stepCompletions?.[plan.currentStep]?.kind === 'semantic'
+    const contractChanged = retained && plan.checkpoint && completionContractSignature(retained) !== completionContractSignature(plan.checkpoint)
+    if (!retained || (!modeChanged && !contractChanged)) return
+    await this.traceEvent('plan.preflight_checkpoint_change_rejected', {
+      request_id: requestId, reason: 'preflight_correction_preserves_result_checkpoint',
+      plan_id: held.plan_id, step_id: step.id, retained_contract: retained, proposed_contract: plan.checkpoint,
+      ...(modeChanged ? { proposed_completion_mode: 'semantic' } : {}),
+    })
+    const error = new AgentLoopError(`preflight_correction_checkpoint_changed: retain the current semantic step and its result checkpoint ${JSON.stringify(retained)}. No operation from this correction ran. Acquisition may run as supporting operations, but ingredient stock cannot replace the requested result; do not insert or reorder steps to attach an acquisition checkpoint to the retained result step.`)
+    error.failureClass = 'plan_category'
+    error.code = 'preflight_correction_checkpoint_changed'
+    throw error
   }
 
   activePlanFrozen() {
@@ -14181,6 +14216,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async commitPlan(plan) {
+    await this.validatePreflightCorrectionScope(plan)
     try {
       plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
     }

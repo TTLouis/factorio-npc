@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  invalid-reference)
+    run_node invalid_reference_factorio.mjs
+    ;;
   queued-craft)
     run_node queued_craft_factorio.mjs --mode control
     stop_factorio
