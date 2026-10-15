@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  targeted-water)
+    run_node targeted_water_factorio.mjs
+    ;;
   closed-action)
     run_node closed_action_factorio.mjs
     ;;
