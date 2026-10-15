@@ -208,7 +208,7 @@ for (const mode of ['ingredient', 'semantic']) test(`Run L checkpoint scope: ${m
       goal: { scope: 'finite', summary: 'Hold a stone furnace', doneWhen: [{ kind: 'inventory_count', item_name: 'stone-furnace', minimum: 1 }] },
     }))
     .push('planner', 'bad-acquisition-checkpoint', mode === 'semantic' ? planReply({ plan: ['Assess available stone'], currentStep: 0,
-      operations: [], assessmentOnly: true, stepCompletions: [{ kind: 'semantic' }],
+      operations: [], assessmentOnly: true, stepCompletions: [{ kind: 'semantic', rationale: 'Assess ingredient availability before crafting.' }],
     }) : planReply({ plan: ['Gather 5 stone', 'Craft a stone furnace'], currentStep: 0,
       operations: [gather('stone', 5)], checkpoint: inventoryCheckpoint('stone', 5),
       stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('stone', 5) }, { kind: 'deterministic' }],
