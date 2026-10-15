@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  step-contract)
+    run_node step_contract_factorio.mjs
+    ;;
   observation-baseline)
     run_node observation_baseline_factorio.mjs
     ;;

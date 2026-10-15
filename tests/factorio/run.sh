@@ -118,6 +118,7 @@ lane_offset() {
     invalid-reference) printf '14' ;;
     shoreline-recovery) printf '15' ;;
     observation-baseline) printf '16' ;;
+    step-contract) printf '17' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

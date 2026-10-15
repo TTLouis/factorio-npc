@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import fs from 'node:fs/promises'
 
 import { EXECUTOR_ROLE, PLANNER_ROLE } from './agent-roles.mjs'
 import { STALE_REPLY_ERROR_CODE } from './agent-context.mjs'
@@ -7,10 +8,13 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { COMPACT_CONTINUATION_PROMPT, CLOSED_CONTROL_PROMPT, EXECUTOR_CLOSED_CONTROL_PROMPT, EXECUTOR_COMPACT_CONTINUATION_PROMPT } from './provider-base.mjs'
-import { STEP_CONTRACT_MARKER } from './luna-step-contracts.mjs'
+import { STEP_CONTRACT_MARKER, STEP_CONTRACT_SCHEMA } from './luna-step-contracts.mjs'
 import { providerRequest } from './provider.mjs'
 import { makeConditionWait } from './step-completion.mjs'
 import { FakeFactorio, gather, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { configuration, Session } from './supervisor.mjs'
+
+const runP = JSON.parse(await fs.readFile(new URL('./fixtures/run-p-step-contract.json', import.meta.url), 'utf8'))
 
 // Step contracts bind just in time (docs/NPC_PLANNING_ROADMAP.md, "One-step contract prediction"): a slice commits its step
 // intents and the first step's checkpoint, and the planner authors each later step's checkpoint in a side call when that step is
@@ -57,20 +61,18 @@ const answerDeclared = call => contractReply(call, declaredFor(call))
 
 // The real loop against a fake Factorio. `script` holds the replies of the ordinary planner/executor calls, in order;
 // `contracts` holds the replies of the step contract calls (a function of the call, a reply, or an Error to throw).
-function harness({ script, contracts = [], agentOptions = {} } = {}) {
+function harness({ script, contracts = [], agentOptions = {}, wire = false } = {}) {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
   const calls = []
   const contractCalls = []
   const trace = []
   const reserves = []
+  const wireCalls = []
   const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
-  const agent = new NpcAgentLoop({
-    rcon: game,
-    memory,
-    provider: async (messages, context) => {
+  const provide = async (messages, context, body) => {
       if (context?.triggerSource === 'step_contract') {
-        const call = { messages: messages.map(message => ({ ...message })), context, order: trace.length }
+        const call = { messages: messages.map(message => ({ ...message })), context, order: trace.length, body }
         contractCalls.push(call)
         const entry = contracts[contractCalls.length - 1] ?? answerDeclared
         const reply = typeof entry === 'function' ? await entry(call, world) : entry
@@ -79,10 +81,33 @@ function harness({ script, contracts = [], agentOptions = {} } = {}) {
       }
       calls.push(messages.map(message => ({ ...message })))
       const entry = script[calls.length - 1]
-      assert.ok(entry, `unscripted provider call ${calls.length}`)
+      assert.ok(entry, `unscripted provider call ${calls.length}: ${JSON.stringify(trace.slice(-14).map(r => ({ event: r.event, reason: r.data?.reason, error: r.data?.error })))}`)
       const next = typeof entry === 'function' ? entry(world) : entry
       return { ...next }
+  }
+  const bridge = Object.create(Session.prototype)
+  bridge.config = configuration({}, {
+    SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only-not-a-real-key',
+    OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'local',
+    OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna',
+  })
+  bridge.provider = (config, messages, context) => providerRequest(config, messages, {
+    ...context, promptTraceFile: null,
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body)
+      wireCalls.push({ body, context })
+      const reply = await provide(messages, context, body)
+      return new Response(JSON.stringify({ id: `wire-${wireCalls.length}`, model: config.model,
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', ...reply } }],
+        usage: { prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
     },
+  })
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    ...(wire ? { agentRoleConfig: bridge.config } : {}),
+    provider: wire ? (messages, context) => bridge.roleProvider(messages, context) : provide,
     reserve: async (request) => { reserves.push(request) },
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     interactionDecisionProvider: jev,
@@ -106,6 +131,7 @@ function harness({ script, contracts = [], agentOptions = {} } = {}) {
     contractCalls,
     trace,
     reserves,
+    wireCalls,
     rows: event => trace.filter(record => record.event === event),
     tracker: () => getActivePlan(memory.planningState(KEY)),
     board: () => memory.currentPlan(KEY),
@@ -772,4 +798,116 @@ test('a fresh draft with currentStep 1 and a bare deterministic entry at index 0
   assert.ok(rejected.data.request_id)
   assert.match(harnessMessagesOf(world.calls[1]).join('\n'), /missing_active_step_checkpoint/)
   assert.equal(world.tracker().steps[0].contract_status, 'bound')
+})
+
+function runPWireWorld({ replayBoth = false, onCorrection } = {}) {
+  const craftStep = runP.committed_steps[2], placementStep = runP.committed_steps[3]
+  const placement = { mode: 'all', requirements: ['offshore-pump', 'boiler'].map((prototype, i) => ({ id: `placed_${i}`, kind: 'entity_count', prototype, minimum: 1 })) }
+  const placed = new Map()
+  const wireFaults = []
+  const validateWire = call => {
+    const text = call.body.messages.map(textOf).join('\n')
+    if (text.includes('[CONTROL_OUTPUT]') || text.includes('[STEERING]')) wireFaults.push('gameplay_contract_injected')
+    if (!text.includes('[STEP_CONTRACT_OUTPUT]') || !text.includes(JSON.stringify(STEP_CONTRACT_SCHEMA))) wireFaults.push('canonical_contract_schema_missing')
+    if (call.body.tools?.length !== 1 || call.body.tools[0].function.name !== 'defineStepContract' || call.body.tool_choice !== 'none') wireFaults.push('wrong_closed_tool_contract')
+    assert.equal(call.body.model, 'gpt-6.1-sol')
+    assert.equal(call.context.allowTools, false)
+  }
+  const world = harness({ wire: true,
+    script: [planReply({ plan: [craftStep.description, placementStep.description], currentStep: 0, operations: [],
+      stepCompletions: [{ kind: 'deterministic', checkpoint: craftStep.completion_contract }, { kind: 'deterministic' }],
+      goal: { scope: 'finite', summary: 'Build the water intake from the crafted power kit', doneWhen: [{ kind: 'entity_working', entity_name: 'offshore-pump', minimum: 1 }] },
+    }),
+    w => ({ content: JSON.stringify({ chatMessage: '', stepId: w.tracker().steps[0].step_id, operations: [{ name: 'craft_item', args: { item_name: 'boiler', count: 1 } }] }) }),
+    w => {
+      assert.equal(w.tracker().steps[1].contract_status, 'bound', `persisted contract precedes executable placement: ${JSON.stringify(w.trace.slice(-18).map(r => ({ event: r.event, reason: r.data?.reason, error: r.data?.error, source: r.data?.source })))}`)
+      return { content: JSON.stringify({ chatMessage: '', stepId: w.tracker().steps[1].step_id, operations: [
+        { name: 'place_entity', args: { entity_name: 'offshore-pump', x: 1, y: 1 } },
+        { name: 'place_entity', args: { entity_name: 'boiler', x: 1, y: 4 } },
+      ] }) }
+    }],
+    contracts: [call => {
+      validateWire(call)
+      return contractReply(call, runP.attempts[0].raw_reply.checkpoint)
+    }, call => {
+      validateWire(call)
+      assert.match(call.messages.at(-1).content, /checkpoint_not_supported/)
+      onCorrection?.(world, call)
+      return replayBoth || wireFaults.length > 0 ? { content: runP.attempts[1].raw_reply_text } : contractReply(call, placement)
+    }],
+  })
+  Object.assign(world.game.inventory, { 'offshore-pump': 1, 'steam-engine': 1, pipe: 10, 'small-electric-pole': 4, 'iron-plate': 10, stone: 5 })
+  const original = world.game.command.bind(world.game)
+  world.game.command = async text => {
+    if (text.includes('"evaluate_condition"') && text.includes('"entity_count"')) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      assert.ok(encoded)
+      const request = JSON.parse(encoded.replace(/\\(.)/g, '$1'))
+      const current = placed.get(request.prototype) ?? 0
+      return JSON.stringify({ ok: true, ...request, current, found: current, truncated: false, satisfied: current >= request.minimum })
+    }
+    return original(text)
+  }
+  world.game.onMutation = text => {
+    if (text.includes("'craft_item'")) world.game.inventory.boiler = 1
+    if (text.includes("'place_entity'")) {
+      assert.equal(world.tracker().steps[1].contract_status, 'bound')
+      placed.set('offshore-pump', 1); placed.set('boiler', 1)
+      world.game.inventory['offshore-pump'] = 0; world.game.inventory.boiler = 0
+      world.game.worldReadings['entity_working:offshore-pump'] = [{ satisfied: true, current: 1, progress_known: false }]
+    }
+  }
+  return { ...world, wireFaults, placement }
+}
+
+test('Run P wire full loop: completed craft -> canonical Sol checkpoint correction -> bound Luna placement -> verified goal', async () => {
+  const world = runPWireWorld()
+  await world.commit()
+  const initial = world.tracker()
+  const goalId = initial.goal_id, planId = initial.plan_id
+  assert.equal(world.game.mutations.length, 1, 'only the crafting batch before its completion')
+  await world.agent.completed()
+  assert.deepEqual(world.wireFaults, [], 'the actual serialized contract request must not inject gameplay output instructions')
+  assert.equal(world.contractCalls.length, 2, 'one exact rejected live shape and one bounded correction')
+  assert.equal(world.tracker().goal_id, goalId)
+  assert.equal(world.tracker().plan_id, planId)
+  assert.deepEqual(world.tracker().steps.map(s => s.description), runP.committed_steps.slice(2, 4).map(s => s.description))
+  assert.equal(world.tracker().execution.step_progress[world.tracker().steps[0].step_id].status, 'completed')
+  assert.equal(world.game.mutations.length, 2)
+  assert.deepEqual(world.rows('plan.contract_call_attempt').map(r => r.data.outcome), ['rejected', 'accepted'])
+  assert.ok(world.contractCalls.every(c => c.context.role === PLANNER_ROLE && c.body.model === 'gpt-6.1-sol'))
+  const executorWires = world.wireCalls.filter(c => c.context.role === EXECUTOR_ROLE)
+  assert.ok(executorWires.length >= 2 && executorWires.every(c => c.body.model === 'gpt-6-luna'))
+  assert.equal(executorWires.some(c => c.body.messages.some(m => textOf(m).includes('[STEP_CONTRACT_REQUEST]'))), false, 'side corrections never enter executor history')
+  await world.agent.completed()
+  assert.equal(world.board(), undefined)
+  assert.equal(world.rows('goal.evaluated').at(-1).data.satisfied, true)
+  assert.equal(world.rows('plan.contract_call_failed').length, 0)
+})
+
+test('Run P exact two invalid contract replies still guard-pause without binding or placing', async () => {
+  const world = runPWireWorld({ replayBoth: true })
+  await world.commit()
+  const result = await world.agent.completed()
+  assert.deepEqual(world.wireFaults, [])
+  assert.equal(world.contractCalls.length, 2)
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(world.tracker().steps[1].contract_status, 'pending')
+  assert.equal(world.game.mutations.length, 1, 'no placement from an invalid contract')
+  assert.match(world.rows('plan.contract_call_failed')[0].data.reason, /reply_has_unexpected_fields:chatMessage,plan,currentStep,operations/)
+})
+
+for (const change of ['stop', 'epoch']) test(`Run P serialized correction after ${change} cannot bind or admit placement`, async () => {
+  const world = runPWireWorld({ onCorrection: w => {
+    if (change === 'stop') w.agent.cancel('test_stop')
+    else w.game.status = { ...w.game.status, epoch: w.game.status.epoch + 1 }
+  } })
+  await world.commit()
+  await assert.rejects(world.agent.completed(), error => error.code === STALE_REPLY_ERROR_CODE)
+  assert.deepEqual(world.wireFaults, [])
+  assert.equal(world.contractCalls.length, 2)
+  assert.equal(world.tracker().steps[1].contract_status, 'pending')
+  assert.equal(world.rows('plan.contract_bound_just_in_time').length, 0)
+  assert.equal(world.game.mutations.length, 1)
+  assert.equal(world.rows('plan.contract_call_failed')[0].data.reason, change === 'stop' ? 'stale_cancelled' : 'stale_actor_or_epoch_changed')
 })
