@@ -224,14 +224,17 @@ async function transformEntityStatus(loop, entry, resultMessage) {
   const saved = { query, reference, view, ...rememberDelivery(loop, previous, resultMessage, surface) }
   rememberBaseline(loop, key, saved)
   if (previous && !usable) await traceRebase(loop, ENTITY_STATUS_TOOL, query)
+  let expanded = providerObservation.observation_mode === 'full'
   return async () => {
-    if (!loop.messages.includes(resultMessage) || baselineVisible(loop, saved)) return
+    if (expanded || !loop.messages.includes(resultMessage) || baselineVisible(loop, saved)) return false
     // Working-context compaction can remove the old full read while keeping
     // this newest diff. Re-expand the already-obtained native result, not an
     // extra observation or an authoritative cached machine fact.
     resultMessage.content = JSON.stringify(fullObservation(status, query, reference, false))
     saved.evidence = [evidence(resultMessage)]
+    expanded = true
     await traceRebase(loop, ENTITY_STATUS_TOOL, query)
+    return true
   }
 }
 
@@ -417,11 +420,14 @@ async function transformNearbyEntities(loop, entry, resultMessage) {
   const saved = { query, view, ...rememberDelivery(loop, previous, resultMessage, surface) }
   rememberNearbyBaseline(loop, key, saved)
   if (previous && !usable) await traceRebase(loop, NEARBY_ENTITIES_TOOL, query)
+  let expanded = providerObservation.observation_mode === 'full'
   return async () => {
-    if (!loop.messages.includes(resultMessage) || baselineVisible(loop, saved)) return
+    if (expanded || !loop.messages.includes(resultMessage) || baselineVisible(loop, saved)) return false
     resultMessage.content = JSON.stringify(nearbyFullObservation(view, query, view.truncated ? 'truncated_scan' : undefined))
     saved.evidence = [evidence(resultMessage)]
+    expanded = true
     await traceRebase(loop, NEARBY_ENTITIES_TOOL, query)
+    return true
   }
 }
 
@@ -431,9 +437,22 @@ function installObservationDiffs(Base) {
   Object.defineProperty(prototype, INSTALL_MARK, { value: true })
 
   prototype.repairObservationBaselines = async function () {
-    const repairs = this.observationBaselineRepairs ?? []
-    this.observationBaselineRepairs = undefined
-    for (const repair of repairs) if (repair) await repair()
+    const repairs = this.observationBaselineRepairs
+    if (!repairs) return
+    // Expansion may trigger another fold and orphan a different observation.
+    // Keep repair records only for surviving tool messages and settle to a
+    // fixed point. Each record expands at most once, bounding the passes.
+    const maximumPasses = repairs.size + 1
+    for (let pass = 0; pass < maximumPasses; pass++) {
+      const visible = new Set(this.messages)
+      let expanded = false
+      for (const [message, repair] of repairs) {
+        if (!visible.has(message)) { repairs.delete(message); continue }
+        expanded = await repair() || expanded
+      }
+      if (!expanded) return
+      this.compactWorkingContext()
+    }
   }
 
   const originalRequest = prototype.request
@@ -442,6 +461,7 @@ function installObservationDiffs(Base) {
     this.entityStatusBaselineOrder = []
     this.nearbyEntitiesBaselines = new Map()
     this.nearbyEntitiesBaselineOrder = []
+    this.observationBaselineRepairs = new Map()
     return originalRequest.apply(this, args)
   }
 
@@ -458,14 +478,14 @@ function installObservationDiffs(Base) {
     await originalHandleToolBatch.call(this, message, prepared)
     // The inner handler can compact earlier exchanges, changing their indices.
     const results = this.messages.filter(item => item.role === 'tool')
-    const repairs = []
+    this.observationBaselineRepairs ??= new Map()
     for (let index = 0; index < prepared.length; index++) {
       const result = results.findLast(item => item.tool_call_id === prepared[index]?.tool?.id)
       if (!result) continue
-      repairs.push(await transformEntityStatus(this, prepared[index], result))
-      repairs.push(await transformNearbyEntities(this, prepared[index], result))
+      const repair = await transformEntityStatus(this, prepared[index], result)
+        ?? await transformNearbyEntities(this, prepared[index], result)
+      if (repair) this.observationBaselineRepairs.set(result, repair)
     }
-    this.observationBaselineRepairs = repairs
     this.compactWorkingContext()
     if (!this.compactionDeferred) await this.repairObservationBaselines()
   }

@@ -6,13 +6,14 @@ Local follow-up to [Run N](RED_AUTOMATION_LIVE_RUN_N_2026-10-15.md), from integr
 
 Compact entity/nearby observations require the exact baseline and required diff messages to remain present, unchanged, in the current conversation and actor/session/epoch scope. Exact entity queries retain their unit number in the query key. A full baseline explicitly carried through normal continuation can be used to interpret a subsequent fresh native read; a rebuilt context without that delivery receives a full native snapshot. Bounded historical metadata remains separate from live mutation authority.
 
-Compaction repair expands an already-obtained native result when its dependency was removed while the newest diff survived. It does not perform an extra observation, reopen tools, spend another recovery generation or admit gameplay. The existing four-entry baseline bounds and context caps are unchanged. `observation.baseline_rebased` records request ID, tool/query, conversation sequence and reason `current_conversation_has_no_delivered_baseline`.
+Compaction repair expands an already-obtained native result when its dependency was removed while the newest diff survived. It does not perform an extra observation, reopen tools, spend another recovery generation or admit gameplay. The existing four-entry baseline bounds and context caps are unchanged. Repair records are pruned to tool messages still present in the working context; each expands at most once, so secondary compaction settles in a bounded number of passes. The provider boundary runs this repair after its last context fold. `observation.baseline_rebased` records request ID, tool/query, conversation sequence and reason `current_conversation_has_no_delivered_baseline`.
 
 ## Validation checklist
 
-- [x] Canonical Docker gate: 2,389 runtime/staging, 1,142 mod tests, typecheck/Lua/generated-Lua checks, exit 0.
+- [x] Canonical Docker gate: 2,390 runtime/staging, 1,142 mod tests, typecheck/Lua/generated-Lua checks, exit 0.
 - [x] Static full-loop Run N replay: exact captured blocker/native recipe, closed C5 correction, actual Session recovery timer/C7, full entity/nearby snapshots, output clearing, copper processing, native-shaped crafting receipt and verified lab inventory goal. Same immutable checkpoint, four intended batches, one auto-resume and real scripted Sol/Luna role resolution.
 - [x] Focused discarded/edited/compacted baseline and changed-surface cases; normal continuation diff/unchanged behavior preserved. Stop/epoch negatives admit no output collection.
+- [x] Review-suggested secondary-compaction regression corroborated: 2,390 total, 2,389 passed and this single expected failure before the follow-up repair. Final full canonical gate is green with all 2,390 tests.
 - [ ] Frozen original-code static control fails at the missing-baseline boundary.
 - [ ] Official frozen real-engine image and nine native lanes pass.
 - [ ] Native original-code control fails at the C7 full-baseline assertion.

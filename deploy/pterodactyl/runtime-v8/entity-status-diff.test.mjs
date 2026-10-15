@@ -253,3 +253,35 @@ for (const boundary of ['discarded_exchange', 'compacted_exchange', 'edited_base
     assert.equal(calls, 3); assert.equal(rcon.entityReads, 2, 're-expansion never spends an extra native read')
   })
 }
+test('getEntityStatus repairs every dependent output after a large re-expansion triggers secondary compaction', async () => {
+  const sized = (unit, items, firstCount = 10) => ({ ...entityStatus(unit, 10), entity: {
+    ...entityStatus(unit, 10).entity,
+    inventories: [{ index: 1, items: Array.from({ length: items }, (_, i) => ({ name: `modded-component-with-a-long-prototype-name-${i}`, quality: 'normal', count: i ? 10 : firstCount })) }],
+  } })
+  const b = sized(202, 100), a = sized(101, 50), changedA = sized(101, 50, 12)
+  const rcon = new FakeRcon([b, a, changedA, b])
+  const read = (id, name, radius) => ({ content: null, tool_calls: [{ id, type: 'function', function: { name: 'getEntityStatus', arguments: JSON.stringify({ name, ...(radius === undefined ? {} : { radius }) }) } }] })
+  let agent, calls = 0
+  agent = new NpcAgentLoop({ rcon, systemPrompt: 'secondary compaction fixture', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
+    provider: async messages => {
+      if (++calls === 1) {
+        // A small deterministic prefix isolates working-context compaction;
+        // tool schemas, native read limits and observation allowances stay real.
+        agent.baseMessages = [{ role: 'system', content: 'secondary compaction fixture' }]
+        agent.messages = agent.baseMessages.map(m => ({ ...m }))
+        agent.maxWorkingChars = JSON.stringify(a).length + JSON.stringify(b).length + Math.floor(JSON.stringify(a.entity.inventories).length / 2)
+        return read('large-b', 'assembling-machine-2', 8)
+      }
+      if (calls === 2) return read('small-a', 'assembling-machine-1', 8)
+      if (calls === 3) return { content: null, tool_calls: [read('latest-a', 'assembling-machine-1').tool_calls[0], read('latest-b', 'assembling-machine-2').tool_calls[0]] }
+      const newest = JSON.parse(toolResult(messages, 'latest-a').content)
+      const baseline = toolResult(messages, 'small-a')
+      assert.ok(newest.observation_mode === 'full' || (baseline && JSON.parse(baseline.content).observation_mode === 'full'),
+        'secondary compaction must never deliver a diff after removing its baseline')
+      assert.equal(JSON.parse(toolResult(messages, 'latest-b').content).observation_mode, 'full')
+      return planMessage([], 'Done.')
+    },
+  })
+  await agent.request('Observe two machines across bounded working-context compaction', { sender: 'TTLouis' })
+  assert.equal(calls, 4); assert.equal(rcon.entityReads, 4)
+})
