@@ -1,6 +1,7 @@
 import { check, DeploymentError } from './common.mjs'
 import { lastUserOutsideTail } from './prompt-prefix.mjs'
 import { providerCapabilityProfile, providerRequest as baseProviderRequest } from './provider-base.mjs'
+import { AGENT_ROLES, resolveAgentRole } from './agent-roles.mjs'
 
 export * from './provider-base.mjs'
 
@@ -285,6 +286,47 @@ export async function providerRequest(config, messages, options = {}) {
   return baseProviderRequest(config, messages, requestOptions)
 }
 
+
+// Explicit CLI-proxy harness preflight, never an endpoint/model auto-detection
+// rule. Exercise the actual role serializers with an owned in-memory transport;
+// this function cannot call a provider, log credentials, or grant game authority.
+export async function verifyCliProxyProviderContracts(config, { requestId = 'cli_proxy_preflight' } = {}) {
+  check(typeof requestId === 'string' && /^[a-zA-Z0-9_.:-]{1,240}$/.test(requestId), 'Invalid CLI-proxy preflight request id')
+  check(config?.aiApiMethod === 'local', 'CLI-proxy preflight requires AI_API_METHOD=local')
+  const roles = AGENT_ROLES.map(role => {
+    const resolved = resolveAgentRole(config, role)
+    const capabilities = providerCapabilityProfile(resolved)
+    check(resolved.profile === 'local' && capabilities.id === 'local'
+      && capabilities.model_family === 'openai-gpt' && capabilities.tools_kept_when_closed === true
+      && capabilities.tool_support === true, `CLI-proxy ${role} requires the local GPT closed-tool contract`)
+    return { role, resolved, capabilities }
+  })
+  const proofs = []
+  for (const { role, resolved, capabilities } of roles) {
+    let body
+    await providerRequest(resolved, [
+      { role: 'system', content: 'Offline serializer preflight. No gameplay or model inference.' },
+      { role: 'user', content: 'Verify the closed decision transport.' },
+    ], {
+      role, allowTools: false, requestId: `${requestId}:${role}`, promptTraceFile: null,
+      requestBodyPatch: { max_tokens: 4000 },
+      fetchImpl: async (_url, options) => {
+        body = JSON.parse(options.body)
+        return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{}' } }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+    check(body?.model === resolved.model && body.tool_choice === 'none' && Array.isArray(body.tools)
+      && body.tools.length > 0 && body.tools.every(tool => tool.type === 'function')
+      && body.tools.some(tool => tool.function?.name === 'submitPlan'), `CLI-proxy ${role} closed serializer contract is missing`)
+    proofs.push({ role, model: resolved.model, profile: resolved.profile,
+      capabilities: { id: capabilities.id, model_family: capabilities.model_family,
+        tools_kept_when_closed: capabilities.tools_kept_when_closed, tool_support: capabilities.tool_support }, body })
+  }
+  return { event: 'provider.cli_proxy_contract_verified', request_id: requestId,
+    reason: 'explicit_local_method_and_role_closed_wire_verified', status: 'pass',
+    ai_api_method: config.aiApiMethod, external_inference_calls: 0, roles: proofs }
+}
 
 export const DECISION_PROVIDER_DEFAULTS = Object.freeze({
   provider: 'typesafe',
