@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: units 17/18 pushed; local image and startup gates complete
+
+- **Remote integration.** Reviewed unit merges `14a03571` and `e39eea27` are included in `origin/experiment/jev-agent-architecture` at source candidate `451bd0e1`. The clean integration worktree remains `peaceful-saha-a52c6f`; the older root checkout's uncommitted docs and local branch ref were preserved.
+- **Green gates.** Canonical Docker static gate: 2,353 runtime/staging and 1,142 mod tests, typecheck and Lua checks. Frozen-image recovery-loop, production, craft-trigger, native-admission and steam-lab lanes passed. No runtime/mod changes followed those tests.
+- **Packaged image.** Full local server build from the pushed source passed. All 51 runtime/prompt files match source, all 31 mod files match the passing engine image, and manifest validation passes. A fresh network-disabled, dummy-provider container reached standalone-NPC readiness, saved and stopped gracefully with exit 0; no provider reservations. No existing server restart or settings edit.
+- **Next.** Local preparation is complete. Run J still requires Louis's go and the actual chosen live-run container's cold-start/file verification. No live provider run or Pterodactyl deployment occurred. [Integration and exact image evidence](validation/UNIT17_18_INTEGRATION_2026-10-15.md).
+
 ## October 15: unit 18 native recovery regressions complete (local)
 
 - **Integrated locally.** Merge `e39eea27` on `og-port-integration`; runtime fix `7b8fe59`, frozen code/test candidate `4783226c`. The native G/H/I chain reaches verified completion across two Factorio/Node restarts, with lost-acknowledgement settlement, zero replay dispatches and pending-timer cancellation. Scripted main-model/Jev only; no network inference.

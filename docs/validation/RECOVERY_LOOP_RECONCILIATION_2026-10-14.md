@@ -44,7 +44,8 @@ This reviews the recovery consolidation proposal written on 2026-10-14, a scratc
 - [x] Unit 18 native recovery-loop lane passes on frozen code/test candidate `4783226c`, independently reviewed and locally merged at `e39eea27`.
 - [x] `bash scripts/test-local.sh all` passes on merged candidate `e39eea27`, and the production, craft-trigger, native-admission and steam-lab lanes pass alongside recovery-loop on frozen candidate `4783226c` (identical code).
 - [x] The installer repin is current: `payload-src/installer.sh` is unchanged; bootstrap tests pass in the static gate.
-- [ ] The image is built from the pushed candidate, and the deployment is verified file by file.
+- [x] Local server image built from pushed candidate `451bd0e1`; all 51 shipped runtime/prompt files and 31 mod files verified against source/passing engine image. Offline standalone startup, native save and graceful shutdown pass. See [remote integration and packaging checkpoint](UNIT17_18_INTEGRATION_2026-10-15.md).
+- [ ] At the authorized run's cold-start preflight, verify the actual chosen container file by file, including any runtime mounts/overrides.
 - [ ] The owner says go for run J.
 
 ## Candidate and open blockers
@@ -53,4 +54,6 @@ Unit 17 is complete and locally integrated at `14a03571` (code/test checkpoint `
 
 Unit 18 is now complete and locally integrated at `e39eea27`. Its real-timer fix adds one composed regression (15 total). The final offline image on frozen candidate `4783226c` passed recovery-loop, production, craft-trigger, native-admission and steam-lab; the merged full Docker gate passed with 2,353 runtime/staging and 1,142 mod tests, typecheck and Lua checks, exit 0. Native restart completion holds 12 copper plates with zero replay dispatches. Pending-timer cancellation also passes. See [unit-18 checkpoint](UNIT18_RECOVERY_ENGINE_2026-10-15.md) for fixture limits, source/image identity and evidence paths.
 
-Run J remains unauthorized. No push or deployment was performed; pushed-candidate image/deployment verification and the owner's go remain open. These scripted native fixtures do not prove autonomous green science.
+Units 17 and 18 were pushed together to `origin/experiment/jev-agent-architecture` at `451bd0e1` on October 15. The full local server image and offline packaging/startup/shutdown checks now pass; the older root checkout's uncommitted documentation was preserved. See the [integration checkpoint](UNIT17_18_INTEGRATION_2026-10-15.md) for exact image identity and evidence.
+
+Run J remains unauthorized. The owner's go and the actual live-run container's cold-start/file preflight remain open. No existing server or live Pterodactyl deployment was changed. These scripted native fixtures do not prove autonomous green science.
