@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run P passes live baseline recovery; checkpoint authoring blocks power placement
+
+- **Verified progress.** One supervised local trial at `36958714`, 15m1s, 64 provider replies (12 Sol / 52 Luna), zero errors; Jev 42/42. Actual C7 provider payload contains the full furnace snapshot, followed by copper-output clearing and iron processing. Native production reached 50 iron/10 copper plates; the NPC crafted the pump, boiler, engine, ten pipes and four poles. The baseline fix now has live continuation evidence.
+- **New blocker.** The next shoreline step required a just-in-time completion contract. Both actual serialized contract requests included provider-injected gameplay `[CONTROL_OUTPUT]` instructions demanding `chatMessage`, `plan`, `currentStep` and `operations`. The first reply used an unsupported entity-existence shape; its correction followed that conflicting gameplay envelope and asked for the accepted checkpoint schema. Strict validation and the two-attempt guard correctly paused before unbound placement. Independent read-only review corroborated the provider prompt conflict.
+- **Next work.** Task-specific checkpoint output/schema isolation with real serialized-provider and native crafting-to-connected-power regressions; preserve strict parsing, planner ownership, existing limits and cancellation fences. Run P save/evidence retained, isolated stack down. No power placement, automated red output or five-minute benchmark. Full goal remains active, local only. [Run P checkpoint](validation/RED_AUTOMATION_LIVE_RUN_P_2026-10-15.md).
+
 ## October 15: Run O transport failure isolated; CLI-proxy connection restored
 
 - **Run O.** Candidate `c0bad249` passed deployment/native-mod and cold-world checks, but all three CLI-proxy connection attempts failed with `ECONNREFUSED`; no Sol/Luna reply, gameplay production or baseline recovery occurred. Jev completed 12/12 requests. Save/evidence preserved and isolated stack down. [Run O checkpoint](validation/RED_AUTOMATION_LIVE_RUN_O_2026-10-15.md).
