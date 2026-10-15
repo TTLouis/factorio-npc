@@ -145,10 +145,15 @@ case "$LANE" in
   local-transfer-target)
     run_node local_transfer_target_factorio.mjs --mode recovery
     stop_factorio
-    SAVE="$PRISTINE_SAVE"
+    # Factorio saves back to --start-server's path on shutdown. Never start
+    # either control directly from the immutable pristine fixture.
+    SAVE="$LANE_ROOT/local-transfer-prefix.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
     start_factorio
     run_node local_transfer_target_factorio.mjs --mode prefix
     stop_factorio
+    SAVE="$LANE_ROOT/local-transfer-destroyed.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
     start_factorio
     run_node local_transfer_target_factorio.mjs --mode destroyed
     ;;
