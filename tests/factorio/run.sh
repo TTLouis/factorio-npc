@@ -113,6 +113,7 @@ lane_offset() {
     entity-observation) printf '9' ;;
     native-admission) printf '10' ;;
     steam-lab) printf '11' ;;
+    recovery-loop) printf '12' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

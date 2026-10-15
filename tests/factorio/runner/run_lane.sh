@@ -22,7 +22,7 @@ PRISTINE_SAVE="$LANE_ROOT/pristine-planning-live.zip"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "$RESULTS" "$WRITE_DATA" "$MODS"
-if [[ "$LANE" == resilience ]]; then
+if [[ "$LANE" == resilience || "$LANE" == recovery-loop ]]; then
   # Independent controllers cannot share a persisted operation-ordinal journal.
   # Capture the untouched generated world before either controller runs.
   cp "$SAVE" "$PRISTINE_SAVE"
@@ -142,6 +142,17 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  recovery-loop)
+    run_node recovery_loop_factorio.mjs --mode prepare --save "$SAVE"
+    restart_factorio
+    run_node recovery_loop_factorio.mjs --mode collect --save "$SAVE"
+    restart_factorio
+    run_node recovery_loop_factorio.mjs --mode settle --save "$SAVE"
+    stop_factorio
+    SAVE="$PRISTINE_SAVE"
+    start_factorio
+    run_node recovery_loop_factorio.mjs --mode cancel --save "$SAVE"
+    ;;
   steam-lab)
     printf '[npc-test][steam-lab] Running steam/drill canary and native powered-lab research gate...\n'
     run_py steam_power_cell.py
