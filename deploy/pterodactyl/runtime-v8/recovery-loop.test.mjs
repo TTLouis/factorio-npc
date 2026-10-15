@@ -37,6 +37,26 @@ const rowsOf = (ctx, name) => ctx.world.named(name)
 const indexOfRow = (ctx, predicate, from = 0) => ctx.world.trace.findIndex((row, index) => index >= from && predicate(row))
 const isC7Restage = row => row.event === 'context.restaged' && row.data.checkpoint === 'C7'
 
+test('R-scope: a recovery timer inherited from a discarded turn starts a fresh supervised turn and finishes', async (t) => {
+  const ctx = await reachRunG(t)
+  ctx.model.push('executor', 'scope:observe', observation())
+    .push('executor', 'scope:collect', executorPlan([collect(3)]))
+  const oldScope = {
+    generation: ctx.world.agent.generation - 1,
+    lineage: ctx.world.agent.agentContext.lineageSequence,
+    requestId: 'discarded_turn',
+  }
+  await ctx.world.agent.turnScope.run(oldScope, () => fireResumeTimer(ctx))
+  await completeAndReport(ctx)
+  assert.equal(ctx.game.inventory['copper-plate'], 12)
+  assert.equal(ctx.world.named('goal.evaluated').at(-1).satisfied, true)
+  assert.equal(ctx.world.named('context.stale_reply_dropped').length, 0)
+  const detached = ctx.world.named('recovery.queue_scope_detached').find(row => row.origin_request_id === 'discarded_turn')
+  assert.equal(detached.reason, 'supervisor_event_starts_fresh_turn')
+  assert.ok(detached.request_id)
+  assertStrictBoundary(ctx)
+})
+
 test('R-GHI: run G, H and I through the scheduled resume reach a verified completion, with the same goal and plan throughout', async (t) => {
   const ctx = await reachRunG(t)
   const { game, model, world, session, chat } = ctx
