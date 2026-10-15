@@ -45,8 +45,8 @@ This reviews the recovery consolidation proposal written on 2026-10-14, a scratc
 - [x] `bash scripts/test-local.sh all` passes on merged candidate `e39eea27`, and the production, craft-trigger, native-admission and steam-lab lanes pass alongside recovery-loop on frozen candidate `4783226c` (identical code).
 - [x] The installer repin is current: `payload-src/installer.sh` is unchanged; bootstrap tests pass in the static gate.
 - [x] Local server image built from pushed candidate `451bd0e1`; all 51 shipped runtime/prompt files and 31 mod files verified against source/passing engine image. Offline standalone startup, native save and graceful shutdown pass. See [remote integration and packaging checkpoint](UNIT17_18_INTEGRATION_2026-10-15.md).
-- [ ] At the authorized run's cold-start preflight, verify the actual chosen container file by file, including any runtime mounts/overrides.
-- [ ] The owner says go for run J.
+- [x] Run J's cold-start preflight verified candidate `9550ecc9`, all 50 runtime/staging modules, committed prompt, release manifest and 31 active mod files; no runtime override applied.
+- [x] The owner authorized run J on October 15. It is concluded; this go does not authorize another run.
 
 ## Candidate and open blockers
 
@@ -56,4 +56,6 @@ Unit 18 is now complete and locally integrated at `e39eea27`. Its real-timer fix
 
 Units 17 and 18 were pushed together to `origin/experiment/jev-agent-architecture` at `451bd0e1` on October 15. The full local server image and offline packaging/startup/shutdown checks now pass; the older root checkout's uncommitted documentation was preserved. See the [integration checkpoint](UNIT17_18_INTEGRATION_2026-10-15.md) for exact image identity and evidence.
 
-Run J remains unauthorized. The owner's go and the actual live-run container's cold-start/file preflight remain open. No existing server or live Pterodactyl deployment was changed. These scripted native fixtures do not prove autonomous green science.
+Run J was authorized and concluded after 12 minutes on October 15. Native copper collection progressed to 10 held plates, then iron to 50 held plates, but the completed-slice planner boundary failed with `checkpoint_requires_active_step`. All 40 provider calls succeeded; no auto-resume occurred. Save/traces are preserved and the isolated stack is down. See [run J checkpoint and proposed bounded fix/regression](LUNA_GREEN_LIVE_RUN_J_2026-10-15.md).
+
+The completed-slice checkpoint fault is now an open blocker. Its production fix and runnable composed regression are required before another live trial, which needs a new owner's go and deployment preflight. No live Pterodactyl deployment was changed. Autonomous green science remains unproven.

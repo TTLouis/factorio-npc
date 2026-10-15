@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: CLI-proxy run J progressed, then hit a completed-slice harness fault
+
+- **One authorized trial.** Candidate `9550ecc9`; deployed runtime/prompt/mod files matched, fresh actor 14, zero humans, speed 1 and the unchanged starter. Actual model `gpt-6-luna`; 40 provider requests/responses, zero provider errors; Jev 43 requests/responses. No operator corrections or retry.
+- **Progress.** Native copper mining/smelting/collection reached 10 held copper plates with empty furnace output; Luna continued to 50 held iron plates. No auto-resume fired, so the new recovery paths were not directly exercised live. No red science, lab/steam cell or green research completion.
+- **Stop.** After a completed slice, a checkpoint-bearing planner `BLOCKED:` reply was persisted against a still-completed plan; `persistPlannerCheckpoint` raised `checkpoint_requires_active_step` (system harness fault). Run-check confirms that fault and an unrecoverable request failure, with no parse errors. This differs from run H's paused-plan activation path.
+- **Preserved/next.** Trial concluded after 12 minutes, checkpoint save/traces preserved and isolated stack down. A captured replay case and bounded-routing design are recorded; production fix and runnable regression remain open before another live run. [Run J checkpoint](validation/LUNA_GREEN_LIVE_RUN_J_2026-10-15.md).
+
 ## October 15: units 17/18 pushed; local image and startup gates complete
 
 - **Remote integration.** Reviewed unit merges `14a03571` and `e39eea27` are included in `origin/experiment/jev-agent-architecture` at source candidate `451bd0e1`. The clean integration worktree remains `peaceful-saha-a52c6f`; the older root checkout's uncommitted docs and local branch ref were preserved.
