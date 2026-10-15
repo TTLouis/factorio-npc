@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Run P checkpoint provider fix reviewed and integrated locally
+
+- **Fix.** Just-in-time checkpoint calls now receive their exclusive target-only JSON contract and canonical predicate schema, without normal gameplay steering/control/style or a gameplay tool catalog. The CLI proxy's explicit disabled-tool guard remains, using only a non-executable checkpoint schema. Strict parsing, two attempts, reserves, planner/executor ownership, native admission and stop/actor/epoch fences remain unchanged. The new provider trace identifies the request and reason.
+- **Proof.** Frozen `8f7ac8ee` passes 2,398 runtime/staging and 1,142 mod tests plus typecheck/Lua checks; eight new regressions exercise actual serialized role-resolved requests, exact live invalid replies and cancellation negatives. All ten network-disabled native lanes pass. New native proof follows real equipment crafting through one bounded contract correction, fresh legal candidates, actual pump/boiler water, sole-steam generation, connected powered lab and science consumption: seven admitted batches, three JIT calls, zero humans, no post-setup correction. Presence counts alone are not connectivity proof.
+- **Controls and integration.** All eight new static cases fail with the two original modules while every old test passes; original native control fails at the exact conflicting gameplay wire instructions. Independent frozen review approved. No-ff local merge `449a0014`; merged canonical gate passes with identical runtime/test code. No push, release or live trial in the fix. The full unattended red-science goal remains active. [Fix validation and evidence](validation/STEP_CONTRACT_RECOVERY_2026-10-15.md).
+
 ## October 15: Run P passes live baseline recovery; checkpoint authoring blocks power placement
 
 - **Verified progress.** One supervised local trial at `36958714`, 15m1s, 64 provider replies (12 Sol / 52 Luna), zero errors; Jev 42/42. Actual C7 provider payload contains the full furnace snapshot, followed by copper-output clearing and iron processing. Native production reached 50 iron/10 copper plates; the NPC crafted the pump, boiler, engine, ten pipes and four poles. The baseline fix now has live continuation evidence.

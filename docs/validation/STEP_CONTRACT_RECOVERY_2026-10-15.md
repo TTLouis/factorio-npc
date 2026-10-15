@@ -19,7 +19,7 @@ The strict target parser, supported predicates, two attempts, token/reserve acco
 - [x] Original two-module static control: **2,398 total / 2,390 pass / eight expected failures**, exit 1. Every new regression fails and every pre-existing test passes.
 - [x] Official frozen Factorio image and all **ten network-disabled native lanes** pass: step-contract, observation-baseline, shoreline-recovery, invalid-reference, queued-craft, recovery-loop, production, craft-trigger, native-admission and steam-lab.
 - [x] Native original-code control fails specifically because the serialized contract request contains conflicting gameplay `[CONTROL_OUTPUT]` instructions and tool catalog, rather than a missing export or test-only shortcut.
-- [ ] Local no-ff integration and merged canonical gate.
+- [x] Local no-ff integration `449a0014fb3b0edd3b2dd4db8b91a1631cb167dd` and merged canonical gate: 2,398 runtime/staging, 1,142 mod, typecheck/Lua/generated-Lua checks, exit 0. Frozen production/test files match the merged tree exactly.
 
 Official image **`sha256:148077f2f5c34be5073fec82803f877abddcf9bdee488561d9ffe355196cf4fc`**, pinned Factorio **2.0.77**. The new lane uses actual production Session/provider serialization, scripted Sol/Luna transport and normalized scripted Jev with network disabled. Setup declares ordinary crafting inputs plus a lab, science and startup fuel on a deterministic shoreline. After setup there is no inventory insertion, teleport, terrain/chunk edit or corrective gameplay.
 
@@ -27,4 +27,6 @@ The engine really crafts the equipment, rejects the exact malformed first checkp
 
 Ignored task evidence under `test-results/step-contract/` includes canonical/static-control logs, official build/ten-lane log, native proof, original native failure and copied lane logs, with a seven-file SHA256 manifest. The original static control is a tracked-only archive with only the two original production modules substituted; the source checkout was never swapped. Native control uses the same image/tests with those modules mounted read-only.
 
-This fixes the corroborated contract wire boundary and proves native continuation through connected power. The full natural-resource automated red-science chain and its five-wall-minute, AI-paused speed-2 throughput benchmark remain unproven. The active goal continues after local integration and fresh-run preflight.
+Local integration uses the established `og-port-integration` coordinator for `experiment/jev-agent-architecture`; the older root checkout and its pre-existing edits remain protected. Merged canonical evidence is `test-results/step-contract/integration-all.log` in that checkout. Installer/bootstrap payload bytes are unchanged; the runtime follows the exact selected source on the next canonical local server build. No push or live inference occurred during this fix.
+
+This fixes the corroborated contract wire boundary and proves native continuation through connected power. The full natural-resource automated red-science chain and its five-wall-minute, AI-paused speed-2 throughput benchmark remain unproven. The active goal continues with fresh-run preflight.
