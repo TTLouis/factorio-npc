@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from '../pterodactyl/runtime-v8/planning-state.mjs'
-import { configureNpcSession } from '../pterodactyl/staging/supervisor-adapter.mjs'
+import { configureNpcSession, deploymentStatus } from '../pterodactyl/staging/supervisor-adapter.mjs'
 
 const execFileAsync = promisify(execFile)
 const key = 'npc:sgluna'
@@ -84,13 +84,14 @@ function planMessage({
   roadmapNodeIds,
   developmentMode,
   includeCheckpoint = true,
+  operations,
 }) {
   return {
     content: JSON.stringify({
       chatMessage,
       plan: [step],
       currentStep: 0,
-      operations: [{
+      operations: operations ?? [{
         name: 'gather_resource',
         args: {
           resource_name: resourceName,
@@ -381,25 +382,33 @@ async function prepare({ rcon, results, stateFile }) {
 async function verify({ rcon, results, stateFile }) {
   await configureNpcSession(rcon, 'sgluna-factorio-planning-lifecycle-verify-0002')
   const before = JSON.parse(await fsp.readFile(path.join(results, 'planning-lifecycle-prepare.json'), 'utf8'))
+  // Disable an existing recipe on this fixture's actual NPC force. An invented
+  // prototype is only a correctable argument error and must never prove a
+  // structural world blocker. No inventory or completion evidence is fabricated.
+  const deployment = await deploymentStatus(rcon)
+  assert.ok(Number.isSafeInteger(deployment.actor_id) && deployment.actor_id > 0)
+  const lockedRecipe = JSON.parse(await rcon.command(`/silent-command local a=game.get_entity_by_unit_number(${deployment.actor_id}); assert(a and a.valid); local r=a.force.recipes["iron-gear-wheel"]; assert(r); local was_enabled=r.enabled; r.enabled=false; rcon.print(helpers.table_to_json({recipe=r.name,enabled=r.enabled,was_enabled=was_enabled}))`))
+  assert.equal(lockedRecipe.recipe, 'iron-gear-wheel')
+  assert.equal(lockedRecipe.enabled, false)
+  assert.equal(typeof lockedRecipe.was_enabled, 'boolean')
 
   let providerCalls = 0
   const memory = new CanonicalTaskBoardMemory()
   const provider = async (messages) => {
     providerCalls++
     assertPlannerMode(messages, 'vertical', `restored planner call ${providerCalls}`)
-    // The missing resource is a naming error preflight gives one bounded
-    // correction turn for; repeating it on that turn is what freezes the plan.
-    if (providerCalls <= 2) {
+    // A locked recipe is a plan-level blocker, with no executor correction turn.
+    if (providerCalls === 1) {
       return planMessage({
         chatMessage: 'Testing the committed frontier against its now-known structural dependency.',
         step: 'Advance the next capability frontier',
-        resourceName: 'sgluna-missing-resource',
+        operations: [{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }],
         includeCheckpoint: false,
         roadmapNodeIds: ['next-capability-frontier'],
         developmentMode: 'vertical',
       })
     }
-    if (providerCalls === 3) {
+    if (providerCalls === 2) {
       return planMessage({
         chatMessage: 'Following the user-approved bounded alternate route.',
         step: 'Use the verified iron route while the unavailable frontier dependency is reconsidered',
@@ -455,8 +464,12 @@ async function verify({ rcon, results, stateFile }) {
   const blockedResult = await agent.request('continue', { sender: 'Louis' })
   planning = memory.planningState(key)
   const blocked = getActivePlan(planning)
-  assert.equal(providerCalls, 2)
-  assert.equal(blockedResult.goalStatus, 'blocked')
+  assert.equal(providerCalls, 1, 'a verified plan-level blocker gets no executor correction turn')
+  assert.equal(blockedResult.goalStatus, 'blocked', 'the committed plan remains blocked even though the guard pause is durable')
+  assert.equal(memory.pauseRecord(key).paused, true)
+  assert.equal(blockedResult.blocker.code, 'recipe_locked')
+  assert.equal(memory.pauseRecord(key).pause_class, 'guard')
+  assert.equal(JSON.parse(await rcon.command(actorIronCommand())).iron, before.iron_after, 'the refused batch changed no inventory')
   assert.equal(blockedResult.operations.length, 0)
   assert.equal(
     blocked.plan_id,
@@ -472,11 +485,15 @@ async function verify({ rcon, results, stateFile }) {
     })))}`,
   )
   assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
-  assert.equal(blocked.blocker?.reason_code, 'operation_preflight_failed:unknown_prototype')
+  assert.equal(blocked.blocker?.reason_code, 'operation_preflight_failed:recipe_locked')
   assert.equal(planning.plans.length, before.plan_count, 'structural blocker must not create an automatic suffix')
   assert.equal(planning.goal.goal_id, before.goal_id)
   assert.equal(planning.roadmap.roadmap_revision_id, before.roadmap_revision_id)
   assert.equal(planning.steering.current_mode, 'vertical')
+
+  const restoredRecipe = JSON.parse(await rcon.command(`/silent-command local a=game.get_entity_by_unit_number(${deployment.actor_id}); assert(a and a.valid); local r=a.force.recipes["iron-gear-wheel"]; r.enabled=${lockedRecipe.was_enabled ? 'true' : 'false'}; rcon.print(helpers.table_to_json({enabled=r.enabled}))`))
+  assert.equal(restoredRecipe.enabled, lockedRecipe.was_enabled)
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.BLOCKED, 'restoring recipe availability alone cannot silently revise a frozen plan')
 
   memory.recordBlockedChoice(key, 'revise', 'Louis', { now: Date.now() })
   await agent.persistState()
@@ -489,7 +506,7 @@ async function verify({ rcon, results, stateFile }) {
   planning = memory.planningState(key)
   const successor = getActivePlan(planning)
 
-  assert.equal(providerCalls, 3)
+  assert.equal(providerCalls, 2)
   assert.equal(revisedResult.goalStatus, 'active')
   assert.equal(successor.derived_from_plan_id, before.active_v3)
   assert.equal(successor.plan_version, before.active_v3_version + 1)
