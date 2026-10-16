@@ -92,8 +92,8 @@ async function prepare({ rcon, results, stateFile }) {
         'Attempting the existing recipe with a verified structural dependency.',
         ['Craft the locked integration recipe', 'Continue the build'],
         [{
-          name: 'craft_recipe',
-          args: { recipe_name: 'iron-gear-wheel', count: 1 },
+          name: 'craft_item',
+          args: { item_name: 'iron-gear-wheel', count: 1 },
         }],
       )
     },
@@ -154,14 +154,14 @@ async function verify({ rcon, results, stateFile }) {
       if (providerCalls === 1) {
         return strictPlan(
           'Ordinary continuation proposal that must remain frozen.',
-          ['Gather the unavailable integration resource differently', 'Continue the build'],
+          ['Try the locked integration recipe differently', 'Continue the build'],
           [{ name: 'wait', args: { ticks: 1 } }],
         )
       }
       if (providerCalls === 2) {
         return strictPlan(
           'Applying the user-approved bounded alternate route.',
-          ['Wait briefly instead of gathering the unavailable integration resource', 'Continue the build'],
+          ['Wait briefly instead of crafting the locked integration recipe', 'Continue the build'],
           [{ name: 'wait', args: { ticks: 1 } }],
         )
       }
@@ -201,7 +201,7 @@ async function verify({ rcon, results, stateFile }) {
   assert.equal(memory.planningState(key).plans.length, 1, 'revise click alone must not create a successor')
 
   const revised = await agent.request(
-    'Use a bounded wait route instead of gathering the unavailable integration resource.',
+    'Use a bounded wait route instead of crafting the locked integration recipe.',
     { sender: 'Louis' },
   )
   const successor = getActivePlan(memory.planningState(key))
@@ -214,7 +214,7 @@ async function verify({ rcon, results, stateFile }) {
   assert.equal(successor.plan_version, before.plan_version + 1)
   assert.equal(memory.planningState(key).plans.length, 2)
   assert.ok(successorEpoch > before.reasoning_epoch, 'approved revision must invalidate predecessor reasoning')
-  assert.equal(successor.steps[0]?.description, 'Wait briefly instead of gathering the unavailable integration resource')
+  assert.equal(successor.steps[0]?.description, 'Wait briefly instead of crafting the locked integration recipe')
 
   await agent.persistState()
   await fsp.writeFile(path.join(results, 'planning-live-verify.json'), JSON.stringify({
