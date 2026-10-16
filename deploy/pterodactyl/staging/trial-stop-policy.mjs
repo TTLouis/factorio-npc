@@ -69,7 +69,10 @@ export function trialStopDecision({ canonical, events = [], startedAt, now, paus
 // A parent hint or old diagnostic snapshot cannot bypass this classification.
 export async function stopTrialIfTerminal({ readCurrent, stop, policy }) {
   const current = await readCurrent()
-  const decision = trialStopDecision({ ...policy, ...current })
-  if (decision.action === 'stop') await stop(decision)
+  let decision = trialStopDecision({ ...policy, ...current })
+  if (decision.action === 'stop') {
+    decision = trialStopDecision({ ...policy, ...await readCurrent() })
+    if (decision.action === 'stop') await stop(decision)
+  }
   return decision
 }

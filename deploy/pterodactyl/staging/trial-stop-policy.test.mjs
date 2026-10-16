@@ -36,6 +36,10 @@ test('Run V observed omission exhaustion remains bounded recovery; a cleared pau
   assert.equal(checked.action, 'continue')
   assert.equal(checked.pausedSince, null)
   assert.equal(stops, 0, 'stale parent stop intent must be reclassified before mutation')
+  const guard = structuredClone(input); guard.canonical.run.pause_class = 'guard'
+  let reads = 0
+  const raced = await stopTrialIfTerminal({ policy: {}, readCurrent: async () => ++reads === 1 ? guard : resumed, stop: async () => { stops++ } })
+  assert.equal(raced.action, 'continue'); assert.equal(stops, 0); assert.equal(reads, 2)
 })
 
 test('canonical structural blocker stops even when run.paused is false; historical blockers do not', () => {
@@ -130,5 +134,15 @@ test('actual supervisor entry point rereads files/native state and refuses Run V
   assert.equal((await check()).action, 'stop')
   assert.equal(calls.at(-1), '!luna stop')
   await assert.rejects(() => supervisorStop({ rcon, root, expectedRunId: 'wrong-run', snapshotCommand: 'native-snapshot' }), /identity mismatch/)
-  assert.equal(calls.length, 4, 'identity mismatch must not issue RCON commands')
+  assert.equal(calls.length, 5, 'identity mismatch must not issue RCON commands')
+  input.canonical.run = { paused: true, pause_class: 'model_recoverable', paused_at: input.now - 600000 }
+  await writeState()
+  let interruptedStops = 0
+  const delayedNative = { command: async command => {
+    if (command === '!luna stop') { interruptedStops++; return '' }
+    input.canonical.run = { paused: false, pause_class: '' }; await writeState()
+    return JSON.stringify(input.native)
+  } }
+  const raced = await supervisorStop({ rcon: delayedNative, root, expectedRunId: 'run-v-replay', snapshotCommand: 'native-snapshot', now: () => input.now })
+  assert.equal(raced.action, 'continue'); assert.equal(interruptedStops, 0, 'a pause cleared during native observation cannot be stopped')
 })
