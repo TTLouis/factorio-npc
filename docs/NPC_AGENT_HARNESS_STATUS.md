@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 16: Run V supervision and water-only shoreline recovery fixed locally
+
+- **Fix.** Shared external trial classifier preserves bounded model/transport recovery; native/canonical observations are refreshed and terminal classification repeated before an automatic supervisor stop. Fresh incomplete-empty water coverage can now use the existing exploration correction without an extra negative pump read. All category/read/resume budgets, immutable-plan and provenance/effect/actor/epoch fences remain unchanged.
+- **Proof.** Independently reviewed code `6fe763b7`, local no-ff merge `1dce938f`. Merged Docker gate passes 2,481 runtime/staging and 1,144 mod tests, typecheck and Lua. Seven stop/race and six serialized water-only regressions pass. Five native lanes pass, including original paired-pump and new water-only worlds through actual movement, fresh discovery, connected steam generation, powered lab and science consumption. Original runtime passes the old native canary then fails the new water-only case specifically on missing exploration guidance.
+- **Boundary.** Local only; no new live provider/Jev calls, Run V resume, push or deployment. Owner requested the concrete proposed 60-minute/40% next-trial plan before approval. General goal remains **paused**; complete unattended red throughput remains unproven. [Fix/evidence](validation/RUN_V_SUPERVISION_SHORELINE_FIX_2026-10-16.md), [proposed trial plan](validation/RED_AUTOMATION_NEXT_TRIAL_PLAN_2026-10-16.md).
+
 ## October 16: Run V verifies delegation and smelting; parent stops early
 
 - **Trial.** Frozen `4cc7b57e`, about 24 minutes; Sol planner8/8, Luna executor63/62, provider71/70 with zero errors (one outstanding at cancellation), Jev55/55. Dedicated CLI-proxy gameplay wire retained closed tools with explicit `none`. Native production reached 50 new iron/ten copper plates, clearing Run U's copper-output obstruction. Pump/boiler/engine/two poles were acquired; only the furnace was placed. No automatic power/science chain or throughput measurement.
