@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 15: Cloud CI health candidate; native verification pending
+
+- Cloud-only cleanup based on pushed `138c0ce6`; no push or deployment is implied.
+- Corrects the runtime-only fluid-tool inventory, lint failures and CI job coupling. The existing `typescript-quality` aggregate still requires every underlying check to succeed.
+- The native lifecycle fixture now uses a genuine locked recipe for its structural-blocker case instead of an invented prototype. Production refusal/recovery policy is unchanged. This fixture edit remains **unverified in the engine**.
+- Offline proof: lint 0 errors/warnings; 2,468 runtime/staging, 102 ordinary-agent and 1,144 mod tests pass; workspace build/typecheck, generated-Lua semantic check, isolated guard compilation and nine payload tests pass. Node 24.19.0 / pinned pnpm 10.30.1. Remaining gates: [cloud CI health checkpoint](validation/CLOUD_CI_HEALTH_2026-10-15.md). This does not establish a playable milestone or autonomous throughput.
+
 ## October 15: Dedicated CLI-proxy profile reviewed and integrated locally; E2E paused
 
 - **Fix.** `AI_API_METHOD=cli-proxy` now selects a separate upstream-inference capability profile. Ordinary HTTPS endpoints work independently of hosting/tunneling; optional local/Tailscale HTTP keeps existing URL rules. No LM Studio context/pricing assumptions. API URL/key/model field names and existing `.env` contents remain unchanged.
