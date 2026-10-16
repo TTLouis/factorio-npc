@@ -51,6 +51,11 @@ function actorIronCommand() {
   return '/silent-command local request={kind="inventory_count",item_name="iron-ore",minimum=1}; local result=remote.call("autorio_tools","evaluate_condition",request); rcon.print(helpers.table_to_json({iron=result and result.current or 0,ok=result and result.ok or false}))'
 }
 
+function actorInventoryCommand(actorId) {
+  assert.ok(Number.isSafeInteger(actorId) && actorId > 0)
+  return `/silent-command local a=game.get_entity_by_unit_number(${actorId}); assert(a and a.valid); local inv=a.get_main_inventory(); assert(inv); local items={}; for _,item in pairs(inv.get_contents()) do local key=item.name..":"..(item.quality or "normal"); items[key]=(items[key] or 0)+item.count end; rcon.print(helpers.table_to_json({actor_id=a.unit_number,force_index=a.force.index,surface_index=a.surface.index,connected_players=#game.connected_players,items=items}))`
+}
+
 async function waitForIdle(rcon, timeoutMs = 15000) {
   const started = Date.now()
   let last
@@ -461,6 +466,13 @@ async function verify({ rcon, results, stateFile }) {
   assertUnmeasuredShelfProgress(planning, 'acquisition-support', before.completed_v2)
   assertUnreadyFrontierRecorded(planning, active)
 
+  // The independent persistence fixture between prepare/verify deliberately
+  // replaces inventory. Refusal effects must be measured at this request's
+  // boundary, not against the earlier planning acquisition snapshot.
+  const refusalBefore = JSON.parse(await rcon.command(actorInventoryCommand(deployment.actor_id)))
+  assert.equal(refusalBefore.actor_id, deployment.actor_id)
+  assert.equal(refusalBefore.connected_players, 0)
+  assert.ok(refusalBefore.items['iron-plate:normal'] >= 2, 'the locked recipe has sufficient native ingredients; refusal must be structural')
   const blockedResult = await agent.request('continue', { sender: 'Louis' })
   planning = memory.planningState(key)
   const blocked = getActivePlan(planning)
@@ -469,7 +481,8 @@ async function verify({ rcon, results, stateFile }) {
   assert.equal(memory.pauseRecord(key).paused, true)
   assert.equal(blockedResult.blocker.code, 'recipe_locked')
   assert.equal(memory.pauseRecord(key).pause_class, 'guard')
-  assert.equal(JSON.parse(await rcon.command(actorIronCommand())).iron, before.iron_after, 'the refused batch changed no inventory')
+  const refusalAfter = JSON.parse(await rcon.command(actorInventoryCommand(deployment.actor_id)))
+  assert.deepEqual(refusalAfter, refusalBefore, 'the refused batch changed no inventory or actor identity')
   assert.equal(blockedResult.operations.length, 0)
   assert.equal(
     blocked.plan_id,
@@ -535,6 +548,8 @@ async function verify({ rcon, results, stateFile }) {
     steering_modes: planning.steering.history.slice(-3).map(entry => entry.mode),
     roadmap_revision_id: planning.roadmap.roadmap_revision_id,
     provider_calls: providerCalls,
+    refusal_before: refusalBefore,
+    refusal_after: refusalAfter,
   }, null, 2))
 
   process.stdout.write(`PASS: full planning lifecycle survived real Factorio restart, froze on structural blocker, and resumed only through explicit user successor=${successor.plan_id}\n`)
