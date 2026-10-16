@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 16: Run V verifies delegation and smelting; parent stops early
+
+- **Trial.** Frozen `4cc7b57e`, about 24 minutes; Sol planner8/8, Luna executor63/62, provider71/70 with zero errors (one outstanding at cancellation), Jev55/55. Dedicated CLI-proxy gameplay wire retained closed tools with explicit `none`. Native production reached 50 new iron/ten copper plates, clearing Run U's copper-output obstruction. Pump/boiler/engine/two poles were acquired; only the furnace was placed. No automatic power/science chain or throughput measurement.
+- **Interpretation.** Parent incorrectly stopped on an observed transient model-recoverable action-omission pause. Built-in automatic recovery had already resumed before stop; a local pump attempt was refused `not_placeable` without mutation. No automatic-resume exhaustion occurred, and future recovery outcome is unknown. Record this as truncated operator-stop evidence. Align supervisor decisions with the frozen runner's terminal rules before another trial; inspect retained shoreline facts/placement receipts offline.
+- **Safety.** Same-goal paired stop/native idle, fresh 875,954-byte save, completed Factorio save and all 56-entry CRC verified; independent review approved the native split-save verifier correction. Isolated stack down and owned forwarder removed. The one-trial 40% floor exception ended; general E2E goal remains **paused**. No second trial, push or deployment. [Run V evidence](validation/RED_AUTOMATION_LIVE_RUN_V_2026-10-16.md).
+
 ## October 16: Pulled cloud CI head; local and all native checks pass, E2E paused
 
 - **Source/fixes.** Fast-forwarded to remote `37d5728b`. Real-engine checks exposed two stale resilience fixtures: a refusal compared inventory against stock replaced by the intervening persistence fixture, and an invented prototype was used to expect a structural blocker. Fresh complete-inventory snapshots and a real locked-recipe preflight fix those cases while preserving frozen-plan, restart, guard-pause and explicit-revision assertions. No production policy or limits changed.
