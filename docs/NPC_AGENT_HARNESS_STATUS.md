@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 16: Pulled cloud CI head; local and all native checks pass, E2E paused
+
+- **Source/fixes.** Fast-forwarded to remote `37d5728b`. Real-engine checks exposed two stale resilience fixtures: a refusal compared inventory against stock replaced by the intervening persistence fixture, and an invented prototype was used to expect a structural blocker. Fresh complete-inventory snapshots and a real locked-recipe preflight fix those cases while preserving frozen-plan, restart, guard-pause and explicit-revision assertions. No production policy or limits changed.
+- **Proof.** Independent review approved `b36872af`; local no-ff merge `8df6d2cc`. Merged Docker checks pass 2,468 runtime/1,144 mod, typecheck and Lua. Expanded lint, 102 ordinary-agent tests, workspace build/typecheck, ordinary/guarded LuaJIT parsing, guard compilation, nine installer tests and isolated Compose assertions pass. The final official network-disabled Factorio image passes **all 22 lanes**, plus 92 Python regressions. An actual one-plate mutation fails the strengthened no-effect assertion.
+- **Boundary.** These fixture fixes and the validation record remain local; remote stays `37d5728b`. E2E goal remains **paused**; no live provider/Jev calls, push or deployment, and existing `.env` API selections remain untouched. This closes the local engine-validation gap, without claiming a new hosted CI run or unattended science throughput. [Validation](validation/LOCAL_NATIVE_CI_VALIDATION_2026-10-16.md).
+
 ## October 15: Cloud CI health candidate; native verification pending
 
 - Cloud-only cleanup based on pushed `138c0ce6`; no push or deployment is implied.
