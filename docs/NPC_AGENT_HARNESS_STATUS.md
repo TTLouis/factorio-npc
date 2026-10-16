@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 16: Run W minimum prompt reaches steam; goal resume limit stops safely
+
+- **Trial.** Frozen `9e00fc5c`, 21.04 minutes with the approved 60-minute cap/40% floor. The single minimum objective was correctly interpreted as sustained red throughput from natural resources. Actual delegation: Sol planner10/10, Luna executor65/65, zero provider errors; Jev48/48. Both roles exercised open/closed CLI-proxy wire. Native output reached 50 new iron/ten copper plates, a connected fueled pump/boiler and two poles. Engine remained held; red0, no measurement.
+- **Boundary.** Current scoped `recovery.auto_resume_exhausted` reached the unchanged goal6/6 limit; the supervisor preserved transient recovery and stopped on genuine terminal authority. Luna's final engine-absent claim contradicted fresh delivered inventory; generic legal engine candidates and boiler geometry had been delivered, but no engine placement was attempted. Missing baseline or native illegal engine placement is not demonstrated. Next offline check: replay connection-specific engine candidates against the saved layout and verify actual generation/load before proposing a harness fix.
+- **Safety.** Fresh paired stop/native idle, 883,308-byte save, complete 56-entry CRC and parent verification passed. Isolated stack and owned tunnel are down; evidence preserved. Weekly remaining44%, trial exception ended. General E2E goal remains **paused**; no second trial, production change, push or deployment. [Run W evidence](validation/RED_AUTOMATION_LIVE_RUN_W_2026-10-16.md).
+
 ## October 16: Run V supervision and water-only shoreline recovery fixed locally
 
 - **Fix.** Shared external trial classifier preserves bounded model/transport recovery; native/canonical observations are refreshed and terminal classification repeated before an automatic supervisor stop. Fresh incomplete-empty water coverage can now use the existing exploration correction without an extra negative pump read. All category/read/resume budgets, immutable-plan and provenance/effect/actor/epoch fences remain unchanged.
