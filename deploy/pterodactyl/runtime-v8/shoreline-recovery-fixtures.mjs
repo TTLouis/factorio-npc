@@ -32,11 +32,12 @@ export class ShorelineGame extends FurnaceFactorio {
     super({ inventory: { 'offshore-pump': 1, boiler: 1, 'steam-engine': 1, 'small-electric-pole': 1, lab: 1, coal: 5, 'iron-plate': 2, 'copper-plate': 1 } })
     this.position = { ...RUN_M_SEARCHES[2].result.actor_position }; this.explored = false; this.placed = new Set(); this.powered = false
     this.preflight = () => ({ ok: true })
+    this.discoveryCenter = walk.args; this.placementOps = placements
   }
   fluid(radius) {
     if (!this.explored) return structuredClone(RUN_M_SEARCHES[radius === 256 ? 2 : 0].result)
     const partial = radius === 256 && !this.explored
-    const samples = this.explored ? [{ name: 'water', fluid_name: 'water', surface_index: 1, position: { x: walk.args.x, y: walk.args.y - 32 }, distance: 32 }] : []
+    const samples = this.explored ? [{ name: 'water', fluid_name: 'water', surface_index: 1, position: { x: this.discoveryCenter.x, y: this.discoveryCenter.y - 32 }, distance: 32 }] : []
     return { ok: true, fluid_name: 'water', actor_position: this.position, surface_index: 1, observed_tick: 610 + this.batchId,
       search_radius: radius, coverage: 'generated_bounding_square', coverage_complete: !partial,
       checked_chunks: partial ? 289 : 81, generated_chunk_count: partial ? 182 : 81, ungenerated_chunk_count: partial ? 107 : 0,
@@ -50,11 +51,11 @@ export class ShorelineGame extends FurnaceFactorio {
     if (text.includes('"get_placement_candidates"') && !this.explored) return JSON.stringify(RUN_M_SEARCHES[1].result)
     if (text.includes('"get_placement_candidates"')) return JSON.stringify({ ok: true, entity_name: 'offshore-pump', center: this.position,
       radius: 24, legal_candidate_count: this.explored ? 1 : 0, returned_candidate_count: this.explored ? 1 : 0,
-      candidates: [{ ...placements[0].args, direction: 0, candidate_id: 'pump-current' }] })
+      candidates: [{ ...this.placementOps[0].args, direction: 0, candidate_id: 'pump-current' }] })
     if (text.includes('"evaluate_condition"') && text.includes('entity_count')) return JSON.stringify({ ok: true, kind: 'entity_count', prototype: 'lab', state: 'powered', satisfied: this.powered, current: this.powered ? 1 : 0, progressing: false, progress_known: true })
     if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: 'npc', actor: { actor_id: this.status.actor_id, position: this.position, surface_index: 1, valid: true } })
     if (text.includes('"autorio_prototypes","details"')) return JSON.stringify({ found: false, query: 'lab' })
-    if (text.includes('"get_nearby_entities"')) return JSON.stringify({ actor_position: this.position, entities: this.placed.has('boiler') ? [{ unit_number: this.furnace.unit_number, name: 'boiler', position: placements[1].args, surface_index: 1 }] : [] })
+    if (text.includes('"get_nearby_entities"')) return JSON.stringify({ actor_position: this.position, entities: this.placed.has('boiler') ? [{ unit_number: this.furnace.unit_number, name: 'boiler', position: this.placementOps[1].args, surface_index: 1 }] : [] })
     const answer = await super.command(text)
     if (this.pendingBatch) {
       this.lastTaskTypes = this.pendingBatch.operations.map(op => ({ walk_to_position: 'walking', place_entity: 'placing', supply_entity: 'moving_items', craft_item: 'crafting' })[op.name])
@@ -105,17 +106,17 @@ export async function beginShoreline(t, { corrections, ready, beforeBlock, state
   return ctx
 }
 
-export function queueShorelineDiscovery(model) {
+export function queueShorelineDiscovery(model, placementOps = placements) {
   model.push('executor', 'discover-water-after-walk', waterRead(128)).push('executor', 'fresh-pump-candidate', pumpRead())
     .push('executor', 'place-connected-chain', messages => {
       const candidate = JSON.parse([...messages].reverse().find(m => m.role === 'tool').content).candidates[0]
-      assert.equal(candidate.x, placements[0].args.x); assert.equal(candidate.y, placements[0].args.y)
-      return decision(placements)
+      assert.equal(candidate.x, placementOps[0].args.x); assert.equal(candidate.y, placementOps[0].args.y)
+      return decision(placementOps)
     })
 }
 export async function finishShoreline(ctx, { afterWalk = false, expectedSteps = structuredClone(ctx.world.memory.planningState(KEY).plans.at(-1).steps) } = {}) {
   if (!afterWalk) {
-    queueShorelineDiscovery(ctx.model)
+    queueShorelineDiscovery(ctx.model, ctx.game.placementOps)
     await completeAndReport(ctx)
     assert.equal(ctx.world.memory.currentPlan(KEY).task_board.completed_count, 0, 'walking is not the power result')
   }

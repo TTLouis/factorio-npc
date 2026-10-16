@@ -15,6 +15,8 @@ import { planReply, jevContractLog } from '../pterodactyl/runtime-v8/task-loop-f
 globalThis.fetch = async () => { throw new Error('inference forbidden in shoreline fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
+const waterOnly = process.argv.includes('--water-only')
+const proofName = waterOnly ? 'shoreline-water-only' : 'shoreline-recovery'
 const transcript = []; const sent = []; const seen = {}; const identities = {}; const placements = {}
 let connection, ctx, eastward, water
 const rcon = { command: async (command, options) => {
@@ -101,26 +103,36 @@ function entityFrom(messages, name) {
 }
 const model = new ScriptedModel()
   .push('planner', 'sol:immutable-powered-lab-slice', reply([], { goal }))
-  .push('executor', 'luna:bounded-local-searches', reads([
+  .push('executor', 'luna:bounded-local-searches', reads(waterOnly ? [
+    ['getFluidSourceTiles', { fluid_name: 'water', search_radius: 128, limit: 8 }],
+  ] : [
     ['getFluidSourceTiles', { fluid_name: 'water', search_radius: 128, limit: 8 }],
     ['getPlacementCandidates', { entity_name: 'offshore-pump', radius: 24, limit: 8 }],
     ['getFluidSourceTiles', { fluid_name: 'water', search_radius: 256, limit: 8 }],
   ]))
   .push('executor', 'luna:unsupported-local-world-blocker', (messages, context) => {
     seen.toolsBeforeBlocker = context.allowTools
-    const answers = messages.filter(message => message.role === 'tool').slice(-3).map(message => JSON.parse(message.content))
-    ;[seen.local, seen.pump, seen.wide] = answers
-    assert.equal(seen.local.returned_count, 0); assert.equal(seen.local.empty_result_is_conclusive, true)
-    assert.equal(seen.pump.legal_candidate_count, 0)
+    const answers = messages.filter(message => message.role === 'tool').slice(waterOnly ? -1 : -3).map(message => JSON.parse(message.content))
+    if (waterOnly) {
+      seen.local = seen.wide = answers[0]
+      assert.equal(transcript.filter(row => row.command.includes('get_placement_candidates')).length, 0)
+      assert.equal(transcript.filter(row => row.command.includes('get_fluid_source_tiles')).length, 1)
+    } else {
+      ;[seen.local, seen.pump, seen.wide] = answers
+      assert.equal(seen.local.returned_count, 0); assert.equal(seen.local.empty_result_is_conclusive, true)
+      assert.equal(seen.pump.legal_candidate_count, 0)
+    }
     assert.equal(seen.wide.returned_count, 0); assert.equal(seen.wide.coverage_complete, false)
     assert.ok(seen.wide.ungenerated_chunk_count > 0)
-    eastward = seen.wide.ungenerated_chunks.find(row => row.center.x > 150 && Math.abs(row.center.y - 16) < 40)?.center
+    eastward = seen.wide.ungenerated_chunks.find(row => row.center.x > (waterOnly ? 100 : 150) && Math.abs(row.center.y - 16) < 40)?.center
     assert.ok(eastward, JSON.stringify(seen.wide))
-    return reply([], { chatMessage: 'BLOCKED: No water was found within radius 128, no offshore-pump candidate within radius 24, and radius 256 was incomplete with no samples. I cannot finish the steam-powered lab.' })
+    return reply([], { chatMessage: waterOnly
+      ? 'BLOCKED: The available actor-centered water scan found no water tiles, and its terrain coverage was incomplete. I cannot identify a legal shoreline placement site from the current evidence.'
+      : 'BLOCKED: No water was found within radius 128, no offshore-pump candidate within radius 24, and radius 256 was incomplete with no samples. I cannot finish the steam-powered lab.' })
   })
   .push('executor', 'luna:bounded-exploration-correction', async (messages, context) => {
+    assert.ok(messages.some(row => String(row.content).includes('[LOCAL_FLUID_SEARCH_RECOVERY]')), 'missing bounded local-fluid exploration correction')
     assert.equal(context.allowTools, seen.toolsBeforeBlocker, 'local correction does not replenish the tool budget')
-    assert.match(JSON.stringify(messages), /\[LOCAL_FLUID_SEARCH_RECOVERY\]/)
     assert.equal(sent.length, 0, 'local blocker refusal cannot dispatch gameplay')
     const s = await snapshot()
     assert.equal(s.entities.length ?? Object.keys(s.entities).length, 0)
@@ -192,10 +204,12 @@ try {
   await configureNpcSession(rcon, 'shoreline-recovery-delegation-session')
   const setup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); '
     + 'game.speed=1; remote.call("autorio_operations","cancel_all_tasks"); local s=game.create_surface("shoreline-recovery",{seed=424242,width=0,height=0,water=0,cliff_settings={cliff_elevation_interval=0},autoplace_settings={entity={treat_missing_as_default=false,settings={}}}}); '
-    + 's.request_to_generate_chunks({16,16},4); s.request_to_generate_chunks({288,16},1); s.force_generate_chunk_requests(); '
+    + (waterOnly ? 's.request_to_generate_chunks({16,16},2); s.request_to_generate_chunks({224,16},1); ' : 's.request_to_generate_chunks({16,16},4); s.request_to_generate_chunks({288,16},1); ')
+    + 's.force_generate_chunk_requests(); '
     + 'for _,e in pairs(s.find_entities()) do e.destroy() end; local tiles={}; '
-    + 'for x=-128,159 do for y=-128,159 do tiles[#tiles+1]={name="landfill",position={x,y}} end end; '
-    + 'for x=256,319 do for y=-32,63 do tiles[#tiles+1]={name=x>=280 and "water" or "landfill",position={x,y}} end end; '
+    + (waterOnly
+      ? 'for x=-64,95 do for y=-64,95 do tiles[#tiles+1]={name="landfill",position={x,y}} end end; for x=192,255 do for y=-32,63 do tiles[#tiles+1]={name=x>=216 and "water" or "landfill",position={x,y}} end end; '
+      : 'for x=-128,159 do for y=-128,159 do tiles[#tiles+1]={name="landfill",position={x,y}} end end; for x=256,319 do for y=-32,63 do tiles[#tiles+1]={name=x>=280 and "water" or "landfill",position={x,y}} end end; ')
     + 's.set_tiles(tiles,true,false,true); assert(a.teleport({16,16},s)); s.always_day=true; local inv=a.get_main_inventory(); inv.clear(); '
     + 'for _,v in pairs({{"offshore-pump",1},{"boiler",1},{"steam-engine",1},{"lab",1},{"small-electric-pole",1},{"coal",10},{"automation-science-pack",10}}) do assert(inv.insert{name=v[1],count=v[2]}==v[2]) end; '
     + 'for _,n in pairs({"steam-power","electronics","automation-science-pack"}) do a.force.technologies[n].researched=true end; '
@@ -227,6 +241,9 @@ try {
   const rejected = world.named('recovery.local_fluid_search_blocker_rejected')
   assert.equal(rejected.length, 1); assert.ok(rejected[0].request_id)
   assert.equal(rejected[0].reason, 'local_fluid_search_is_not_world_blocker')
+  if (waterOnly) assert.equal(rejected[0].basis, 'water_only')
+  else assert.ok(rejected[0].water_search && rejected[0].pump_search)
+  assert.equal(world.named('recovery.auto_resume_started').length, 0)
   assert.equal(sent.length, 1)
   for (let index = 0; index < 7; index++) {
     await completion()
@@ -265,11 +282,11 @@ try {
   assert.ok(world.modelRequests.slice(1).every(row => row.model === EXECUTOR_MODEL))
   assert.deepEqual(model.remaining, []); assert.deepEqual(model.violations, [])
   assert.deepEqual(jevContractLog.filter(row => !row.ok), [])
-  await fsp.writeFile(path.join(results, 'shoreline-recovery-proof.json'), JSON.stringify({ status: 'pass', candidate: process.env.NPC_TEST_CANDIDATE_SHA ?? null,
+  await fsp.writeFile(path.join(results, `${proofName}-proof.json`), JSON.stringify({ status: 'pass', candidate: process.env.NPC_TEST_CANDIDATE_SHA ?? null, waterOnly,
     setup, before, seen, poweredBefore, after, identities, placements, models: world.modelRequests, trace: world.trace }, null, 2))
-  process.stdout.write('shoreline recovery native delegation PASS\n')
+  process.stdout.write(`${proofName} native delegation PASS\n`)
 } catch (error) {
-  await fsp.writeFile(path.join(results, 'shoreline-recovery-error.txt'), `${error.stack}\n${JSON.stringify({ labels: model.labels, logs: ctx?.logs, seen, trace: ctx?.world.trace, transcript }, null, 2)}`)
+  await fsp.writeFile(path.join(results, `${proofName}-error.txt`), `${error.stack}\n${JSON.stringify({ labels: model.labels, logs: ctx?.logs, seen, trace: ctx?.world.trace, transcript }, null, 2)}`)
   throw error
 } finally {
   if (ctx) { ctx.session.stopping = true; ctx.session.clearAutoResume() }
