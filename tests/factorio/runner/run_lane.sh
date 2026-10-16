@@ -22,7 +22,7 @@ PRISTINE_SAVE="$LANE_ROOT/pristine-planning-live.zip"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "$RESULTS" "$WRITE_DATA" "$MODS"
-if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft || "$LANE" == local-transfer-target ]]; then
+if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft || "$LANE" == local-transfer-target || "$LANE" == shoreline-recovery ]]; then
   # Independent controllers cannot share a persisted operation-ordinal journal.
   # Capture the untouched generated world before either controller runs.
   cp "$SAVE" "$PRISTINE_SAVE"
@@ -174,6 +174,11 @@ case "$LANE" in
     ;;
   shoreline-recovery)
     run_node shoreline_recovery_factorio.mjs
+    stop_factorio
+    SAVE="$LANE_ROOT/shoreline-water-only.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node shoreline_recovery_factorio.mjs --water-only
     ;;
   invalid-reference)
     run_node invalid_reference_factorio.mjs

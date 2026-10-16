@@ -12538,12 +12538,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const current = this.localSearchScope()
     const matches = row => this.currentLocalSearchObservation(row, current)
     const water = this.localFluidSearchObservation; const pump = this.localPumpSearchObservation
-    if (!matches(water) || !matches(pump)
-      || Math.abs(water.fact.actor_position.x - pump.fact.center.x) > 0.01
-      || Math.abs(water.fact.actor_position.y - pump.fact.center.y) > 0.01) return
-    const facts = { water_search: water.fact, pump_search: pump.fact }
+    // Fresh incomplete water coverage already supplies bounded native frontier
+    // facts. A separate empty pump search is not needed to reject a claimed
+    // world blocker or to explain exploration; neither read proves reachability.
+    if (!matches(water)) return
+    const matchingPump = matches(pump)
+      && Math.abs(water.fact.actor_position.x - pump.fact.center.x) <= 0.01
+      && Math.abs(water.fact.actor_position.y - pump.fact.center.y) <= 0.01
+    const facts = { water_search: water.fact, ...(matchingPump ? { pump_search: pump.fact } : {}) }
     await this.traceEvent('recovery.local_fluid_search_blocker_rejected', {
       request_id: this.traceRequest.id, reason: 'local_fluid_search_is_not_world_blocker',
+      basis: matchingPump ? 'water_and_pump' : 'water_only',
       goal_id: current.goalId, plan_id: current.planId, step_id: current.stepId, ...facts,
     })
     const error = new AgentLoopError(`[LOCAL_FLUID_SEARCH_RECOVERY] These native observations establish local absence and incomplete coverage, not a world blocker: ${JSON.stringify(facts)}. Keep the committed goal, active step and result checkpoint. Choose a bounded exploratory walk_to_position using the observed unexplored centers (they are not known reachable, water or legal placements), or another action supported by current evidence. The harness has not chosen a destination or run an operation. After a movement receipt, use fresh water and placement discovery before placing a pump. No additional observation or retry allowance is granted.`)
