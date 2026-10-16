@@ -7,7 +7,6 @@ import { providerRequest } from './provider.mjs'
 import { recoverInterruptedAgentPlan } from './supervisor.mjs'
 import {
   STEAM_AUTHORING_OUTPUT_UNITS,
-  STEAM_PLAN,
   STEAM_ROUNDS,
   STEAM_SCRIPTED_BLOCKED_ANSWER,
   STEAM_TAIL_OUTPUT_UNITS,

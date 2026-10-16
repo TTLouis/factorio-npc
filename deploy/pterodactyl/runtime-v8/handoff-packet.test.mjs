@@ -1041,7 +1041,7 @@ test('6: mining-source normalization refuses wrong names, errors, partial search
   assert.equal(rawLeafSourceFromRead(empty, 'copper-ore', 1024).state, 'none')
   for (const answer of [null, 'not json', { ...empty, ok: false }, { ...empty, name: 'iron-ore' },
     { ...empty, searched_radius: 32 }, { ...empty, max_radius: 32 }, { ...empty, error: 'unavailable' },
-    { ...empty, found: true, returned_count: 1, matched_count: 1, entities: [{ name: 'copper-ore', type: 'resource', position: { x: NaN, y: 1 }, distance: 4 }] }]) {
+    { ...empty, found: true, returned_count: 1, matched_count: 1, entities: [{ name: 'copper-ore', type: 'resource', position: { x: Number.NaN, y: 1 }, distance: 4 }] }]) {
     assert.equal(rawLeafSourceFromRead(answer, 'copper-ore', 1024).state, 'failed')
   }
   assert.deepEqual(rawLeafFromRecipeDetails({ found: false, code: 'no_recipe', query: 'copper-ore', mined_from: ['copper-ore', 'copper-ore'] }), { item: 'copper-ore', mined_from: ['copper-ore'] })
@@ -1335,7 +1335,7 @@ test('9: a build bill, a science residual and harvest sources with full raw-leaf
   const roots = [...bill.roots, ...science.flatMap(entry => entry.roots)]
   const items = ['offshore-pump', 'boiler', 'steam-engine', 'small-electric-pole', 'automation-science-pack', 'electronic-circuit', 'pipe', 'iron-gear-wheel', 'stone-furnace', 'iron-plate', 'wood', 'copper-cable', 'stone', 'copper-plate', 'iron-ore', 'copper-ore', 'lab', 'coal', 'solid-fuel']
   const held = heldOf(Object.fromEntries(items.map(item => [item, item === 'lab' ? 1 : item === 'iron-plate' ? 15 : 0])))
-  const derived = deriveResidualNeeds({ roots, recipes: recipes, held })
+  const derived = deriveResidualNeeds({ roots, recipes, held })
   assert.equal(derived.ok, true, JSON.stringify(derived))
   const found = (resource, x) => ({ resource, state: 'found', x, y: 8.5, distance: 192.7 + x / 100, radius: 1024 })
   for (const row of derived.rows) {

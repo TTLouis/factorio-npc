@@ -121,7 +121,7 @@ describe('mining reach recovery', () => {
       const target = { ...f.resource, type: 'tree', unit_number: undefined,
         prototype: { is_building: false, mineable_properties: { minable: true } },
         selection_box: { left_top: { x: 1, y: -1 }, right_bottom: { x: 3, y: 1 } } } as any
-      const other = { ...target }, recovered = vi.fn()
+      const other = { ...target }; const recovered = vi.fn()
       if (mode === 'surface') target.surface = { index: 2 }
       if (mode === 'connected') (f.actor as any).status_snapshot = () => ({ actor_id: 42, kind: 'connected_player' })
       vi.mocked(f.actor.update_selected_entity).mockImplementation(() => { f.character.selected = other })

@@ -33,7 +33,7 @@ test('acknowledgementLine: from the goal text and route only, no world or comple
   assert.deepEqual(ACK_INTENTS, ['new_goal', 'amend_current', 'continue_current'])
   const line = acknowledgementLine({ text: STEAM_REQUEST_TEXT, intent: 'new_goal' })
   assert.match(line, /^Heard you\. I will start on: "Can you get steam power going/)
-  assert.doesNotMatch(line, /\b(done|complete[d]?|finished|built|placed|crafted|verified)\b/i)
+  assert.doesNotMatch(line, /\b(done|completed?|finished|built|placed|crafted|verified)\b/i)
   assert.match(acknowledgementLine({ text: 'make it faster', intent: 'amend_current' }), /^Heard you\. I will adjust the current goal: "make it faster"/)
   assert.match(acknowledgementLine({ text: 'continue', intent: 'continue_current' }), /pick the current goal back up/)
   // Routes that answer at once get no acknowledgement of their own.
@@ -42,7 +42,7 @@ test('acknowledgementLine: from the goal text and route only, no world or comple
   }
   // Rich text and quotes in the player's words are echoed as plain text,
   // long goals are cut.
-  const rich = acknowledgementLine({ text: '[color=red]build[/color] "a" [item=iron-plate] ' + 'x'.repeat(300), intent: 'new_goal' })
+  const rich = acknowledgementLine({ text: `[color=red]build[/color] "a" [item=iron-plate] ${  'x'.repeat(300)}`, intent: 'new_goal' })
   assert.doesNotMatch(rich, /\[|"a"/)
   assert.ok(rich.length < 240, `bounded line, got ${rich.length}`)
   assert.match(rich, /\.\.\."\. I will share/)

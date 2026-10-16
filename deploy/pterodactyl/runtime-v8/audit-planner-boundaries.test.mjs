@@ -227,7 +227,7 @@ function adapter(argumentsText, finish = 'content_filter') {
 }
 
 test('real adapter filtered valid and salvageable submitPlan replies produce no executable plan', async () => {
-  for (const args of [submitted, submitted.slice(0, -1) + ',"checkpoint"::']) {
+  for (const args of [submitted, `${submitted.slice(0, -1)  },"checkpoint"::`]) {
     const world = harness(INVENTORY_RESEARCH, { provider: adapter(args), reserve: async () => ({}) })
     world.agent.active = true
     world.agent.epoch = world.game.status

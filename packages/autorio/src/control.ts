@@ -405,7 +405,7 @@ function operation_preflight(name: string, args: Record<string, any>) {
         resource_search: { radius, position: source.position, amount: source.amount } })
     }
     if (!actor || !actor.is_valid) return reject('no_actor')
-    const x = args.x, y = args.y, count = args.count ?? 1
+    const x = args.x; const y = args.y; const count = args.count ?? 1
     if (typeof x !== 'number' || typeof y !== 'number' || x !== x || y !== y || math.abs(x) === math.huge || math.abs(y) === math.huge) {
       return reject('invalid_resource_position')
     }

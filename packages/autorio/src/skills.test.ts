@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   assert_safe_skill_id,

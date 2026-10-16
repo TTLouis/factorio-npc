@@ -178,7 +178,7 @@ test('configured CLI-proxy full loop clears copper output, smelts and collects f
   const proof = await provider.verifyCliProxyProviderContracts(config, { requestId: 'fixture_full_loop_preflight' })
   assert.equal(proof.event, 'provider.cli_proxy_contract_verified')
   const game = new IronBootstrapGame({ inventory: { 'iron-plate': 8 }, furnace: { output: { 'copper-plate': 10 }, source: { 'iron-ore': 50 }, fuel: { wood: 8 } } })
-  const model = new ScriptedModel(), wires = []
+  const model = new ScriptedModel(); const wires = []
   const connection = bridge(config, async (_url, options) => {
     const body = JSON.parse(options.body)
     wires.push(body)
@@ -188,7 +188,7 @@ test('configured CLI-proxy full loop clears copper output, smelts and collects f
   const world = recoveryWorld({ game, model, agentRoleConfig: config, roleProvider: (messages, context) => { connection.currentContext = context; return connection.roleProvider(messages, context) } })
   const { session, logs } = recoverySession(world)
   const ctx = { game, model, world, session }
-  const checkpoint = inventoryCheckpoint('iron-plate', 58), step = 'Clear the copper output, smelt the iron ore and collect fifty iron plates'
+  const checkpoint = inventoryCheckpoint('iron-plate', 58); const step = 'Clear the copper output, smelt the iron ore and collect fifty iron plates'
   const decision = operations => ({ chatMessage: '', stepId: world.agent.targetedObservationIdentity().data.stepId, operations })
   let identity, allowance, budget
   model.push('planner', 'sol:iron-bootstrap', planReply({ plan: [step], currentStep: 0, operations: [], checkpoint,

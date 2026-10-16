@@ -327,6 +327,8 @@ test('a recipe_locked refusal gets no correction turn and ends in exactly one gu
   assert.equal(w.calls.length, 3, 'planner, observation, the refused batch: no correction turn')
   assert.equal(noCorrection(w).length, 0)
   assert.equal(result.blocker.code, 'recipe_locked')
+  assert.equal(result.goalStatus, 'blocked')
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
   const record = w.memory.pauseRecord(KEY)
   assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, 'blocked_recipe_locked', 'guard'])
   assert.equal(w.named('goal.paused').length, 1)
@@ -417,7 +419,6 @@ const SUPPLY_MISSING = {
 const SUPPLY_ONLY_BATCH = () => [supply([{ item_name: 'coal', count: 10 }])]
 const supplyEntity = text => text.includes("'supply_entity'")
 const blockedEnds = w => w.named('operations.blocked_end_classified')
-const recoveryEvents = w => w.rows.filter(row => row.event.startsWith('recovery.auto_resume'))
 
 // Schedules (or declines) the supervisor's decision on the pause the request left, with the recovery rows captured.
 async function superviseOnce(w) {
@@ -594,7 +595,7 @@ test('unit 13: a repeating executor refusal is bounded end to end: two restages,
   assert.equal(ends.every(row => row.data.pause_class === 'model_recoverable' && row.data.reason === 'argument_refusal_after_retry'), true)
   assert.equal(w.named('operations.blocked_end_paused').length, 0)
   // Every restaged executor got its own argument correction turn before its refusal ended the request: one per request, three in all.
-  assert.deepEqual(w.named('operations.preflight_recoverable').map(row => row.data.failure_class), Array(3).fill('model_correctable_unknown_prototype'))
+  assert.deepEqual(w.named('operations.preflight_recoverable').map(row => row.data.failure_class), Array.from({length: 3}).fill('model_correctable_unknown_prototype'))
   assert.equal(new Set(w.named('operations.preflight_recoverable').map(row => row.request_id)).size, 3)
   assert.equal(rows('operations.refusal_budget_reset').length, 2, 'one reset per restage')
 

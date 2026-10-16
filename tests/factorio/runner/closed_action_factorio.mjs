@@ -17,7 +17,7 @@ import { planReply, jevContractLog } from '../pterodactyl/runtime-v8/task-loop-f
 globalThis.fetch = async () => { throw new Error('uninjected inference forbidden in closed-action fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const transcript = [], sent = [], wire = [], wireFaults = []
+const transcript = []; const sent = []; const wire = []; const wireFaults = []
 let connection, ctx, furnaceUnit
 const rcon = { command: async (command, options) => {
   const answer = await connection.command(command, options)
@@ -25,7 +25,7 @@ const rcon = { command: async (command, options) => {
   if (command.includes('local ok,result=pcall') && command.includes('"authorize"')) sent.push(command)
   return answer
 } }
-const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
+const lua = async body => JSON.parse(await rcon.command(`/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ${  body}`))
 const snapshot = () => lua(`local o=remote.call("autorio_operations","status"); local s=a.surface;
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end;
   local machines={}; for _,e in pairs(s.find_entities_filtered{force=a.force,type={"furnace","mining-drill"}}) do machines[#machines+1]={name=e.name,unit_number=e.unit_number,position=e.position} end;

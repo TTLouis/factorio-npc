@@ -1503,7 +1503,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       this.recordLocators(key, state, {
         durableOperations: incomingDurableOperations,
         exactTargetAudit: incomingExactTargetAudit,
-        previousExactTargetAudit: previousExactTargetAudit,
+        previousExactTargetAudit,
       })
       // A batch of operations resumes a paused run, drops any condition wait
       // and any provider recovery (both were for the previous request).
@@ -1539,7 +1539,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       this.recordLocators(key, state, {
         durableOperations: [],
         exactTargetAudit: incomingExactTargetAudit,
-        previousExactTargetAudit: previousExactTargetAudit,
+        previousExactTargetAudit,
       })
       this.recordRunResume(key, state, 'plan_recorded')
       this.writeRunField(key, state, 'persistent_runtime', runtime)
@@ -1562,7 +1562,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     this.recordLocators(key, state, {
       durableOperations: [],
       exactTargetAudit: incomingExactTargetAudit,
-      previousExactTargetAudit: previousExactTargetAudit,
+      previousExactTargetAudit,
     })
 
     if (verifiedCompletion) {
@@ -9275,7 +9275,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // is staged only as the fallback for a refused restage.
     const resumeAfterBudgetPause = intent === 'continue_current'
       && planBefore?.status === 'paused'
-      && /^(request_output_ceiling|provider_output_budget_exhausted|recoverable_provider_failure:provider_budget)\b/.test(String(planBefore.pause_reason ?? ''))
+      && /^(?:request_output_ceiling|provider_output_budget_exhausted|recoverable_provider_failure:provider_budget)\b/.test(String(planBefore.pause_reason ?? ''))
     let pendingStartRestage
     if (resumeProviderBudgetHandoff || resumeAfterBudgetPause) {
       const recovery = planBefore.provider_recovery
@@ -11291,8 +11291,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (typeof readFence === 'function') await readFence()
     if (this.messages.length > before) {
       const message = this.messages.at(-1)
-      message.content = message.content.replace('Do not request another read-only observation;', 'Normal observation tools remain closed;')
-        + '\nFollow the current CONTROL_DECISION_STATE for any eligible bounded fact request.'
+      const closedObservationContent = message.content.replace('Do not request another read-only observation;', 'Normal observation tools remain closed;')
+      message.content = `${closedObservationContent}\nFollow the current CONTROL_DECISION_STATE for any eligible bounded fact request.`
     }
   }
 
@@ -11349,7 +11349,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair, allowTools = false }) {
+  async handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, allowTools = false }) {
     let intent
     try { intent = JSON.parse(message.content) } catch { return undefined }
     if (!intent || !Object.hasOwn(intent, 'observationRequest')) return undefined
@@ -12537,7 +12537,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || this.memory.pendingOperation?.(identity.key) || identity.state?.admission_status === 'admission_failed') return
     const current = this.localSearchScope()
     const matches = row => this.currentLocalSearchObservation(row, current)
-    const water = this.localFluidSearchObservation, pump = this.localPumpSearchObservation
+    const water = this.localFluidSearchObservation; const pump = this.localPumpSearchObservation
     if (!matches(water) || !matches(pump)
       || Math.abs(water.fact.actor_position.x - pump.fact.center.x) > 0.01
       || Math.abs(water.fact.actor_position.y - pump.fact.center.y) > 0.01) return
@@ -15056,7 +15056,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           operations: operations.map((operation, index) => ({ ...operation, preflight: preflight[index] })),
         })
       }
-      catch (error) {
+      catch (caughtError) {
+        let error = caughtError
         if (!error?.preflight) throw error
         if (error.preflight.code === STEP_CONTRACT_PENDING_CODE) {
           // Backstop: a restart between the step close and the bind, or a resumed task, reaches an active step with no

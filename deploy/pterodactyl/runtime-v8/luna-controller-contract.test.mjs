@@ -306,7 +306,7 @@ test('a mixed deterministic and semantic execution draft is refused with semanti
 test('assessmentOnly keeps its all-semantic no-operation slice, still refuses operations, and an unmarked all-semantic draft keeps its own code', async () => {
   const steps = ['Assess the copper patch']
   const semantic = [{ kind: 'semantic', rationale: 'Assess the available copper patch from observations.' }]
-  const assessed = harness((call, memory) => call === 1
+  const assessed = harness(call => call === 1
     ? draft({ plan: steps, operations: [], assessmentOnly: true, stepCompletions: semantic })
     : { plan: steps, currentStep: 0, operations: [], chatMessage: 'BLOCKED: A fresh patch observation is still needed.' })
   await assert.rejects(assessed.agent.request('Assess the copper patch.', { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
@@ -747,7 +747,7 @@ test('the declared semantic-to-deterministic transition on a committed plan admi
 
 test('run C: an unverified blocker gets one fresh handoff and can admit a grounded operation', async () => {
   const world = harness(call => call === 1 ? draft({ operations: [] }) : call === 2
-    ? { plan: ['Gather ten copper ore'], currentStep: 0, operations: [], chatMessage: 'BLOCKED: no copper ore in the local scan. ' + 'The source location is unverified. '.repeat(40) }
+    ? { plan: ['Gather ten copper ore'], currentStep: 0, operations: [], chatMessage: `BLOCKED: no copper ore in the local scan. ${  'The source location is unverified. '.repeat(40)}` }
     : { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)] })
   await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
   assert.equal(world.calls.length, 3)

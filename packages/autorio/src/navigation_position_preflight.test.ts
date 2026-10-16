@@ -24,7 +24,7 @@ it('refuses a goal circle entirely inside a furnace/character collision expansio
 })
 
 it('does not invent obstruction proofs for noncolliding, invalid or diagonally rotated targets', () => {
-  const f = fixture(), args = { x: 16, y: -96 }
+  const f = fixture(); const args = { x: 16, y: -96 }
   f.furnace.prototype.collision_mask = { layers: { object: true } } as any
   expect(navigation_position_preflight(f.actor, args)).toMatchObject({ ok: true })
   f.furnace.prototype.collision_mask = f.character.prototype.collision_mask
@@ -32,13 +32,13 @@ it('does not invent obstruction proofs for noncolliding, invalid or diagonally r
   expect(navigation_position_preflight(f.actor, args)).toMatchObject({ ok: true })
   f.furnace.direction = 0; f.furnace.valid = false
   expect(navigation_position_preflight(f.actor, args)).toMatchObject({ ok: true })
-  f.furnace.valid = true; f.furnace.bounding_box.left_top.x = NaN
+  f.furnace.valid = true; f.furnace.bounding_box.left_top.x = Number.NaN
   expect(navigation_position_preflight(f.actor, args)).toMatchObject({ ok: true })
 })
 
 it('validates actor, finite position and native reach bounds before scanning', () => {
   const f = fixture()
-  for (const args of [{ x: NaN, y: 0 }, { x: 0, y: Infinity }, { x: 0, y: 0, reach_distance: 0.1 }, { x: 0, y: 0, reach_distance: 65 }]) {
+  for (const args of [{ x: Number.NaN, y: 0 }, { x: 0, y: Infinity }, { x: 0, y: 0, reach_distance: 0.1 }, { x: 0, y: 0, reach_distance: 65 }]) {
     expect(navigation_position_preflight(f.actor, args).ok).toBe(false)
   }
   expect(navigation_position_preflight(undefined, { x: 0, y: 0 }).ok).toBe(false)

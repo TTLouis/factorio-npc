@@ -17,7 +17,7 @@ let forbiddenFetchCalls = 0
 globalThis.fetch = async () => { forbiddenFetchCalls++; throw new Error('uninjected inference forbidden in normal-observation fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const transcript = [], sent = [], wire = [], wireFaults = [], seen = {}
+const transcript = []; const sent = []; const wire = []; const wireFaults = []; const seen = {}
 const preflight = {}
 let connection, ctx, unit, initialNativeReads
 const rcon = { command: async (command, options) => {
@@ -26,7 +26,7 @@ const rcon = { command: async (command, options) => {
   if (command.includes('local ok,result=pcall') && command.includes('"authorize"')) sent.push(command)
   return answer
 } }
-const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces["normal-observation"].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
+const lua = async body => JSON.parse(await rcon.command(`/silent-command local a=game.surfaces["normal-observation"].find_entities_filtered{name="character"}[1]; assert(a); ${  body}`))
 const snapshot = () => lua(`local o=remote.call("autorio_operations","status"); local f;
   for _,e in pairs(a.surface.find_entities_filtered{force=a.force,name="stone-furnace"}) do if e.unit_number==${unit} then f=e; break end end; assert(f and f.valid,"declared furnace identity missing");
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end;

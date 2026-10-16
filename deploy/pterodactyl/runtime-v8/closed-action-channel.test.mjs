@@ -66,7 +66,7 @@ class HeldFurnaceGame extends FurnaceFactorio {
 
 function fixture(t) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new HeldFurnaceGame(), model = new ScriptedModel(), wire = []
+  const game = new HeldFurnaceGame(); const model = new ScriptedModel(); const wire = []
   const bridge = Object.create(Session.prototype)
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only',
     OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'local', OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' })
@@ -125,7 +125,7 @@ function assertClosed(ctx, messages) {
 }
 
 test('Run Q: C7 resume, one ordinary typed inventory read, closed JSON placement, fresh identity and smelting finish the unchanged goal', async t => {
-  const ctx = fixture(t), { model, world, game } = ctx
+  const ctx = fixture(t); const { model, world, game } = ctx
   let beforeInventory, unit
   model.push('planner', 'sol:commit', ctx.planner)
     .push('executor', 'luna:captured-unverified-blocker', ctx.bad, 2)
@@ -224,7 +224,7 @@ test('Run Q: C7 resume, one ordinary typed inventory read, closed JSON placement
 })
 
 test('Run Q exact blocker remains rejected and two step resumes cannot create a machine or waive the checkpoint', async t => {
-  const ctx = fixture(t), { model, game, world } = ctx
+  const ctx = fixture(t); const { model, game, world } = ctx
   assert.match(badReply.chatMessage, /tools are closed so I cannot place it/)
   model.push('planner', 'sol:commit', ctx.planner).push('executor', 'luna:captured-blocker', ctx.bad, 4)
   await ctx.start()
@@ -245,7 +245,7 @@ test('Run Q exact blocker remains rejected and two step resumes cannot create a 
 })
 
 for (const boundary of ['stop', 'epoch']) test(`Run Q closed proposal after ${boundary} cannot reach admission`, async t => {
-  const ctx = fixture(t), { model, world, game } = ctx
+  const ctx = fixture(t); const { model, world, game } = ctx
   let boundaryReached = false
   model.push('planner', 'sol:commit', ctx.planner)
     .push('executor', 'luna:close-normal-budget', ctx.normalReads)

@@ -231,7 +231,7 @@ test('C3: the commit hands the slice to a fresh executor built from the packet p
   // The executor's rounds are attributed to it; the planner's to it.
   const requestRows = world.rows('provider.request')
   assert.deepEqual(requestRows.map(row => row.data.role), [undefined, 'executor', 'executor', 'executor', 'planner'])
-  assert.deepEqual(requestRows.slice(1, 4).map(row => row.data.handoff_id), Array(3).fill(restaged[0].data.handoff_id))
+  assert.deepEqual(requestRows.slice(1, 4).map(row => row.data.handoff_id), Array.from({length: 3}).fill(restaged[0].data.handoff_id))
   assert.equal(requestRows[4].data.handoff_id, parked.data.handoff_id)
   assert.equal(analyzeBehaviorTrace(world.trace).findings.filter(finding => ['restage_loop', 'restage_packet_oversize', 'stale_reply_not_dropped'].includes(finding.signature)).length, 0)
 })

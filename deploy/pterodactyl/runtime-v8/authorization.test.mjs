@@ -485,7 +485,7 @@ test('MW1: a stale grant is refused when a replacement is requested, with a name
 test('MW1: a replacement commits only while its grant is current; a stale grant is refused at commit and the draft stays uncommitted', () => {
   const blocked = blockedState(STANDING_AUTO)
   const drafted = applyPlanningEvent(blocked, request(blocked, STANDING_AUTO))
-  const draft = getActivePlan(drafted)
+  assert.ok(getActivePlan(drafted), 'replacement draft exists before admission checks')
   const commit = (state, gc) => applyPlanningEvent(state, { type: PLANNING_EVENT.PLAN_COMMITTED, now: 2100, plan_id: state.active_plan_id, runtime_validation: { passed: true }, ...(gc ? { grant_check: gc } : {}) })
 
   // The positive case first: current grant, same actor and epoch -> commits, and the lineage is frozen with the steps.

@@ -801,7 +801,7 @@ test('a fresh draft with currentStep 1 and a bare deterministic entry at index 0
 })
 
 function runPWireWorld({ replayBoth = false, onCorrection } = {}) {
-  const craftStep = runP.committed_steps[2], placementStep = runP.committed_steps[3]
+  const craftStep = runP.committed_steps[2]; const placementStep = runP.committed_steps[3]
   const placement = { mode: 'all', requirements: ['offshore-pump', 'boiler'].map((prototype, i) => ({ id: `placed_${i}`, kind: 'entity_count', prototype, minimum: 1 })) }
   const placed = new Map()
   const wireFaults = []
@@ -864,7 +864,7 @@ test('Run P wire full loop: completed craft -> canonical Sol checkpoint correcti
   const world = runPWireWorld()
   await world.commit()
   const initial = world.tracker()
-  const goalId = initial.goal_id, planId = initial.plan_id
+  const goalId = initial.goal_id; const planId = initial.plan_id
   assert.equal(world.game.mutations.length, 1, 'only the crafting batch before its completion')
   await world.agent.completed()
   assert.deepEqual(world.wireFaults, [], 'the actual serialized contract request must not inject gameplay output instructions')

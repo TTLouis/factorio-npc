@@ -86,13 +86,18 @@ export function parseAdmittedOperations(text) {
   for (const call of calls) {
     const rest = text.slice(call.index + call[0].length)
     const name = call[1]
-    let match
-    if (name === 'gather_resource' && (match = /^'([^']+)',(\d+),(\d+)\)/.exec(rest))) operations.push({ name, args: { resource_name: match[1], count: Number(match[2]) } })
-    else if (name === 'supply_entity' && (match = /^(\d+),\{(.*?)\}\)/.exec(rest))) {
+    const patterns = {
+      gather_resource: /^'([^']+)',(\d+),(\d+)\)/,
+      supply_entity: /^(\d+),\{(.*?)\}\)/,
+      move_items_exact: /^'([^']+)',(\d+),(\d+),(true|false)\)/,
+    }
+    const match = Object.hasOwn(patterns, name) ? patterns[name].exec(rest) : undefined
+    if (name === 'gather_resource' && match) operations.push({ name, args: { resource_name: match[1], count: Number(match[2]) } })
+    else if (name === 'supply_entity' && match) {
       const items = [...match[2].matchAll(/item_name='([^']+)',count=(\d+)/g)].map(item => ({ item_name: item[1], count: Number(item[2]) }))
       operations.push({ name, args: { unit_number: Number(match[1]), items } })
     }
-    else if (name === 'move_items_exact' && (match = /^'([^']+)',(\d+),(\d+),(true|false)\)/.exec(rest))) {
+    else if (name === 'move_items_exact' && match) {
       operations.push({ name, args: { item_name: match[1], unit_number: Number(match[2]), max_count: Number(match[3]), to_entity: match[4] === 'true' } })
     }
     else operations.push({ name, args: { raw: rest.slice(0, 80) } })

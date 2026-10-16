@@ -1422,7 +1422,7 @@ export function nearestShelfRefinementTarget(state) {
  * A slice's verified results establish progress. They cannot establish the
  * broader shelf intent when that node declares no recognition evidence.
  */
-function attachPlanResultsToShelf(roadmap, { nodeIds, planId, results, satisfiedRecognitionIds, status, now }) {
+function attachPlanResultsToShelf(roadmap, { nodeIds, planId, results, satisfiedRecognitionIds, now }) {
   if (!roadmap) return roadmap
   const targets = new Set(nodeIds ?? [])
   if (targets.size === 0) return roadmap

@@ -257,7 +257,7 @@ test('a pending amendment and an out-of-range current step are not salvaged', as
 
 test('a real plan in code fences or with prose around it beats a stray call', async () => {
   const plan = { chatMessage: '', plan: ['Mine fuel'], currentStep: 0, operations: [], checkpoint: { mode: 'all', requirements: [] } }
-  for (const content of ['```json\n' + JSON.stringify(plan) + '\n```', 'Here is my plan: ' + JSON.stringify(plan) + ' done']) {
+  for (const content of [`\`\`\`json\n${  JSON.stringify(plan)  }\n\`\`\``, `Here is my plan: ${  JSON.stringify(plan)  } done`]) {
     const { agent } = agentWithPlan()
     assert.equal(await agent.salvageClosedRoundCalls({ content }, OP, ctx), undefined, content.slice(0, 20))
   }

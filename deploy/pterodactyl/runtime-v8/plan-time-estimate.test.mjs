@@ -483,7 +483,7 @@ test('slice time splits are non-overlapping deltas that add up to the request sp
   assert.deepEqual([second.wall_ms, second.think_ms, second.actor_busy_ms, second.idle_ms], [300_000, 30_000, 200_000, 70_000])
   const total = timing.timeSplit()
   for (const field of ['wall_ms', 'think_ms', 'actor_busy_ms', 'idle_ms']) {
-    assert.equal(first[field] + second[field], total[field], field + ' adds up')
+    assert.equal(first[field] + second[field], total[field], `${field  } adds up`)
   }
   // A new request starts its own mark at its own start.
   clock = 700_000

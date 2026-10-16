@@ -20,7 +20,7 @@ const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >
 const mode = arg('mode')
 assert.ok(['recovery', 'prefix', 'destroyed'].includes(mode))
 const results = path.resolve(arg('results'))
-const transcript = [], sent = [], wire = [], wireFaults = [], seen = {}
+const transcript = []; const sent = []; const wire = []; const wireFaults = []; const seen = {}
 let connection, ctx, intended, decoy, freshUnit
 const historical = { x: 11, y: -62 }
 const rcon = { command: async (command, options) => {
@@ -29,7 +29,7 @@ const rcon = { command: async (command, options) => {
   if (command.includes('local ok,result=pcall') && command.includes('"authorize"')) sent.push(command)
   return answer
 } }
-const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces["local-transfer"].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
+const lua = async body => JSON.parse(await rcon.command(`/silent-command local a=game.surfaces["local-transfer"].find_entities_filtered{name="character"}[1]; assert(a); ${  body}`))
 const snapshot = () => lua(`local o=remote.call("autorio_operations","status"); local s=a.surface;
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end;
   local machines={}; for _,e in pairs(s.find_entities_filtered{force=a.force,name="stone-furnace"}) do machines[#machines+1]={unit_number=e.unit_number,position=e.position,
@@ -266,7 +266,7 @@ try {
     assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
     seen.walked = walk
     seen.smelted = await until('ten native intended-furnace copper plates', async () => {
-      const s = await snapshot(), target = s.machines.find(row => row.unit_number === intended)
+      const s = await snapshot(); const target = s.machines.find(row => row.unit_number === intended)
       return target?.output['copper-plate'] === 10 && s.electronics ? s : false
     })
     await completion()
@@ -297,7 +297,7 @@ try {
       assert.deepEqual(world.named('transfer.supply_recovery'), [])
     }
   }
-  const after = await idle(), untouched = after.machines.find(row => row.unit_number === decoy)
+  const after = await idle(); const untouched = after.machines.find(row => row.unit_number === decoy)
   assert.ok(untouched)
   assert.deepEqual(untouched.output, {}); assert.deepEqual(untouched.source, {}); assert.deepEqual(untouched.fuel, {})
   assert.equal(after.actor_id, before.actor_id)

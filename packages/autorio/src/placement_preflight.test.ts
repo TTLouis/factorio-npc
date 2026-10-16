@@ -25,7 +25,7 @@ describe('current held placement item preflight', () => {
     expect(placement_item_preflight(undefined, 'placement-test-machine')).toMatchObject({ ok: false, code: 'no_actor' })
     expect(placement_item_preflight({ is_valid: false } as any, 'placement-test-machine')).toMatchObject({ code: 'no_actor' })
     expect(placement_item_preflight({ is_valid: true, get_main_inventory: () => undefined } as any, 'placement-test-machine')).toMatchObject({ code: 'no_inventory' })
-    for (const count of [undefined, '2', NaN, Infinity, -Infinity, -1, 1.5, 9007199254740992]) {
+    for (const count of [undefined, '2', Number.NaN, Infinity, -Infinity, -1, 1.5, 9007199254740992]) {
       const actor = { is_valid: true, get_main_inventory: () => ({ get_item_count: () => count }) } as any
       expect(placement_item_preflight(actor, 'placement-test-machine')).toMatchObject({ ok: false, code: 'placement_item_unreadable' })
     }

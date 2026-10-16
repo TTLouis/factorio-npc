@@ -152,3 +152,14 @@ test('MW1 reserve: the supervisor handles the command itself - no model call, no
   assert.match(chat.at(-1), /Released wooden-chest #900/)
   assert.equal(requests, 0)
 })
+
+
+test('reserve syntax keeps whitespace and punctuation semantics without overlapping whitespace retries', () => {
+  for (const action of ['reserve', 'unreserve']) {
+    for (const suffix of ['', ' ', '.', '!', ' \t. \n', '\n!\t']) {
+      assert.deepEqual(parseReserveCommand(`${action} the chest${suffix}`), { action: action === 'reserve' ? 'reserve' : 'release' })
+    }
+    assert.equal(parseReserveCommand(`${action}${' '.repeat(32768)}?`), null)
+    assert.equal(parseReserveCommand(`${action} chest!!`), null)
+  }
+})

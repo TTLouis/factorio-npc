@@ -1,5 +1,4 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
-export { completionFinalizationDecision } from './completion-finalization.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
@@ -28,16 +27,6 @@ import {
   isStepContractPending,
   STEP_CONTRACT_PENDING_CODE,
   STEP_CONTRACT_STATUS,
-} from './planning-state.mjs'
-import { duplicateEffectGuard, operationSignature } from './operation-reconciliation.mjs'
-import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
-import {
-  mostRecentResumable,
-  taskLedgerOf,
-  taskLedgerView,
-  TASK_LEDGER_REFUSAL,
-} from './task-ledger.mjs'
-import {
   applyPlanningEvent,
   autoResumeAllowance,
   createEmptyPlanningState,
@@ -53,6 +42,15 @@ import {
   STEERING_BOUNDARY,
   steeringContextForDraft,
 } from './planning-state.mjs'
+import { operationSignature } from './operation-reconciliation.mjs'
+import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
+import {
+  mostRecentResumable,
+  taskLedgerOf,
+  taskLedgerView,
+  TASK_LEDGER_REFUSAL,
+} from './task-ledger.mjs'
+export { completionFinalizationDecision } from './completion-finalization.mjs'
 
 // Which reducer event carries each legacy run field.
 const RUN_FIELD_EVENTS = Object.freeze({
@@ -1580,7 +1578,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   /** Harness-owned: surface a legacy operation record that no evidence can settle as a question the user can answer. */
-  raiseOperationEffectQuestion(key, record, { reason, requestId } = {}) {
+  raiseOperationEffectQuestion(key, record, { reason } = {}) {
     const before = authorizationOf(this.planningState(key)).questions.length
     const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.OPERATION_EFFECT_QUESTION_RAISED, source: 'runtime', now: Date.now(),
       operation_key: record?.operation_key, reason })

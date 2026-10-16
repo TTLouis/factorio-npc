@@ -32,6 +32,7 @@ export default antfu(
     files: [
       'deploy/**/*.mjs',
       'tools/**/*.mjs',
+      'tests/factorio/runner/**/*.mjs',
     ],
     rules: {
       // These files are direct Node.js runtimes/CLIs, not browser-bundled code.
@@ -90,6 +91,21 @@ export default antfu(
           destructuredArrayIgnorePattern: '^_',
         },
       ],
+    },
+  },
+  {
+    files: ['deploy/**/*.test.mjs', 'deploy/**/*-fixtures.mjs', 'tests/factorio/runner/**/*.mjs'],
+    rules: {
+      // Fixture callbacks run after their enclosing setup has initialized.
+      // Keep same-scope temporal-dead-zone checks; allow outer-scope closures.
+      'no-use-before-define': ['error', { functions: false, classes: false, variables: false }],
+    },
+  },
+  {
+    files: ['tests/factorio/runner/**/*.mjs'],
+    rules: {
+      // Standalone Node ESM entry points deliberately await their scenario.
+      'antfu/no-top-level-await': 'off',
     },
   },
   {

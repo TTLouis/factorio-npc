@@ -1,4 +1,3 @@
-import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { drain_push_queue, KNOWLEDGE_CHUNK_RADIUS, observe_window, pull_engine_chart, queue_full_push } from './map_knowledge'
 import { new_npc_vision_controller } from './npc_vision'

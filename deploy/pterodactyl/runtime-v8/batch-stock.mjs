@@ -222,6 +222,7 @@ function sortedUnique(values) {
  * @param {Array<object>} [input.preflight] the mod's preflight result per operation (same index); facts only
  * @param {Map<string, number>} input.inventory the observed main inventory of the actor
  * @param {Array<object>} [input.recipes] recipe facts (handoff cache entries)
+ * @param {boolean} [input.checkIsolation] whether to check isolated operation stock
  * @param {Set<string>} [input.noRecipeItems] items the game was read to have no recipe for
  */
 export function evaluateBatchStock({ operations, preflight = [], inventory, recipes = [], noRecipeItems, checkIsolation = true }) {

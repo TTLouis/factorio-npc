@@ -33,7 +33,7 @@ function harness({ provider, maxContinuations, delegated = false } = {}) {
     rcon: game,
     memory,
     ...(maxContinuations === undefined ? {} : { maxContinuations }),
-    provider: answersStepContract(async (messages) => {
+    provider: answersStepContract(async () => {
       world.calls++
       assert.ok(world.calls < 20, 'slice scenario did not terminate')
       return provider(world.calls, world)

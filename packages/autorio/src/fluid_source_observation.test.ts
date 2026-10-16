@@ -34,7 +34,7 @@ describe('native fluid-bearing tile observation', () => {
     const { actor, surface } = fixture()
     expect(fluid_source_observation(undefined, { fluid_name: 'modded-fluid' })).toMatchObject({ code: 'no_actor' })
     expect(fluid_source_observation(actor, { fluid_name: 'unknown' })).toMatchObject({ code: 'unknown_fluid' })
-    for (const search_radius of [0, -1, 257, 1.5, Infinity, NaN]) expect(fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius })).toMatchObject({ code: 'invalid_fluid_source_bounds' })
+    for (const search_radius of [0, -1, 257, 1.5, Infinity, Number.NaN]) expect(fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius })).toMatchObject({ code: 'invalid_fluid_source_bounds' })
     for (const limit of [0, 9, 1.5]) expect(fluid_source_observation(actor, { fluid_name: 'modded-fluid', limit })).toMatchObject({ code: 'invalid_fluid_source_bounds' })
     surface.is_chunk_generated.mockReturnValue(false)
     expect(fluid_source_observation(actor, { fluid_name: 'modded-fluid' })).toMatchObject({ ok: false, code: 'fluid_source_search_unexplored', coverage: 'none', coverage_complete: false,

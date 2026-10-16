@@ -1324,7 +1324,7 @@ export class JevCheckpoints {
 
   // Every behavior-trace row passes here. Returns extra rows to write after it. Synchronous and cheap when
   // nothing is waiting.
-  observe(event, data, requestId) {
+  observe(event, data, _requestId) {
     if (!this.enabled || this.trackers.size === 0) return []
     if (event.startsWith('jev.') || event.startsWith('c4.')) return []
     const rows = []

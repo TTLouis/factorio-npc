@@ -14,15 +14,15 @@ import { planReply, jevContractLog } from '../pterodactyl/runtime-v8/task-loop-f
 globalThis.fetch = async () => { throw new Error('inference forbidden in observation-baseline fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const transcript = [], sent = [], observations = [], phases = []
-let connection, ctx, unit, labPosition, call = 0
+const transcript = []; const sent = []; const observations = []; const phases = []
+let connection; let ctx; let unit; let labPosition; let call = 0
 const rcon = { command: async (command, options) => {
   const answer = await connection.command(command, options)
   transcript.push({ command, answer: String(answer) })
   if (command.includes('local ok,result=pcall') && command.includes('"authorize"')) sent.push(command)
   return answer
 } }
-const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
+const lua = async body => JSON.parse(await rcon.command(`/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ${  body}`))
 const snapshot = () => lua(`local f=nil; for _,e in pairs(a.surface.find_entities_filtered{type="furnace",force=a.force}) do if e.unit_number==${unit} then f=e end end; assert(f);
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end;
   local o=remote.call("autorio_operations","status"); local labs={}; for _,e in pairs(a.surface.find_entities_filtered{name="lab",force=a.force}) do labs[#labs+1]={unit_number=e.unit_number,position=e.position,energy=e.energy} end;
@@ -96,7 +96,7 @@ function plateBill(recipes, name, count = 1, visiting = new Set()) {
   assert.ok(recipe, `missing native recipe in lab bill: ${name}`)
   const product = recipe.products.find(row => row.type === 'item' && row.name === name)
   assert.ok(product && Number.isInteger(product.amount) && product.amount > 0 && (product.probability ?? 1) === 1)
-  const crafts = Math.ceil(count / product.amount), bill = {}, ancestors = new Set([...visiting, name])
+  const crafts = Math.ceil(count / product.amount); const bill = {}; const ancestors = new Set([...visiting, name])
   for (const ingredient of recipe.ingredients) {
     assert.equal(ingredient.type, 'item')
     for (const [plate, amount] of Object.entries(plateBill(recipes, ingredient.name, crafts * ingredient.amount, ancestors))) bill[plate] = (bill[plate] ?? 0) + amount
@@ -119,7 +119,7 @@ const model = new ScriptedModel()
   .push('executor', 'luna:observe-copper-output', observe())
   .push('executor', 'luna:mixed-source-refusal', messages => { fullPair(messages, 'before-C7'); return conflict() })
   .push('executor', 'luna:repeat-mixed-source-refusal', () => conflict())
-  .push('executor', 'luna:C7-observe-same-world', messages => {
+  .push('executor', 'luna:C7-observe-same-world', () => {
     assert.ok(ctx.world.trace.some(row => row.event === 'context.restaged' && row.data.checkpoint === 'C7'))
     assert.equal(sent.length, 1, 'neither refused batch reached native admission')
     return observe()

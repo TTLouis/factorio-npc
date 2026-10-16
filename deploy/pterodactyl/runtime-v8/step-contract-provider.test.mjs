@@ -29,7 +29,7 @@ test('checkpoint side calls deliver canonical schema without gameplay steering/c
     const captured = []
     const reply = await providerRequest(config, messages, { ...options, fetchImpl: transport(captured) })
     assert.equal(parseStepContractReply(reply.content, { stepId: 'target' }).ok, true)
-    const body = captured[0], text = body.messages.map(textOf).join('\n')
+    const body = captured[0]; const text = body.messages.map(textOf).join('\n')
     assert.ok(text.includes('[STEP_CONTRACT_OUTPUT]') && text.includes(JSON.stringify(STEP_CONTRACT_SCHEMA)))
     assert.equal(text.includes('[STEERING]'), false)
     assert.equal(text.includes('[CONTROL_OUTPUT]'), false)
@@ -48,7 +48,7 @@ test('checkpoint side calls deliver canonical schema without gameplay steering/c
 test('checkpoint wire contract has request-correlated trace and removes stale gameplay steering on correction', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'step-contract-wire-'))
   try {
-    const traceFile = path.join(dir, 'prompts.jsonl'), captured = []
+    const traceFile = path.join(dir, 'prompts.jsonl'); const captured = []
     await providerRequest(configs[0], [...messages, { role: 'user', content: '[STEERING] stale gameplay guidance [CONTROL_OUTPUT]' },
       { role: 'assistant', content: '{}' }, { role: 'user', content: '[HARNESS] invalid checkpoint; nothing was bound.' }],
     { ...options, fetchImpl: transport(captured), requestId: 'req_contract_wire', promptTraceFile: traceFile })

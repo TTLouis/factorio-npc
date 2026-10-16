@@ -48,7 +48,7 @@ test('undici fetch failures classify as transport from the cause code, and only 
   // The cause message names the host; it is never copied into the fields.
   assert.equal(JSON.stringify(transportTraceFields(fetchFailed())).includes(FAKE_HOST), false)
   // An AggregateError cause (undici's refused connection to several addresses) carries the code on its members.
-  const aggregate = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new AggregateError([Object.assign(new Error('connect'), { code: 'ECONNREFUSED' })]), { code: undefined }) })
+  const aggregate = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new AggregateError([Object.assign(new Error('connect'), { code: 'ECONNREFUSED' })], 'fixture connection failure'), { code: undefined }) })
   assert.equal(failureCauseCode(aggregate), 'ECONNREFUSED')
   assert.equal(transportFailureOf(aggregate)?.subkind, 'transport')
   // No cause at all: the legacy text still places it, and there is no code to report.
@@ -396,7 +396,7 @@ test('exhausting the limit leaves one chat line and one exhausted row, and the r
   assert.equal(exhaustedLines.length, 1)
   assert.equal(run.chat.at(-1), exhaustedLines[0])
   assert.match(exhaustedLines[0], /after 6 automatic retries \(transport\).*did not start/)
-  assert.equal(run.chat.some(line => /^Request failed:/.test(line)), false, 'no second, raw failure line')
+  assert.equal(run.chat.some(line => line.startsWith('Request failed:')), false, 'no second, raw failure line')
   assert.equal(JSON.stringify([run.trace, run.chat, run.logs]).includes(FAKE_HOST), false)
 
   // run-check: the exhaustion is the finding, once; the earlier failures stay informational.

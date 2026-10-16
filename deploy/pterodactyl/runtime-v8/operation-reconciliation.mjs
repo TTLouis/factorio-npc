@@ -403,7 +403,7 @@ export function isLostAcknowledgement(error) {
   const message = error instanceof Error ? error.message : String(error)
   if (/Invalid deployment epoch|Invalid operation batch|Invalid operation acknowledgement marker/i.test(message)) return false
   if (/stale npc actor epoch|NPC actor epoch changed/i.test(message)) return false
-  return /acknowledg(e)?ment missing|Invalid Autorio batch acknowledgement|ECONNRESET|ETIMEDOUT|EPIPE|socket|timed out|timeout|RCON|connection (closed|lost)/i.test(message)
+  return /acknowledge?ment missing|Invalid Autorio batch acknowledgement|ECONNRESET|ETIMEDOUT|EPIPE|socket|timed out|timeout|RCON|connection (?:closed|lost)/i.test(message)
 }
 
 /** The bounded record the reducer persists (every field checked; unknown fields dropped). */

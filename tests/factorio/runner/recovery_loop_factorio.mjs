@@ -253,6 +253,6 @@ main().catch(async error => {
 }).finally(async () => {
   stopTimers()
   await fsp.writeFile(path.join(results, `recovery-${mode}-transcript.json`), JSON.stringify(transcript, null, 2)).catch(() => {})
-  await fsp.writeFile(path.join(results, `recovery-${mode}-behavior.jsonl`), (ctx?.world.trace ?? []).map(row => JSON.stringify(row)).join('\n') + '\n').catch(() => {})
+  await fsp.writeFile(path.join(results, `recovery-${mode}-behavior.jsonl`), `${(ctx?.world.trace ?? []).map(row => JSON.stringify(row)).join('\n')  }\n`).catch(() => {})
   connection?.close()
 })

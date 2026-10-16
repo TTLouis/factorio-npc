@@ -85,7 +85,7 @@ function planTimeLine(stepTimes, planSteps) {
  * @param {Array<{step_id:string, expected_seconds?:number, machine_wait_seconds?:number, elapsed_wall_seconds?:number}>} [args.stepTimes] runtime time records of the closed plan's steps
  * @param {object} [args.timeSplit] the NPC time split of this slice (PlanTiming.sliceTimeSplit); the line is omitted without one
  * @param {object} [args.limits] overrides for VERIFIED_RESULTS_LIMITS
- * @returns {{ text: string, chars: number, dropped: string[], over_limit: boolean, plan_id: string|undefined }}
+ * @returns {{ text: string, chars: number, dropped: string[], over_limit: boolean, plan_id: string|undefined }} the bounded verified-results packet
  */
 export function buildVerifiedResults({ planningState, goalEvaluation, stepTimes = [], timeSplit, limits: limitOverrides } = {}) {
   const limits = { ...VERIFIED_RESULTS_LIMITS, ...limitOverrides }

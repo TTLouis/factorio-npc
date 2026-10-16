@@ -117,7 +117,7 @@ test('the request output ceiling resets per slice against the request-wide count
   assert.deepEqual(state, { used: 22_000, ceiling, remaining: 18_000, exceeded: false })
   assert.equal(sliceCeilingState({ aggregateOutputUnits: 38_000 + 40_001, baseline, ceiling }).exceeded, true)
   // The request-wide comparison would already have tripped at the same reading.
-  assert.equal(60_000 > ceiling, true)
+  assert.equal(ceiling < 60_000, true)
 })
 
 test('slice ceiling helpers tolerate a missing or restarted counter', () => {

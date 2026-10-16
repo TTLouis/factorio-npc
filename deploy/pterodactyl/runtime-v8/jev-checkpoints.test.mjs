@@ -1481,8 +1481,7 @@ test('a shadow Jev that never answers in time leaves provider-call order, messag
 
 
 test('advisory observation families: a round that starts during the wait is caught by the guard after it (the restage is refused, nothing is swapped, the judgment is abandoned); a guard that refuses beforehand spends no call', async () => {
-  let world
-  world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev: scriptedJev({ next_step_route: directAnswer, ...Object.fromEntries(Object.entries(FAMILY_ANSWERS).map(([id, answer]) => [id, restageOnly(answer)])) }, { onCall: (state) => { if (state?.contract === 'restage_observation_families' && world?.armed) world.agent.providerCallsByGeneration.set(world.agent.generation, 1) } }), tokens: SLICE_TOKENS, game: new FactsFactorio() })
+  const world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev: scriptedJev({ next_step_route: directAnswer, ...Object.fromEntries(Object.entries(FAMILY_ANSWERS).map(([id, answer]) => [id, restageOnly(answer)])) }, { onCall: (state) => { if (state?.contract === 'restage_observation_families' && world?.armed) world.agent.providerCallsByGeneration.set(world.agent.generation, 1) } }), tokens: SLICE_TOKENS, game: new FactsFactorio() })
   await world.say() // C3 happens here (shadow stage: nothing waits)
   forceStage(world, 'observation_families', 'advisory')
   const planning = world.memory.planningState(KEY)

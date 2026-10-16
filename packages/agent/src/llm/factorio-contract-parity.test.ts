@@ -63,6 +63,7 @@ describe('canonical Factorio provider contract parity', () => {
     expect(toolsWithPolicy('runtime-v8-only')).toEqual([
       'estimateProductionTime',
       'findSkills',
+      'getFluidSourceTiles',
       'getLocalSpatialObservation',
       'getMiningDetails',
       'getResearchPath',

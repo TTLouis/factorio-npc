@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { DSML_MAX_CALLS, DSML_MAX_CHARS, parseDsmlToolCalls } from './dsml-tool-calls.mjs'
+import { diagnoseDsmlRejection, DSML_MAX_CALLS, DSML_MAX_CHARS, parseDsmlToolCalls } from './dsml-tool-calls.mjs'
 
 const O = '<｜｜DSML｜｜ '
 const C = '</｜｜DSML｜｜ '
@@ -73,4 +73,14 @@ test('does not execute anything: values are data', () => {
 test('the pipe-and-spacing variants the model has emitted still parse', () => {
   const text = '<|DSML|calls><|DSML|invoke name="a"><|DSML|parameter name="k" string="false">1</|DSML|parameter></|DSML|invoke></|DSML|calls>'
   assert.deepEqual(parseDsmlToolCalls(text).calls, [{ name: 'a', args: { k: 1 } }])
+})
+
+
+test('DSML diagnostics preserve opening/closing whitespace variants and reject long near-tags', () => {
+  for (const separator of ['', ' ', '\t\n']) {
+    for (const slash of ['', '/']) {
+      assert.equal(diagnoseDsmlRejection(`<${separator}${slash}${separator}|DSML|tool_calls>`).split('+')[0], 'unrecognized_tag_tool_calls')
+    }
+  }
+  assert.equal(diagnoseDsmlRejection(`<${' '.repeat(32768)}!`), undefined)
 })

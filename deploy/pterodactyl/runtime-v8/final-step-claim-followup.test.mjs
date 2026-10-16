@@ -42,7 +42,7 @@ function harness(game, provider) {
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,
-    provider: async (messages, ...rest) => {
+    provider: async (messages) => {
       calls++
       assert.ok(calls < 10, 'planner loop did not terminate')
       prompts.push(lastConversationMessage(messages))

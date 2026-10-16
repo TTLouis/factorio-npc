@@ -654,7 +654,7 @@ test('an in-turn slice close presents the turn token through restageInTurn, and 
 })
 
 test('a restaged planner lineage restages again at a later slice close and never keeps growing', async () => {
-  const world = plannerHarness({ shelf: false, softLimit: 5000, tokens: call => 6000 })
+  const world = plannerHarness({ shelf: false, softLimit: 5000, tokens: () => 6000 })
   await world.say()
   await world.closeSlice()
   await world.closeSlice()

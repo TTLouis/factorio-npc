@@ -22,7 +22,7 @@ export const RESERVE_COMMAND_STATUS = 'provisional_pending_owner'
 export const RESERVE_NEAREST_RADIUS = 8
 export const RESERVABLE_ENTITY_TYPES = Object.freeze(['container', 'logistic-container'])
 
-const RESERVE_PATTERN = /^\s*(reserve|unreserve)(?:\s+(?:this|that|the))?(?:\s+(?:chest|container|storage))?\s*[.!]?\s*$/i
+const RESERVE_PATTERN = /^\s*(reserve|unreserve)(?:\s+(?:this|that|the))?(?:\s+(?:chest|container|storage))?\s*(?:[.!]\s*)?$/i
 
 /** `{ action: 'reserve' | 'release' }` for a reserve/unreserve command, otherwise null. */
 export function parseReserveCommand(text) {

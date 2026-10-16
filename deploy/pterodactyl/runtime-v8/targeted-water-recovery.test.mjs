@@ -11,7 +11,7 @@ import { providerRequest } from './provider.mjs'
 import { executorProviderToolDefinitions } from './structured-policy.mjs'
 import { normalizeObservationRequest } from './targeted-observation.mjs'
 import { recoveryWorld, recoverySession, ScriptedModel, settle, KEY, assertStrictBoundary } from './recovery-loop-fixtures.mjs'
-import { ShorelineGame, POWER_CHECKPOINT, shorelineDecisionScript, search, decision, walk, finishShoreline, RUN_M_SEARCHES } from './shoreline-recovery-fixtures.mjs'
+import { ShorelineGame, POWER_CHECKPOINT, shorelineDecisionScript, decision, walk, finishShoreline, RUN_M_SEARCHES } from './shoreline-recovery-fixtures.mjs'
 import { planReply } from './task-loop-fixtures.mjs'
 
 const captured = JSON.parse(await fs.readFile(new URL('./fixtures/run-r-shoreline.json', import.meta.url)))
@@ -31,7 +31,7 @@ class WaterGame extends ShorelineGame {
 
 async function loop(t, { afterWater, afterMalformed, corrections, stateFile = null } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new WaterGame(), model = new ScriptedModel(), wire = []
+  const game = new WaterGame(); const model = new ScriptedModel(); const wire = []
   const bridge = Object.create(Session.prototype)
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only',
     OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'local', OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' })
@@ -139,7 +139,7 @@ test('Run R full serialized loop: spent six resumes, pump-only absence, one targ
 // above and the native lane separately prove admission and physical effects.
 function boundary({ stateFile = null, pumpArgs, pumpResult } = {}) {
   const memory = new CanonicalTaskBoardMemory(); memory.restore(structuredClone(saved))
-  const key = saved.planning_states[0].key, state = memory.currentPlan(key)
+  const key = saved.planning_states[0].key; const state = memory.currentPlan(key)
   state.status = 'active'; memory.recordRunResume(key, state, 'fixture_resume')
   const game = new WaterGame(); game.status.actor_id = 6; game.status.epoch = 1
   let calls = 0

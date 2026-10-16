@@ -150,7 +150,7 @@ function planMessage({ chatMessage = 'Working.', plan = [], currentStep = 0, ope
   return { content: JSON.stringify({ chatMessage, plan, currentStep, operations }) }
 }
 
-test('a plain LM-Studio decision with tool_calls:[] on the action-omission-repair no-tools round is processed, not read as a phantom observation', async t => {
+test('a plain LM-Studio decision with tool_calls:[] on the action-omission-repair no-tools round is processed, not read as a phantom observation', async () => {
   const plan = ['Mine fuel', 'Load the furnace']
   let call = 0
   const provider = async (loopMessages, context) => {

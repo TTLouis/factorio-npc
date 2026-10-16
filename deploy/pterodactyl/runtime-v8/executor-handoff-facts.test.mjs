@@ -341,7 +341,7 @@ test('D2: an executor that still returns zero operations twice keeps the existin
     // The receipt landed before this request: the counts the packet could not carry arrive with the continuation, read then.
     const refreshed = request.messages.map(textOf).find(text => text.includes('[HARNESS] Executor facts refreshed after the batch receipt landed'))
     assert.ok(refreshed, 'the continuation carries the refreshed facts')
-    assert.match(refreshed, /held_counts \(fresh live read of the actor inventory, as_of=tick:601,epoch:3\): .*copper-plate=10/m)
+    assert.match(refreshed, /held_counts \(fresh live read of the actor inventory, as_of=tick:601,epoch:3\): .*copper-plate=10/)
     assert.match(refreshed, /copper-plate required=15 held=10 missing=5/)
   }
   assert.equal(world.rows('recovery.action_omission_failed').length, 1)

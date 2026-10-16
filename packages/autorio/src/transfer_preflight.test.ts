@@ -95,7 +95,7 @@ describe('transfer preflight facts: supply_entity', () => {
     ;(parts.source as any).length = 1
     ;(parts.fuel as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'coal')
     ;(parts.source as any).can_insert = vi.fn((stack: { name: string }) => stack.name !== 'coal')
-    const copper = { item_name: 'copper-ore', count: 80 }, iron = { item_name: 'iron-ore', count: 120 }
+    const copper = { item_name: 'copper-ore', count: 80 }; const iron = { item_name: 'iron-ore', count: 120 }
     const target = furnace(11, parts)
     const facts = transfer_preflight_facts(actor, target, 'supply_entity', { unit_number: 11,
       items: [{ item_name: 'coal', count: 20 }, ...(copper_first ? [copper, iron] : [iron, copper])],
@@ -217,7 +217,7 @@ describe('transfer preflight facts: supply_entity', () => {
     ;(parts.source as any).count_empty_stacks = vi.fn(() => 0)
     ;(parts.source as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'iron-ore')
     ;(parts.fuel as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'wood')
-    const ore = { item_name: 'copper-ore', count: 75 }, fuel = { item_name: 'wood', count: 18 }
+    const ore = { item_name: 'copper-ore', count: 75 }; const fuel = { item_name: 'wood', count: 18 }
     const facts = transfer_preflight_facts(actor, furnace(3, parts), 'supply_entity', {
       unit_number: 3, items: ore_first ? [ore, fuel] : [fuel, ore],
     })!
@@ -443,7 +443,7 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     target.valid = false
     expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: 8 })).toMatchObject({ ok: false, code: 'navigation_target_not_found' })
     scan.mockClear()
-    for (const radius of [undefined, 0, 4097, 1.5, NaN, Infinity]) {
+    for (const radius of [undefined, 0, 4097, 1.5, Number.NaN, Infinity]) {
       expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: radius })).toMatchObject({ ok: false, code: 'invalid_navigation_search_radius' })
     }
     ;(held.actor as any).is_valid = false
@@ -590,7 +590,7 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
       .toMatchObject({ ok: false, code: 'no_natural_harvest_source', operation: 'harvest_product' })
     expect(preflight('harvest_product', { product_name: 'not-an-item', search_radius: 64 }))
       .toMatchObject({ ok: false, code: 'unknown_prototype' })
-    for (const search_radius of [0, 4097, 1.5, NaN, Infinity]) {
+    for (const search_radius of [0, 4097, 1.5, Number.NaN, Infinity]) {
       expect(preflight('harvest_product', { product_name: 'stone', search_radius }))
         .toMatchObject({ ok: false, code: 'invalid_harvest_search_radius' })
     }

@@ -90,7 +90,7 @@ class LabGame extends FurnaceFactorio {
 
 function fullFixture(t) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new LabGame(), model = new ScriptedModel(), wire = []
+  const game = new LabGame(); const model = new ScriptedModel(); const wire = []
   const bridge = Object.create(Session.prototype)
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only', OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'local', OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' })
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null,
@@ -107,7 +107,7 @@ function fullFixture(t) {
 }
 
 test('Run T full loop: open redundant research read stays cached; model clears iron, collects five smelted copper and crafts a lab on the same step', async t => {
-  const ctx = fullFixture(t), { game, model, world, session } = ctx
+  const ctx = fullFixture(t); const { game, model, world, session } = ctx
   assert.equal(game.smelt(5), 0, 'mixed iron output really blocks the copper input')
   let before, resumeLedger, closedLedger
   model.push('planner', 'sol:lab-prerequisite', planReply({ plan: [STEP], currentStep: 0, operations: [], checkpoint: CHECKPOINT,
@@ -182,7 +182,7 @@ test('Run T full loop: open redundant research read stays cached; model clears i
 
 function focusedFixture() {
   const memory = new CanonicalTaskBoardMemory(); memory.restore(structuredClone(saved))
-  const key = saved.planning_states[0].key, state = memory.currentPlan(key)
+  const key = saved.planning_states[0].key; const state = memory.currentPlan(key)
   state.status = 'active'; memory.recordRunResume(key, state, 'scripted_fixture_resume')
   const game = new FakeFactorio({ inventory: { 'iron-plate': 8 } })
   game.status.actor_id = 6; game.status.epoch = 1
@@ -192,7 +192,7 @@ function focusedFixture() {
     if (text.includes('"get_inventory_items"')) { reads++; await game.duringRead?.(); if (game.readError) throw new Error('declared fixture read failure') }
     return original(text)
   }
-  const events = [], agent = new NpcAgentLoop({ rcon: game, memory, traceFile: null, decisionTraceFile: null,
+  const events = []; const agent = new NpcAgentLoop({ rcon: game, memory, traceFile: null, decisionTraceFile: null,
     provider: async () => planReply({ plan: state.plan, currentStep: state.current_step, operations: [{ name: 'wait', args: { ticks: 1 } }] }),
     onActivity: (event, data) => events.push({ event, data }), completionProtocolVersion: 2, jevCheckpoints: false })
   agent.active = true; agent.epoch = { ...game.status }; agent.requestInfo = { memoryKey: key }; agent.traceRequest = { id: 'req_normal_observation_fixture' }
@@ -212,7 +212,7 @@ async function ordinary(world, alias = true) {
 }
 
 for (const mode of ['fresh', 'cached', 'excluded-family', 'exhausted-open-tier', 'forced-closed-budget']) test(`normal typed observation has ordinary tool budget/cache semantics: ${mode}`, async () => {
-  const alias = focusedFixture(), direct = focusedFixture()
+  const alias = focusedFixture(); const direct = focusedFixture()
   for (const world of [alias, direct]) {
     if (mode === 'cached') await ordinary(world, false)
     if (mode === 'excluded-family') world.agent.observationRelevanceOverride = ['recipe_production']
@@ -231,7 +231,7 @@ for (const mode of ['fresh', 'cached', 'excluded-family', 'exhausted-open-tier',
 })
 
 test('consumed closed allowance does not deny an open normal fact or renew the closed allowance', async () => {
-  const world = focusedFixture(), identity = world.agent.targetedObservationIdentity()
+  const world = focusedFixture(); const identity = world.agent.targetedObservationIdentity()
   world.agent.closedRoundObservationUsed = true
   world.memory.targetedObservationLedger = new Map([[identity.ledgerKey, identity.basis]])
   await ordinary(world)
@@ -257,7 +257,7 @@ test('open alias in action omission recovery obeys its existing one-read bound',
 })
 
 for (const repeatedMissingFact of [false, true]) test(`recoverPlan targeted_observation executes one fact then a closed action despite ${repeatedMissingFact ? 'a Jev provider that would repeatedly request missing_fact' : 'a resolved missing fact'}`, async () => {
-  const world = focusedFixture(), providerCalls = [], decisions = []
+  const world = focusedFixture(); const providerCalls = []; const decisions = []
   world.agent.interactionDecisionProvider = contractCheckedJev(async (state, questions) => {
     decisions.push({ state, questions })
     return { model: 'jev-latest', provider: 'TypeSafe', answers: {
@@ -289,7 +289,7 @@ for (const repeatedMissingFact of [false, true]) test(`recoverPlan targeted_obse
 })
 
 for (const invalid of ['mixed', 'stale-step', 'ungrounded']) test(`open typed request retains strict control validation: ${invalid}`, async () => {
-  const world = focusedFixture(), message = world.request(), intent = JSON.parse(message.content)
+  const world = focusedFixture(); const message = world.request(); const intent = JSON.parse(message.content)
   if (invalid === 'mixed') intent.operations = [{ name: 'wait', args: { ticks: 1 } }]
   if (invalid === 'stale-step') intent.observationRequest.stepId = 'obsolete-step'
   if (invalid === 'ungrounded') { intent.observationRequest.tool = 'getEntityStatus'; intent.observationRequest.args = { unit_number: 999 } }

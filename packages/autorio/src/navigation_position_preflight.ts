@@ -8,7 +8,7 @@ const finite = (value: unknown): value is number => typeof value === 'number' &&
 export function navigation_position_preflight(actor: ControlledActor | undefined, args: Record<string, any>) {
   const reject = (code: string, details: Record<string, unknown> = {}) => ({ ok: false, operation: 'walk_to_position', code, ...details })
   if (!actor || !actor.is_valid || !actor.character?.valid) return reject('no_actor')
-  const x = args.x, y = args.y, reach = args.reach_distance ?? 0.75
+  const x = args.x; const y = args.y; const reach = args.reach_distance ?? 0.75
   if (!finite(x) || !finite(y)) return reject('invalid_navigation_position')
   if (!finite(reach) || reach < 0.25 || reach > 64) return reject('invalid_navigation_reach_distance')
   const character = actor.character

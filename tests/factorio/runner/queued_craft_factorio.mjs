@@ -16,7 +16,7 @@ const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >
 const mode = arg('mode')
 assert.ok(['control', 'proof'].includes(mode))
 const results = path.resolve(arg('results'))
-const transcript = [], sent = []
+const transcript = []; const sent = []
 let connection, ctx, unit
 const rcon = { command: async (command, options) => {
   const answer = await connection.command(command, options)
@@ -24,7 +24,7 @@ const rcon = { command: async (command, options) => {
   if (command.includes('local ok,result=pcall') && command.includes('"authorize"')) sent.push(command)
   return answer
 } }
-const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
+const lua = async body => JSON.parse(await rcon.command(`/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ${  body}`))
 const snapshot = () => lua(`local f=nil; for _,e in pairs(a.surface.find_entities_filtered{type="furnace",position=a.position,radius=32}) do if e.unit_number==${unit} then f=e end end; assert(f and f.valid); local o=remote.call("autorio_operations","status");
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end
   rcon.print(helpers.table_to_json({held=counts(a.get_main_inventory()),output=counts(f.get_output_inventory()),humans=#game.connected_players,speed=game.speed,

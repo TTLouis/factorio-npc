@@ -21,7 +21,7 @@ function harness({ memory = new CanonicalTaskBoardMemory(), game = new FakeFacto
   world.jev = recordingJev(async (_state, questions) =>
     questions.intent ? { overrides: { intent: { choice: world.intent, confidence: 0.9 } } } : undefined)
   const rows = []
-  const provider = async (messages) => {
+  const provider = async () => {
     const objective = memory.currentPlan(KEY)?.objective ?? ''
     const board = memory.currentPlan(KEY)?.task_board
     const index = Number.isSafeInteger(board?.active_index) ? board.active_index : 0

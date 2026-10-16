@@ -275,7 +275,7 @@ class RecordedWorld {
   // --- the game executing an admitted batch ---------------------------------------------------------------------------
   operationsIn(text) {
     const operations = []
-    for (const match of text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'((?:,[^\n]*?)?)\)(?=\s*(?:\n|;|$|end|\)))/g)) {
+    for (const match of text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'((?:,[^\n]*?)?)\)(?=\s*(?:[\n;]|$|end|\)))/g)) {
       const name = match[1]
       const rest = match[2]
       if (name === 'move_items_exact') {
@@ -420,7 +420,7 @@ test('fixture: every recorded entry names its retained request and turn, and car
   assert.ok(fixture.provenance.trimmed.length >= 3, 'the trimming is documented')
   const everything = JSON.stringify(fixture)
   // Patterns are assembled from parts so this file itself carries none of the strings the hygiene grep looks for.
-  const forbidden = [String.raw`\.ts\.` + "net", "tt" + "docker", "tail9" + "fa03b", "https?:", "s" + String.raw`k-[A-Za-z0-9]{10}`, "bear" + "er "]
+  const forbidden = [`${String.raw`\.ts\.`  }net`, "tt" + "docker", "tail9" + "fa03b", "https?:", `s${  String.raw`k-[A-Za-z0-9]{10}`}`, "bear" + "er "]
   for (const pattern of forbidden) assert.doesNotMatch(everything, new RegExp(pattern, "i"), pattern)
   // Realistic output sizes are kept, not toy values.
   assert.ok(worldReads.recipeLab.length > 5000)
@@ -538,7 +538,6 @@ test('shape 3 residual: a wait-only batch on an idle furnace whose checkpoint is
   const nextCopper = () => recorded('req_muw0yzan_3.turn2.executor_wait', { currentStep: 1, operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 5, search_radius: 256 } }] })
   const run = loop(world, [furnaceReads(), plannerCommit3(), executorWait(), nextCopper()])
   await run.say(requestText.req_muw0yzan_3)
-  const committedPlan = structuredClone(run.reducerPlan())
   world.finishBatch() // the furnace finishes its 50 inside the first wait, as in the retained run
   assert.equal(world.totalInFurnace('iron-plate'), 50)
   assert.equal(world.working(), false, 'the furnace is idle')
@@ -589,7 +588,6 @@ test('shape 3 residual: repeated retained old-step waits are rejected after worl
 
 const COLLECT_OP = replies['req_muw0yzan_3.turn12.collect_with_checkpoint_change'].operations
 const SPLIT_PLAN = ['Smelt iron plates until furnace 15 holds 50', 'Collect the 50 plates from furnace 15', ...FIVE_STEPS.slice(1)]
-const furnaceContract = replies['req_muw0yzan_3.turn1.planner_commit'].checkpoint
 const heldContract = minimum => ({ mode: 'all', requirements: [{ id: 'requirement_1', kind: 'inventory_count', item_name: 'iron-plate', minimum }], confidence: 0, source: 'planner_semantic_checkpoint' })
 
 test('shape 1 (draft time): the furnace checkpoint paired with the recorded collection is refused before admission, and the split plan closes from world evidence', async () => {

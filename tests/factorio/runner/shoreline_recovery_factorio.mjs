@@ -15,7 +15,7 @@ import { planReply, jevContractLog } from '../pterodactyl/runtime-v8/task-loop-f
 globalThis.fetch = async () => { throw new Error('inference forbidden in shoreline fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const transcript = [], sent = [], seen = {}, identities = {}, placements = {}
+const transcript = []; const sent = []; const seen = {}; const identities = {}; const placements = {}
 let connection, ctx, eastward, water
 const rcon = { command: async (command, options) => {
   const answer = await connection.command(command, options)
@@ -23,7 +23,7 @@ const rcon = { command: async (command, options) => {
   if (command.includes('local ok,result=pcall') && command.includes('"authorize"')) sent.push(command)
   return answer
 } }
-const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces["shoreline-recovery"].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
+const lua = async body => JSON.parse(await rcon.command(`/silent-command local a=game.surfaces["shoreline-recovery"].find_entities_filtered{name="character"}[1]; assert(a); ${  body}`))
 const snapshot = () => lua(`local o=remote.call("autorio_operations","status"); local s=a.surface; local entities={};
   for _,e in pairs(s.find_entities_filtered{force=a.force,name={"offshore-pump","boiler","steam-engine","lab","small-electric-pole"}}) do
     local st=nil; for k,v in pairs(defines.entity_status) do if v==e.status then st=k end end;
@@ -174,7 +174,7 @@ const model = new ScriptedModel()
     assert.equal(lab.energy, 0)
     assert.equal(s.progress, 0)
     assert.equal(ctx.world.memory.currentPlan(KEY).task_board.completed_count, 0, 'all equipment and science cannot close the powered checkpoint')
-    const engine = placements['steam-engine'].position, labPosition = placements.lab.position
+    const engine = placements['steam-engine'].position; const labPosition = placements.lab.position
     return reads([['getPlacementCandidates', { entity_name: 'small-electric-pole', center: { x: (engine.x + labPosition.x) / 2, y: (engine.y + labPosition.y) / 2 }, radius: 8, limit: 8 }]])
   })
   .push('executor', 'luna:connect-power-bridge', messages => placeFrom(messages, 'small-electric-pole', rows => rows.find(row => {
@@ -234,17 +234,17 @@ try {
     assert.deepEqual(world.memory.planningState(KEY).plans.at(-1).steps, canonicalSteps)
   }
   await until('native steam-powered lab research', async () => {
-    const s = await snapshot(), lab = s.entities.find(e => e.name === 'lab'), engine = s.entities.find(e => e.name === 'steam-engine')
+    const s = await snapshot(); const lab = s.entities.find(e => e.name === 'lab'); const engine = s.entities.find(e => e.name === 'steam-engine')
     return lab?.energy > 0 && engine?.generating > 0 && s.progress > 0 ? s : false
   })
   const poweredBefore = await snapshot()
   await completion()
   await until('native science consumption and advancing research', async () => {
-    const s = await snapshot(), lab = s.entities.find(e => e.name === 'lab')
+    const s = await snapshot(); const lab = s.entities.find(e => e.name === 'lab')
     return lab?.science < 10 && s.progress > poweredBefore.progress ? s : false
   })
   const after = await idle()
-  const lab = after.entities.find(e => e.name === 'lab'), engine = after.entities.find(e => e.name === 'steam-engine'), boiler = after.entities.find(e => e.name === 'boiler')
+  const lab = after.entities.find(e => e.name === 'lab'); const engine = after.entities.find(e => e.name === 'steam-engine'); const boiler = after.entities.find(e => e.name === 'boiler')
   assert.equal(after.actor_id, before.actor_id)
   assert.equal(after.artificial, 0)
   assert.ok(lab.energy > 0 && lab.network > 0 && lab.network === engine.network)

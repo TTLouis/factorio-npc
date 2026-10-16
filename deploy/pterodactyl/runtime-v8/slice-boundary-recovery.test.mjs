@@ -280,7 +280,7 @@ function assertPacketOnly(messages, { checkpoint = 'C7', role = 'executor' } = {
   assert.match(String(messages[1].content), /^\[HANDOFF\] Rebuilt from durable harness state/)
   assert.match(String(messages[2].content), new RegExp(`^--- step block ---\nrestage: role=${role} checkpoint=${checkpoint} reason=recovery:`))
   assert.deepEqual(messages.filter(message => message.role === 'assistant' || message.role === 'tool'), [], 'no exchange of the earlier conversation')
-  assert.ok(!messages.some(message => /^\[(CHAT|MEMORY|PLAN_STATE)\]/.test(String(message.content ?? ''))), 'no earlier transcript, dialogue memory or legacy plan dump')
+  assert.ok(!messages.some(message => /^\[(?:CHAT|MEMORY|PLAN_STATE)\]/.test(String(message.content ?? ''))), 'no earlier transcript, dialogue memory or legacy plan dump')
 }
 
 test('C7: a restart rebuilds the conversation from a packet (persisted plan, fresh actor and epoch), traced as one context.restaged row', async () => {
@@ -388,7 +388,10 @@ test('C7: an actor replacement rebuilds from a packet with the replacement actor
   game.inventory['iron-ore'] = 10
   const oldTurn = agent.completed().then(() => 'admitted', error => `dropped: ${error.message}`) // step 1 done: the planner is asked what is next (call 3, held)
   // Wait on the clock, not on a spin count: the step close persists the state file, and real file I/O lags under load.
-  for (const deadline = Date.now() + 5000; calls < 3 && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 1))
+  for (const deadline = Date.now() + 5000; Date.now() < deadline;) {
+    if (calls >= 3) break
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
   assert.equal(calls, 3, 'the old turn has a provider call in flight')
   assert.equal(agent.providerCallsInFlight, 1, 'and it is still open when the recovery restages')
   const mutationsBefore = game.mutations.length

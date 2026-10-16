@@ -15,7 +15,7 @@ import { inventoryCheckpoint, planReply, jevContractLog, gather } from '../ptero
 globalThis.fetch = async () => { throw new Error('inference forbidden in invalid-reference fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const transcript = [], sent = []
+const transcript = []; const sent = []
 let connection, ctx, placePosition, unit
 const rcon = { command: async (command, options) => {
   const answer = await connection.command(command, options)
@@ -23,7 +23,7 @@ const rcon = { command: async (command, options) => {
   if (command.includes('local ok,result=pcall') && command.includes('"authorize"')) sent.push(command)
   return answer
 } }
-const lua = async body => JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ' + body))
+const lua = async body => JSON.parse(await rcon.command(`/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); ${  body}`))
 const snapshot = () => lua(`local o=remote.call("autorio_operations","status");
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end;
   local f=a.surface.find_entities_filtered{type="furnace",force=a.force,position=a.position,radius=32}[1];

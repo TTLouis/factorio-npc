@@ -15,6 +15,7 @@ import {
   fireResumeTimer,
   KEY,
   observation,
+  parseAdmittedOperations,
   PLATES,
   reachRunG,
   recoverySession,
@@ -454,7 +455,10 @@ test('R-cancel: a stop that lands while the fired resume waits on the executor m
     return executorPlan([collect(3)])
   })
   ctx.t.mock.timers.tick(15_000)
-  for (let spin = 0; spin < 400 && !reached; spin++) await new Promise(resolve => setImmediate(resolve))
+  for (let spin = 0; spin < 400; spin++) {
+    if (reached) break
+    await new Promise(resolve => setImmediate(resolve))
+  }
   assert.equal(reached, true, 'the restaged executor is waiting on the model')
   assert.equal(ctx.world.named('recovery.auto_resume_plan_resumed').length, 1)
   assert.equal(ctx.world.memory.currentPlan(KEY).status, 'active')
@@ -627,3 +631,14 @@ for (const scenario of ['failed_read', 'actor_changed', 'batch_in_flight']) {
     assertStrictBoundary(ctx)
   })
 }
+
+
+test('recovery fixture parser keeps known arguments and treats unknown operation names as raw data', () => {
+  assert.deepEqual(parseAdmittedOperations("remote.call('autorio_operations','gather_resource','iron-ore',2,32)"), [
+    { name: 'gather_resource', args: { resource_name: 'iron-ore', count: 2 } },
+  ])
+  for (const name of ['constructor', '__proto__', 'unknown']) {
+    assert.deepEqual(parseAdmittedOperations(`remote.call('autorio_operations','${name}',1)`), [{ name, args: { raw: '1)' } }])
+  }
+  assert.deepEqual(parseAdmittedOperations("remote.call('autorio_operations','toString',1)"), [], 'only lowercase operation names are part of the fixture grammar')
+})

@@ -246,8 +246,8 @@ test('getNearbyEntities refuses to diff truncated scans', async () => {
 for (const boundary of ['discarded_exchange', 'compacted_exchange']) {
   test(`getNearbyEntities re-expands the current native snapshot after ${boundary}`, async () => {
     const rcon = new FakeRcon([nearbySnapshot([entity(101, 'assembling-machine-1', 4, 2)]), nearbySnapshot([entity(101, 'assembling-machine-1', 4, 2)])])
-    let agent, calls = 0
-    agent = new NpcAgentLoop({ rcon, systemPrompt: 'nearby baseline delivery boundary', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
+    let calls = 0
+    const agent = new NpcAgentLoop({ rcon, systemPrompt: 'nearby baseline delivery boundary', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
       provider: async messages => {
         if (++calls === 1) return nearbyTool('before-boundary')
         if (calls === 2) {

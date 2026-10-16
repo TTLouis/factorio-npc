@@ -106,7 +106,7 @@ class RemoteFurnaceGame extends FurnaceFactorio {
 
 function fixture(t, options = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new RemoteFurnaceGame(options), model = new ScriptedModel(), wire = []
+  const game = new RemoteFurnaceGame(options); const model = new ScriptedModel(); const wire = []
   const bridge = Object.create(Session.prototype)
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only', OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'local', OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' })
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null,
@@ -151,7 +151,7 @@ function assertRecovery(ctx, messages) {
 }
 
 test('Run S full loop: correlated first-task miss, model travel, fresh target/counts, exact supply and ten native-style copper finish the same step', async t => {
-  const ctx = fixture(t), { game, model, world } = ctx
+  const ctx = fixture(t); const { game, model, world } = ctx
   await ctx.start()
   const before = structuredClone(getActivePlan(world.memory.planningState(KEY)))
   model.push('executor', 'luna:choose-travel', messages => {
@@ -196,7 +196,7 @@ test('Run S full loop: correlated first-task miss, model travel, fresh target/co
 })
 
 for (const mode of ['historical-unproved', 'completed-prefix']) test(`Run S ${mode}: location recovery preserves uncertainty and duplicate guard`, async t => {
-  const ctx = fixture(t, { proof: mode !== 'historical-unproved', prefix: mode === 'completed-prefix' }), { model, world, game } = ctx
+  const ctx = fixture(t, { proof: mode !== 'historical-unproved', prefix: mode === 'completed-prefix' }); const { model, world, game } = ctx
   await ctx.start()
   model.push('executor', 'luna:choose-travel', messages => { assertRecovery(ctx, messages); return ctx.action([WALK]) })
   await ctx.fail()
@@ -218,7 +218,7 @@ for (const mode of ['historical-unproved', 'completed-prefix']) test(`Run S ${mo
 })
 
 for (const mode of ['wrong-tick', 'wrong-actor', 'wrong-epoch', 'wrong-signature', 'wrong-batch', 'wrong-item', 'missing-accepted', 'exact-target', 'player', 'destroyed-target']) test(`local transfer recovery fails closed: ${mode}`, async t => {
-  const ctx = fixture(t), { game, world } = ctx
+  const ctx = fixture(t); const { game, world } = ctx
   await ctx.start()
   game.completeBatch()
   game.receiptOverride = status => {
@@ -243,7 +243,7 @@ for (const mode of ['wrong-tick', 'wrong-actor', 'wrong-epoch', 'wrong-signature
 })
 
 test('local target recovery spends the existing persistent two-attempt supply allowance, then blocks without a third mutation', async t => {
-  const ctx = fixture(t), { game, model, world } = ctx
+  const ctx = fixture(t); const { game, model, world } = ctx
   await ctx.start()
   model.push('executor', 'luna:retry-local-selection', () => ctx.action(LEGACY), 2)
   await ctx.fail()
@@ -262,7 +262,7 @@ test('local target recovery spends the existing persistent two-attempt supply al
 })
 
 for (const boundary of ['stop', 'epoch']) test(`local target recovery proposal fenced after ${boundary}`, async t => {
-  const ctx = fixture(t), { model, game, world } = ctx
+  const ctx = fixture(t); const { model, game, world } = ctx
   await ctx.start()
   let reached = false
   model.push('executor', 'luna:stale-travel-proposal', messages => {

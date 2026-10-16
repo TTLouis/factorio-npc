@@ -152,7 +152,7 @@ test('parsed cards are bounded, deduplicated and drop malformed entries and need
       STEAM_CARDS[0],
       { id: 'Bad Id!', name: 'bad' },
       { id: 'none', name: 'collides with the Jev none option' },
-      { id: 'huge-card', name: long, status: 'weird', summary: long, produces: Array(20).fill('a'), needs: [{ subject: 'x', state: 'bogus', technology: 'BAD TECH' }, 'plain-need', ...Array(8).fill({ subject: 'y', state: 'have' })], matched: [], score: 1 },
+      { id: 'huge-card', name: long, status: 'weird', summary: long, produces: Array.from({length: 20}).fill('a'), needs: [{ subject: 'x', state: 'bogus', technology: 'BAD TECH' }, 'plain-need', ...Array.from({length: 8}).fill({ subject: 'y', state: 'have' })], matched: [], score: 1 },
       ...Array.from({ length: 6 }, (_, index) => ({ ...STEAM_CARDS[1], id: `extra-${index}` })),
     ],
   }))
@@ -315,7 +315,7 @@ test('loading an offered skill and committing a plan with it traces skill.loaded
   const offerAt = calls[1].findIndex(message => typeof message.content === 'string' && message.content.startsWith(SKILL_OFFERS_PREFIX))
   const lastTurn = calls[1].findLastIndex(message => message.role === 'assistant' || message.role === 'tool')
   assert.ok(offerAt > lastTurn, 'offers come after the stored history')
-  const tailOnly = messages => messages.every(message => /^\[(SKILL_OFFERS|PLANNING_LOD|DECISION_ENVELOPE|CONTROL_DECISION_STATE)\]/.test(message.content))
+  const tailOnly = messages => messages.every(message => /^\[(?:SKILL_OFFERS|PLANNING_LOD|DECISION_ENVELOPE|CONTROL_DECISION_STATE)\]/.test(message.content))
   assert.ok(tailOnly(calls[1].slice(lastTurn + 1)), 'only tail blocks follow the stored history')
   assert.ok(tailOnly(calls[0].slice(3)), 'in the first round too, only tail blocks follow the request context')
   const [loaded] = events('skill.loaded')

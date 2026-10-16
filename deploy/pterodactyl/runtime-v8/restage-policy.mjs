@@ -61,7 +61,7 @@ function tokenCount(value) {
  * @param {number} args.contextTokens monotonic size counter (see contextSizeState)
  * @param {number} args.softLimitTokens
  * @param {number} [args.hardLimitTokens] defaults to 2 x softLimitTokens
- * @returns {{ restage: boolean, checkpoint: string|null, reason: string }}
+ * @returns {{ restage: boolean, checkpoint: string|null, reason: string }} the boundary restage decision
  */
 export function decideRestage({ role, boundary, contextTokens, softLimitTokens, hardLimitTokens } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`restage role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)

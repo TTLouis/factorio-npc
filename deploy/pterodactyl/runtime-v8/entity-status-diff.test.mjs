@@ -232,8 +232,8 @@ for (const boundary of ['discarded_exchange', 'compacted_exchange', 'edited_base
     const statuses = [entityStatus(101, 10), entityStatus(101, boundary === 'compacted_exchange' ? 12 : 10)]
     if (boundary === 'changed_surface') { statuses[0].surface_index = 1; statuses[1].surface_index = 2 }
     const rcon = new FakeRcon(statuses)
-    let agent, calls = 0
-    agent = new NpcAgentLoop({ rcon, systemPrompt: 'baseline delivery boundary', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
+    let calls = 0
+    const agent = new NpcAgentLoop({ rcon, systemPrompt: 'baseline delivery boundary', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
       provider: async messages => {
         if (++calls === 1) return entityTool('before-boundary')
         if (calls === 2) {
@@ -258,11 +258,11 @@ test('getEntityStatus repairs every dependent output after a large re-expansion 
     ...entityStatus(unit, 10).entity,
     inventories: [{ index: 1, items: Array.from({ length: items }, (_, i) => ({ name: `modded-component-with-a-long-prototype-name-${i}`, quality: 'normal', count: i ? 10 : firstCount })) }],
   } })
-  const b = sized(202, 100), a = sized(101, 50), changedA = sized(101, 50, 12)
+  const b = sized(202, 100); const a = sized(101, 50); const changedA = sized(101, 50, 12)
   const rcon = new FakeRcon([b, a, changedA, b])
   const read = (id, name, radius) => ({ content: null, tool_calls: [{ id, type: 'function', function: { name: 'getEntityStatus', arguments: JSON.stringify({ name, ...(radius === undefined ? {} : { radius }) }) } }] })
-  let agent, calls = 0
-  agent = new NpcAgentLoop({ rcon, systemPrompt: 'secondary compaction fixture', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
+  let calls = 0
+  const agent = new NpcAgentLoop({ rcon, systemPrompt: 'secondary compaction fixture', memory: new CanonicalTaskBoardMemory(), stateFile: null, traceFile: null,
     provider: async messages => {
       if (++calls === 1) {
         // A small deterministic prefix isolates working-context compaction;

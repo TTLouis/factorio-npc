@@ -119,7 +119,7 @@ export function parseDsmlToolCalls(content, limits = {}) {
 }
 
 // Any DSML-prefixed tag at all, known or not (group 1: its name).
-const ANY_DSML_TAG = /<\s*\/?\s*[｜|]{1,4}\s*DSML\s*[｜|]{1,4}\s*([A-Z_][\w.-]*)/gi
+const ANY_DSML_TAG = /<\s*(?:\/\s*)?[｜|]{1,4}\s*DSML\s*[｜|]{1,4}\s*([A-Z_][\w.-]*)/gi
 const KNOWN_TAGS = new Set(['calls', 'invoke', 'parameter'])
 
 /**

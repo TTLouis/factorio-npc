@@ -137,7 +137,7 @@ describe('placement candidate execution', () => {
     ;(globalThis as any).prototypes.item['candidate-test-kit'] = {}
     ;(globalThis as any).prototypes.entity = { 'candidate-test-machine': { name: 'candidate-test-machine', type: 'container',
       tile_width: 1, tile_height: 1, items_to_place_this: [{ name: 'candidate-test-kit', count: 2 }] } }
-    let held = 1, placeable = true
+    let held = 1; let placeable = true
     const controlled = actor(() => placeable)
     controlled.is_valid = true
     controlled.get_main_inventory = () => ({ get_item_count: (name: string) => { expect(name).toBe('candidate-test-kit'); return held } })
