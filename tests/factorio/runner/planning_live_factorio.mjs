@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from '../pterodactyl/runtime-v8/planning-state.mjs'
-import { configureNpcSession } from '../pterodactyl/staging/supervisor-adapter.mjs'
+import { configureNpcSession, deploymentStatus } from '../pterodactyl/staging/supervisor-adapter.mjs'
 
 const execFileAsync = promisify(execFile)
 const key = 'npc:sgluna'
@@ -73,6 +73,12 @@ function makeAgent({ rcon, stateFile, memory, provider }) {
 
 async function prepare({ rcon, results, stateFile }) {
   await configureNpcSession(rcon, 'sgluna-factorio-planning-prepare-0001')
+  const deployment = await deploymentStatus(rcon)
+  assert.ok(Number.isSafeInteger(deployment.actor_id) && deployment.actor_id > 0)
+  const lockedRecipe = JSON.parse(await rcon.command(`/silent-command local a=game.get_entity_by_unit_number(${deployment.actor_id}); assert(a and a.valid); local r=a.force.recipes["iron-gear-wheel"]; assert(r); local was_enabled=r.enabled; r.enabled=false; rcon.print(helpers.table_to_json({recipe=r.name,enabled=r.enabled,was_enabled=was_enabled}))`))
+  assert.equal(lockedRecipe.recipe, 'iron-gear-wheel')
+  assert.equal(lockedRecipe.enabled, false)
+  assert.equal(typeof lockedRecipe.was_enabled, 'boolean')
 
   let providerCalls = 0
   const memory = new CanonicalTaskBoardMemory()
@@ -83,34 +89,32 @@ async function prepare({ rcon, results, stateFile }) {
     provider: async () => {
       providerCalls++
       return strictPlan(
-        'Attempting the deterministic integration resource.',
-        ['Gather the unavailable integration resource', 'Continue the build'],
+        'Attempting the existing recipe with a verified structural dependency.',
+        ['Craft the locked integration recipe', 'Continue the build'],
         [{
-          name: 'gather_resource',
-          args: {
-            resource_name: 'sgluna-missing-resource',
-            count: 1,
-            search_radius: 32,
-          },
+          name: 'craft_recipe',
+          args: { recipe_name: 'iron-gear-wheel', count: 1 },
         }],
       )
     },
   })
 
-  const result = await agent.request('gather the deterministic integration resource', { sender: 'Louis' })
+  const result = await agent.request('craft the existing integration recipe', { sender: 'Louis' })
   const planning = memory.planningState(key)
   const blocked = getActivePlan(planning)
   const engine = JSON.parse(await rcon.command(operationStatusCommand()))
 
-  // The deliberately missing resource is a naming error: preflight grants one
-  // bounded correction turn, and repeating it there freezes the plan.
-  assert.equal(providerCalls, 2)
+  // An invented prototype is an argument error, not a structural dependency.
+  // Use an actual locked recipe so the plan-level blocker gets no correction turn.
+  assert.equal(providerCalls, 1)
   assert.equal(result.goalStatus, 'blocked')
   assert.equal(result.operations.length, 0)
-  assert.equal(result.blocker?.code, 'unknown_prototype')
+  assert.equal(result.blocker?.code, 'recipe_locked')
+  assert.equal(memory.pauseRecord(key).paused, true)
+  assert.equal(memory.pauseRecord(key).pause_class, 'guard')
   assert.equal(planning.plans.length, 1, 'preflight failure must not create a replacement suffix')
   assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
-  assert.equal(blocked.blocker?.reason_code, 'operation_preflight_failed:unknown_prototype')
+  assert.equal(blocked.blocker?.reason_code, 'operation_preflight_failed:recipe_locked')
   assert.equal(memory.currentPlan(key)?.planning?.blocked?.awaiting_choice, true)
   assert.equal(engine.task_state, 'idle', 'rejected preflight must not start world work')
   assert.equal(engine.queue_length, 0, 'rejected preflight must not queue world work')
@@ -123,6 +127,8 @@ async function prepare({ rcon, results, stateFile }) {
     plan_version: blocked.plan_version,
     reasoning_epoch: memory.planningReasoningEpoch(key),
     blocker: blocked.blocker,
+    actor_id: deployment.actor_id,
+    locked_recipe: lockedRecipe,
     engine: {
       task_state: engine.task_state,
       queue_length: engine.queue_length,
@@ -180,6 +186,12 @@ async function verify({ rcon, results, stateFile }) {
   assert.equal(stillBlocked.status, PLAN_STATUS.BLOCKED)
   assert.equal(stillBlocked.plan_id, before.plan_id)
   assert.equal(memory.planningState(key).plans.length, 1, 'ordinary continuation must not create a suffix plan')
+
+  const deployment = await deploymentStatus(rcon)
+  assert.equal(deployment.actor_id, before.actor_id)
+  const restoredRecipe = JSON.parse(await rcon.command(`/silent-command local a=game.get_entity_by_unit_number(${deployment.actor_id}); assert(a and a.valid); local r=a.force.recipes["iron-gear-wheel"]; assert(r and r.enabled==false); r.enabled=${before.locked_recipe.was_enabled ? 'true' : 'false'}; rcon.print(helpers.table_to_json({enabled=r.enabled}))`))
+  assert.equal(restoredRecipe.enabled, before.locked_recipe.was_enabled)
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.BLOCKED, 'restoring recipe availability alone cannot revise the frozen plan')
 
   memory.recordBlockedChoice(key, 'revise', 'Louis', { now: Date.now() })
   await agent.persistState()
