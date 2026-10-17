@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 17: Run W saved-layout steam/power replay passes offline
+
+- **Exact boundary.** The captured shoreline has no directly connected engine candidate; its inline footprint crosses water, with additional pole/actor overlap. Pole removal alone is insufficient. A pristine-copy scripted repair crafts two pipes from held iron, clears one natural tree, routes steam inland, places the held engine and crafts/places a real inserter load. Both original poles and the original save remain unchanged.
+- **Proof.** Production structured parsing/rendering and actor/epoch admission, zero humans/artificial power, network-disabled Docker, eight native operations. Three steady samples prove connected boiler/pipes/engine and 400 W supplied to the inserter on a positive shared network. Independent review and 364-file evidence verification passed. This is deterministic mechanics proof, without Session/full-loop autonomous recovery or throughput claims.
+- **Assessment.** Planner had relevant inventory/recipes/research/shoreline reads; executor's final missing-engine claim contradicted delivered inventory. Recommend bounded fresh topology/obstruction facts and planner wake-up summaries. Just-in-time step contracts exist; asynchronous next-step prediction remains unbuilt. Local task branch `test/run-w-saved-layout` only, no production change, provider/Jev calls, goal resume, integration push or deployment. E2E goal remains **paused**. [Replay and audit](validation/RUN_W_SAVED_LAYOUT_REPLAY_2026-10-17.md).
+
 ## October 16: Run W minimum prompt reaches steam; goal resume limit stops safely
 
 - **Trial.** Frozen `9e00fc5c`, 21.04 minutes with the approved 60-minute cap/40% floor. The single minimum objective was correctly interpreted as sustained red throughput from natural resources. Actual delegation: Sol planner10/10, Luna executor65/65, zero provider errors; Jev48/48. Both roles exercised open/closed CLI-proxy wire. Native output reached 50 new iron/ten copper plates, a connected fueled pump/boiler and two poles. Engine remained held; red0, no measurement.
