@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 17: Run X partial-transfer, completion and stop regressions fixed offline
+
+- **Recovery.** Fully accounted native transfer refusals now settle as known partial work, preserving completed effects and refusing original-batch replay. Fresh same-step repairs share the existing two-attempt allowance. Missing receipts, changed actors/epochs and cancelled tails retain uncertainty and the duplicate guard.
+- **Contracts and stop.** A blocked executor continuation reaches canonical blocked admission instead of being treated as a new draft missing completion declarations. The committed checkpoint remains immutable. Operator stop emits the canonical pause trace even while the plan remains BLOCKED; strict stop-proof rules are unchanged.
+- **Proof.** Frozen production `2865d1b4`; 2,536 runtime/staging tests, 1,181 mod tests, typecheck/Lua/generated-Lua, lint and nine payload tests PASS. All 24 native lanes and 92 Python checks PASS. The new full loop physically smelts five copper plates to reach fifteen held; missing-proof and original-code controls discriminate the fixes. Independent source/evidence review passed. [Validation checkpoint](validation/RUN_X_PARTIAL_TRANSFER_RECOVERY_2026-10-17.md).
+- **Boundary.** Historical Run X save/evidence is preserved and all owned test containers are down. Autonomous red-science throughput remains unproven. The E2E goal stays **paused**; no live provider/Jev run or deployment.
+
 ## October 17: Run X reaches furnace transition; red automation remains unproven
 
 - **Trial.** Frozen `ffc0a046`, sole minimum objective, actual Sol6.1 planner8/Luna executor47, 55/55 replies and zero provider transport errors; Jev50/50. Native output reached 60 iron/ten copper plates with ten hand-crafted gears held. Only the furnace was placed; no power, automated chain or red output. Measurement never started. Canonical terminal stop occurred at 14.22 minutes; weekly remaining31% stayed above the approved30% floor.
