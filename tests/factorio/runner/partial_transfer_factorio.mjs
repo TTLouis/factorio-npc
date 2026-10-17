@@ -120,7 +120,12 @@ if (mode === 'recovery') model
       assert.equal(status.reference, `entity:${unit}`)
       assert.equal(status.query.name, 'stone-furnace')
       assert.ok(Array.isArray(status.changes?.entity?.inventories), 'fresh inventories must be present in the delivered diff')
-      entity = { ...seen.initialDeliveredEntity, ...status.changes.entity }
+      const baseline = messages.filter(row => row.role === 'tool').map(row => {
+        try { return JSON.parse(row.content).entity } catch { return undefined }
+      }).find(row => row?.unit_number === unit)
+      assert.deepEqual(baseline, seen.initialDeliveredEntity, 'the actual current provider conversation must retain the delivered full baseline')
+      seen.currentConversationRetainsBaseline = true
+      entity = { ...baseline, ...status.changes.entity }
     }
     assert.equal(entity.unit_number, unit)
     seen.freshDeliveredEntity = structuredClone(entity)
