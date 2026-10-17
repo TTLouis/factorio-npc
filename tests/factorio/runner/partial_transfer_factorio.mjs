@@ -120,11 +120,16 @@ if (mode === 'recovery') model
       assert.equal(status.reference, `entity:${unit}`)
       assert.equal(status.query.name, 'stone-furnace')
       assert.ok(Array.isArray(status.changes?.entity?.inventories), 'fresh inventories must be present in the delivered diff')
-      const baseline = messages.filter(row => row.role === 'tool').map(row => {
+      const fullTool = messages.filter(row => row.role === 'tool').map(row => {
         try { return JSON.parse(row.content).entity } catch { return undefined }
       }).find(row => row?.unit_number === unit)
+      const deliveredBlock = messages.find(row => row.role === 'user' && row.content.startsWith('[ENTITY_STATUS_BASELINE]'))
+      const carried = deliveredBlock ? JSON.parse(deliveredBlock.content.slice(deliveredBlock.content.indexOf('\n') + 1)) : []
+      const carriedSnapshot = carried.find(row => row.reference === status.reference && row.query.name === status.query.name && row.query.radius === status.query.radius && row.entity?.unit_number === unit)
+      const baseline = fullTool ?? carriedSnapshot?.entity
       assert.deepEqual(baseline, seen.initialDeliveredEntity, 'the actual current provider conversation must retain the delivered full baseline')
       seen.currentConversationRetainsBaseline = true
+      seen.deliveredBaselineBlock = deliveredBlock?.content ?? null
       entity = { ...baseline, ...status.changes.entity }
     }
     assert.equal(entity.unit_number, unit)
