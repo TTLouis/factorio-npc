@@ -25,6 +25,8 @@ function actor_status() {
       npc_id?: string
     }
     connected_players?: number
+    surface_index?: number
+    force_index?: number
   }
 }
 
@@ -92,6 +94,8 @@ remote.add_interface('sgluna_deployment', {
       actor_kind: actor.actor?.kind,
       actor_name: actor.actor?.name,
       npc_id: actor.actor?.npc_id,
+      surface_index: actor.surface_index,
+      force_index: actor.force_index,
       connected_players: actor.connected_players ?? 0,
       allowed: current_matches_session(),
       idle: tasks.task_state === 'idle' && tasks.queue_empty === true && tasks.queue_length === 0,

@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { isTailBlock } from './prompt-prefix.mjs'
 import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
 import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
 import {
@@ -315,7 +316,7 @@ test('loading an offered skill and committing a plan with it traces skill.loaded
   const offerAt = calls[1].findIndex(message => typeof message.content === 'string' && message.content.startsWith(SKILL_OFFERS_PREFIX))
   const lastTurn = calls[1].findLastIndex(message => message.role === 'assistant' || message.role === 'tool')
   assert.ok(offerAt > lastTurn, 'offers come after the stored history')
-  const tailOnly = messages => messages.every(message => /^\[(?:SKILL_OFFERS|PLANNING_LOD|DECISION_ENVELOPE|CONTROL_DECISION_STATE)\]/.test(message.content))
+  const tailOnly = messages => messages.every(isTailBlock)
   assert.ok(tailOnly(calls[1].slice(lastTurn + 1)), 'only tail blocks follow the stored history')
   assert.ok(tailOnly(calls[0].slice(3)), 'in the first round too, only tail blocks follow the request context')
   const [loaded] = events('skill.loaded')

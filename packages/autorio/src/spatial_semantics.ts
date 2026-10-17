@@ -1,5 +1,6 @@
 import type { LuaEntity } from 'factorio:runtime'
 import { find_world_entities } from './npc_vision'
+import { electric_prototype_facts, protected_read } from './electric_facts'
 
 const MAX_FLUID_STORAGES = 8
 const MAX_PIPE_CONNECTIONS_PER_STORAGE = 8
@@ -66,12 +67,19 @@ function compact_fluid_ports(entity: LuaEntity) {
       if (connection.target_position !== undefined) summary.target_position = connection.target_position
       const target = entity_identity(connection.target?.owner)
       if (target !== undefined) summary.target = target
+      if (target !== undefined && connection.target_fluidbox_index !== undefined) {
+        const reverse = protected_read(() => connection.target!.owner.fluidbox.get_pipe_connections(connection.target_fluidbox_index!))
+        if (reverse !== undefined) summary.reciprocal = reverse.some(other => other.target?.owner === entity && other.target_fluidbox_index === index)
+      }
       if (connection.target_fluidbox_index !== undefined) summary.target_fluidbox_index = connection.target_fluidbox_index
       connections.push(summary)
     }
 
+    const current = protected_read(() => entity.get_fluid(index))
     storages.push({
       index,
+      capacity: protected_read(() => fluidbox.get_capacity(index)),
+      contents: current ? { name: current.name, amount: current.amount, temperature: current.temperature } : undefined,
       prototypes: compact_fluidbox_prototype(fluidbox.get_prototype(index)),
       connections,
       connections_truncated: raw_connections.length > connection_count,
@@ -196,11 +204,18 @@ export function compact_spatial_summary(entity: LuaEntity) {
   const item_io = compact_item_io(entity)
   const fluid = compact_fluid_ports(entity)
   const mining = compact_mining_coverage(entity)
-  if (item_io === undefined && fluid === undefined && mining === undefined) return undefined
+  const prototype = electric_prototype_facts(entity.prototype)
+  const has_power = prototype.power !== undefined || prototype.thermal !== undefined || prototype.electric_pole !== undefined
+  if (item_io === undefined && fluid === undefined && mining === undefined && !has_power) return undefined
 
   const result: Record<string, unknown> = {}
   if (item_io !== undefined) result.item_io = item_io
   if (fluid !== undefined) result.fluid = fluid
   if (mining !== undefined) result.mining = mining
+  if (has_power) result.power = {
+    prototype,
+    stored_energy_joules: protected_read(() => entity.energy),
+    electric_network_id: protected_read(() => entity.electric_network_id),
+  }
   return result
 }

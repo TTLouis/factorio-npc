@@ -39,10 +39,10 @@ describe('prototype details expose electric and fluid-throughput facts', () => {
   })
 
   it('gives watts for the lab, the boiler and the steam engine, and the boiler fuel categories', () => {
-    expect(entity_of('lab').power).toEqual({ consumption_watts: 60000 })
-    expect(entity_of('boiler').power).toEqual({ consumption_watts: 1800000 })
+    expect(entity_of('lab').power).toEqual({ consumption_watts: 60000, prototype_quality: 'normal' })
+    expect(entity_of('boiler').power).toEqual({ consumption_watts: 1800000, prototype_quality: 'normal' })
     expect(entity_of('boiler').burner).toEqual({ fuel_categories: ['chemical'], effectivity: 1 })
-    expect(entity_of('steam-engine').power).toEqual({ production_watts: 900000, fluid_usage_per_second: 30 })
+    expect(entity_of('steam-engine').power).toEqual({ production_watts: 900000, fluid_usage_per_second: 30, prototype_quality: 'normal' })
   })
 
   it('gives the pump speed and adds nothing to entities that have none of these facts', () => {

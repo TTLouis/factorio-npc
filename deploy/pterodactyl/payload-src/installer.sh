@@ -13,8 +13,8 @@ else
 fi
 NODE_VERSION="v24.21.0"
 PNPM_VERSION="10.30.1"
-SGLUNA_REF="ad3e87523b157880a360e773de68519e49f809f0"
-REVISION="2026-09-14.22"
+SGLUNA_REF="e220bf9becd06de08505f41294d9cc6a2316aeb5"
+REVISION="2026-10-17.topology.2"
 DEPLOYMENT_REVISION="sgluna-deploy-v8-npc-staging"
 WORK=""
 
@@ -156,7 +156,7 @@ cp "$WORK/source/packages/autorio/info.json" "$WORK/source/packages/autorio/dist
 cp -a "$WORK/source/packages/autorio/dist/." "$APP/autorio/"
 
 log 'Copying v8 supervisor, shared policy, and prompt'
-for file in agent-roles.mjs agent-context.mjs handoff-packet.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs completion-finalization.mjs targeted-observation.mjs luna-step-contracts.mjs planning-state.mjs authorization.mjs refusal-class.mjs pause-class.mjs batch-stock.mjs replacement-wake.mjs task-ledger.mjs operation-reconciliation.mjs operation-ledger.mjs reserve-command.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs goal-definition.mjs goal-reading.mjs goal-requirements.mjs skill-offers.mjs plan-time-estimate.mjs usage-ledger.mjs production-wait.mjs prompt-prefix.mjs dsml-tool-calls.mjs control-json-repair.mjs responsiveness.mjs npc-agent-loop.mjs; do
+for file in agent-roles.mjs agent-context.mjs handoff-packet.mjs topology-context.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs completion-finalization.mjs targeted-observation.mjs luna-step-contracts.mjs planning-state.mjs authorization.mjs refusal-class.mjs pause-class.mjs batch-stock.mjs replacement-wake.mjs task-ledger.mjs operation-reconciliation.mjs operation-ledger.mjs reserve-command.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs goal-definition.mjs goal-reading.mjs goal-requirements.mjs skill-offers.mjs plan-time-estimate.mjs usage-ledger.mjs production-wait.mjs prompt-prefix.mjs dsml-tool-calls.mjs control-json-repair.mjs responsiveness.mjs npc-agent-loop.mjs; do
   cp "$WORK/source/deploy/pterodactyl/runtime-v8/$file" "$APP/src/runtime-v8/$file"
 done
 for file in structured-policy.mjs supervisor-adapter.mjs npc-agent-loop.mjs; do
@@ -242,6 +242,7 @@ const names = [
   'src/prompt.md',
   'src/runtime-v8/common.mjs',
   'src/runtime-v8/canonical-task-board-memory.mjs',
+  'src/runtime-v8/topology-context.mjs',
   'src/runtime-v8/completion-finalization.mjs',
   'src/runtime-v8/targeted-observation.mjs',
   'src/runtime-v8/luna-step-contracts.mjs',

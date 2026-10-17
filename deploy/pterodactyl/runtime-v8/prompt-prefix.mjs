@@ -32,14 +32,15 @@
 // the same layout without markers.
 
 import { createHash } from 'node:crypto'
+import { TOPOLOGY_PREFIX } from './topology-context.mjs'
 
 // Blocks the harness recomputes for every round and never stores in the
 // working history: skill offers, goal requirements, the decision envelope and planning outline
 // guidance (npc-agent-loop.mjs callProvider), and steering (provider-base.mjs).
-export const TAIL_MARKERS = Object.freeze(['[SKILL_OFFERS]', '[REQUIREMENTS]', '[DECISION_ENVELOPE]', '[PLANNING_LOD]', '[STEERING]', '[CONTROL_DECISION_STATE]'])
+export const TAIL_MARKERS = Object.freeze(['[SKILL_OFFERS]', '[REQUIREMENTS]', '[DECISION_ENVELOPE]', '[PLANNING_LOD]', '[STEERING]', '[CONTROL_DECISION_STATE]', TOPOLOGY_PREFIX])
 // The tail blocks that round-type detection looks past. The decision envelope
 // and outline guidance were always the "last user message" and stay so.
-const DETECTION_SKIPPED_MARKERS = Object.freeze(['[SKILL_OFFERS]', '[REQUIREMENTS]', '[STEERING]', '[CONTROL_DECISION_STATE]'])
+const DETECTION_SKIPPED_MARKERS = Object.freeze(['[SKILL_OFFERS]', '[REQUIREMENTS]', '[STEERING]', '[CONTROL_DECISION_STATE]', TOPOLOGY_PREFIX])
 const TERMINAL_MARKERS = Object.freeze(['[MOD]', '[HARNESS]'])
 const DIGEST_MARKER = '[OBSERVATIONS COMPACTED]'
 

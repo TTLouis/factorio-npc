@@ -123,6 +123,7 @@ lane_offset() {
     targeted-water) printf '19' ;;
     local-transfer-target) printf '20' ;;
     normal-observation) printf '21' ;;
+    fresh-topology) printf '22' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

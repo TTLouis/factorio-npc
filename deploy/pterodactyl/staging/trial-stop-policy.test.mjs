@@ -4,6 +4,8 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { trialStopDecision, stopTrialIfTerminal } from './trial-stop-policy.mjs'
 import { supervisorStop } from './trial-supervisor-stop.mjs'
 
@@ -15,6 +17,16 @@ const base = () => ({ startedAt, now: Date.parse(v.pause_at), goalId, actorId: 6
   canonical: { goal: { goal_id: goalId }, active_plan_id: 'p',
     plans: [{ plan_id: 'p', plan_version: 1, status: 'EXECUTING', active_step_index: 0, steps: [{ step_id: 's' }] }],
     run: { paused: true, pause_class: v.pause_class, pause_reason: v.pause_reason, paused_at: Date.parse(v.pause_at) } },
+})
+
+test('supervisor CLI exits before connecting when its explicit run identity is missing', () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./trial-supervisor-stop.mjs', import.meta.url))], {
+    env: {}, encoding: 'utf8', timeout: 10000,
+  })
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /Explicit expected run ID required/)
+  assert.doesNotMatch(result.stderr, /ENOENT|ECONN|RCON/)
 })
 const exhausted = input => ({ event: 'recovery.auto_resume_exhausted', ts: new Date(input.now).toISOString(),
   request_id: 'recovery-current', data: { goal_id: goalId, plan_id: 'p', plan_version: 1, step_id: 's', reason: 'goal_limit_reached' } })

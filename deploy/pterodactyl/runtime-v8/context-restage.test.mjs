@@ -53,6 +53,16 @@ async function steamReplayFingerprint() {
   await world.request()
   await world.closeStep1()
   await world.failSupplyBatch()
+  // Fresh topology is a separately labelled volatile contract. This historical fixture has
+  // no actor surface/force scope, so it reports unavailable (or deferred behind its batch), without extra world reads.
+  const topologyRows = world.trace.filter(row => row.event === 'context.topology_refreshed')
+  assert.ok(topologyRows.length > 0)
+  for (const row of topologyRows) {
+    assert.ok(['unavailable', 'deferred'].includes(row.data.state))
+    assert.equal(row.data.reason, row.data.state === 'deferred' ? 'mutation_pending' : 'actor_scope_unknown')
+    assert.equal(row.data.reads_attempted, 0)
+    assert.equal(row.data.candidate_solves, 0)
+  }
   const requestIds = new Map()
   const rows = world.trace.map(record => normalizeRow(record, requestIds))
   const calls = world.calls.map(call => ({
@@ -66,7 +76,7 @@ async function steamReplayFingerprint() {
   }
 }
 
-test('a run that never restages sends the same provider requests and writes the same trace rows', async () => {
+test('a run that never restages preserves its frozen requests and trace with the explicit volatile topology contract', async () => {
   const actual = await steamReplayFingerprint()
   if (process.env.UPDATE_RESTAGE_GOLDEN === '1') {
     await fsp.mkdir(path.dirname(GOLDEN_FILE), { recursive: true })

@@ -207,4 +207,29 @@ describe('compact spatial semantics', () => {
       target_fluidbox_index: 1,
     })
   })
+
+  it('reads fresh stored fluid and reciprocal links without inferring power from connectivity', () => {
+    let amount = 5
+    const source: any = { valid: true, name: 'heater', type: 'boiler', unit_number: 90,
+      position: { x: 0, y: 0 }, fluids_count: 1,
+      prototype: { type: 'boiler', get_max_energy_usage: () => 30000 }, energy: 0,
+      get_fluid: () => ({ name: 'steam', amount, temperature: 165 }),
+    }
+    const target: any = { valid: true, name: 'pipe', type: 'pipe', unit_number: 91, position: { x: 1, y: 0 },
+      fluidbox: { get_pipe_connections: () => [{ target: { owner: source }, target_fluidbox_index: 1 }] },
+    }
+    source.fluidbox = { length: 1, get_capacity: () => 200, get_prototype: () => ({ index: 1, production_type: 'output' }),
+      get_pipe_connections: () => [{ position: { x: 0, y: 0 }, target: { owner: target }, target_fluidbox_index: 1 }],
+    }
+    const first = compact_spatial_summary(source) as any
+    expect(first.fluid.storages[0]).toMatchObject({ capacity: 200, contents: { name: 'steam', amount: 5, temperature: 165 } })
+    expect(first.fluid.storages[0].connections[0].reciprocal).toBe(true)
+    expect(first.power).toMatchObject({ prototype: { power: { consumption_watts: 1800000 } }, stored_energy_joules: 0 })
+    amount = 0
+    target.fluidbox.get_pipe_connections = () => []
+    const second = compact_spatial_summary(source) as any
+    expect(second.fluid.storages[0].contents.amount).toBe(0)
+    expect(second.fluid.storages[0].connections[0].reciprocal).toBe(false)
+    expect(first.fluid.storages[0].contents.amount).toBe(5)
+  })
 })

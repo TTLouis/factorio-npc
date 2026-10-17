@@ -127,7 +127,44 @@ export function electric_prototype_facts(prototype: any): Record<string, unknown
     power.fluid_usage_per_second = steam * TICKS_PER_SECOND
     has_power = true
   }
-  if (has_power) facts.power = power
+  const maximum_temperature = prototype_number(prototype, ['maximum_temperature'], [])
+  if (maximum_temperature !== undefined && maximum_temperature > 0) power.maximum_temperature = maximum_temperature
+  if (has_power) {
+    power.prototype_quality = 'normal'
+    facts.power = power
+  }
+
+  // A rated heat budget, not measured output. Read fluids and temperatures from
+  // this game's prototypes; a modded boiler must not inherit a vanilla ratio.
+  if (prototype.type === 'boiler' && usage !== undefined && usage > 0) {
+    const target = prototype_number(prototype, ['target_temperature'], [])
+    const boxes: any = protected_read(() => prototype.fluidbox_prototypes)
+    let input: any
+    let output: any
+    let input_count = 0
+    let output_count = 0
+    if (boxes) for (const [, box] of pairs(boxes as Record<number, any>)) {
+      const filter = protected_read(() => box.filter)
+      if (box.production_type === 'output' && filter) { output = filter; output_count++ }
+      if ((box.production_type === 'input' || box.production_type === 'input-output') && filter) { input = filter; input_count++ }
+    }
+    const initial = prototype_number(input, ['default_temperature'], [])
+    const heat = prototype_number(output, ['heat_capacity'], [])
+    if (input_count === 1 && output_count === 1 && target !== undefined && initial !== undefined && heat !== undefined && heat > 0 && target > initial) {
+      facts.thermal = {
+        source: 'running_prototype',
+        prototype_quality: 'normal',
+        input_fluid: input.name,
+        output_fluid: output.name,
+        target_temperature: target,
+        input_default_temperature: initial,
+        heat_capacity_joules_per_unit_degree: heat,
+        heating_capacity_watts: usage * TICKS_PER_SECOND,
+        fluid_output_per_second_at_target: usage * TICKS_PER_SECOND / (heat * (target - initial)),
+        conditional_on: 'full_energy_supply_and_input_fluid_at_default_temperature',
+      }
+    }
+  }
 
   const burner: any = protected_read(() => prototype.burner_prototype)
   if (burner) {
