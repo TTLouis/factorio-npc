@@ -130,19 +130,29 @@ const model = new ScriptedModel()
   .push('executor', 'luna:place-steam-outlet', messages => place(messages, 'pipe1'))
   .push('executor', 'luna:identify-first-pipe', reads([['getEntityStatus', { name: 'pipe', radius: 32 }]]))
   .push('executor', 'luna:turn-inland-from-observed-port', async messages => {
-    const status = lastTool(messages)
     const e = entity(messages, 'pipe1'); seen.firstPipe = e
     // Project an actual native four-port pipe through the production helper.
     // This component assertion covers nested omission even when the full-loop
     // lean packet above drops the pipe to retain the boiler and capacity.
     // Delayed import preserves the original-image missing-context control.
     const { topologyEntities, topologyText } = await import('../pterodactyl/runtime-v8/topology-context.mjs')
-    const actual = topologyEntities({ ...status, entities: [e] })
-    assert.ok(e.spatial.fluid.storages.some(storage => storage.connections.length === 4))
+    // The model observation normalizer deliberately omits native envelope
+    // metadata. Reuse the already captured raw native answer, never synthesize
+    // its scope from the fixture or re-read the world for this projection.
+    const native = transcript.filter(row => row.command.includes('"get_entity_status"'))
+      .map(row => JSON.parse(row.answer)).findLast(status => status.entity?.unit_number === e.unit_number)
+    assert.ok(native)
+    assert.equal(native.actor_id, setup.actor_id)
+    assert.equal(native.surface_index, setup.surface_index)
+    assert.ok(Number.isSafeInteger(native.observed_tick))
+    const actual = topologyEntities({ ...native, entities: [native.entity] })
+    assert.ok(actual, 'actual native pipe envelope must supply valid observation provenance')
+    assert.ok(native.entity.spatial.fluid.storages.some(storage => storage.connections.length === 4))
     const compact = JSON.parse(topologyText({ state: 'fresh', ...actual }).slice('fresh_topology: '.length))
     assert.equal(compact.truncated, true)
     assert.ok(compact.entities[0].fluid.some(storage => storage.truncated === true && storage.ports.length === 3))
     seen.nativePipeProjection = compact
+    seen.nativePipeStatus = native
     return reads([['getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: e.unit_number, storage_index: 1, connection_index: 4 }, limit: 8 }]])
   })
   .push('executor', 'luna:place-inland-pipe', messages => place(messages, 'pipe2'))
