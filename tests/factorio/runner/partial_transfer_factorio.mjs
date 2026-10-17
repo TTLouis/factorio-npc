@@ -104,6 +104,7 @@ const model = new ScriptedModel()
   .push('executor', 'luna:observe-real-reserved-iron-craft', () => readStatus())
   .push('executor', 'luna:clear-prefix-and-switch-to-copper', messages => {
     const status = lastTool(messages); assert.equal(status.entity.unit_number, unit)
+    seen.initialDeliveredEntity = structuredClone(status.entity)
     const items = status.entity.inventories.flatMap(row => Array.isArray(row.items) ? row.items : [])
     assert.ok(items.some(row => row.name === 'iron-ore' && row.count === 7))
     assert.ok(items.some(row => row.name === 'iron-plate' && row.count === 17))
@@ -112,8 +113,18 @@ const model = new ScriptedModel()
 if (mode === 'recovery') model
   .push('executor', 'luna:fresh-observation-after-accounted-partial-effect', () => readStatus())
   .push('executor', 'luna:canonical-continuation-without-new-completion-contracts', messages => {
-    const status = lastTool(messages); assert.equal(status.entity.unit_number, unit)
-    const items = status.entity.inventories.flatMap(row => Array.isArray(row.items) ? row.items : [])
+    const status = lastTool(messages)
+    seen.freshDeliveredStatus = structuredClone(status)
+    let entity = status.entity
+    if (status.observation_mode === 'diff') {
+      assert.equal(status.reference, `entity:${unit}`)
+      assert.equal(status.query.name, 'stone-furnace')
+      assert.ok(Array.isArray(status.changes?.entity?.inventories), 'fresh inventories must be present in the delivered diff')
+      entity = { ...seen.initialDeliveredEntity, ...status.changes.entity }
+    }
+    assert.equal(entity.unit_number, unit)
+    seen.freshDeliveredEntity = structuredClone(entity)
+    const items = entity.inventories.flatMap(row => Array.isArray(row.items) ? row.items : [])
     assert.ok(items.some(row => row.name === 'iron-plate' && row.count === 1))
     assert.ok(items.some(row => row.name === 'coal' && row.count === 4))
     assert.ok(!items.some(row => row.name === 'iron-ore'))
