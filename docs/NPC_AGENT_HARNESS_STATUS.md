@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 17: Run X reaches furnace transition; red automation remains unproven
+
+- **Trial.** Frozen `ffc0a046`, sole minimum objective, actual Sol6.1 planner8/Luna executor47, 55/55 replies and zero provider transport errors; Jev50/50. Native output reached 60 iron/ten copper plates with ten hand-crafted gears held. Only the furnace was placed; no power, automated chain or red output. Measurement never started. Canonical terminal stop occurred at 14.22 minutes; weekly remaining31% stayed above the approved30% floor.
+- **Boundary.** During the additional-copper step, native batch20 completed three transfer tasks before copper was refused with `target_rejects_item`. Partial-effect uncertainty was preserved. The next executor action failed `missing_step_completions`; the independently refreshed canonical plan was `BLOCKED`, requiring user decision. Next replay the physical furnace recipe transition/completed prefix and completion-contract recovery. Final normalized status agrees with fresh post-stop native state, so earlier snapshots do not establish a stale observation bug.
+- **Archival.** Strict paired stop-trace confirmation failed because no `goal.paused` event was emitted. A separately authorized, independently verified fresh cancellation/durable same-goal operator pause allowed safe archival without clearing pending effects. The 598,298-byte save passes all55 ZIP-entry CRCs and offline Factorio2.0.77 loading of a pristine copy. A one-chunk archive-guard assumption was corrected locally with ten regression groups; original failures remain preserved. Owned stack/forwarder are down and evidence retained. Broader E2E goal remains **paused**; no new production patch or second trial. [Run X evidence](validation/RED_AUTOMATION_LIVE_RUN_X_2026-10-17.md).
+
 ## October 17: Lean fresh topology and placement obstruction context integrated
 
 - **Behavior.** Planner and executor receive a scoped native snapshot capped at 1,950 characters: relevant held stock, fluid/electric connections, conditional prototype capacity ratios and bounded rejected-footprint witnesses from admitted observations. Actor/session/epoch/surface/force changes and pending or intervening mutations invalidate it. Existing plan ownership, admission, observation/recovery limits and the executor's 6,000-character handoff remain intact.
