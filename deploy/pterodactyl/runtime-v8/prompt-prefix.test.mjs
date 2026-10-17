@@ -5,6 +5,7 @@ import {
   cacheBreakpointIndexes,
   classifyPrefixBreak,
   insertTailBlock,
+  isTailBlock,
   lastUserOutsideTail,
   promptLayout,
   sharedPrefixMessages,
@@ -15,9 +16,28 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { buildPrefixReport,DEFECT_PREFIX_REASONS, EXPECTED_PREFIX_REASONS, formatPrefixReport } from './prefix-report.mjs'
 import { providerRequest } from './provider.mjs'
 import { STEAM_SCRIPTED_BLOCKED_ANSWER, steamReplayHarness } from './steam-run-fixtures.mjs'
+import { TOPOLOGY_PREFIX } from './topology-context.mjs'
 
 const user = content => ({ role: 'user', content })
 const system = { role: 'system', content: 'SYSTEM' }
+
+test('fresh topology changes only the volatile tail and never the cache breakpoint or round-type instruction', () => {
+  const stored = [system, user('[CHAT] a: route steam'), { role: 'assistant', content: '', tool_calls: [{ id: 'topology-read' }] },
+    { role: 'tool', tool_call_id: 'topology-read', content: '{"ok":true}' }]
+  const first = insertTailBlock(stored, user(`${TOPOLOGY_PREFIX}{"state":"fresh","observed_tick":1000}`))
+  const second = insertTailBlock(stored, user(`${TOPOLOGY_PREFIX}{"state":"fresh","observed_tick":1100,"held":{"steam-engine":1}}`))
+  assert.ok(isTailBlock(first.at(-1)))
+  assert.equal(tailStart(first), stored.length)
+  assert.deepEqual(cacheBreakpointIndexes(first), [0, 1])
+  assert.equal(lastUserOutsideTail(first).content, '[CHAT] a: route steam')
+  assert.equal(promptLayout(first).prefix_key, promptLayout(second).prefix_key)
+  assert.deepEqual(first.slice(0, tailStart(first)), second.slice(0, tailStart(second)), 'the serialized stable prefix remains byte-identical')
+  assert.equal(classifyPrefixBreak({ messages: first }, { messages: second }).reason, 'tail_only')
+  const receipt = user('[MOD] Autorio operation batch completed.')
+  const completion = insertTailBlock([...stored, receipt], first.at(-1))
+  assert.equal(completion.at(-1), receipt)
+  assert.equal(lastUserOutsideTail(completion), receipt)
+})
 
 test('tail placement: blocks go after stored history and before a trailing terminal instruction', () => {
   const stored = [system, user('[CHAT] a: go'), { role: 'assistant', content: '', tool_calls: [{ id: 'c' }] }, { role: 'tool', tool_call_id: 'c', content: '{}' }]
