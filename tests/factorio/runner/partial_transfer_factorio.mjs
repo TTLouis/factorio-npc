@@ -222,8 +222,8 @@ try {
     assert.equal(after.held['copper-ore'], 5); assert.equal(after.held.coal ?? 0, 0)
     assert.equal(world.named('goal.evaluated').at(-1).satisfied, true)
     assert.equal(world.memory.currentPlan(KEY), undefined)
-    assert.equal(sent.filter(command => command.includes("'iron-ore',7")).length, 1)
-    assert.equal(sent.filter(command => command.includes("'iron-plate',17")).length, 1)
+    assert.equal(sent.filter(command => command.includes(`'move_items_exact','iron-ore',${unit},7,false`)).length, 1)
+    assert.equal(sent.filter(command => command.includes(`'move_items_exact','iron-plate',${unit},17,false`)).length, 1)
     seen.after = after
   } else {
     assert.ok(corruptions.length > 0)
