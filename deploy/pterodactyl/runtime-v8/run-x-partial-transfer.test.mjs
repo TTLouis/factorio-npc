@@ -174,4 +174,3 @@ test('Run X blocked continuation is rejected by canonical authority, never treat
   assert.ok(world.named('operations.skipped').some(row => row.reason === 'plan_blocked_awaiting_user'))
   healthy(ctx)
 })
-
