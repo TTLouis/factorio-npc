@@ -204,6 +204,29 @@ Source archives and the original Run W save hash were independently checked.
 All owned native containers are down; exports, saves and failed-attempt
 evidence remain preserved. No unrelated container was modified.
 
-Merged gate and publication target follow below. Local evidence is retained
+Merged gate and publication target are recorded below. Local evidence is retained
 under task checkout
 `test-results/fresh-topology-2026-10-17/` and `test-results/topology-*.log`.
+## Merged validation and publication
+
+Reviewed task `dc2f0c89` is integrated by no-ff merge
+`8eadec71e4f8b87e5efecc98c704b178f0e1bffd` in the existing integration
+coordinator checkout. Its production/test tree matches the reviewed task;
+subsequent checkpoint edits are documentation only.
+
+The required merged `scripts/test-local.sh all` gate exits **0**:
+**2,517 runtime/staging tests**, **1,150 mod tests**, typecheck, Lua build and
+generated-Lua validation pass. Full lint, immutable payload regeneration check
+and all **nine payload tests** also exit **0** on the merged tree. Logs and
+explicit exit receipts are retained in that integration checkout:
+`test-results/topology-merged-all.log`, `topology-merged-all-exit.txt`,
+`topology-merged-artifact-lint.log` and `topology-merged-artifact-lint-exit.txt`.
+There is no production delta requiring a repeated native suite after the merge.
+
+The owner-authorized publication target is
+`origin/experiment/jev-agent-architecture`, using a normal push. The exact
+published HEAD and remote-ref comparison are retained in
+`test-results/topology-remote-confirmation.json` after publication and in the
+shared worktree registry. These are local validation results, without a claim
+about hosted CI. The broader E2E goal stays paused; no new live provider/Jev
+trial or deployment was started.
