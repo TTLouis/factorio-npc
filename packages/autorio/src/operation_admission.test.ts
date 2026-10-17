@@ -277,4 +277,115 @@ describe('durable operation admission', () => {
     expect(admission.begin({ ...identity, operation_key: 'overflow', ordinal: 65 })).toMatchObject({ ok: false, error: 'admission_journal_full' })
     expect(admission.status().records).toHaveLength(64)
   })
+  describe('exact drained transfer refusal', () => {
+    function setup() {
+      const receipt = {
+        ...ref, state: 'cancelled', outcome: 'refused', tick: 110,
+        task_count: 4, started_count: 4, task_types: ['moving_items', 'moving_items', 'moving_items', 'moving_items'],
+        completed_count: 3, refused_count: 1,
+        refusals: [{ operation_id: 21, type: 'moving_items', code: 'nothing_moved', cause: 'target_rejects_item', target_unit_number: 49, held_count: 10, tick: 109 }],
+      }
+      const status: any = { batch_generation: 1, receipt_journal: [] }
+      const admission = new_operation_admission(actor, () => status)
+      // Run X admitted two withdrawals, then one supply wrapper that queued
+      // coal and copper: three model operations, four native transfer tasks.
+      admission.begin({ ...identity, operation_count: 3 })
+      for (const [index, operation] of ['move_items_exact', 'move_items_exact', 'supply_entity'].entries()) {
+        admission.slot(identity.operation_key, index + 1, { ok: true, operation, batch_refs: [ref] })
+      }
+      admission.finish(identity.operation_key, { ok: true })
+      status.receipt_journal = [receipt]
+      ;(globalThis as any).storage.sgluna_task_receipt_journal = status.receipt_journal
+      ;(globalThis as any).storage.sgluna_task_batch_generation = 1
+      const stored = (globalThis as any).storage.sgluna_operation_admissions[0]
+      return { admission, status, receipt, stored }
+    }
+    it('closes fully accounted partial effects without claiming success, absence or a pre-mutation refusal', () => {
+      const { admission, stored } = setup()
+      expect(admission.status().records[0]).toMatchObject({ state: 'partial', ok: false, error: 'exact_terminal_transfer_refusal' })
+      expect(admission.status().records[0].proven_refusal).toBeUndefined()
+      expect(stored.state, 'status is a pure projection').toBe('admitted')
+      expect(pinned_operation_batch_refs()).toEqual([])
+      expect(admission.begin({ ...identity, operation_count: 3 })).toMatchObject({ ok: true, duplicate: true, record: { state: 'partial' } })
+      expect(stored.state).toBe('partial')
+      expect((globalThis as any).log).toHaveBeenCalledWith('[AUTORIO] operation.admission.partial request_id=request operation_key=request/operation reason=exact_terminal_transfer_refusal')
+      admission.begin({ ...identity, operation_count: 3 })
+      expect((globalThis as any).log.mock.calls.filter(([line]: [string]) => line.includes('operation.admission.partial'))).toHaveLength(1)
+    })
+    it('can close previously uncertain work and deduplicates a shared batch reference across slots', () => {
+      const { admission, stored } = setup()
+      stored.state = 'uncertain'
+      expect(admission.status().records[0].state).toBe('partial')
+    })
+    it('does not reinterpret a failed supply wrapper as a pre-mutation refusal', () => {
+      const admission = new_operation_admission(actor, () => ({ batch_generation: 1, receipt_journal: [] }))
+      admission.begin(identity)
+      admission.slot(identity.operation_key, 1, { ok: false, refused: true, operation: 'supply_entity', batch_refs: [], error: 'Unable to queue copper-ore supply' })
+      admission.finish(identity.operation_key, { ok: false })
+      expect(admission.status().records[0]).toMatchObject({ state: 'uncertain', slots: [{ mutation_unknown: true }] })
+      expect(admission.status().records[0].proven_refusal).toBeUndefined()
+    })
+    it('requires every separate referenced batch to close and accepts exact completed companion receipts', () => {
+      const { admission, status, stored } = setup()
+      const second = { batch_id: 2, batch_generation: 1, batch_ref: 'batch-g1-2' }
+      stored.slots[0].batch_refs.push(second)
+      expect(admission.status().records[0].state).not.toBe('partial')
+      status.receipt_journal.push({ ...second, state: 'completed', tick: 111, task_count: 1, started_count: 1, task_types: ['moving_items'] })
+      expect(admission.status().records[0].state).toBe('partial')
+    })
+    const invalid: Array<[string, (world: ReturnType<typeof setup>) => void]> = [
+      ['generation changed', w => { w.status.batch_generation = 2 }],
+      ['missing receipt', w => { w.status.receipt_journal = [] }],
+      ['wrong receipt identity', w => { w.receipt.batch_id = 9 }],
+      ['cancelled tail', w => { w.receipt.started_count = 3 }],
+      ['hard cancellation', w => { w.receipt.outcome = 'cancelled' }],
+      ['missing completed count', w => { delete (w.receipt as any).completed_count }],
+      ['mismatched totals', w => { w.receipt.completed_count = 2 }],
+      ['fractional totals', w => { w.receipt.completed_count = 2.5 }],
+      ['truncated task types', w => { w.receipt.task_types.pop() }],
+      ['non-transfer task', w => { w.receipt.task_types[0] = 'placing' }],
+      ['truncated refusal list', w => { w.receipt.refusals = [] }],
+      ['unknown cause', w => { w.receipt.refusals[0].cause = 'unknown' }],
+      ['other transfer failure', w => { w.receipt.refusals[0].code = 'item_missing' }],
+      ['missing operation id', w => { delete (w.receipt.refusals[0] as any).operation_id }],
+      ['missing target', w => { delete (w.receipt.refusals[0] as any).target_unit_number }],
+      ['no held items', w => { w.receipt.refusals[0].held_count = 0 }],
+      ['future refusal', w => { w.receipt.refusals[0].tick = 111 }],
+      ['nonfinite receipt tick', w => { w.receipt.tick = Number.NaN }],
+      ['synchronous mutation slot', w => { w.stored.slots[0].operation = 'equip_weapon' }],
+      ['player transfer slot', w => { w.stored.slots[0].operation = 'move_items_with_player' }],
+      ['unmapped slot', w => { w.stored.slots[0].batch_refs = [] }],
+      ['incomplete slots', w => { w.stored.slots.pop() }],
+      ['wrong slot index', w => { w.stored.slots[1].index = 1 }],
+      ['slot failed', w => { w.stored.slots[0].ok = false }],
+      ['invalid batch ref', w => { w.stored.slots[0].batch_refs = [{ ...ref, batch_ref: 'wrong' }] }],
+    ]
+    it.each(invalid)('keeps %s unresolved', (_label, mutate) => {
+      const world = setup()
+      mutate(world)
+      expect(world.admission.status().records[0].state).not.toBe('partial')
+      expect(world.stored.state).toBe('admitted')
+    })
+    it('rejects duplicate refusal operation identities even when the counts add up', () => {
+      const { admission, receipt } = setup()
+      receipt.refused_count = 2
+      receipt.completed_count = 2
+      receipt.refusals.push({ ...receipt.refusals[0] })
+      expect(admission.status().records[0].state).toBe('uncertain')
+    })
+    it('retains the terminal partial audit after receipt eviction and counts it as bounded history', () => {
+      const { admission, status } = setup()
+      admission.begin({ ...identity, operation_count: 3 })
+      status.receipt_journal = []
+      expect(admission.status().records[0].state).toBe('partial')
+      for (let ordinal = 2; ordinal <= 70; ordinal++) {
+        const key = `later-${ordinal}`
+        expect(admission.begin({ ...identity, operation_key: key, ordinal }).ok).toBe(true)
+        admission.slot(key, 1, { ok: true, batch_refs: [] })
+        admission.finish(key, { ok: true })
+      }
+      expect(admission.status().records).toHaveLength(64)
+      expect(admission.begin({ ...identity, operation_count: 3 })).toMatchObject({ ok: false, error: 'expired_operation_ordinal' })
+    })
+  })
 })

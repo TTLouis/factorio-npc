@@ -1027,6 +1027,7 @@ function compactBasicOperationResult(result) {
     item_name: typeof result.item_name === 'string' ? cleanMemoryText(result.item_name, 200) : undefined,
     requested_count: Number.isSafeInteger(result.requested_count) ? result.requested_count : undefined,
     moved_count: Number.isSafeInteger(result.moved_count) ? result.moved_count : undefined,
+    held_count: Number.isSafeInteger(result.held_count) ? result.held_count : undefined,
     placed_unit_number: Number.isSafeInteger(result.placed_unit_number) ? result.placed_unit_number : undefined,
     placed_entity_type: typeof result.placed_entity_type === 'string' ? cleanMemoryText(result.placed_entity_type, 100) : undefined,
     placed_position: result.placed_position && Number.isFinite(result.placed_position.x) && Number.isFinite(result.placed_position.y)
@@ -1063,7 +1064,7 @@ const BASIC_OPERATION_TASK_TYPE = new Map([
   ['attacking', 'attacking'],
 ])
 
-export function correlateBasicOperationResult(receipt, result, { actorId } = {}) {
+export function correlateBasicOperationResult(receipt, result, { actorId, terminalPartial = false } = {}) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return { result: undefined }
   const reasons = []
   const expectedTaskType = BASIC_OPERATION_TASK_TYPE.get(result.type)
@@ -1072,7 +1073,10 @@ export function correlateBasicOperationResult(receipt, result, { actorId } = {})
   }
   if (Number.isFinite(receipt?.tick)) {
     if (!Number.isFinite(result.tick)) reasons.push('missing_tick_identity')
-    else if (receipt.tick !== result.tick) reasons.push('tick_mismatch')
+    else if (receipt.tick !== result.tick && !(terminalPartial && result.tick <= receipt.tick
+      && receipt.refusals?.some(row => row.operation_id === result.operation_id && row.tick === result.tick
+        && row.type === result.type && row.code === result.code && row.item_name === result.item_name
+        && row.target_unit_number === result.target_unit_number))) reasons.push('tick_mismatch')
   }
   if (Number.isSafeInteger(actorId)) {
     if (!Number.isSafeInteger(result.actor_id)) reasons.push('missing_actor_identity')
@@ -1096,6 +1100,7 @@ export function receiptEvidence(raw, outcome, context = {}) {
       : undefined
     const correlated = correlateBasicOperationResult(receipt, parsed?.basic_operation?.last_result, {
       actorId: context.actor_id ?? parsed?.actor?.actor_id,
+      terminalPartial: context.admitted_batch?.terminal_partial === true,
     })
     return {
       kind: outcome === 'failed' ? 'operation_error_receipt' : 'operation_receipt',
@@ -7343,6 +7348,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async validateStepCompletionDeclarations(plan) {
     const planning = this.memory.planningState?.(this.activePlanKey())
     const held = getActivePlanningPlan(planning)
+    if (held?.status === PLAN_STATUS.BLOCKED && this.agentContext.role === EXECUTOR_ROLE) {
+      // A blocked committed contract remains immutable. Let the existing
+      // canonical admission path return its blocker; this is not a new draft.
+      await this.traceEvent('plan.completion_declarations_preserved', {
+        request_id: this.traceRequest?.id, plan_id: held.plan_id,
+        reason: 'canonical_plan_blocked',
+      })
+      return
+    }
     if (FROZEN_PLAN_STATUSES.has(held?.status)) {
       const step = held.steps?.[held.active_step_index]
       const declaredTransition = plan.semanticCompletion?.stepId === step?.step_id
@@ -8977,7 +8991,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch {}
     const rawStatus = await this.readTaskStatusRaw()
     const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
-    const admitted = [RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_CANCELLED].includes(result.verdict)
+    const admitted = [RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.ADMITTED_PARTIAL].includes(result.verdict)
     let held = pending
     if ([RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)) {
       this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key })
@@ -9042,14 +9056,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!pending) return
       const watermark = batchWatermark(rawStatus)
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
-      const actor = capturedActor ?? (this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined)
-      const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
-      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
+      let actor = capturedActor ?? (this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined)
+      let result = reconcilePendingOperation(pending, { status: rawStatus, actor })
+      if (result.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !capturedActor) {
+        // Unlike historical full completion, partial recovery needs the live
+        // actor fence even when the last basic-operation result is absent.
+        const current = await super.captureEpoch()
+        actor = { actor_id: current.actor_id, epoch: current.epoch }
+        result = reconcilePendingOperation(pending, { status: rawStatus, actor })
+      }
+      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_PARTIAL, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
+      if (provable && result.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL) {
+        this.memory.updatePendingOperation?.(key, {
+          state: PENDING_STATE.ADMITTED, effect: result.effect, verdict: result.verdict,
+          reason: result.reason, batch_id: result.batch_id, reconciled_at: Date.now(),
+        }, pending.operation_key)
+      }
       const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
       const rid = requestId ?? this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
-      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable || result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) {
+      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable || [RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, RECONCILE_VERDICT.ADMITTED_PARTIAL].includes(result.verdict)) {
         await this.traceEvent('operation.reconciled', {
           request_id: rid,
           trigger: 'receipt',
@@ -10076,14 +10103,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   goalPausedTrace(source, extra = {}) {
-    const state = this.peekPlanState(this.activePlanKey())
-    if (state?.status !== 'paused') return undefined
+    const key = this.activePlanKey()
+    const state = this.peekPlanState(key)
+    if (!state) return undefined
+    const record = this.memory.pauseRecord?.(key) ?? state
+    // A frozen plan stays BLOCKED while its run can be operator-paused.
+    // Trace the durable pause, never infer it from the plan's projection.
+    const paused = typeof this.memory.pauseRecord === 'function' ? record?.paused === true : state.status === 'paused'
+    if (!paused) return undefined
+    if (record?.goal_id && record.goal_id !== state.goal_id) return undefined
+    const pauseReason = String(record?.pause_reason ?? state.pause_reason ?? '')
     const request = this.traceRequest
-    if (request?.goal_paused_traced === state.pause_reason) return undefined
-    if (request && request.start_status === 'paused' && request.start_pause_reason === state.pause_reason) return undefined
-    if (request) request.goal_paused_traced = state.pause_reason
-    const pauseReason = String(state.pause_reason ?? '')
-    const record = this.memory.pauseRecord?.(this.activePlanKey()) ?? state
+    if (request?.goal_paused_traced === pauseReason) return undefined
+    if (request && request.start_status === 'paused' && request.start_pause_reason === pauseReason) return undefined
+    if (request) request.goal_paused_traced = pauseReason
     return {
       request_id: request?.id ?? this.lastTerminalRequestId,
       cause: cleanMemoryText(pauseReason.split(':')[0], 120) || 'paused',
@@ -10429,9 +10462,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const status = JSON.parse(raw)
       const cancelled = status.last_cancelled_batch
       const basic = status.basic_operation?.last_result
-      const currentActor = basic?.type === 'moving_items' && basic.code === 'no_target'
+      const recoveryCandidate = basic?.type === 'moving_items' && (basic.code === 'no_target'
+        || (basic.code === 'nothing_moved' && basic.to_entity === true))
+      const currentActor = recoveryCandidate
         ? await super.captureEpoch() : undefined
-      const admitted = basic?.type === 'moving_items' && basic.code === 'no_target'
+      const admitted = recoveryCandidate
         && basic.accepted === false && basic.completed === false && cancelled && outstanding.find(pending => {
         if (pending.protocol_version !== 2 || pending.actor?.actor_id !== this.epoch?.actor_id
           || pending.actor?.epoch !== this.epoch?.epoch || pending.plan_id !== admission?.plan_id
@@ -10444,9 +10479,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           && ref.batch_ref === cancelled.batch_ref))
         if (!matches) return false
         const result = reconcilePendingOperation(pending, { status, actor: { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } })
-        return [RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
+        if (result.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !cancelled.refusals?.some(row =>
+          row.operation_id === basic.operation_id && row.type === basic.type && row.code === basic.code
+          && row.item_name === basic.item_name && row.target_unit_number === basic.target_unit_number
+          && (basic.tick === cancelled.tick || basic.tick === row.tick))) return false
+        return [RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, RECONCILE_VERDICT.ADMITTED_PARTIAL].includes(result.verdict)
       })
-      await this.settleOutstandingOperation(raw)
+      await this.settleOutstandingOperation(raw, undefined, { actor: currentActor })
       this.recordPlacementReceipt(raw)
       const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
       const evidence = receiptEvidence(raw, this.planUpdateReason === 'failure' ? 'failed' : 'completed', {
@@ -10459,6 +10498,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           goal_id: admitted.goal_id, plan_id: admitted.plan_id, step_id: admitted.step_id,
           actor_id: admitted.actor.actor_id, actor_epoch: admitted.actor.epoch,
           batch_id: cancelled.batch_id, batch_generation: cancelled.batch_generation,
+          terminal_partial: reconcilePendingOperation(admitted, { status, actor: currentActor }).verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL,
         } : undefined,
       })
       // The plan and step this batch was admitted under, when the memory
@@ -11032,7 +11072,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const supplyState = this.memory.currentPlan?.(this.activePlanKey())
     const supplyRecovery = latestTransferSupplyExecutionRecovery(supplyState)
     const targetRecovery = supplyRecovery?.recovery === 'local_target_reacquisition'
+    const partialRecovery = supplyRecovery?.recovery === 'terminal_transfer_refusal'
     if (supplyRecovery) {
+      if (partialRecovery) await this.traceEvent('transfer.partial_recovery', {
+        request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
+        operation_key: supplyRecovery.operation_key, attempt: supplyRecovery.attempt,
+        retry_budget: supplyRecovery.retry_budget, reason: 'exact_terminal_target_rejection_same_step',
+      })
       if (targetRecovery) await this.traceEvent('transfer.target_recovery', {
         request_id: this.traceRequest?.id,
         step_id: supplyState?.task_board?.active_step_id,
@@ -11070,7 +11116,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
       })
     }
-    const supplyGuidance = targetRecovery
+    const supplyGuidance = partialRecovery
+      ? ` [HARNESS] The exact native transfer receipt accounts for the completed tasks and the target_rejects_item refusal without moving that item. The completed prefix remains applied; this is partial work, not success of the whole batch. Do not replay the original batch or its prefix. Re-observe the actual target and held counts, then choose only the missing effects inside this same committed step. A furnace may finish an in-progress craft after its input is cleared; inspect its output before changing ingredients. The committed plan and checkpoint remain unchanged. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer allowance; all other limits remain unchanged.`
+      : targetRecovery
       ? ` [HARNESS] The legacy name-based transfer found no ${cleanMemoryText(supplyRecovery.entity_name, 200)} within interaction reach (no_target). This is a bounded local target-reacquisition dependency inside the same committed step, not evidence that a historical machine was destroyed or WORLD_BLOCKED. The plan, step contract and requested result are unchanged. Historical coordinates are travel guidance only: choose travel if appropriate, wait for its receipt, then re-observe the actual spatial target and current inventories before proposing an exact transfer. Do not substitute a same-name machine or use a cached unit number as execution authority. The original batch may have a successful prefix; its uncertainty and duplicate-effect guard remain authoritative. Do not replay that batch or its cancelled tail; propose only effects justified by fresh counts. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer recovery allowance; all other limits and authority checks remain unchanged.`
       : supplyRecovery
       ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget}; once these are spent the failure is recorded as the step blocker (the plan and step contract stay unchanged).`
@@ -13847,7 +13895,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  // goalPausedTrace reads the legacy status, which stays 'blocked' for a frozen plan; name the pause here, once per request.
+  // A frozen refusal supplies its precise blocker cause and source here, once per request.
   async traceFrozenPlanPaused(record, cause, stateResult, source) {
     if (this.traceRequest) this.traceRequest.goal_paused_traced = record.pause_reason
     await this.traceEvent('goal.paused', {

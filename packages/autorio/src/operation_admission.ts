@@ -30,7 +30,7 @@ export type AdmissionSlotInput = Omit<AdmissionSlot, 'index' | 'refused_before_m
   refused?: boolean
 }
 export interface OperationAdmission extends OperationCorrelation {
-  state: 'admitting' | 'admitted' | 'uncertain' | 'completed' | 'failed' | 'not_admitted'
+  state: 'admitting' | 'admitted' | 'uncertain' | 'completed' | 'failed' | 'partial' | 'not_admitted'
   generation: number
   tick: number
   slots: AdmissionSlot[]
@@ -54,6 +54,10 @@ export const PURE_SUBMIT_OPERATIONS = [
   'move_items_with_player', 'set_machine_recipe', 'launch_rocket', 'wait', 'craft_item',
   'harvest_product',
 ]
+// supply_entity's successful submission only queues submit_move_exact calls.
+// Its failed submission can cancel a prefix, so it is deliberately NOT added
+// to PURE_SUBMIT_OPERATIONS or the pre-mutation-refusal proof above.
+const DELIVERY_OPERATIONS = ['move_items', 'move_items_exact', 'supply_entity']
 declare const storage: { sgluna_operation_admissions?: OperationAdmission[], sgluna_operation_admission_high_water?: number,
   sgluna_task_receipt_journal?: TaskBatchReceipt[], sgluna_task_batch_generation?: number }
 
@@ -74,6 +78,54 @@ function correlation(raw: OperationCorrelation) {
 function journal() {
   if (!storage.sgluna_operation_admissions) storage.sgluna_operation_admissions = []
   return storage.sgluna_operation_admissions
+}
+// A drained refused batch accounts for every task; a cancelled tail does not.
+// This closes only the native admission ledger, never verifies the step, claims
+// whole-batch success or authorizes replay. The runtime separately checks its
+// exact signature, current actor/epoch and idle state before allowing recovery.
+function terminal_transfer_refusal(record: OperationAdmission, status: { receipt_journal: TaskBatchReceipt[], batch_generation: number }) {
+  if (!['admitted', 'uncertain'].includes(record.state) || !integer(record.generation)
+    || record.generation !== status.batch_generation || !integer(record.operation_count)
+    || record.operation_count > ADMISSION_LIMITS.slots || record.slots.length !== record.operation_count) return false
+  const refs: TaskBatchIdentity[] = []
+  for (let index = 0; index < record.slots.length; index++) {
+    const slot = record.slots[index]
+    if (!slot || slot.index !== index + 1 || slot.ok !== true || slot.operation === undefined
+      || !DELIVERY_OPERATIONS.includes(slot.operation) || !Array.isArray(slot.batch_refs)
+      || slot.batch_refs.length === 0 || slot.batch_refs.length > ADMISSION_LIMITS.refs) return false
+    for (const ref of slot.batch_refs) {
+      if (!ref || !integer(ref.batch_id) || ref.batch_generation !== record.generation
+        || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return false
+      if (!refs.some(previous => previous.batch_ref === ref.batch_ref)) refs.push(ref)
+    }
+  }
+  if (refs.length === 0 || refs.length > ADMISSION_LIMITS.refs) return false
+  let refused = 0
+  for (const ref of refs) {
+    const receipt = status.receipt_journal.find(row => row.batch_id === ref.batch_id
+      && row.batch_generation === ref.batch_generation && row.batch_ref === ref.batch_ref)
+    if (!receipt || !integer(receipt.task_count) || receipt.task_count > 64 || receipt.started_count !== receipt.task_count
+      || typeof receipt.tick !== 'number' || receipt.tick < 0 || receipt.tick > 9007199254740990 || receipt.tick !== math.floor(receipt.tick)
+      || !Array.isArray(receipt.task_types) || receipt.task_types.length !== receipt.task_count
+      || !receipt.task_types.every(type => type === 'moving_items')) return false
+    if (receipt.state === 'completed' && receipt.outcome === undefined) continue
+    if (receipt.state !== 'cancelled' || receipt.outcome !== 'refused'
+      || typeof receipt.completed_count !== 'number' || receipt.completed_count < 0
+      || receipt.completed_count !== math.floor(receipt.completed_count) || !integer(receipt.refused_count)
+      || receipt.completed_count + receipt.refused_count !== receipt.task_count
+      || !Array.isArray(receipt.refusals) || receipt.refusals.length !== receipt.refused_count) return false
+    const ids: number[] = []
+    for (const refusal of receipt.refusals) {
+      if (!refusal || refusal.type !== 'moving_items' || refusal.code !== 'nothing_moved'
+        || refusal.cause !== 'target_rejects_item' || !integer(refusal.operation_id)
+        || !integer(refusal.target_unit_number) || !integer(refusal.held_count)
+        || typeof refusal.tick !== 'number' || refusal.tick < 0 || refusal.tick > receipt.tick
+        || refusal.tick !== math.floor(refusal.tick) || ids.includes(refusal.operation_id)) return false
+      ids.push(refusal.operation_id)
+    }
+    refused += receipt.refused_count
+  }
+  return refused > 0
 }
 export function pinned_operation_batch_refs() {
   const refs: string[] = []
@@ -107,6 +159,11 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.ok = false
     record.proven_refusal = true
     record.error = 'refused_before_mutation'
+  }
+  else if (terminal_transfer_refusal(record, status)) {
+    record.state = 'partial'
+    record.ok = false
+    record.error = 'exact_terminal_transfer_refusal'
   }
   else if (record.generation !== status.batch_generation || refs.some(ref => {
     const receipt = receipt_for(ref)
@@ -149,6 +206,9 @@ export function new_operation_admission(
       const derived = reconcile_record(record, status)
       if (persist && derived.state === 'failed' && record.state !== 'failed') {
         log(`[AUTORIO] operation.admission.refused request_id=${record.operation_key.split('/')[0]} operation_key=${record.operation_key} reason=engine_refused_first_task`)
+      }
+      if (persist && derived.state === 'partial' && record.state !== 'partial') {
+        log(`[AUTORIO] operation.admission.partial request_id=${record.operation_key.split('/')[0]} operation_key=${record.operation_key} reason=exact_terminal_transfer_refusal`)
       }
       Object.assign(record, derived)
     }

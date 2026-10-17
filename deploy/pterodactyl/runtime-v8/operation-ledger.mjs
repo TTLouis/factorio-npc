@@ -1,4 +1,4 @@
-import { sanitizePendingOperation, duplicateEffectGuard } from './operation-reconciliation.mjs'
+import { sanitizePendingOperation, duplicateEffectGuard, operationSignature, EFFECT } from './operation-reconciliation.mjs'
 
 export const OPERATION_LEDGER_LIMIT = 64
 export function operationLedger(raw, legacy) {
@@ -47,6 +47,15 @@ export function conflictingOperation(state, proposed) {
   for (const record of pendingOperations(state)) {
     const guard = duplicateEffectGuard(record, proposed)
     if (guard.refuse) return guard
+  }
+  // A known partial batch is no longer uncertain, but its successful tasks
+  // must never be replayed as the original batch for the same committed step.
+  for (const record of operationLedger(state?.operation_ledger).closed) {
+    if (record.effect === EFFECT.PARTIAL_KNOWN && record.plan_id === proposed.planId && record.step_id === proposed.stepId
+      && record.signature === operationSignature(proposed.operations)) {
+      return { refuse: true, reason: 'terminal_partial_batch_replay', operation_key: record.operation_key,
+        effect: record.effect, verdict: record.verdict, state: record.state }
+    }
   }
   return { refuse: false }
 }

@@ -63,6 +63,7 @@ export const PENDING_STATE = Object.freeze({
 export const RECONCILE_VERDICT = Object.freeze({
   ADMITTED_IN_FLIGHT: 'admitted_in_flight',
   ADMITTED_COMPLETED: 'admitted_completed',
+  ADMITTED_PARTIAL: 'admitted_partial',
   ADMITTED_CANCELLED: 'admitted_cancelled',
   NOT_ADMITTED: 'not_admitted',
   // The mod proved each refused operation changed nothing (a validation refusal, or the engine refusing the batch's
@@ -79,6 +80,7 @@ export const EFFECT = Object.freeze({
   HAPPENED: 'happened',
   IN_FLIGHT: 'in_flight',
   PARTIAL_UNKNOWN: 'partial_unknown',
+  PARTIAL_KNOWN: 'partial_known',
   UNKNOWN: 'unknown',
   NOT_HAPPENED: 'not_happened',
 })
@@ -225,6 +227,50 @@ function historicalCompletionProven(admission, status) {
       && receipt.outcome !== 'refused' && receipt.outcome !== 'cancelled')))
 }
 
+// A drained transfer batch can contain successful tasks and no-movement
+// refusals. Unlike cancellation, its exact receipt accounts for EVERY task.
+// This proves a partial effect, never whole-batch success or permission to replay.
+function terminalTransferRefusal(admission, status, pending) {
+  if (!['admitted', 'uncertain', 'failed', 'partial'].includes(admission.state) || status.task_state !== 'idle' || status.queue_length !== 0
+    || status.active_batch || !Array.isArray(status.receipt_journal)
+    || !pending.operations.every(op => ['move_items', 'move_items_exact', 'supply_entity'].includes(op.name))) return null
+  const slots = admission.slots
+  if (!Array.isArray(slots) || slots.length !== admission.operation_count
+    || !slots.every((slot, index) => slot?.index === index + 1 && slot.ok === true
+      && slot.operation === pending.operations[index]?.name && DELIVERY_OPERATIONS.has(slot.operation)
+      && Array.isArray(slot.batch_refs) && slot.batch_refs.length > 0 && slot.batch_refs.length <= 16)) return null
+  const refs = slots.flatMap(slot => slot.batch_refs)
+  const receipts = []
+  for (const ref of refs) {
+    if (!Number.isSafeInteger(ref?.batch_id) || ref.batch_id < 1 || ref.batch_generation !== admission.generation
+      || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return null
+    const receipt = (status.receipt_journal ?? []).find(row => row.batch_id === ref.batch_id
+      && row.batch_generation === ref.batch_generation && row.batch_ref === ref.batch_ref)
+    if (!receipt) return null
+    if (!receipts.includes(receipt)) receipts.push(receipt)
+  }
+  let completed = 0; let refused = 0
+  for (const receipt of receipts) {
+    if (!Number.isSafeInteger(receipt.task_count) || receipt.task_count < 1 || receipt.task_count > 64
+      || !Number.isSafeInteger(receipt.tick) || receipt.tick < 0
+      || receipt.started_count !== receipt.task_count || !Array.isArray(receipt.task_types)
+      || receipt.task_types.length !== receipt.task_count || !receipt.task_types.every(type => type === 'moving_items')) return null
+    if (receipt.state === 'completed' && !receipt.outcome) { completed += receipt.task_count; continue }
+    if (receipt.state !== 'cancelled' || receipt.outcome !== 'refused'
+      || !Number.isSafeInteger(receipt.completed_count) || receipt.completed_count < 0
+      || !Number.isSafeInteger(receipt.refused_count) || receipt.refused_count < 1
+      || receipt.completed_count + receipt.refused_count !== receipt.task_count
+      || !Array.isArray(receipt.refusals) || receipt.refusals.length !== receipt.refused_count
+      || new Set(receipt.refusals.map(row => row.operation_id)).size !== receipt.refused_count
+      || !receipt.refusals.every(row => row?.type === 'moving_items' && row.code === 'nothing_moved'
+        && row.cause === 'target_rejects_item' && Number.isSafeInteger(row.operation_id) && row.operation_id > 0
+        && Number.isSafeInteger(row.target_unit_number) && row.target_unit_number > 0 && Number.isSafeInteger(row.held_count) && row.held_count > 0
+        && Number.isSafeInteger(row.tick) && row.tick >= 0 && row.tick <= receipt.tick)) return null
+    completed += receipt.completed_count; refused += receipt.refused_count
+  }
+  return refused > 0 ? { completed_tasks: completed, refused_tasks: refused, batch_id: refs[0].batch_id } : null
+}
+
 /**
  * Decide what happened to a pending batch from the mod's current status and the current actor. Pure; the caller traces it.
  *
@@ -277,6 +323,9 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     // A sealed exact receipt describes historical work by its original actor.
     // Unfinished work from an old actor is never resumed or assumed complete.
     if (staleActor) return staleActor
+    const partial = terminalTransferRefusal(admission, status, pending)
+    if (partial) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
+      reason: 'exact_terminal_transfer_refusal', ...partial }
     if (admission.state === 'admitted') return { verdict: RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, effect: EFFECT.IN_FLIGHT, reason: 'exact_admission_in_flight', batch_id: batchId }
     if (admission.state === 'not_admitted') return { verdict: RECONCILE_VERDICT.NOT_ADMITTED, effect: EFFECT.NOT_HAPPENED, reason: 'exact_admission_proven_absent' }
     const refs = (admission.slots ?? []).flatMap(slot => slot.batch_refs ?? [])
@@ -368,6 +417,8 @@ export function reconciliationFacts(result, pending) {
     batch_id: result?.batch_id ?? null,
     operations: (pending?.operations ?? []).map(operation => operation.name),
     effect_classes: [...new Set((pending?.operations ?? []).map(operation => operation.effect_class))],
+    ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL
+      ? { completed_tasks: result.completed_tasks, refused_tasks: result.refused_tasks } : {}),
     ...(result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
       ? { applied_slots: result.applied_slots ?? [], refused_slots: result.refused_slots ?? [], refusal_codes: result.refusal_codes ?? [], unrun_slots: result.unrun_slots ?? 0 }
       : {}),
@@ -377,6 +428,9 @@ export function reconciliationFacts(result, pending) {
 /** One sentence for the model: what the game's batch records prove, and what that allows. Never says "succeeded" for an uncertain effect. */
 export function reconciliationGuidance(result, pending) {
   const facts = JSON.stringify(reconciliationFacts(result, pending))
+  if (result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL) {
+    return `Operation reconciliation: the exact native receipt accounts for every transfer task: ${result.completed_tasks} completed and ${result.refused_tasks} refused without moving anything. This is partial work, not batch success. Do not replay the completed prefix or the original batch. Re-observe current inventories and the target, then choose only the missing effects for the same committed step. Facts: ${facts}`
+  }
   if (result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) {
     const applied = (result.applied_slots ?? []).length > 0
       ? ` Operations ${result.applied_slots.join(', ')} completed before the refusal; do not repeat them.`
