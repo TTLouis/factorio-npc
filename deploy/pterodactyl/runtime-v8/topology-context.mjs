@@ -33,7 +33,11 @@ export function topologyEntities(answer) {
   const relevant = answer.entities.filter(entity => entity && (entity.spatial?.fluid || entity.spatial?.power || ['boiler', 'generator', 'electric-pole'].includes(entity.type)))
     .sort((a, b) => Number(Boolean(b.spatial?.power?.prototype?.thermal)) - Number(Boolean(a.spatial?.power?.prototype?.thermal)) || Number(Boolean(b.spatial?.fluid)) - Number(Boolean(a.spatial?.fluid)))
   return { actor_id: integer(answer.actor_id), observed_tick: answer.observed_tick, surface_index: answer.surface_index, force_index: integer(answer.force_index),
-    truncated: answer.truncated === true || relevant.length > TOPOLOGY_LIMITS.entities,
+    truncated: answer.truncated === true || relevant.length > TOPOLOGY_LIMITS.entities || relevant.some(entity => {
+      const fluid = entity.spatial?.fluid
+      return fluid?.storages_truncated === true || (fluid?.storages?.length ?? 0) > 2
+        || (Array.isArray(fluid?.storages) && fluid.storages.some(storage => storage.connections_truncated === true || (storage.connections?.length ?? 0) > 3))
+    }),
     entities: relevant.slice(0, TOPOLOGY_LIMITS.entities).map(entity => ({
       name: name(entity.name), type: name(entity.type), position: position(entity.position), direction: integer(entity.direction),
       status: name(entity.status_name ?? entity.spatial?.power?.status_name),

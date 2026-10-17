@@ -131,6 +131,44 @@ test('malformed and oversized reads never produce authoritative fresh topology; 
   const text = topologyText(facts); assert.ok(text.length <= 1950); assert.equal(JSON.parse(text.slice(TOPOLOGY_PREFIX.length)).truncated, true)
 })
 
+for (const cut of ['four_pipe_ports', 'three_storages', 'source_storages_truncated', 'source_connections_truncated']) test(`lean topology exposes nested fluid truncation: ${cut}`, () => {
+  const source = nativeNearby()
+  const fluid = { storages: [{ index: 1, connections: [{ connection_index: 1 }, { connection_index: 2 }] }] }
+  if (cut === 'four_pipe_ports') fluid.storages[0].connections.push({ connection_index: 3 }, { connection_index: 4 })
+  if (cut === 'three_storages') fluid.storages.push({ index: 2, connections: [] }, { index: 3, connections: [] })
+  if (cut === 'source_storages_truncated') fluid.storages_truncated = true
+  if (cut === 'source_connections_truncated') fluid.storages[0].connections_truncated = true
+  source.entities = [{ name: 'pipe', type: 'pipe', position: { x: -22.5, y: -93.5 }, spatial: { fluid } }]
+  const facts = topologyEntities(source)
+  assert.equal(facts.truncated, true, 'the compact record never implies all fluid geometry was retained')
+  assert.ok(facts.entities[0].fluid.length <= 2)
+  assert.ok(facts.entities[0].fluid[0].ports.length <= 3)
+  const text = topologyText(facts)
+  assert.ok(text.length <= 1950)
+  assert.equal(JSON.parse(text.slice(TOPOLOGY_PREFIX.length)).truncated, true, 'the whole bounded JSON record retains the cut flag')
+  const complete = nativeNearby()
+  complete.entities = [{ name: 'pipe', type: 'pipe', spatial: { fluid: { storages: [{ index: 1, connections: [{ connection_index: 1 }] }] } } }]
+  assert.equal(topologyEntities(complete).truncated, false, 'a complete small record is not falsely marked truncated')
+})
+
+test('full Session planner and executor see a four-port pipe as a truncated three-port summary', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const ctx = harness()
+  ctx.game.nativeNearby.entities = [{ name: 'pipe', type: 'pipe', position: { x: -22.5, y: -93.5 }, spatial: {
+    fluid: { storages: [{ index: 1, connections: Array.from({ length: 4 }, (_, index) => ({ connection_index: index + 1 })) }] },
+  } }]
+  const check = messages => {
+    const facts = contextOf(messages)
+    assert.equal(facts.truncated, true)
+    assert.equal(facts.entities[0].name, 'pipe')
+    assert.equal(facts.entities[0].fluid[0].ports.length, 3)
+  }
+  ctx.model.push('planner', 'lean pipe geometry is explicit', messages => { check(messages); return draft() })
+    .push('executor', 'truncated pipe geometry survives delegation', messages => { check(messages); return craft() })
+  await begin(ctx)
+  assert.deepEqual(ctx.model.violations, []); assert.deepEqual(ctx.world.named('request.failed'), [])
+})
+
 for (const scenario of ['malformed', 'oversized', 'missing_scope', 'actor_mismatch', 'surface_mismatch', 'force_mismatch', 'stale_tick']) test(`full Session refuses fresh topology from ${scenario}`, async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const game = new TopologyGame()
