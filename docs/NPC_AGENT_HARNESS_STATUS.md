@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 17: Lean fresh topology and placement obstruction context
+
+- **Behavior.** Planner and executor receive a scoped native snapshot capped at 1,950 characters: relevant held stock, fluid/electric connections, conditional prototype capacity ratios and bounded rejected-footprint witnesses from admitted observations. Actor/session/epoch/surface/force changes and pending or intervening mutations invalidate it. Existing plan ownership, admission, observation/recovery limits and the executor's 6,000-character handoff remain intact.
+- **Expansion guidance.** Running vanilla prototypes derive 60 steam/s per fully supplied boiler versus 30/s per engine, so guidance suggests room/access for two compatible engines. This does not add a second engine to the committed task, reserve space or claim actual throughput. Missing/incompatible evidence gives no assumed ratio. Asynchronous next-step prediction remains unbuilt.
+- **Proof.** Frozen `f3903af5` passes 2,517 runtime/staging tests, including 33 topology cases. Mod gates pass 1,150 tests, typecheck, Lua build and generated-Lua validation; nine payload tests pass. The native full-loop fixture delivers both actual role serializers, crafts/routes two pipes through normal admission and powers a real inserter at 400 W with both original poles retained. It places exactly one engine and reports a legal connected expansion footprint. All 23 native lanes pass, with final production/fixture rechecks covering shoreline recovery, normal observation and fresh topology. Native source/image mapping and integration results are recorded in the [validation checkpoint](validation/FRESH_TOPOLOGY_CONTEXT_2026-10-17.md).
+- **Boundary.** Scripted decisions and native mechanics are proven; autonomous red-science throughput remains unproven. The broader E2E goal remains **paused**. No live provider/Jev run or deployment.
+
 ## October 17: Run W saved-layout steam/power replay passes offline
 
 - **Exact boundary.** The captured shoreline has no directly connected engine candidate; its inline footprint crosses water, with additional pole/actor overlap. Pole removal alone is insufficient. A pristine-copy scripted repair crafts two pipes from held iron, clears one natural tree, routes steam inland, places the held engine and crafts/places a real inserter load. Both original poles and the original save remain unchanged.
