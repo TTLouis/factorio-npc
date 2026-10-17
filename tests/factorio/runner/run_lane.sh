@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  fresh-topology)
+    run_node fresh_topology_factorio.mjs
+    ;;
   normal-observation)
     run_node normal_observation_factorio.mjs
     ;;

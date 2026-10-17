@@ -14,6 +14,8 @@ async function fixture() {
   let actor = {
     mode: 'npc',
     connected_players: 0,
+    surface_index: 1,
+    force_index: 2,
     actor: {
       actor_id: 18,
       kind: 'standalone_character',
@@ -93,6 +95,21 @@ test('npc configure succeeds with zero connected players and captures physical p
   assert.equal(status.connected_players, 0)
   assert.equal(status.idle, true)
   assert.equal(status.actor_interface, true)
+  assert.equal(status.surface_index, 1)
+  assert.equal(status.force_index, 2)
+})
+
+test('status refreshes live scope without inventing an actor epoch change', async () => {
+  const f = await fixture()
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
+  const before = f.calls.sgluna_deployment.status()
+  f.setActor({ ...f.actor, surface_index: 3, force_index: 4 })
+  const after = f.calls.sgluna_deployment.status()
+  assert.equal(after.actor_id, before.actor_id)
+  assert.equal(after.epoch, before.epoch)
+  assert.equal(after.allowed, true)
+  assert.equal(after.surface_index, 3)
+  assert.equal(after.force_index, 4)
 })
 
 test('human join count does not change NPC authorization', async () => {

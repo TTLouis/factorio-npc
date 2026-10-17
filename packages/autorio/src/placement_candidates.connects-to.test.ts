@@ -135,6 +135,31 @@ describe('placement candidates that join a live fluid port', () => {
     ] }])
   }
 
+  it('reports fresh bounded rejected-join witnesses then admits a newly cleared layout using native checks', () => {
+    build_pump()
+    const actor = actor_at(0, 0)
+    actor.status_snapshot = () => ({ actor_id: 9 })
+    let blocked = true
+    actor.surface.can_place_entity = () => !blocked
+    actor.surface.get_tile = () => ({ name: 'water', collides_with: (layer: string) => layer === 'water_tile' })
+    ;(boiler as any).collision_mask = { layers: { water_tile: true } }
+    try {
+      const rejected: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+      expect(rejected.candidates).toEqual([])
+      expect(rejected.obstructions).toMatchObject({ source: 'native_placement_checks', actor_id: 9, observed_tick: 500, surface_index: 1, force_index: 1, rejected_count: 2, examined_count: 2 })
+      expect(rejected.obstructions.samples[0].terrain_tiles[0].reason).toBe('terrain_collision_mask')
+      blocked = false
+      ;(globalThis as any).game.tick = 501
+      const fresh: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+      expect(fresh.obstructions).toMatchObject({ observed_tick: 501, rejected_count: 0, samples: [] })
+      expect(fresh.candidates).toHaveLength(2)
+      const submit = () => true
+      blocked = true
+      expect(execute_placement_candidate(actor, fresh.candidate_set_id, fresh.candidates[0].id, submit)[0]).toBe(false)
+    }
+    finally { delete (boiler as any).collision_mask }
+  })
+
   it('returns only boiler footprints whose water port lands on the pump port, each naming the port it joins', () => {
     build_pump()
     const result = placement_candidates_for_actor(actor_at(0, 0), {

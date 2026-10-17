@@ -36,19 +36,40 @@ describe('electric facts read from prototypes', () => {
   it('reports watts for a lab and a boiler, production and steam use for an engine, fuel categories and pump speed', () => {
     // The engine reports joules per tick; 1000 J/tick is 60 kW.
     const lab = raising({ name: 'lab', type: 'lab', get_max_energy_usage: () => 1000 }, 'max_energy_usage', 'max_energy_production', 'fluid_usage_per_tick', 'pumping_speed')
-    expect(electric_prototype_facts(lab)).toEqual({ power: { consumption_watts: 60000 } })
+    expect(electric_prototype_facts(lab)).toEqual({ power: { consumption_watts: 60000, prototype_quality: 'normal' } })
 
     const boiler = { name: 'boiler', type: 'boiler', get_max_energy_usage: () => 30000, burner_prototype: { effectivity: 1, fuel_categories: { chemical: true, nuclear: false, 'modded-fuel': true } } }
     expect(electric_prototype_facts(boiler)).toEqual({
-      power: { consumption_watts: 1800000 },
+      power: { consumption_watts: 1800000, prototype_quality: 'normal' },
       burner: { fuel_categories: ['chemical', 'modded-fuel'], effectivity: 1 },
     })
 
     const engine = { name: 'steam-engine', type: 'generator', get_max_energy_production: () => 15000, get_fluid_usage_per_tick: () => 0.5 }
-    expect(electric_prototype_facts(engine)).toEqual({ power: { production_watts: 900000, fluid_usage_per_second: 30 } })
+    expect(electric_prototype_facts(engine)).toEqual({ power: { production_watts: 900000, fluid_usage_per_second: 30, prototype_quality: 'normal' } })
 
     expect(electric_prototype_facts({ name: 'offshore-pump', type: 'offshore-pump', pumping_speed: 1 })).toEqual({ pump: { pumping_speed_per_second: 60 } })
     expect(electric_prototype_facts({ name: 'wooden-chest', type: 'container' })).toEqual({})
+  })
+
+  it('derives conditional boiler capacity from current fluid prototypes rather than a fixed engine ratio', () => {
+    const boiler: any = { type: 'boiler', get_max_energy_usage: () => 30000, target_temperature: 165,
+      fluidbox_prototypes: [
+        { production_type: 'input-output', filter: { name: 'water', default_temperature: 15 } },
+        { production_type: 'output', filter: { name: 'steam', heat_capacity: 200 } },
+      ] }
+    expect(electric_prototype_facts(boiler).thermal).toMatchObject({
+      source: 'running_prototype', input_fluid: 'water', output_fluid: 'steam',
+      target_temperature: 165, heating_capacity_watts: 1800000,
+      fluid_output_per_second_at_target: 60,
+      conditional_on: 'full_energy_supply_and_input_fluid_at_default_temperature',
+    })
+    boiler.fluidbox_prototypes[1].filter.heat_capacity = 400
+    expect((electric_prototype_facts(boiler).thermal as any).fluid_output_per_second_at_target).toBe(30)
+    boiler.target_temperature = 15
+    expect(electric_prototype_facts(boiler).thermal).toBeUndefined()
+    boiler.target_temperature = 165
+    boiler.fluidbox_prototypes.push(boiler.fluidbox_prototypes[1])
+    expect(electric_prototype_facts(boiler).thermal).toBeUndefined()
   })
 })
 

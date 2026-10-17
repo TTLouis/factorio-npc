@@ -205,3 +205,6 @@ jobs:
 
       - name: Run deterministic Factorio NPC harness
         run: pnpm test:npc
+
+      - name: Run topology context full-loop regression
+        run: docker run --rm --network none -e NPC_TEST_LANES=fresh-topology factorio-npc-test

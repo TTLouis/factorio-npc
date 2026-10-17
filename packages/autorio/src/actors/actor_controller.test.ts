@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { get_load_handler } from '../test-event-registry'
 import {
+  create_actor_remote_interface,
   get_actor_mode,
   get_controlled_actor,
   get_load_reconciliation_status,
@@ -69,6 +70,27 @@ beforeEach(() => {
 })
 
 describe('actor mode', () => {
+  it('reports live actor surface and force scope on each status observation', () => {
+    const surface = (globalThis as any).game.surfaces[1]
+    const character = fake_character(42)
+    character.surface = surface
+    character.force = (globalThis as any).game.forces.player
+    surface.create_entity.mockReturnValue(character)
+    set_actor_mode('npc')
+    const original = (globalThis as any).remote.add_interface
+    let status: () => any
+    ;(globalThis as any).remote.add_interface = (_name: string, value: any) => { status = value.status }
+    try {
+      create_actor_remote_interface()
+      expect(status!()).toMatchObject({ observed_tick: 123, surface_index: 1, force_index: 1, actor: { actor_id: 42 } })
+      character.surface = { ...surface, index: 2 }
+      character.force = { ...character.force, index: 3 }
+      ;(globalThis as any).game.tick = 124
+      expect(status!()).toMatchObject({ observed_tick: 124, surface_index: 2, force_index: 3, actor: { actor_id: 42 } })
+    }
+    finally { ;(globalThis as any).remote.add_interface = original }
+  })
+
   it('defaults to the legacy connected-player mode', () => {
     ;(globalThis as any).storage = {}
     expect(get_actor_mode()).toBe('player')

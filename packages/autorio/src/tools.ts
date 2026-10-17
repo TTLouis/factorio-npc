@@ -11,7 +11,7 @@ import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { count_world_entities, find_world_entities } from './npc_vision'
 import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
-import { nearest_pole_for_unpowered, status_shows_no_power } from './electric_facts'
+import { nearest_pole_for_unpowered, protected_read, status_shows_no_power } from './electric_facts'
 
 const MAX_NEARBY_RADIUS = 64
 const MAX_NEARBY_RESULTS = 40
@@ -401,6 +401,9 @@ export function create_tools_remote_interface() {
           supports_direction: entity.supports_direction,
           rotatable: entity.rotatable,
           amount: entity.type === 'resource' ? entity.amount : undefined,
+          status: entity.status,
+          status_name: status_name(entity.status),
+          working: status_name(entity.status) === 'working',
         }
         const spatial = compact_spatial_summary(entity)
         if (spatial !== undefined) summary.spatial = spatial
@@ -409,6 +412,10 @@ export function create_tools_remote_interface() {
 
       return {
         actor_position: actor.position,
+        observed_tick: game.tick,
+        actor_id: protected_read(() => actor.status_snapshot().actor_id),
+        surface_index: actor.surface.index,
+        force_index: actor.force.index,
         radius: bounded_radius,
         entities,
         matched_count: matches.length,
@@ -550,6 +557,10 @@ export function create_tools_remote_interface() {
 
       return {
         found: true,
+        observed_tick: game.tick,
+        actor_id: protected_read(() => actor.status_snapshot().actor_id),
+        surface_index: actor.surface.index,
+        force_index: actor.force.index,
         actor_position: actor.position,
         radius: bounded_radius,
         unit_number,

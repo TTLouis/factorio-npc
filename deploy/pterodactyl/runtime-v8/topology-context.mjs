@@ -1,0 +1,98 @@
+// Bounded native facts, never placement authority or an instruction to modify a plan.
+export const TOPOLOGY_PREFIX = 'fresh_topology: '
+export const TOPOLOGY_LIMITS = Object.freeze({ chars: 1950, rawChars: 49152, entities: 4, radius: 32, scan: 16, reads: 3 })
+const name = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(value) ? value : undefined
+const number = value => typeof value === 'number' && Number.isFinite(value) ? value : undefined
+const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined
+const position = value => number(value?.x) !== undefined && number(value?.y) !== undefined ? { x: value.x, y: value.y } : undefined
+export function topologyJson(raw) {
+  if (typeof raw !== 'string' || raw.length > TOPOLOGY_LIMITS.rawChars) return undefined
+  try { const value = JSON.parse(raw); return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined }
+  catch { return undefined }
+}
+const cleanScalars = (value, keys) => Object.fromEntries(keys.flatMap(key => {
+  const item = value?.[key]
+  return typeof item === 'boolean' || number(item) !== undefined || name(item) ? [[key, item]] : []
+}))
+function fluidSummary(fluid) {
+  if (!fluid || !Array.isArray(fluid.storages)) return undefined
+  return fluid.storages.slice(0, 2).map(storage => ({
+    ...cleanScalars(storage, ['index', 'filter', 'fluid', 'amount', 'temperature', 'capacity']),
+    truncated: storage.connections_truncated === true || (storage.connections?.length ?? 0) > 3,
+    ...(storage.contents ? { contents: cleanScalars(storage.contents, ['name', 'amount', 'temperature']) } : {}),
+    ports: (Array.isArray(storage.connections) ? storage.connections : []).slice(0, 3).map(port => ({
+      ...cleanScalars(port, ['connection_index', 'direction', 'flow_direction', 'connected', 'reciprocal']),
+      ...(position(port.position ?? port.tile) ? { tile: position(port.position ?? port.tile) } : {}),
+      ...(position(port.target_position) ? { opens: position(port.target_position) } : {}),
+      ...(port.target ? { target: cleanScalars(port.target, ['name', 'unit_number', 'storage_index']) } : {}),
+    })),
+  }))
+}
+export function topologyEntities(answer) {
+  if (!answer || answer.ok === false || !Array.isArray(answer.entities) || integer(answer.observed_tick) === undefined || integer(answer.surface_index) === undefined) return undefined
+  const relevant = answer.entities.filter(entity => entity && (entity.spatial?.fluid || entity.spatial?.power || ['boiler', 'generator', 'electric-pole'].includes(entity.type)))
+    .sort((a, b) => Number(Boolean(b.spatial?.power?.prototype?.thermal)) - Number(Boolean(a.spatial?.power?.prototype?.thermal)) || Number(Boolean(b.spatial?.fluid)) - Number(Boolean(a.spatial?.fluid)))
+  return { actor_id: integer(answer.actor_id), observed_tick: answer.observed_tick, surface_index: answer.surface_index, force_index: integer(answer.force_index),
+    truncated: answer.truncated === true || relevant.length > TOPOLOGY_LIMITS.entities,
+    entities: relevant.slice(0, TOPOLOGY_LIMITS.entities).map(entity => ({
+      name: name(entity.name), type: name(entity.type), position: position(entity.position), direction: integer(entity.direction),
+      status: name(entity.status_name ?? entity.spatial?.power?.status_name),
+      fluid: fluidSummary(entity.spatial?.fluid),
+      fluid_truncated: entity.spatial?.fluid?.storages_truncated === true || (entity.spatial?.fluid?.storages?.length ?? 0) > 2,
+      power: { ...cleanScalars(entity.spatial?.power, ['stored_energy_joules', 'electric_network_id']), ...cleanScalars(entity.spatial?.power?.prototype?.power, ['production_watts', 'consumption_watts', 'fluid_usage_per_second', 'maximum_temperature']) },
+      thermal: cleanScalars(entity.spatial?.power?.prototype?.thermal, ['target_temperature', 'output_fluid', 'fluid_output_per_second_at_target', 'source', 'conditional_on', 'prototype_quality']),
+    })),
+  }
+}
+export function topologyCapacity(nearby, generator) {
+  const capacity = []
+  const engine = generator?.entity
+  const use = engine?.power?.fluid_usage_per_second
+  if (!(use > 0) || !Number.isFinite(use)) return capacity
+  for (const entity of nearby?.entities ?? []) {
+    const thermal = entity.thermal
+    const rate = thermal?.fluid_output_per_second_at_target
+    // These are compatible prototype maxima, not current output or a performance guarantee.
+    if (!(rate > 0) || !Number.isFinite(rate) || !Number.isFinite(rate / use) || thermal.source !== 'running_prototype' || !name(thermal.output_fluid)
+      || !(thermal.target_temperature > 0) || !(engine.power.maximum_temperature >= thermal.target_temperature)) continue
+    const filter = engine?.fluidboxes?.[0]?.filter ?? engine?.fluid_filter ?? engine?.power?.fluid_filter
+    if (filter !== thermal.output_fluid) continue
+    const box = engine?.fluidboxes?.[0]
+    if (number(box?.minimum_temperature) !== undefined && thermal.target_temperature < box.minimum_temperature) continue
+    if (number(box?.maximum_temperature) !== undefined && thermal.target_temperature > box.maximum_temperature) continue
+    capacity.push({ producer: entity.name, consumer: name(engine.name), fluid: thermal.output_fluid,
+      producer_units_per_second: rate, consumer_units_per_second: use, consumers_per_producer: rate / use,
+      state: 'conditional_prototype_capacity', prototype_quality: thermal.prototype_quality ?? 'unknown', condition: thermal.conditional_on ?? 'full_energy_supply_and_input_fluid_at_default_temperature' })
+  }
+  return capacity.slice(0, 2)
+}
+export function topologyObstruction(answer) {
+  const facts = answer?.obstructions
+  if (answer?.ok !== true || !facts || facts.source !== 'native_placement_checks' || integer(facts.observed_tick) === undefined
+    || integer(facts.surface_index) === undefined || !Array.isArray(facts.samples)) return undefined
+  return { entity_name: name(answer.entity_name), actor_id: integer(facts.actor_id), ...cleanScalars(facts, ['source', 'observed_tick', 'surface_index', 'force_index', 'scope', 'examined_count', 'rejected_count', 'unknown_count']),
+    truncated: facts.truncated === true || facts.samples.length > 2 || facts.samples.some(sample => (sample.terrain_tiles?.length ?? 0) > 3 || (sample.entities?.length ?? 0) > 3),
+    samples: facts.samples.slice(0, 2).map(sample => ({ position: position(sample.position), direction: integer(sample.direction), unknown: sample.unknown !== false,
+      terrain: (Array.isArray(sample.terrain_tiles) ? sample.terrain_tiles : []).slice(0, 3).map(tile => ({ name: name(tile.name), position: position(tile.position) })),
+      entities: (Array.isArray(sample.entities) ? sample.entities : []).slice(0, 3).map(entity => ({ name: name(entity.name), position: position(entity.position) })),
+    })),
+    authority: 'sampled_obstructions_only_not_clearance_or_removal_permission' }
+}
+export function topologyText(facts, maxChars = TOPOLOGY_LIMITS.chars) {
+  if (!facts) return ''
+  const bounded = structuredClone(facts)
+  let text = TOPOLOGY_PREFIX + JSON.stringify(bounded)
+  // Keep the first (thermal producer) and sampled obstacles ahead of peripheral entities.
+  while (text.length > maxChars && bounded.entities?.length > 1) {
+    bounded.entities.pop(); bounded.truncated = true; text = TOPOLOGY_PREFIX + JSON.stringify(bounded)
+  }
+  const drop = ['entities', 'obstructions', 'capacity']
+  for (const key of drop) {
+    while (text.length > maxChars && bounded[key]?.length) {
+      bounded[key].pop(); bounded.truncated = true
+      text = TOPOLOGY_PREFIX + JSON.stringify(bounded)
+    }
+  }
+  if (text.length > maxChars) return TOPOLOGY_PREFIX + JSON.stringify({ state: 'unavailable', reason: 'size_limit', truncated: true })
+  return text
+}

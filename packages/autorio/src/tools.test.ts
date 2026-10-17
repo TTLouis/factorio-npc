@@ -50,7 +50,7 @@ beforeEach(() => {
 describe('goal conditions while the NPC body is dead', () => {
   it('refuses water as an entity name before an engine query and supplies the native fluid-read alternative', async () => {
     const find = vi.fn()
-    actor_state.actor = { position: { x: 0, y: 0 }, surface: { index: 1, find_entities_filtered: find } }
+    actor_state.actor = { position: { x: 0, y: 0 }, force: { index: 1 }, status_snapshot: () => ({ actor_id: 7 }), surface: { index: 1, find_entities_filtered: find } }
     ;(globalThis as any).prototypes.entity = {}
     ;(globalThis as any).prototypes.fluid = { water: {} }
     const tools = await tools_interface()
@@ -173,7 +173,7 @@ describe('nearby entity observation', () => {
       nearby_entity('burner-mining-drill', 'mining-drill', 5, 41),
     ]
     const find = vi.fn(() => matches)
-    actor_state.actor = { position: { x: 0, y: 0 }, surface: { index: 1, find_entities_filtered: find } }
+    actor_state.actor = { position: { x: 0, y: 0 }, force: { index: 1 }, status_snapshot: () => ({ actor_id: 7 }), surface: { index: 1, find_entities_filtered: find } }
     const tools = await tools_interface()
 
     const result = tools.get_nearby_entities(20, undefined, undefined, 3)
@@ -181,6 +181,7 @@ describe('nearby entity observation', () => {
     expect(result.entities.map((entity: any) => entity.unit_number ?? entity.name)).toEqual([41, 42, 'iron-ore'])
     expect(result.entities[2].position).toEqual({ x: 1, y: 0 })
     expect(result).toMatchObject({ matched_count: 5, returned_count: 3, truncated: true })
+    expect(result).toMatchObject({ observed_tick: 10, actor_id: 7, surface_index: 1, force_index: 1 })
     expect(result.type_counts).toEqual({ 'resource': 3, 'furnace': 1, 'mining-drill': 1 })
     expect((globalThis as any).storage.sgluna_entity_reference_hints[41]).toMatchObject({ name: 'burner-mining-drill' })
   })

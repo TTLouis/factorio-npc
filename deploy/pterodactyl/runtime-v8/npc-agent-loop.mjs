@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
+import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText } from './topology-context.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
 import {
@@ -3324,7 +3325,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // (the slice-close wake passes the state it just settled); `shelfCandidates`
   // rides a planner restage at a shelf pickup. Undefined when no goal has been
   // admitted (a reducer-less memory, a goal that never started).
-  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState, jevFacts, jevHints, executorFacts } = {}) {
+  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState, jevFacts, jevHints, executorFacts, topology } = {}) {
     const packetRole = role ?? this.agentContext.role
     const held = planningState ?? this.memory.planningState?.(this.activePlanKey())
     if (!held?.goal?.goal_id) return undefined
@@ -3344,6 +3345,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       jevFacts, // U11 advisory: bounded facts Jev's observation families add (never replacing a mandatory record)
       jevHints,
       executorFacts: packetRole === EXECUTOR_ROLE ? executorFacts : undefined, // D2: harness-read facts for a fresh executor, labelled fresh / stale / historical
+      topology,
       // A staged user amendment belongs to the planner: it rides the packet of a planner restage (C5,
       // C1/C2) so the restage that replaces the conversation holding its text does not drop it. The
       // executor never gets it.
@@ -3460,7 +3462,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         executorFacts = gathered?.facts
         executorFactsMeta = gathered?.meta
       }
-      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state, jevFacts: prepared?.facts, jevHints: prepared?.hints, executorFacts })
+      const topology = !args.packet && !this.restageGuardRefusal(safePoint) ? await this.gatherTopologyContext({ requestId }) : undefined
+      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state, jevFacts: prepared?.facts, jevHints: prepared?.hints, executorFacts, topology })
       if (!packet) {
         await this.jev.afterRestage(prepared, { restaged: false, reason: 'no_admitted_goal' })
         return { restaged: false, reason: 'no_admitted_goal' }
@@ -5087,6 +5090,130 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.handoffFence = `actor_changed_${phase}_handoff_refresh`
       throw error
     }
+    return status
+  }
+
+  // A fixed read-only allowance at a safe decision boundary, independent of model-requested observations.
+  // Never solves candidates, never expands a closed/targeted allowance, and never survives an actor/session change.
+  async gatherTopologyContext({ requestId = this.traceRequest?.id } = {}) {
+    const state = this.memory.planningState?.(this.activePlanKey())
+    const plan = getActivePlanningPlan(state)
+    const step = plan?.steps?.[plan.active_step_index]
+    const topic = `${step?.description ?? ''} ${state?.goal?.objective ?? this.requestInfo?.text ?? ''}`
+    if (!/steam|boiler|engine|pump|pipe|electric|power|fluid|factory|automat/i.test(topic) && !this.topologyObservation) return undefined
+    const fence = { ...this.epoch }
+    if (!Number.isSafeInteger(fence.actor_id) || !Number.isSafeInteger(fence.epoch)) return undefined
+    if (this.topologyPrototypeSession !== fence.session) {
+      this.topologyPrototypeFacts = new Map()
+      this.topologyPrototypeSession = fence.session
+    }
+    const generation = this.generation
+    const lineage = this.agentContext.lineageSequence
+    const mutation = this.worldMutationSeq ?? 0
+    const key = JSON.stringify([requestId, this.agentContext.conversationSeq, fence.session, fence.actor_id, fence.epoch,
+      this.lastTaskStatusView?.last_completed_batch?.tick, this.lastTaskStatusView?.last_completed_batch?.batch_id, mutation])
+    if (this.topologyBoundary?.key === key) {
+      const status = await this.handoffFenceCheck(fence, 'before_cached_topology')
+      if (generation !== this.generation || lineage !== this.agentContext.lineageSequence) throw new AgentLoopError('Cached topology refresh cancelled or superseded')
+      if (status.session !== fence.session || status.surface_index !== fence.surface_index || status.force_index !== fence.force_index) {
+        this.topologyBoundary.facts = { state: 'unavailable', reason: 'actor_scope_changed', source: 'native_bounded_reads' }
+      }
+      if (status.idle === false) return { state: 'deferred', reason: 'native_mutation_pending', source: 'native_bounded_reads' }
+      return this.currentTopologyFacts()
+    }
+    const facts = { state: 'unavailable', source: 'native_bounded_reads', actor_id: fence.actor_id, epoch: fence.epoch,
+      session: fence.session, reason: 'native_read_unavailable', identities: 'observations_not_execution_authority' }
+    let reads = 0
+    const planningFence = JSON.stringify([state?.goal?.goal_id, state?.goal?.status, plan?.plan_id, plan?.plan_version, plan?.active_step_index])
+    let nativeScope = { surface_index: fence.surface_index, force_index: fence.force_index }
+    const valid = async () => {
+      if (this.generation !== generation || this.agentContext.lineageSequence !== lineage || this.epoch?.session !== fence.session) throw new AgentLoopError('Topology refresh cancelled or superseded')
+      const status = await this.handoffFenceCheck(fence, 'during')
+      if (status.session !== fence.session) { const error = new AgentLoopError('Topology deployment session changed'); error.handoffFence = 'topology_session_changed'; throw error }
+      const live = this.memory.planningState?.(this.activePlanKey())
+      const livePlan = getActivePlanningPlan(live)
+      if (planningFence !== JSON.stringify([live?.goal?.goal_id, live?.goal?.status, livePlan?.plan_id, livePlan?.plan_version, livePlan?.active_step_index])) throw new AgentLoopError('Topology planning boundary superseded')
+      for (const field of ['surface_index', 'force_index']) if (nativeScope && Number.isSafeInteger(status[field]) && status[field] !== nativeScope[field]) {
+        const error = new AgentLoopError('Topology actor surface or force changed'); error.handoffFence = 'topology_scope_changed'; throw error
+      }
+      if (this.generation !== generation || this.agentContext.lineageSequence !== lineage) throw new AgentLoopError('Topology refresh cancelled or superseded')
+      if ((this.worldMutationSeq ?? 0) !== mutation || this.batchInFlight || this.memory.pendingOperation?.(this.activePlanKey())) { const error = new AgentLoopError('Topology refresh overlapped a mutation'); error.handoffFence = 'topology_mutation_overlap'; throw error }
+      if (status.idle === false) { const error = new AgentLoopError('Native operation changed during topology refresh'); error.handoffFence = 'topology_native_operation_pending'; throw error }
+    }
+    if (this.batchInFlight || this.memory.pendingOperation?.(this.activePlanKey()) || this.epoch?.idle === false) {
+      facts.state = 'deferred'; facts.reason = 'mutation_pending'
+    }
+    else if (!Number.isSafeInteger(fence.surface_index) || !Number.isSafeInteger(fence.force_index)) facts.reason = 'actor_scope_unknown'
+    else {
+      await valid()
+      try {
+        reads++
+        const raw = await this.rcon.command(this.observationToolCommand('getNearbyEntities', { radius: TOPOLOGY_LIMITS.radius, limit: TOPOLOGY_LIMITS.scan }))
+        await valid()
+        const nearby = topologyEntities(topologyJson(String(raw)))
+        if (nearby && nearby.actor_id === fence.actor_id && nearby.observed_tick >= (this.lastTaskStatusView?.last_completed_batch?.tick ?? 0)
+          && (fence.surface_index === undefined || fence.surface_index === nearby.surface_index)
+          && (fence.force_index === undefined || fence.force_index === nearby.force_index)) {
+          nativeScope = nearby
+          await valid()
+          Object.assign(facts, nearby, { state: 'fresh', reason: 'bounded_safe_boundary_native_facts' })
+          reads++
+          const inventoryRaw = String(await this.rcon.command(this.observationToolCommand('getInventoryItems', {})))
+          await valid()
+          const counts = inventoryRaw.length <= TOPOLOGY_LIMITS.rawChars ? parseInventoryCounts(inventoryRaw) : undefined
+          const relevantNames = new Set([...(this.handoffRecipeFacts?.keys() ?? []), ...[...(this.handoffPlacingItems?.values() ?? [])].map(entry => entry.item)])
+          const relevance = item => topic.toLowerCase().includes(item) || item.split('-').some(token => token.length >= 5 && new RegExp(`\\b${token}\\b`, 'i').test(topic)) || relevantNames.has(item)
+          const selected = [...(counts ?? [])].sort(([a], [b]) => Number(relevance(b)) - Number(relevance(a)))
+          facts.held = counts ? Object.fromEntries(selected.slice(0, 8)) : 'unavailable'
+          facts.held_scope = 'selected_inventory_items; omitted_counts_unknown'
+          if (counts && counts.size > 8) { facts.truncated = true; facts.held_omitted = counts.size - 8 }
+          // Resolve at most one already named build target, never search the prototype catalogue.
+          const words = `${step?.description ?? ''} ${topic}`.toLowerCase()
+          const target = [...(counts?.keys() ?? [])].find(item => /^[a-z0-9-]{1,100}$/.test(item)
+            && (words.includes(item) || words.includes(item.replaceAll('-', ' ')) || item.split('-').some(token => token.length >= 5 && new RegExp(`\\b${token}\\b`).test(words)))
+            && !this.topologyPrototypeFacts?.has(item))
+          if (target) {
+            reads++
+            const detail = topologyJson(String(await this.rcon.command(this.observationToolCommand('getPrototypeDetails', { name: target }))))
+            await valid()
+            if (detail?.found === true && detail.entity?.name === target) {
+              this.topologyPrototypeFacts ??= new Map()
+              this.topologyPrototypeFacts.set(target, detail)
+              while (this.topologyPrototypeFacts.size > 8) this.topologyPrototypeFacts.delete(this.topologyPrototypeFacts.keys().next().value)
+            }
+          }
+          facts.capacity = [...(this.topologyPrototypeFacts?.values() ?? [])].flatMap(detail => topologyCapacity(nearby, detail)).slice(0, 2)
+          facts.expansion = facts.capacity.length ? 'Reserve room for compatible consumers and connecting pipes according to conditional prototype capacity; current goal and committed step remain unchanged.' : 'capacity_unknown; request a bounded relevant prototype fact before assuming a ratio'
+        }
+        else facts.reason = nearby ? 'native_tick_stale' : 'malformed_or_unscoped_native_read'
+      }
+      catch (error) {
+        // Cancellation and identity changes are refusals, not an unavailable-world fallback.
+        if (error?.handoffFence || this.generation !== generation || this.agentContext.lineageSequence !== lineage) throw error
+        facts.state = 'unavailable'; facts.reason = 'native_read_failed'
+      }
+      await valid()
+    }
+    this.topologyBoundary = { key, facts, actor_id: fence.actor_id, epoch: fence.epoch, session: fence.session, generation, mutation }
+    await this.traceEvent('context.topology_refreshed', { request_id: requestId, reason: facts.reason, state: facts.state,
+      actor_id: fence.actor_id, epoch: fence.epoch, observed_tick: facts.observed_tick, surface_index: facts.surface_index,
+      reads_attempted: reads, read_limit: TOPOLOGY_LIMITS.reads, candidate_solves: 0 }, { requestId })
+    return this.currentTopologyFacts()
+  }
+
+  currentTopologyFacts() {
+    const held = this.topologyBoundary
+    if (!held || held.actor_id !== this.epoch?.actor_id || held.epoch !== this.epoch?.epoch || held.session !== this.epoch?.session || held.generation !== this.generation) return undefined
+    if (this.batchInFlight || this.memory.pendingOperation?.(this.activePlanKey())) return { state: 'deferred', source: 'native_bounded_reads', reason: 'mutation_pending', actor_id: held.actor_id, epoch: held.epoch, session: held.session }
+    const facts = { ...held.facts }
+    const observation = this.topologyObservation
+    if (facts.state === 'fresh' && observation && observation.actor_id === held.actor_id && observation.epoch === held.epoch
+      && observation.session === held.session && observation.generation === held.generation && observation.mutation === (this.worldMutationSeq ?? 0)) {
+      const data = observation.facts
+      if (data.actor_id === facts.actor_id && data.surface_index === facts.surface_index && data.force_index === facts.force_index && data.observed_tick >= facts.observed_tick) facts.obstructions = [data]
+      else facts.obstructions_state = 'stale_or_different_surface'
+    }
+    return facts
   }
 
   // The facts for the packet of an executor restage. Reads are fenced by the actor and epoch the restage was asked for:
@@ -7484,6 +7611,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // Facts for the packet, read now. Bounded; a failed read is reported as unavailable, never guessed.
   async gatherStepContractFacts() {
     const facts = { as_of: this.observationTag() }
+    const topology = await this.gatherTopologyContext()
+    if (topology) facts.topology = JSON.parse(topologyText(topology).slice(TOPOLOGY_PREFIX.length))
     try {
       const raw = await this.rcon.command(this.observationToolCommand('getInventoryItems', {}))
       const counts = parseInventoryCounts(raw)
@@ -11672,7 +11801,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.compactWorkingContext()
       await this.repairObservationBaselines()
     }
+    const topology = await this.gatherTopologyContext()
     let providerMessages = providerMessagesOverride ?? this.providerMessages()
+    if (topology) {
+      // Replace the volatile record rather than retaining yesterday's world beside today's one.
+      providerMessages = providerMessages.map(row => typeof row.content === 'string' && row.content.includes(`\n${TOPOLOGY_PREFIX}`)
+        ? { ...row, content: row.content.split('\n').filter(line => !line.startsWith(TOPOLOGY_PREFIX)).join('\n') } : row)
+        .filter(row => !String(row.content).startsWith(TOPOLOGY_PREFIX))
+      const handoffChars = providerMessages.filter(row => String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
+        .reduce((sum, row) => sum + String(row.content).length + 1, 0)
+      const room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars
+      if (room >= 120) providerMessages = insertTailBlock(providerMessages, { role: 'user', content: topologyText(topology, room) })
+    }
     const controlState = this.controlDecisionState(effectiveAllowTools)
     const controlText = `[CONTROL_DECISION_STATE] ${JSON.stringify(controlState)}\n${controlState.phase === 'draft'
         ? 'The planner owns this uncommitted draft. Correct it with completion declarations; a valid draft may have operations: [] and then be delegated to the executor.'
@@ -12849,6 +12989,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     for (let index = 0; index < results.length; index++) {
       const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
+      if (admittedCached[index] !== true && admittedStaticCached[index] !== true) {
+        if (toolName === 'getPlacementCandidates') {
+          const facts = topologyObstruction(topologyJson(original))
+          if (facts) this.topologyObservation = { facts, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch,
+            session: this.epoch?.session, generation: this.generation, mutation: this.worldMutationSeq ?? 0 }
+        }
+        if (toolName === 'getPrototypeDetails') {
+          const detail = topologyJson(original)
+          if (detail?.found === true && detail.entity?.name === admittedPrepared[index]?.args?.name) {
+            this.topologyPrototypeFacts ??= new Map()
+            this.topologyPrototypeFacts.set(detail.entity.name, detail)
+            while (this.topologyPrototypeFacts.size > 8) this.topologyPrototypeFacts.delete(this.topologyPrototypeFacts.keys().next().value)
+            if (this.topologyBoundary?.facts?.state === 'fresh') this.topologyBoundary.facts.capacity = [...this.topologyPrototypeFacts.values()].flatMap(entry => topologyCapacity(this.topologyBoundary.facts, entry)).slice(0, 2)
+          }
+        }
+      }
       this.recordLiveEntityToolResult(toolName, original)
       if (admittedCached[index] !== true) this.recordHandoffToolFacts(toolName, original, admittedPrepared[index]?.args) // D2: stable recipe facts and counts a later executor is briefed with
       const loadedSkill = this.recordLoadedSkillToolResult(toolName, admittedPrepared[index]?.args, original)

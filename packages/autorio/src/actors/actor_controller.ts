@@ -429,6 +429,9 @@ export function create_actor_remote_interface() {
       return {
         mode: get_actor_mode(),
         actor: actor?.status_snapshot(),
+        observed_tick: game.tick,
+        surface_index: actor?.surface.index,
+        force_index: actor?.force.index,
         connected_players: game.connected_players.length,
         load_reconciliation: get_load_reconciliation_status(),
         death_recovery: get_npc_recovery_status(),

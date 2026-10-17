@@ -37,6 +37,7 @@
 import { createHash } from 'node:crypto'
 
 import { sanitizeDurableModelText } from './durable-text.mjs'
+import { topologyText } from './topology-context.mjs'
 import { describeGoalCondition } from './goal-definition.mjs'
 import {
   buildContextRestagedEvent,
@@ -76,6 +77,7 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   'jev_facts',
   'note',
   'historical_entities',
+  'topology',
   'fluid_source_hints',
   'receipt',
   'skills',
@@ -1763,7 +1765,7 @@ export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS
   return ['[HARNESS] Executor facts refreshed after the batch receipt landed (live reads taken now, same labels as the handoff packet; facts only):', ...records.map(record => record.text)].join('\n')
 }
 
-function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts }) {
+function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology }) {
   const records = [
     { key: 'restage', block: 'step', text: `restage: role=${role} checkpoint=${checkpoint}${reason ? ` reason=${oneLine(reason, limits.reasonChars)}` : ''}` },
   ]
@@ -1777,6 +1779,7 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
   // new epoch). Volatile: it moves with every actor replacement.
   const actorLine = scalarLine(actor, ACTOR_KEYS, limits.runtimeChars)
   if (actorLine) records.push({ key: 'actor', block: 'step', text: `actor: ${actorLine}` })
+  if (topology) records.push({ key: 'topology', block: 'step', drop: 'topology', text: topologyText(topology) })
   if (!plan) {
     records.push({ key: 'active_step', block: 'step', text: 'active_step: none (no committed plan)' })
   }
@@ -1864,7 +1867,7 @@ export function estimateTokens(chars) {
  * @param {object} [args.executorFacts] D2: harness-read facts for a fresh executor ({recipes, counts, machine, residual, historical_entities, fluid_source_hints}); each record is labelled fresh, stale or historical
  * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, previousContextChars, now, sequence, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, topology, previousContextChars, now, sequence, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -1877,7 +1880,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...goalRecords(planningState, limits),
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
-    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts }),
+    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology }),
     ...shelfCandidateRecords(shelfCandidates, limits),
   ]
 

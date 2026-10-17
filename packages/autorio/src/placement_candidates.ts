@@ -4,9 +4,10 @@ import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_feat
 import { candidate_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
 import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, snap_placement_center, type PlacementFootprint } from './placement_geometry'
 import { resolve_exact_entity } from './entity_reference'
-import { pole_candidate_facts, pole_reach } from './electric_facts'
+import { pole_candidate_facts, pole_reach, protected_read } from './electric_facts'
 import { find_world_entities } from './npc_vision'
 import { placement_item_preflight } from './placement_preflight'
+import { placement_obstruction_sample } from './placement_obstructions'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -452,15 +453,27 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   const distance_origin = nearest_first ? { x: actor.position.x, y: actor.position.y } : undefined
   const candidates: PlacementCandidate[] = []
   let scanned = 0
+  let rejected = 0
+  const obstruction_samples: Array<ReturnType<typeof placement_obstruction_sample>> = []
 
-  function consider(position: { x: number, y: number }, direction: number) {
+  function consider(position: { x: number, y: number }, direction: number, target?: LiveFluidPort) {
+    // Diagnose only compatible solved joins, not nearby but incompatible ports.
+    if (target !== undefined) {
+      let joins = false
+      for (const port of candidate_fluid_ports(prototype, position, direction) ?? []) if (fluid_ports_join(target, port)) joins = true
+      if (!joins) return undefined
+    }
     if (!actor.surface.can_place_entity({
       name: request.entity_name,
       position,
       direction,
       force: actor.force,
       ...check_args,
-    })) return undefined
+    })) {
+      rejected++
+      if (obstruction_samples.length < 3) obstruction_samples.push(placement_obstruction_sample(actor, prototype, position, direction))
+      return undefined
+    }
     if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) return undefined
 
     const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
@@ -497,7 +510,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
           const key = `${target.storage_index}:${target.connection_index}:${position.x}:${position.y}:${direction}`
           if (seen[key] === true) continue
           seen[key] = true
-          const candidate = consider(position, direction)
+          const candidate = consider(position, direction, target)
           if (candidate === undefined) continue
           const joined = joining_port(candidate, target)
           if (joined === undefined) continue
@@ -569,6 +582,20 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     ordering: nearest_first ? 'nearest_to_actor_first' : 'resource_coverage_then_nearest_to_center',
     electric_pole: reach,
     scanned,
+    obstructions: {
+      source: 'native_placement_checks',
+      observed_tick: game.tick,
+      actor_id: protected_read(() => actor.status_snapshot().actor_id),
+      interpretation: 'observed_collision_mask_intersections_not_exhaustive_rejection_causes',
+      surface_index: actor.surface.index,
+      force_index: actor.force.index,
+      scope: 'sampled_footprints',
+      examined_count: obstruction_samples.length,
+      rejected_count: rejected,
+      unknown_count: obstruction_samples.filter(sample => sample.unknown).length,
+      samples: obstruction_samples,
+      truncated: rejected > obstruction_samples.length || obstruction_samples.some(sample => sample.truncated),
+    },
     legal_candidate_count: candidates.length,
     returned_candidate_count: selected.length,
     candidates: selected,
