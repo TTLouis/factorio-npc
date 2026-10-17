@@ -52,7 +52,7 @@ class PartialFurnace extends FurnaceFactorio {
     this.furnace.source = {}; this.furnace.output = { 'iron-plate': 1 }; this.furnace.fuel = { coal: 4 }
     this.effects.push(...ORIGINAL.slice(0, 2).map(operation => ({ operation: operation.name, item: operation.args.item_name, moved: operation.args.max_count })), { operation: 'supply_entity', item: 'coal', moved: 5 })
     const ref = { batch_id: batch.batch_id, batch_generation: 1, batch_ref: `batch-g1-${batch.batch_id}` }
-    this.cancelledBatch = { ...ref, task_count: 4, task_types: new Array(4).fill('moving_items'), started_count: 4,
+    this.cancelledBatch = { ...ref, task_count: 4, task_types: Array.from({ length: 4 }, () => 'moving_items'), started_count: 4,
       completed_count: 3, refused_count: 1, outcome: 'refused', tick: 700,
       reason: 'moving_items:nothing_moved:target_rejects_item', refusals: [{ operation_id: 21, type: 'moving_items', code: 'nothing_moved', cause: 'target_rejects_item', item_name: 'copper-ore', target_unit_number: 49, held_count: 10, tick: 699 }] }
     this.receipts.push({ ...this.cancelledBatch, state: 'cancelled' })
