@@ -40,7 +40,7 @@ operations. Strict paired trace proof remains unchanged.
 - [x] Frozen source, payload repin and full canonical gates.
 - [x] Native reserved-iron furnace repair and unknown-proof control.
 - [x] Original-source failure controls and native regression canaries.
-- [ ] Final review, integration, merged canonical gate and remote verification.
+- [x] Final review, integration and merged canonical gate.
 
 All tests use scripted providers, Docker and isolated local Factorio. Historical
 Run X evidence and its checkpoint remain unchanged; the broader live goal stays
@@ -133,3 +133,22 @@ The complete task evidence index, including static checks, original controls,
 source exports and the sealed native manifest, contains **3,434 entries**:
 `test-results/run-x-offline-final-manifest.json`, SHA256
 `83e559c87b41848adfdac3c727da7b7f34eb55ddf49d5abfc57c9e64dd0253e8`.
+
+## Integration
+
+Separate source and final evidence reviews approved clean task `5a2c3458`.
+Both sealed manifests were independently verified again: all 3,434 task entries
+and 1,529 native entries have unique bounded paths, matching sizes and digests.
+The exact 19 owned native container IDs are absent.
+
+Reviewed no-ff merge `a0a379fad374f766751c5a3cbe2aae7cbba8c205` lands the task
+in the Jev integration checkout. Its source matches the reviewed task exactly.
+The merged canonical gate passes **2,536 runtime/staging and 1,181 mod tests**,
+typecheck, Lua generation and generated-Lua validation (exit 0). The immutable
+payload was already repinned on the task branch and remains byte-identical to its
+validated source. Merged gate evidence is retained in the integration checkout's
+`test-results/run-x-merged-all.log` and `run-x-merged-all-exit.txt`.
+
+Publication target is `experiment/jev-agent-architecture`, following the normal
+green-merge push procedure. This checkpoint proves offline recovery mechanics;
+it does not prove autonomous red throughput or resume the paused E2E goal.
