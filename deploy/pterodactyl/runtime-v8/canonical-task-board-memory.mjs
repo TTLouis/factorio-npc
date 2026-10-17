@@ -324,12 +324,15 @@ function correctableTransferTarget(evidence, state, plan) {
   const basic = receipt?.basic_operation
   const admitted = receipt?.admitted_batch
   const correlation = receipt?.correlation
+  const partial = admitted?.terminal_partial === true && basic?.code === 'nothing_moved'
+    && basic.to_entity === true && basic.moved_count === 0
+    && receipt.reason === 'moving_items:nothing_moved:target_rejects_item'
   if (evidence?.kind !== 'operation_error_receipt' || basic?.type !== 'moving_items'
-    || basic.code !== 'no_target' || basic.accepted !== false || basic.completed !== false
-    || basic.target_unit_number !== undefined || basic.player_name !== undefined
-    || basic.to_player === true || !/^[a-z0-9][a-z0-9_-]{0,199}$/.test(basic.entity_name ?? '')
-    || receipt.reason !== 'moving_items:no_target' || !Number.isFinite(receipt.tick)
-    || receipt.tick !== basic.tick || !Array.isArray(receipt.task_types) || !receipt.task_types.includes('moving_items')) return undefined
+    || (!partial && basic.code !== 'no_target') || basic.accepted !== false || basic.completed !== false
+    || (!partial && basic.target_unit_number !== undefined) || basic.player_name !== undefined
+    || basic.to_player === true || (!partial && !/^[a-z0-9][a-z0-9_-]{0,199}$/.test(basic.entity_name ?? ''))
+    || (!partial && receipt.reason !== 'moving_items:no_target') || !Number.isFinite(receipt.tick)
+    || (!partial && receipt.tick !== basic.tick) || !Array.isArray(receipt.task_types) || !receipt.task_types.includes('moving_items')) return undefined
   if (!admitted || !Number.isSafeInteger(admitted.actor_id) || !Number.isSafeInteger(admitted.actor_epoch)
     || admitted.actor_id !== basic.actor_id || admitted.actor_id !== correlation?.actor_id
     || admitted.actor_epoch !== correlation?.actor_epoch || admitted.goal_id !== state.goal_id
@@ -341,14 +344,19 @@ function correctableTransferTarget(evidence, state, plan) {
   const operations = (state.last_operations ?? []).map(parseStoredOperation)
   if (!operations.length || operations.some(operation => !operation)
     || operationSignature(operations) !== admitted.signature) return undefined
-  const intent = operations.find(operation => operation.name === 'move_items'
+  const intent = partial ? operations.find(operation => operation.args.unit_number === basic.target_unit_number
+    && ((operation.name === 'move_items_exact' && operation.args.to_entity === true
+      && operation.args.item_name === basic.item_name && operation.args.max_count === basic.requested_count)
+      || (operation.name === 'supply_entity' && operation.args.items?.some(item => item.item_name === basic.item_name && item.count === basic.requested_count))))
+    : operations.find(operation => operation.name === 'move_items'
     && operation.args.entity_name === basic.entity_name && operation.args.item_name === basic.item_name
     && operation.args.max_count === basic.requested_count && operation.args.to_entity === basic.to_entity)
   if (!intent) return undefined
   return {
-    task_type: 'moving_items', code: 'no_target', entity_name: basic.entity_name,
+    task_type: 'moving_items', code: basic.code, entity_name: basic.entity_name,
     item_name: basic.item_name, requested_count: basic.requested_count, to_entity: basic.to_entity,
-    recovery: 'local_target_reacquisition', operation_key: admitted.operation_key,
+    target_unit_number: basic.target_unit_number,
+    recovery: partial ? 'terminal_transfer_refusal' : 'local_target_reacquisition', operation_key: admitted.operation_key,
   }
 }
 

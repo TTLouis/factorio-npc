@@ -22,7 +22,7 @@ PRISTINE_SAVE="$LANE_ROOT/pristine-planning-live.zip"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "$RESULTS" "$WRITE_DATA" "$MODS"
-if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft || "$LANE" == local-transfer-target || "$LANE" == shoreline-recovery ]]; then
+if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft || "$LANE" == local-transfer-target || "$LANE" == shoreline-recovery || "$LANE" == partial-transfer ]]; then
   # Independent controllers cannot share a persisted operation-ordinal journal.
   # Capture the untouched generated world before either controller runs.
   cp "$SAVE" "$PRISTINE_SAVE"
@@ -142,6 +142,14 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  partial-transfer)
+    run_node partial_transfer_factorio.mjs --mode recovery
+    stop_factorio
+    SAVE="$LANE_ROOT/partial-transfer-unknown.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node partial_transfer_factorio.mjs --mode unknown
+    ;;
   fresh-topology)
     run_node fresh_topology_factorio.mjs
     ;;

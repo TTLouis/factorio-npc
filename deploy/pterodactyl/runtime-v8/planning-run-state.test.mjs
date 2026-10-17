@@ -735,7 +735,7 @@ test('pause chat line: a blocked plan is not announced as paused, and text says 
   for (const line of [blockedLine, blockedCancel, pauseChatLine({ status: 'paused' })]) assert.doesNotMatch(line, /AIRI/)
 })
 
-test('pausing a blocked plan traces no goal.paused: the legacy record stays blocked', () => {
+test('pausing a blocked plan traces its durable run pause while the legacy record stays blocked', () => {
   const memory = new CanonicalTaskBoardMemory()
   const agent = new NpcAgentLoop({
     rcon: new PlanningRcon(),
@@ -750,7 +750,10 @@ test('pausing a blocked plan traces no goal.paused: the legacy record stays bloc
   startCommittedPlan(memory)
   block(memory)
   assert.equal(memory.pausePlan(KEY, 'ui_pause').status, 'blocked')
-  assert.equal(agent.goalPausedTrace('ui_pause'), undefined)
+  const paused = agent.goalPausedTrace('ui_pause')
+  assert.equal(paused.cause, 'ui_pause')
+  assert.equal(paused.goal_id, memory.planningState(KEY).goal.goal_id)
+  assert.equal(memory.currentPlan(KEY).status, 'blocked')
 })
 
 test('USER_REVISION_APPROVED clears run.paused; plan semantics come only from the revision', () => {
