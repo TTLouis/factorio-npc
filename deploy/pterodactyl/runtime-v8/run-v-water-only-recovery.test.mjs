@@ -117,7 +117,7 @@ function boundary() {
   const key = saved.planning_states[0].key; const state = memory.currentPlan(key)
   state.status = 'active'; memory.recordRunResume(key, state, 'fixture_resume')
   const game = new RunVGame()
-  const agent = new NpcAgentLoop({ rcon: game, memory, traceFile: null, decisionTraceFile: null, reserve: async () => ({}), provider: async () => { throw Error('no provider expected') } })
+  const agent = new NpcAgentLoop({ rcon: game, memory, traceFile: null, decisionTraceFile: null, reserve: async () => ({}), provider: async () => { throw new Error('no provider expected') } })
   agent.active = true; agent.epoch = { ...game.status }; agent.requestInfo = { memoryKey: key }; agent.traceRequest = { id: 'req-v' }
   const events = []; agent.behaviorTrace = { emit: async row => events.push(row) }
   agent.recordHandoffToolFacts('getFluidSourceTiles', JSON.stringify(capture.water.result), capture.water.args)

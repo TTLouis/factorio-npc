@@ -8,7 +8,7 @@ describe('bounded native placement obstruction witnesses', () => {
   const proto = { tile_width: 3, tile_height: 5, collision_mask: { layers: { object: true, water_tile: true } } }
   it('reports terrain and colliding entities, excluding disjoint resource masks, with bounded samples', () => {
     const actor: any = { surface: {
-      get_tile: (x: number, y: number) => ({ name: 'water', collides_with: (layer: string) => layer === 'water_tile' }),
+      get_tile: (_x: number, _y: number) => ({ name: 'water', collides_with: (layer: string) => layer === 'water_tile' }),
       find_entities_filtered: () => [
         { valid: true, name: 'pole', type: 'electric-pole', unit_number: 7, position: { x: 0, y: 0 }, prototype: { collision_mask: { layers: { object: true } } } },
         { valid: true, name: 'ore', type: 'resource', prototype: { collision_mask: { layers: { resource: true } } } },

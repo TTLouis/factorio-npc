@@ -10,10 +10,10 @@ import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
 import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
 import { parseOperation, renderOperation } from '../pterodactyl/runtime-v8/structured-policy.mjs'
 
-globalThis.fetch = async () => { throw Error('network/model inference forbidden in saved-layout replay') }
+globalThis.fetch = async () => { throw new Error('network/model inference forbidden in saved-layout replay') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const transcript = [], evidence = { rung: 'A1 deterministic saved-layout mechanics; not autonomous success' }
+const transcript = []; const evidence = { rung: 'A1 deterministic saved-layout mechanics; not autonomous success' }
 let connection
 const rcon = { command: async (command, options) => {
   const response = await connection.command(command, options)
@@ -120,7 +120,7 @@ try {
   evidence.steadySamples=[]
   for(let i=0;i<3;i++) {
    await delay(1000)
-   const s=await snapshot(),e=s.entities.find(e=>e.name==='steam-engine'),l=s.entities.find(e=>e.name==='inserter')
+   const s=await snapshot(); const e=s.entities.find(e=>e.name==='steam-engine'); const l=s.entities.find(e=>e.name==='inserter')
    assert(e.steam>0 && e.generation>0 && l.energy>0 && Number.isSafeInteger(e.network) && e.network>0 && e.network===l.network,'native steam must continue powering the real inserter drain')
    assert.deepEqual(s.entities.filter(e=>e.name==='small-electric-pole').map(e=>e.id),[22,23])
    evidence.steadySamples.push(s)

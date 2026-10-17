@@ -8,7 +8,7 @@ import { stopTrialIfTerminal } from './trial-stop-policy.mjs'
 export async function supervisorStop({ rcon, root, snapshotCommand, expectedRunId, now = Date.now }) {
   const logs = path.join(root, 'logs')
   const identity = JSON.parse(await fs.readFile(path.join(logs, 'e2e-trial-identity.json'), 'utf8'))
-  if (identity.run_id !== expectedRunId || !identity.goal_id || !identity.actor_id) throw Error('Trial identity mismatch')
+  if (identity.run_id !== expectedRunId || !identity.goal_id || !identity.actor_id) throw new Error('Trial identity mismatch')
   const decision = await stopTrialIfTerminal({ policy: {}, readCurrent: async () => {
     const native = JSON.parse(await rcon.command(snapshotCommand))
     const names = (await fs.readdir(logs)).filter(name => /^sgluna-behavior\.jsonl(?:\.\d+)?$/.test(name))
@@ -29,9 +29,9 @@ export async function supervisorStop({ rcon, root, snapshotCommand, expectedRunI
   return decision
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+async function main() {
   const runId = process.argv[2]
-  if (!runId) throw Error('Explicit expected run ID required')
+  if (!runId) throw new Error('Explicit expected run ID required')
   const release = path.dirname(await fs.realpath('/opt/sgluna/start-sgluna.sh'))
   const { Rcon } = await import(pathToFileURL(path.join(release, 'src/runtime-v8/common.mjs')))
   const rcon = new Rcon(27015, process.env.SGLUNA_RCON_PASSWORD, 15000)
@@ -41,4 +41,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       snapshotCommand: await fs.readFile('/e2e/snapshot.lua', 'utf8') })
     process.stdout.write(`${JSON.stringify(decision)}\n`)
   } finally { rcon.close() }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch(error => {
+    console.error(error)
+    process.exitCode = 1
+  })
 }

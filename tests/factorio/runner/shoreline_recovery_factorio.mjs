@@ -202,18 +202,18 @@ try {
     try { await connection.connect(); return true } catch { return false }
   }, 20000)
   await configureNpcSession(rcon, 'shoreline-recovery-delegation-session')
-  const setup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); '
-    + 'game.speed=1; remote.call("autorio_operations","cancel_all_tasks"); local s=game.create_surface("shoreline-recovery",{seed=424242,width=0,height=0,water=0,cliff_settings={cliff_elevation_interval=0},autoplace_settings={entity={treat_missing_as_default=false,settings={}}}}); '
-    + (waterOnly ? 's.request_to_generate_chunks({16,16},2); s.request_to_generate_chunks({224,16},1); ' : 's.request_to_generate_chunks({16,16},4); s.request_to_generate_chunks({288,16},1); ')
-    + 's.force_generate_chunk_requests(); '
-    + 'for _,e in pairs(s.find_entities()) do e.destroy() end; local tiles={}; '
-    + (waterOnly
+  const setup = JSON.parse(await rcon.command(`/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); `
+    + `game.speed=1; remote.call("autorio_operations","cancel_all_tasks"); local s=game.create_surface("shoreline-recovery",{seed=424242,width=0,height=0,water=0,cliff_settings={cliff_elevation_interval=0},autoplace_settings={entity={treat_missing_as_default=false,settings={}}}}); ${
+     waterOnly ? 's.request_to_generate_chunks({16,16},2); s.request_to_generate_chunks({224,16},1); ' : 's.request_to_generate_chunks({16,16},4); s.request_to_generate_chunks({288,16},1); '
+     }s.force_generate_chunk_requests(); `
+    + `for _,e in pairs(s.find_entities()) do e.destroy() end; local tiles={}; ${
+     waterOnly
       ? 'for x=-64,95 do for y=-64,95 do tiles[#tiles+1]={name="landfill",position={x,y}} end end; for x=192,255 do for y=-32,63 do tiles[#tiles+1]={name=x>=216 and "water" or "landfill",position={x,y}} end end; '
-      : 'for x=-128,159 do for y=-128,159 do tiles[#tiles+1]={name="landfill",position={x,y}} end end; for x=256,319 do for y=-32,63 do tiles[#tiles+1]={name=x>=280 and "water" or "landfill",position={x,y}} end end; ')
-    + 's.set_tiles(tiles,true,false,true); assert(a.teleport({16,16},s)); s.always_day=true; local inv=a.get_main_inventory(); inv.clear(); '
-    + 'for _,v in pairs({{"offshore-pump",1},{"boiler",1},{"steam-engine",1},{"lab",1},{"small-electric-pole",1},{"coal",10},{"automation-science-pack",10}}) do assert(inv.insert{name=v[1],count=v[2]}==v[2]) end; '
-    + 'for _,n in pairs({"steam-power","electronics","automation-science-pack"}) do a.force.technologies[n].researched=true end; '
-    + 'assert(not a.force.technologies.automation.researched); rcon.print(helpers.table_to_json({actor_id=a.unit_number,surface_index=s.index,position=a.position}))'))
+      : 'for x=-128,159 do for y=-128,159 do tiles[#tiles+1]={name="landfill",position={x,y}} end end; for x=256,319 do for y=-32,63 do tiles[#tiles+1]={name=x>=280 and "water" or "landfill",position={x,y}} end end; '
+     }s.set_tiles(tiles,true,false,true); assert(a.teleport({16,16},s)); s.always_day=true; local inv=a.get_main_inventory(); inv.clear(); `
+    + `for _,v in pairs({{"offshore-pump",1},{"boiler",1},{"steam-engine",1},{"lab",1},{"small-electric-pole",1},{"coal",10},{"automation-science-pack",10}}) do assert(inv.insert{name=v[1],count=v[2]}==v[2]) end; `
+    + `for _,n in pairs({"steam-power","electronics","automation-science-pack"}) do a.force.technologies[n].researched=true end; `
+    + `assert(not a.force.technologies.automation.researched); rcon.print(helpers.table_to_json({actor_id=a.unit_number,surface_index=s.index,position=a.position}))`))
   // Setup ends here: no teleport, terrain edit, generated-chunk request, stock
   // insertion, or corrective command is issued after this boundary.
   const before = await idle()

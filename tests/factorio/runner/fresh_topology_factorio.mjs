@@ -16,10 +16,10 @@ import { providerRequest } from '../pterodactyl/runtime-v8/provider.mjs'
 import { planReply, jevContractLog } from '../pterodactyl/runtime-v8/task-loop-fixtures.mjs'
 
 let fetchCalls = 0
-globalThis.fetch = async () => { fetchCalls++; throw Error('inference forbidden in fresh-topology native fixture') }
+globalThis.fetch = async () => { fetchCalls++; throw new Error('inference forbidden in fresh-topology native fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const transcript = [], sent = [], seen = {}, identities = {}, placements = {}
+const transcript = []; const sent = []; const seen = {}; const identities = {}; const placements = {}
 let connection, ctx, setup
 const rcon = { command: async (command, options) => {
   const answer = await connection.command(command, options)
@@ -145,11 +145,28 @@ const model = new ScriptedModel()
   })
   .push('executor', 'luna:place-held-engine-on-legal-inland-footprint', messages => place(messages, 'steam-engine'))
   .push('executor', 'luna:fresh-engine-capacity-and-connectivity', reads([['getEntityStatus', { name: 'steam-engine', radius: 32 }]]))
-  .push('executor', 'luna:craft-real-electric-load', messages => {
+  .push('executor', 'luna:derive-future-expansion-from-native-capacity', messages => {
     const e = entity(messages, 'steam-engine'); seen.engine = e
     const usage = e.spatial.power.prototype.power.fluid_usage_per_second
     assert.ok(usage > 0); seen.capacityRatio = seen.nativeBoilerOutputPerSecond / usage
     assert.equal(seen.capacityRatio, 2, 'running vanilla prototypes support two full-load engines per fully supplied boiler')
+    return reads([['getPlacementCandidates', { entity_name: 'steam-engine', connects_to: { unit_number: e.unit_number }, limit: 8 }]])
+  })
+  .push('executor', 'luna:keep-a-legal-second-engine-footprint-without-expanding-the-goal', messages => {
+    const future = lastTool(messages)
+    assert.ok(future.ok === true && future.candidates?.length > 0, 'the observed first-engine route must leave a native-feasible connected second-engine footprint')
+    seen.futureEngineCandidates = future
+    const line = messages.flatMap(row => String(row.content).split('\n')).findLast(row => row.startsWith('fresh_topology: '))
+    assert.ok(line)
+    seen.futureEngineContext = JSON.parse(line.slice('fresh_topology: '.length))
+    assert.equal(seen.futureEngineContext.held['steam-engine'] ?? 0, 0)
+    assert.equal(ctx.world.memory.planningState(KEY).plans.at(-1).steps[0].description, STEP, 'expansion observation must preserve the committed current step')
+    const first = placements['steam-engine'].footprint.world_box
+    assert.ok(future.candidates.some(candidate => {
+      const second = candidate.footprint.world_box
+      return second.right_bottom.x <= first.left_top.x || second.left_top.x >= first.right_bottom.x
+        || second.right_bottom.y <= first.left_top.y || second.left_top.y >= first.right_bottom.y
+    }), 'future engine footprint must not overlap the placed engine')
     return reply([{ name: 'craft_item', args: { item_name: 'inserter', count: 1 } }, { name: 'supply_entity', args: { unit_number: setup.boiler, items: [{ item_name: 'coal', count: 5 }] } }])
   })
   .push('executor', 'luna:legal-load-within-retained-pole-coverage', () => reads([['getPlacementCandidates', { entity_name: 'inserter', center: { x: -21.5, y: -92.5 }, radius: 3, limit: 8 }]]))
@@ -203,16 +220,17 @@ try {
   }
   seen.steadySamples = []
   await until('native generation powering real inserter drain', async () => {
-    const s = await snapshot(), e = s.entities.find(row => row.name === 'steam-engine'), load = s.entities.find(row => row.name === 'inserter')
+    const s = await snapshot(); const e = s.entities.find(row => row.name === 'steam-engine'); const load = s.entities.find(row => row.name === 'inserter')
     return e?.generating > 0 && e.steam > 0 && load?.energy > 0 && e.network > 0 && e.network === load.network ? s : false
   })
-  for (let i = 0; i < 3; i++) { await delay(1000); const s = await snapshot(), e = s.entities.find(row => row.name === 'steam-engine'), load = s.entities.find(row => row.name === 'inserter')
+  for (let i = 0; i < 3; i++) { await delay(1000); const s = await snapshot(); const e = s.entities.find(row => row.name === 'steam-engine'); const load = s.entities.find(row => row.name === 'inserter')
     assert.ok(e.generating > 0 && e.steam > 0 && load.energy > 0 && e.network > 0 && e.network === load.network); seen.steadySamples.push(s)
   }
   await completion()
   const after = await idle()
   assert.equal(after.actor_id, before.actor_id); assert.equal(after.artificial, 0)
   assert.equal(after.entities.filter(e => e.name === 'pipe').length, 2)
+  assert.equal(after.entities.filter(e => e.name === 'steam-engine').length, 1, 'capacity guidance cannot silently enlarge the committed one-engine goal')
   assert.deepEqual(after.entities.filter(e => e.name === 'small-electric-pole').map(e => e.unit_number).sort((a,b) => a-b), [...setup.poles].sort((a,b) => a-b))
   assert.ok(after.entities.find(e => e.unit_number === identities.pipe1).fluid_targets.includes(setup.boiler))
   assert.ok(after.entities.find(e => e.unit_number === identities.pipe2).fluid_targets.includes(identities['steam-engine']))
