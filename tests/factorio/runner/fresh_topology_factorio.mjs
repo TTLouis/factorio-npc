@@ -129,8 +129,20 @@ const model = new ScriptedModel()
   .push('executor', 'luna:fresh-boiler-outlet-pipe', () => reads([['getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: setup.boiler, storage_index: 2 }, limit: 8 }]]))
   .push('executor', 'luna:place-steam-outlet', messages => place(messages, 'pipe1'))
   .push('executor', 'luna:identify-first-pipe', reads([['getEntityStatus', { name: 'pipe', radius: 32 }]]))
-  .push('executor', 'luna:turn-inland-from-observed-port', messages => {
+  .push('executor', 'luna:turn-inland-from-observed-port', async messages => {
+    const status = lastTool(messages)
     const e = entity(messages, 'pipe1'); seen.firstPipe = e
+    // Project an actual native four-port pipe through the production helper.
+    // This component assertion covers nested omission even when the full-loop
+    // lean packet above drops the pipe to retain the boiler and capacity.
+    // Delayed import preserves the original-image missing-context control.
+    const { topologyEntities, topologyText } = await import('../pterodactyl/runtime-v8/topology-context.mjs')
+    const actual = topologyEntities({ ...status, entities: [e] })
+    assert.ok(e.spatial.fluid.storages.some(storage => storage.connections.length === 4))
+    const compact = JSON.parse(topologyText({ state: 'fresh', ...actual }).slice('fresh_topology: '.length))
+    assert.equal(compact.truncated, true)
+    assert.ok(compact.entities[0].fluid.some(storage => storage.truncated === true && storage.ports.length === 3))
+    seen.nativePipeProjection = compact
     return reads([['getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: e.unit_number, storage_index: 1, connection_index: 4 }, limit: 8 }]])
   })
   .push('executor', 'luna:place-inland-pipe', messages => place(messages, 'pipe2'))
@@ -152,14 +164,18 @@ const model = new ScriptedModel()
     assert.equal(seen.capacityRatio, 2, 'running vanilla prototypes support two full-load engines per fully supplied boiler')
     return reads([['getPlacementCandidates', { entity_name: 'steam-engine', connects_to: { unit_number: e.unit_number }, limit: 8 }]])
   })
-  .push('executor', 'luna:keep-a-legal-second-engine-footprint-without-expanding-the-goal', messages => {
+  .push('executor', 'luna:keep-a-legal-second-engine-footprint-without-expanding-the-goal', async messages => {
     const future = lastTool(messages)
     assert.ok(future.ok === true && future.candidates?.length > 0, 'the observed first-engine route must leave a native-feasible connected second-engine footprint')
     seen.futureEngineCandidates = future
     const line = messages.flatMap(row => String(row.content).split('\n')).findLast(row => row.startsWith('fresh_topology: '))
     assert.ok(line)
     seen.futureEngineContext = JSON.parse(line.slice('fresh_topology: '.length))
-    assert.equal(seen.futureEngineContext.held['steam-engine'] ?? 0, 0)
+    if (Object.hasOwn(seen.futureEngineContext.held, 'steam-engine')) assert.equal(seen.futureEngineContext.held['steam-engine'], 0)
+    else assert.match(seen.futureEngineContext.held_scope, /omitted_counts_unknown/, 'an omitted lean inventory item is not an authoritative zero')
+    const native = await snapshot()
+    assert.equal(native.inventory.filter(item => item.name === 'steam-engine').reduce((count, item) => count + item.count, 0), 0)
+    seen.futureEngineNativeInventory = native.inventory
     assert.equal(ctx.world.memory.planningState(KEY).plans.at(-1).steps[0].description, STEP, 'expansion observation must preserve the committed current step')
     const first = placements['steam-engine'].footprint.world_box
     assert.ok(future.candidates.some(candidate => {
