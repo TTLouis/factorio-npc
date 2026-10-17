@@ -99,13 +99,15 @@ test('Run X full loop: exact terminal partial transfer, fresh furnace read, oper
   const ctx = fixture(t); const { game, model, world } = ctx
   await ctx.start()
   const before = structuredClone(getActivePlan(world.memory.planningState(KEY)))
+  let recoveryGuidance = ''
   model.push('executor', 'luna:observe', messages => {
-    assert.match(messages.map(row => String(row.content)).join('\n'), /Do not replay the original batch/)
+    recoveryGuidance = messages.map(row => String(row.content)).join('\n')
     return observe()
   }).push('executor', 'luna:repair', () => ctx.action(REPAIR, { checkpoint: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 1 }] } }))
     .push('executor', 'luna:collect', () => ctx.action([extract('copper-plate', 5)]))
   await ctx.fail()
   assert.equal(game.sent.length, 2, JSON.stringify({ logs: ctx.logs, violations: model.violations, trace: world.trace.slice(-12) }))
+  assert.match(recoveryGuidance, /Do not replay the original batch/)
   assert.deepEqual(game.sent[1].operations, REPAIR)
   const closed = world.memory.planningState(KEY).operation_ledger.closed.find(row => row.verdict === 'admitted_partial')
   assert.equal(closed.effect, 'partial_known')
@@ -170,6 +172,7 @@ test('Run X blocked continuation is rejected by canonical authority, never treat
   await ctx.fail()
   assert.equal(game.sent.length, 1)
   assert.equal(world.memory.currentPlan(KEY).status, 'blocked')
+  assert.deepEqual(world.named('request.failed'), [])
   assert.equal(world.named('plan.completion_declarations_preserved')[0].reason, 'canonical_plan_blocked')
   assert.ok(world.named('operations.skipped').some(row => row.reason === 'plan_blocked_awaiting_user'))
   healthy(ctx)
