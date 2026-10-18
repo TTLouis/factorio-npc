@@ -1,3 +1,4 @@
+import type { PlayerParameters } from './types'
 import { TaskStates } from './types'
 
 type NonIdleTaskState = Exclude<TaskStates, TaskStates.IDLE>
@@ -37,4 +38,14 @@ export function is_runtime_task_state(state: unknown): state is RuntimeTaskState
 
 export function unsupported_task_state_reason(state: unknown) {
   return `unsupported_task_state:${state}`
+}
+
+/**
+ * A queued task's index in its batch's task_types, stamped when it is added.
+ * Recovery tasks pushed by interrupt_current_with carry none; the interrupted
+ * task object is resumed as itself and keeps its index.
+ */
+export function batch_task_index(task: PlayerParameters | undefined) {
+  const index = (task as { batch_task_index?: unknown } | undefined)?.batch_task_index
+  return typeof index === 'number' && index >= 0 && index === math.floor(index) ? index : undefined
 }

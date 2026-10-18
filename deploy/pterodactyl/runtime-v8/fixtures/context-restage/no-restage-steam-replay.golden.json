@@ -303,7 +303,7 @@
     },
     {
       "event": "factorio.status",
-      "sha": "0b0e8fad660b3bf9"
+      "sha": "f767572c3fb06744"
     },
     {
       "event": "step.completion_checked",
@@ -527,7 +527,7 @@
     },
     {
       "event": "factorio.status",
-      "sha": "7a309d742038c50e"
+      "sha": "3afd547d51901465"
     },
     {
       "event": "factorio.error_continuation",

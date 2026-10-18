@@ -238,6 +238,40 @@ test('an engine refusal of the first task before any change, with every dependen
   assert.notEqual(reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: { ...status, receipt_journal: [] } }).verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
 })
 
+test('Run Z batch 21: an engine refusal at the first task of slot 2 settles with slot 1 applied, not as an unresolved cancellation', () => {
+  const pending = exactPending([
+    { name: 'place_entity', args: { entity_name: 'boiler', x: 43.5, y: -49, direction: 4 } },
+    { name: 'place_entity', args: { entity_name: 'steam-engine', x: 42.5, y: -48.5, direction: 4 } },
+  ])
+  const slots = [{ ...queuedSlot(1), operation: 'place_entity', queued_tasks: 1 }, { ...queuedSlot(2), operation: 'place_entity', queued_tasks: 1 }]
+  const admission = journalFor(pending, { error: 'refused_before_mutation', applied_slot_count: 1, slots })
+  // started_count 4: boiler, its approach walk, the resumed boiler, then the steam engine.
+  const receipt = { ...BATCH_REF, state: 'cancelled', started_count: 4, tasks_started: 2, failed_before_mutation: true, failed_task_index: 1,
+    reason: 'placing:not_placeable', task_count: 2, task_types: ['placing', 'placing'], tick: 10 }
+  const status = { batch_generation: 1, admission_journal: [admission], receipt_journal: [receipt] }
+  const result = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status })
+  assert.equal(result.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+  assert.equal(result.effect, EFFECT.HAPPENED)
+  assert.deepEqual(result.applied_slots, [1])
+  assert.deepEqual(result.refused_slots, [2])
+  assert.equal(result.unrun_slots, 0)
+  assert.match(reconciliationGuidance(result, pending), /refused operations 2 before changing anything.*Operations 1 completed before the refusal/)
+  // The runtime re-derives the prefix; a mod claim that does not match the receipt is not proof.
+  const weaker = [
+    [{ applied_slot_count: 0 }, {}], [{ applied_slot_count: 2 }, {}], [{ applied_slot_count: 1.5 }, {}],
+    [{}, { failed_task_index: 0 }], [{}, { failed_task_index: undefined }], [{}, { tasks_started: 1 }], [{}, { tasks_started: undefined }],
+    [{}, { task_count: 3 }], [{}, { failed_before_mutation: undefined }], [{}, { refused_count: 1 }], [{}, { state: 'uncertain' }],
+    [{ slots: [{ ...slots[0], queued_tasks: 2 }, slots[1]] }, {}], [{ slots: [{ ...slots[0], queued_tasks: 0 }, slots[1]] }, {}],
+    [{ slots: [{ ...slots[0], queued_tasks: undefined }, slots[1]] }, {}],
+    [{ slots: [slots[0], { ...slots[1], batch_refs: [{ batch_id: 5, batch_generation: 1, batch_ref: 'batch-g1-5' }] }] }, {}],
+  ]
+  for (const [record, receiptChange] of weaker) {
+    const unproven = reconcilePendingOperation(pending, { actor: EXACT_ACTOR,
+      status: { ...status, admission_journal: [{ ...admission, ...record }], receipt_journal: [{ ...receipt, ...receiptChange }] } })
+    assert.notEqual(unproven.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, JSON.stringify([record, receiptChange]))
+  }
+})
+
 test('genuinely unknown effects are never read as a refusal', () => {
   const pending = exactPending()
   const two = exactPending([...PLACE, ...PLACE])

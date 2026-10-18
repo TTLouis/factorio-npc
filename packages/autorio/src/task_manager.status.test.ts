@@ -228,7 +228,7 @@ describe('task manager status snapshot', () => {
       receipt_journal: [{
         batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1',
         task_count: 2, task_types: [TaskStates.WAITING, TaskStates.WAITING],
-        tick: 0, reason: 'cancelled', state: 'cancelled', started_count: 1,
+        tick: 0, reason: 'cancelled', state: 'cancelled', started_count: 1, tasks_started: 1,
       }],
       tasks_added: 2,
       task_state: TaskStates.IDLE,
@@ -248,6 +248,7 @@ describe('task manager status snapshot', () => {
         tick: 0,
         reason: 'cancelled',
         started_count: 1,
+        tasks_started: 1,
       },
     })
   })

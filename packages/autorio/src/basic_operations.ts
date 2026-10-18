@@ -1,5 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
+import { batch_task_index } from './task_state_runtime'
 import type {
   PlayerParametersLaunchRocket,
   PlayerParametersMineEntity,
@@ -547,7 +548,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     // journal still requires started_count === 1 to settle a whole batch.
     const local_transfer_miss = task.type === TaskStates.MOVING_ITEMS && code === 'no_target'
       && task.target_unit_number === undefined && task.player_name === undefined && task.entity_name !== undefined
-    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING || local_transfer_miss })
+    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING || local_transfer_miss, task_index: batch_task_index(task) })
     suppress_cancel_receipt = false
     result_for(actor, task, false, false, code, details)
     log(`[AUTORIO] [ERROR] ${task.type} failed: ${code}; dependent operations cancelled`)

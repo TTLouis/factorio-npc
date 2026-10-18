@@ -1,6 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { register_actor_mode_transition_handler, register_npc_recovery_handler, register_npc_single_player_load_handler } from './actors/actor_controller'
-import { is_runtime_task_state, unsupported_task_state_reason } from './task_state_runtime'
+import { batch_task_index, is_runtime_task_state, unsupported_task_state_reason } from './task_state_runtime'
 import type { PlayerParameters, PlayerState } from './types'
 import { TaskStates } from './types'
 import { pinned_operation_batch_refs } from './operation_admission'
@@ -40,20 +40,36 @@ export interface TaskBatchReceipt extends TaskBatchIdentity {
   completed_count?: number
   refusals?: TaskBatchRefusal[]
   /**
-   * Tasks of this batch the runtime had activated (taken off the queue) when
-   * the batch closed. Queued tasks beyond this count never began.
+   * Task activations of this batch when it closed. Recovery tasks (an approach
+   * walk) and a task resumed after one count again, so this can exceed the
+   * number of tasks that began; only 1 means a single task ever ran.
    */
   started_count?: number
+  /**
+   * Distinct queued tasks of this batch that had begun when it closed: the
+   * highest task_types index activated, plus one. Recovery tasks are not
+   * counted and a resumed task is counted once.
+   */
+  tasks_started?: number
   /**
    * Set only on a cancellation whose failing task is known to have changed
    * nothing in the world (a placement the engine refused before creating it).
    * With started_count === 1 that proves no task of the batch had any effect.
    */
   failed_before_mutation?: boolean
+  /**
+   * With failed_before_mutation: the task_types index of the task whose
+   * failure cancelled the batch. Tasks are activated in queue order and a
+   * batch with no refusals stops at its first failure, so every earlier task
+   * completed and no later one began.
+   */
+  failed_task_index?: number
 }
 
 export interface TaskCancelProof {
   failed_before_mutation: boolean
+  /** The failing task's index in its batch (batch_task_index), when it has one. */
+  task_index?: number
 }
 
 const MAX_RECEIPT_REFUSALS = 8
@@ -68,6 +84,9 @@ interface TaskExecutionState {
   last_cancelled_batch?: TaskBatchReceipt
   active_batch_refusals: TaskBatchRefusal[]
   active_batch_started: number
+  /** Optional: absent in saves made before the fields existed. */
+  active_batch_tasks_started?: number
+  active_batch_current_task?: number
   tasks_added_total: number
 }
 
@@ -190,10 +209,13 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       execution().active_batch_console_quiet = quiet_task
       execution().active_batch_refusals = []
       execution().active_batch_started = 0
+      execution().active_batch_tasks_started = 0
+      execution().active_batch_current_task = undefined
     }
     else if (!quiet_task) {
       execution().active_batch_console_quiet = false
     }
+    ;(task as { batch_task_index?: number }).batch_task_index = execution().active_batch_task_types.length
     execution().active_batch_task_types.push(task.type)
     storage.sgluna_task_active_batch = {
       batch_id: execution().active_batch_id!, batch_generation: ensure_batch_generation(), batch_ref: batch_ref(execution().active_batch_id!),
@@ -214,7 +236,13 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       reason,
       started_count: execution().active_batch_started,
     }
-    if (kind === 'cancelled' && proof?.failed_before_mutation === true) receipt.failed_before_mutation = true
+    if (execution().active_batch_tasks_started !== undefined) receipt.tasks_started = execution().active_batch_tasks_started
+    if (kind === 'cancelled' && proof?.failed_before_mutation === true) {
+      receipt.failed_before_mutation = true
+      // The failing task names itself; it must also be the task running now.
+      const current = execution().active_batch_current_task
+      if (proof.task_index !== undefined && proof.task_index === current) receipt.failed_task_index = current
+    }
     // Refusals ride on whichever receipt closes the batch, so a later hard
     // failure that cancels the rest does not hide an earlier refusal.
     if (execution().active_batch_refusals.length > 0) {
@@ -237,6 +265,8 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     execution().active_batch_console_quiet = false
     execution().active_batch_refusals = []
     execution().active_batch_started = 0
+    execution().active_batch_tasks_started = 0
+    execution().active_batch_current_task = undefined
     return receipt
   }
 
@@ -407,7 +437,12 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     }
 
     log(`[AUTORIO] Next task: ${task.type}, batch=${execution().active_batch_id}, task queue length: ${execution().task_queue.length}`)
-    if (execution().active_batch_id !== undefined) execution().active_batch_started++
+    if (execution().active_batch_id !== undefined) {
+      execution().active_batch_started++
+      const index = batch_task_index(task)
+      execution().active_batch_current_task = index
+      if (index !== undefined && index + 1 > (execution().active_batch_tasks_started ?? 0)) execution().active_batch_tasks_started = index + 1
+    }
     execution().player_state.task_state = task.type
     switch (task.type) {
       case TaskStates.WALKING_TO_ENTITY:

@@ -696,6 +696,71 @@ test('a cancelled placement WITHOUT the mod first-task proof preserves the plan 
   assert.equal(held.data.reason, 'unresolved_operation_scope_conflict')
 })
 
+test('Run Z batch 21: a later placement refused after an earlier one was built settles with the built one applied, not held', async () => {
+  const STEPS = ['Place a boiler and a steam engine at the offshore pump', 'Connect the steam engine with a small electric pole']
+  const prompts = []
+  const trace = []
+  const world = harness({
+    provider: async messages => {
+      prompts.push(messages.map(message => String(message.content ?? '')).join('\n'))
+      return planReply({ plan: STEPS, currentStep: 0, operations: prompts.length === 1
+        ? [
+            { name: 'place_entity', args: { entity_name: 'boiler', x: 43.5, y: -49, direction: 4 } },
+            { name: 'place_entity', args: { entity_name: 'steam-engine', x: 38.5, y: -48.5, direction: 4 } },
+          ]
+        : [{ name: 'place_entity', args: { entity_name: 'steam-engine', x: 38.5, y: -52.5, direction: 4 } }] })
+    },
+  })
+  world.agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+
+  await world.say('build steam power at the offshore pump', 'new_goal')
+  const committed = world.reducerPlan()
+  assert.deepEqual(world.game.lastTaskTypes, ['placing', 'placing'])
+  // The boiler (task 0) was built, the steam engine (task 1) was refused before it was created.
+  await world.agent.failed(world.game.failLastBatch({ type: 'placing', code: 'not_placeable', entity_name: 'steam-engine' }, undefined, { failedTaskIndex: 1 }))
+
+  const state = world.memory.currentPlan(KEY)
+  assert.equal(state.status, 'active')
+  assert.equal(state.blocker, '')
+  assert.equal(world.reducerPlan().plan_id, committed.plan_id)
+  const reconciled = trace.filter(record => record.event === 'operation.reconciled' && record.data.verdict === 'refused_before_mutation')
+  assert.equal(reconciled.length >= 1, true)
+  assert.equal(reconciled[0].data.effect, 'happened')
+  assert.deepEqual(reconciled[0].data.applied_slots, [1])
+  assert.deepEqual(reconciled[0].data.refused_slots, [2])
+  assert.equal(trace.some(record => record.event === 'operation.uncertainty_blocked'), false)
+  // The refused batch no longer holds the step; what is outstanding now is the corrected one.
+  assert.equal(world.memory.pendingOperations(KEY).some(pending => pending.ordinal === 1), false)
+  // The corrected steam engine alone is admitted for the same step.
+  assert.equal(world.game.mutations.length, 2)
+  assert.deepEqual(world.game.lastTaskTypes, ['placing'])
+})
+
+test('Run Z batch 21 without the failing-task proof keeps the uncertainty guard', async () => {
+  const STEPS = ['Place a boiler and a steam engine at the offshore pump', 'Connect the steam engine with a small electric pole']
+  const prompts = []
+  const trace = []
+  const world = harness({
+    provider: async messages => {
+      prompts.push(messages.map(message => String(message.content ?? '')).join('\n'))
+      return planReply({ plan: STEPS, currentStep: 0, operations: prompts.length === 1
+        ? [
+            { name: 'place_entity', args: { entity_name: 'boiler', x: 43.5, y: -49, direction: 4 } },
+            { name: 'place_entity', args: { entity_name: 'steam-engine', x: 38.5, y: -48.5, direction: 4 } },
+          ]
+        : [{ name: 'place_entity', args: { entity_name: 'steam-engine', x: 38.5, y: -52.5, direction: 4 } }] })
+    },
+  })
+  world.agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  await world.say('build steam power at the offshore pump', 'new_goal')
+  const reason = world.game.failLastBatch({ type: 'placing', code: 'not_placeable', entity_name: 'steam-engine' }, undefined, { failedTaskIndex: 1 })
+  delete world.game.cancelledBatch.failed_task_index
+  await world.agent.failed(reason)
+  assert.equal(trace.some(record => record.event === 'operation.reconciled' && record.data.verdict === 'refused_before_mutation'), false)
+  assert.ok(world.memory.pendingOperation(KEY), 'the unproven batch stays held')
+  assert.equal(world.game.mutations.length, 1)
+})
+
 // ---------------------------------------------------------------------------
 // Item 1.5, widened (owner, 2026-09-28): any provider failure that pauses a
 // goal leaves it visibly paused -- one chat line, a Resume, and a goal.paused

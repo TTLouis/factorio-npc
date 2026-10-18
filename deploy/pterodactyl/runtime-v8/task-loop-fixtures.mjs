@@ -119,8 +119,10 @@ export class FakeFactorio {
 
   // Fails the last admitted batch the way Autorio reports it: the failing
   // operation's result (correlated to the batch by tick and actor) and the
-  // cancelled batch with its dependent operations.
-  failLastBatch(result, reason = `${result.type}:${result.code}`) {
+  // cancelled batch with its dependent operations. failedTaskIndex: the task
+  // that failed is a later one (every earlier task completed), as the mod's
+  // receipt records it (tasks_started, failed_task_index).
+  failLastBatch(result, reason = `${result.type}:${result.code}`, { failedTaskIndex } = {}) {
     const tick = 600 + this.batchId
     // Like the mod (basic_operations.ts fail): only a placement failure claims it changed nothing, and the receipt records how
     // many tasks had started. A failing first task with that claim proves no task of the batch had any effect.
@@ -129,6 +131,10 @@ export class FakeFactorio {
       task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick, reason,
       started_count: this.lastTaskTypes.length > 0 && this.lastTaskTypes[0] === result.type ? 1 : 2,
       ...(placing ? { failed_before_mutation: true } : {}) }
+    if (Number.isSafeInteger(failedTaskIndex)) {
+      Object.assign(this.cancelledBatch, { started_count: failedTaskIndex + 1, tasks_started: failedTaskIndex + 1,
+        ...(placing ? { failed_task_index: failedTaskIndex } : {}) })
+    }
     this.lastBasicResult = { operation_id: this.batchId, tick, actor_id: this.status.actor_id, accepted: true, completed: false, ...result }
     this.taskState = 'idle'
     this.queueLength = 0
@@ -260,8 +266,10 @@ export class FakeFactorio {
           this.admissions.push(record)
           return `${marker}${JSON.stringify({ ok: false, result: `autorio rejected operation ${refusal.slot}: ${refusal.error}`, prefix: [], admission: record })}`
         }
+        const names = [...text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'/g)].map(([, name]) => name)
         this.admissions.push({ ...identity, generation: this.generation ?? 1, batch_id: this.batchId, state: 'admitted',
-          slots: Array.from({ length: identity.operation_count }, (_, index) => ({ index: index + 1, ok: true,
+          slots: Array.from({ length: identity.operation_count }, (_, index) => ({ index: index + 1, ok: true, operation: names[index],
+            queued_tasks: (TASK_TYPES_BY_OPERATION[names[index]] ?? ['waiting']).length,
             batch_refs: [{ batch_id: this.batchId, batch_generation: this.generation ?? 1, batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}` }] })) })
       }
       this.lastBasicResult = undefined
@@ -280,9 +288,17 @@ export class FakeFactorio {
     return this.admissions.map((record) => {
       if (record.state === 'uncertain' || record.state === 'failed') return record
       if (this.cancelledBatch?.batch_id === record.batch_id) {
-        const proven = this.cancelledBatch.started_count === 1 && this.cancelledBatch.failed_before_mutation === true
+        const cancelled = this.cancelledBatch
+        const proven = cancelled.started_count === 1 && cancelled.failed_before_mutation === true
+        // cancelled_slot_prefix: the failing task is the first task of a slot and the batch holds exactly these slots' tasks.
+        let first = 0
+        const starts = record.slots.map(slot => { const start = first; first += slot.queued_tasks; return start })
+        const applied = cancelled.failed_before_mutation === true && cancelled.task_count === first
+          && cancelled.tasks_started === (cancelled.failed_task_index ?? -2) + 1 ? starts.indexOf(cancelled.failed_task_index) : -1
         // Terminal states are retained by the mod's journal.
-        Object.assign(record, proven ? { state: 'failed', ok: false, proven_refusal: true, error: 'refused_before_mutation' } : { state: 'uncertain', error: 'batch_reconciliation_required' })
+        Object.assign(record, proven ? { state: 'failed', ok: false, proven_refusal: true, error: 'refused_before_mutation' }
+          : applied >= 0 ? { state: 'failed', ok: false, proven_refusal: true, applied_slot_count: applied, error: 'refused_before_mutation' }
+            : { state: 'uncertain', error: 'batch_reconciliation_required' })
         return record
       }
       return { ...record, state: this.taskState === 'idle' && record.batch_id <= this.batchId ? 'completed' : 'admitted' }

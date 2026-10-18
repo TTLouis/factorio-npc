@@ -203,4 +203,43 @@ describe('Autorio task batch receipts', () => {
     })
   })
 
+  it('counts a resumed task once and names the task whose pre-mutation failure cancelled the batch (Run Z batch 21)', () => {
+    const manager = new_task_manager(() => actor())
+    const boiler = { type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 43.5, y: -49 }, direction: 4 } as any
+    const engine = { type: TaskStates.PLACING, entity_name: 'steam-engine', position: { x: 42.5, y: -48.5 }, direction: 4 } as any
+    manager.add_task(boiler)
+    manager.add_task(engine)
+    // Interaction recovery: an approach walk, then the same boiler task resumes and completes.
+    expect(manager.interrupt_current_with({ type: TaskStates.WALKING_DIRECT, target_position: { x: 40, y: -45 } } as any, boiler)).toBe(true)
+    manager.reset_task_state()
+    manager.next_task()
+    expect(manager.player_state.parameters_place_entity).toBe(boiler)
+    manager.reset_task_state()
+    manager.next_task()
+    expect(manager.player_state.parameters_place_entity).toBe(engine)
+    manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 1 })
+
+    expect(manager.get_status_snapshot().last_cancelled_batch).toMatchObject({
+      task_count: 2, task_types: [TaskStates.PLACING, TaskStates.PLACING],
+      started_count: 4, tasks_started: 2, failed_before_mutation: true, failed_task_index: 1,
+    })
+  })
+
+  it('names no failing task when the proof does not identify the task that is running', () => {
+    const manager = new_task_manager(() => actor())
+    manager.add_task({ type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 0.5, y: 0.5 } } as any)
+    manager.add_task({ type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 4.5, y: 0.5 } } as any)
+    manager.reset_task_state()
+    manager.next_task()
+    manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 0 })
+    const receipt = manager.get_status_snapshot().last_cancelled_batch
+    expect(receipt).toMatchObject({ tasks_started: 2, failed_before_mutation: true })
+    expect(receipt?.failed_task_index).toBeUndefined()
+
+    manager.add_task({ type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 0.5, y: 0.5 } } as any)
+    manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true })
+    expect(manager.get_status_snapshot().last_cancelled_batch).toMatchObject({ tasks_started: 1, started_count: 1 })
+    expect(manager.get_status_snapshot().last_cancelled_batch?.failed_task_index).toBeUndefined()
+  })
+
 })

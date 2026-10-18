@@ -23,6 +23,8 @@ export interface AdmissionSlot {
   refusal_code?: string
   operation?: string
   batch_refs: TaskBatchIdentity[]
+  /** Tasks this slot added to the task queue (the tasks_added witness across the call). */
+  queued_tasks?: number
 }
 /** Fields the harness supplies for a slot; the mod, not the harness, decides what a refusal proves. */
 export type AdmissionSlotInput = Omit<AdmissionSlot, 'index' | 'refused_before_mutation' | 'refusal_code'> & {
@@ -45,6 +47,11 @@ export interface OperationAdmission extends OperationCorrelation {
    * after the refusal never ran.
    */
   proven_refusal?: boolean
+  /**
+   * With proven_refusal from a cancelled batch: slots 1..applied_slot_count
+   * ran to completion before the refusing task of the next slot.
+   */
+  applied_slot_count?: number
 }
 // Operations whose submission validates, then either queues a task or returns a
 // refusal without touching the world. A refusal from any other operation
@@ -138,6 +145,43 @@ export function pinned_operation_batch_refs() {
   return refs
 }
 
+/**
+ * The number of leading slots that completed when the engine cancelled this
+ * admission's batch at the first task of the next slot, before that task
+ * changed anything; undefined unless every link is exact. Requires one batch
+ * holding exactly the tasks these slots queued (so task indexes map to slots),
+ * every slot having queued work (a slot that queued nothing acted at
+ * submission, whatever its position), no refusals inside it, a placement-style failure proof naming the failing
+ * task, and that task being the first one its slot queued. Tasks run in queue
+ * order and a cancellation stops the rest, so earlier slots completed and
+ * later ones never began.
+ */
+function cancelled_slot_prefix(record: OperationAdmission, receipt_for: (ref: TaskBatchIdentity) => TaskBatchReceipt | undefined) {
+  const ref = record.slots.flatMap(slot => slot.batch_refs)[0]
+  if (!ref) return undefined
+  let queued = 0
+  for (const slot of record.slots) {
+    if (!slot.ok || slot.operation === undefined || !PURE_SUBMIT_OPERATIONS.includes(slot.operation)) return undefined
+    const tasks = slot.queued_tasks
+    if (typeof tasks !== 'number' || tasks < 1 || tasks !== math.floor(tasks) || slot.batch_refs.length !== 1) return undefined
+    const own = slot.batch_refs[0]
+    if (own.batch_ref !== ref.batch_ref || own.batch_id !== ref.batch_id || own.batch_generation !== ref.batch_generation) return undefined
+    queued += tasks
+  }
+  const receipt = receipt_for(ref)
+  if (receipt?.state !== 'cancelled' || receipt.failed_before_mutation !== true || receipt.task_count !== queued
+    || receipt.refused_count !== undefined || (receipt.refusals?.length ?? 0) > 0) return undefined
+  const failed = receipt.failed_task_index
+  if (typeof failed !== 'number' || failed < 0 || failed >= queued || receipt.tasks_started !== failed + 1) return undefined
+  let first = 0
+  for (let position = 0; position < record.slots.length; position++) {
+    if (first === failed) return position
+    first += record.slots[position].queued_tasks!
+    if (first > failed) return undefined
+  }
+  return undefined
+}
+
 function reconcile_record(stored: OperationAdmission, status: { receipt_journal: TaskBatchReceipt[], batch_generation: number }) {
   const record = { ...stored }
   if (!admission_unresolved(record)) return record
@@ -160,15 +204,25 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.proven_refusal = true
     record.error = 'refused_before_mutation'
   }
-  else if (terminal_transfer_refusal(record, status)) {
+  else if (record.state === 'admitted' && refs.length > 0) {
+    const applied = cancelled_slot_prefix(record, receipt_for)
+    if (applied !== undefined) {
+      record.state = 'failed'
+      record.ok = false
+      record.proven_refusal = true
+      record.applied_slot_count = applied
+      record.error = 'refused_before_mutation'
+    }
+  }
+  if (admission_unresolved(record) && terminal_transfer_refusal(record, status)) {
     record.state = 'partial'
     record.ok = false
     record.error = 'exact_terminal_transfer_refusal'
   }
-  else if (record.generation !== status.batch_generation || refs.some(ref => {
+  else if (admission_unresolved(record) && (record.generation !== status.batch_generation || refs.some(ref => {
     const receipt = receipt_for(ref)
     return receipt !== undefined && receipt.state !== 'completed'
-  })) {
+  }))) {
     record.state = 'uncertain'
     record.error = 'batch_reconciliation_required'
   }
@@ -266,6 +320,8 @@ export function new_operation_admission(
     const refused = !raw.ok && raw.refused === true && typeof raw.operation === 'string'
       && PURE_SUBMIT_OPERATIONS.includes(raw.operation)
       && typeof tasks_added === 'number' && tasks_added === record.work_mark
+    const queued_tasks = raw.ok && typeof tasks_added === 'number' && typeof record.work_mark === 'number' && tasks_added >= record.work_mark
+      ? tasks_added - record.work_mark : undefined
     record.work_mark = tasks_added
     const error = typeof raw.error === 'string' ? raw.error.slice(0, 512) : undefined
     record.slots.push({
@@ -273,7 +329,7 @@ export function new_operation_admission(
       mutation_unknown: raw.ok ? undefined : !refused,
       // The queue did not grow, so any open batch the harness saw belongs to earlier work.
       refused_before_mutation: refused ? true : undefined, refusal_code: refused ? (error ?? 'rejected').slice(0, 128) : undefined,
-      error, batch_refs: refused ? [] : refs,
+      error, batch_refs: refused ? [] : refs, queued_tasks,
     })
     return { ok: true, record }
   }

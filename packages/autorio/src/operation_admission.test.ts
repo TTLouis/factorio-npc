@@ -269,6 +269,55 @@ describe('durable operation admission', () => {
       manager.cancel_all_tasks('operator_cancel')
       expect(admission.status().records[0].state).toBe('uncertain')
     })
+    // Run Z batch 21: the boiler was built after an approach walk, then the steam engine was refused before it was created.
+    function boiler_then_engine() {
+      const { admission, manager } = setup(2)
+      const boiler = { type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 43.5, y: -49 }, direction: 4 } as any
+      manager.add_task(boiler)
+      admission.slot(identity.operation_key, 1, { ok: true, operation: 'place_entity', batch_refs: [ref] })
+      manager.add_task({ type: TaskStates.PLACING, entity_name: 'steam-engine', position: { x: 42.5, y: -48.5 }, direction: 4 } as any)
+      admission.slot(identity.operation_key, 2, { ok: true, operation: 'place_entity', batch_refs: [ref] })
+      admission.finish(identity.operation_key, { ok: true })
+      manager.interrupt_current_with({ type: TaskStates.WALKING_DIRECT, target_position: { x: 40, y: -45 } } as any, boiler)
+      manager.reset_task_state()
+      manager.next_task()
+      manager.reset_task_state()
+      manager.next_task()
+      return { admission, manager }
+    }
+    it('settles a batch cancelled at the first task of a later slot, with the earlier slots applied', () => {
+      const { admission, manager } = boiler_then_engine()
+      manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 1 })
+      expect(manager.get_status_snapshot().receipt_journal[0]).toMatchObject({ started_count: 4, tasks_started: 2, failed_task_index: 1 })
+      const record = admission.status().records[0]
+      expect(record).toMatchObject({ state: 'failed', ok: false, proven_refusal: true, applied_slot_count: 1, error: 'refused_before_mutation',
+        slots: [{ queued_tasks: 1 }, { queued_tasks: 1 }] })
+      expect(pinned_operation_batch_refs()).toEqual([])
+    })
+    it('keeps the cancelled prefix uncertain unless every link of the proof is exact', () => {
+      // The proof does not name the running task.
+      let { admission, manager } = boiler_then_engine()
+      manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 0 })
+      expect(admission.status().records[0]).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+      ;(globalThis as any).storage = {}
+      // Later work extended the same batch, so its task indexes no longer map onto these slots.
+      ;({ admission, manager } = boiler_then_engine())
+      manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+      manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 1 })
+      expect(admission.status().records[0].state).toBe('uncertain')
+      ;(globalThis as any).storage = {}
+      // The failing task is the second task of one slot: that slot's first task already ran.
+      const single = setup(1)
+      single.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+      single.manager.add_task({ type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 1, y: 1 } } as any)
+      single.admission.slot(identity.operation_key, 1, { ok: true, operation: 'place_entity', batch_refs: [ref] })
+      single.admission.finish(identity.operation_key, { ok: true })
+      single.manager.reset_task_state()
+      single.manager.next_task()
+      single.manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 1 })
+      expect(single.manager.get_status_snapshot().receipt_journal[0]).toMatchObject({ failed_task_index: 1 })
+      expect(single.admission.status().records[0].state).toBe('uncertain')
+    })
   })
   it('rejects the 65th unresolved admission without evicting any accepted work', () => {
     const manager = new_task_manager(() => undefined)

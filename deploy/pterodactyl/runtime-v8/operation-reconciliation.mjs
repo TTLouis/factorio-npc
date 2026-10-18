@@ -187,6 +187,9 @@ export function buildPendingOperation({ requestId, operationKey, attemptId, ordi
  *     `mutation_unknown === false`. The ok slots completed synchronously; operations after the refusal never ran.
  *   - engine-refused: state `failed`, every slot is ok with batch refs, and every referenced receipt is a cancellation whose
  *     first task refused before any change (`started_count === 1`, `failed_before_mutation`). No task had any effect.
+ *   - engine-refused after a prefix: state `failed` with `applied_slot_count`, one batch holding exactly the tasks the slots
+ *     queued, and a cancellation proof naming the failing task as the first task of slot applied_slot_count + 1
+ *     (`failed_task_index`, `tasks_started`). Earlier slots completed; later ones never began. Re-derived here, not trusted.
  * Anything else (a thrown error, an unknown operation, queued work in flight, a reload) is not proof.
  */
 export function provenRefusal(admission, status) {
@@ -203,12 +206,31 @@ export function provenRefusal(admission, status) {
   }
   const receipts = Array.isArray(status?.receipt_journal) ? status.receipt_journal : []
   if (!slots.every(slot => slot?.ok === true && Array.isArray(slot.batch_refs) && slot.batch_refs.length > 0)) return null
+  if (admission.applied_slot_count !== undefined) return cancelledSlotPrefix(admission, slots, receipts)
   const proven = refs.every(ref => receipts.some(receipt => receipt?.batch_ref === ref.batch_ref && receipt.batch_id === ref.batch_id
     && receipt.batch_generation === ref.batch_generation && receipt.state === 'cancelled' && receipt.started_count === 1
     && receipt.failed_before_mutation === true))
   if (!proven) return null
   return { applied_slots: [], refused_slots: slots.map(slot => slot.index), refusal_codes: [text(receipts.find(receipt => receipt?.batch_ref === refs[0].batch_ref)?.reason, 80)].filter(Boolean),
     unrun_slots: 0 }
+}
+
+function cancelledSlotPrefix(admission, slots, receipts) {
+  const applied = admission.applied_slot_count
+  if (!Number.isSafeInteger(applied) || applied < 0 || applied >= slots.length || slots.length !== admission.operation_count) return null
+  const ref = slots[0].batch_refs[0]
+  if (!slots.every(slot => slot.batch_refs.length === 1 && slot.batch_refs[0]?.batch_ref === ref?.batch_ref
+    && slot.batch_refs[0].batch_id === ref.batch_id && slot.batch_refs[0].batch_generation === ref.batch_generation
+    && Number.isSafeInteger(slot.queued_tasks) && slot.queued_tasks >= 1)) return null
+  const receipt = receipts.find(entry => entry?.batch_ref === ref.batch_ref && entry.batch_id === ref.batch_id
+    && entry.batch_generation === ref.batch_generation)
+  const queued = slots.reduce((sum, slot) => sum + slot.queued_tasks, 0)
+  const failed = slots.slice(0, applied).reduce((sum, slot) => sum + slot.queued_tasks, 0)
+  if (receipt?.state !== 'cancelled' || receipt.failed_before_mutation !== true || receipt.task_count !== queued
+    || receipt.refused_count !== undefined || (Array.isArray(receipt.refusals) && receipt.refusals.length > 0)
+    || receipt.failed_task_index !== failed || receipt.tasks_started !== failed + 1) return null
+  return { applied_slots: slots.slice(0, applied).map(slot => slot.index), refused_slots: [slots[applied].index],
+    refusal_codes: [text(receipt.reason, 80)].filter(Boolean), unrun_slots: slots.length - applied - 1 }
 }
 
 // A restart can change live generation without invalidating already sealed work.
