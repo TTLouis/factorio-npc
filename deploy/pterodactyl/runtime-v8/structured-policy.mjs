@@ -1198,11 +1198,18 @@ planningOnly.parameters.properties.operations = { type: 'array', maxItems: 0, it
 planningOnly.parameters.properties.executionGuidance = {
   type: 'array', maxItems: 30,
   description: 'One brief per execution step, aligned with plan. Explain approach and optional time-saving investments. skillIds must name loaded details.',
-  items: { type: 'object', additionalProperties: false, required: ['approach', 'rationale', 'constraints', 'skillIds'], properties: {
+  items: { type: 'object', additionalProperties: false, required: ['approach', 'rationale', 'constraints', 'skillIds', 'materialSupply'], properties: {
     approach: { type: 'string', minLength: 1, maxLength: 200 },
     rationale: { type: 'string', minLength: 1, maxLength: 240 },
     constraints: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 100 } },
     skillIds: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 120 } },
+    materialSupply: { description: 'Explicit method for the step resource, or null for other work. A skill alone does not mandate a layout. Explain setup/time savings in rationale.', anyOf: [
+      { type: 'null' },
+      { type: 'object', additionalProperties: false, required: ['mode', 'resource'], properties: {
+        mode: { type: 'string', enum: ['direct_feed', 'manual_bootstrap'] },
+        resource: { type: 'string', minLength: 1, maxLength: 80, pattern: '^[a-z0-9][a-z0-9_-]{0,79}$' },
+      } },
+    ] },
   } },
 }
 export const planningOnlyProviderToolDefinitions = [...toolDefinitions, ...planningOnlyControlToolDefinitions]

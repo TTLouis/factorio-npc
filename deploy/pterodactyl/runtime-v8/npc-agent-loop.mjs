@@ -20,7 +20,7 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
-import { EXECUTION_ONLY_PROMPT, normalizeExecutionGuidance, normalizePlannerReview, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
@@ -3346,7 +3346,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // executor suffix for the executor. The prefix is the same for every conversation of
   // a role, so a restage within a role keeps the provider's cached prefix.
   rolePrefixMessages(role) {
-    if (this.completionProtocolVersion >= 3) return [{ role: 'system', content: `${roleSystemPrompt(this.systemPrompt, role)}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}` }]
+    if (this.completionProtocolVersion >= 3) return [{ role: 'system', content: `${role === EXECUTOR_ROLE ? executionOnlyPrompt(roleSystemPrompt(this.systemPrompt, role)) : this.systemPrompt}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}` }]
     const plannerDelegation = this.completionProtocolVersion >= 2 && this.executorHandoffEnabled && role !== EXECUTOR_ROLE
       ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step: a deterministic checkpoint for the first step and {kind:"deterministic"} for each later step, whose checkpoint the harness requests when that step is about to start. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
       : ''
@@ -3358,6 +3358,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     error.code = code
     error.failureClass = 'plan_category'
     return error
+  }
+
+  executorControlGuidance(text) {
+    return this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE ? executionOnlyPrompt(text) : text
   }
 
   validatePlannerRoleOutput(plan) {
@@ -3378,7 +3382,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const visibleIds = new Set(rendered.map(skill => skill.id))
       const missing = guidance.flatMap(brief => brief.skillIds).filter(id => !visibleIds.has(id))
       if (missing.length > 0) throw this.roleContractError('invalid_execution_guidance', `Select only details present in [SKILL_CONTEXT]: ${[...new Set(missing)].join(', ')}. Open getSkillDetails, or select fewer skills if the context size limit omits a detail.`)
+      if (guidance.some(brief => brief.skillIds.includes('direct-miner-smelting') && brief.materialSupply === undefined)) throw this.roleContractError('invalid_execution_guidance', 'Choose materialSupply explicitly when considering direct-miner-smelting: direct_feed or manual_bootstrap with the resource, or null for a step that does not supply raw material. Dedicated cells remain optional; compare setup and saved time in rationale.')
     }
+  }
+
+  async reviewExecutorSupplyDrift(plan) {
+    if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE) return undefined
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const step = held?.steps?.[held.active_step_index]
+    const drift = manualSupplyDrift(step?.execution_guidance, plan.operations, id => this.liveObservedExactTarget(id))
+    if (drift.length === 0) return undefined
+    await this.assertCurrent()
+    await this.traceEvent('executor.strategy_refused', { request_id: this.traceRequest?.id,
+      plan_id: held.plan_id, step_id: step.step_id, reason: 'manual_supply_would_replace_selected_direct_feed',
+      resource: step.execution_guidance.materialSupply.resource, refused_operations: drift.map(op => op.name),
+      authority: 'advisory_only', world_blocker_proven: false })
+    return this.handlePlannerReview({ operations: [], plannerReview: { reason: 'scope_change',
+      rationale: 'Proposed manual resource supply would replace the planner-selected direct_feed method. Review the method and its setup/time tradeoff; no operation from this batch ran.' } }, step.step_id)
   }
 
   async handlePlannerReview(plan, stepId) {
@@ -3411,7 +3431,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.memory.remember(key, this.requestInfo.turnId, { sender: this.requestInfo.sender, user: this.requestInfo.text,
       assistant: `[Executor advisory; unverified] ${chatMessage}`, operations: [] })
     await this.persistState()
+    await this.assertCurrent()
     const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId })
+    await this.assertCurrent()
     if (returned.returned) this.messages.push({ role: 'user', content: `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}` })
     this.active = false
     const state = this.memory.currentPlan?.(key)
@@ -9684,17 +9706,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason,
         semanticScope,
         // The recovery capsule of an action-omission repair rides on top of the packet.
-        extraMessage: resumeActionOmission ? actionOmissionRecoveryCapsule(planBefore, taskStatus) : undefined,
+        extraMessage: resumeActionOmission ? this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus)) : undefined,
         runtime: taskStatus,
       }
       if (resumeProviderBudgetHandoff) {
         const budgetCapsule = providerBudgetHandoffCapsule(planBefore, taskStatus, reason, semanticScope)
-        const repairCapsule = resumeActionOmission ? `\n${actionOmissionRecoveryCapsule(planBefore, taskStatus)}` : ''
+        const repairCapsule = resumeActionOmission ? `\n${this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus))}` : ''
         this.memory.setNextContextOverride?.(memoryKey, `${budgetCapsule}${repairCapsule}`)
       }
     }
     else if (resumeActionOmission) {
-      this.memory.setNextContextOverride?.(memoryKey, actionOmissionRecoveryCapsule(planBefore, taskStatus))
+      this.memory.setNextContextOverride?.(memoryKey, this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus)))
     }
     if (this.traceRequest) await this.traceEvent('request.superseded', { usage: this.traceRequest.usage })
     this.traceRequest = {
@@ -13161,7 +13183,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : `The action-omission repair permits exactly one targeted observation, but the provider requested ${prepared.length}.`
       this.messages.push({
         role: 'user',
-        content: `[HARNESS] ${reason} No observation from this batch was executed. ${ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE}`,
+        content: `[HARNESS] ${reason} No observation from this batch was executed. ${this.executorControlGuidance(ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE)}`,
       })
       await this.recoveryDiagnostic({
         failure_class: 'action_omission',
@@ -13401,7 +13423,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.actionOmissionRepairActive) {
       this.actionOmissionObservationUsed = true
       this.actionOmissionForceNoTools = true
-      this.messages.push({ role: 'user', content: `[HARNESS] ${ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE}` })
+      this.messages.push({ role: 'user', content: `[HARNESS] ${this.executorControlGuidance(ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE)}` })
       await this.traceEvent('recovery.action_omission_observation_complete', {
         cached: admittedCached[0] === true,
         observation: admittedPrepared[0]?.tool?.function?.name,
@@ -13553,7 +13575,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.actionOmissionObservationUsed = true
     this.actionOmissionForceNoTools = true
     this.freshContextRecoveryInProgress = true
-    this.messages.push({ role: 'user', content: '[HARNESS] This is the one fresh-context recovery for the current goal. Return one JSON control decision using the current authoritative step and facts. You may close a satisfied semantic assessment or choose a valid operation; if the required fact is unavailable, state BLOCKED: and explain it. No additional retry generation follows this decision.' })
+    this.messages.push({ role: 'user', content: this.executorControlGuidance('[HARNESS] This is the one fresh-context recovery for the current goal. Return one JSON control decision using the current authoritative step and facts. You may close a satisfied semantic assessment or choose a valid operation; if the required fact is unavailable, state BLOCKED: and explain it. No additional retry generation follows this decision.') })
     return { attempted: true, result: await this.runTurn() }
   }
 
@@ -13584,7 +13606,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const latestVerification = [...(state?.task_board?.evidence ?? [])].reverse().find(item => item?.kind === 'deterministic_verification')
     if (!latestVerification) return ''
     this.pendingFiniteNoOperationPlan = plan
-    return actionOmissionRepairMessage(state)
+    return this.executorControlGuidance(actionOmissionRepairMessage(state))
   }
 
   async preflightOperations(operations) {
@@ -14591,6 +14613,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
 
     if (!blockerDecision?.decision?.accepted) {
+      if (this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE
+        && evidenceKind === 'provider_blocker' && !this.batchInFlight && !this.duplicateEffectHold && !this.memory.pendingOperation?.(this.activePlanKey())) {
+        const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+        const step = held?.steps?.[held.active_step_index]
+        if (step && (await this.assertCurrent()).idle === true) {
+          await this.traceEvent('executor.legacy_blocker_review', { request_id: this.traceRequest?.id,
+            plan_id: held.plan_id, step_id: step.step_id, reason: 'unverified_blocker_is_advisory_review',
+            rejection_reason: blockerDecision?.decision?.rejection_reason, world_blocker_proven: false })
+          return this.handlePlannerReview({ operations: [], plannerReview: { reason: 'approach_infeasible',
+            rationale: cleanMemoryText(providerBlockerReason(plan) || reason || 'The executor could not ground the active approach.', 400) } }, step.step_id)
+        }
+      }
       // A model's unverified world claim is not a provider outage. Use the existing
       // durable, one-per-goal recovery allowance before reporting controller exhaustion.
       await this.traceEvent('recovery.unverified_blocker', {
@@ -14935,6 +14969,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
+    const supplyReview = await this.reviewExecutorSupplyDrift(plan)
+    if (supplyReview !== undefined) return supplyReview
     await this.validateStepCompletionDeclarations(plan)
     const heldForRoleHandoff = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     if (this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
@@ -15289,7 +15325,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const state = await this.beginActionOmissionRepair(plan, 'no_operation_for_remaining_plan')
       if (state?.status === 'active') {
         this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
-        this.messages.push({ role: 'user', content: `[HARNESS] ${actionOmissionRepairMessage(state)}${plan.plan.length === 0 ? this.unmetGoalNote() : ''}` })
+        this.messages.push({ role: 'user', content: `[HARNESS] ${this.executorControlGuidance(actionOmissionRepairMessage(state))}${plan.plan.length === 0 ? this.unmetGoalNote() : ''}` })
         return this.runTurn()
       }
     }

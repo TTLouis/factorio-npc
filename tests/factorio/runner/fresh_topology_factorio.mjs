@@ -107,7 +107,7 @@ const model = new ScriptedModel()
   .push('planner', 'sol:fresh-lean-world-context', messages => { contextFacts(messages, 'planner'); return reply([], { goal,
     ...(roleContracts ? { executionGuidance: [{ approach: 'Route steam around the shoreline to the held engine and power the inserter.',
       rationale: 'Use the held engine and retain room for future expansion; extra capacity is optional.',
-      constraints: ['Preserve existing poles.', 'Build one engine for this requested result.'], skillIds: ['steam-power-bootstrap'] }] } : {}),
+      constraints: ['Preserve existing poles.', 'Build one engine for this requested result.'], skillIds: ['steam-power-bootstrap'], materialSupply: null }] } : {}),
   }) })
   .push('executor', 'luna:fresh-held-engine-and-topology', messages => {
     contextFacts(messages, 'executor')
@@ -288,6 +288,47 @@ try {
   assert.deepEqual(model.remaining, []); assert.deepEqual(jevContractLog.filter(row => !row.ok), []); assert.equal(fetchCalls, 0)
   assert.equal(world.modelRequests[0].model, PLANNER_MODEL); assert.ok(world.modelRequests.slice(1).every(row => row.model === EXECUTOR_MODEL))
   assert.deepEqual(world.named('recovery.auto_resume_started'), [], 'fresh native facts do not buy extra resumes')
+  if (process.env.NPC_TEST_EXECUTOR_STRATEGY === '1') {
+    assert.ok(roleContracts, 'strategy boundary uses production protocol 3')
+    const initialAdmissions = sent.length
+    const initialMutations = await snapshot()
+    const requestStart = wires.length
+    model.push('planner', 'sol:explicit-direct-feed-method', () => planReply({
+      chatMessage: '', plan: ['Produce fifty copper plates from natural resources'], currentStep: 0, operations: [],
+      goal: { scope: 'finite', summary: 'Produce fifty copper plates from natural resources', doneWhen: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 50 }] },
+      stepCompletions: [{ kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 50 }] } }],
+      executionGuidance: [{ approach: 'Use a miner feeding the furnace; choose fresh geometry and fuel separately.',
+        rationale: 'Direct feeding can save repeated hand supply; extra dedicated cells remain optional.',
+        constraints: [], skillIds: ['direct-miner-smelting'], materialSupply: { mode: 'direct_feed', resource: 'copper-ore' } }],
+    }))
+      .push('executor', 'luna:manual-fallback-is-not-selected-method', () => {
+        const held = world.memory.planningState(KEY).plans.at(-1)
+        return planReply({ stepId: held.steps[held.active_step_index].step_id, operations: [
+          { name: 'wait', args: { ticks: 60 } },
+          { name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10, search_radius: 256 } },
+        ] })
+      })
+    ctx.session.queuePlayerRequest('TTLouis', 'Produce fifty copper plates from natural resources')
+    await settle(ctx.session); healthy()
+    const finalGuard = await idle()
+    assert.equal(sent.length, initialAdmissions, 'no native authorization envelope from any part of the refused batch')
+    assert.equal(finalGuard.actor_id, initialMutations.actor_id)
+    assert.deepEqual(finalGuard.position, initialMutations.position)
+    assert.deepEqual(finalGuard.inventory, initialMutations.inventory)
+    const refused = world.named('executor.strategy_refused').at(-1)
+    const review = world.named('executor.planner_review_requested').at(-1)
+    assert.ok(refused?.request_id && review?.request_id)
+    assert.equal(review.authority, 'advisory_only')
+    assert.equal(review.world_blocker_proven, false)
+    const held = world.memory.planningState(KEY).plans.at(-1)
+    assert.notEqual(held.status, 'BLOCKED')
+    assert.deepEqual(held.steps[0].execution_guidance.materialSupply, { mode: 'direct_feed', resource: 'copper-ore' })
+    assert.deepEqual(wires.slice(requestStart).map(row => row.role), ['planner', 'executor'])
+    assert.deepEqual(model.remaining, [])
+    assert.equal(fetchCalls, 0)
+    seen.strategyGuard = { status: 'pass', initialAdmissions, finalAdmissions: sent.length, refused, review,
+      before: initialMutations, after: finalGuard, held, models: wires.slice(requestStart) }
+  }
   await fsp.writeFile(path.join(results, 'fresh-topology-proof.json'), JSON.stringify({ status: 'pass', candidate: process.env.NPC_TEST_CANDIDATE_SHA ?? null, goalId, setup, before, seen, after, identities, placements, models: world.modelRequests, trace: world.trace, fetchCalls }, null, 2))
   process.stdout.write('fresh-topology native delegation PASS\n')
 } catch (error) {
