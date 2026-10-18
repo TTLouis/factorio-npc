@@ -46,9 +46,6 @@
     "typescript": "~5.9.3"
   },
   "simple-git-hooks": {
-    "pre-commit": "pnpm lint-staged && pnpm typecheck"
-  },
-  "lint-staged": {
-    "*": "eslint --fix"
+    "pre-commit": "git diff --cached --check && bash scripts/test-local.sh all"
   }
 }

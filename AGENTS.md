@@ -2,6 +2,12 @@
 
 These repository notes are for coding agents working on this fork. They describe current project invariants and validation expectations; user instructions for a specific task remain authoritative.
 
+## Start with the current task
+
+- Read the parent workspace `AGENTS.md` and `WORKTREES.md` before branch/worktree operations. Their ownership and naming policy supersedes older examples in this checkout.
+- Use [SPEC.md](SPEC.md) for a short project contract and links to the authoritative architecture/roadmaps. Read only the documents needed for the changed subsystem; search historical validation records when a concrete failure requires them.
+- Follow [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md) for task acceptance criteria, evidence and review. Keep one bounded change per task; record the source SHA, dependency, tests and unresolved limits in its work note.
+
 ## Project direction
 
 SGLuna is an autonomous in-world Factorio NPC. The core runtime must not depend on owning or impersonating a connected human player.
@@ -37,8 +43,7 @@ The intended actor is a real standalone Factorio `character` controlled through 
 
 ## Branch and promotion policy
 
-- `main` is the stable integration/deployment baseline.
-- `feat/npc-transition-work` is the active single-NPC integration/E2E branch and may contain capabilities newer than main.
+- `main` is the stable baseline. `experiment/jev-agent-architecture` is the only development/integration destination; `feat/npc-transition-work` is historical.
 - A green feature HEAD is not automatically a release. Freeze a candidate SHA, run the appropriate heavyweight gates, then promote a validated checkpoint.
 - Preserve main-only deployment/documentation changes when reconciling a long-lived feature branch.
 - Do not mix swarm experiments into a single-NPC promotion unless they are explicitly in scope and independently validated.
@@ -77,7 +82,8 @@ Do not update a historical validation record in place to describe a newer commit
 ## Local test gates (Windows host)
 
 - Never run `pnpm`, `vitest`, `eslint`, `tstl` or `pnpm install` on the Windows host. The checkout's `node_modules` are WSL symlinks that Windows Node cannot follow, and a host install can delete links that other worktrees are using. All tests run in Docker.
-- The ordinary gate is `bash scripts/test-local.sh all`, run from Git Bash inside the `npc-dev` image. It never installs packages or touches the network. `runtime` runs `node --test` over `deploy/pterodactyl/staging` and `runtime-v8`, with the mounts those suites need. `mod` runs autorio vitest, `tsc --noEmit`, the Lua build and the generated-Lua check. Do not invent ad hoc mounts; missing `contracts/` or repo-root compose files cause false failures.
+- Run `bash scripts/test-local.sh all` from Git Bash on Windows or a POSIX shell on Linux/macOS. The script starts isolated, network-disabled containers from the existing `npc-dev` image; it never installs dependencies. `runtime` runs `node --test` over `deploy/pterodactyl/staging` and `runtime-v8`, with the mounts those suites need. `mod` runs autorio vitest, `tsc --noEmit`, the Lua build and the generated-Lua check. Do not invent ad hoc mounts; missing `contracts/` or repo-root compose files cause false failures.
+- The pre-commit configuration checks staged whitespace and runs this Docker gate without rewriting staged files; existing hook installations need a refresh in a supported environment. Lint remains a required CI check. A successful hook does not replace review or real-engine evidence.
 - The full build gate is `docker build -f tests/factorio/Dockerfile --target build .`. Real-engine lanes run with `docker build -f tests/factorio/Dockerfile -t factorio-npc-test . && docker run --rm -e NPC_TEST_LANES=<lane> factorio-npc-test`, or `scripts/e2e-cloud.sh` in a cloud sandbox. Run the real-engine lanes at milestones, not before every push.
 - Redirect long test output to a log file and report the real exit code. Piping into `tail` or `head` hides failures.
 - Batch edits and verify once at the end instead of rerunning the suite after every small change.
@@ -137,7 +143,7 @@ Live runs call real providers and cost money. Do not start one (RCON rounds, the
 ## Agent build workflow (worktrees and merges)
 
 - **Integration worktree.** Work lands on the active integration branch (currently `experiment/jev-agent-architecture`) from one integration worktree.
-  - Create each unit's worktree yourself with `git worktree add -b <branch> ../<name> HEAD`. Brief subagents with the absolute worktree path and a `cd` into it on every command. Do not rely on auto-created isolation worktrees: a resumed agent whose worktree was removed runs in the integration worktree.
+  - Register the task in the parent `WORKTREES.md`, then use `git worktree add -b <type>/<task-slug> <workspace>/.worktrees/<type>-<task-slug> <verified-current-Jev-SHA>`. Reuse the existing task checkout on resume. Brief any authorized subagents with that absolute path and use it on every command.
   - Reviewers read diffs with `git -C <path>` or `git diff` and never `git checkout` inside another worktree.
   - Never use a bare `git stash` (the stack is shared across worktrees). Use a temporary WIP commit instead.
 - **Merge protocol, per unit:**
