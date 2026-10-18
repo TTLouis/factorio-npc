@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 18: Executor supply strategy and advisory review fixed offline
+
+- **Strategy.** New planner briefs explicitly choose direct feeding, manual bootstrap or no resource method. Selected direct-miner-smelting details require that choice before commit. An explicitly chosen direct-feed method rejects manual supply of that resource before the whole batch is admitted and returns advisory review. Startup fuel and unrelated materials remain allowed. Additional dedicated cells remain optional investments justified by time savings.
+- **Review.** Protocol 3 removes conflicting harness instructions to emit legacy `BLOCKED` prose. A legacy executor claim rejected by outcome authority can reach advisory review only at an idle, settled, current step. Accepted blockers, uncertain effects, actor/generation checks, plan authority and budgets retain their guards. Review pauses and returns planner context; it does not automatically run an unbounded planner loop.
+- **Proof.** Frozen runtime `736dc960`, reviewed merge `05bfccce`: 29 focused, 2,632 runtime and 1,234 mod tests, typecheck/Lua, lint, installer9 and 92 Python checks pass. Actual original/candidate module controls distinguish both defects. Native Factorio 2.0.77 preserves powered-load output and refuses a mismatched supply batch with authorization envelopes unchanged at six, actor inventory/position unchanged, and zero external fetches. [Offline checkpoint](validation/EXECUTOR_STRATEGY_REVIEW_2026-10-18.md).
+- **Boundary.** No live provider/Jev calls or gameplay trial ran for this fix. The replay covers the recorded response and authority path, not the entire water exploration. Live strategy choice, time savings and autonomous red-science throughput remain unproven. All owned test containers and the native test image were removed; sealed evidence is retained.
+
 ## October 18: Planner/executor contracts merged; Run AB stops before power
 
 - **Integration.** Published `80eaf9e5` includes reviewed planner-only strategy/skill selection, executor briefs and selected details, bounded advisory review and an integration guard against selecting details absent from the rendered context. Merged 2,620 runtime/1,234 mod tests, lint, installer9, native protocol3/92Python and hosted CI/release/security pass. [Contract checkpoint](validation/PLANNER_EXECUTOR_CONTRACTS_2026-10-18.md).

@@ -67,7 +67,9 @@ records the handback. Their tests assert reason and absence of world authority.
 - [x] Frozen native protocol 3 canary, including physical no-admission proof for
   a mismatched batch and preservation of the existing powered-load scenario.
 - [x] Independent review approved after the actual recovery-prompt correction.
-- [ ] Merged integration gate and publication.
+- [x] Merged integration gate: 2,632 runtime and 1,234 mod tests, typecheck
+  and Lua checks passed at `05bfccce2474007c2332608772022088d7a1d183`.
+  Publication follows the reviewed integration procedure to Jev.
 
 Evidence: `test-results/executor-strategy-review`. The baseline/candidate probe
 disables external inference and uses network-disabled Docker. Its recorded fixture
@@ -94,3 +96,9 @@ the candidate returned one advisory review after two scripted role calls.
 All run-owned containers and the native image are removed after evidence capture.
 Shared development/Factorio dependency images are retained. No live inference,
 world resume, allowance reset or additional gameplay trial occurred.
+
+Task evidence is sealed: 80 files / 6,028,162 bytes; manifest SHA256
+`ff59073a6be78e4da4b4f1eda25279d43368397f5ce94d9114b595fb57ed413a`.
+Independent review corroborated the seal, negative controls and native results.
+Merged evidence is retained separately in `test-results/executor-strategy-integration`;
+the merged runtime and native fixture match the frozen task bytes.
