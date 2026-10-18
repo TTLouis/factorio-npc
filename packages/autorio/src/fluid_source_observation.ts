@@ -11,6 +11,70 @@ const MAX_SOURCE_TILE_NAMES = 128
 // Native tile results examined per read; the nearest `limit` of them are returned.
 const MAX_SCANNED_TILES = 256
 const MAX_REPORTED_UNGENERATED_CHUNKS = 8
+const RECENT_FLUID_TTL_TICKS = 60 * 60
+const MAX_RECENT_FLUID_READS = 16
+
+interface FluidSourceSample {
+  name: string
+  fluid_name: string
+  position: { x: number, y: number }
+  surface_index: number
+  distance: number
+}
+
+interface CoveredFluidHint extends FluidSourceSample {
+  hidden_tile: string
+  double_hidden_tile?: string
+  removal_layers: number
+  cover_minable: true
+  requires_terrain_removal: true
+  placement_authority: false
+}
+
+interface RecentFluidSourceObservation {
+  ok: boolean
+  fluid_name: string
+  actor_position: { x: number, y: number }
+  surface_index: number
+  observed_tick: number
+  search_radius: number
+  samples: FluidSourceSample[]
+  covered_fluid_hints: CoveredFluidHint[]
+  covered_scan_truncated: boolean
+  covered_empty_result_is_conclusive: boolean
+}
+
+interface RecentFluidRead {
+  actor_id: number
+  force_index: number
+  observation: RecentFluidSourceObservation
+}
+
+declare const storage: { sgluna_recent_fluid_reads?: RecentFluidRead[] }
+
+/** A recent bounded fact, never placement authority. Re-read after movement/terrain changes. */
+export function get_recent_fluid_source_observation(actor: ControlledActor | undefined, fluid_name?: string) {
+  if (!actor?.is_valid) return undefined
+  const actor_id = actor.status_snapshot().actor_id
+  if (actor_id === undefined) return undefined
+  for (const read of storage.sgluna_recent_fluid_reads ?? []) {
+    const fact = read.observation
+    if (read.actor_id === actor_id && read.force_index === actor.force.index && fact.surface_index === actor.surface.index
+      && (fluid_name === undefined || fact.fluid_name === fluid_name) && game.tick >= fact.observed_tick && game.tick - fact.observed_tick <= RECENT_FLUID_TTL_TICKS) return fact
+  }
+  return undefined
+}
+
+function remember_fluid_read(actor: ControlledActor, observation: RecentFluidSourceObservation) {
+  const actor_id = actor.status_snapshot().actor_id
+  if (actor_id === undefined) return
+  const reads = (storage.sgluna_recent_fluid_reads ?? []).filter(read => read.actor_id !== actor_id
+    || read.force_index !== actor.force.index || read.observation.surface_index !== actor.surface.index
+    || read.observation.fluid_name !== observation.fluid_name)
+  reads.unshift({ actor_id, force_index: actor.force.index, observation })
+  if (reads.length > MAX_RECENT_FLUID_READS) reads.pop()
+  storage.sgluna_recent_fluid_reads = reads
+}
 
 function integer(value: unknown, minimum: number, maximum: number): value is number {
   return typeof value === 'number' && value === math.floor(value) && value >= minimum && value <= maximum
@@ -97,13 +161,38 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
     found.push({ name: tile.name, position: tile_position, distance_squared: squared_distance(position, tile_position) })
   }
   found.sort((left, right) => left.distance_squared < right.distance_squared ? -1 : left.distance_squared > right.distance_squared ? 1 : 0)
-  const samples: Array<{ name: string, fluid_name: string, position: { x: number, y: number }, surface_index: number, distance: number }> = []
+  const samples: FluidSourceSample[] = []
   for (let index = 0; index < math.min(found.length, limit); index++) {
     const tile = found[index]
     samples.push({ name: tile.name, fluid_name: request.fluid_name, position: tile.position, surface_index: surface.index,
       distance: math.floor(math.sqrt(tile.distance_squared) * 10 + 0.5) / 10 })
   }
-  return { ok: true, fluid_name: request.fluid_name, actor_position: position, surface_index: surface.index,
+  // Factorio preserves water beneath removable landfill/foundation in native
+  // hidden tile layers. These are recovery hints, not present fluid sources or
+  // permission to mine terrain (which can expose water under built entities).
+  const covered = surface.find_tiles_filtered({ position, radius, has_hidden_tile: true, limit: MAX_SCANNED_TILES + 1 })
+  const covered_scan_truncated = covered.length > MAX_SCANNED_TILES
+  const covered_found: Array<CoveredFluidHint & { distance_squared: number }> = []
+  for (let index = 0; index < math.min(covered.length, MAX_SCANNED_TILES); index++) {
+    const tile = covered[index]
+    if (tile.surface.index !== surface.index) return { ok: false, code: 'fluid_source_result_unreadable' }
+    if (!surface.is_chunk_generated({ x: math.floor(tile.position.x / 32), y: math.floor(tile.position.y / 32) })) continue
+    if (!tile.prototype.mineable_properties?.minable || !tile.hidden_tile || tile.prototype.fluid) continue
+    const hidden = prototypes.tile[tile.hidden_tile]
+    const double_hidden = tile.double_hidden_tile ? prototypes.tile[tile.double_hidden_tile] : undefined
+    const direct = hidden?.fluid?.name === request.fluid_name
+    const layered = hidden?.mineable_properties?.minable && double_hidden?.fluid?.name === request.fluid_name
+    if (!direct && !layered) continue
+    const tile_position = { x: tile.position.x, y: tile.position.y }
+    const distance_squared = squared_distance(position, tile_position)
+    covered_found.push({ name: tile.name, fluid_name: request.fluid_name, position: tile_position, surface_index: surface.index,
+      distance: math.floor(math.sqrt(distance_squared) * 10 + 0.5) / 10, distance_squared,
+      hidden_tile: tile.hidden_tile, ...(tile.double_hidden_tile ? { double_hidden_tile: tile.double_hidden_tile } : {}),
+      removal_layers: direct ? 1 : 2, cover_minable: true, requires_terrain_removal: true, placement_authority: false })
+  }
+  covered_found.sort((left, right) => left.distance_squared < right.distance_squared ? -1 : left.distance_squared > right.distance_squared ? 1 : 0)
+  const covered_fluid_hints: CoveredFluidHint[] = covered_found.slice(0, limit).map(({ distance_squared: _distance, ...hint }) => hint)
+  const result = { ok: true, fluid_name: request.fluid_name, actor_position: position, surface_index: surface.index,
     observed_tick: game.tick, search_radius: radius,
     // Samples come from generated terrain in the bounding square; coverage_complete says whether every chunk of it was.
     coverage: 'generated_bounding_square', coverage_complete, ...chunk_report,
@@ -111,5 +200,13 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
     empty_result_is_conclusive: coverage_complete && !scan_truncated,
     matching_tile_prototypes: names.length, samples, returned_count: samples.length, truncated: found.length > samples.length || scan_truncated,
     scanned_tile_limit: MAX_SCANNED_TILES, scan_truncated,
-    ordering: scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first' }
+    ordering: scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first',
+    covered_fluid_hints, covered_returned_count: covered_fluid_hints.length,
+    covered_scan_truncated, covered_scanned_tile_limit: MAX_SCANNED_TILES,
+    covered_truncated: covered_found.length > covered_fluid_hints.length || covered_scan_truncated,
+    covered_empty_result_is_conclusive: coverage_complete && !covered_scan_truncated,
+    covered_ordering: covered_scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first',
+    covered_hint_requires_native_mining_validation: true }
+  remember_fluid_read(actor, result)
+  return result
 }
