@@ -94,3 +94,12 @@ review returns; a broader programmatic post-return race was not proven in this
 review. These limits are not a claim of live autonomous red-science success.
 Full merged gates, payload repin, frozen native validation and hosted checks remain
 the integration acceptance boundary before the owner-authorized live trial.
+
+Integration candidate 5bec9163 (reviewed runtime merge 3bc607f4, separate payload
+repin 5bec9163) passed 2,620 runtime tests, 1,234 mod tests, typecheck, Lua build
+and generated-Lua checks. All changed JavaScript passed current-config lint;
+payload generation/check and nine installer tests passed. Frozen Factorio 2.0.77
+fresh-topology validation with NPC_TEST_ROLE_CONTRACTS=1 passed, including
+92 Python regressions. Evidence is retained under
+`test-results/planner-executor-integration`; its native container was removed.
+Hosted checks and exact-deployment preflight precede the authorized live run.
