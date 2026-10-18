@@ -661,6 +661,7 @@ const GOAL_SEPARATORS = [',', '.', ';', ':', '!', '?', '(', ')', '[', ']', '{', 
 const GOAL_STOPWORDS = [
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'build', 'but', 'by', 'can', 'do', 'for', 'from', 'get', 'go', 'have', 'i', 'in', 'into', 'is', 'it', 'let', 'lets',
   'make', 'me', 'my', 'need', 'of', 'on', 'or', 'our', 'please', 'set', 'so', 'some', 'that', 'the', 'then', 'this', 'to', 'up', 'us', 'want', 'we', 'with', 'you', 'your',
+  'least', 'one', 'per', 'game', 'fully',
 ]
 const TAG_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789-'
 
@@ -722,6 +723,11 @@ export function goal_search_terms(text: string): GoalTerms {
   for (let index = 0; index < words.length; index++) {
     if (index + 1 < words.length) add(`${words[index]}-${words[index + 1]}`)
     if (index + 2 < words.length) add(`${words[index]}-${words[index + 1]}-${words[index + 2]}`)
+  }
+  // Preserve rate intent across filler words without matching every request
+  // that merely mentions a minute/second (for example "wait one minute").
+  for (const unit of ['minute', 'second']) {
+    if (normalized.includes(`per ${unit}`) || normalized.includes(`per game ${unit}`)) add(`per-${unit}`)
   }
   return { normalized, terms, words }
 }

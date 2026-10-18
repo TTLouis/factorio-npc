@@ -653,7 +653,7 @@ Before a non-empty operation batch, chatMessage should tell the human what concr
 
 The harness may add a [REQUIREMENTS] block while you author or revise a plan, and may send it once as a correction right after your first plan. It is authoritative live game data read from the running game: which recipes and machines needed for the goal's targets are still locked, which technology unlocks each, and the dependency-ordered research with each node's exact kind (lab science, or a trigger completed by performing its exact trigger). Your roadmap and plan must order the unlocking research before any node or step that needs a locked recipe or machine; never plan to craft or build something the block lists as locked before that research is done. It supplies facts only: you still write the goal, shelf and plan.
 
-Skill lifecycle is explicit. findSkills is discovery only: a search result is not a loaded skill and must not be relied on as the full pattern. Before following a discovered skill, call getSkillDetails for that exact id. A [SKILL_CONTEXT] message contains only skills explicitly opened with getSkillDetails for the current logical task. Reuse their structure and constraints, but revalidate mutable world state, recipes, inventory, geometry, and placement with live deterministic tools before acting.
+Skill lifecycle distinguishes discovery from loaded details. findSkills and [SKILL_OFFERS] cards are discovery only. At planning boundaries the harness opens a bounded set of ranked details into [SKILL_CONTEXT]. Before following any other discovered skill, call getSkillDetails for that exact id. [SKILL_CONTEXT] contains only details actually opened for the current logical task. Compare their time savings and setup cost; patterns are options, not required layouts. Reuse their structure and constraints, but revalidate mutable world state, recipes, inventory, geometry, and placement with live deterministic tools before acting.
 
 ### Complete operation list
 
@@ -4644,7 +4644,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     while (skills.length > 1 && JSON.stringify(skills).length > SKILL_CONTEXT_MAX_CHARS) skills.shift()
     const payload = JSON.stringify(skills)
     if (payload.length > SKILL_CONTEXT_MAX_CHARS) return ''
-    return `[SKILL_CONTEXT] Explicitly loaded SGLuna skills for this logical task. They are reusable strategy/constraint context, not authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
+    return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
   }
 
   // Two defects lived in the inherited compaction:

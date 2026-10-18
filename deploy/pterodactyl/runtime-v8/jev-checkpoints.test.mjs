@@ -1042,10 +1042,11 @@ const STEAM_CARDS = [
 ]
 
 class SkillFactorio extends FakeFactorio {
-  constructor() {
+  constructor(missing = []) {
     super()
     this.skills['steam-power-bootstrap'] = { id: 'steam-power-bootstrap', name: 'Steam Power Bootstrap', revision: 2, status: 'candidate', stage: 'pattern', summary: 'Starter steam power.' }
     this.skills['starter-mining-belt-output'] = { id: 'starter-mining-belt-output', name: 'Starter Mining Belt Output', revision: 1, status: 'candidate', stage: 'pattern', summary: 'A mining row.' }
+    for (const id of missing) delete this.skills[id]
   }
 
   async command(text) {
@@ -1054,12 +1055,12 @@ class SkillFactorio extends FakeFactorio {
   }
 }
 
-async function skillScenario({ pick, loads }) {
+async function skillScenario({ pick, loads, missing = [] }) {
   const trace = []
   const skillJev = recordingJev(async (_state, questions) => (questions.skill_choice ? { overrides: { skill_choice: { choice: pick, confidence: 0.9 } } } : undefined))
   let call = 0
   const agent = new NpcAgentLoop({
-    rcon: new SkillFactorio(),
+    rcon: new SkillFactorio(missing),
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill order scenario',
     npcId: 'sgluna',
@@ -1090,14 +1091,15 @@ test('skill order in shadow: Jev\'s pick is recorded in the ledger and scored ag
   assert.ok(recorded.request_id)
   const scored = used.rows('jev.judgment_scored').find(row => row.data.family === 'skill_order')
   assert.equal(scored.data.agreed, true)
-  assert.deepEqual(scored.data.outcome.loaded_skills, ['steam-power-bootstrap'])
+  assert.deepEqual(scored.data.outcome.loaded_skills, ['starter-mining-belt-output', 'steam-power-bootstrap'])
   assert.equal(scored.data.stage, 'shadow')
 
-  const ignored = await skillScenario({ pick: 'starter-mining-belt-output', loads: 'steam-power-bootstrap' })
+  const ignored = await skillScenario({ pick: 'starter-mining-belt-output', loads: 'steam-power-bootstrap', missing: ['starter-mining-belt-output'] })
   assert.equal(ignored.rows('jev.judgment_scored').find(row => row.data.family === 'skill_order').data.agreed, false, 'the agent loaded a different skill')
-  const none = await skillScenario({ pick: 'starter-mining-belt-output', loads: undefined })
+  const missing = STEAM_CARDS.map(card => card.id)
+  const none = await skillScenario({ pick: 'starter-mining-belt-output', loads: undefined, missing })
   assert.equal(none.rows('jev.judgment_scored').find(row => row.data.family === 'skill_order').data.agreed, false, 'Jev picked a skill the agent never loaded')
-  const skip = await skillScenario({ pick: 'none', loads: undefined })
+  const skip = await skillScenario({ pick: 'none', loads: undefined, missing })
   assert.equal(skip.rows('jev.judgment_scored').find(row => row.data.family === 'skill_order').data.agreed, true, 'none agrees with loading nothing')
 
   // Even with the evidence for a higher stage, skill order is never allowed above shadow.
