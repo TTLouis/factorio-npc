@@ -127,6 +127,7 @@ lane_offset() {
     partial-transfer) printf '23' ;;
     offshore-water-first) printf '24' ;;
     pump-landfill-removal) printf '25' ;;
+    zero-transfer) printf '26' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

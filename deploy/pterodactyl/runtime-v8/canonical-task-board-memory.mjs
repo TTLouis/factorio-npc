@@ -307,6 +307,7 @@ function correctableTransferShortage(evidence) {
   return {
     task_type: 'moving_items',
     code: basic.code,
+    source_removed_count: Number.isSafeInteger(basic.source_removed_count) && basic.source_removed_count >= 0 ? basic.source_removed_count : undefined,
     item_name: typeof basic.item_name === 'string' ? basic.item_name.slice(0, 100) : undefined,
     requested_count: Number.isSafeInteger(basic.requested_count) ? basic.requested_count : undefined,
     to_entity: typeof basic.to_entity === 'boolean' ? basic.to_entity : undefined,

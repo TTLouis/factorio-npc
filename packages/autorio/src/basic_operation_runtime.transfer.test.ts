@@ -91,6 +91,50 @@ beforeEach(() => {
 })
 
 describe('exact entity item transfers', () => {
+  it.each([false, true])('proves zero source removal on an empty extraction (exact=%s), cancelling its unrun tail', (exact) => {
+    const c = context()
+    const source = inventory({ 'copper-plate': 10 })
+    const furnace = entity(101, source, { name: 'stone-furnace', type: 'furnace' })
+    ;(globalThis as any).prototypes.entity['stone-furnace'] = { name: 'stone-furnace' }
+    c.findEntities.mockReturnValue([furnace] as any)
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => furnace)
+    const submit = () => exact ? c.controller.submit_move_exact('iron-plate', 101, 50, false)
+      : c.controller.submit_move('iron-plate', 'stone-furnace', 50, false)
+    expect(submit()[0]).toBe(true)
+    c.controller.submit_wait(60)
+    expect(c.runtime.state_moving_items(c.actor)).toBe(0)
+    expect(source.counts).toEqual({ 'copper-plate': 10, 'iron-plate': 0 })
+    expect(c.actorInventory.counts).toEqual({ 'firearm-magazine': 20 })
+    expect(c.controller.status().last_result).toMatchObject({ code: 'nothing_moved', moved_count: 0, source_removed_count: 0 })
+    expect(c.manager.get_status_snapshot()).toMatchObject({ task_state: TaskStates.IDLE, queue_empty: true,
+      last_cancelled_batch: { task_count: 2, tasks_started: 1, failed_task_index: 0, failed_before_mutation: true } })
+  })
+
+  it('retains ambiguity when extraction removed items before zero insertion and an unsuccessful rollback', () => {
+    const c = context()
+    const source = inventory({ 'firearm-magazine': 5 })
+    const target = entity(101, source)
+    c.actorInventory.insert.mockReturnValue(0)
+    source.insert.mockReturnValue(0)
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => target)
+    c.controller.submit_move_exact('firearm-magazine', 101, 5, false)
+    expect(c.runtime.state_moving_items(c.actor)).toBe(0)
+    expect(source.counts['firearm-magazine']).toBe(0)
+    expect(c.controller.status().last_result).toMatchObject({ code: 'nothing_moved', moved_count: 0, source_removed_count: 5 })
+    expect(c.manager.get_status_snapshot().last_cancelled_batch?.failed_before_mutation).not.toBe(true)
+  })
+
+  it('does not infer no mutation from moved_count alone or grant extraction proof to a player transfer', () => {
+    for (const player_name of [undefined, 'human']) {
+      const c = context()
+      c.controller.submit_move('iron-plate', 'stone-furnace', 50, false)
+      const task = c.manager.player_state.parameters_move_items!
+      if (player_name) task.player_name = player_name
+      c.controller.fail(c.actor, task, 'nothing_moved', player_name ? { moved_count: 0, source_removed_count: 0 } : { moved_count: 0 })
+      expect(c.manager.get_status_snapshot().last_cancelled_batch?.failed_before_mutation).not.toBe(true)
+    }
+  })
+
   it('proves a first legacy local miss changed no inventory and cancels its queued tail', () => {
     const c = context()
     ;(globalThis as any).prototypes.entity['gun-turret'] = { name: 'gun-turret' }

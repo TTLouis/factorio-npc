@@ -45,6 +45,8 @@ export interface BasicOperationResult {
   item_name?: string
   requested_count?: number
   moved_count?: number
+  /** Extraction: total removed before insertion/rollback. Zero proves no source was changed. */
+  source_removed_count?: number
   to_entity?: boolean
   to_player?: boolean
   requested_ticks?: number
@@ -548,7 +550,13 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     // journal still requires started_count === 1 to settle a whole batch.
     const local_transfer_miss = task.type === TaskStates.MOVING_ITEMS && code === 'no_target'
       && task.target_unit_number === undefined && task.player_name === undefined && task.entity_name !== undefined
-    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING || local_transfer_miss, task_index: batch_task_index(task) })
+    // A zero delivery count alone is insufficient: extraction may have removed
+    // items before a failed insertion/rollback. Only the measured zero-removal
+    // path proves this failed task had no inventory effect.
+    const empty_extraction = task.type === TaskStates.MOVING_ITEMS && code === 'nothing_moved'
+      && task.to_entity === false && task.player_name === undefined
+      && details.moved_count === 0 && details.source_removed_count === 0
+    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING || local_transfer_miss || empty_extraction, task_index: batch_task_index(task) })
     suppress_cancel_receipt = false
     result_for(actor, task, false, false, code, details)
     log(`[AUTORIO] [ERROR] ${task.type} failed: ${code}; dependent operations cancelled`)

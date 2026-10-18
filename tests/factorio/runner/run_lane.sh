@@ -160,6 +160,9 @@ case "$LANE" in
     start_factorio
     run_node partial_transfer_factorio.mjs --mode unknown
     ;;
+  zero-transfer)
+    run_node zero_transfer_factorio.mjs
+    ;;
   fresh-topology)
     run_node fresh_topology_factorio.mjs
     ;;

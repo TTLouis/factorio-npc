@@ -1029,6 +1029,7 @@ function compactBasicOperationResult(result) {
     item_name: typeof result.item_name === 'string' ? cleanMemoryText(result.item_name, 200) : undefined,
     requested_count: Number.isSafeInteger(result.requested_count) ? result.requested_count : undefined,
     moved_count: Number.isSafeInteger(result.moved_count) ? result.moved_count : undefined,
+    source_removed_count: Number.isSafeInteger(result.source_removed_count) && result.source_removed_count >= 0 ? result.source_removed_count : undefined,
     held_count: Number.isSafeInteger(result.held_count) ? result.held_count : undefined,
     placed_unit_number: Number.isSafeInteger(result.placed_unit_number) ? result.placed_unit_number : undefined,
     placed_entity_type: typeof result.placed_entity_type === 'string' ? cleanMemoryText(result.placed_entity_type, 100) : undefined,
@@ -11224,6 +11225,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const targetRecovery = supplyRecovery?.recovery === 'local_target_reacquisition'
     const partialRecovery = supplyRecovery?.recovery === 'terminal_transfer_refusal'
     if (supplyRecovery) {
+      if (supplyRecovery.code === 'nothing_moved' && supplyRecovery.to_entity === false && supplyRecovery.source_removed_count === 0) {
+        await this.traceEvent('transfer.extraction_classified', {
+          request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
+          attempt: supplyRecovery.attempt, retry_budget: supplyRecovery.retry_budget,
+          reason: 'native_zero_source_removal_same_step_candidate',
+          grants_mutation_authority: false,
+        })
+      }
       if (partialRecovery) await this.traceEvent('transfer.partial_recovery', {
         request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
         operation_key: supplyRecovery.operation_key, attempt: supplyRecovery.attempt,
