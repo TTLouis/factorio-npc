@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import { EXECUTOR_ROLE, PLANNER_ROLE } from './agent-roles.mjs'
 import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
-import { POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_PREFIX, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
+import { POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_PREFIX, postBatchFamilyReads, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
 import { lastUserOutsideTail } from './prompt-prefix.mjs'
 
 const COMPLETION = '[MOD] Autorio operation batch completed: placed offshore-pump'
@@ -235,6 +235,63 @@ test('an actor replaced during the bundle cancels the continuation instead of de
     return output
   }
   await assert.rejects(agent.postBatchFactBundle('continue_current'), /epoch changed/)
+})
+
+test('family reads come before the step recipes, so a tight size budget drops recipes first', async () => {
+  const { agent, rcon } = await executorAgent()
+  rcon.recipeFiller = POST_BATCH_FACT_CHARS
+  await agent.handleToolBatch({ tool_calls: [recipeCall('pump', 'offshore-pump')] })
+  const bundle = await agent.postBatchFactBundle('targeted_observation', { families: ['inventory_equipment', 'research_state'], closeWhenCovered: true })
+  assert.deepEqual(bundle.reads.map(read => read.name), ['getInventoryItems', 'getResearchStatus'])
+  assert.deepEqual(bundle.reads.map(read => read.family), ['inventory_equipment', 'research_state'])
+  assert.deepEqual(bundle.covered, ['inventory_equipment', 'research_state'])
+})
+
+test('the read-only phase closes only for the selection the facts were read for, while they are shown', async () => {
+  const { agent } = await executorAgent()
+  const covered = () => agent.postBatchFactBundle('targeted_observation', { families: ['research_state'], closeWhenCovered: true })
+
+  // Jev's selection for this decision differs from the bundle's: no close.
+  agent.observationRelevanceOverride = ['research_state', 'placement_candidates']
+  let bundle = await covered()
+  agent.deliverPostBatchFacts(bundle)
+  await agent.closeObservationPhaseOnCoveredFacts(bundle)
+  assert.equal(agent.observationDecisionForced, false)
+
+  // Read before a world mutation: never held, so never closes.
+  agent.observationRelevanceOverride = ['research_state']
+  bundle = await covered()
+  agent.noteWorldMutation()
+  agent.deliverPostBatchFacts(bundle)
+  await agent.closeObservationPhaseOnCoveredFacts(bundle)
+  assert.equal(agent.observationDecisionForced, false)
+
+  // A failure bundle (closeWhenCovered false) carries the facts without closing.
+  bundle = await agent.postBatchFactBundle('targeted_observation', { families: ['research_state'] })
+  agent.deliverPostBatchFacts(bundle)
+  await agent.closeObservationPhaseOnCoveredFacts(bundle)
+  assert.equal(agent.observationDecisionForced, false)
+
+  bundle = await covered()
+  agent.deliverPostBatchFacts(bundle)
+  await agent.closeObservationPhaseOnCoveredFacts(bundle)
+  assert.equal(agent.observationDecisionForced, true)
+  assert.deepEqual(agent.providerRoundPhase(false, 'post_step_observe'), { phase: 'decide', reason: 'post_batch_facts_cover_selected_families' })
+  // A reset or restage starts a new decision: the reason goes with the closed phase.
+  agent.resetObservationDecisionState()
+  assert.equal(agent.observationDecisionForced, false)
+  assert.equal(agent.providerRoundPhase(false, 'post_step_observe').reason, 'tools_off')
+})
+
+test('a family read answers only when the game returned the fact', () => {
+  assert.equal(postBatchReadAnswers({ name: 'getResearchStatus', args: {}, output: '{"current":null}' }), true)
+  assert.equal(postBatchReadAnswers({ name: 'getResearchStatus', args: {}, output: '{"ok":false,"error":"no_force"}' }), false)
+  assert.equal(postBatchReadAnswers({ name: 'getResearchStatus', args: {}, output: 'not json' }), false)
+  assert.equal(postBatchReadAnswers({ name: 'getEntityStatus', args: { unit_number: 35 }, output: '{"found":true,"entity":{"unit_number":35}}' }), true)
+  assert.equal(postBatchReadAnswers({ name: 'getEntityStatus', args: { unit_number: 35 }, output: '{"found":false}' }), false)
+  assert.equal(postBatchReadAnswers({ name: 'getEntityStatus', args: { unit_number: 35 }, output: '{"found":true,"entity":{"unit_number":36}}' }), false)
+  assert.deepEqual(postBatchFamilyReads(['entity_status', 'recipe_production', 'research_state'], {}).map(read => read.name), ['getResearchStatus'])
+  assert.deepEqual(postBatchFamilyReads(['entity_status'], { placedUnitNumber: 35 }), [{ name: 'getEntityStatus', args: { unit_number: 35 }, family: 'entity_status' }])
 })
 
 test('the step working set is most recent first, deduplicated and bounded', () => {

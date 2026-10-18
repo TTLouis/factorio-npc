@@ -196,7 +196,7 @@ import {
   retireGoalRequirements,
 } from './goal-requirements.mjs'
 import { UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
-import { POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_ROUTES, postBatchFactsContext, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
+import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
 import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -2181,6 +2181,40 @@ function compactTaskBatch(batch) {
     tick: Number.isFinite(batch.tick) ? batch.tick : undefined,
     reason: typeof batch.reason === 'string' ? cleanMemoryText(batch.reason, 800) : undefined,
   }
+}
+
+// The placement the last batch completed, when its receipt proves one: the batch placed, and its last basic result
+// is this actor's completed placement of an exact unit. Takes the task status or its decision view.
+function completedPlacementResult(status, actorId) {
+  if (!status || typeof status !== 'object' || Array.isArray(status)) return undefined
+  const batch = status.last_completed_batch
+  const result = status.basic_operation?.last_result
+  if (!batch || !result || result.completed !== true || result.code !== 'completed' || result.type !== 'placing') return undefined
+  if (!Array.isArray(batch.task_types) || !batch.task_types.includes('placing')) return undefined
+  if (Number.isFinite(batch.tick) && Number.isFinite(result.tick) && result.tick > batch.tick) return undefined
+  if (Number.isSafeInteger(result.actor_id) && Number.isSafeInteger(actorId) && result.actor_id !== actorId) return undefined
+  if (!Number.isSafeInteger(result.placed_unit_number)
+    || typeof result.entity_name !== 'string'
+    || !result.placed_position
+    || !Number.isFinite(result.placed_position.x)
+    || !Number.isFinite(result.placed_position.y)) return undefined
+  return result
+}
+
+// The unit a batch placed when it was the batch's only placement, so the receipt names exactly one entity.
+function singlePlacedUnitNumber(status, actorId) {
+  const types = status?.last_completed_batch?.task_types
+  if (!Array.isArray(types) || status.last_completed_batch.task_count !== types.length) return undefined
+  if (types.filter(type => type === 'placing').length !== 1) return undefined
+  return completedPlacementResult(status, actorId)?.placed_unit_number
+}
+
+// The observation families Jev's typed relevance selected for a post-step decision, or null without a selection.
+function selectedObservationFamilies(steering) {
+  return steering?.observation_relevance?.source === 'typed_relevance'
+    && Array.isArray(steering.observation_relevance.selected_families)
+    ? steering.observation_relevance.selected_families
+    : null
 }
 
 function taskStatusDecisionView(raw) {
@@ -6091,20 +6125,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let parsed
     try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw }
     catch { return }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return
-
-    const batch = parsed.last_completed_batch
-    const result = parsed.basic_operation?.last_result
-    if (!batch || !result || result.completed !== true || result.code !== 'completed' || result.type !== 'placing') return
-    if (!Array.isArray(batch.task_types) || !batch.task_types.includes('placing')) return
-    if (Number.isFinite(batch.tick) && Number.isFinite(result.tick) && result.tick > batch.tick) return
-    if (Number.isSafeInteger(result.actor_id) && Number.isSafeInteger(this.epoch?.actor_id)
-      && result.actor_id !== this.epoch.actor_id) return
-    if (!Number.isSafeInteger(result.placed_unit_number)
-      || typeof result.entity_name !== 'string'
-      || !result.placed_position
-      || !Number.isFinite(result.placed_position.x)
-      || !Number.isFinite(result.placed_position.y)) return
+    const result = completedPlacementResult(parsed, this.epoch?.actor_id)
+    if (!result) return
 
     // MW1: the placement receipt is what identifies an entity as the NPC's own (a player-built entity is one whose
     // engine last_user is a human the NPC did not stamp). Recorded durably, once per entity.
@@ -6507,14 +6529,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // The predicted lookups for the executor's next round, read live in one go when the batch receipt lands:
-  // inventory, plus the recipes it already read for this step (see post-batch-facts.mjs).
-  async postBatchFactBundle(route) {
+  // inventory, the default read of each observation family Jev selected (`families`; a completion receipt `view`
+  // names the entity its batch's one placement made), then the recipes it already read for this step (see post-batch-facts.mjs).
+  // `closeWhenCovered` lets a bundle that answers every selected family close the decision's read-only phase.
+  async postBatchFactBundle(route, { families = null, view, closeWhenCovered = false } = {}) {
     if (this.agentContext?.role !== EXECUTOR_ROLE || !POST_BATCH_ROUTES.has(route) || this.batchInFlight) return undefined
     const stepKey = this.postBatchStepKey()
     if (!stepKey) return undefined
     this.stepFactWorkingSet ??= new StepFactWorkingSet()
     const mutation = this.worldMutationSeq ?? 0
-    const planned = [{ name: 'getInventoryItems', args: {} }, ...this.stepFactWorkingSet.recipes(stepKey)]
+    const familyReads = postBatchFamilyReads(families, { placedUnitNumber: singlePlacedUnitNumber(view, this.epoch?.actor_id) })
+    const planned = []
+    for (const item of [{ name: 'getInventoryItems', args: {} }, ...familyReads, ...this.stepFactWorkingSet.recipes(stepKey)]) {
+      const signature = item.signature ?? toolSignature(item.name, item.args)
+      const held = planned.find(entry => entry.signature === signature)
+      if (held) held.family ??= item.family
+      else planned.push({ ...item, signature })
+    }
     const reads = []
     const skipped = []
     let chars = 0
@@ -6536,16 +6567,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         continue
       }
       chars += output.length
-      reads.push({ name: item.name, args: item.args, signature: toolSignature(item.name, item.args), output })
+      reads.push({ name: item.name, args: item.args, signature: item.signature, output, ...(item.family ? { family: item.family } : {}) })
     }
+    const selected = Array.isArray(families) ? [...new Set(families)] : []
+    const covered = selected.filter(family => reads.some(read => read.family === family && postBatchReadAnswers(read)))
     await this.traceEvent('observation.post_batch_facts', {
       request_id: this.traceRequest?.id,
       route,
       tools: reads.map(read => read.name),
       chars,
+      ...(selected.length ? { selected_families: selected, covered_families: covered, uncovered_families: selected.filter(family => !covered.includes(family)) } : {}),
       ...(skipped.length ? { skipped } : {}),
     })
-    return reads.length ? { reads, mutation } : undefined
+    return reads.length ? { reads, mutation, families: selected, covered, closeWhenCovered } : undefined
   }
 
   // Held for the decision this continuation starts and shown as a tail block each round (postBatchFactsContext).
@@ -6556,10 +6590,34 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reads = factBundle?.reads
     if (!Array.isArray(reads) || reads.length === 0 || factBundle.mutation !== (this.worldMutationSeq ?? 0)) return
     const scope = unchangedFactScope(this.epoch)
-    this.postBatchFacts = { reads, scope, stepKey: this.postBatchStepKey(), mutation: factBundle.mutation }
+    this.postBatchFacts = { reads, scope, stepKey: this.postBatchStepKey(), mutation: factBundle.mutation,
+      covered: Array.isArray(factBundle.covered) ? factBundle.covered : [] }
     this.unchangedFactReads ??= new UnchangedFactReads()
     for (const read of reads) this.unchangedFactReads.recordDelivered(scope, read.signature, read.output)
     this.jev?.noteProvided?.(reads.map(read => read.name))
+  }
+
+  // A completion bundle that answers every family Jev selected for this decision leaves nothing for a read-only
+  // round to fetch, so the decision opens with its observation phase closed (the closed-round contract and its
+  // one targeted read are unchanged). Only while those facts are shown, and for the selection they were read
+  // for. Nothing is added to the history: the held block names the families it answers.
+  async closeObservationPhaseOnCoveredFacts(factBundle) {
+    const selected = factBundle?.families
+    if (factBundle?.closeWhenCovered !== true || this.postBatchFacts?.reads !== factBundle.reads || !Array.isArray(selected) || selected.length === 0) return
+    if (!selected.every(family => factBundle.covered.includes(family)) || this.observationDecisionForced === true) return
+    const decision = Array.isArray(this.observationRelevanceOverride) ? [...new Set(this.observationRelevanceOverride)] : []
+    if (decision.length !== selected.length || !decision.every(family => selected.includes(family)) || !this.postBatchFactsText()) return
+    this.observationDecisionPressure = true
+    this.observationDecisionPressureRemaining = 0
+    this.observationDecisionForced = true
+    this.observationPhaseClosedBy = POST_BATCH_COVERAGE_REASON
+    await this.traceEvent('observation.phase_closed', {
+      request_id: this.traceRequest?.id,
+      reason_code: POST_BATCH_COVERAGE_REASON,
+      selected_families: selected,
+      covered_by: Object.fromEntries(selected.map(family => [family, factBundle.reads.find(read => read.family === family)?.name])),
+      tools_enabled: false,
+    })
   }
 
   postBatchFactsText() {
@@ -10687,6 +10745,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.researchPreflightRetries = 0
     this.messages.push({ role: 'user', content: cleanMemoryText(modMessage, 18000) })
     this.deliverPostBatchFacts(factBundle)
+    await this.closeObservationPhaseOnCoveredFacts(factBundle)
     await this.traceEvent(traceEventName)
     return withinTurn ? this.runTurn() : this.runGuarded()
   }
@@ -11027,7 +11086,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
     const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
     const transitionFact = stepCompletion?.verified === true ? this.stepTransitionFact(stepCompletion.state) : ''
-    const factBundle = pendingAmendment ? undefined : await this.postBatchFactBundle(routed.route)
+    const factBundle = pendingAmendment ? undefined : await this.postBatchFactBundle(routed.route, {
+      families: selectedObservationFamilies(routed.steering), view: receipt.view, closeWhenCovered: true })
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
@@ -11047,10 +11107,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
     this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
     this.observationBudgetRemaining = this.observationBudgetOverride
-    this.observationRelevanceOverride = routed.steering?.observation_relevance?.source === 'typed_relevance'
-      && Array.isArray(routed.steering.observation_relevance.selected_families)
-      ? routed.steering.observation_relevance.selected_families
-      : null
+    this.observationRelevanceOverride = selectedObservationFamilies(routed.steering)
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     this.jev.beginWake(c4)
     let wakeFailed = true
@@ -11144,10 +11201,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
     this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
     this.observationBudgetRemaining = this.observationBudgetOverride
-    this.observationRelevanceOverride = routed.steering?.observation_relevance?.source === 'typed_relevance'
-      && Array.isArray(routed.steering.observation_relevance.selected_families)
-      ? routed.steering.observation_relevance.selected_families
-      : null
+    this.observationRelevanceOverride = selectedObservationFamilies(routed.steering)
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     const recoverable = latestRecoverableOperationFailure(this.memory.currentPlan?.(this.activePlanKey()))
     if (recoverable) {
@@ -11215,7 +11269,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
       : ''
     const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
-    const factBundle = await this.postBatchFactBundle(routed.route)
+    // A failed batch's receipt has no completed placement of its own (its last completed batch is an older one).
+    const factBundle = await this.postBatchFactBundle(routed.route, { families: selectedObservationFamilies(routed.steering) })
     try {
       return await this.continueFromModMessage(
         `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}${deferredFacts ? ` ${deferredFacts}` : ''}`,
@@ -11533,6 +11588,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // observation budget spent) the round is `decide` too. The provider maps
   // the phase onto effort and output cap; the reason is traced with it.
   providerRoundPhase(allowTools, triggerSource) {
+    if (allowTools === false && this.observationPhaseClosedBy === POST_BATCH_COVERAGE_REASON) return { phase: 'decide', reason: POST_BATCH_COVERAGE_REASON }
     if (allowTools === false) return { phase: 'decide', reason: 'tools_off' }
     if (!CONTINUATION_TRIGGERS.has(triggerSource)) return { phase: 'decide', reason: 'plan_may_be_written' }
     const state = this.peekPlanState(this.activePlanKey())
@@ -11550,6 +11606,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   resetObservationDecisionState() {
     super.resetObservationDecisionState()
     this.closedRoundObservationUsed = false
+    this.observationPhaseClosedBy = undefined
   }
 
   async forceDecisionFromObservations(reason, reasonCode, readFence) {
