@@ -61,10 +61,13 @@ records the handback. Their tests assert reason and absence of world authority.
   returns preserve their guards.
 - [x] Actual system prefix plus ordinary/compact/open/closed/repair/fresh-recovery
   instructions advertise review rather than legacy blocked prose.
-- [ ] Final full Docker gate, current-config lint, immutable payload pin.
-- [ ] Frozen native protocol 3 canary, including physical no-admission proof for
+- [x] Final full Docker gate: 2,632 runtime tests and 1,234 mod tests, typecheck,
+  Lua build/generated-Lua checks, current-config lint; payload generation/check
+  and nine installer tests passed.
+- [x] Frozen native protocol 3 canary, including physical no-admission proof for
   a mismatched batch and preservation of the existing powered-load scenario.
-- [ ] Independent review, integration gate and publication.
+- [x] Independent review approved after the actual recovery-prompt correction.
+- [ ] Merged integration gate and publication.
 
 Evidence: `test-results/executor-strategy-review`. The baseline/candidate probe
 disables external inference and uses network-disabled Docker. Its recorded fixture
@@ -72,3 +75,22 @@ retains non-secret water/navigation context, but the scripted replay exercises
 the final response and review path; it does not reproduce Run AB's entire map or
 prove autonomous exploration. Passing these gates cannot prove a live model will
 choose the fastest strategy or that autonomous red throughput is achieved.
+
+Frozen runtime/native candidate: `736dc9608dff343c1e78fe86007651dfa9270884`;
+separate payload pin: `2c66a3017bb7093d30a07e6d5c81928a445ca587`.
+The Factorio 2.0.77 fresh-topology lane ran with `NPC_TEST_ROLE_CONTRACTS=1`
+and `NPC_TEST_EXECUTOR_STRATEGY=1`; all 92 Python regressions passed. The
+original powered-load test retained three positive samples. The new direct-feed
+refusal kept native authorization envelopes at six before/after, actor inventory
+and position unchanged, exactly two scripted role calls, and advisory-only review
+without world-blocker authority. Global external fetch remained zero.
+
+The original `34bc7791` runtime admitted one manual batch from the ambiguous
+selected-skill brief; the candidate refused it before commit. With the same
+recorded Run AB blocked reply, the original spent a fresh context and failed;
+the candidate returned one advisory review after two scripted role calls.
+`negative-controls.json` records these actual module comparisons.
+
+All run-owned containers and the native image are removed after evidence capture.
+Shared development/Factorio dependency images are retained. No live inference,
+world resume, allowance reset or additional gameplay trial occurred.
