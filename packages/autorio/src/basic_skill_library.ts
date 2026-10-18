@@ -181,14 +181,14 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 3,
+    revision: 4,
     id: 'direct-miner-smelting',
     name: 'Direct Miner Smelting',
     kind: 'production',
     stage: 'pattern',
     status: 'candidate',
-    summary: 'For very early plate production, consider placing a mining drill so its output feeds a furnace directly, eliminating a belt and input inserter when live geometry permits. Fuel remains a separate dependency unless the selected machines do not require it.',
-    goal_tags: ['smelting', 'smelt', 'iron', 'copper', 'ore', 'furnace', 'mining'],
+    summary: 'For early plates from natural resources, consider a burner miner feeding a dedicated furnace per resource. Parallel iron and copper production can save mining, hand-supply and shared-furnace switching time. Compare setup cost with the remaining work; a small manual bootstrap may finish sooner. Validate live geometry and provide fuel separately.',
+    goal_tags: ['smelting', 'smelt', 'iron', 'copper', 'ore', 'furnace', 'mining', 'natural-resource', 'automated-factory'],
     source: SOURCE,
     preconditions: [
       { kind: 'custom', subject: 'smeltable-resource', description: 'The target resource can be mined at the selected location.' },
@@ -226,6 +226,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     confidence: confidence(),
     examples: [
       { summary: 'Bootstrap a few iron plates with existing early infrastructure.', notes: 'Prefer an already placed compatible miner/furnace pair when available; otherwise validate exact placement before building.' },
+      { summary: 'Save time on repeated iron and copper demand with dedicated direct-fed furnace pairs.', notes: 'Compare crafting, fuel, travel and placement cost with manual mining, hand supply and switching a shared furnace. A burner miner can feed its furnace while other work proceeds. This is an efficiency option, not a prerequisite; reuse or hand-feed for a small finite bootstrap when cheaper. Check actual resource coverage, output target, fuel and plate output.' },
       { summary: 'To grow beyond the first pair, or to meet a rate or deadline, follow skill scale-out-production-line.', notes: 'It sizes the pair count from the rate tools and covers the early snowball.' },
     ],
   },

@@ -17,6 +17,7 @@ import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-healt
 import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
 import {
   ensureSkillOffers,
+  loadOfferedSkillDetails,
   parseSkillChoice,
   parseSkillOffers,
   refreshSkillOffersAtShelfPickup,
@@ -25,6 +26,7 @@ import {
   SKILL_CARD_MAX_CHARS,
   SKILL_CHOICE_MODE,
   SKILL_OFFERS_PREFIX,
+  SKILL_AUTOLOAD_LIMIT,
   skillChoiceQuestions,
   skillOfferBlock,
   skillOfferCommand,
@@ -69,17 +71,19 @@ const STEAM_CARDS = [
 ]
 
 const STEAM_GOAL = 'Get steam power running so we have electricity'
-const offersIn = messages => messages.find(message => typeof message.content === 'string' && message.content.includes(SKILL_OFFERS_PREFIX))
+const offersIn = messages => messages.find(message => typeof message.content === 'string' && message.content.startsWith(SKILL_OFFERS_PREFIX))
 
 class SkillFactorio extends FakeFactorio {
   constructor({ offer } = {}) {
     super()
     this.offer = offer
     this.offerRequests = []
+    this.detailRequests = []
     this.skills['steam-power-bootstrap'] = { id: 'steam-power-bootstrap', name: 'Steam Power Bootstrap', revision: 2, status: 'candidate', stage: 'pattern', summary: 'Starter steam power.' }
   }
 
   async command(text) {
+    if (text.includes('remote.call("autorio_skills","get"')) this.detailRequests.push(text)
     if (text.includes('remote.call("autorio_skills","offer"')) {
       const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
       this.offerRequests.push(JSON.parse(encoded.replace(/\\(.)/g, '$1')))
@@ -317,7 +321,9 @@ test('loading an offered skill and committing a plan with it traces skill.loaded
   assert.ok(offerAt > lastTurn, 'offers come after the stored history')
   const tailOnly = messages => messages.every(isTailBlock)
   assert.ok(tailOnly(calls[1].slice(lastTurn + 1)), 'only tail blocks follow the stored history')
-  assert.ok(tailOnly(calls[0].slice(3)), 'in the first round too, only tail blocks follow the request context')
+  const firstTail = calls[0].findIndex(isTailBlock)
+  assert.ok(firstTail > 0 && tailOnly(calls[0].slice(firstTail)), 'only tail blocks follow the request and loaded skill context')
+  assert.ok(calls[0].findIndex(message => message.content?.startsWith('[SKILL_CONTEXT]')) < firstTail)
   const [loaded] = events('skill.loaded')
   assert.ok(loaded.request_id)
   assert.deepEqual(
@@ -331,6 +337,152 @@ test('loading an offered skill and committing a plan with it traces skill.loaded
   assert.deepEqual(followed[0].data.offered_ids, ['steam-power-bootstrap'])
   assert.deepEqual(followed[0].data.mentioned_in_plan, ['steam-power-bootstrap'])
   assert.equal(followed[0].data.reason, 'plan_committed_with_skill_context')
+})
+
+test('the harness opens real details before the first planner reply, without relying on model tool selection', async () => {
+  const game = new SkillFactorio()
+  game.skills['steam-power-bootstrap'].topology = { relations: [{ from: 'boiler', to: 'engine', description: 'Use the actual steam port geometry' }] }
+  game.skills['steam-power-bootstrap'].constraints = [{ description: 'Fuel and live pipe connections need verification' }]
+  const { agent, calls, events } = await scenario({ game })
+  const context = calls[0].find(message => message.content?.startsWith('[SKILL_CONTEXT]'))?.content
+  assert.match(context, /actual steam port geometry/)
+  assert.match(context, /Fuel and live pipe connections/)
+  assert.match(context, /Compare time savings with setup cost/)
+  assert.match(context, /optional strategies, not required layouts/)
+  assert.equal(events('skill.loaded').length, 1, 'the missing mining detail was never treated as loaded')
+  assert.equal(events('skill.loaded')[0].data.source, 'harness_planning_boundary')
+  assert.equal(events('skill.load_skipped').length, 1)
+  assert.deepEqual(events('skill.followed')[0].data.skill_ids, ['steam-power-bootstrap'])
+  assert.ok(events('skill.loaded')[0].seq < events('skill.followed')[0].seq)
+  assert.equal(game.detailRequests.length, 2)
+  assert.equal(agent.loadedSkillContext.size, 1)
+  assert.equal(calls.length, 1, 'loading adds no provider turn')
+})
+
+test('Run AA: red automation planning sees dedicated direct-feed time-saving guidance before commitment and isolates the next task', async () => {
+  const cards = [
+    { ...STEAM_CARDS[0], id: 'direct-miner-smelting', name: 'Direct Miner Smelting', matched: ['natural-resource', 'automated-factory'], score: 8 },
+    { ...STEAM_CARDS[0], id: 'scale-out-production-line', name: 'Scale Out A Production Line', matched: ['per-minute'], score: 4 },
+  ]
+  const game = new SkillFactorio({ offer: { ok: true, cards } })
+  game.skills['direct-miner-smelting'] = {
+    id: 'direct-miner-smelting', revision: 4, stage: 'pattern', status: 'candidate',
+    summary: 'Dedicated burner miner/furnace pairs can save hand-supply and furnace switching time; compare setup cost with remaining work.',
+    topology: { relations: [{ kind: 'direct_item_output', from: 'miner', to: 'furnace', description: 'Validate actual miner output target' }] },
+    constraints: [{ description: 'Observe resource coverage and provide fuel separately' }],
+    examples: [{ notes: 'Manual bootstrap may finish sooner for a small job; pairs are an efficiency option, not a prerequisite.' }],
+  }
+  game.skills['scale-out-production-line'] = { id: 'scale-out-production-line', summary: 'Measure rates and check setup payback before copying a proven cell.' }
+  const { agent, calls, events } = await scenario({
+    game,
+    intents: ['new_goal', 'new_goal'],
+    requests: ['Build a fully automated factory producing at least one automation-science-pack per game minute from natural resources.', 'Get steam power running so we have electricity'],
+    afterFirst: async () => { game.offer = { ok: true, cards: STEAM_CARDS } },
+  })
+  const first = calls[0].find(message => message.content?.startsWith('[SKILL_CONTEXT]'))?.content
+  assert.match(first, /save hand-supply and furnace switching time/)
+  assert.match(first, /Manual bootstrap may finish sooner/)
+  assert.match(first, /actual miner output target/)
+  assert.match(first, /provide fuel separately/)
+  assert.deepEqual(events('skill.followed')[0].data.skill_ids, cards.map(card => card.id).reverse())
+  assert.deepEqual(events('skill.loaded').slice(0, 2).map(row => row.request_id), [events('skill.offered')[0].request_id, events('skill.offered')[0].request_id])
+  const next = calls.at(-1).find(message => message.content?.startsWith('[SKILL_CONTEXT]'))?.content
+  assert.match(next, /steam-power-bootstrap/)
+  assert.doesNotMatch(next, /direct-miner-smelting|scale-out-production-line/)
+  assert.deepEqual([...agent.loadedSkillContext.keys()], ['steam-power-bootstrap'])
+})
+
+function loadingLoop(game) {
+  const loop = fakeLoop(game)
+  loop.loadedSkillContext = new Map()
+  loop.recordLoadedSkillToolResult = NpcAgentLoop.prototype.recordLoadedSkillToolResult
+  return loop
+}
+
+test('automatic detail reads are capped, failures stay cards, and a revision reuses loaded details', async () => {
+  const cards = Array.from({ length: 5 }, (_, i) => ({ ...STEAM_CARDS[0], id: `pattern-${i}` }))
+  const game = new SkillFactorio({ offer: { ok: true, cards } })
+  for (const card of cards) game.skills[card.id] = { id: card.id, summary: 'Real detail', constraints: [{ description: 'Observe live geometry' }] }
+  const loop = loadingLoop(game)
+  await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
+  assert.equal(game.detailRequests.length, SKILL_AUTOLOAD_LIMIT)
+  assert.deepEqual([...loop.loadedSkillContext.keys()], cards.slice(0, 3).map(card => card.id).reverse())
+  await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'amend_current', text: 'Revise' })
+  assert.equal(game.detailRequests.length, SKILL_AUTOLOAD_LIMIT)
+  loop.skillOffers.authoring = false
+  await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'continue_current', text: 'Continue' })
+  assert.equal(game.detailRequests.length, SKILL_AUTOLOAD_LIMIT, 'execution does not reload skills')
+
+  for (const raw of ['not json', '{}', '{"id":"wrong-pattern"}', '{"ok":false,"error":"missing"}']) {
+    const failed = loadingLoop({ command: async () => raw })
+    const offer = failed.skillOffers = { cards: [STEAM_CARDS[0]], authoring: true }
+    await loadOfferedSkillDetails(failed, offer)
+    assert.equal(failed.loadedSkillContext.size, 0)
+    assert.equal(failed.traced.filter(row => row.event === 'skill.loaded').length, 0)
+    assert.equal(failed.traced.filter(row => row.event === 'skill.load_skipped').length, 1)
+  }
+})
+
+test('late library responses cannot populate a replaced goal, request, actor, session or cancelled lineage', async () => {
+  for (const mutate of [
+    loop => { loop.skillOffers = null },
+    loop => { loop.traceRequest = { id: 'new_request' } },
+    loop => { loop.epoch.actor_id++ },
+    loop => { loop.epoch.epoch++ },
+    loop => { loop.epoch.session = 'new_session' },
+    loop => { loop.generation = 2 },
+    loop => { loop.agentContext = { lineageSequence: 2 } },
+  ]) {
+    const gate = deferred()
+    const loop = loadingLoop({ command: async () => gate.promise })
+    const offer = loop.skillOffers = { cards: [STEAM_CARDS[0]], authoring: true }
+    const job = loadOfferedSkillDetails(loop, offer)
+    mutate(loop)
+    gate.resolve(JSON.stringify({ id: STEAM_CARDS[0].id, summary: 'stale' }))
+    await job
+    assert.equal(loop.loadedSkillContext.size, 0)
+    assert.equal(loop.traced.length, 0)
+  }
+})
+
+test('the highest-ranked detail survives the total context ceiling with large supporting patterns', async () => {
+  const cards = Array.from({ length: 3 }, (_, i) => ({ ...STEAM_CARDS[0], id: `pattern-${i}` }))
+  const game = new SkillFactorio({ offer: { ok: true, cards } })
+  for (const card of cards) game.skills[card.id] = { id: card.id, constraints: Array.from({ length: 10 }, () => ({ description: 'x'.repeat(580) })) }
+  const loop = loadingLoop(game)
+  await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
+  const context = NpcAgentLoop.prototype.skillContext.call(loop)
+  assert.ok(context.length < 16500)
+  assert.match(context, /pattern-0/)
+  assert.doesNotMatch(context, /pattern-2/)
+})
+
+test('an old offer lookup cannot overwrite a newer search, even before detail loading', async () => {
+  const gate = deferred()
+  let calls = 0
+  const game = new SkillFactorio()
+  const command = game.command.bind(game)
+  game.command = text => text.includes('"offer"') && ++calls === 1 ? gate.promise : command(text)
+  const loop = loadingLoop(game)
+  const old = ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: 'Old goal' })
+  const fresh = await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
+  gate.resolve(JSON.stringify({ ok: true, cards: [{ ...STEAM_CARDS[0], id: 'stale-pattern' }] }))
+  assert.equal(await old, null)
+  assert.equal(loop.skillOffers, fresh)
+  assert.equal(loop.loadedSkillContext.has('stale-pattern'), false)
+})
+
+test('a timed-out detail read ends the boundary budget and a late response remains unloaded', async () => {
+  const gate = deferred()
+  let reads = 0
+  const loop = loadingLoop({ command: async () => { reads++; return gate.promise } })
+  const offer = loop.skillOffers = { cards: STEAM_CARDS, authoring: true }
+  await loadOfferedSkillDetails(loop, offer)
+  gate.resolve(JSON.stringify({ id: STEAM_CARDS[0].id, summary: 'late' }))
+  await Promise.resolve()
+  assert.equal(reads, 1)
+  assert.equal(loop.loadedSkillContext.size, 0)
+  assert.equal(loop.traced[0].data.reason, 'timeout')
 })
 
 test('the block is shown only while authoring or revising: gone after commit, back for an amendment, no per-step re-offer', async () => {

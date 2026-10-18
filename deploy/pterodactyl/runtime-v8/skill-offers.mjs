@@ -17,17 +17,20 @@
 //   traced but never reaches the prompt, and the call is not awaited, so it
 //   adds no planning latency. The path is shadow -> advisory ->
 //   part of the decision loop; flip SKILL_CHOICE_MODE, not a user setting.
-// - Loading full details stays explicit through getSkillDetails.
+// - The harness opens up to three ranked details at a planning boundary. Cards
+//   alone never count as loaded; the model may open other details explicitly.
 //
 // Seam for 2.8 (e), meaning-based scoring with a local embedding model: it
 // belongs on the mod side next to the keyword score (see skills.ts), always
 // falling back to keywords. Nothing here depends on LM Studio.
 
-import { luaString } from '../staging/structured-policy.mjs'
+import { luaString, toolCommand } from '../staging/structured-policy.mjs'
 import { getActivePlan, nearestShelfRefinementTarget, PLAN_STATUS } from './planning-state.mjs'
 
 export const SKILL_OFFERS_PREFIX = '[SKILL_OFFERS]'
 export const SKILL_OFFER_LIMIT = 5
+export const SKILL_AUTOLOAD_LIMIT = 3
+export const SKILL_AUTOLOAD_TIMEOUT_MS = 3000
 export const SKILL_CARD_MAX_CHARS = 600
 // The mod measures the goal in UTF-8 bytes (Lua strings are bytes).
 export const SKILL_OFFER_MAX_GOAL_BYTES = 500
@@ -162,7 +165,7 @@ export function needCounts(cards) {
 export function skillOfferBlock(offer) {
   if (!offer?.cards?.length) return ''
   const lines = [
-    `${SKILL_OFFERS_PREFIX} Skills matched to this goal by the harness (tags and live needs), best first. Needs: have = held or already placed; can craft = recipe enabled; locked = research first. These are cards, not loaded skills: call getSkillDetails with an id before following one. Guidance only; revalidate live state. You may still use findSkills for a different sub-problem.`,
+    `${SKILL_OFFERS_PREFIX} Skills matched to this goal by the harness (tags and live needs), best first. Needs: have = held or already placed; can craft = recipe enabled; locked = research first. These cards are discovery only. The harness opens bounded top-ranked details into [SKILL_CONTEXT]; for any other card call getSkillDetails before following it. Compare patterns for time savings and setup cost; no layout is required. Revalidate live state. You may still use findSkills for a different sub-problem.`,
     ...offer.cards.map((card, index) => `${index + 1}. ${renderSkillCard(card)}`),
   ]
   if (SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY && offer.advisor?.applied) {
@@ -345,10 +348,68 @@ async function rankWithJev(loop, offer, trigger) {
   if (SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY) await job
 }
 
+function skillReadFence(loop) {
+  const generation = loop.generation
+  const lineage = loop.agentContext?.lineageSequence
+  const request = loop.traceRequest
+  const { actor_id, epoch, session } = loop.epoch ?? {}
+  return () => loop.generation === generation && loop.agentContext?.lineageSequence === lineage
+    && loop.traceRequest === request && loop.epoch?.actor_id === actor_id
+    && loop.epoch?.epoch === epoch && loop.epoch?.session === session
+}
+
+// Static library reads have their own small planning-boundary cap; they do not
+// consume or replenish the model's live-world observation allowance. Never run
+// this during execution. A failed detail remains only a discovery card.
+export async function loadOfferedSkillDetails(loop, offer, current = skillReadFence(loop)) {
+  if (typeof loop.recordLoadedSkillToolResult !== 'function') return
+  const deadline = Date.now() + SKILL_AUTOLOAD_TIMEOUT_MS
+  for (const card of offer.cards.slice(0, SKILL_AUTOLOAD_LIMIT)) {
+    if (!current() || loop.skillOffers !== offer || !offer.authoring) return
+    if (loop.loadedSkillContext?.has(card.id)) continue
+    let timer
+    try {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) break
+      const raw = await Promise.race([
+        loop.rcon.command(toolCommand('getSkillDetails', { id: card.id })),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('skill_detail_timeout')), remaining) }),
+      ])
+      if (!current() || loop.skillOffers !== offer || !offer.authoring) return
+      const skill = loop.recordLoadedSkillToolResult('getSkillDetails', { id: card.id }, raw)
+      if (!skill) throw new Error('skill_detail_invalid')
+      // The task context keeps its most recent entries when it hits its size
+      // ceiling. Keep the highest-ranked offered detail last so lower-ranked
+      // supporting patterns cannot crowd it out of the actual planner prompt.
+      for (const ranked of offer.cards.slice(0, SKILL_AUTOLOAD_LIMIT).reverse()) {
+        const loaded = loop.loadedSkillContext.get(ranked.id)
+        if (!loaded) continue
+        loop.loadedSkillContext.delete(ranked.id)
+        loop.loadedSkillContext.set(ranked.id, loaded)
+      }
+      await loop.traceEvent('skill.context_loaded', {
+        skill_id: skill.id, revision: skill.revision,
+        loaded_skill_count: loop.loadedSkillContext.size, source: 'harness_planning_boundary',
+      })
+      await traceSkillLoaded(loop, skill, 'harness_planning_boundary')
+    }
+    catch (error) {
+      if (!current() || loop.skillOffers !== offer) return
+      const reason = error?.message === 'skill_detail_timeout' ? 'timeout' : 'lookup_failed'
+      await loop.traceEvent('skill.load_skipped', { offer_seq: offer.seq, skill_id: card.id, reason, source: 'harness_planning_boundary' })
+      if (reason === 'timeout') break
+    }
+    finally { clearTimeout(timer) }
+  }
+}
+
 // One complete search: ask the mod, keep the cards, trace, then Jev's shadow
 // pick. Never throws; a failure leaves no offer and says why.
 async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
   abortSkillChoice(loop, 'superseded_by_newer_search')
+  const fence = skillReadFence(loop)
+  const sequence = loop.skillSearchSequence = (loop.skillSearchSequence ?? 0) + 1
+  const current = () => fence() && loop.skillSearchSequence === sequence
   const query = utf8Prefix(goal, SKILL_OFFER_MAX_GOAL_BYTES)
   if (!query) {
     loop.skillOffers = null
@@ -358,10 +419,12 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
   let raw
   try { raw = await loop.rcon.command(skillOfferCommand(query)) }
   catch (error) {
+    if (!current()) return null
     loop.skillOffers = null
     await loop.traceEvent('skill.offer_skipped', { trigger, reason: 'lookup_failed', intent, error: text(error instanceof Error ? error.message : String(error), 200) })
     return null
   }
+  if (!current()) return null
   const parsed = parseSkillOffers(raw)
   if (!parsed.ok || parsed.cards.length === 0) {
     loop.skillOffers = null
@@ -394,6 +457,7 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
     })),
   })
   await rankWithJev(loop, offer, trigger)
+  await loadOfferedSkillDetails(loop, offer, current)
   return offer
 }
 
@@ -418,6 +482,7 @@ export async function ensureSkillOffers(loop, { memoryKey, intent, text: request
     if (current?.memoryKey === memoryKey) {
       current.authoring = true
       await loop.traceEvent('skill.offer_reshown', { trigger: 'revision', reason: 'revision_round', intent, offered_ids: current.cards.map(card => card.id) })
+      await loadOfferedSkillDetails(loop, current)
       return current
     }
     const objective = planningGoal(loop, memoryKey)?.goal?.objective ?? requestText
@@ -461,7 +526,7 @@ function offerRank(loop, id) {
   return index >= 0 ? index + 1 : undefined
 }
 
-export async function traceSkillLoaded(loop, skill) {
+export async function traceSkillLoaded(loop, skill, source = 'model_tool') {
   if (!skill?.id) return
   const rank = offerRank(loop, skill.id)
   await loop.traceEvent('skill.loaded', {
@@ -470,6 +535,7 @@ export async function traceSkillLoaded(loop, skill) {
     offered: rank !== undefined,
     offer_rank: rank,
     reason: rank !== undefined ? 'loaded_offered_skill' : 'loaded_unoffered_skill',
+    source,
   })
 }
 

@@ -283,6 +283,23 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
     expect(goal.terms).not.toContain('please')
   })
 
+  it('finds early smelting and rate options for the Run AA natural-resource factory goal without quantity-word noise', () => {
+    ensure_basic_skill_definitions()
+    const goal = 'Build a fully automated factory producing at least one automation-science-pack per game minute from natural resources.'
+    const cards = skill_cards_for_goal(goal, 5, fresh_world())
+    expect(cards.slice(0, 3).map(card => card.id)).toEqual(expect.arrayContaining(['direct-miner-smelting', 'scale-out-production-line']))
+    expect(cards.flatMap(card => card.matched)).not.toEqual(expect.arrayContaining(['text:least', 'text:one', 'text:game']))
+    expect(goal_search_terms(goal).terms).toContain('per-minute')
+    expect(skill_cards_for_goal('at least one per game', 5, fresh_world())).toEqual([])
+    expect(goal_search_terms('Wait one minute').terms).not.toContain('per-minute')
+    const detail = get_skill_definition('direct-miner-smelting')!
+    expect(detail.revision).toBe(4)
+    expect(detail.summary).toContain('save')
+    expect(detail.summary).toContain('small manual bootstrap may finish sooner')
+    expect(detail.examples.some(example => example.notes?.includes('efficiency option, not a prerequisite'))).toBe(true)
+    for (const check of ['resource coverage', 'output target', 'fuel', 'plate output']) expect(JSON.stringify(detail.examples)).toContain(check)
+  })
+
   // Eval (plan 2.8 d): fixed goal texts must put the expected skill in the top 3.
   const eval_goals: Array<[string, string]> = [
     ['Get steam power running so we have electricity', 'steam-power-bootstrap'],
