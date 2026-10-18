@@ -19,6 +19,7 @@ let fetchCalls = 0
 globalThis.fetch = async () => { fetchCalls++; throw new Error('inference forbidden in fresh-topology native fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
+const roleContracts = process.env.NPC_TEST_ROLE_CONTRACTS === '1'
 const transcript = []; const sent = []; const seen = {}; const identities = {}; const placements = {}
 let connection, ctx, setup
 const rcon = { command: async (command, options) => {
@@ -103,7 +104,11 @@ function contextFacts(messages, role) {
   seen[`${role}Context`] = facts
 }
 const model = new ScriptedModel()
-  .push('planner', 'sol:fresh-lean-world-context', messages => { contextFacts(messages, 'planner'); return reply([], { goal }) })
+  .push('planner', 'sol:fresh-lean-world-context', messages => { contextFacts(messages, 'planner'); return reply([], { goal,
+    ...(roleContracts ? { executionGuidance: [{ approach: 'Route steam around the shoreline to the held engine and power the inserter.',
+      rationale: 'Use the held engine and retain room for future expansion; extra capacity is optional.',
+      constraints: ['Preserve existing poles.', 'Build one engine for this requested result.'], skillIds: ['steam-power-bootstrap'] }] } : {}),
+  }) })
   .push('executor', 'luna:fresh-held-engine-and-topology', messages => {
     contextFacts(messages, 'executor')
     return reads([['getEntityStatus', { unit_number: setup.boiler }], ['getPlacementCandidates', { entity_name: 'steam-engine', connects_to: { unit_number: setup.boiler, storage_index: 2 }, limit: 8 }]])
@@ -226,6 +231,12 @@ try {
     OPENAI_API_BASEURL: 'https://fixture.example.test/v1', OPENAI_MODEL: `${PLANNER_MODEL},${EXECUTOR_MODEL}`, AI_API_METHOD: 'cli-proxy' })
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null, fetchImpl: async (_url, options) => {
     const body = JSON.parse(options.body)
+    if (roleContracts) {
+      const schema = body.tools.find(tool => tool.function.name === 'submitPlan').function.parameters
+      if (context.role === 'planner') { assert.equal(schema.properties.operations.maxItems, 0); assert.ok(schema.properties.executionGuidance) }
+      else { assert.equal(schema.properties.executionGuidance, undefined); assert.ok(schema.properties.plannerReview) }
+      assert.equal(context.completionProtocolVersion, 3, 'native candidate must enforce the production role contract')
+    }
     wires.push({ model: body.model, role: context.role, tool_choice: body.tool_choice, tools: body.tools?.length ?? 0 })
     assert.equal(body.tools.length, 41); assert.ok(body.tools.some(tool => tool.function?.name === 'getPumpSitePreparation'))
     assert.equal(body.tool_choice, context.allowTools === false ? 'none' : 'auto')
@@ -233,7 +244,8 @@ try {
     return new Response(JSON.stringify({ choices: [{ finish_reason: response.tool_calls ? 'tool_calls' : 'stop', message: { role: 'assistant', ...response } }],
       usage: { prompt_tokens: 2000, completion_tokens: 120 } }), { status: 200 })
   } })
-  const world = recoveryWorld({ game: rcon, model, decisionScript, agentRoleConfig: bridge.config, roleProvider: (messages, context) => bridge.roleProvider(messages, context) })
+  const world = recoveryWorld({ game: rcon, model, decisionScript, agentRoleConfig: bridge.config, roleProvider: (messages, context) => bridge.roleProvider(messages, context),
+    completionProtocolVersion: roleContracts ? 3 : 2 })
   world.modelRequests = wires
   const status = await deploymentStatus(rcon, { requireAllowed: true })
   ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
@@ -266,7 +278,12 @@ try {
   assert.equal(world.memory.currentPlan(KEY), undefined)
   assert.ok(world.named('step.candidate_placement_receipt_checked').length >= 4)
   const deduplicated = world.named('context.skill_refs_deduplicated')
-  assert.ok(deduplicated.length > 0, 'loaded skill refs must yield packet space to live topology in this regression')
+  if (roleContracts) {
+    assert.equal(world.agent.completionProtocolVersion, 3)
+    assert.ok(canonicalSteps[0].execution_guidance)
+    assert.equal(world.named('plan.delegation_committed').length, 1)
+  }
+  else assert.ok(deduplicated.length > 0, 'loaded skill refs must yield packet space to live topology in this regression')
   assert.ok(deduplicated.every(row => row.request_id && row.reason === 'loaded_details_already_in_prefix' && row.removed_chars > 0 && row.packet_char_limit === 6000))
   assert.deepEqual(model.remaining, []); assert.deepEqual(jevContractLog.filter(row => !row.ok), []); assert.equal(fetchCalls, 0)
   assert.equal(world.modelRequests[0].model, PLANNER_MODEL); assert.ok(world.modelRequests.slice(1).every(row => row.model === EXECUTOR_MODEL))

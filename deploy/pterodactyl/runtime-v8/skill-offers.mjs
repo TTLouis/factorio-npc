@@ -516,6 +516,7 @@ export async function refreshSkillOffersAtShelfPickup(loop, planning) {
 
 // The block, only while the planner is authoring or revising a plan.
 export function skillOffersContext(loop) {
+  if (loop.completionProtocolVersion >= 3 && loop.agentContext?.role === 'executor') return ''
   const offer = loop.skillOffers
   if (!offer || !offer.authoring || offer.memoryKey !== loop.activePlanKey?.()) return ''
   return skillOfferBlock(offer)
