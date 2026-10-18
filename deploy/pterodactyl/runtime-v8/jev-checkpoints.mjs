@@ -865,6 +865,7 @@ export class JevCheckpoints {
       wake_tokens: wakeTokens,
       observation_rounds: observationRounds.length,
       observation_round_tokens: observationRounds.reduce((total, round) => total + round.tokens, 0),
+      ...(wake.prefetched ? { prefetched_lookups: wake.prefetched } : {}),
     }
     tracker.wake_failed = error
     await this.emitWakeMeasured(tracker)
@@ -1298,6 +1299,15 @@ export class JevCheckpoints {
   }
 
   // --- what the running flows tell us ---------------------------------------------------------------------
+
+  // Facts the harness read and handed over itself (the post-batch facts): not the agent's lookups, so they never
+  // count as observation the agent needed, and no Jev saving claims them. A C4 wake reports them next to its own
+  // lookups. (A restage observation window has always closed by then: its first admitted operation ends it.)
+  noteProvided(names) {
+    for (const tracker of this.trackers.values()) {
+      if (tracker.kind === 'c4' && tracker.wake?.open) tracker.wake.prefetched = (tracker.wake.prefetched ?? 0) + names.length
+    }
+  }
 
   // Called for every fresh observation tool the agent ran (the loop's recordJevObservations).
   noteObservations(names) {

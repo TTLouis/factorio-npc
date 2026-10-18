@@ -4,6 +4,9 @@ import test from 'node:test'
 import { EXECUTOR_ROLE, PLANNER_ROLE } from './agent-roles.mjs'
 import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 import { POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_PREFIX, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
+import { lastUserOutsideTail } from './prompt-prefix.mjs'
+
+const COMPLETION = '[MOD] Autorio operation batch completed: placed offshore-pump'
 
 // Run Y (2026-10-17) pump step shapes: after each batch the executor's next round only
 // re-read its inventory and the recipes it had already looked up for the step.
@@ -97,17 +100,94 @@ test('after a batch the executor gets its inventory and the step recipes it alre
   assert.equal(rcon.commands.slice(before).filter(command => !command.includes('sgluna_deployment')).length, 3)
 
   newDecision(agent, 1)
+  agent.messages.push({ role: 'user', content: COMPLETION })
+  const history = agent.messages.length
   agent.deliverPostBatchFacts(bundle)
-  const delivered = agent.messages.at(-1)
-  assert.equal(delivered.role, 'user')
-  assert.ok(delivered.content.startsWith(POST_BATCH_FACTS_PREFIX))
-  assert.match(delivered.content, /getRecipeDetails \{"item_or_recipe":"boiler","requested_count":1\} => /)
-  assert.equal(agent.freshObservationSinceContinuation, true)
+  // A tail block, not history: the [MOD] receipt stays the instruction this round answers.
+  assert.equal(agent.messages.length, history)
+  const sent = agent.providerMessages()
+  const facts = sent.at(-2)
+  assert.ok(facts.content.startsWith(POST_BATCH_FACTS_PREFIX))
+  assert.match(facts.content, /getRecipeDetails \{"item_or_recipe":"boiler","requested_count":1\} => /)
+  assert.equal(sent.at(-1).content, COMPLETION)
+  assert.equal(lastUserOutsideTail(sent).content, COMPLETION)
+  // Harness reads are not the decision's own observation.
+  assert.equal(agent.freshObservationSinceContinuation, false)
 
   // If the model asks again anyway, it is an unchanged fact: answered live, no budget spent.
   await agent.handleToolBatch({ tool_calls: [recipeCall('pump-again', 'offshore-pump'), call('inventory-again', 'getInventoryItems')] })
   assert.equal(agent.observationBudgetRemaining, 1)
   assert.equal(agent.observationDecisionForced, false)
+})
+
+test('the facts drop out of the prompt once a batch is sent, the step changes, or the next receipt has none', async () => {
+  const { agent } = await executorAgent()
+  await agent.handleToolBatch({ tool_calls: [recipeCall('pump', 'offshore-pump')] })
+  const bundle = await agent.postBatchFactBundle('continue_current')
+  const shown = () => agent.providerMessages().some(message => String(message.content).startsWith(POST_BATCH_FACTS_PREFIX))
+  agent.deliverPostBatchFacts(bundle)
+  assert.equal(shown(), true)
+  // Still shown after the model's own tool round, and round detection still finds the receipt.
+  agent.messages.push({ role: 'user', content: COMPLETION })
+  agent.messages.push({ role: 'assistant', content: '', tool_calls: [call('look', 'getResearchStatus')] })
+  agent.messages.push({ role: 'tool', tool_call_id: 'look', content: '{}' })
+  assert.equal(shown(), true)
+  assert.equal(lastUserOutsideTail(agent.providerMessages()).content, COMPLETION)
+
+  agent.setStep('connect-steam-power')
+  assert.equal(shown(), false)
+  agent.setStep('place-offshore-pump')
+  assert.equal(shown(), true)
+  agent.agentContext.role = PLANNER_ROLE
+  assert.equal(shown(), false, 'a planner on the same plan and step never sees the executor\'s facts')
+  agent.agentContext.role = EXECUTOR_ROLE
+  assert.equal(shown(), true)
+  agent.deliverPostBatchFacts(undefined)
+  assert.equal(shown(), false)
+
+  // A batch sent since the read hides them for good, even once its receipt clears the in-flight flag
+  // and before the next continuation replaces them.
+  agent.deliverPostBatchFacts(bundle)
+  agent.noteWorldMutation({ sent: true })
+  assert.equal(shown(), false)
+  agent.noteWorldMutation()
+  agent.batchInFlight = false
+  assert.equal(shown(), false)
+  // A bundle read before a mutation is never held.
+  agent.deliverPostBatchFacts(bundle)
+  assert.equal(agent.postBatchFacts, undefined)
+
+  // A reset (cancel, new request) drops them.
+  agent.deliverPostBatchFacts(await agent.postBatchFactBundle('continue_current'))
+  assert.equal(shown(), true)
+  agent.reset()
+  assert.equal(agent.postBatchFacts, undefined)
+})
+
+test('the real step key follows the active plan step and the actor epoch', async () => {
+  const { agent } = await executorAgent()
+  delete agent.postBatchStepKey
+  let plan = { plan_id: 'plan-1', active_step_index: 0, steps: [{ step_id: 'place-offshore-pump' }] }
+  agent.memory.planningState = () => ({ plans: [plan], active_plan_id: plan.plan_id })
+  assert.equal(agent.postBatchStepKey(),postBatchStepKey('npc:standalone_character:18:3', 'plan-1', 'place-offshore-pump'))
+  agent.deliverPostBatchFacts(await agent.postBatchFactBundle('continue_current'))
+  assert.ok(agent.postBatchFactsText().startsWith(POST_BATCH_FACTS_PREFIX))
+  plan = { ...plan, active_step_index: 1, steps: [...plan.steps, { step_id: 'connect-steam-power' }] }
+  assert.equal(agent.postBatchFactsText(), '')
+  plan = { ...plan, active_step_index: 0 }
+  agent.epoch = { ...agent.epoch, epoch: 4 }
+  assert.equal(agent.postBatchFactsText(), '', 'a replaced actor never sees the old actor\'s facts')
+})
+
+test('the tool trace marks a re-read of a shown fact as prefetched', async () => {
+  const { agent } = await executorAgent()
+  const traced = []
+  agent.traceEvent = async (event, data) => { traced.push({ event, data }) }
+  agent.deliverPostBatchFacts(await agent.postBatchFactBundle('continue_current'))
+  await agent.handleToolBatch({ tool_calls: [call('inventory-again', 'getInventoryItems')] })
+  const row = traced.find(item => item.event === 'tool.call' && item.data.name === 'getInventoryItems')
+  assert.equal(row?.data.prefetched, true)
+  assert.equal(row?.data.unchanged_fact, true)
 })
 
 test('recipes read for an earlier step are not predicted for the next one', async () => {

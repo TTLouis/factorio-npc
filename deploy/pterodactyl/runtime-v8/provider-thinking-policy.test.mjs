@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { POST_BATCH_FACTS_PREFIX } from './post-batch-facts.mjs'
+import { insertTailBlock } from './prompt-prefix.mjs'
 import { providerRequest, selectReasoningPolicy } from './provider.mjs'
 
 const VALID_PLAN = JSON.stringify({ chatMessage: '', plan: [], currentStep: 0, operations: [] })
@@ -55,6 +57,20 @@ test('successful deterministic completion continuation uses low effort with thin
   assert.equal(seen.body.max_tokens, 3000)
   assert.equal(message._sglunaProvider.reasoning_effort, 'low')
   assert.equal(message._sglunaProvider.reasoning_policy_reason, 'deterministic_completion')
+})
+
+test('the post-batch facts tail block leaves the completion round policy unchanged, also after the model\'s own tool round', async () => {
+  const facts = { role: 'user', content: `${POST_BATCH_FACTS_PREFIX}\ngetInventoryItems {} => {"items":[]}` }
+  const base = [{ role: 'system', content: 'system' }, { role: 'user', content: '[CHAT] tester: build a furnace' }]
+  const toolRound = [{ role: 'assistant', content: '', tool_calls: [{ id: 'look', type: 'function', function: { name: 'getResearchStatus', arguments: '{}' } }] }, { role: 'tool', tool_call_id: 'look', content: '{}' }]
+  const policy = ({ seen, message }) => [seen.body.reasoning_effort, JSON.stringify(seen.body.thinking), seen.body.max_tokens, message._sglunaProvider.reasoning_policy_reason]
+  const plain = await captureRequest([...base, { role: 'user', content: COMPLETION }], { allowTools: true })
+  const withFacts = await captureRequest(insertTailBlock([...base, { role: 'user', content: COMPLETION }], facts), { allowTools: true })
+  assert.deepEqual(policy(withFacts), policy(plain))
+  assert.equal(withFacts.message._sglunaProvider.reasoning_policy_reason, 'deterministic_completion')
+  const afterTools = await captureRequest([...base, { role: 'user', content: COMPLETION }, ...toolRound], { allowTools: true })
+  const afterToolsWithFacts = await captureRequest(insertTailBlock([...base, { role: 'user', content: COMPLETION }, ...toolRound], facts), { allowTools: true })
+  assert.deepEqual(policy(afterToolsWithFacts), policy(afterTools))
 })
 
 test('Jev post-step reanchor stays compact and uses low reasoning', async () => {

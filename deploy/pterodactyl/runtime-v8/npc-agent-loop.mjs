@@ -197,7 +197,7 @@ import {
   retireGoalRequirements,
 } from './goal-requirements.mjs'
 import { UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
-import { POST_BATCH_FACT_CHARS, POST_BATCH_ROUTES, postBatchFactsMessage, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
+import { POST_BATCH_FACT_CHARS, POST_BATCH_ROUTES, postBatchFactsContext, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -3189,6 +3189,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.pendingInteractionAmendment = null
     this.pendingAmendmentConversationSeq = undefined
     this.pendingBlindWait = null
+    this.postBatchFacts = undefined
     // D2: a reset (actor replacement, death, a new request) ends whatever the deferred handoff facts were waiting for.
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
@@ -4657,13 +4658,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   compactWorkingContext() {
     if (this.compactionDeferred) return
     const overBudget = () => this.messages.length > this.maxWorkingMessages
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this) // 2.8 hook: injected skill and requirements text counts
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this) - this.postBatchFactsText().length // 2.8 hook: injected skill and requirements text counts
     // 2.9: every fold rewrites the digest and so breaks the provider's cached
     // prefix from the digest onward. Folding only down to the ceiling would
     // fold on every round once the working context is full; folding to a low
     // watermark makes the rounds in between pure appends.
     const overLowWater = () => this.messages.length > this.maxWorkingMessages * COMPACTION_LOW_WATERMARK
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > (this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this)) * COMPACTION_LOW_WATERMARK
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > (this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this) - this.postBatchFactsText().length) * COMPACTION_LOW_WATERMARK
     if (!overBudget()) return
     while (overLowWater()) {
       const newest = this.messages.findLastIndex(message => message.role === 'assistant' && Array.isArray(message.tool_calls))
@@ -4708,7 +4709,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // for a whole logical task, so it stays in the fixed prefix.
     const offered = insertTailBlock(messages, skillOffersContext(this) ? { role: 'user', content: skillOffersContext(this) } : undefined) // 2.8 hook
     // Live game requirements for the goal's targets: tail too, shown only while a plan is authored or revised.
-    const tailed = insertTailBlock(offered, goalRequirementsContext(this) ? { role: 'user', content: goalRequirementsContext(this) } : undefined)
+    const requirementsTailed = insertTailBlock(offered, goalRequirementsContext(this) ? { role: 'user', content: goalRequirementsContext(this) } : undefined)
+    // The facts read after the last batch receipt: tail, for the rounds of the decision that receipt started.
+    const postBatchFacts = this.postBatchFactsText()
+    const tailed = insertTailBlock(requirementsTailed, postBatchFacts ? { role: 'user', content: postBatchFacts } : undefined)
     const skillContext = this.skillContext()
     if (!skillContext) return tailed
     // Skill context belongs to the fixed prefix, which ends before the first
@@ -6501,8 +6505,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { routed: true, conditionWait: waiting.condition_wait }
   }
 
-  // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
-  // what the machines hold now and that elapsed time proves nothing. Never throws except on an epoch change.
   postBatchStepKey() {
     const plan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     return postBatchStepKey(unchangedFactScope(this.epoch), plan?.plan_id, plan?.steps?.[plan.active_step_index]?.step_id)
@@ -6515,6 +6517,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const stepKey = this.postBatchStepKey()
     if (!stepKey) return undefined
     this.stepFactWorkingSet ??= new StepFactWorkingSet()
+    const mutation = this.worldMutationSeq ?? 0
     const planned = [{ name: 'getInventoryItems', args: {} }, ...this.stepFactWorkingSet.recipes(stepKey)]
     const reads = []
     const skipped = []
@@ -6546,23 +6549,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       chars,
       ...(skipped.length ? { skipped } : {}),
     })
-    return reads.length ? { reads } : undefined
+    return reads.length ? { reads, mutation } : undefined
   }
 
-  // Delivered with the continuation, these count as live reads the model received: a repeat of one is
-  // unchanged-fact (no budget), and the decision has fresh evidence as if the model had read them itself.
+  // Held for the decision this continuation starts and shown as a tail block each round (postBatchFactsContext).
+  // A repeat of one of these reads is an unchanged fact (no budget). They are harness reads, not the model's: they
+  // never count as the decision's own fresh observation, and a C4 wake counts them apart from its lookups.
   deliverPostBatchFacts(factBundle) {
-    this.postBatchPrefetched = undefined
+    this.postBatchFacts = undefined
     const reads = factBundle?.reads
-    if (!Array.isArray(reads) || reads.length === 0) return
-    this.messages.push({ role: 'user', content: postBatchFactsMessage(reads) })
-    this.unchangedFactReads ??= new UnchangedFactReads()
+    if (!Array.isArray(reads) || reads.length === 0 || factBundle.mutation !== (this.worldMutationSeq ?? 0)) return
     const scope = unchangedFactScope(this.epoch)
+    this.postBatchFacts = { reads, scope, stepKey: this.postBatchStepKey(), mutation: factBundle.mutation }
+    this.unchangedFactReads ??= new UnchangedFactReads()
     for (const read of reads) this.unchangedFactReads.recordDelivered(scope, read.signature, read.output)
-    this.postBatchPrefetched = new Set(reads.map(read => read.signature))
-    this.freshObservationSinceContinuation = true
+    this.jev?.noteProvided?.(reads.map(read => read.name))
   }
 
+  postBatchFactsText() {
+    return postBatchFactsContext(this, { scope: unchangedFactScope(this.epoch), stepKey: this.postBatchStepKey(), role: this.agentContext?.role, mutation: this.worldMutationSeq ?? 0 })
+  }
+
+  // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
+  // what the machines hold now and that elapsed time proves nothing. Never throws except on an epoch change.
   async blindWaitReceiptFacts(receipt) {
     const types = receipt?.view?.last_completed_batch?.task_types
     const waitOnly = Array.isArray(types) && types.length > 0 && types.every(type => type === 'waiting')
@@ -13073,7 +13082,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         args: entry.args,
         cached: admittedCached[index],
         ...(admittedUnchanged[index] ? { unchanged_fact: true } : {}),
-        ...(this.postBatchPrefetched?.has(entry.signature) ? { prefetched: true } : {}),
+        ...(this.postBatchFacts?.reads.some(read => read.signature === entry.signature) && this.postBatchFactsText() ? { prefetched: true } : {}),
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
       await this.traceEvent('tool.call', toolTrace)

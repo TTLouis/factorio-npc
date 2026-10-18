@@ -1278,10 +1278,26 @@ test('deciding C4 keeps fact reads ungated: a read the executor asks for in the 
   const measured = world.rows('c4.wake_measured')[0]
   assert.equal(measured.data.fresh_lookups, 1)
   assert.equal(measured.data.observation_rounds, 1, 'the fact read is an observation round')
+  assert.equal(measured.data.prefetched_lookups, 1, 'the harness-read inventory is reported apart from the agent\'s lookups')
   // The agent still chose to look something up, so observation WAS needed: the direct answer disagrees and saves nothing.
   const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
   assert.equal(scored.data.agreed, false)
   assert.equal(scored.data.saving, undefined)
+})
+
+test('deciding C4: a fact read the post-batch facts did not cover is still admitted by the tier override', async () => {
+  const researchObservation = () => ({ tool_calls: [{ id: 'call_research', index: 0, type: 'function', function: { name: 'getResearchStatus', arguments: '{}' } }] })
+  const world = harness({ script: [plannerSlice(), researchObservation(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS, game: new FactsFactorio() })
+  forceStage(world, 'c4_next_step', 'deciding', { samples: [2500] })
+  await runSliceWithContractedStep2(world)
+  assert.equal(world.rows('c4.route_applied')[0].data.mode, 'deciding')
+  const read = world.rows('tool.call').find(row => row.data.name === 'getResearchStatus')
+  assert.equal(read.data.prefetched, undefined)
+  const admitted = world.rows('observation.tier_admitted')
+  assert.equal(admitted.length, 1)
+  const measured = world.rows('c4.wake_measured')[0].data
+  assert.equal(measured.fresh_lookups, 1)
+  assert.equal(measured.prefetched_lookups, 1, 'the inventory the harness read is counted apart')
 })
 
 test('cancelling a request aborts an in-flight U11 Jev call and abandons the judgments still waiting for an outcome; nothing counts as agreement', async () => {
