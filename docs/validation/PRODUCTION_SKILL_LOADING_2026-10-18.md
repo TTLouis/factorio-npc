@@ -31,10 +31,39 @@ Dependencies: existing skill library, offer boundary and task-local skill contex
 No other task owns these changes. Static library reads carry no live-world proof
 or mutation authority; Jev skill ranking stays shadow-only.
 
-- [ ] Reproduce with deterministic scripted loop and library fixtures
-- [ ] Implement bounded loading and relevance/guidance correction
-- [ ] Offline Docker gate, payload checks and original-code negative controls
+- [x] Reproduce with deterministic scripted loop and library fixtures
+- [x] Implement bounded loading and relevance/guidance correction
+- [x] Offline Docker gate, payload checks and original-code negative controls
 - [ ] Independent review and affected rechecks
 - [ ] Integrate, fresh merged gate and exact-head CI
 
-Checkpoint: implementation in progress; no autonomous gameplay claim.
+Candidate code `19395ce5`; separate payload repin `22f3ff0d` points at that
+immutable source. `bash scripts/test-local.sh all` exited 0: 2,599 runtime tests,
+1,234 mod tests, typecheck, Lua build and generated-Lua checks. The final pass did
+not enable snapshot updates. The intentional prompt snapshot update changes only
+body/provider-request hashes; context hashes, message counts and trace shape stay
+unchanged. Payload build/check, nine payload tests and ESLint on all three changed
+TypeScript files exited 0, using existing `npc-dev` with network disabled.
+
+Evidence: ignored `test-results/production-skills/` contains complete logs and
+exit records. The same standalone first-planner assertion passes on the candidate
+and fails on the original skill-offer module because the detail context is empty.
+The native-library regression fails with both original source files because the
+first three omit direct smelting. Both controls use unchanged new assertions;
+neither failure is an import/build error. No provider or Jev credentials/calls.
+
+The task's scripted Run AA case checks actual detail text, request-correlated
+load/commit traces and next-goal isolation. Additional cases cover detail failure,
+timeout, large-context priority, replaced offers, actor/epoch/session/request and
+generation/lineage changes. Existing shelf/revision, budget, uncertainty and
+handoff suites remain green. The curated direct-smelting revision is now 4 so
+existing unedited library copies receive the guidance through normal seeding.
+
+Owned test containers use the runner's logged `npc-static-*` scopes and the exact
+`npc-production-skills-{positive,original,mod-original,payload}-01a14fa4` names.
+All are removed after their run, including expected negative failures; no Compose
+project, persistent volume or new image was created.
+
+Checkpoint: independent review and integration pending. These checks prove
+context delivery and matching; autonomous layout choice and sustained red science
+still require a separately authorized live trial.
