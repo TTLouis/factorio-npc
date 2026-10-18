@@ -405,7 +405,7 @@ test('the shelf pickup and ceiling hooks are wired in the live loop (not only im
   const wake = source.indexOf("route: 'next_shelf_slice'")
   const hook = source.indexOf('await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion)')
   assert.ok(wake > 0 && hook > wake && hook - wake < 400, 'the shelf pickup search runs right after the next_shelf_slice wake')
-  assert.match(source, /return \[skillOffersContext\(this\), goalRequirementsContext\(this\), this\.postBatchFactsText\(\)\]/)
+  assert.match(source, /\[SKILL_OFFERS_PREFIX\]: \(\) => skillOffersContext\(this\)/)
 })
 
 test('the working-character ceiling reserves room for the loaded skill and the loop-state tail blocks', async () => {

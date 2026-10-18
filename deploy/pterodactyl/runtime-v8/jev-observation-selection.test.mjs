@@ -264,8 +264,8 @@ test('Jev cannot defer fact reads, admits one discovery read, and still bounds r
 })
 
 test('spending the read budget closes the observation phase without a recovery record', async () => {
-  // Run Y: 63 of 70 recovery.classified rows were this normal close, and it became the request's recovery
-  // record that later recovery decisions and failure snapshots read.
+  // Run Y (docs/NPC_EXECUTOR_RUN_AHEAD_DESIGN_2026-10-18.md): 63 of 70 recovery.classified rows were this normal
+  // close, and it became the request's recovery record that later recovery decisions and failure snapshots read.
   const rcon = new ObservationSelectionRcon()
   const agent = new NpcAgentLoop({
     rcon,
@@ -294,7 +294,7 @@ test('spending the read budget closes the observation phase without a recovery r
   assert.equal(agent.observationBudgetRemaining, 0)
   assert.equal(agent.observationDecisionForced, true)
   assert.match(agent.messages.at(-1).content, /observation phase for this decision is now closed/)
-  const closed = events.filter(row => row.event === 'observation.phase_closed')
+  const closed = events.filter(row => row.event === 'observation.budget_closed')
   assert.equal(closed.length, 1)
   assert.equal(closed[0].data.reason_code, 'jev_observation_budget_complete')
   assert.equal(events.some(row => row.event === 'recovery.classified'), false)

@@ -259,7 +259,8 @@ test('prefix report: names why each call stopped sharing the previous prefix, wi
 })
 
 test('the tail-block registry is the one list of markers, detection skips and loop-state blocks', () => {
-  assert.deepEqual(TAIL_MARKERS, TAIL_BLOCKS.map(block => block.marker))
+  // Pinned: this order is the order promptLayout reports tail_markers in.
+  assert.deepEqual(TAIL_MARKERS, ['[SKILL_OFFERS]', '[REQUIREMENTS]', '[DECISION_ENVELOPE]', '[PLANNING_LOD]', '[STEERING]', '[CONTROL_DECISION_STATE]', TOPOLOGY_PREFIX, POST_BATCH_FACTS_MARKER])
   assert.equal(new Set(TAIL_MARKERS).size, TAIL_MARKERS.length, 'markers are unique')
   for (const block of TAIL_BLOCKS) {
     assert.ok(['loop_state', 'provider_round', 'provider'].includes(block.rendered), block.marker)

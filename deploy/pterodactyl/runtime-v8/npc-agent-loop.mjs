@@ -178,7 +178,7 @@ import {
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
-import { insertTailBlock } from './prompt-prefix.mjs'
+import { insertTailBlock, TAIL_BLOCKS } from './prompt-prefix.mjs'
 import { repairControlJson } from './control-json-repair.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
@@ -196,7 +196,7 @@ import {
   retireGoalRequirements,
 } from './goal-requirements.mjs'
 import { UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
-import { POST_BATCH_FACT_CHARS, POST_BATCH_ROUTES, postBatchFactsContext, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
+import { POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_ROUTES, postBatchFactsContext, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
 import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -6566,11 +6566,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return postBatchFactsContext(this, { scope: unchangedFactScope(this.epoch), stepKey: this.postBatchStepKey(), role: this.agentContext?.role, mutation: this.worldMutationSeq ?? 0 })
   }
 
-  // The 'loop_state' tail blocks of prompt-prefix.mjs TAIL_BLOCKS that apply this round, in prompt order:
+  // The 'loop_state' tail blocks of prompt-prefix.mjs TAIL_BLOCKS that apply this round, in table order:
   // skill offers and goal requirements while a plan is authored or revised, then the facts read after the
-  // last batch receipt. providerMessages() places them and compaction reserves room for them.
+  // last batch receipt. providerMessages() places them and compaction reserves room for them. A loop_state
+  // row without a renderer here throws on the first round.
   roundTailBlocks() {
-    return [skillOffersContext(this), goalRequirementsContext(this), this.postBatchFactsText()].filter(Boolean)
+    const render = {
+      [SKILL_OFFERS_PREFIX]: () => skillOffersContext(this),
+      [REQUIREMENTS_PREFIX]: () => goalRequirementsContext(this),
+      [POST_BATCH_FACTS_MARKER]: () => this.postBatchFactsText(),
+    }
+    return TAIL_BLOCKS.filter(block => block.rendered === 'loop_state').map(block => render[block.marker]()).filter(Boolean)
   }
 
   // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
@@ -13365,7 +13371,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // The decision's read budget was spent by admitted reads: the observation phase ends as designed. That is
     // not a recovery, so it neither becomes the request's recovery record nor reads as one in the trace.
     if (details?.reason_code === 'jev_observation_budget_complete') {
-      await this.traceEvent('observation.phase_closed', { reason_code: details.reason_code, reason: details.reason, tools_enabled: false })
+      await this.traceEvent('observation.budget_closed', { reason_code: details.reason_code, reason: details.reason, tools_enabled: false })
       return
     }
     if (this.traceRequest) this.traceRequest.recovery = { ...(this.traceRequest.recovery ?? {}), ...details }
