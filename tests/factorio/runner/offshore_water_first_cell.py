@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Provider-free native regression: water facts precede candidate-only pumps.
 
-All terrain/items are declared test fixtures. Hidden tile reads are read-only;
-the single native mine_tile call below is a harness mechanics probe, never an
-NPC terrain mutation API. Zero humans, native speed one, real candidate build.
+All terrain/items are declared test fixtures. Hidden tile reads are read-only.
+Native mine_tile and superforced blueprint calls below are harness mechanics
+probes, never NPC terrain APIs. A separate fixture exposes water afterwards;
+this lane does not claim autonomous landfill removal. Zero humans, speed one.
 """
 import argparse
 import json
@@ -61,7 +62,7 @@ def run(client, results):
     require(premature.get('ok') is False and premature.get('code') == 'water_search_required', premature)
     require(snapshot('after water-first refusal') == before, {'before': before})
 
-    for args in ["{'offshore-pump'}", f"{{'offshore-pump',{fixture['ox']+2.5},{fixture['oy']+0.5},4}}"]:
+    for args in ["{entity_name='offshore-pump'}", f"{{entity_name='offshore-pump',x={fixture['ox']+2.5},y={fixture['oy']+0.5},direction=4}}"]:
         preflight = command(lua_json(remote_call('autorio_preflight', 'operation', "'place_entity'," + args)), 'generic pump preflight')
         require(preflight.get('code') == 'placement_candidate_required' and preflight.get('ok') is False, preflight)
     for coordinates in ['', f",{fixture['ox']+2.5},{fixture['oy']+0.5},4"]:
@@ -78,10 +79,38 @@ def run(client, results):
     covered = tool('get_placement_candidates', request, 'covered water cannot become candidate authority')
     require(covered.get('code') == 'water_source_not_exposed', covered)
 
-    exposed = lua(f"local p={{x={fixture['ox']+5},y={fixture['oy']}}}; local before=s.get_tile(p); "
-                  "local old={name=before.name,hidden_tile=before.hidden_tile}; local mined=a.mine_tile(before); local after=s.get_tile(p); "
-                  "rcon.print(helpers.table_to_json({before=old,mined=mined,after=after.name,fluid=after.prototype.fluid and after.prototype.fluid.name}))", 'native landfill mining mechanics')
-    require(exposed.get('mined') is True and exposed.get('after') == 'water' and exposed.get('fluid') == 'water', exposed)
+    approach = lua(f"local accepted=remote.call('autorio_operations','walk_to_position',{fixture['ox']+3.5},{fixture['oy']+0.5},0.5); "
+                   "rcon.print(helpers.table_to_json({accepted=accepted}))", 'approach covered source within tile reach')
+    require(approach.get('accepted') is True or (isinstance(approach.get('accepted'), list) and approach['accepted'][0] is True), approach)
+    wait_until_idle(lambda label: command(operation_status_command(), label), 'approach covered source', 30)
+
+    hand_mining = lua(f"local p={{x={fixture['ox']+6},y={fixture['oy']}}}; local before=s.get_tile(p); "
+                  "local old={name=before.name,hidden_tile=before.hidden_tile}; local items_before=a.get_item_count('landfill'); "
+                  "local proxy=before.order_deconstruction(a.force); local marked=before.to_be_deconstructed(a.force); "
+                  "local mined=a.mine_tile(before); local after=s.get_tile(p); "
+                  "rcon.print(helpers.table_to_json({before=old,marked=marked,proxy=proxy and proxy.valid,mined=mined,after=after.name,"
+                  "landfill_before=items_before,landfill_after=a.get_item_count('landfill'),fluid=after.prototype.fluid and after.prototype.fluid.name}))", 'native landfill mining mechanics')
+    # Native 2.0.77 hand tile mining does not implement Ctrl+Shift building.
+    # Keep this limitation explicit instead of treating prototype minability as
+    # proof that a standalone physical removal operation is implemented.
+    require(hand_mining.get('marked') is True and hand_mining.get('mined') is False and hand_mining.get('after') == 'landfill'
+            and hand_mining.get('landfill_after') == hand_mining.get('landfill_before'), hand_mining)
+    superforced = lua(f"local p={{x={fixture['ox']+4.5},y={fixture['oy']+0.5}}}; local t=s.get_tile({fixture['ox']+5},{fixture['oy']}); "
+                     "local inv=game.create_inventory(1); local b=inv[1]; b.set_stack{name='blueprint'}; "
+                     "b.set_blueprint_entities{{entity_number=1,name='offshore-pump',position={0,0},direction=4}}; "
+                     "local ghosts=b.build_blueprint{surface=s,force=a.force,position=p,build_mode=defines.build_mode.superforced}; "
+                     "local out={ghosts=#ghosts,cover=t.name,hidden_tile=t.hidden_tile,marked_for_removal=t.to_be_deconstructed(a.force),"
+                     "tile_proxies=#s.find_entities_filtered{type='deconstructible-tile-proxy'},rules=prototypes.entity['offshore-pump'].tile_buildability_rules}; "
+                     "for _,e in pairs(ghosts) do e.destroy() end; for _,e in pairs(s.find_entities_filtered{type='deconstructible-tile-proxy'}) do e.destroy() end; "
+                     "inv.destroy(); rcon.print(helpers.table_to_json(out))", 'native superforced removal hints')
+    require(superforced.get('ghosts') == 1 and superforced.get('cover') == 'landfill' and superforced.get('marked_for_removal') is True
+            and superforced.get('tile_proxies', 0) >= 1 and len(superforced.get('rules') or []) == 2, superforced)
+    # Begin an explicit exposed-shore fixture for the independent candidate
+    # construction proof. No assertion below credits the NPC with tile removal.
+    exposed = lua(f"local t={{}}; for x={fixture['ox']+5},{fixture['ox']+8} do for y={fixture['oy']-2},{fixture['oy']+2} do "
+                  "t[#t+1]={name='water',position={x,y}} end end; s.set_tiles(t,true,false,true); "
+                  f"local t=s.get_tile({fixture['ox']+5},{fixture['oy']}); rcon.print(helpers.table_to_json({{fixture_only=true,name=t.name,fluid=t.prototype.fluid and t.prototype.fluid.name}}))", 'exposed shore fixture')
+    require(exposed.get('fixture_only') is True and exposed.get('name') == 'water', exposed)
     fluid = tool('get_fluid_source_tiles', "{fluid_name='water',search_radius=12,limit=8}", 'refresh exposed water')
     require(len(fluid.get('samples') or []) > 0, fluid)
     choices = tool('get_placement_candidates', request, 'candidate search after water')
@@ -89,7 +118,7 @@ def run(client, results):
     candidate = choices['candidates'][0]
     accepted = lua("local ok,message=remote.call('autorio_operations','place_candidate'," + repr(choices['candidate_set_id']) + ',' + repr(candidate['id']) + "); "
                    "rcon.print(helpers.table_to_json({accepted=ok,message=message}))", 'candidate pump build')
-    require(accepted.get('accepted') is True, accepted)
+    require(accepted.get('accepted') is True or (isinstance(accepted.get('accepted'), list) and accepted['accepted'][0] is True), accepted)
     status = wait_until_idle(lambda label: command(operation_status_command(), label), 'candidate pump build', 30)
     receipt = (status.get('basic_operation') or {}).get('last_result') or {}
     require(receipt.get('completed') is True, receipt)
@@ -97,7 +126,9 @@ def run(client, results):
                 "name=p.name,position=p.position,source_tile=p.get_fluid_source_tile(),source_fluid=p.get_fluid_source_fluid(),"
                 "humans=#game.connected_players,speed=game.speed,inventory=a.get_main_inventory().get_contents()}))", 'built native pump')
     require(final.get('source_fluid') == 'water' and final.get('humans') == 0 and final.get('speed') == 1, final)
-    evidence.update(status='pass', fluid=fluid, covered=covered, exposed=exposed, choices=choices, final=final)
+    evidence.update(status='pass', fluid=fluid, covered=covered, native_hand_mining=hand_mining,
+                    native_superforced_hints=superforced, exposed_fixture=exposed, choices=choices, final=final,
+                    autonomous_landfill_removal_proven=False)
     output.write_text(json.dumps(evidence, indent=2))
     print('PASS: offshore-water-first: hidden hints, water-first admission, generic bypass refusal and native candidate build', flush=True)
 
