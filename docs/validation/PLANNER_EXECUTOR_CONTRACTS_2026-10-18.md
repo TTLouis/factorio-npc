@@ -22,7 +22,7 @@ committed semantics, bounded recovery and persistent budgets remain authoritativ
 
 - [x] Implement role contracts and focused context
 - [x] Scripted regressions and offline gates
-- [ ] Separate code and installer payload commits
+- [x] Separate code and installer payload commits
 - [ ] Independent review (required before integration)
 - [ ] Integration by the integration checkout owner
 
@@ -53,10 +53,11 @@ Validation (logs under ignored test-results/planner-executor-contracts/):
   runtime-revision.log, exit 0, 2,619/2,619. Both role schemas run through the
   loop; actionless replacements retain the verified prefix and commit-time grant
   check, while Revise still requires a fresh human chat origin.
-- Current-config ESLint: exit 0, lint-final.log. Final added fixture checked
-  separately before commit.
+- Current-config ESLint: exit 0, lint-candidate.log, every changed JavaScript
+  file in the committed feature range. Payload generator/test lint also passed.
 - Factorio 2.0.77 native fresh-topology with NPC_TEST_ROLE_CONTRACTS=1:
-  native-final/run.log and lane-results/fresh-topology-proof.json; PASS, zero
+  native-committed/run.log and lane-results/fresh-topology-proof.json, exact
+  feature SHA fba2a419728b597fb7c0f6aca7f7bdc6be1c5e97; PASS, zero
   connected humans, no live inference, actual fluid connection/placement,
   sustained generation under load, immutable committed brief. Python 92/92 PASS.
 - Archived original runtime is a negative control: its action-capable planner
@@ -64,7 +65,12 @@ Validation (logs under ignored test-results/planner-executor-contracts/):
 - First native image attempt omitted deployment source preparation and failed
   setup before the objective; retained under native-candidate/. Corrected builder
   uses the repository's source-preparer and guard, then the native case passed.
+- Installer generation, --check, nine payload tests and generator/test lint:
+  payload.log, exit 0. Immutable payload source pinned to fba2a419; SHA256
+  01125551dfca41df20395f64bc222222ae09d8fd4df47966d7b4fafdec6a4021.
 
-Owned runs have exact container CID and cleanup logs. Only the task image tag
-is disposable; cached dependency/Factorio base images belong to the workspace.
-Independent review and integration remain pending with the integration owner.
+Owned runs have exact container CID and cleanup logs. All owned containers and
+the task image tag/remaining build image were removed and absence verified
+(image-cleanup.log). Shared dependency/Factorio images were retained. Evidence
+stays in this task checkout. Independent review and integration remain pending
+with the integration owner; this side chat did not push or write that checkout.
