@@ -23,6 +23,7 @@
 //     operations or into plan steps.
 
 import { authoredCompletionContractSupported, completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
+import { storedExecutionGuidance } from './role-contracts.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   authorizationHasContent,
@@ -922,6 +923,7 @@ function sanitizeStep(raw, { planId, planVersion, sequence }) {
     step_id: stepId,
     description,
     completion_contract: contract ?? null,
+    ...(storedExecutionGuidance(source.execution_guidance) ? { execution_guidance: storedExecutionGuidance(source.execution_guidance) } : {}),
     ...(source.completion_mode === 'deterministic' || source.completion_mode === 'semantic'
       ? { completion_mode: source.completion_mode, ...(source.completion_mode === 'semantic' ? { semantic_rationale: text(source.semantic_rationale, 600) } : {}) }
       : {}),
@@ -1682,6 +1684,7 @@ export function planTrackerView(state, { planId } = {}) {
         index,
         description: step.description,
         completion_contract: clone(step.completion_contract),
+        ...(step.execution_guidance ? { execution_guidance: clone(step.execution_guidance) } : {}),
         ...(step.completion_mode ? { completion_mode: step.completion_mode, ...(step.completion_mode === 'semantic' ? { semantic_rationale: step.semantic_rationale } : {}) } : {}),
         ...(step.contract_status ? { contract_status: step.contract_status } : {}),
         ...(step.contract_binding ? { contract_binding: clone(step.contract_binding) } : {}),

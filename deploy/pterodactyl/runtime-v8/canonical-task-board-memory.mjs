@@ -1,5 +1,6 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
+import { storedExecutionGuidance } from './role-contracts.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
@@ -165,8 +166,10 @@ function completionPolicyFields(entry) {
   return undefined
 }
 
-function proposalSteps(descriptions, entries, offset = 0) {
-  return descriptions.map((description, index) => ({ description, ...completionPolicyFields(entries?.[offset + index]) }))
+function proposalSteps(descriptions, entries, offset = 0, guidance) {
+  return descriptions.map((description, index) => ({ description, ...completionPolicyFields(entries?.[offset + index]),
+    ...(storedExecutionGuidance(guidance?.[offset + index]) ? { execution_guidance: storedExecutionGuidance(guidance[offset + index]) } : {}),
+  }))
 }
 
 // Real evidence the legacy board holds for a step it closed. Only kinds the
@@ -1226,7 +1229,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
   }
 
-  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, developmentMode, stepCompletions, replacePrecommit = false } = {}) {
+  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, developmentMode, stepCompletions, executionGuidance, replacePrecommit = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
     let goalAdmitted = false
@@ -1297,7 +1300,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         ...(developmentMode ? { development_mode: developmentMode } : {}),
         // A replaced draft keeps its lineage (including a carried verified
         // prefix), so its steps exclude what the predecessor already holds.
-        steps: draftSteps.map((step, index) => ({ ...step, ...completionPolicyFields(stepCompletions?.[policyOffset + index]) })),
+        steps: draftSteps.map((step, index) => ({ ...step, ...completionPolicyFields(stepCompletions?.[policyOffset + index]),
+          ...(storedExecutionGuidance(executionGuidance?.[policyOffset + index]) ? { execution_guidance: storedExecutionGuidance(executionGuidance[policyOffset + index]) } : {}),
+        })),
       })
     }
     this.planningByNpc.set(key, planning)
@@ -1554,7 +1559,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       action_scope: 'recovery',
       reason: { code: facts.reason_code, detail: facts.detail, evidence_refs: facts.evidence_refs },
       impacts: {},
-      steps: proposalSteps(suffix, draft?.stepCompletions, incoming.length - suffix.length),
+      steps: proposalSteps(suffix, draft?.stepCompletions, incoming.length - suffix.length, draft?.executionGuidance),
       ...(Array.isArray(draft?.roadmapNodeIds) ? { roadmap_node_ids: draft.roadmapNodeIds } : {}),
       ...(draft?.developmentMode ? { development_mode: draft.developmentMode } : {}),
     }, { requestId, now })
@@ -2114,7 +2119,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         development_mode: active.development_mode,
         // The draft keeps its lineage. On a revised plan the board leads with
         // the predecessor's verified steps, which are not this plan's steps.
-        steps: draftStepsFromBoard(state.task_board, active),
+        steps: draftStepsFromBoard(state.task_board, active).map((step, index) => ({ ...step,
+          ...(active.steps[index]?.execution_guidance ? { execution_guidance: active.steps[index].execution_guidance } : {}),
+        })),
       })
       this.planningByNpc.set(key, refreshed)
       this.syncPlanningState(key, state)
@@ -2343,7 +2350,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         source: 'user',
         approved_by: requestInfo.sender,
         plan_id: blockedPlan.plan_id,
-        steps: proposalSteps(steps, plan?.stepCompletions, plan.plan.length - steps.length),
+        steps: proposalSteps(steps, plan?.stepCompletions, plan.plan.length - steps.length, plan?.executionGuidance),
         ...(Array.isArray(plan?.roadmapNodeIds) ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
         ...(plan?.developmentMode ? { development_mode: plan.developmentMode } : {}),
       })
@@ -2396,6 +2403,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         roadmapNodeIds: plan?.roadmapNodeIds,
         developmentMode: plan?.developmentMode,
         stepCompletions: plan?.stepCompletions,
+        executionGuidance: plan?.executionGuidance,
         replacePrecommit: Array.isArray(plan?.stepCompletions) && !userRevisionApproved && !supersededPlanId && !replacementAccepted,
       })
       this.seedRunFromLegacy(key, result.state)
@@ -2454,7 +2462,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       type: PLANNING_EVENT.DRAFT_CREATED,
       now,
       origin: 'user_replan',
-      steps: proposalSteps(steps, plan?.stepCompletions),
+      steps: proposalSteps(steps, plan?.stepCompletions, 0, plan?.executionGuidance),
       ...(Array.isArray(plan?.roadmapNodeIds) ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
       ...(plan?.developmentMode ? { development_mode: plan.developmentMode } : {}),
     })

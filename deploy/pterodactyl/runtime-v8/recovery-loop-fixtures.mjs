@@ -476,7 +476,7 @@ export class ScriptedModel {
 
 // --- the agent, the session ----------------------------------------------------------------------------------------------------
 
-export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory(), agentRoleConfig, roleProvider, decisionScript } = {}) {
+export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory(), agentRoleConfig, roleProvider, decisionScript, completionProtocolVersion = 2 } = {}) {
   const trace = []
   let lastTraceAt = 0
   const agentLogs = []
@@ -485,7 +485,7 @@ export function recoveryWorld({ game, model, stateFile = null, memory = new Cano
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,
-    completionProtocolVersion: 2,
+    completionProtocolVersion,
     replacementWake: true,
     provider: answersStepContract((messages, context) => roleProvider ? roleProvider(messages, context, model) : model.provide(messages, context)),
     ...(agentRoleConfig ? { agentRoleConfig } : {}),

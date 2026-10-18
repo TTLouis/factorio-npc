@@ -1796,6 +1796,8 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
         text: `active_step: ${activeIndex + 1} of ${plan.steps.length} ${step.step_id} | ${oneLine(step.description, limits.stepChars)} | batches=${progress?.batches_attempted ?? 0} accepted_for_close=${evidence}`,
       })
       const contract = contractText(step, limits.contractChars)
+      if (role === 'executor' && step.execution_guidance) records.push({ key: 'execution_brief', block: 'step',
+        text: `execution_guidance (planner choice; revalidate live facts): ${JSON.stringify(step.execution_guidance)}` })
       if (contract) records.push({ key: 'contract', block: 'step', drop: 'contract', text: `active_step_contract: ${contract}` })
       const held = plan.execution?.receipts?.[step.step_id]
       const tail = (Array.isArray(held) ? held : []).slice(-limits.receiptTail)

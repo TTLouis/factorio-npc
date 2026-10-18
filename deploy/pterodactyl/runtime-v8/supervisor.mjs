@@ -3438,7 +3438,7 @@ export class Session {
         )
       : undefined
     this.agent = new NpcAgentLoop({
-      completionProtocolVersion: 2,
+      completionProtocolVersion: 3,
       replacementWake: true, // MW5: player-objective grant at admission and the replacement wake
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,

@@ -111,6 +111,80 @@ function world(script, { game = gameWithMissingFurnace(), intents = [], agentOpt
 
 const chatText = calls => calls.flat().map(message => (typeof message.content === 'string' ? message.content : '')).join('\n')
 
+// Production v3 keeps the same replacement grant/verified-prefix path while
+// moving the first actual action to the executor.
+function planningOnly(message) {
+  const plan = JSON.parse(message.content)
+  return planReply({ ...plan, operations: [], executionGuidance: plan.plan.map(description => ({ approach: description,
+    rationale: 'Preserve the requested result with the bounded current approach.', constraints: [], skillIds: [] })) })
+}
+
+function strictReplacementWorld({ revokeAtCommit = false } = {}) {
+  const w = world([planningOnly(plannerDraft()), planReply({ plan: IRON_PLAN, currentStep: 0, operations: [gather('iron-ore', 10)] }),
+    observation(), ...staleTwice(), planningOnly(replacementDraft()), memory => {
+      const plan = getActivePlan(memory.planningState(KEY))
+      return planReply({ stepId: plan.steps[0].step_id, operations: [placeFurnace()] })
+    }], { agentOptions: { completionProtocolVersion: 3 } })
+  if (revokeAtCommit) {
+    const original = w.memory.commitReplacementPlan.bind(w.memory)
+    w.memory.commitReplacementPlan = (key, options) => {
+      w.memory.revokeAuthorization(key, w.memory.currentGoalGrant(key).grant_id, { reason: 'fixture_revoked_before_commit' })
+      return original(key, options)
+    }
+  }
+  return w
+}
+
+test('protocol 3 replacement delegates an empty planner draft, preserves its verified prefix and admits only executor actions', async () => {
+  const w = strictReplacementWorld()
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const first = getActivePlan(w.planning())
+  w.game.inventory['iron-ore'] = 10
+  const result = await w.agent.completed()
+  const replacement = getActivePlan(w.planning())
+  assert.equal(replacement.plan_version, 2)
+  assert.equal(replacement.derived_from_plan_id, first.plan_id)
+  assert.deepEqual(replacement.carried_forward_evidence, [`${first.plan_id}:${first.steps[0].step_id}`])
+  assert.ok(replacement.steps[0].execution_guidance)
+  assert.equal(w.named('plan.replacement_committed').length, 1)
+  assert.equal(w.named('plan.delegation_committed').length, 2)
+  assert.equal(w.game.mutations.length, 2)
+  assert.equal(result.operations[0].name, 'place_entity')
+  assert.equal(w.calls.length, 7)
+})
+
+test('protocol 3 empty replacement still rechecks a revoked grant at commit and sends no successor action', async () => {
+  const w = strictReplacementWorld({ revokeAtCommit: true })
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  await assert.rejects(w.agent.completed(), /replacement authorization|grant.*revoked/)
+  assert.equal(w.game.mutations.length, 1)
+  assert.equal(w.named('plan.replacement_committed').length, 0)
+  assert.equal(w.calls.length, 6)
+})
+
+test('protocol 3 explicit user revision can commit without planner actions and keeps the verified prefix', async () => {
+  const w = world([planningOnly(plannerDraft()), planReply({ plan: IRON_PLAN, currentStep: 0, operations: [gather('iron-ore', 10)] }),
+    observation(), ...staleTwice(), planningOnly(replacementDraft()), memory => {
+      const held = getActivePlan(memory.planningState(KEY))
+      return planReply({ stepId: held.steps[0].step_id, operations: [placeFurnace()] })
+    }], { intents: ['new_goal', 'amend_current'], agentOptions: { completionProtocolVersion: 3, replacementWake: false } })
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const original = getActivePlan(w.planning())
+  w.game.inventory['iron-ore'] = 10
+  await w.agent.completed()
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  const result = await w.agent.request('Place a new furnace to finish the requested gears.', { sender: 'Louis' })
+  const revised = getActivePlan(w.planning())
+  assert.equal(revised.plan_version, 2)
+  assert.equal(revised.derived_from_plan_id, original.plan_id)
+  assert.deepEqual(revised.carried_forward_evidence, [`${original.plan_id}:${original.steps[0].step_id}`])
+  assert.ok(revised.steps[0].execution_guidance)
+  assert.equal(result.operations[0].name, 'place_entity')
+  assert.equal(w.game.mutations.length, 2)
+  assert.equal(w.named('plan.replacement_wake').length, 0)
+})
+
 // --- the grant at goal admission -------------------------------------------------------------------------------------
 
 test('MW5: a chat new_goal is admitted with a player_task grant for its own result, all five scopes, unbound to an actor', async () => {

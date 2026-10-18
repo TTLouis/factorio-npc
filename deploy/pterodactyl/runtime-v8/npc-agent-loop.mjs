@@ -20,6 +20,7 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
+import { EXECUTION_ONLY_PROMPT, normalizeExecutionGuidance, normalizePlannerReview, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
@@ -3345,10 +3346,75 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // executor suffix for the executor. The prefix is the same for every conversation of
   // a role, so a restage within a role keeps the provider's cached prefix.
   rolePrefixMessages(role) {
+    if (this.completionProtocolVersion >= 3) return [{ role: 'system', content: `${roleSystemPrompt(this.systemPrompt, role)}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}` }]
     const plannerDelegation = this.completionProtocolVersion >= 2 && this.executorHandoffEnabled && role !== EXECUTOR_ROLE
       ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step: a deterministic checkpoint for the first step and {kind:"deterministic"} for each later step, whose checkpoint the harness requests when that step is about to start. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
       : ''
     return [{ role: 'system', content: roleSystemPrompt(this.systemPrompt, role === EXECUTOR_ROLE ? EXECUTOR_ROLE : PLANNER_ROLE) + plannerDelegation }]
+  }
+
+  roleContractError(code, message) {
+    const error = new AgentLoopError(message)
+    error.code = code
+    error.failureClass = 'plan_category'
+    return error
+  }
+
+  validatePlannerRoleOutput(plan) {
+    if (this.completionProtocolVersion < 3 || this.agentContext.role !== PLANNER_ROLE) return
+    if (Array.isArray(plan.operations) && plan.operations.length > 0) throw this.roleContractError('planner_cannot_mutate',
+      'The planner chooses strategy and completion conditions, never gameplay operations. Resubmit operations:[] with the plan and aligned executionGuidance; the executor chooses actions after commit.')
+    if (plan.plannerReview !== undefined) throw this.roleContractError('invalid_planner_review', 'Only an executor may request plannerReview')
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    if (Array.isArray(plan.plan) && plan.plan.length > 0 && !FROZEN_PLAN_STATUSES.has(held?.status) && plan.assessmentOnly !== true) {
+      let guidance
+      try { guidance = normalizeExecutionGuidance(plan.executionGuidance, plan.plan.length) }
+      catch (cause) { throw this.roleContractError('invalid_execution_guidance', cause.message) }
+      const missing = guidance.flatMap(brief => brief.skillIds).filter(id => !this.loadedSkillContext?.has(id))
+      if (missing.length > 0) throw this.roleContractError('invalid_execution_guidance', `Load getSkillDetails before selecting skills: ${[...new Set(missing)].join(', ')}`)
+    }
+  }
+
+  async handlePlannerReview(plan, stepId) {
+    const review = normalizePlannerReview(plan.plannerReview)
+    if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE || plan.operations?.length !== 0 || plan.semanticCompletion || plan.checkpoint) {
+      throw this.roleContractError('invalid_planner_review', 'plannerReview must be an executor decision with empty operations and no completion claim')
+    }
+    const before = await this.assertCurrent()
+    const key = this.activePlanKey()
+    const held = getActivePlanningPlan(this.memory.planningState?.(key))
+    const activeStep = held?.steps?.[held.active_step_index]
+    const alias = this.memory.currentPlan?.(key)?.task_board?.active_step_id
+    if (!activeStep || !stepId || ![activeStep.step_id, alias].includes(stepId)
+      || this.batchInFlight || this.memory.pendingOperation?.(key) || before.idle !== true) {
+      throw this.roleContractError('invalid_planner_review', 'Review requires the exact active step and an idle safe point with no unsettled operation')
+    }
+    const requestId = this.traceRequest?.id
+    await this.traceEvent('executor.planner_review_requested', { request_id: requestId, plan_id: held.plan_id,
+      step_id: activeStep.step_id, reason: review.reason, rationale: review.rationale,
+      authority: 'advisory_only', world_blocker_proven: false })
+    // Only an already-established structural blocker and current grant can
+    // launch a replacement. Model rationale never becomes blocker evidence.
+    if (held.status === PLAN_STATUS.BLOCKED) {
+      const woke = await this.wakePlannerForReplacement({ trigger: 'executor_review' })
+      if (woke !== undefined) return woke
+    }
+    await this.assertCurrent()
+    if (held.status !== PLAN_STATUS.BLOCKED) this.memory.pausePlan(key, `executor_review:${review.reason}`, { pause_class: PAUSE_CLASS.GUARD })
+    const chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
+    this.memory.remember(key, this.requestInfo.turnId, { sender: this.requestInfo.sender, user: this.requestInfo.text,
+      assistant: `[Executor advisory; unverified] ${chatMessage}`, operations: [] })
+    await this.persistState()
+    const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId })
+    if (returned.returned) this.messages.push({ role: 'user', content: `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}` })
+    this.active = false
+    const state = this.memory.currentPlan?.(key)
+    await this.traceEvent('request.completed', { request_id: requestId, outcome: 'planner_review_required', reason: review.reason,
+      planner_returned: returned.returned, chat_message: chatMessage, usage: this.traceRequest?.usage })
+    this.traceRequest = null
+    return { chatMessage, operations: [], plan: state?.plan ?? [], currentStep: state?.current_step ?? 0,
+      epoch: before.epoch, actorId: before.actor_id, goalId: state?.goal_id, goalStatus: state?.status,
+      taskBoard: visibleTaskBoard(state?.task_board), blocker: { class: 'planner_review_required', reason: review.reason } }
   }
 
   // The one place that decides whether the conversation may be swapped right now: not
@@ -3373,7 +3439,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const held = planningState ?? this.memory.planningState?.(this.activePlanKey())
     if (!held?.goal?.goal_id) return undefined
     // Loaded-skill refs ride the step block (ids only; the text loads through getSkillDetails).
-    const skillIds = this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.keys()].slice(-3) : []
+    const active = getActivePlanningPlan(held)
+    const guidance = active?.steps?.[active.active_step_index]?.execution_guidance
+    const skillIds = packetRole === EXECUTOR_ROLE && guidance ? guidance.skillIds
+      : this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.keys()].slice(-3) : []
     const state = skillIds.length > 0 && held.loaded_skill_ids === undefined ? { ...held, loaded_skill_ids: skillIds } : held
     return buildHandoffPacket({
       planningState: state,
@@ -3388,7 +3457,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       jevFacts, // U11 advisory: bounded facts Jev's observation families add (never replacing a mandatory record)
       jevHints,
       executorFacts: packetRole === EXECUTOR_ROLE ? executorFacts : undefined, // D2: harness-read facts for a fresh executor, labelled fresh / stale / historical
-      topology,
+      // Reserve the native geometry slot; callProvider replaces it with fresh
+      // topology. A mandatory execution brief must not crowd that slot out.
+      topology: this.completionProtocolVersion >= 3 ? undefined : topology,
+      ...(this.completionProtocolVersion >= 3 ? { limits: { maxChars: 6000 - TOPOLOGY_LIMITS.chars } } : {}),
       // A staged user amendment belongs to the planner: it rides the packet of a planner restage (C5,
       // C1/C2) so the restage that replaces the conversation holding its text does not drop it. The
       // executor never gets it.
@@ -3580,6 +3652,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // sent) once delegation is active or the config runs the roles on
   // different models, where roleProvider needs it to pick the planner model.
   providerRoleFields(attribution) {
+    if (this.completionProtocolVersion >= 3) return { role: attribution?.role ?? this.agentContext.role }
     const fields = this.agentContext.providerContextFields(attribution)
     if (fields.role === undefined && attribution?.role === PLANNER_ROLE && this.agentContext.rolesDiffer) return { role: PLANNER_ROLE }
     return fields
@@ -4058,7 +4131,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }) }
     }
     if (held?.status !== PLAN_STATUS.BLOCKED || held.plan_id !== wake.plan_id) return undefined
-    if (!Array.isArray(plan.operations) || plan.operations.length === 0 || !Array.isArray(plan.plan) || plan.plan.length === 0) {
+    if (!Array.isArray(plan.operations) || (this.completionProtocolVersion < 3 && plan.operations.length === 0) || !Array.isArray(plan.plan) || plan.plan.length === 0) {
       wake.repairs += 1
       if (wake.repairs > 2) {
         await this.traceEvent('plan.replacement_refused', { request_id: requestId, plan_id: wake.plan_id, grant_id: wake.grant_id, reason: 'draft_without_operations_after_repair', stage: 'draft' })
@@ -4069,7 +4142,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }) }
       }
       await this.traceEvent('plan.replacement_draft_repair', { request_id: requestId, plan_id: wake.plan_id, reason: 'replacement_draft_needs_operations', attempt: wake.repairs })
-      this.messages.push({ role: 'user', content: '[HARNESS] A replacement draft needs the full step list with stepCompletions for every step (a checkpoint for the step at currentStep, {kind:"deterministic"} after it), currentStep set to the first unfinished step, and the operations for that step. This reply did not have them, so nothing was changed.' })
+      this.messages.push({ role: 'user', content: `[HARNESS] A replacement draft needs the full step list with stepCompletions for every step (a checkpoint for the step at currentStep, {kind:"deterministic"} after it), currentStep set to the first unfinished step, and ${this.completionProtocolVersion >= 3 ? 'aligned executionGuidance with operations:[] for executor delegation' : 'the operations for that step'}. This reply did not have them, so nothing was changed.` })
       return { result: await this.runTurn() }
     }
     const current = await this.assertCurrent()
@@ -4427,6 +4500,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (next.roadmapNodeIds !== undefined) { strip('roadmapNodeIds'); ignored.push('roadmapNodeIds'); reasons.push('roadmap_is_planner_authority') }
     if (next.developmentMode !== undefined) { strip('developmentMode'); ignored.push('developmentMode'); reasons.push('development_mode_is_planner_authority') }
     if (next.assessmentOnly !== undefined) { strip('assessmentOnly'); ignored.push('assessmentOnly'); reasons.push('assessment_only_is_planner_authority') }
+    if (next.executionGuidance !== undefined) { strip('executionGuidance'); ignored.push('executionGuidance'); reasons.push('execution_guidance_is_planner_authority') }
     // A reply bound by step id carries the committed plan list and the committed active index downstream, so every
     // later consumer sees one consistent identity. A semantic claim that moves currentStep one forward keeps its own
     // meaning (the claim closes the active step), so that form is left as the model wrote it.
@@ -4640,7 +4714,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   skillContext() {
     if (!(this.loadedSkillContext instanceof Map) || this.loadedSkillContext.size === 0) return ''
-    const skills = [...this.loadedSkillContext.values()]
+    const separatedExecution = this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE
+    const held = separatedExecution ? getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey())) : undefined
+    const guidance = held?.steps?.[held.active_step_index]?.execution_guidance
+    const skills = [...this.loadedSkillContext.values()].filter(skill => !guidance || guidance.skillIds.includes(skill.id))
+    if (skills.length === 0) return ''
     while (skills.length > 1 && JSON.stringify(skills).length > SKILL_CONTEXT_MAX_CHARS) skills.shift()
     const payload = JSON.stringify(skills)
     if (payload.length > SKILL_CONTEXT_MAX_CHARS) return ''
@@ -7471,6 +7549,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   plannerOnlyDraftCandidate(plan) {
     const planning = this.memory.planningState?.(this.activePlanKey())
     const held = getActivePlanningPlan(planning)
+    // A recorded Revise choice belongs to a fresh human chat request only;
+    // supervisor recovery cannot inherit it (revisionSafeRequestInfo).
+    const userRevision = held?.status === PLAN_STATUS.BLOCKED && held.blocker?.user_choice?.choice === 'revise'
+      && this.requestInfo?.origin === 'chat' && Boolean(this.requestInfo.sender?.trim()) && Boolean(this.requestInfo.text?.trim())
+    const replacementIndex = held?.status === PLAN_STATUS.BLOCKED && (this.replacementWake || userRevision)
+      ? held.active_step_index : held?.carried_forward_evidence?.length ?? 0
     // The one bounded planner recovery may author the next slice without an
     // initial batch. Revalidation sees its DRAFT after recordPlan, so retain
     // the same exception only while its immediate predecessor is completed.
@@ -7480,12 +7564,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         || (held?.status === PLAN_STATUS.DRAFT && planning.plans.at(-2)?.status === PLAN_STATUS.COMPLETED))
     return this.completionProtocolVersion >= 2 && this.executorHandoffEnabled
       && this.agentContext.role === PLANNER_ROLE && !!this.requestInfo
-      && plan.operations.length === 0 && plan.plan.length > 0 && plan.currentStep === 0
+      && plan.operations.length === 0 && plan.plan.length > 0
+      && (plan.currentStep === 0 || (this.completionProtocolVersion >= 3 && plan.currentStep === replacementIndex))
       && plan.stepCompletions?.length === plan.plan.length
       && plan.assessmentOnly !== true
       && !plan.semanticCompletion && !providerBlockerReason(plan)
-      && !this.currentPendingAmendment() && !held?.replacement
-      && (!held || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED].includes(held.status))
+      && (this.completionProtocolVersion >= 3 || (!this.currentPendingAmendment() && !held?.replacement))
+      && (!held || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED].includes(held.status)
+        || (this.completionProtocolVersion >= 3 && held.status === PLAN_STATUS.BLOCKED && (!!this.replacementWake || userRevision)))
       && !this.genericRecoveryDecisionActive
       && (completedSliceRecovery || (!this.actionOmissionRepairActive && !this.freshContextRecoveryInProgress))
   }
@@ -11673,9 +11759,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // This describes a proposal transport, never permission to execute. Tool
       // closure limits observations; normal parsing/preflight/admission still
       // validate operations supplied in assistant JSON.
-      operationSubmission: { channel: allowTools ? 'submitPlan_or_assistant_json' : 'assistant_json',
+      operationSubmission: { channel: this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE ? 'planning_only' : allowTools ? 'submitPlan_or_assistant_json' : 'assistant_json',
         validation: 'required', grantsAuthority: false },
       role: this.agentContext.role, targetedReadEligible: allowTools === false && eligible && !used, targetedAllowanceUsed: used,
+      ...(this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE && identity.step?.execution_guidance
+        ? { executionGuidance: identity.step.execution_guidance } : {}),
       resourceSearchNames: this.targetedResourceSearchNames(),
       ...(allowTools === false && eligible && !used && this.targetedWaterSearchBasis(identity) ? {
         targetedWaterSearch: { tool: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 256, limit: 8 } },
@@ -12073,7 +12161,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // front. Plan at outline level; each step is refined when it is active.
     if (providerMessagesOverride === undefined
       && (triggerSource === 'new_goal' || ['deep', 'strategic'].includes(this.reasoningBudgetOverride))) {
-      providerMessages = [...providerMessages, { role: 'user', content: PLANNING_LOD_GUIDANCE }]
+      providerMessages = [...providerMessages, { role: 'user', content: this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
+        ? '[PLANNING_LOD] Decide approach, dependencies, build order, quantities, completion conditions and the per-step executionGuidance. Consider relevant loaded skills and setup cost/time savings. Defer exact operation arguments and mutable placement geometry to the executor; operations must be [].' : PLANNING_LOD_GUIDANCE }]
     }
     // An assembly invariant, not a repair: a split tool exchange is a harness
     // bug, and sending it only turns that bug into a provider 400.
@@ -12118,6 +12207,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     try {
       message = await this.provider(providerMessages, {
         ...this.providerRoleFields(attribution),
+        ...(this.completionProtocolVersion >= 3 ? { completionProtocolVersion: this.completionProtocolVersion } : {}),
         epoch: current.epoch,
         actorId: current.actor_id,
         round,
@@ -12591,12 +12681,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let semanticCompletion
     let timeReview
     let stepId
+    let executionGuidance
+    let plannerReview
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
       try { raw = JSON.parse(message.content) }
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        this.validatePlannerRoleOutput(raw)
+        if (Object.hasOwn(raw, 'executionGuidance')) {
+          try { executionGuidance = normalizeExecutionGuidance(raw.executionGuidance, raw.plan?.length) }
+          catch (cause) { throw this.roleContractError('invalid_execution_guidance', cause.message) }
+        }
+        if (Object.hasOwn(raw, 'plannerReview')) {
+          try { plannerReview = normalizePlannerReview(raw.plannerReview) }
+          catch (cause) { throw this.roleContractError('invalid_planner_review', cause.message) }
+          if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE || raw.operations?.length !== 0 || raw.semanticCompletion || raw.checkpoint || !raw.stepId) {
+            throw this.roleContractError('invalid_planner_review', 'plannerReview requires an executor active stepId, empty operations and no completion claim')
+          }
+        }
         if (Object.prototype.hasOwnProperty.call(raw, 'assessmentOnly')) {
           if (typeof raw.assessmentOnly !== 'boolean') {
             const error = new AgentLoopError('assessmentOnly must be boolean')
@@ -12678,7 +12782,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         // 2.6: the model's answer to a time review; traced, never executed.
         if (Object.prototype.hasOwnProperty.call(raw, 'timeReview')) timeReview = parseTimeReview(raw.timeReview)
-        if (assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition || stepId !== undefined
+        if (executionGuidance || plannerReview || assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition || stepId !== undefined
           || Object.prototype.hasOwnProperty.call(raw, 'timeReview')
           || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
@@ -12696,6 +12800,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             goal: _goal,
             timeReview: _timeReview,
             stepId: _stepId,
+            executionGuidance: _executionGuidance,
+            plannerReview: _plannerReview,
             ...base
           } = raw
           // With the step id given, plan and currentStep are not needed from the executor.
@@ -12720,6 +12826,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (goalDefinition) plan.goalDefinition = goalDefinition
     if (timeReview) plan.timeReview = timeReview
     if (stepId !== undefined) plan.stepId = stepId
+    if (executionGuidance) plan.executionGuidance = executionGuidance
+    if (plannerReview) plan.plannerReview = plannerReview
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
       // on; refused in commitPlan, it failed the request (live, 2026-09-25).
@@ -12730,6 +12838,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     this.enforceGoalDefinition(plan)
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
+    if (plan.executionGuidance) plan.executionGuidance = plan.executionGuidance.filter((_, index) => !isLifecycleMetaStep(plan.plan[index]))
     if (plan.stepCompletions) {
       plan.stepCompletions = plan.stepCompletions.filter((_, index) => !isLifecycleMetaStep(plan.plan[index]))
       // Only the step at currentStep commits a checkpoint with the slice. A checkpoint sent for a later step is discarded:
@@ -12836,6 +12945,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       plan = this.parsePlanMessage(message)
     }
     catch (error) {
+      if (['planner_cannot_mutate', 'invalid_execution_guidance', 'invalid_planner_review'].includes(error?.code)) await this.traceEvent('role.contract_refused', {
+        request_id: this.traceRequest?.id, reason: error.code, role: this.agentContext.role,
+      })
       if (error?.code === 'invalid_operation_arguments') {
         await this.traceEvent('operations.arguments_rejected', {
           request_id: this.traceRequest?.id,
@@ -14802,6 +14914,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async commitPlan(plan) {
+    // Backstop for programmatic callers: never silently drop planner actions.
+    this.validatePlannerRoleOutput(plan)
+    const reviewStepId = plan.plannerReview ? plan.stepId : undefined
     await this.validatePreflightCorrectionScope(plan)
     try {
       plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
@@ -14813,7 +14928,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
+    if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
     await this.validateStepCompletionDeclarations(plan)
+    const heldForRoleHandoff = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    if (this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
+      && FROZEN_PLAN_STATUSES.has(heldForRoleHandoff?.status)
+      && heldForRoleHandoff.steps[heldForRoleHandoff.active_step_index]?.completion_mode !== 'semantic'
+      && plan.operations.length === 0 && !plan.semanticCompletion) {
+      // A planner consulted during an amendment/recovery cannot rewrite a
+      // healthy slice and cannot act on it. Return its existing contract to
+      // execution without recording the proposed plan or replenishing budgets.
+      await this.assertCurrent()
+      await this.traceEvent('planner.committed_slice_returned', { request_id: this.traceRequest?.id,
+        plan_id: heldForRoleHandoff.plan_id, reason: 'healthy_committed_semantics_preserved' })
+      const handoff = await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
+      if (!handoff.restaged) throw new AgentLoopError(`planner_execution_handoff_refused:${handoff.reason}`)
+      return this.runTurn()
+    }
     const timeReview = await this.reviewPlanTime(plan)
     if (timeReview?.held === true) return timeReview.result
     plan = await this.applyLowRiskTypedProjection(plan)
@@ -15318,10 +15449,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.assertCurrent()
       const key = this.requestInfo.memoryKey
       const draft = getActivePlanningPlan(this.memory.planningState?.(key))
-      if (!draft || draft.replacement || !this.plannerOnlyDraftCandidate(plan)) {
+      if (!draft || !this.plannerOnlyDraftCandidate(plan)) {
         throw new AgentLoopError('planner_only_commit_refused: draft identity or authority changed')
       }
-      const committedState = this.memory.commitPlanningPlan(key, {
+      let committedState
+      if (draft.replacement) {
+        const replaced = this.memory.commitReplacementPlan(key, {
+          current: { actor_id: before.actor_id, actor_epoch: before.epoch }, now: Date.now(), requestId: this.traceRequest?.id,
+        })
+        if (!replaced.ok) throw new AgentLoopError(`planner_only_commit_refused: replacement authorization ${replaced.reason}`)
+        committedState = replaced.state
+        await this.announceReplacementCommitted(getActivePlanningPlan(committedState))
+      }
+      else committedState = this.memory.commitPlanningPlan(key, {
         now: Date.now(), runtime_validation: { passed: true, scope: 'completion_contracts' },
       })
       const committed = getActivePlanningPlan(committedState)

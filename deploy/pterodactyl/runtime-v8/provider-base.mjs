@@ -6,7 +6,8 @@ import { diagnoseDsmlRejection, parseDsmlToolCalls } from './dsml-tool-calls.mjs
 import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
 import { EXECUTOR_ROLE } from './agent-roles.mjs'
 import { stepContractMessages, STEP_CONTRACT_TOOL_DEFINITIONS, STEP_CONTRACT_TRIGGER } from './luna-step-contracts.mjs'
-import { approvedOperationListText, executorProviderToolDefinitions, parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
+import { approvedOperationListText, executionOnlyProviderToolDefinitions, executorProviderToolDefinitions, parsePlan, planningOnlyProviderToolDefinitions, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
+import { EXECUTION_ONLY_PROMPT, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
 
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
 const FAILURE_MARKER = '[MOD] Autorio operation error:'
@@ -820,7 +821,7 @@ function topLevelJsonObjectSpans(text) {
 // (parsePlanMessage in npc-agent-loop.mjs), so a plan object that carries them
 // is still a plan. parsePlan itself is strict-exact-keys over the executable
 // surface only.
-const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'stepCompletions', 'assessmentOnly', 'observationRequest', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview', 'stepId']
+const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'stepCompletions', 'assessmentOnly', 'observationRequest', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview']
 
 // The executable surface of a plan object once its extensions are lifted. An executor binds its operations to the
 // committed active step by `stepId` and then needs neither plan nor currentStep: parsePlanMessage defaults them the
@@ -1404,6 +1405,7 @@ export async function providerRequest(config, messages, {
   interactionRouter = false,
   triggerSource,
   role,
+  completionProtocolVersion = 1,
 } = {}) {
   check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
   check(typeof config.model === 'string' && /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model), 'Invalid model identifier')
@@ -1424,7 +1426,10 @@ export async function providerRequest(config, messages, {
     || (!forceFullPlanner && isSuccessfulCompletionContinuation(messages, { allowTools, recoveryAttempt }))
   // The executor has its own submitPlan schema and answer-shape wording; every other caller keeps the shared ones.
   const executorRound = role === EXECUTOR_ROLE && !interactionRouter
-  const roleToolDefinitions = executorRound ? executorProviderToolDefinitions : toolDefinitions
+  const separatedRound = completionProtocolVersion >= 3 && !interactionRouter && !stepContractRound
+  const roleToolDefinitions = separatedRound
+    ? executorRound ? executionOnlyProviderToolDefinitions : planningOnlyProviderToolDefinitions
+    : executorRound ? executorProviderToolDefinitions : toolDefinitions
   const compactedMessages = compactContinuation ? compactCompletionMessages(messages, { role: executorRound ? EXECUTOR_ROLE : undefined }) : messages
   const capability = providerCapabilityProfile(config)
   check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
@@ -1437,14 +1442,19 @@ export async function providerRequest(config, messages, {
   // control contract is dynamic guidance beside steering, before the receipt.
   const controlledMessages = !stepContractRound && !interactionRouter && !allowTools
     ? steeredMessages.map(message => message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith(STEERING_MARKER)
-      ? { ...message, content: `${message.content}\n\n${executorRound ? EXECUTOR_CLOSED_CONTROL_PROMPT : CLOSED_CONTROL_PROMPT}` }
+      ? { ...message, content: `${message.content}\n\n${separatedRound && !executorRound ? '[CONTROL_OUTPUT] Tools are closed. Return one planning-only JSON control decision with operations:[] and the applicable plan, currentStep, goal, roadmap, stepCompletions and executionGuidance fields.' : executorRound ? EXECUTOR_CLOSED_CONTROL_PROMPT : CLOSED_CONTROL_PROMPT}` }
       : message)
     : steeredMessages
   // The interaction router answers in JSON content, so it keeps its own
   // prompt untouched by either the style block or a cache breakpoint.
+  // Compaction can replace a system prompt; restore the role contract there
+  // too, rather than letting a compact legacy continuation invite mutations.
+  const rolePrompt = executorRound ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT
+  const roleMessages = separatedRound ? controlledMessages.map(message => message.role === 'system' && !String(message.content).includes(rolePrompt)
+    ? { ...message, content: `${message.content}\n\n${rolePrompt}` } : message) : controlledMessages
   const styledMessages = interactionRouter || stepContractRound
     ? controlledMessages
-    : applyProviderStylePrompt(controlledMessages, capability.style_profile ?? capability.id)
+    : applyProviderStylePrompt(roleMessages, capability.style_profile ?? capability.id)
   const cacheBreakpoints = interactionRouter
     ? { messages: styledMessages, breakpoints: 0 }
     : applyAnthropicCacheBreakpoints(styledMessages, capability)

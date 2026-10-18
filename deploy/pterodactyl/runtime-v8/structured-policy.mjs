@@ -1020,7 +1020,7 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview'])
   // An executor binds its operations to the committed active step by id; plan and currentStep are then not needed.
   const stepIdGiven = typeof args.stepId === 'string' && args.stepId.trim().length > 0
   check(args.stepId === undefined || stepIdGiven, 'submitPlan.stepId must be the active step id')
@@ -1044,6 +1044,8 @@ export function plannerControlPayloadFromMessage(message) {
     plan,
     currentStep,
     operations: args.operations,
+    ...(args.executionGuidance !== undefined ? { executionGuidance: args.executionGuidance } : {}),
+    ...(args.plannerReview !== undefined ? { plannerReview: args.plannerReview } : {}),
     ...(stepIdGiven ? { stepId: args.stepId.trim() } : {}),
     ...(args.observationRequest !== undefined ? { observationRequest: normalizeObservationRequest(args.observationRequest) } : {}),
     ...(args.assessmentOnly !== undefined ? { assessmentOnly: args.assessmentOnly } : {}),
@@ -1185,6 +1187,36 @@ export const executorProviderToolDefinitions = [
   ...toolDefinitions,
   ...executorControlToolDefinitions,
 ]
+
+// Production protocol 3: keep the legacy tool definitions byte-stable for
+// older callers. Empty operations is transport compatibility, never an action.
+export const planningOnlyControlToolDefinitions = structuredClone(plannerControlToolDefinitions)
+const planningOnly = planningOnlyControlToolDefinitions[0].function
+planningOnly.description = 'Choose and explain a bounded plan slice. Gameplay operations belong to the executor; operations must be empty.'
+delete planningOnly.parameters.properties.stepId
+planningOnly.parameters.properties.operations = { type: 'array', maxItems: 0, items: { type: 'object' }, description: 'Always empty. The executor chooses operations after commit.' }
+planningOnly.parameters.properties.executionGuidance = {
+  type: 'array', maxItems: 30,
+  description: 'One brief per execution step, aligned with plan. Explain approach and optional time-saving investments. skillIds must name loaded details.',
+  items: { type: 'object', additionalProperties: false, required: ['approach', 'rationale', 'constraints', 'skillIds'], properties: {
+    approach: { type: 'string', minLength: 1, maxLength: 200 },
+    rationale: { type: 'string', minLength: 1, maxLength: 240 },
+    constraints: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 100 } },
+    skillIds: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 120 } },
+  } },
+}
+export const planningOnlyProviderToolDefinitions = [...toolDefinitions, ...planningOnlyControlToolDefinitions]
+
+export const executionOnlyControlToolDefinitions = structuredClone(executorControlToolDefinitions)
+executionOnlyControlToolDefinitions[0].function.parameters.properties.plannerReview = {
+  type: 'object', additionalProperties: false, required: ['reason', 'rationale'],
+  description: 'Request strategic review with empty operations. This is not world evidence or permission to replace a plan.',
+  properties: {
+    reason: { type: 'string', enum: ['approach_infeasible', 'scope_change', 'local_recovery_exhausted'] },
+    rationale: { type: 'string', minLength: 1, maxLength: 400 },
+  },
+}
+export const executionOnlyProviderToolDefinitions = [...toolDefinitions, ...executionOnlyControlToolDefinitions]
 
 const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getActorStatus: 'runtime_status',
