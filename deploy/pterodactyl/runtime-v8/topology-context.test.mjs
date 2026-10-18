@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { topologyCapacity, topologyEntities, topologyJson, topologyObstruction, topologyText, TOPOLOGY_PREFIX } from './topology-context.mjs'
+import { topologyCapacity, topologyEntities, topologyJson, topologyObstruction, topologyText, TOPOLOGY_PREFIX, deduplicateTopologySkillRefs } from './topology-context.mjs'
 import { KEY, recoveryWorld, recoverySession, ScriptedModel, settle } from './recovery-loop-fixtures.mjs'
 import { FakeFactorio, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 import { getActivePlan } from './planning-state.mjs'
@@ -27,6 +27,29 @@ const contextOf = messages => {
   assert.ok(lines[0].length <= 1950)
   return JSON.parse(lines[0].slice(TOPOLOGY_PREFIX.length))
 }
+
+test('loaded skill details keep duplicate IDs from crowding live topology out of the 6000-character handoff', () => {
+  const ids = ['scale-out-production-line', 'direct-insertion-chain', 'steam-power-bootstrap']
+  const details = `[SKILL_CONTEXT] Loaded details\n${JSON.stringify(ids.map(id => ({ id, constraints: ['Verify live state'] })))}`
+  const stable = { role: 'user', content: '[HANDOFF]\n' + 'g'.repeat(1990) }
+  const step = { role: 'user', content: '--- step block ---\nactor: actor_id=18\n' + 's'.repeat(1960) + `\nloaded_skills: ${ids.join(', ')}` }
+  const messages = [stable, step, { role: 'user', content: details }]
+  const before = stable.content.length + step.content.length + 2
+  assert.ok(before + 1950 > 6000)
+  const result = deduplicateTopologySkillRefs(messages)
+  assert.ok(result.removed > 0)
+  assert.equal(result.messages[0], stable)
+  assert.equal(result.messages[2], messages[2], 'full loaded details stay present')
+  assert.match(result.messages[1].content, /actor: actor_id=18/)
+  assert.doesNotMatch(result.messages[1].content, /loaded_skills:/)
+  assert.ok(result.messages[0].content.length + result.messages[1].content.length + 2 + 1950 <= 6000)
+  assert.match(step.content, /loaded_skills:/, 'the canonical packet is not mutated')
+  for (const context of ['', '[SKILL_CONTEXT] malformed', `[SKILL_CONTEXT] partial\n${JSON.stringify([{ id: ids[0] }])}`]) {
+    const outgoing = context ? [stable, step, { role: 'user', content: context }] : [stable, step]
+    assert.equal(deduplicateTopologySkillRefs(outgoing).removed, 0, 'IDs without actual outgoing loaded details are preserved')
+  }
+  assert.equal(deduplicateTopologySkillRefs([{ ...stable, content: '[HANDOFF]\nshort' }, { ...step, content: `--- step block ---\nloaded_skills: ${ids.join(', ')}` }, messages[2]]).removed, 0, 'no churn without packet pressure')
+})
 class TopologyGame extends FakeFactorio {
   constructor() {
     super({ inventory: { 'steam-engine': 1, 'iron-plate': 2 } })
