@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { buildArtifacts, channelInstaller, installerLoader, verifyGeneratedArtifacts } from './build-payload.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const PAYLOAD_REF = '24ef39ffb337e8d61eb0fe89da2b4b48de0c4f1a'
-const PAYLOAD_SHA256 = 'a4553af87969f67ace02763099d7b8760b13dc8b199dde884b5e7a0e1df41f27'
+const PAYLOAD_REF = 'bef4ff49aa798bd9f54c6ee905d99a1feae58020'
+const PAYLOAD_SHA256 = 'e1ee36c1583bdc5fac23cb4c85930cb809f76911d7d1c1932038e485ea4d35ba'
 const source = Buffer.from(`#!/usr/bin/env bash
 SGLUNA_REF="0123456789abcdef0123456789abcdef01234567"
 REVISION="test"
