@@ -175,7 +175,7 @@ try {
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', AI_API_METHOD: 'cli-proxy', OPENAI_API_KEY: 'fixture-only-not-a-real-key', OPENAI_API_BASEURL: 'https://fixture.example.test/v1', OPENAI_MODEL: `${PLANNER_MODEL},${EXECUTOR_MODEL}` })
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null, fetchImpl: async (_url, options) => {
     const body = JSON.parse(options.body)
-    assert.equal(body.tools.length, 40); assert.equal(body.tool_choice, context.allowTools === false ? 'none' : 'auto')
+    assert.equal(body.tools.length, 41); assert.ok(body.tools.some(tool => tool.function?.name === 'getPumpSitePreparation')); assert.equal(body.tool_choice, context.allowTools === false ? 'none' : 'auto')
     wire.push({ role: context.role, model: body.model, tool_choice: body.tool_choice, tools: body.tools.length })
     const message = await model.provide(body.messages, context)
     return new Response(JSON.stringify({ choices: [{ finish_reason: message.tool_calls ? 'tool_calls' : 'stop', message: { role: 'assistant', ...message } }], usage: { prompt_tokens: 2000, completion_tokens: 120 } }), { status: 200 })
