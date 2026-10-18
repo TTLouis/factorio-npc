@@ -48,6 +48,7 @@ export const refusal_class_by_code: Record<string, RefusalClass> = {
   invalid_resource_position: 'argument',
   invalid_resource_search_radius: 'argument',
   placement_candidate_unavailable: 'argument',
+  placement_candidate_required: 'argument',
   no_natural_harvest_source: 'argument',
   // A wrong technology name is the same kind of naming error as an unknown recipe or prototype.
   invalid_name: 'argument',

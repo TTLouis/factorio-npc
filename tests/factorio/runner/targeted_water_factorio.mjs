@@ -128,7 +128,9 @@ const model = new ScriptedModel()
   })
   .push('executor', 'luna:existing-one-fact-water-request', (messages, context) => {
     seen.pump = lastTool(messages)
-    assert.equal(seen.pump.legal_candidate_count, 0)
+    assert.equal(seen.pump.ok, false)
+    assert.equal(seen.pump.code, 'water_search_required')
+    assert.equal(seen.pump.scanned, undefined, 'water-first refusal performs no candidate scan')
     const state = control(messages)
     if (context.allowTools !== false || JSON.stringify(state.targetedWaterSearch) !== JSON.stringify(targetedWater)) {
       wireFaults.push({ reason: 'pump_only_closed_round_has_no_eligible_targeted_water_search', allowTools: context.allowTools, targetedWaterSearch: state.targetedWaterSearch })
@@ -142,7 +144,7 @@ const model = new ScriptedModel()
       'no normal fluid read occurs before the targeted boundary')
     return { content: JSON.stringify({ plan: [step], currentStep: 0, stepId: state.stepId, operations: [],
       observationRequest: { stepId: state.stepId, ...state.targetedWaterSearch,
-        rationale: 'The current actor-centered offshore-pump search returned no legal site; need bounded water coverage before choosing exploration.' } }) }
+        rationale: 'The native pump lookup requires a preceding water observation; need bounded water coverage before choosing exploration.' } }) }
   })
   .push('executor', 'luna:unsupported-local-world-blocker', (messages, context) => {
     seen.toolsBeforeBlocker = context.allowTools
@@ -289,7 +291,7 @@ try {
   assert.equal(rejected[0].reason, 'local_fluid_search_is_not_world_blocker')
   const waterReads = world.named('observation.targeted_water_search')
   assert.equal(waterReads.length, 1)
-  assert.equal(waterReads[0].reason, 'fresh_empty_pump_search_needs_water_coverage')
+  assert.equal(waterReads[0].reason, 'native_pump_search_requires_water_first')
   assert.ok(waterReads[0].request_id)
   assert.equal(waterReads[0].search_radius, 256); assert.equal(waterReads[0].limit, 8)
   assert.equal(world.named('observation.targeted_granted').length, 1)

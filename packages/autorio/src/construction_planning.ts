@@ -405,6 +405,8 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
   }
   const prototype = prototypes.entity[request.entity_name]
   if (!prototype) return { ok: false, error: { code: 'UNKNOWN_ENTITY', message: `unknown entity ${request.entity_name}` } }
+  if (prototype.type === 'offshore-pump') return { ok: false, error: { code: 'PLACEMENT_CANDIDATE_REQUIRED',
+    message: 'First read fluid source tiles, then use getPlacementCandidates and place_candidate for offshore pumps' } }
   const anchor = resolve_anchor(actor, request)
   if ('error' in anchor) return { ok: false, error: { code: 'INVALID_ANCHOR', message: anchor.error } }
 

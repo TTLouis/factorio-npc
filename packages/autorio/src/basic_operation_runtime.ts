@@ -9,6 +9,7 @@ import { entity_role_inventories } from './inventory_roles'
 import type { InventoryRole } from './inventory_roles'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
+import { placement_candidate_matches } from './placement_candidates'
 import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
@@ -446,6 +447,12 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (!prototype) {
       controller.fail(actor, task, 'unknown_entity')
       return [false, `Unknown entity prototype ${task.entity_name}`]
+    }
+
+    if (prototype.type === 'offshore-pump' && (!task.placement_candidate
+      || !placement_candidate_matches(actor, task.placement_candidate, task.entity_name, task.position?.x, task.position?.y, task.direction))) {
+      controller.fail(actor, task, 'placement_candidate_unavailable')
+      return [false, 'Offshore pumps require a current validated placement candidate']
     }
 
     if (!task.position) {

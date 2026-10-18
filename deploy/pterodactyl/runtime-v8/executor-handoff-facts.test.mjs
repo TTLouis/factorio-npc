@@ -793,7 +793,7 @@ test('3a: only a well-formed answer to the request that was made reaches the cac
     [WATER_FAR, undefined], // no request to check the answer against
     [{ ...WATER_FAR, returned_count: 3 }, request],
     [{ ...WATER_FAR, samples: [{ ...WATER_FAR.samples[0], surface_index: 2 }, WATER_FAR.samples[1]] }, request],
-    [{ ...WATER_FAR, padding: 'x'.repeat(5000) }, request],
+    [{ ...WATER_FAR, padding: 'x'.repeat(9000) }, request],
   ]) record(answer, args)
   assert.equal(world.agent.handoffFluidHints.size, 0)
   record(WATER_FAR, request)

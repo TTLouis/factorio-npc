@@ -1,5 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { fluid_source_observation } from './fluid_source_observation'
 import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor } from './placement_candidates'
+
+// Geometry fixtures still establish the native water-read prerequisite.
+function observe_water(actor: any) {
+  actor.is_valid = true
+  actor.status_snapshot = () => ({ actor_id: 18 })
+  actor.surface.is_chunk_generated = () => true
+  actor.surface.find_tiles_filtered = (args: any) => args.has_hidden_tile ? [] : [{ name: 'water', position: { x: 0, y: 0 }, prototype: { fluid: { name: 'water' } }, surface: { index: actor.surface.index } }]
+  ;(globalThis as any).prototypes.fluid = { water: {} }
+  ;(globalThis as any).prototypes.tile = { water: { fluid: { name: 'water' } } }
+  fluid_source_observation(actor, { fluid_name: 'water' })
+  return actor
+}
 
 // Prototype shapes follow Factorio 2.0: fluidbox_prototypes[].pipe_connections[]
 // carry a base `direction` and four cardinal-relative `positions` (north, east,
@@ -117,7 +130,7 @@ describe('placement candidates that join a live fluid port', () => {
   })
 
   function actor_at(x: number, y: number) {
-    return {
+    return observe_water({
       position: { x, y },
       force: { index: 1 },
       surface: {
@@ -125,7 +138,7 @@ describe('placement candidates that join a live fluid port', () => {
         can_place_entity: (args: any) => { place_calls.push(args); return true },
         find_entities_filtered: () => [],
       },
-    } as any
+    } as any)
   }
 
   // A pump already built with its output port on (8.5, 20.5) opening east onto (9.5, 20.5).
@@ -350,6 +363,7 @@ describe('shoreline placement ordering', () => {
       },
     } as any
 
+    observe_water(actor)
     const result = placement_candidates_for_actor(actor, { entity_name: 'offshore-pump', center: { x: 14.5, y: 0.5 }, radius: 10 }) as any
 
     expect(result.ordering).toBe('nearest_to_actor_first')

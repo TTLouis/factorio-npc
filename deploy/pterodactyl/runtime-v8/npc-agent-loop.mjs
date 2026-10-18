@@ -4924,6 +4924,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.localPumpSearchObservation = undefined
         let result
         try { if (typeof raw === 'string' && raw.length <= 4096) result = JSON.parse(raw) } catch { return }
+        if (result?.ok === false && result.code === 'water_search_required' && result.entity_name === 'offshore-pump') {
+          this.localPumpSearchObservation = { actorCentered: args.center === undefined && args.connects_to === undefined,
+            requiresWater: true, fact: { entity_name: 'offshore-pump', code: result.code, placement_scan_performed: false },
+            scope: this.localSearchScope() }
+        }
         if (result?.ok === true && result.entity_name === 'offshore-pump' && result.legal_candidate_count === 0
           && result.returned_candidate_count === 0 && Number.isSafeInteger(args.radius) && args.radius >= 1 && args.radius <= 24
           && result.candidates && typeof result.candidates === 'object' && Object.keys(result.candidates).length === 0
@@ -11628,7 +11633,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (waterBasis) {
       await this.traceEvent('observation.targeted_water_search', { request_id: this.traceRequest?.id,
-        reason: 'fresh_empty_pump_search_needs_water_coverage', goal_id: initial.data.goalId, step_id: initial.data.stepId,
+        reason: waterBasis.requiresWater ? 'native_pump_search_requires_water_first' : 'fresh_empty_pump_search_needs_water_coverage', goal_id: initial.data.goalId, step_id: initial.data.stepId,
         search_radius: request.args.search_radius, limit: request.args.limit, pump_search: waterBasis.fact })
       await fence()
     }
@@ -12730,7 +12735,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // facts. A separate empty pump search is not needed to reject a claimed
     // world blocker or to explain exploration; neither read proves reachability.
     if (!matches(water)) return
-    const matchingPump = matches(pump)
+    const matchingPump = matches(pump) && Number.isFinite(pump.fact?.center?.x) && Number.isFinite(pump.fact?.center?.y)
       && Math.abs(water.fact.actor_position.x - pump.fact.center.x) <= 0.01
       && Math.abs(water.fact.actor_position.y - pump.fact.center.y) <= 0.01
     const facts = { water_search: water.fact, ...(matchingPump ? { pump_search: pump.fact } : {}) }
@@ -13100,7 +13105,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async traceNativeObservationFact(toolName, args, raw) {
     if (toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities' && toolName !== 'getPlacementCandidates' && toolName !== 'getEntityStatus') return
     let result
-    const readLimit = toolName === 'getPlacementCandidates' || toolName === 'getEntityStatus' ? 65536 : 4096
+    const readLimit = toolName === 'getPlacementCandidates' || toolName === 'getEntityStatus' ? 65536 : toolName === 'getFluidSourceTiles' ? 8192 : 4096
     try { if (typeof raw === 'string' && raw.length <= readLimit) result = JSON.parse(raw) } catch { /* unreadable stays undefined */ }
     const readable = Boolean(result && typeof result === 'object' && !Array.isArray(result))
     if (toolName === 'getFluidSourceTiles') {
@@ -13122,6 +13127,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
     }
     else if (toolName === 'getPlacementCandidates') {
+      if (result?.code === 'water_search_required' || result?.code === 'water_source_not_exposed') {
+        await this.traceEvent('observation.pump_water_prerequisite', { request_id: this.traceRequest?.id,
+          reason: result.code, entity_name: args?.entity_name, placement_scan_performed: false })
+      }
       const candidates = readable && Array.isArray(result.candidates) ? result.candidates : []
       const joined = candidates.filter(candidate => candidate?.connects_to && typeof candidate.connects_to === 'object')
       const electric = candidates.filter(candidate => candidate?.electric && typeof candidate.electric === 'object')
@@ -15478,6 +15487,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             retry_budget: MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET,
           })
           const index = Number.isSafeInteger(error.preflight.operation_index) ? error.preflight.operation_index : 0
+          if (error.preflight.code === 'placement_candidate_required') await this.traceEvent('operations.pump_candidate_required', {
+            request_id: this.traceRequest?.id, reason: 'generic_offshore_pump_placement_refused', operation_index: index,
+          })
           this.messages.push({
             role: 'user',
             // A producer may carry its own correction text (the batch stock refusal names the shortage per item).

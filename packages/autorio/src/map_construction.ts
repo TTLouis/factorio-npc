@@ -86,6 +86,8 @@ export function inspect_remote_construction(
     return { ok: false, code: 'invalid_entity_name', entity_name }
   }
 
+  if (prototypes.entity[entity_name].type === 'offshore-pump') return { ok: false, code: 'placement_candidate_required', entity_name, required_operation: 'place_candidate' }
+
   const surface = surface_by_index(surface_index)
   if (!surface || !surface.valid) {
     return { ok: false, code: 'invalid_surface', surface_index }

@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  offshore-water-first)
+    run_py offshore_water_first_cell.py
+    ;;
   partial-transfer)
     run_node partial_transfer_factorio.mjs --mode recovery
     stop_factorio

@@ -338,17 +338,11 @@ describe('precise placement runtime', () => {
     const manual = (globalThis as any).defines.build_check_type.manual
     const f = fixture('offshore-pump', 1)
     f.surface.can_place_entity.mockImplementation((args: any) => args.build_check_type !== manual)
-    expect(f.controller.submit_placement('offshore-pump', 2.5, 0.5, 0)).toBe(true)
+    expect(f.controller.submit_placement('offshore-pump', 2.5, 0.5, 0)).toBe(false)
 
-    const result = f.runtime.state_placing(f.actor)
-
-    expect(result?.[0]).toBe(false)
-    expect(f.surface.can_place_entity).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'offshore-pump',
-      build_check_type: manual,
-    }))
+    expect(f.surface.can_place_entity).not.toHaveBeenCalled()
     expect(f.surface.create_entity).not.toHaveBeenCalled()
     expect(f.item.count).toBe(1)
-    expect(f.controller.status().last_result).toMatchObject({ code: 'not_placeable' })
+    expect(f.controller.status().last_result).toMatchObject({ code: 'placement_candidate_required' })
   })
 })

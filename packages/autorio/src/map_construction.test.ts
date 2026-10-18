@@ -1,7 +1,7 @@
 import type { LuaEntity, LuaLogisticNetwork, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { inspect_remote_construction, stage_remote_entity_ghost } from './map_construction'
+import { construction_intent, execute_prepared_remote_construction_plan, inspect_remote_construction, stage_remote_entity_ghost } from './map_construction'
 
 function make_network(overrides: Partial<LuaLogisticNetwork> = {}) {
   return {
@@ -228,4 +228,19 @@ describe('map remote construction', () => {
     expect(surface.find_logistic_networks_by_construction_area).not.toHaveBeenCalled()
   })
 
+})
+
+
+it('rejects pump remote intents, direct ghosts and legacy tokens before collision or robot mutation', () => {
+  ;(globalThis as any).prototypes.entity['test-pump'] = { type: 'offshore-pump' }
+  const surface = make_surface([make_network()])
+  const actor = make_actor(surface)
+  actor.status_snapshot = () => ({ actor_id: 18 }) as any
+  ;(globalThis as any).game.get_surface.mockReturnValue(surface)
+  for (const prepare of [false, true]) expect(construction_intent(actor, 1, 1, 1, 'test-pump', 0, prepare)).toMatchObject({ ok: false, code: 'placement_candidate_required', execution: { prepared: false } })
+  expect(stage_remote_entity_ghost(actor, 1, 1, 1, 'test-pump', 0)).toMatchObject({ accepted: false, code: 'placement_candidate_required' })
+  ;(globalThis as any).storage.sgluna_validated_remote_construction_plan = { validation_id: 1, actor_id: 18, force_index: 1, surface_index: 1, created_tick: game.tick, x: 1, y: 1, entity_name: 'test-pump', direction: 0 }
+  expect(execute_prepared_remote_construction_plan(actor, 1, 1)?.[0]).toBe(false)
+  expect(surface.can_place_entity).not.toHaveBeenCalled()
+  expect(surface.create_entity).not.toHaveBeenCalled()
 })
