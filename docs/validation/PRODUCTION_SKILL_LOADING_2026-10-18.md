@@ -112,3 +112,11 @@ partial-transfer cases (ordinary recovery and unknown-effect control), including
 the outgoing-context guard and correlated trace assertions addressed its two
 findings. All native evidence/saves were copied out before teardown; the three
 run-owned images and every owned container are removed. Repromotion pending.
+
+Final integration merge `31392fec4feaae40efd737b97925c3082a69d5e2` passed the
+fresh merged offline gate (2,600 / 1,234 / type / Lua) and payload check/nine tests,
+all exit 0. Follow-up evidence is sealed: 207 files, 19,170,093 bytes, manifest
+SHA256 `4efc0a910a682fb89f44a09b51f11ce6f8094fcc728c093cc7195a1b517bc877`.
+Original candidate evidence and the historical Run AA report remain unchanged.
+Published-head hosted results are recorded in shared `WORKTREES.md`; live
+autonomous red-science production remains untested by this offline fix.
