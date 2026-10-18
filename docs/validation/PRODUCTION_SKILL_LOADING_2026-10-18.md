@@ -120,3 +120,10 @@ SHA256 `4efc0a910a682fb89f44a09b51f11ce6f8094fcc728c093cc7195a1b517bc877`.
 Original candidate evidence and the historical Run AA report remain unchanged.
 Published-head hosted results are recorded in shared `WORKTREES.md`; live
 autonomous red-science production remains untested by this offline fix.
+
+CI `39152243119` flagged two `prefer-template` violations in the new pressure
+fixture. Reviewed correction `4628ef39` preserves the exact generated strings;
+runtime and payload are unchanged. ESLint on every changed JS/TS file with the
+current repository configuration exited 0. Both candidate and fresh merge
+`f47158700b5e09069eeed7d552722a0e981c874e` passed the offline gate
+(2,600 runtime / 1,234 mod / type / Lua). The payload continues to pin `7821af20`.
