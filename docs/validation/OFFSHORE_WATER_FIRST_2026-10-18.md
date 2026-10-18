@@ -20,8 +20,8 @@ Source: integration `250dc81d` (production `957ebedf`). Task: fix/offshore-water
 - [x] Factorio 2.0.77 native API probes distinguish ordinary placement from super-force blueprint staging; preserved under ignored task evidence.
 - [x] Candidate runtime gate: 2,538 tests; mod gate: 1,202 tests, typecheck and generated Lua checks. The subsequent missing-center regression passed in its 13-test focused suite; merged full gate remains required.
 - [x] All 25 native lane scopes covered: 23 passed in the first matrix; targeted-water and shoreline-recovery then passed with offshore-water-first in a three-lane rerun after correcting the no-scan recovery edge case. The unchanged original native image fails the new water-first assertion as expected. Both matrices also ran the 92 Python regressions.
-- [ ] Installer payload repin and merged gates.
-- [ ] Owned-resource cleanup and integration.
+- [x] Installer payload repinned to reviewed production commit `24ef39ff`, validated by all 9 payload checks; merged gate passed 2,539 runtime / 1,202 mod tests plus typecheck/Lua.
+- [x] Integrated at `90bfe652`; all owned containers and three temporary regression image tags removed. Shared images and all archived evidence retained.
 
 Final results and immutable candidate commits will be recorded here after validation.
 
@@ -39,3 +39,16 @@ The first broad matrix caught a missing-center access in the new prerequisite re
 The native super-force blueprint produced a pump ghost and six deconstructible tile proxies for the fixture, leaving the covered water marked for deconstruction. Direct character `mine_tile` returned false even after marking, with unchanged tile/inventory. Autonomous landfill removal is therefore not proven or implemented. A separately declared exposed-water fixture proves subsequent fresh water reads, candidate lookup and real pump construction; it is not reported as autonomous removal.
 
 Candidate lint passes with this checkout's ESLint configuration. The first lint invocation used a stale cached-image configuration; the corrected invocation mounts the current configuration. No lint rule was weakened. Prompt fingerprints changed only for the intentional tool/recovery guidance; healthy trace ordering and message counts remain equal.
+
+
+## Final validation and integration
+
+- Reviewed production commit: `24ef39ffb337e8d61eb0fe89da2b4b48de0c4f1a`.
+- Payload repin: `b23d3241`; payload installer source bytes unchanged (`a4553af87969f67ace02763099d7b8760b13dc8b199dde884b5e7a0e1df41f27`), immutable ref advanced to the reviewed commit.
+- Integration merge: `90bfe652b856fe7397d8dde5f9696c3e1465b811`.
+- Merged `scripts/test-local.sh all`: exit 0; 2,539 runtime tests, 1,202 mod tests, typecheck, Lua build and generated-Lua validation.
+- Lint of changed TypeScript/JavaScript with current checkout configuration: exit 0. Payload 9/9. Native runner Python regressions 92/92.
+- Byte verification: 31 compiled native files identical between the broad matrix and corrected rerun image; 53 reviewed runtime files match normalized Git bytes at `24ef39ff`. The only image runtime differences were the missing-center guard, its regression test and the intentional prompt golden file. The three affected lanes passed on the corrected runtime.
+- Cleanup: no task-owned container, network, volume, tunnel or image tag remains. All test evidence, setup failures and save files remain under the ignored task `test-results/` directory. No live providers were called, no deployment or budget reset occurred, and the protected `.env` was neither read nor edited.
+
+Next separate capability: implementing and proving bounded native terrain removal/robot fulfillment for covered-water sites. The current fix discovers and reports preparation facts; it does not claim autonomous landfill removal or a successful red-science trial.
