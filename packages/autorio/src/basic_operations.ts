@@ -10,13 +10,14 @@ import type {
   PlayerParametersWaiting,
 } from './types'
 import { TaskStates } from './types'
+import { placement_candidate_matches } from './placement_candidates'
 
 type BasicTask = PlayerParametersMineEntity | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
 type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
-  | 'item_missing' | 'no_position' | 'not_placeable' | 'create_failed'
+  | 'item_missing' | 'no_position' | 'not_placeable' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
@@ -301,7 +302,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue(task, actor)
   }
 
-  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number) {
+  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }) {
     const has_x = x !== undefined
     const has_y = y !== undefined
     if (has_x !== has_y || (has_x && (!valid_coordinate(x!) || !valid_coordinate(y!)))) {
@@ -314,8 +315,14 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     }
     const actor = actor_for_submission()
     if (!actor) return false
+    if (prototypes.entity[entity_name]?.type === 'offshore-pump'
+      && (!placement_candidate || !placement_candidate_matches(actor, placement_candidate, entity_name, x, y, direction))) {
+      result_for(actor, undefined, false, false, 'placement_candidate_required')
+      return false
+    }
     const task: PlayerParametersPlaceEntity = {
       type: TaskStates.PLACING,
+      placement_candidate,
       entity_name,
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,

@@ -96,3 +96,19 @@ test('a fluid read and an unknown-entity refusal reach the model unchanged and w
   assert.equal(refused.data.observation_tool, 'getFluidSourceTiles')
   assert.equal(rows.filter(row => row.event === 'observation.entity_read_refused').length, 1)
 })
+
+
+test('pump water prerequisites write a request-correlated no-scan event and tool guidance requires water first', async () => {
+  const rows = []
+  const agent = { traceRequest: { id: 'request-pump-water' }, traceEvent: async (event, data) => rows.push({ event, data }) }
+  for (const code of ['water_search_required', 'water_source_not_exposed']) {
+    await NpcAgentLoop.prototype.traceNativeObservationFact.call(agent, 'getPlacementCandidates', { entity_name: 'offshore-pump' }, JSON.stringify({ ok: false, code }))
+  }
+  const events = rows.filter(row => row.event === 'observation.pump_water_prerequisite')
+  assert.equal(events.length, 2)
+  assert.ok(events.every(row => row.data.request_id === 'request-pump-water' && row.data.placement_scan_performed === false))
+  const guidance = toolDefinitions.find(row => row.function.name === 'getPlacementCandidates').function.description
+  assert.match(guidance, /FIRST call getFluidSourceTiles/)
+  assert.match(guidance, /covered_fluid_hints/)
+  assert.match(guidance, /MUST use place_candidate/)
+})

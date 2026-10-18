@@ -24,14 +24,15 @@ const control = messages => JSON.parse(messages.findLast(row => String(row.conte
 class WaterGame extends ShorelineGame {
   constructor() { super(); this.waterReads = 0 }
   async command(text) {
+    if (this.pumpPrerequisite && this.waterReads === 0 && text.includes('"get_placement_candidates"')) return JSON.stringify({ ok: false, entity_name: 'offshore-pump', code: 'water_search_required' })
     if (text.includes('"get_fluid_source_tiles"')) { this.waterReads++; await this.duringWater?.() }
     return super.command(text)
   }
 }
 
-async function loop(t, { afterWater, afterMalformed, corrections, stateFile = null } = {}) {
+async function loop(t, { afterWater, afterMalformed, corrections, stateFile = null, pumpPrerequisite = false } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new WaterGame(); const model = new ScriptedModel(); const wire = []
+  const game = new WaterGame(); game.pumpPrerequisite = pumpPrerequisite; const model = new ScriptedModel(); const wire = []
   const bridge = Object.create(Session.prototype)
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only',
     OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'local', OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' })
@@ -273,4 +274,22 @@ test('repeated Run R local blockers retain the existing category and six-goal ca
   assert.equal(ctx.game.sent.length, 0); assert.equal(ctx.game.waterReads, 1)
   assert.deepEqual(ctx.world.named('recovery.auto_resume_started'), [])
   assert.deepEqual(ctx.model.remaining, []); assert.deepEqual(ctx.model.violations, [])
+})
+
+
+test('a water-first prerequisite refusal without a fabricated scan center uses the same single fact and water-only blocker correction', async t => {
+  const ctx = await loop(t, { pumpPrerequisite: true })
+  const grant = ctx.world.named('observation.targeted_water_search')
+  assert.equal(grant.length, 1)
+  assert.equal(grant[0].reason, 'native_pump_search_requires_water_first')
+  assert.equal(grant[0].pump_search.placement_scan_performed, false)
+  assert.equal(grant[0].pump_search.center, undefined)
+  const rejection = ctx.world.named('recovery.local_fluid_search_blocker_rejected')
+  assert.equal(rejection.length, 1)
+  assert.equal(rejection[0].basis, 'water_only')
+  assert.equal(rejection[0].pump_search, undefined)
+  assert.equal(ctx.world.named('observation.targeted_granted').length, 1)
+  assert.equal(ctx.world.memory.autoResumeAllowance(KEY).goal_attempts, 6)
+  assert.equal(ctx.game.sent.length, 1)
+  assert.deepEqual(ctx.world.named('request.failed'), [])
 })

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { fluid_source_observation } from './fluid_source_observation'
 import { placement_candidates_for_actor, sort_candidates, type PlacementCandidate } from './placement_candidates'
 
 function luaPairs(value: Record<string, unknown>) {
@@ -441,6 +442,15 @@ describe('placement candidates', () => {
       },
     } as any
 
+    actor.is_valid = true
+    actor.status_snapshot = () => ({ actor_id: 18 })
+    actor.surface.index = 1
+    actor.surface.is_chunk_generated = () => true
+    actor.surface.find_tiles_filtered = (args: any) => args.has_hidden_tile ? [] : [{ name: 'water', position: { x: 0, y: 0 }, prototype: { fluid: { name: 'water' } }, surface: { index: 1 } }]
+    ;(globalThis as any).prototypes.fluid = { water: {} }
+    ;(globalThis as any).prototypes.tile = { water: { fluid: { name: 'water' } } }
+    ;(globalThis as any).storage = {}
+    fluid_source_observation(actor, { fluid_name: 'water' })
     const result = placement_candidates_for_actor(actor, { entity_name: 'offshore-pump', radius: 2, limit: 4 }) as any
 
     expect(asked.length).toBeGreaterThan(0)

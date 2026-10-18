@@ -420,6 +420,9 @@ def run(client: Rcon, results: Path) -> None:
         print(f"PASS: PROTOTYPE_FACTS - pole reach {pole_facts}, engine {engine_facts}, boiler {boiler_entity.get('power')} burning {(boiler_entity.get('burner') or {}).get('fuel_categories')}, lab {lab_facts}, pump {pump_facts}", flush=True)
 
         # ---- WATER_EDGE -------------------------------------------------
+        water = json_command(lua_json(remote_call('autorio_tools', 'get_fluid_source_tiles', "{fluid_name='water',search_radius=128,limit=8}")), 'water before pump search')
+        require(water.get('ok') is True and water.get('returned_count', 0) > 0, water)
+        evidence['water_before_pump'] = water
         shore_center = (ox - 5.5, oy + 2.5)
         pump_set = candidates(
             f"{{entity_name='offshore-pump',center={{x={shore_center[0]},y={shore_center[1]}}},radius=4,limit=8}}",
@@ -441,20 +444,19 @@ def run(client: Rcon, results: Path) -> None:
         require(pump_set.get('ordering') == 'nearest_to_actor_first', {'message': 'pump candidates are not labelled nearest-first', 'ordering': pump_set.get('ordering')})
         distances = [candidate['distance_from_actor'] for candidate in pump_set['candidates']]
         require(distances == sorted(distances), {'message': 'pump candidates are not ordered by distance from the actor', 'distances': distances})
-        dry = run_failed_operation(
-            remote_call('autorio_operations', 'place_entity', repr('offshore-pump'), str(ox - 2.5), str(oy + 0.5), str(NORTH)),
-            'pump on dry land refusal',
-            'not_placeable',
-        )
-        facing_away = run_failed_operation(
-            remote_call('autorio_operations', 'place_entity', repr('offshore-pump'), str(ox - 5.5), str(oy + 0.5), str(NORTH)),
-            'pump facing away from the water refusal',
-            'not_placeable',
-        )
-        evidence['pump_refusals'] = {'dry_land': dry, 'facing_away': facing_away}
+        # Read-only native checks retain the exact dry-land/facing rejection proof.
+        native_checks = json_command(lua_json("{dry=game.surfaces[1].can_place_entity{name='offshore-pump',position={x=" + str(ox-2.5) + ",y=" + str(oy+0.5) + "},direction=" + str(NORTH) + ",force=game.forces.player,build_check_type=defines.build_check_type.manual},away=game.surfaces[1].can_place_entity{name='offshore-pump',position={x=" + str(ox-5.5) + ",y=" + str(oy+0.5) + "},direction=" + str(NORTH) + ",force=game.forces.player,build_check_type=defines.build_check_type.manual}}"), 'native pump invalid geometry')
+        require(native_checks['dry'] is False and native_checks['away'] is False, native_checks)
+        refused = []
+        for px in [ox - 2.5, ox - 5.5]:
+            result = admission(remote_call('autorio_operations', 'place_entity', repr('offshore-pump'), str(px), str(oy + 0.5), str(NORTH)), 'raw pump candidate bypass refusal')
+            require(result.get('accepted') is False, result)
+            status = operation_status('raw pump refusal status')
+            require((status.get('basic_operation') or {}).get('last_result', {}).get('code') == 'placement_candidate_required', status)
+            refused.append({'admission': result, 'status': status})
+        evidence['pump_refusals'] = {'native_geometry': native_checks, 'raw_candidate_bypass': refused}
         flush()
-        print(f"PASS: WATER_EDGE - the pump query returns {pump_set['legal_candidate_count']} shoreline placements "
-              f"(all on the water edge, direction west); dry land and a pump facing away from the water are refused as not_placeable", flush=True)
+        print(f"PASS: WATER_EDGE - {pump_set['legal_candidate_count']} shoreline candidates; native invalid geometry and raw candidate bypass refused", flush=True)
 
         # ---- PUMP -------------------------------------------------------
         pump_candidate = min(

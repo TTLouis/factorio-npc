@@ -130,6 +130,8 @@ export interface PlayerParametersPlaceEntity {
   owner_actor_kind?: string
   owner_force_index?: number
   entity_name: string
+  /** Native candidate registry identity; never accepted on the generic placement wire. */
+  placement_candidate?: { candidate_set_id: string, candidate_id: string }
   /** Exact requested placement position. When omitted the runtime finds a local valid position. */
   position?: MapPositionStruct
   /** Factorio direction value (0..15) for precise placement. */

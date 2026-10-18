@@ -130,7 +130,7 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   fluidHints: 16,
   fluidHintChars: 1200,
   fluidHintStoreChars: 4000,
-  fluidReadChars: 4096,
+  fluidReadChars: 8192, // Includes bounded hidden/double-hidden terrain preparation hints.
   // Unit 3b: recipe reads the harness may spend on one handoff to close a step root's recipe chain.
   recipePrefetchReads: 8,
   // Unit 9: a build or science bill is a whole recipe closure (a steam-power build reaches 15 items), so a handoff for such a step may

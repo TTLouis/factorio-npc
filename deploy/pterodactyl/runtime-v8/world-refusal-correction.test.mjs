@@ -759,3 +759,21 @@ test('unit 13: a failure line that did not pause anything does not say "[Plan pa
   })
   assert.equal(result.chatMessage, 'The game refused operation 1 (craft_item: unknown_prototype) again after the correction.')
 })
+
+
+test('offshore pump generic placement uses the existing argument correction and preserves the active plan', async () => {
+  const pump = { name: 'place_entity', args: { entity_name: 'offshore-pump' } }
+  const correction = 'Read water first, inspect covered_fluid_hints, then getPlacementCandidates and place_candidate. No generic pump placement.'
+  const game = gameRefusing({ ok: false, code: 'placement_candidate_required', operation: 'place_entity', refusal_class: 'argument', correction_message: correction }, text => text.includes("'place_entity'"))
+  const w = world([plannerDraft(), executor([pump]), executor(CORRECTED_BATCH())], { game })
+  await runToExecutor(w)
+  assert.equal(w.named('operations.pump_candidate_required').length, 1)
+  const trace = w.named('operations.pump_candidate_required')[0]
+  assert.ok(trace.request_id)
+  assert.equal(trace.data.reason, 'generic_offshore_pump_placement_refused')
+  assert.ok(w.calls.flat().some(row => row.content === correction))
+  assert.equal(w.game.admissions.some(row => JSON.stringify(row).includes('offshore-pump')), false)
+  assert.equal(w.agent.modelCorrectablePreflightRetries, 1)
+  assert.equal(w.agent.worldCorrectionRetries ?? 0, 0)
+  assert.equal(getActivePlan(w.planning()).steps[1].description, IRON_PLAN[1])
+})

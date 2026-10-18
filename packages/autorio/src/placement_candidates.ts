@@ -8,6 +8,7 @@ import { pole_candidate_facts, pole_reach, protected_read } from './electric_fac
 import { find_world_entities } from './npc_vision'
 import { placement_item_preflight } from './placement_preflight'
 import { placement_obstruction_sample } from './placement_obstructions'
+import { get_recent_fluid_source_observation } from './fluid_source_observation'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -76,6 +77,7 @@ interface PlacementCandidateSet {
   entity_name: string
   surface_index: number
   force_index: number
+  actor_id?: number
   target_resource?: string
   candidates: PlacementCandidate[]
 }
@@ -428,6 +430,33 @@ function joining_port(candidate: PlacementCandidate, target: LiveFluidPort) {
  * a square and hoping an aligned footprint is among the first few. Placement whose
  * legality is decided by tile rules (a shoreline) is ordered nearest the actor first.
  */
+// The super-force UI uses these native prototype rules when staging removal.
+// They are preparation hints in north-facing coordinates, never proof that a
+// covered site can be physically built or permission to change the terrain.
+function pump_terrain_preparation(prototype: any) {
+  const raw = (prototype.tile_buildability_rules ?? []) as Array<any>
+  const rules: Array<Record<string, unknown>> = []
+  function layers(mask: any) {
+    const names: string[] = []
+    let truncated = false
+    const native_layers = (mask?.layers ?? {}) as Record<string, boolean>
+    for (const [name, enabled] of pairs(native_layers)) {
+      if (enabled !== true) continue
+      if (names.length >= 16) { truncated = true; break }
+      names.push(name)
+    }
+    return { layers: names, truncated }
+  }
+  for (let index = 0; index < math.min(raw.length, 8); index++) {
+    const rule = raw[index]
+    rules.push({ area: rule.area, colliding_tiles: layers(rule.colliding_tiles), required_tiles: layers(rule.required_tiles),
+      remove_on_collision: rule.remove_on_collision === true })
+  }
+  return { source: 'native_prototype_tile_buildability_rules', orientation: 'north_unrotated', rules, truncated: raw.length > rules.length,
+    interpretation: 'Super-force build may stage terrain deconstruction, not immediate water restoration. Inspect covered fluid hints, then revalidate physical candidates after native removal.',
+    placement_authority: false }
+}
+
 export function placement_candidates_for_actor(actor: ControlledActor, request: PlacementCandidateRequest) {
   const prototype = prototypes.entity[request.entity_name]
   if (!prototype) return { ok: false as const, error: 'entity prototype not found', entity_name: request.entity_name }
@@ -443,7 +472,20 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     join_target = resolved.target
   }
   const join_origin = join_target !== undefined ? join_target.ports[0].target_position : undefined
-  const center = request.center ?? covers ?? join_origin ?? actor.position
+  let water_center: { x: number, y: number } | undefined
+  let terrain_preparation: ReturnType<typeof pump_terrain_preparation> | undefined
+  if (prototype.type === 'offshore-pump') {
+    terrain_preparation = pump_terrain_preparation(prototype)
+    const water = get_recent_fluid_source_observation(actor)
+    if (!water) return { ok: false as const, code: 'water_search_required', entity_name: request.entity_name, terrain_preparation,
+      error: 'Read getFluidSourceTiles for water before searching pump candidates; check its covered_fluid_hints before selecting a site.' }
+    const samples = water.samples
+    if (!samples || samples.length === 0) return { ok: false as const, code: 'water_source_not_exposed', entity_name: request.entity_name, terrain_preparation,
+      error: 'No exposed water sample is known. Inspect covered_fluid_hints for removable cover, or explore the reported unknown area, then read water and validate candidates again.',
+      water_search: water }
+    water_center = samples[0].position
+  }
+  const center = request.center ?? covers ?? join_origin ?? water_center ?? actor.position
   if (!finite(center.x) || !finite(center.y)) return { ok: false as const, error: 'center must be finite', entity_name: request.entity_name }
   const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
@@ -579,6 +621,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
             flow_direction: port.flow_direction,
           })),
         },
+    terrain_preparation,
     ordering: nearest_first ? 'nearest_to_actor_first' : 'resource_coverage_then_nearest_to_center',
     electric_pole: reach,
     scanned,
@@ -619,6 +662,7 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
     id,
     generated_tick: game.tick,
     entity_name: result.entity_name,
+    actor_id: actor.status_snapshot?.().actor_id,
     surface_index: actor.surface.index,
     force_index: actor.force.index,
     target_resource: result.target_resource,
@@ -661,7 +705,7 @@ function resolve_placement_candidate(
 ) {
   const set = candidate_sets()[candidate_set_id]
   if (!set) return { ok: false as const, error: 'placement candidate set is unavailable' }
-  if (game.tick - set.generated_tick > CANDIDATE_TTL_TICKS) return { ok: false as const, error: 'placement candidate set expired' }
+  if (game.tick < set.generated_tick || game.tick - set.generated_tick > CANDIDATE_TTL_TICKS) return { ok: false as const, error: 'placement candidate set expired' }
   if (actor.surface.index !== set.surface_index || actor.force.index !== set.force_index) return { ok: false as const, error: 'placement candidate belongs to another actor surface/force' }
 
   let candidate: PlacementCandidate | undefined
@@ -675,6 +719,9 @@ function resolve_placement_candidate(
 
   const prototype = prototypes.entity[set.entity_name]
   if (!prototype) return { ok: false as const, error: 'entity prototype is no longer available' }
+  if (prototype.type === 'offshore-pump' && (set.actor_id === undefined || actor.status_snapshot?.().actor_id !== set.actor_id)) {
+    return { ok: false as const, error: 'placement candidate belongs to another actor' }
+  }
   if (candidate.connects_to !== undefined) {
     // A connection candidate is only meaningful next to the entity it was solved for.
     const target = resolve_exact_entity(actor, candidate.connects_to.unit_number)
@@ -703,6 +750,12 @@ function resolve_placement_candidate(
   return { ok: true as const, set, candidate }
 }
 
+export function placement_candidate_matches(actor: ControlledActor, proof: { candidate_set_id: string, candidate_id: string }, entity_name: string, x?: number, y?: number, direction?: number) {
+  const resolved = resolve_placement_candidate(actor, proof.candidate_set_id, proof.candidate_id)
+  return resolved.ok && resolved.set.entity_name === entity_name && resolved.candidate.position.x === x
+    && resolved.candidate.position.y === y && resolved.candidate.direction === direction
+}
+
 export function placement_candidate_preflight(actor: ControlledActor, candidate_set_id: string, candidate_id: string) {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
   // A changed join keeps the stale-candidate class; its error text starts with connects_to_port_changed.
@@ -715,12 +768,14 @@ export function execute_placement_candidate(
   actor: ControlledActor,
   candidate_set_id: string,
   candidate_id: string,
-  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number) => boolean,
+  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }) => boolean,
 ): [boolean, string] {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
   if (!resolved.ok) return [false, resolved.error]
   const { set, candidate } = resolved
-  const accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
+  const accepted = prototypes.entity[set.entity_name]?.type === 'offshore-pump'
+    ? submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, { candidate_set_id, candidate_id })
+    : submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
   return accepted
     ? [true, `placement candidate accepted: ${candidate_set_id}/${candidate_id}`]
     : [false, 'placement candidate could not be queued']

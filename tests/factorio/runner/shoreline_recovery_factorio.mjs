@@ -244,7 +244,7 @@ try {
   assert.equal(rejected.length, 1); assert.ok(rejected[0].request_id)
   assert.equal(rejected[0].reason, 'local_fluid_search_is_not_world_blocker')
   if (waterOnly) assert.equal(rejected[0].basis, 'water_only')
-  else assert.ok(rejected[0].water_search && rejected[0].pump_search)
+  else { assert.equal(rejected[0].basis, 'water_only'); assert.ok(rejected[0].water_search); assert.equal(rejected[0].pump_search, undefined) }
   assert.equal(world.named('recovery.auto_resume_started').length, 0)
   assert.equal(sent.length, 1)
   for (let index = 0; index < 7; index++) {

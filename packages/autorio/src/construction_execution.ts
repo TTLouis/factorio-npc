@@ -211,6 +211,9 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
   const boxes: Array<WorldBox | undefined> = []
   for (let index = 0; index < placements.length; index++) {
     const placement = placements[index]
+    if (prototypes.entity[placement.entity_name]?.type === 'offshore-pump') return { ok: false, error: {
+      code: 'PLACEMENT_CANDIDATE_REQUIRED', message: 'Offshore pumps require water-first discovery and place_candidate with live native registry ids', index,
+    } }
     const placement_item = resolve_entity_placement_item(placement.entity_name)
     if (!placement_item.ok) {
       return {

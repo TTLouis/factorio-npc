@@ -331,3 +331,13 @@ describe('validated construction execution', () => {
   })
 
 })
+
+
+it('cannot use raw construction validation to bypass pump candidate identity', () => {
+  ;(globalThis as any).prototypes.entity['test-pump'] = { type: 'offshore-pump' }
+  const f = fixture_with_controller({ 'test-pump': 1 })
+  const result = validate_construction_execution_plan(f.actor, { plan_id: 'pump-plan', placements: [{ entity_name: 'test-pump', x: 1, y: 1, direction: 0 }] })
+  expect(result).toMatchObject({ ok: false, error: { code: 'PLACEMENT_CANDIDATE_REQUIRED' } })
+  expect(f.surface.can_place_entity).not.toHaveBeenCalled()
+  expect(f.manager.get_status_snapshot().queue_length).toBe(0)
+})

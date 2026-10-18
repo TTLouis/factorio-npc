@@ -427,6 +427,7 @@ function operation_preflight(name: string, args: Record<string, any>) {
         expected: 'entity prototype',
       })
     }
+    if (name === 'place_entity' && prototype.type === 'offshore-pump') return reject('placement_candidate_required', { field: 'entity_name', identity: entity_name, required_operation: 'place_candidate', correction_message: 'Offshore pumps require place_candidate with live native registry ids. First read getFluidSourceTiles for water and inspect covered_fluid_hints, then request getPlacementCandidates near observed exposed water. If needed move within build reach and refresh candidates. Do not retry generic place_entity with or without coordinates; the committed step is unchanged.' })
     if (name === 'place_entity') return { operation: name, ...placement_item_preflight(actor, entity_name) }
     if (name === 'walk_to_entity') {
       if (!actor || !actor.is_valid) return reject('no_actor')
@@ -561,7 +562,7 @@ remote.add_interface('autorio_operations', {
       actor,
       candidate_set_id,
       candidate_id,
-      (entity_name, x, y, direction) => basic_operation_controller.submit_placement(entity_name, x, y, direction),
+      (entity_name, x, y, direction, proof) => basic_operation_controller.submit_placement(entity_name, x, y, direction, proof),
     )
     if (result[0]) log(`[AUTORIO] New place_candidate task: ${candidate_set_id}/${candidate_id}`)
     return result
