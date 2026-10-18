@@ -3,6 +3,7 @@ import type { new_task_manager } from './task_manager'
 import type {
   PlayerParametersLaunchRocket,
   PlayerParametersMineEntity,
+  PlayerParametersPreparePumpSite,
   PlayerParametersMoveItems,
   PlayerParametersPlaceEntity,
   PlayerParametersRotateEntity,
@@ -11,8 +12,9 @@ import type {
 } from './types'
 import { TaskStates } from './types'
 import { placement_candidate_matches } from './placement_candidates'
+import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
 
-type BasicTask = PlayerParametersMineEntity | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
+type BasicTask = PlayerParametersMineEntity | PlayerParametersPreparePumpSite | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
 type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
@@ -23,6 +25,7 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'not_rotatable' | 'rotation_failed'
   | 'not_recipe_machine' | 'recipe_disabled' | 'incompatible_recipe' | 'set_recipe_failed'
   | 'not_rocket_silo' | 'rocket_not_ready' | 'launch_failed' | 'launch_not_confirmed'
+  | 'pump_preparation_refused'
 
 export interface BasicOperationResult {
   operation_id?: number
@@ -76,6 +79,11 @@ export interface BasicOperationResult {
   refusal_tick?: number
   /** Present on a republished refusal: how many operations of its batch were refused. */
   batch_refused_count?: number
+  preparation_id?: string
+  preparation_reason?: string
+  execution_strategy?: 'actor'
+  removed_layers?: number
+  reclaimed_items?: Record<string, number>
 }
 
 /**
@@ -193,6 +201,8 @@ function result_for(actor: ControlledActor | undefined, task: BasicTask | undefi
     actor_kind: bound?.actor_kind ?? identity?.kind,
     force_index: bound?.force_index ?? (actor?.is_valid ? actor.force.index : undefined),
     entity_name: task && 'entity_name' in task ? task.entity_name : undefined,
+    ...(task?.type === TaskStates.PREPARING_PUMP_SITE ? { preparation_id: task.preparation_id, execution_strategy: 'actor' as const,
+      removed_layers: task.removed_layers ?? 0, reclaimed_items: task.reclaimed_items } : {}),
     target_unit_number: task?.type === TaskStates.MINING || task?.type === TaskStates.MOVING_ITEMS || task?.type === TaskStates.SETTING_RECIPE || task?.type === TaskStates.ROTATING || task?.type === TaskStates.LAUNCHING_ROCKET ? task.target_unit_number : undefined,
     recipe_name: task?.type === TaskStates.SETTING_RECIPE ? task.recipe_name : undefined,
     player_name: task?.type === TaskStates.MOVING_ITEMS ? task.player_name : undefined,
@@ -254,6 +264,17 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       requested_count: count,
     }
     return queue(task, actor)
+  }
+
+  function submit_prepare_pump_site(preparation_id: string) {
+    const actor = actor_for_submission()
+    if (!actor) return false
+    const checked = pump_site_preflight(actor, preparation_id)
+    if (!checked.ok) {
+      result_for(actor, undefined, false, false, 'pump_preparation_refused', { preparation_id, preparation_reason: checked.code })
+      return false
+    }
+    return queue({ type: TaskStates.PREPARING_PUMP_SITE, preparation_id, owner_surface_index: actor.surface.index }, actor)
   }
 
   function submit_mining_exact(target_unit_number: number) {
@@ -543,6 +564,12 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
   }
 
   register_cancel(TaskStates.MINING, () => manager.player_state.parameters_mine_entity)
+  manager.register_cancel_handler(TaskStates.PREPARING_PUMP_SITE, () => {
+    const task = manager.player_state.parameters_prepare_pump_site
+    if (!task) return
+    cleanup_pump_preparation(task)
+    if (!suppress_cancel_receipt) result_for(get_actor(), task, false, false, 'cancelled')
+  })
   register_cancel(TaskStates.PLACING, () => manager.player_state.parameters_place_entity)
   register_cancel(TaskStates.ROTATING, () => manager.player_state.parameters_rotate_entity)
   register_cancel(TaskStates.MOVING_ITEMS, () => manager.player_state.parameters_move_items)
@@ -559,6 +586,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
 
   return {
     submit_mining,
+    submit_prepare_pump_site,
     submit_mining_exact,
     submit_mining_at,
     submit_placement,

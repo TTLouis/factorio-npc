@@ -4,6 +4,7 @@ import { is_runtime_task_state, unsupported_task_state_reason } from './task_sta
 import type { PlayerParameters, PlayerState } from './types'
 import { TaskStates } from './types'
 import { pinned_operation_batch_refs } from './operation_admission'
+import { cleanup_pump_preparation, invalidate_pump_preparation_proposals } from './pump_site_preparation'
 
 export interface TaskBatchIdentity {
   batch_id: number
@@ -145,6 +146,9 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       return { ok: true, reconciled: false, batch_generation: ensure_batch_generation() }
     const interrupted = storage.sgluna_task_active_batch
     if (interrupted) retain_receipt({ ...interrupted, state: 'uncertain', reason: 'save_load_unfinished', tick: game.tick })
+    const pump_preparation = storage.sgluna_task_execution?.player_state.parameters_prepare_pump_site
+    if (pump_preparation) cleanup_pump_preparation(pump_preparation)
+    invalidate_pump_preparation_proposals()
     storage.sgluna_task_active_batch = undefined
     storage.sgluna_task_execution = empty_execution()
     const previous = valid_persisted_counter(storage.sgluna_task_batch_generation) ? storage.sgluna_task_batch_generation : 0
@@ -331,6 +335,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     execution().player_state.parameters_walk_to_entity = undefined
     execution().player_state.parameters_walking_direct = undefined
     execution().player_state.parameters_mine_entity = undefined
+    execution().player_state.parameters_prepare_pump_site = undefined
     execution().player_state.parameters_harvest_product = undefined
     execution().player_state.parameters_clear_construction_area = undefined
     execution().player_state.parameters_place_entity = undefined
@@ -413,6 +418,9 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
         break
       case TaskStates.MINING:
         execution().player_state.parameters_mine_entity = task
+        break
+      case TaskStates.PREPARING_PUMP_SITE:
+        execution().player_state.parameters_prepare_pump_site = task
         break
       case TaskStates.HARVESTING:
         execution().player_state.parameters_harvest_product = task
@@ -508,6 +516,11 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               last_target_amount: task.last_target_amount,
             }
           : { type: execution().player_state.task_state }
+      }
+      case TaskStates.PREPARING_PUMP_SITE: {
+        const task = execution().player_state.parameters_prepare_pump_site
+        return task ? { preparation_id: task.preparation_id, execution_strategy: 'actor', position: task.position,
+          removed_layers: task.removed_layers ?? 0, reclaimed_items: task.reclaimed_items, tile_index: task.tile_index ?? 0 } : undefined
       }
       case TaskStates.HARVESTING: {
         const task = execution().player_state.parameters_harvest_product
@@ -665,6 +678,8 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
 
   function discard_all_tasks_after_actor_loss() {
     initialize()
+    const pump_preparation = execution().player_state.parameters_prepare_pump_site
+    if (pump_preparation) cleanup_pump_preparation(pump_preparation)
     clear_task_state_without_controls()
     execution().task_queue.length = 0
     const receipt = close_batch('cancelled', 'actor_loss')

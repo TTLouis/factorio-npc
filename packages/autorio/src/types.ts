@@ -5,6 +5,7 @@ export enum TaskStates {
   IDLE = 'idle',
   WALKING_TO_ENTITY = 'walking_to_entity',
   MINING = 'mining',
+  PREPARING_PUMP_SITE = 'preparing_pump_site',
   HARVESTING = 'harvesting',
   CLEARING_AREA = 'clearing_area',
   PLACING = 'placing',
@@ -87,6 +88,25 @@ export interface PlayerParametersMineEntity {
   mining_rejects?: number
   /** True after this target was handed to Factorio; a stopped state on a later tick is a rejected start. */
   mining_attempted?: boolean
+}
+
+export interface PlayerParametersPreparePumpSite {
+  type: TaskStates.PREPARING_PUMP_SITE
+  operation_id?: number
+  owner_actor_id?: number
+  owner_actor_kind?: string
+  owner_force_index?: number
+  preparation_id: string
+  owner_surface_index?: number
+  position?: MapPositionStruct
+  started_tick?: number
+  layer_started_tick?: number
+  tile_index?: number
+  removed_layers?: number
+  reclaimed_items?: Record<string, number>
+  owned_proxies?: LuaEntity[]
+  expected_tiles?: Array<{ position: MapPositionStruct, name: string, hidden?: string, double_hidden?: string }>
+  prepared_snapshot?: Array<{ position: MapPositionStruct, name: string, hidden?: string, double_hidden?: string }>
 }
 
 export interface PlayerParametersHarvestProduct {
@@ -292,6 +312,7 @@ export type PlayerParameters
   = | PlayerParametersWalkToEntity
     | PlayerParametersWalkingDirect
     | PlayerParametersMineEntity
+    | PlayerParametersPreparePumpSite
     | PlayerParametersHarvestProduct
     | PlayerParametersClearConstructionArea
     | PlayerParametersPlaceEntity
@@ -309,6 +330,7 @@ export interface PlayerState {
   parameters_walk_to_entity?: PlayerParametersWalkToEntity
   parameters_walking_direct?: PlayerParametersWalkingDirect
   parameters_mine_entity?: PlayerParametersMineEntity
+  parameters_prepare_pump_site?: PlayerParametersPreparePumpSite
   parameters_harvest_product?: PlayerParametersHarvestProduct
   parameters_clear_construction_area?: PlayerParametersClearConstructionArea
   parameters_place_entity?: PlayerParametersPlaceEntity

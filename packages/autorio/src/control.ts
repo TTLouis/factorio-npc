@@ -56,6 +56,7 @@ import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { get_actor_inventory_items } from './utils/inventory'
 import { find_world_entities } from './npc_vision'
+import { cleanup_pump_preparation, invalidate_pump_preparation_proposals, pump_site_preflight, tick_pump_preparation } from './pump_site_preparation'
 
 create_tools_remote_interface()
 create_discovery_remote_interface(get_controlled_actor)
@@ -112,6 +113,20 @@ const runtime_task_dispatchers: Record<RuntimeTaskState, RuntimeTaskDispatcher> 
   },
   [TaskStates.WALKING_DIRECT]: actor => state_walking_direct(actor),
   [TaskStates.MINING]: actor => basic_operation_runtime.state_mining(actor),
+  [TaskStates.PREPARING_PUMP_SITE]: actor => {
+    const task = task_manager.player_state.parameters_prepare_pump_site
+    if (!task) return
+    if (!basic_operation_controller.identity_matches(actor, task) || task.owner_surface_index !== actor.surface.index) {
+      cleanup_pump_preparation(task)
+      basic_operation_controller.fail(actor, task, 'actor_changed')
+      return
+    }
+    const result = tick_pump_preparation(actor, task)
+    if (result.state === 'failed') {
+      cleanup_pump_preparation(task)
+      basic_operation_controller.fail(actor, task, 'pump_preparation_refused', { preparation_reason: result.reason })
+    } else if (result.state === 'complete') basic_operation_controller.complete(actor, task, { preparation_reason: result.reason })
+  },
   [TaskStates.HARVESTING]: actor => harvest_controller.tick(actor),
   [TaskStates.CLEARING_AREA]: actor => area_clearing_controller.tick(actor),
   [TaskStates.PLACING]: actor => basic_operation_runtime.state_placing(actor),
@@ -246,6 +261,11 @@ function operation_preflight(name: string, args: Record<string, any>) {
     if (!actor || !actor.is_valid) return reject('no_actor')
     if (typeof args.candidate_set_id !== 'string' || typeof args.candidate_id !== 'string') return reject('invalid_preflight_args')
     return { operation: name, ...placement_candidate_preflight(actor, args.candidate_set_id, args.candidate_id) }
+  }
+  if (name === 'prepare_pump_site') {
+    if (typeof args.preparation_id !== 'string') return reject('invalid_preflight_args')
+    const checked = pump_site_preflight(actor, args.preparation_id)
+    return checked.ok ? accept({ preparation_id: args.preparation_id, execution_strategy: 'actor' }) : reject(checked.code)
   }
 
   if (name === 'move_items_with_player') {
@@ -555,6 +575,7 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New execute_construction_plan task: validation=${validation_id}, placements=${placement_count}`)
     return result
   },
+  prepare_pump_site: (preparation_id: string) => basic_operation_controller.submit_prepare_pump_site(preparation_id),
   place_candidate: (candidate_set_id: string, candidate_id: string): [boolean, string] => {
     const actor = get_controlled_actor()
     if (!actor) return [false, 'controlled actor is unavailable']
@@ -718,7 +739,11 @@ function sweep_npc_vision(reason: string) {
 }
 
 script.on_init(() => sweep_npc_vision('on_init'))
-script.on_configuration_changed(() => sweep_npc_vision('on_configuration_changed'))
+script.on_configuration_changed(() => {
+  if (task_manager.player_state.task_state === TaskStates.PREPARING_PUMP_SITE) task_manager.cancel_all_tasks('pump_site_configuration_changed')
+  invalidate_pump_preparation_proposals()
+  sweep_npc_vision('on_configuration_changed')
+})
 
 function setup() {
   const seeded = ensure_basic_skill_definitions()

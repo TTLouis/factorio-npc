@@ -11,6 +11,7 @@ import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { count_world_entities, find_world_entities } from './npc_vision'
 import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
+import { get_pump_site_preparation } from './pump_site_preparation'
 import { nearest_pole_for_unpowered, protected_read, status_shows_no_power } from './electric_facts'
 
 const MAX_NEARBY_RADIUS = 64
@@ -568,6 +569,7 @@ export function create_tools_remote_interface() {
       }
     },
     get_fluid_source_tiles: (request: FluidSourceRequest) => fluid_source_observation(get_controlled_actor(), request),
+    get_pump_site_preparation: (request: { x: number, y: number, direction?: number }) => get_pump_site_preparation(get_controlled_actor(), request),
     get_placement_candidates: (request: PlacementCandidateRequest) => {
       const actor = get_controlled_actor()
       if (!actor) return { ok: false, error: 'no controlled actor' }
