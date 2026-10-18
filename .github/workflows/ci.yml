@@ -15,11 +15,24 @@ on:
 
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check offline local runner behavior
+        run: bash tests/tooling/test-local.test.sh
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -86,12 +99,13 @@ jobs:
   # check report its own result even when another one fails.
   typescript-quality:
     if: ${{ always() }}
-    needs: [lint, unit-tests, typescript-build]
+    needs: [tooling, lint, unit-tests, typescript-build]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Require all TypeScript quality checks
         run: |
+          test "${{ needs.tooling.result }}" = success
           test "${{ needs.lint.result }}" = success
           test "${{ needs.unit-tests.result }}" = success
           test "${{ needs.typescript-build.result }}" = success

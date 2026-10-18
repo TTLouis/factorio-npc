@@ -47,7 +47,9 @@ The standalone-NPC baseline includes:
 - an in-game task/plan UI used by the current NPC harness;
 - Docker and Pterodactyl deployment paths for headless servers.
 
-`main` is the stable integration/deployment baseline. `feat/npc-transition-work` remains the active single-NPC integration/E2E line while newer work is promoted in validated checkpoints.
+`main` is the stable baseline. Development integrates into `experiment/jev-agent-architecture`; promotion requires a validated checkpoint.
+
+For development, start with the [project contract](./SPEC.md) and [task/validation workflow](./docs/DEVELOPMENT_WORKFLOW.md). They link the existing architecture, roadmap and evidence rather than replacing them.
 
 ## Validation model
 

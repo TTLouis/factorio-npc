@@ -106,7 +106,7 @@ Changing `FACTORIO_VERSION` requires rebuilding the image. A published release i
 - The current tested/published container platform is `linux/amd64`.
 - RCON remains internal to the container and is not exposed on the host.
 - The legacy top-level `docker/` directory is not used by this deployment.
-- `main` is the release baseline; `feat/npc-transition-work` remains the ongoing single-NPC development branch.
+- `main` is the release baseline; `experiment/jev-agent-architecture` is the development/integration branch.
 
 
 ### Legacy deployment aliases

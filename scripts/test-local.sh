@@ -26,10 +26,71 @@ usage() {
 }
 
 cmd="${1:-}"
-[[ -n "$cmd" ]] || usage
+case "$cmd" in runtime|mod|all) ;; *) usage ;; esac
+[[ $# -eq 1 ]] || usage
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+
+# Docker Desktop needs Windows paths from Git Bash; native POSIX shells do not
+# implement pwd -W. Do not mount the whole checkout (which may contain .env).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) host_root="$(pwd -W)" ;;
+  *) host_root="$root" ;;
+esac
+
+run_scope="npc-static-$$-$RANDOM"
+cid_dir="$(mktemp -d)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) cid_host_dir="$(cd "$cid_dir" && pwd -W)" ;;
+  *) cid_host_dir="$cid_dir" ;;
+esac
+cleanup() {
+  local status=$?
+  trap - EXIT
+  local file cid remaining retain=false
+  for file in "$cid_dir"/*.cid; do
+    [[ -f "$file" ]] || continue
+    cid="$(cat "$file")"
+    # --rm normally did this already. A populated cidfile proves ownership even
+    # when docker run is interrupted; never remove a container by a guessed name.
+    [[ -n "$cid" ]] || continue
+    if remaining="$(docker container ls -aq --no-trunc --filter "id=$cid")"; then
+      if [[ -n "$remaining" ]]; then
+        if ! docker rm -f "$cid" >/dev/null; then
+          status=1
+          retain=true
+        elif ! remaining="$(docker container ls -aq --no-trunc --filter "id=$cid")" || [[ -n "$remaining" ]]; then
+          status=1
+          retain=true
+        fi
+      fi
+    else
+      status=1
+      retain=true
+    fi
+    if [[ "$retain" == true ]]; then
+      echo "Cleanup unverified for $cid; recovery: docker rm -f $cid" >&2
+    fi
+  done
+  if [[ "$retain" == true ]]; then
+    echo "Retained owned container IDs in $cid_dir" >&2
+  else
+    rm -rf -- "$cid_dir"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+run_container() {
+  local lane="$1"
+  shift
+  echo "== owned container: $run_scope-$lane (no Compose project) =="
+  MSYS_NO_PATHCONV=1 docker run --rm --pull never --network none \
+    --name "$run_scope-$lane" --cidfile "$cid_host_dir/$lane.cid" "$@"
+}
 
 run_runtime() {
   echo "== runtime: node --test deploy/pterodactyl/staging + runtime-v8 =="
@@ -43,31 +104,31 @@ run_runtime() {
   #   vision vehicle prototype; the image copy would test a stale prototype.
   # .devcontainer + the repo-root compose/.env/.gitignore/.dockerignore files:
   #   read directly by local-compose-secret-boundary.test.mjs.
-  MSYS_NO_PATHCONV=1 docker run --rm \
+  run_container runtime \
     -e UPDATE_RESTAGE_GOLDEN \
-    -v "$(pwd -W)/deploy/pterodactyl:/src/deploy/pterodactyl" \
-    -v "$(pwd -W)/contracts:/src/contracts:ro" \
-    -v "$(pwd -W)/packages/autorio/src:/src/packages/autorio/src:ro" \
-    -v "$(pwd -W)/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
-    -v "$(pwd -W)/packages/agent/src:/src/packages/agent/src:ro" \
-    -v "$(pwd -W)/.devcontainer:/src/.devcontainer:ro" \
-    -v "$(pwd -W)/compose.devcontainer.yml:/src/compose.devcontainer.yml:ro" \
-    -v "$(pwd -W)/compose.yml:/src/compose.yml:ro" \
-    -v "$(pwd -W)/compose.e2e.yml:/src/compose.e2e.yml:ro" \
-    -v "$(pwd -W)/compose.desktop-operator.yml:/src/compose.desktop-operator.yml:ro" \
-    -v "$(pwd -W)/.env.example:/src/.env.example:ro" \
-    -v "$(pwd -W)/.gitignore:/src/.gitignore:ro" \
-    -v "$(pwd -W)/.dockerignore:/src/.dockerignore:ro" \
+    -v "$host_root/deploy/pterodactyl:/src/deploy/pterodactyl" \
+    -v "$host_root/contracts:/src/contracts:ro" \
+    -v "$host_root/packages/autorio/src:/src/packages/autorio/src:ro" \
+    -v "$host_root/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
+    -v "$host_root/packages/agent/src:/src/packages/agent/src:ro" \
+    -v "$host_root/.devcontainer:/src/.devcontainer:ro" \
+    -v "$host_root/compose.devcontainer.yml:/src/compose.devcontainer.yml:ro" \
+    -v "$host_root/compose.yml:/src/compose.yml:ro" \
+    -v "$host_root/compose.e2e.yml:/src/compose.e2e.yml:ro" \
+    -v "$host_root/compose.desktop-operator.yml:/src/compose.desktop-operator.yml:ro" \
+    -v "$host_root/.env.example:/src/.env.example:ro" \
+    -v "$host_root/.gitignore:/src/.gitignore:ro" \
+    -v "$host_root/.dockerignore:/src/.dockerignore:ro" \
     npc-dev sh -c "node --test deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs"
 }
 
 run_mod() {
   echo "== mod: autorio vitest + tsc --noEmit + Lua build + check-generated-lua =="
-  MSYS_NO_PATHCONV=1 docker run --rm \
-    -v "$(pwd -W)/packages/autorio/src:/src/packages/autorio/src:ro" \
-    -v "$(pwd -W)/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
-    -v "$(pwd -W)/packages/autorio/scripts:/src/packages/autorio/scripts:ro" \
-    npc-dev sh -c "cd packages/autorio && npx vitest run && npx tsc --noEmit -p . && pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build >/dev/null && pnpm run build && node scripts/check-generated-lua.mjs"
+  run_container mod \
+    -v "$host_root/packages/autorio/src:/src/packages/autorio/src:ro" \
+    -v "$host_root/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
+    -v "$host_root/packages/autorio/scripts:/src/packages/autorio/scripts:ro" \
+    npc-dev sh -c "cd packages/autorio && npx --no-install vitest run && npx --no-install tsc --noEmit -p . && pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build >/dev/null && pnpm run build && node scripts/check-generated-lua.mjs"
 }
 
 case "$cmd" in
