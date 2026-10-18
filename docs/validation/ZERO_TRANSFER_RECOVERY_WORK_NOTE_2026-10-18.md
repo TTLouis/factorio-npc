@@ -10,11 +10,11 @@ Acceptance: real controller/task-manager tests distinguish empty extraction from
 
 - [x] Reproduce with deterministic regression and original-code negative control.
 - [x] Implement bounded native proof and correlated classification trace; classification explicitly grants no mutation authority.
-- [ ] Full Docker gate, applicable native lanes, payload repin and checks; preserve exact exits and versions.
+- [x] Full Docker gate, applicable native lanes, payload repin and checks; preserve exact exits and versions.
 - [x] Independent review; resolve actionable findings.
 - [ ] Integrate through an available owned checkout; validate merged candidate.
 
-Checkpoint: 2,592 runtime/staging and 1,233 mod tests, typecheck, Lua/generated-Lua and targeted lint pass. New Factorio 2.0.77 lane proves ten real copper plates, the unchanged zero-removal failure, exact refusal settlement, missing-proof/admission-lineage/stale-admission controls, and fifty real iron plates after correction. Original native mod fails the new proof; original TypeScript source fails three new assertions while twenty existing transfer tests pass. Independent reviewer reports no remaining blockers. Existing production and partial-transfer canaries, payload repin and integration remain. Historical Run AA evidence remains sealed.
+Checkpoint: code `930d0e2b`, separate payload repin `0eb81b81`. 2,592 runtime/staging and 1,233 mod tests, typecheck, Lua/generated-Lua, targeted lint and nine payload tests pass. New Factorio 2.0.77 lane proves ten real copper plates, the unchanged zero-removal failure, exact refusal settlement, missing-proof/admission-lineage/stale-admission controls, and fifty real iron plates after correction. Existing `local-transfer-target`, `partial-transfer` and `production` lanes pass, including the burner-drill/furnace canary and powered assembler cell; all 92 Python checks pass. Original native mod fails the new proof; original TypeScript source fails three new assertions while twenty existing transfer tests pass. Independent reviewer reports no remaining blockers. Integration remains pending an ownership handoff: `WORKTREES.md` still assigns the integration checkout to session01a14fbe. Historical Run AA evidence remains sealed. No live trial, provider/Jev calls or deployment occurred.
 
 ## Separate planning observation requested by the owner
 
