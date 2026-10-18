@@ -263,6 +263,49 @@ test('Jev cannot defer fact reads, admits one discovery read, and still bounds r
   assert.deepEqual(executed(), ['inventory', 'nearby'])
 })
 
+test('spending the read budget closes the observation phase without a recovery record', async () => {
+  // Run Y: 63 of 70 recovery.classified rows were this normal close, and it became the request's recovery
+  // record that later recovery decisions and failure snapshots read.
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'observation phase close test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = await rcon.command('remote.call("sgluna_deployment","status")').then(JSON.parse)
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.traceRequest = { id: 'req_phase_close' }
+  agent.observationBudgetOverride = 1
+  agent.observationBudgetRemaining = 1
+  agent.observationRelevanceOverride = ['inventory_equipment']
+  const events = []
+  const traceEvent = agent.traceEvent.bind(agent)
+  agent.traceEvent = async (event, data) => {
+    events.push({ event, data })
+    return traceEvent(event, data)
+  }
+
+  await agent.handleToolBatch({ tool_calls: [{ id: 'inventory', type: 'function', function: { name: 'getInventoryItems', arguments: '{}' } }] })
+
+  assert.equal(agent.observationBudgetRemaining, 0)
+  assert.equal(agent.observationDecisionForced, true)
+  assert.match(agent.messages.at(-1).content, /observation phase for this decision is now closed/)
+  const closed = events.filter(row => row.event === 'observation.phase_closed')
+  assert.equal(closed.length, 1)
+  assert.equal(closed[0].data.reason_code, 'jev_observation_budget_complete')
+  assert.equal(events.some(row => row.event === 'recovery.classified'), false)
+  assert.equal(agent.traceRequest.recovery, undefined)
+
+  // A real recovery still records and traces as one.
+  await agent.recoveryDiagnostic({ failure_class: 'observation_no_progress', reason_code: 'jev_observation_budget_exhausted', reason: 'over budget' })
+  assert.equal(events.filter(row => row.event === 'recovery.classified').length, 1)
+  assert.equal(agent.traceRequest.recovery.reason_code, 'jev_observation_budget_exhausted')
+})
+
 test('every observation tool has an admission tier', () => {
   for (const name of Object.keys(observationToolFamilyCatalog())) {
     assert.ok(Object.hasOwn(OBSERVATION_TOOL_TIER, name), name)

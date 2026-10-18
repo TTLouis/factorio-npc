@@ -13359,6 +13359,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.messages.push({ role: 'assistant', content: JSON.stringify(omittedPlan) })
       }
     }
+    // The decision's read budget was spent by admitted reads: the observation phase ends as designed. That is
+    // not a recovery, so it neither becomes the request's recovery record nor reads as one in the trace.
+    if (details?.reason_code === 'jev_observation_budget_complete') {
+      await this.traceEvent('observation.phase_closed', { reason_code: details.reason_code, reason: details.reason, tools_enabled: false })
+      return
+    }
     if (this.traceRequest) this.traceRequest.recovery = { ...(this.traceRequest.recovery ?? {}), ...details }
     await this.traceEvent('recovery.classified', details)
   }
