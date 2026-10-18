@@ -4,9 +4,10 @@ export const TOPOLOGY_LIMITS = Object.freeze({ chars: 1950, rawChars: 49152, ent
 
 // Loaded details live in the task prefix. Under packet pressure their duplicate
 // ID-only record must not evict live geometry from the separate topology slot.
-export function deduplicateTopologySkillRefs(messages, skillContext) {
+export function deduplicateTopologySkillRefs(messages) {
   const packet = row => row.role === 'user' && (String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
   const chars = messages.filter(packet).reduce((sum, row) => sum + row.content.length + 1, 0)
+  const skillContext = messages.findLast(row => row.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[SKILL_CONTEXT]'))?.content
   if (!chars || chars + TOPOLOGY_LIMITS.chars <= 6000 || !skillContext?.startsWith('[SKILL_CONTEXT]')) return { messages, removed: 0 }
   let details
   try { details = JSON.parse(skillContext.slice(skillContext.indexOf('\n') + 1)) }

@@ -12020,7 +12020,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       providerMessages = providerMessages.map(row => typeof row.content === 'string' && row.content.includes(`\n${TOPOLOGY_PREFIX}`)
         ? { ...row, content: row.content.split('\n').filter(line => !line.startsWith(TOPOLOGY_PREFIX)).join('\n') } : row)
         .filter(row => !String(row.content).startsWith(TOPOLOGY_PREFIX))
-      const deduplicated = deduplicateTopologySkillRefs(providerMessages, this.skillContext())
+      const deduplicated = deduplicateTopologySkillRefs(providerMessages)
       providerMessages = deduplicated.messages
       if (deduplicated.removed) await this.traceEvent('context.skill_refs_deduplicated', {
         request_id: this.traceRequest?.id, reason: 'loaded_details_already_in_prefix',

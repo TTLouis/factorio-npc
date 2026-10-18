@@ -36,7 +36,7 @@ test('loaded skill details keep duplicate IDs from crowding live topology out of
   const messages = [stable, step, { role: 'user', content: details }]
   const before = stable.content.length + step.content.length + 2
   assert.ok(before + 1950 > 6000)
-  const result = deduplicateTopologySkillRefs(messages, details)
+  const result = deduplicateTopologySkillRefs(messages)
   assert.ok(result.removed > 0)
   assert.equal(result.messages[0], stable)
   assert.equal(result.messages[2], messages[2], 'full loaded details stay present')
@@ -45,9 +45,10 @@ test('loaded skill details keep duplicate IDs from crowding live topology out of
   assert.ok(result.messages[0].content.length + result.messages[1].content.length + 2 + 1950 <= 6000)
   assert.match(step.content, /loaded_skills:/, 'the canonical packet is not mutated')
   for (const context of ['', '[SKILL_CONTEXT] malformed', `[SKILL_CONTEXT] partial\n${JSON.stringify([{ id: ids[0] }])}`]) {
-    assert.equal(deduplicateTopologySkillRefs(messages, context).removed, 0, 'IDs without actual loaded details are preserved')
+    const outgoing = context ? [stable, step, { role: 'user', content: context }] : [stable, step]
+    assert.equal(deduplicateTopologySkillRefs(outgoing).removed, 0, 'IDs without actual outgoing loaded details are preserved')
   }
-  assert.equal(deduplicateTopologySkillRefs([{ ...stable, content: '[HANDOFF]\nshort' }, { ...step, content: `--- step block ---\nloaded_skills: ${ids.join(', ')}` }], details).removed, 0, 'no churn without packet pressure')
+  assert.equal(deduplicateTopologySkillRefs([{ ...stable, content: '[HANDOFF]\nshort' }, { ...step, content: `--- step block ---\nloaded_skills: ${ids.join(', ')}` }, messages[2]]).removed, 0, 'no churn without packet pressure')
 })
 class TopologyGame extends FakeFactorio {
   constructor() {
