@@ -841,7 +841,7 @@ test('the hooks are wired in the live loop (not only implemented)', async () => 
   assert.match(source, /await refreshGoalRequirementsAtShelfPickup\(this, planningAfterCompletion\)/)
   assert.match(source, /await retireGoalRequirements\(this, plan\)/)
   assert.match(source, /async parsePlanMessageChecked\(message, options = \{\}\)/)
-  assert.match(source, /injectedRequirementsChars\(this\)/)
+  assert.match(source, /return \[skillOffersContext\(this\), goalRequirementsContext\(this\), this\.postBatchFactsText\(\)\]/)
   assert.equal(staging.match(/await this\.parsePlanMessageChecked\(message\)/g).length, 1, 'the planning round runs the async check')
   assert.equal(staging.match(/await this\.parsePlanMessageChecked\(message, \{ recovery: true \}\)/g).length, 1, 'the recovery loop runs it marked as recovery')
   assert.match(source, /authoritative live game data/, 'the planning prompt tells the planner the block is authoritative')

@@ -17,7 +17,6 @@ import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-healt
 import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
 import {
   ensureSkillOffers,
-  injectedSkillChars,
   parseSkillChoice,
   parseSkillOffers,
   refreshSkillOffersAtShelfPickup,
@@ -341,7 +340,7 @@ test('the block is shown only while authoring or revising: gone after commit, ba
     afterFirst: async (loop) => {
       // After the commit, rounds that carry out the step get no block.
       assert.equal(skillOffersContext(loop), '')
-      assert.equal(injectedSkillChars(loop), 0)
+      assert.equal(loop.roundTailBlocks().some(block => block.startsWith(SKILL_OFFERS_PREFIX)), false)
     },
   })
   assert.ok(offersIn(calls[0]), 'authoring round has the block')
@@ -406,19 +405,31 @@ test('the shelf pickup and ceiling hooks are wired in the live loop (not only im
   const wake = source.indexOf("route: 'next_shelf_slice'")
   const hook = source.indexOf('await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion)')
   assert.ok(wake > 0 && hook > wake && hook - wake < 400, 'the shelf pickup search runs right after the next_shelf_slice wake')
-  assert.match(source, /> this\.maxWorkingChars - injectedSkillChars\(this\)/)
+  assert.match(source, /return \[skillOffersContext\(this\), goalRequirementsContext\(this\), this\.postBatchFactsText\(\)\]/)
 })
 
-test('the working-character ceiling counts the injected skill text', async () => {
+test('the working-character ceiling reserves room for the loaded skill and the loop-state tail blocks', async () => {
   const { agent } = await scenario({
     planner: (callIndex) => callIndex === 1
       ? { content: 'Loading.', tool_calls: [toolCall('call_00_skill0000000000000001', 0, 'getSkillDetails', { id: 'steam-power-bootstrap' })] }
       : planReply({ plan: ['Build steam power', 'Check it'], operations: [{ name: 'wait', args: { ticks: 1 } }] }),
   })
   agent.skillOffers.authoring = true
-  const expected = skillOffersContext(agent).length + agent.skillContext().length
-  assert.ok(expected > 0)
-  assert.equal(injectedSkillChars(agent), expected)
+  assert.ok(skillOffersContext(agent).length > 0 && agent.skillContext().length > 0)
+  assert.equal(agent.roundTailBlocks()[0], skillOffersContext(agent))
+  const reserved = agent.skillContext().length + agent.roundTailBlocks().reduce((total, block) => total + block.length, 0)
+
+  // History that fits the ceiling on its own, but not with the reserved text, folds its oldest exchange.
+  const exchange = id => [
+    { role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name: 'getInventoryItems', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: id, content: 'x'.repeat(2000) },
+  ]
+  agent.messages = [...agent.baseMessages, ...exchange('a'), ...exchange('b'), ...exchange('c')]
+  const history = agent.messages.reduce((total, message) => total + String(message.content ?? '').length + JSON.stringify(message.tool_calls ?? '').length, 0)
+  agent.maxWorkingMessages = 100
+  agent.maxWorkingChars = history + Math.floor(reserved / 2)
+  agent.compactWorkingContext()
+  assert.ok(agent.messages.some(message => String(message.content).startsWith('[OBSERVATIONS COMPACTED]')))
 })
 
 function deferred() {

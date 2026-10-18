@@ -639,10 +639,6 @@ export function goalRequirementsContext(loop) {
   return requirements.block
 }
 
-export function injectedRequirementsChars(loop) {
-  return goalRequirementsContext(loop).length
-}
-
 // Hook in commitPlan: a committed plan ends the authoring round.
 export async function retireGoalRequirements(loop, plan) {
   const requirements = loop.goalRequirements

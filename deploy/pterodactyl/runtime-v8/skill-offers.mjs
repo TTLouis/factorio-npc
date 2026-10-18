@@ -456,14 +456,6 @@ export function skillOffersContext(loop) {
   return skillOfferBlock(offer)
 }
 
-// Characters the harness injects as skill text (offers plus loaded skill
-// context), so the working-context ceiling can count them.
-export function injectedSkillChars(loop) {
-  const offers = skillOffersContext(loop)
-  const loaded = typeof loop.skillContext === 'function' ? loop.skillContext() : ''
-  return offers.length + loaded.length
-}
-
 function offerRank(loop, id) {
   const index = loop.skillOffers?.cards?.findIndex(card => card.id === id) ?? -1
   return index >= 0 ? index + 1 : undefined

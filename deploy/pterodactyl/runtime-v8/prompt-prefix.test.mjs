@@ -9,6 +9,8 @@ import {
   lastUserOutsideTail,
   promptLayout,
   sharedPrefixMessages,
+  TAIL_BLOCKS,
+  TAIL_MARKERS,
   tailStart,
 } from './prompt-prefix.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
@@ -17,6 +19,9 @@ import { buildPrefixReport,DEFECT_PREFIX_REASONS, EXPECTED_PREFIX_REASONS, forma
 import { providerRequest } from './provider.mjs'
 import { STEAM_SCRIPTED_BLOCKED_ANSWER, steamReplayHarness } from './steam-run-fixtures.mjs'
 import { TOPOLOGY_PREFIX } from './topology-context.mjs'
+import { SKILL_OFFERS_PREFIX } from './skill-offers.mjs'
+import { REQUIREMENTS_PREFIX } from './goal-requirements.mjs'
+import { POST_BATCH_FACTS_MARKER } from './post-batch-facts.mjs'
 
 const user = content => ({ role: 'user', content })
 const system = { role: 'system', content: 'SYSTEM' }
@@ -251,4 +256,25 @@ test('prefix report: names why each call stopped sharing the previous prefix, wi
   assert.equal(report.reasons.find(row => row.reason === 'tail_only').cached_input_share, 0.9)
   assert.equal(report.reasons.find(row => row.reason === 'tools_removed').cached_input_share, 0.3)
   assert.match(formatPrefixReport(report), /tools_removed \(DEFECT\): 1 calls · in 1,000 \(30% cached, 700 miss\)/)
+})
+
+test('the tail-block registry is the one list of markers, detection skips and loop-state blocks', () => {
+  assert.deepEqual(TAIL_MARKERS, TAIL_BLOCKS.map(block => block.marker))
+  assert.equal(new Set(TAIL_MARKERS).size, TAIL_MARKERS.length, 'markers are unique')
+  for (const block of TAIL_BLOCKS) {
+    assert.ok(['loop_state', 'provider_round', 'provider'].includes(block.rendered), block.marker)
+    assert.ok(['skipped', 'answered'].includes(block.detection), block.marker)
+  }
+  // The loop-state blocks are the ones NpcAgentLoop.roundTailBlocks() renders, by their modules' own prefixes.
+  assert.deepEqual(TAIL_BLOCKS.filter(block => block.rendered === 'loop_state').map(block => block.marker),
+    [SKILL_OFFERS_PREFIX, REQUIREMENTS_PREFIX, POST_BATCH_FACTS_MARKER])
+  assert.deepEqual(TAIL_BLOCKS.filter(block => block.detection === 'answered').map(block => block.marker), ['[DECISION_ENVELOPE]', '[PLANNING_LOD]'])
+
+  // Detection looks past every 'skipped' block to the round's instruction, and stops at an 'answered' one.
+  const receipt = { role: 'user', content: '[MOD] batch 4 completed' }
+  for (const block of TAIL_BLOCKS) {
+    const messages = [{ role: 'system', content: 'sys' }, receipt, { role: 'user', content: `${block.marker} text` }]
+    assert.equal(isTailBlock(messages[2]), true, block.marker)
+    assert.equal(lastUserOutsideTail(messages) === receipt, block.detection === 'skipped', block.marker)
+  }
 })

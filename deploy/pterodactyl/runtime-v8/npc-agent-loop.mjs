@@ -188,7 +188,6 @@ import {
   ensureGoalRequirements,
   goalRequirementsContext,
   groundFirstPlan,
-  injectedRequirementsChars,
   lockedRecipeBlocker,
   describeLockedRecipePreflight,
   REQUIREMENTS_PREFIX,
@@ -198,7 +197,7 @@ import {
 } from './goal-requirements.mjs'
 import { UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
 import { POST_BATCH_FACT_CHARS, POST_BATCH_ROUTES, postBatchFactsContext, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
-import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
+import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -4657,14 +4656,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   compactWorkingContext() {
     if (this.compactionDeferred) return
+    // 2.8 hook: the loaded skill context and the loop-state tail blocks are sent with every round, so they count.
+    const workingChars = this.maxWorkingChars - this.skillContext().length
+      - this.roundTailBlocks().reduce((total, block) => total + block.length, 0)
     const overBudget = () => this.messages.length > this.maxWorkingMessages
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this) - this.postBatchFactsText().length // 2.8 hook: injected skill and requirements text counts
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > workingChars
     // 2.9: every fold rewrites the digest and so breaks the provider's cached
     // prefix from the digest onward. Folding only down to the ceiling would
     // fold on every round once the working context is full; folding to a low
     // watermark makes the rounds in between pure appends.
     const overLowWater = () => this.messages.length > this.maxWorkingMessages * COMPACTION_LOW_WATERMARK
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > (this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this) - this.postBatchFactsText().length) * COMPACTION_LOW_WATERMARK
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > workingChars * COMPACTION_LOW_WATERMARK
     if (!overBudget()) return
     while (overLowWater()) {
       const newest = this.messages.findLastIndex(message => message.role === 'assistant' && Array.isArray(message.tool_calls))
@@ -4704,15 +4706,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.pendingSupersededHandoffTrace = { previous_step_id: recorded, current_step_id: step?.step_id }
       }
     }
-    // 2.9: the skill offers are recomputed per round (shown only while a plan
-    // is authored), so they are tail, like steering. Loaded skill context lives
+    // 2.9: the loop-state tail blocks are recomputed per round, like steering. Loaded skill context lives
     // for a whole logical task, so it stays in the fixed prefix.
-    const offered = insertTailBlock(messages, skillOffersContext(this) ? { role: 'user', content: skillOffersContext(this) } : undefined) // 2.8 hook
-    // Live game requirements for the goal's targets: tail too, shown only while a plan is authored or revised.
-    const requirementsTailed = insertTailBlock(offered, goalRequirementsContext(this) ? { role: 'user', content: goalRequirementsContext(this) } : undefined)
-    // The facts read after the last batch receipt: tail, for the rounds of the decision that receipt started.
-    const postBatchFacts = this.postBatchFactsText()
-    const tailed = insertTailBlock(requirementsTailed, postBatchFacts ? { role: 'user', content: postBatchFacts } : undefined)
+    const tailed = this.roundTailBlocks().reduce((list, content) => insertTailBlock(list, { role: 'user', content }), messages)
     const skillContext = this.skillContext()
     if (!skillContext) return tailed
     // Skill context belongs to the fixed prefix, which ends before the first
@@ -6568,6 +6564,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   postBatchFactsText() {
     return postBatchFactsContext(this, { scope: unchangedFactScope(this.epoch), stepKey: this.postBatchStepKey(), role: this.agentContext?.role, mutation: this.worldMutationSeq ?? 0 })
+  }
+
+  // The 'loop_state' tail blocks of prompt-prefix.mjs TAIL_BLOCKS that apply this round, in prompt order:
+  // skill offers and goal requirements while a plan is authored or revised, then the facts read after the
+  // last batch receipt. providerMessages() places them and compaction reserves room for them.
+  roundTailBlocks() {
+    return [skillOffersContext(this), goalRequirementsContext(this), this.postBatchFactsText()].filter(Boolean)
   }
 
   // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says

@@ -35,13 +35,25 @@ import { createHash } from 'node:crypto'
 import { TOPOLOGY_PREFIX } from './topology-context.mjs'
 import { POST_BATCH_FACTS_MARKER } from './post-batch-facts.mjs'
 
-// Blocks the harness recomputes for every round and never stores in the
-// working history: skill offers, goal requirements, the decision envelope and planning outline
-// guidance (npc-agent-loop.mjs callProvider), and steering (provider-base.mjs).
-export const TAIL_MARKERS = Object.freeze(['[SKILL_OFFERS]', '[REQUIREMENTS]', '[DECISION_ENVELOPE]', '[PLANNING_LOD]', '[STEERING]', '[CONTROL_DECISION_STATE]', TOPOLOGY_PREFIX, POST_BATCH_FACTS_MARKER])
-// The tail blocks that round-type detection looks past. The decision envelope
-// and outline guidance were always the "last user message" and stay so.
-const DETECTION_SKIPPED_MARKERS = Object.freeze(['[SKILL_OFFERS]', '[REQUIREMENTS]', '[STEERING]', '[CONTROL_DECISION_STATE]', TOPOLOGY_PREFIX, POST_BATCH_FACTS_MARKER])
+// Every block the harness recomputes for every round and never stores in the working history. A new tail
+// block is one row here plus its renderer.
+// - rendered: where it is built. 'loop_state' blocks come from NpcAgentLoop.roundTailBlocks(), which
+//   compaction reserves room for; 'provider_round' blocks are added in callProviderRound after compaction,
+//   under their own limits; 'provider' is provider-base.mjs.
+// - detection: 'skipped' blocks are looked past by round-type detection (lastUserOutsideTail). The decision
+//   envelope and outline guidance were always the "last user message" and stay so ('answered').
+export const TAIL_BLOCKS = Object.freeze([
+  { marker: '[SKILL_OFFERS]', rendered: 'loop_state', detection: 'skipped' },
+  { marker: '[REQUIREMENTS]', rendered: 'loop_state', detection: 'skipped' },
+  { marker: '[DECISION_ENVELOPE]', rendered: 'provider_round', detection: 'answered' },
+  { marker: '[PLANNING_LOD]', rendered: 'provider_round', detection: 'answered' },
+  { marker: '[STEERING]', rendered: 'provider', detection: 'skipped' },
+  { marker: '[CONTROL_DECISION_STATE]', rendered: 'provider_round', detection: 'skipped' },
+  { marker: TOPOLOGY_PREFIX, rendered: 'provider_round', detection: 'skipped' },
+  { marker: POST_BATCH_FACTS_MARKER, rendered: 'loop_state', detection: 'skipped' },
+].map(block => Object.freeze(block)))
+export const TAIL_MARKERS = Object.freeze(TAIL_BLOCKS.map(block => block.marker))
+const DETECTION_SKIPPED_MARKERS = Object.freeze(TAIL_BLOCKS.filter(block => block.detection === 'skipped').map(block => block.marker))
 const TERMINAL_MARKERS = Object.freeze(['[MOD]', '[HARNESS]'])
 const DIGEST_MARKER = '[OBSERVATIONS COMPACTED]'
 
