@@ -31,8 +31,8 @@ const contextOf = messages => {
 test('loaded skill details keep duplicate IDs from crowding live topology out of the 6000-character handoff', () => {
   const ids = ['scale-out-production-line', 'direct-insertion-chain', 'steam-power-bootstrap']
   const details = `[SKILL_CONTEXT] Loaded details\n${JSON.stringify(ids.map(id => ({ id, constraints: ['Verify live state'] })))}`
-  const stable = { role: 'user', content: '[HANDOFF]\n' + 'g'.repeat(1990) }
-  const step = { role: 'user', content: '--- step block ---\nactor: actor_id=18\n' + 's'.repeat(1960) + `\nloaded_skills: ${ids.join(', ')}` }
+  const stable = { role: 'user', content: `[HANDOFF]\n${'g'.repeat(1990)}` }
+  const step = { role: 'user', content: `--- step block ---\nactor: actor_id=18\n${'s'.repeat(1960)}\nloaded_skills: ${ids.join(', ')}` }
   const messages = [stable, step, { role: 'user', content: details }]
   const before = stable.content.length + step.content.length + 2
   assert.ok(before + 1950 > 6000)
