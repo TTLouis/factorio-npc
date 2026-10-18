@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText } from './topology-context.mjs'
 
-import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
+import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory, toolSignature } from '../staging/npc-agent-loop.mjs'
 import {
   addTaskBoardEvidence,
   recordTaskBoardCheckpointStockRefusal,
@@ -197,6 +197,7 @@ import {
   retireGoalRequirements,
 } from './goal-requirements.mjs'
 import { UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
+import { POST_BATCH_FACT_CHARS, POST_BATCH_ROUTES, postBatchFactsMessage, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -6502,6 +6503,66 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
   // what the machines hold now and that elapsed time proves nothing. Never throws except on an epoch change.
+  postBatchStepKey() {
+    const plan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    return postBatchStepKey(unchangedFactScope(this.epoch), plan?.plan_id, plan?.steps?.[plan.active_step_index]?.step_id)
+  }
+
+  // The predicted lookups for the executor's next round, read live in one go when the batch receipt lands:
+  // inventory, plus the recipes it already read for this step (see post-batch-facts.mjs).
+  async postBatchFactBundle(route) {
+    if (this.agentContext?.role !== EXECUTOR_ROLE || !POST_BATCH_ROUTES.has(route) || this.batchInFlight) return undefined
+    const stepKey = this.postBatchStepKey()
+    if (!stepKey) return undefined
+    this.stepFactWorkingSet ??= new StepFactWorkingSet()
+    const planned = [{ name: 'getInventoryItems', args: {} }, ...this.stepFactWorkingSet.recipes(stepKey)]
+    const reads = []
+    const skipped = []
+    let chars = 0
+    for (const item of planned) {
+      let output
+      try {
+        await this.assertCurrent()
+        output = String(await this.rcon.command(this.observationToolCommand(item.name, item.args))).slice(0, 12000)
+        await this.assertCurrent()
+      }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/epoch changed|cancelled|superseded/i.test(message)) throw error
+        skipped.push({ tool: item.name, reason: 'read_failed' })
+        continue
+      }
+      if (chars + output.length > POST_BATCH_FACT_CHARS) {
+        skipped.push({ tool: item.name, reason: 'size' })
+        continue
+      }
+      chars += output.length
+      reads.push({ name: item.name, args: item.args, signature: toolSignature(item.name, item.args), output })
+    }
+    await this.traceEvent('observation.post_batch_facts', {
+      request_id: this.traceRequest?.id,
+      route,
+      tools: reads.map(read => read.name),
+      chars,
+      ...(skipped.length ? { skipped } : {}),
+    })
+    return reads.length ? { reads } : undefined
+  }
+
+  // Delivered with the continuation, these count as live reads the model received: a repeat of one is
+  // unchanged-fact (no budget), and the decision has fresh evidence as if the model had read them itself.
+  deliverPostBatchFacts(factBundle) {
+    this.postBatchPrefetched = undefined
+    const reads = factBundle?.reads
+    if (!Array.isArray(reads) || reads.length === 0) return
+    this.messages.push({ role: 'user', content: postBatchFactsMessage(reads) })
+    this.unchangedFactReads ??= new UnchangedFactReads()
+    const scope = unchangedFactScope(this.epoch)
+    for (const read of reads) this.unchangedFactReads.recordDelivered(scope, read.signature, read.output)
+    this.postBatchPrefetched = new Set(reads.map(read => read.signature))
+    this.freshObservationSinceContinuation = true
+  }
+
   async blindWaitReceiptFacts(receipt) {
     const types = receipt?.view?.last_completed_batch?.task_types
     const waitOnly = Array.isArray(types) && types.length > 0 && types.every(type => type === 'waiting')
@@ -10553,7 +10614,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // `withinTurn` is for a caller that is already inside a planner turn (for
   // example commitPlan): the next turn is then returned to that caller the way
   // every other in-turn correction is, not started as a second guarded run.
-  async continueFromModMessage(modMessage, traceEventName, { withinTurn = false } = {}) {
+  async continueFromModMessage(modMessage, traceEventName, { withinTurn = false, factBundle } = {}) {
     if (!this.active || !this.epoch) return null
     const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
     const continuationLimit = currentPlan?.status === 'active' ? 64 : this.maxContinuations
@@ -10607,6 +10668,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.worldCorrectionRetries = 0
     this.researchPreflightRetries = 0
     this.messages.push({ role: 'user', content: cleanMemoryText(modMessage, 18000) })
+    this.deliverPostBatchFacts(factBundle)
     await this.traceEvent(traceEventName)
     return withinTurn ? this.runTurn() : this.runGuarded()
   }
@@ -10947,6 +11009,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
     const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
     const transitionFact = stepCompletion?.verified === true ? this.stepTransitionFact(stepCompletion.state) : ''
+    const factBundle = pendingAmendment ? undefined : await this.postBatchFactBundle(routed.route)
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
@@ -10977,6 +11040,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const result = await this.continueFromModMessage(
         `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}${transitionFact ? `[HARNESS] ${transitionFact} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.completion_continuation',
+        { factBundle },
       )
       wakeFailed = false
       if (pendingAmendment) { this.pendingInteractionAmendment = null; this.pendingAmendmentConversationSeq = undefined }
@@ -11133,10 +11197,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
       : ''
     const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
+    const factBundle = await this.postBatchFactBundle(routed.route)
     try {
       return await this.continueFromModMessage(
         `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.error_continuation',
+        { factBundle },
       )
     }
     finally {
@@ -13007,6 +13073,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         args: entry.args,
         cached: admittedCached[index],
         ...(admittedUnchanged[index] ? { unchanged_fact: true } : {}),
+        ...(this.postBatchPrefetched?.has(entry.signature) ? { prefetched: true } : {}),
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
       await this.traceEvent('tool.call', toolTrace)
@@ -13082,6 +13149,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       this.recordLiveEntityToolResult(toolName, original)
+      if (toolName === 'getRecipeDetails') {
+        this.stepFactWorkingSet ??= new StepFactWorkingSet()
+        this.stepFactWorkingSet.noteRecipe(this.postBatchStepKey(), admittedPrepared[index]?.args, admittedPrepared[index]?.signature)
+      }
       if (admittedCached[index] !== true) this.recordHandoffToolFacts(toolName, original, admittedPrepared[index]?.args) // D2: stable recipe facts and counts a later executor is briefed with
       const loadedSkill = this.recordLoadedSkillToolResult(toolName, admittedPrepared[index]?.args, original)
       if (loadedSkill) {

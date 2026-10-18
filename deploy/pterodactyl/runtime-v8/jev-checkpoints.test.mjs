@@ -1269,8 +1269,12 @@ test('deciding C4 keeps fact reads ungated: a read the executor asks for in the 
   forceStage(world, 'c4_next_step', 'deciding', { samples: [2500] })
   await runSliceWithContractedStep2(world)
   assert.equal(world.rows('c4.route_applied')[0].data.mode, 'deciding')
-  assert.equal(world.game.factReads, 1, 'the inventory read ran')
-  assert.deepEqual(world.rows('observation.tier_admitted')[0].data.tools, [{ tool: 'getInventoryItems', tier: 'fact' }])
+  assert.equal(world.game.factReads, 2, 'the post-batch inventory read and the inventory read the executor asked for both ran')
+  // The post-batch facts already delivered this inventory, so the repeat is admitted as an unchanged fact, not by the tier override.
+  const read = world.rows('tool.call').find(row => row.data.name === 'getInventoryItems')
+  assert.equal(read.data.prefetched, true)
+  assert.equal(read.data.unchanged_fact, true)
+  assert.equal(world.rows('observation.tier_admitted').length, 0)
   const measured = world.rows('c4.wake_measured')[0]
   assert.equal(measured.data.fresh_lookups, 1)
   assert.equal(measured.data.observation_rounds, 1, 'the fact read is an observation round')

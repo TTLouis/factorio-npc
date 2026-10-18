@@ -90,7 +90,7 @@ function stableValue(value) {
   return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]))
 }
 
-function toolSignature(name, args) {
+export function toolSignature(name, args) {
   return `${name}:${JSON.stringify(stableValue(args))}`
 }
 
