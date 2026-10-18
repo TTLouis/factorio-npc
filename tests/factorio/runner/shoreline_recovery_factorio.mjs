@@ -120,7 +120,9 @@ const model = new ScriptedModel()
     } else {
       ;[seen.local, seen.pump, seen.wide] = answers
       assert.equal(seen.local.returned_count, 0); assert.equal(seen.local.empty_result_is_conclusive, true)
-      assert.equal(seen.pump.legal_candidate_count, 0)
+      assert.equal(seen.pump.ok, false)
+      assert.equal(seen.pump.code, 'water_source_not_exposed')
+      assert.equal(seen.pump.scanned, undefined, 'empty fluid facts do not authorize a candidate scan')
     }
     assert.equal(seen.wide.returned_count, 0); assert.equal(seen.wide.coverage_complete, false)
     assert.ok(seen.wide.ungenerated_chunk_count > 0)
@@ -128,7 +130,7 @@ const model = new ScriptedModel()
     assert.ok(eastward, JSON.stringify(seen.wide))
     return reply([], { chatMessage: waterOnly
       ? 'BLOCKED: The available actor-centered water scan found no water tiles, and its terrain coverage was incomplete. I cannot identify a legal shoreline placement site from the current evidence.'
-      : 'BLOCKED: No water was found within radius 128, no offshore-pump candidate within radius 24, and radius 256 was incomplete with no samples. I cannot finish the steam-powered lab.' })
+      : 'BLOCKED: No exposed water was found within radius 128, the native pump lookup requires exposed water, and radius 256 was incomplete with no samples. I cannot finish the steam-powered lab.' })
   })
   .push('executor', 'luna:bounded-exploration-correction', async (messages, context) => {
     assert.ok(messages.some(row => String(row.content).includes('[LOCAL_FLUID_SEARCH_RECOVERY]')), 'missing bounded local-fluid exploration correction')
