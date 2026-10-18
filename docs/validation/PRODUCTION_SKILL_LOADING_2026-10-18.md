@@ -34,8 +34,9 @@ or mutation authority; Jev skill ranking stays shadow-only.
 - [x] Reproduce with deterministic scripted loop and library fixtures
 - [x] Implement bounded loading and relevance/guidance correction
 - [x] Offline Docker gate, payload checks and original-code negative controls
-- [ ] Independent review and affected rechecks
-- [ ] Integrate, fresh merged gate and exact-head CI
+- [x] Independent review and affected rechecks
+- [x] Integrate and run fresh merged offline gates
+- [ ] Exact published-head CI (see shared WORKTREES.md for final run status)
 
 Candidate code `19395ce5`; separate payload repin `22f3ff0d` points at that
 immutable source. `bash scripts/test-local.sh all` exited 0: 2,599 runtime tests,
@@ -64,6 +65,17 @@ Owned test containers use the runner's logged `npc-static-*` scopes and the exac
 All are removed after their run, including expected negative failures; no Compose
 project, persistent volume or new image was created.
 
-Checkpoint: independent review and integration pending. These checks prove
-context delivery and matching; autonomous layout choice and sustained red science
-still require a separately authorized live trial.
+Independent reviewer `production_skills_review` approved code `19395ce5` and
+follow-ups `22f3ff0d`/`a7762ace`, with no blockers. Integration merge
+`439c65ab4e2e14e950ec836bd2d75c417686ca11` passed the fresh offline gate
+(2,599 runtime / 1,234 mod / type / Lua) and payload check plus nine tests, all
+exit 0. Merged evidence is retained in
+`test-results/production-skills-integration/`. Candidate evidence is sealed:
+17 files, 2,256,512 bytes, manifest SHA256
+`f3198b945180488d7136521224b3b98f95d6e9248f12f885ef995db32931ba5c`.
+The historical Run AA report remains untracked and unchanged (SHA256
+`1d0df36e51981bc9c29323575592aaf5a616dc878d00f3b7b6f602509227d101`).
+
+Checkpoint: merged offline checks complete; published-head CI pending. These
+checks prove context delivery and matching; autonomous layout choice and sustained
+red science still require a separately authorized live trial.
