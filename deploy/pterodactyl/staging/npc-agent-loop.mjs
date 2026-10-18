@@ -829,6 +829,12 @@ export class NpcAgentLoop {
         if (entry.tool.function.name === THROUGHPUT_MEASUREMENT_TOOL) {
           output = await this.runThroughputMeasurement(entry)
         }
+        else if (typeof entry._sglunaPrereadOutput === 'string') {
+          // Already read live by the subclass during admission; the actor must
+          // still be current when that answer is delivered.
+          await this.assertCurrent()
+          output = entry._sglunaPrereadOutput
+        }
         else {
           await this.assertCurrent()
           output = String(await this.rcon.command(entry.command)).slice(0, 12000)

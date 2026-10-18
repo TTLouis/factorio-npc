@@ -196,6 +196,7 @@ import {
   requirementTargets,
   retireGoalRequirements,
 } from './goal-requirements.mjs'
+import { UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -12894,9 +12895,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const admission = prepared._sglunaObservationAdmission
     const cachedPrepared = prepared.map(entry => this.toolCache.has(entry.signature))
     const staticCachedPrepared = prepared.map(entry => entry.tool.function.name === 'getPrototypeDetails' && this.staticPrototypeCache.has(entry.signature))
+    // Recipe and inventory facts are read live here; an answer identical to the
+    // one last delivered in this actor epoch is admitted without spending budget.
+    this.unchangedFactReads ??= new UnchangedFactReads()
+    const factScope = unchangedFactScope(this.epoch)
+    const unchangedPrepared = []
+    const prereadSignatures = new Set()
+    for (let index = 0; index < prepared.length; index++) {
+      const entry = prepared[index]
+      if (this.observationDecisionForced === true || cachedPrepared[index] === true || !UNCHANGED_FACT_TOOLS.has(entry?.tool?.function?.name)) continue
+      if (prereadSignatures.has(entry.signature)) continue
+      prereadSignatures.add(entry.signature)
+      await this.assertCurrent()
+      entry._sglunaPrereadOutput = String(await this.rcon.command(entry.command)).slice(0, 12000)
+      await this.assertCurrent()
+      unchangedPrepared[index] = this.unchangedFactReads.isUnchanged(factScope, entry.signature, entry._sglunaPrereadOutput)
+    }
     const admittedPrepared = []
     const admittedCached = []
     const admittedStaticCached = []
+    const admittedUnchanged = []
     const deferredPrepared = []
     const deferredByRelevance = []
     const selectedObservationFamilies = Array.isArray(this.observationRelevanceOverride)
@@ -12914,7 +12932,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let discoveryAdmitted = 0
 
     for (let index = 0; index < prepared.length; index++) {
-      const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true
+      const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true && unchangedPrepared[index] !== true
       const name = prepared[index]?.tool?.function?.name
       const family = observationToolFamily(name)
       const tier = observationToolTier(name)
@@ -12928,6 +12946,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         admittedPrepared.push(prepared[index])
         admittedCached.push(cachedPrepared[index])
         admittedStaticCached.push(staticCachedPrepared[index])
+        admittedUnchanged.push(unchangedPrepared[index] === true)
         if (tier === 'discovery') discoveryAdmitted++
         if (tierOverride) tierAdmitted.push({ tool: name, tier })
         else if (fresh && Number.isFinite(freshSlots)) freshSlots--
@@ -12964,7 +12983,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const freshRequestedCount = admittedPrepared.reduce(
-      (total, _entry, index) => total + (admittedCached[index] !== true && admittedStaticCached[index] !== true ? 1 : 0),
+      (total, _entry, index) => total + (admittedCached[index] !== true && admittedStaticCached[index] !== true && admittedUnchanged[index] !== true ? 1 : 0),
       0,
     )
     if (admittedPrepared.length === 0) {
@@ -12987,6 +13006,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         name: entry.tool.function.name,
         args: entry.args,
         cached: admittedCached[index],
+        ...(admittedUnchanged[index] ? { unchanged_fact: true } : {}),
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
       await this.traceEvent('tool.call', toolTrace)
@@ -13011,6 +13031,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.compactionDeferred = false
     }
     const results = this.messages.slice(beforeCount + 1).filter(item => item.role === 'tool')
+    for (const entry of admittedPrepared) {
+      if (typeof entry._sglunaPrereadOutput === 'string') this.unchangedFactReads.recordDelivered(factScope, entry.signature, entry._sglunaPrereadOutput)
+    }
     if (!this.actionOmissionRepairActive && Number.isSafeInteger(this.observationBudgetRemaining) && freshRequestedCount > 0) {
       this.observationBudgetRemaining = Math.max(0, this.observationBudgetRemaining - freshRequestedCount)
       if (this.observationBudgetRemaining === 0) {
@@ -13077,6 +13100,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         tool_call_id: admittedPrepared[index]?.tool.id,
         name: admittedPrepared[index]?.tool.function.name,
         cached: admittedCached[index],
+        ...(admittedUnchanged[index] ? { unchanged_fact: true } : {}),
         original_output_chars: original.length,
         output_chars: output.length,
       }

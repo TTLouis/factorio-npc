@@ -559,7 +559,7 @@
     },
     {
       "event": "tool.call",
-      "sha": "4b0d866a5caa0a26"
+      "sha": "93ac3d020424ce72"
     },
     {
       "event": "tool.call",
@@ -567,7 +567,7 @@
     },
     {
       "event": "tool.result",
-      "sha": "e7527d219a5229f7"
+      "sha": "f96d7966814f529d"
     },
     {
       "event": "tool.result",
