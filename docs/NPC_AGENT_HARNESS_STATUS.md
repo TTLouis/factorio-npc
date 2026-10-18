@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 18: Planner/executor contracts merged; Run AB stops before power
+
+- **Integration.** Published `80eaf9e5` includes reviewed planner-only strategy/skill selection, executor briefs and selected details, bounded advisory review and an integration guard against selecting details absent from the rendered context. Merged 2,620 runtime/1,234 mod tests, lint, installer9, native protocol3/92Python and hosted CI/release/security pass. [Contract checkpoint](validation/PLANNER_EXECUTOR_CONTRACTS_2026-10-18.md).
+- **Live result.** One authorized cold trial lasted40.6362min:118/118 provider replies (Sol10/Luna108),86/86Jev,zero errors. Two committed slices and38executor gameplay admissions produced95iron/18copper plates, lab and main steam kit, but no installed power or red science. Skill details and briefs remained present; the executor still hand-mined and reused one furnace, leaving its miner held. Additional cells were framed as optional time savings. No `plannerReview` request occurred.
+- **Boundary.** A wider water read found exposed samples, but the walk toward one ended `navigation_unreachable`; subsequent narrow incomplete reads were empty and pump candidates refused. Unsupported legacy `BLOCKED` prose followed. Seven request failures consumed the unchanged goal6/6 recovery allowance. Next replay that case against the new advisory review contract, plus investigate brief adherence and the steam-kit checkpoint's omitted pipe/coal promises. These are follow-up findings, not fixes validated by this trial.
+- **Closeout.** Strict paired stop/nativeidle, fresh519,592Bsave/all55CRC/exact2.0.77 pristine load pass. Owned stack/network/volumes/unique images/tunnel and browser are gone; sharedlocal image retained. Sealed216files/43frozenhelpers verified; no corrections/resets/secondtrial. Automated red throughput remains unproven. [Run AB report](validation/RED_AUTOMATION_LIVE_RUN_AB_2026-10-18.md).
+
 ## October 18: Run Z reaches connected water; partial placement blocks automation
 
 - **Result.** The single owner-authorized fresh trial at frozen `e86934e2` stopped after 19.5451 minutes with 50 new iron plates, ten copper plates and zero red science. Pump 35 supplied boiler 36; the engine remained held, no generation or automated chain existed, and measurement never started. Actual planner/executor routing was Sol/Luna, 81/81 provider replies and 54/54 Jev exchanges, zero errors.
