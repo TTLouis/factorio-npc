@@ -9217,6 +9217,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }, pending.operation_key)
       }
       const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
+      // A cancellation the game proved happened after a completed prefix: the failure turn states which operations ran.
+      if (settled && result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION && (result.applied_slots ?? []).length > 0) {
+        this.receiptPrefixSettlement = { result, pending }
+      }
       const rid = requestId ?? this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
@@ -10593,6 +10597,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async taskStatusReceipt() {
     this.noteWorldMutation() // D2: a batch receipt is being read; whatever was observed before it is history
+    this.receiptPrefixSettlement = undefined
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
     try {
@@ -11167,6 +11172,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.reasoningTriggerSource = null
     const cleanError = cleanMemoryText(errorText, 4000)
     const receipt = await this.taskStatusReceipt()
+    const prefixSettlement = this.receiptPrefixSettlement
+    this.receiptPrefixSettlement = undefined
     const receiptKey = runtimeReceiptKey('failure', receipt.view, cleanError, this.epoch?.epoch)
     if (this.lastHandledRuntimeReceipt.failure === receiptKey) {
       if (this.traceRequest?.usage) this.traceRequest.usage.coalesced_runtime_events++
@@ -11274,7 +11281,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const factBundle = await this.postBatchFactBundle(routed.route, { families: selectedObservationFamilies(routed.steering) })
     try {
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}${deferredFacts ? ` ${deferredFacts}` : ''}`,
+        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${prefixSettlement ? ` [HARNESS] ${reconciliationGuidance(prefixSettlement.result, prefixSettlement.pending)}` : ''}${recoverableGuidance}${supplyGuidance}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.error_continuation',
         { factBundle },
       )

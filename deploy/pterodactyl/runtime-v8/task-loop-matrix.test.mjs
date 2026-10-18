@@ -731,6 +731,8 @@ test('Run Z batch 21: a later placement refused after an earlier one was built s
   assert.equal(trace.some(record => record.event === 'operation.uncertainty_blocked'), false)
   // The refused batch no longer holds the step; what is outstanding now is the corrected one.
   assert.equal(world.memory.pendingOperations(KEY).some(pending => pending.ordinal === 1), false)
+  // The failure turn states the settled prefix as a fact.
+  assert.match(prompts[1], /refused operations 2 before changing anything.*Operations 1 completed before the refusal/)
   // The corrected steam engine alone is admitted for the same step.
   assert.equal(world.game.mutations.length, 2)
   assert.deepEqual(world.game.lastTaskTypes, ['placing'])
@@ -758,6 +760,7 @@ test('Run Z batch 21 without the failing-task proof keeps the uncertainty guard'
   await world.agent.failed(reason)
   assert.equal(trace.some(record => record.event === 'operation.reconciled' && record.data.verdict === 'refused_before_mutation'), false)
   assert.ok(world.memory.pendingOperation(KEY), 'the unproven batch stays held')
+  assert.doesNotMatch(prompts.join('\n'), /completed before the refusal/)
   assert.equal(world.game.mutations.length, 1)
 })
 

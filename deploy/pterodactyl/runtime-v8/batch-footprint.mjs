@@ -95,7 +95,7 @@ export function batchFootprintOverlap(operations, preflight) {
         identity: footprint.entity_name,
         detail: `operation ${index + 1} (${footprint.entity_name}) overlaps operation ${earlier.index + 1} (${earlier.footprint.entity_name}) of the same batch`,
         batch_footprint: facts,
-        correction_message: `[HARNESS] Refused before admission: no operation from this batch ran. Operation ${index + 1} would place ${footprint.entity_name} on tiles that operation ${earlier.index + 1} of the same batch places ${earlier.footprint.entity_name} on (collision boxes from the game's prototypes, overlapping by ${round(area)} tiles). Each placement was accepted on its own against the current world; together they cannot both be built. The plan, the step and the requested result are unchanged. Facts: ${JSON.stringify(facts)}`,
+        correction_message: `[HARNESS] Refused before admission: no operation from this batch ran. Operation ${index + 1} would place ${footprint.entity_name} on tiles that operation ${earlier.index + 1} of the same batch places ${earlier.footprint.entity_name} on (collision boxes from the game's prototypes, overlapping by ${round(area)} tiles). Each placement's own preflight does not compare it with the rest of the batch; these two cannot both be built. The plan, the step and the requested result are unchanged. Facts: ${JSON.stringify(facts)}`,
       }
     }
     placed.push({ index, footprint })
