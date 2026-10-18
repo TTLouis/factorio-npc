@@ -5,6 +5,10 @@
     "pterodactyl-runtime-v8"
   ],
   "operations": {
+    "prepare_pump_site": {
+      "args": ["preparation_id"], "remote": ["autorio_operations", "prepare_pump_site"],
+      "surfaces": ["ordinary-agent", "pterodactyl-runtime-v8"], "pterodactyl_layer": "runtime-v8-extension"
+    },
     "walk_to_entity": {
       "args": [
         "entity_name",
@@ -662,6 +666,13 @@
         "pterodactyl-runtime-v8"
       ],
       "surface_policy": "shared"
+    },
+    "getPumpSitePreparation": {
+      "remote": ["autorio_tools", "get_pump_site_preparation"],
+      "category": "construction",
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only",
+      "args": ["x", "y", "direction"]
     },
     "getFluidSourceTiles": {
       "remote": ["autorio_tools", "get_fluid_source_tiles"],

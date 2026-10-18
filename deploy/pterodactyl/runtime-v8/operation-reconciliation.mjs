@@ -24,7 +24,7 @@ export const PENDING_OPERATION_LIMITS = Object.freeze({
 const DELIVERY_OPERATIONS = new Set(['move_items', 'move_items_exact', 'move_items_with_player', 'supply_entity'])
 const CRAFT_OPERATIONS = new Set(['craft_item'])
 const PLACE_OPERATIONS = new Set(['place_entity', 'place_candidate', 'execute_construction_plan'])
-const WORLD_OPERATIONS = new Set(['mine_entity', 'mine_entity_exact', 'clear_area', 'rotate_entity', 'rotate_entity_exact', 'set_machine_recipe', 'equip_weapon', 'equip_ammo', 'equip_armor'])
+const WORLD_OPERATIONS = new Set(['prepare_pump_site', 'mine_entity', 'mine_entity_exact', 'clear_area', 'rotate_entity', 'rotate_entity_exact', 'set_machine_recipe', 'equip_weapon', 'equip_ammo', 'equip_armor'])
 
 export function effectClassOf(name) {
   if (DELIVERY_OPERATIONS.has(name)) return 'delivery'

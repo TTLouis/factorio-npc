@@ -13127,12 +13127,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // a bounded fluid-terrain sample set, and an entity-name read refused because the name is not an entity prototype
   // (a fluid name points at getFluidSourceTiles). Observation-only: neither row changes state or admits anything.
   async traceNativeObservationFact(toolName, args, raw) {
-    if (toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities' && toolName !== 'getPlacementCandidates' && toolName !== 'getEntityStatus') return
+    if (toolName !== 'getPumpSitePreparation' && toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities' && toolName !== 'getPlacementCandidates' && toolName !== 'getEntityStatus') return
     let result
-    const readLimit = toolName === 'getPlacementCandidates' || toolName === 'getEntityStatus' ? 65536 : toolName === 'getFluidSourceTiles' ? 8192 : 4096
+    const readLimit = toolName === 'getPlacementCandidates' || toolName === 'getEntityStatus' || toolName === 'getPumpSitePreparation' ? 65536 : toolName === 'getFluidSourceTiles' ? 8192 : 4096
     try { if (typeof raw === 'string' && raw.length <= readLimit) result = JSON.parse(raw) } catch { /* unreadable stays undefined */ }
     const readable = Boolean(result && typeof result === 'object' && !Array.isArray(result))
-    if (toolName === 'getFluidSourceTiles') {
+    if (toolName === 'getPumpSitePreparation') {
+      await this.traceEvent('observation.pump_site_preparation_observed', {
+        request_id: this.traceRequest?.id, reason: 'bounded_native_pump_site_preparation_read',
+        readable, ok: readable ? result.ok === true : undefined,
+        code: readable ? result.code : undefined,
+        preparation_id: typeof result?.preparation_id === 'string' ? result.preparation_id.slice(0, 100) : undefined,
+        tile_count: Array.isArray(result?.removal_tiles) ? result.removal_tiles.length : undefined,
+        backend: result?.execution_strategy,
+      })
+    }
+    else if (toolName === 'getFluidSourceTiles') {
       await this.traceEvent('observation.fluid_sources_observed', {
         reason: 'bounded_native_fluid_tile_read',
         fluid_name: typeof args?.fluid_name === 'string' ? args.fluid_name.slice(0, 200) : undefined,

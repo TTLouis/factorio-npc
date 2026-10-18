@@ -180,6 +180,7 @@ export const OPERATION_STOCK_EFFECTS = Object.freeze({
   }),
   place_entity: Object.freeze({ claims: true, effect: placementEffect }),
   place_candidate: Object.freeze({ claims: true, effect: placementEffect }),
+  prepare_pump_site: Object.freeze({ claims: false, effect: () => ({ unverifiable: { reason: 'terrain_recovery_requires_native_receipt_and_inventory_read', may_produce: true } }) }),
   // The materials of a validated construction plan live in the mod's validation record, not in the arguments.
   execute_construction_plan: Object.freeze({ claims: true, effect: () => ({ unverifiable: { reason: 'construction_materials_not_declared', may_produce: false } }) }),
   craft_item: Object.freeze({

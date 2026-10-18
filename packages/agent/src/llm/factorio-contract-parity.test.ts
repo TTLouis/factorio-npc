@@ -66,6 +66,7 @@ describe('canonical Factorio provider contract parity', () => {
       'getFluidSourceTiles',
       'getLocalSpatialObservation',
       'getMiningDetails',
+    'getPumpSitePreparation',
       'getResearchPath',
       'getResearchRequest',
       'getSkillDetails',

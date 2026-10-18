@@ -318,10 +318,10 @@ test('planner prompts and the stepCompletions schema say execution plans declare
   assert.doesNotMatch(COMPACT_CONTINUATION_PROMPT, /\} or \{kind:"semantic"/)
   assert.doesNotMatch(CLOSED_CONTROL_PROMPT, /\} or \{kind:"semantic"|at least one deterministic step and stepCompletions/)
   const sha = text => createHash('sha256').update(text).digest('hex')
-  // The compact variant is unchanged. The closed variant now explicitly
-  // distinguishes operation proposals from closed observation tools (Run Q).
-  assert.equal(sha(EXECUTOR_COMPACT_CONTINUATION_PROMPT), 'cf609a119e5907e504ab0db36a355e415b8b0a3c940e28a8055ac363ac9b6028')
-  assert.equal(sha(EXECUTOR_CLOSED_CONTROL_PROMPT), 'a04212a64b2881ec78798f832fba65e6960baf8a008a5794e5abf656f20d0dcc')
+  // The approved operation catalog now includes bounded pump-site preparation.
+  // Both executor variants retain their closed-action completion rules.
+  assert.equal(sha(EXECUTOR_COMPACT_CONTINUATION_PROMPT), '5a11da2ed7ca30757269939d438283f826482824397f9899aec2d32f70975341')
+  assert.equal(sha(EXECUTOR_CLOSED_CONTROL_PROMPT), '038bff7f76859611309fb28dba5a192be9f6174a42ff441339a32a69feb5f84e')
 })
 
 test('a submitPlan wrapper in content whose nested object names the step (no plan array) unwraps and binds like a bare stepId reply', async () => {
