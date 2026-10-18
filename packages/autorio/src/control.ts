@@ -35,7 +35,7 @@ import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
 import { execute_placement_candidate, placement_candidate_preflight } from './placement_candidates'
-import { placement_item_preflight } from './placement_preflight'
+import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
 import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
@@ -448,7 +448,10 @@ function operation_preflight(name: string, args: Record<string, any>) {
       })
     }
     if (name === 'place_entity' && prototype.type === 'offshore-pump') return reject('placement_candidate_required', { field: 'entity_name', identity: entity_name, required_operation: 'place_candidate', correction_message: 'Offshore pumps require place_candidate with live native registry ids. First read getFluidSourceTiles for water and inspect covered_fluid_hints, then request getPlacementCandidates near observed exposed water. If needed move within build reach and refresh candidates. Do not retry generic place_entity with or without coordinates; the committed step is unchanged.' })
-    if (name === 'place_entity') return { operation: name, ...placement_item_preflight(actor, entity_name) }
+    if (name === 'place_entity') {
+      const planned_footprint = planned_placement_footprint(entity_name, args.x, args.y, args.direction)
+      return { operation: name, ...placement_item_preflight(actor, entity_name), ...(planned_footprint ? { planned_footprint } : {}) }
+    }
     if (name === 'walk_to_entity') {
       if (!actor || !actor.is_valid) return reject('no_actor')
       const radius = args.search_radius

@@ -6,7 +6,7 @@ import { placement_check_args, placement_footprint, placement_footprint_covers_p
 import { resolve_exact_entity } from './entity_reference'
 import { pole_candidate_facts, pole_reach, protected_read } from './electric_facts'
 import { find_world_entities } from './npc_vision'
-import { placement_item_preflight } from './placement_preflight'
+import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { placement_obstruction_sample } from './placement_obstructions'
 import { get_recent_fluid_source_observation } from './fluid_source_observation'
 
@@ -772,7 +772,9 @@ export function placement_candidate_preflight(actor: ControlledActor, candidate_
   // A changed join keeps the stale-candidate class; its error text starts with connects_to_port_changed.
   if (!resolved.ok) return { ok: false, code: 'placement_candidate_unavailable', error: resolved.error }
   // Only the native registry supplies entity identity and geometry.
-  return placement_item_preflight(actor, resolved.set.entity_name)
+  const { set, candidate } = resolved
+  const planned_footprint = planned_placement_footprint(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
+  return { ...placement_item_preflight(actor, set.entity_name), ...(planned_footprint ? { planned_footprint } : {}) }
 }
 
 export function execute_placement_candidate(

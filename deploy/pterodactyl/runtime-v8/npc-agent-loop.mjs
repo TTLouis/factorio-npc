@@ -65,6 +65,7 @@ import {
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
+import { batchFootprintOverlap } from './batch-footprint.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
   blockerFacts,
@@ -13544,6 +13545,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         failure.preflightResults = results.slice()
         throw failure
       }
+    }
+    // Every placement was checked against the world as it is now; this checks the batch's placements against each
+    // other (batch-footprint.mjs), from the footprints the mod returned with them.
+    const overlap = batchFootprintOverlap(operations, results)
+    if (overlap) {
+      const failure = new AgentLoopError(`Operation preflight rejected operation ${overlap.operation_index + 1} (${overlap.operation}): ${overlap.code}`)
+      failure.preflight = overlap
+      failure.preflightResults = results.slice()
+      throw failure
     }
     await this.settleBatchStock(operations, results, held, assertPreflightCurrent)
     return results
