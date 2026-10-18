@@ -8,7 +8,15 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
-## October 18: Native landfill preparation validated; Run Z ready for release checks
+## October 18: Run Z reaches connected water; partial placement blocks automation
+
+- **Result.** The single owner-authorized fresh trial at frozen `e86934e2` stopped after 19.5451 minutes with 50 new iron plates, ten copper plates and zero red science. Pump 35 supplied boiler 36; the engine remained held, no generation or automated chain existed, and measurement never started. Actual planner/executor routing was Sol/Luna, 81/81 provider replies and 54/54 Jev exchanges, zero errors.
+- **Blocker.** Batch 21 completed boiler placement, then refused an overlapping engine footprint and cancelled the pole tail. `admitted_cancelled` / `partial_unknown` prevented duplicate repair; canonical `unresolved_operation_effect` required user decision. Three listed tasks reported four starts, so internal approach/resume accounting needs exact offline replay before claiming a reconciliation defect or permitting repair. Assess same-batch footprint validation too; preserve the uncertainty fence.
+- **Landfill boundary.** Native removal and subsequent candidate placement are proven by the static/native gates below. Run Z used exposed water and did not exercise landfill removal. Water-first refusal and automatic recovery to a validated pump candidate worked live. The actor job boundary supports future robot execution; no robot backend is exposed yet.
+- **Closeout.** Strict paired stop/native idle, fresh 695,581-byte save, all 55 CRCs and exact-release Factorio 2.0.77 pristine-copy load pass. All owned containers, networks, disposable volumes, image tags and SSH tunnel are removed; prior archives and environment remain preserved. All 186 Run Z evidence files and 26 frozen helpers verify independently. Weekly remaining was 92% at trial finish, 91% at final publication check, above the approximately 5% reserve. No manual gameplay correction, budget reset or second trial. Automatic red throughput remains unproven. [Run Z result and sealed evidence](validation/RED_AUTOMATION_LIVE_RUN_Z_2026-10-18.md).
+- **Publication scope.** Later, separately published telemetry/tail-registry work through `cc2e5cb9` is preserved. Run Z evaluated `e86934e2`; its release/engine evidence does not validate that later runtime.
+
+## October 18: Native landfill preparation validated before Run Z
 
 - **Capability.** Water-first pump preparation can reclaim a single native landfill layer directly over water through real tile-proxy mining. Actor-bound references, native mining time, inventory, reach, footing and protected/foreign-work checks constrain removal. Completion, interruption, restart and actor loss preserve real effects and clean only owned work. The job boundary permits future robot execution; this release exposes actor work only.
 - **Pump authority.** Preparation is a separate task/receipt. It invalidates the actor's old water observations and pump candidates; fresh water and legal candidate-ID placement are required afterward. Preparing terrain never proves a working pump or power.
