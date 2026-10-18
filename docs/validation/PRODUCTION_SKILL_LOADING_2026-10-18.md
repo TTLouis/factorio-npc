@@ -102,4 +102,13 @@ generation samples, unchanged poles and immutable goal, zero inference fetches.
 The native lane additionally asserts full loaded guidance reaches both roles and
 checks the deduplication trace. Evidence and original failure saves are retained
 under `test-results/production-skills-ci-followup/`; frozen rerun, review and
-repromotion pending.
+repromotion pending at that checkpoint.
+
+Frozen follow-up code `7821af20`, payload `fc3a8956`: offline gate exited 0
+(2,600 runtime / 1,234 mod / type / Lua), payload check and nine tests passed.
+The frozen real-Factorio 2.0.77 image passed fresh-topology and both
+partial-transfer cases (ordinary recovery and unknown-effect control), including
+92 Python runner regressions. Independent review approved the final code after
+the outgoing-context guard and correlated trace assertions addressed its two
+findings. All native evidence/saves were copied out before teardown; the three
+run-owned images and every owned container are removed. Repromotion pending.
