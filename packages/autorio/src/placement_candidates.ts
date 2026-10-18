@@ -94,6 +94,17 @@ function candidate_sets() {
   return storage.sgluna_placement_candidate_sets
 }
 
+/** Cover removal requires new water facts and a newly generated pump candidate. */
+export function invalidate_actor_pump_candidates(actor: ControlledActor) {
+  const sets = candidate_sets()
+  const actor_id = actor.status_snapshot().actor_id
+  for (const [id, set] of pairs(sets)) {
+    if (set.actor_id === actor_id && set.force_index === actor.force.index && set.surface_index === actor.surface.index
+      && prototypes.entity[set.entity_name]?.type === 'offshore-pump') delete sets[id]
+  }
+  storage.sgluna_placement_candidate_set_order = (storage.sgluna_placement_candidate_set_order ?? []).filter(id => sets[id] !== undefined)
+}
+
 function next_candidate_set_id() {
   const next = storage.sgluna_placement_candidate_next_id ?? 1
   storage.sgluna_placement_candidate_next_id = next + 1

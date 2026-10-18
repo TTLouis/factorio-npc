@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { isLegacyOperationCommand, parseStructuredOperations, renderStructuredOperation, renderStructuredOperations } from './operations'
 
 describe('structured Autorio operations', () => {
+  it('accepts only a validated pump preparation reference and preserves it in the native call', () => {
+    const operation = { name: 'prepare_pump_site', args: { preparation_id: 'pump-preparation-7' } }
+    const [parsed] = parseStructuredOperations([operation])
+    expect(parsed).toEqual(operation)
+    expect(renderStructuredOperation(parsed)).toBe("remote.call('autorio_operations', 'prepare_pump_site', 'pump-preparation-7')")
+    for (const preparation_id of ['', 'pump-preparation-0', 'candidate-1', 'pump-preparation-1.5', "pump-preparation-1');game.clear()", 7]) {
+      expect(() => parseStructuredOperations([{ name: 'prepare_pump_site', args: { preparation_id } }])).toThrow()
+    }
+    for (const args of [{}, { preparation_id: 'pump-preparation-7', x: 0 }, { preparation_id: 'pump-preparation-7', backend: 'robot' }, { preparation_id: 'pump-preparation-7', force: true }]) {
+      expect(() => parseStructuredOperations([{ name: 'prepare_pump_site', args }])).toThrow()
+    }
+  })
+
   it('normalizes optional defaults while validating operation shape', () => {
     const operations = parseStructuredOperations([
       { name: 'mine_entity', args: { entity_name: 'iron-ore' } },

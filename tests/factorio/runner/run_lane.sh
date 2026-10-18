@@ -142,6 +142,13 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  pump-landfill-removal)
+    run_py pump_landfill_removal_cell.py
+    run_py pump_landfill_lifecycle.py --phase prepare --save "$SAVE"
+    restart_factorio
+    run_py pump_landfill_lifecycle.py --phase verify
+    run_py pump_landfill_lifecycle.py --phase death
+    ;;
   offshore-water-first)
     run_py offshore_water_first_cell.py
     ;;

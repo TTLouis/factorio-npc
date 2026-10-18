@@ -33,6 +33,7 @@ const toolSamples = {
   getNearbyEntities: {},
   getPlacementCandidates: { entity_name: 'stone-furnace' },
   getFluidSourceTiles: { fluid_name: 'water' },
+  getPumpSitePreparation: { x: 0, y: 0, direction: 0 },
   findLongRangeEntities: { name: 'iron-ore' },
   findNearestEnemy: {},
   getEntityStatus: { name: 'stone-furnace' },
@@ -77,7 +78,7 @@ test('runtime-v8 delegates base operation behavior while owning place_candidate 
     .filter(([, definition]) => definition.pterodactyl_layer === 'runtime-v8-extension')
     .map(([name]) => name)
     .sort()
-  assert.deepEqual(extensions, ['place_candidate'])
+  assert.deepEqual(extensions, ['place_candidate', 'prepare_pump_site'])
   const candidate = runtime.parseOperation({ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } })
   assert.equal(candidate.name, 'place_candidate')
   assert.match(runtime.renderOperation(candidate), /remote\.call\(["']autorio_operations["']\s*,\s*["']place_candidate["']/)
@@ -120,6 +121,7 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     'getFluidSourceTiles',
     'getLocalSpatialObservation',
     'getMiningDetails',
+    'getPumpSitePreparation',
     'getResearchPath',
     'getResearchRequest',
     'getSkillDetails',

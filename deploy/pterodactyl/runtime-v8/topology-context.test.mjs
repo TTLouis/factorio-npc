@@ -103,7 +103,7 @@ test('full Session delegates lean fresh topology and admitted obstruction facts 
   assert.deepEqual(ctx.world.modelRequests.map(row => row.model), ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-6-luna'])
   assert.deepEqual(ctx.world.modelRequests.map(row => row.tool_choice), ['auto', 'auto', 'none'])
   for (const wire of ctx.world.modelRequests) {
-    assert.equal(wire.tools.length, 40)
+    assert.equal(wire.tools.length, 41)
     contextOf(wire.messages)
     const handoff = wire.messages.filter(row => String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---') || String(row.content).startsWith(TOPOLOGY_PREFIX))
     if (handoff.some(row => String(row.content).startsWith('[HANDOFF]'))) assert.ok(handoff.reduce((n, row) => n + row.content.length + 1, 0) <= 6000)

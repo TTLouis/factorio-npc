@@ -6,6 +6,7 @@ export const SUPPORTED_RUNTIME_TASK_STATES = [
   TaskStates.WALKING_TO_ENTITY,
   TaskStates.WALKING_DIRECT,
   TaskStates.MINING,
+  TaskStates.PREPARING_PUMP_SITE,
   TaskStates.HARVESTING,
   TaskStates.CLEARING_AREA,
   TaskStates.PLACING,

@@ -76,6 +76,13 @@ function remember_fluid_read(actor: ControlledActor, observation: RecentFluidSou
   storage.sgluna_recent_fluid_reads = reads
 }
 
+/** Terrain mutation invalidates prior water facts for this exact actor scope. */
+export function invalidate_actor_fluid_source_observations(actor: ControlledActor) {
+  const actor_id = actor.status_snapshot().actor_id
+  storage.sgluna_recent_fluid_reads = (storage.sgluna_recent_fluid_reads ?? []).filter(read => read.actor_id !== actor_id
+    || read.force_index !== actor.force.index || read.observation.surface_index !== actor.surface.index)
+}
+
 function integer(value: unknown, minimum: number, maximum: number): value is number {
   return typeof value === 'number' && value === math.floor(value) && value >= minimum && value <= maximum
 }

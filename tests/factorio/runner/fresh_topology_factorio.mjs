@@ -225,7 +225,7 @@ try {
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null, fetchImpl: async (_url, options) => {
     const body = JSON.parse(options.body)
     wires.push({ model: body.model, role: context.role, tool_choice: body.tool_choice, tools: body.tools?.length ?? 0 })
-    assert.equal(body.tools.length, 40)
+    assert.equal(body.tools.length, 41); assert.ok(body.tools.some(tool => tool.function?.name === 'getPumpSitePreparation'))
     assert.equal(body.tool_choice, context.allowTools === false ? 'none' : 'auto')
     const response = await model.provide(body.messages, context)
     return new Response(JSON.stringify({ choices: [{ finish_reason: response.tool_calls ? 'tool_calls' : 'stop', message: { role: 'assistant', ...response } }],

@@ -29,6 +29,7 @@ const placementArgs = z.object({
 })
 
 export const structuredOperationSchema = z.discriminatedUnion('name', [
+  z.object({ name: z.literal('prepare_pump_site'), args: z.object({ preparation_id: z.string().regex(/^pump-preparation-[1-9][0-9]*$/) }).strict() }).strict(),
   z.object({
     name: z.literal('walk_to_entity'),
     args: z.object({
@@ -314,6 +315,8 @@ export function renderStructuredOperation(operation: StructuredOperation): strin
       return `remote.call('autorio_operations', 'harvest_product', ${renderLuaString(operation.args.product_name)}, ${operation.args.count}, ${operation.args.search_radius})`
     case 'clear_construction_area':
       return `remote.call('autorio_operations', 'clear_construction_area', ${operation.args.x}, ${operation.args.y}, ${operation.args.width}, ${operation.args.height})`
+    case 'prepare_pump_site':
+      return `remote.call('autorio_operations', 'prepare_pump_site', ${renderLuaString(operation.args.preparation_id)})`
     case 'place_candidate':
       return `remote.call('autorio_operations', 'place_candidate', ${renderLuaString(operation.args.candidate_set_id)}, ${renderLuaString(operation.args.candidate_id)})`
     case 'place_entity': {
