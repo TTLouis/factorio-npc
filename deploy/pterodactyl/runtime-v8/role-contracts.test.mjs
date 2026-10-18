@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import fs from 'node:fs/promises'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
 import { getActivePlan } from './planning-state.mjs'
-import { normalizeExecutionGuidance, normalizePlannerReview } from './role-contracts.mjs'
+import { buildPendingOperation, EFFECT } from './operation-reconciliation.mjs'
+import { manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview } from './role-contracts.mjs'
 import { providerRequest } from './provider.mjs'
 import { executionOnlyControlToolDefinitions, planningOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:sgluna'
+const runAB = JSON.parse(await fs.readFile(new URL('./fixtures/run-ab-executor-review.json', import.meta.url), 'utf8'))
 const brief = (skillIds = []) => ({ approach: 'Gather the copper needed for the current slice.',
   rationale: 'A small stock requirement does not repay extra setup yet.', constraints: ['Keep the requested quantity.'], skillIds })
 const draft = (overrides = {}) => ({ chatMessage: '', plan: ['Gather ten copper ore'], currentStep: 0, operations: [],
@@ -280,4 +283,206 @@ test('a deterministic step close refreshes both the focused brief and the select
   assert.equal(w.calls.length, 3)
   assert.equal(w.game.mutations.length, 2)
   assert.equal(w.memory.currentPlan(KEY).task_board.completed_count, 1)
+})
+
+const supplyBrief = mode => ({ ...brief(['direct-miner-smelting']),
+  approach: 'Use the held miner and furnace for this resource; validate their direct output.',
+  materialSupply: mode ? { mode, resource: 'copper-ore' } : null })
+
+function supplyDraft(agent, mode) {
+  agent.loadedSkillContext.set('direct-miner-smelting', { id: 'direct-miner-smelting', summary: 'Optional direct-feed time savings.' })
+  return draft({ executionGuidance: [supplyBrief(mode)] })
+}
+
+test('selected direct-smelting knowledge requires a conscious planner method choice before commit', async () => {
+  const w = world([({ agent }) => {
+    const plan = supplyDraft(agent, 'direct_feed')
+    delete plan.executionGuidance[0].materialSupply
+    return plan
+  }, ({ agent, game, messages }) => {
+    assert.equal(game.mutations.length, 0)
+    assert.ok(messages.some(row => row.role === 'user' && row.content.includes('Choose materialSupply explicitly')))
+    return supplyDraft(agent, 'manual_bootstrap')
+  }, action])
+  await w.say()
+  assert.equal(w.game.mutations.length, 1)
+  assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'manual_bootstrap')
+  assert.ok(w.events.some(row => row.event === 'role.contract_refused' && row.data.reason === 'invalid_execution_guidance'))
+})
+
+test('direct-feed drift refuses the whole batch before startup fuel or manual ore can run', async () => {
+  let before
+  const w = world([({ agent }) => supplyDraft(agent, 'direct_feed'), ({ memory }) => {
+    before = structuredClone(memory.planningState(KEY))
+    return { stepId: getActivePlan(before).steps[0].step_id, operations: [gather('coal', 2), gather('copper-ore', 10)] }
+  }])
+  const result = await w.say()
+  assert.equal(result.blocker.class, 'planner_review_required')
+  assert.equal(w.game.mutations.length, 0)
+  assert.deepEqual(w.plan().steps, getActivePlan(before).steps)
+  assert.equal(w.agent.providerBudgetGeneration, 1)
+  assert.equal(w.memory.planningState(KEY).goal.fresh_context_recovery_used, before.goal.fresh_context_recovery_used)
+  const refused = w.events.find(row => row.event === 'executor.strategy_refused')
+  assert.equal(refused.data.reason, 'manual_supply_would_replace_selected_direct_feed')
+  assert.ok(refused.data.request_id)
+  assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 1)
+  assert.equal(w.calls.length, 2, 'no new model allowance or automatic planner loop')
+})
+
+for (const mode of ['manual_bootstrap', null]) {
+  test(`selected skill with ${mode ?? 'non-production'} choice remains optional knowledge`, async () => {
+    const w = world([({ agent }) => supplyDraft(agent, mode), action])
+    await w.say()
+    assert.equal(w.game.mutations.length, 1)
+    assert.equal(w.events.filter(row => row.event === 'executor.strategy_refused').length, 0)
+  })
+}
+
+test('direct-feed step can acquire startup fuel without a mandatory extra cell', async () => {
+  const w = world([({ agent }) => supplyDraft(agent, 'direct_feed'), ({ memory }) => ({
+    stepId: getActivePlan(memory.planningState(KEY)).steps[0].step_id, operations: [gather('coal', 2)],
+  })])
+  await w.say()
+  assert.equal(w.game.mutations.length, 1)
+  assert.equal(w.events.filter(row => row.event === 'executor.strategy_refused').length, 0)
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(w.memory.snapshot())
+  assert.deepEqual(getActivePlan(restored.planningState(KEY)).steps[0].execution_guidance.materialSupply, { mode: 'direct_feed', resource: 'copper-ore' })
+})
+
+test('direct-feed boundary covers resource and transfer aliases but preserves fuel and finished output', () => {
+  const blocked = [gather('copper-ore', 1),
+    { name: 'mine_resource_at', args: { resource_name: 'copper-ore' } },
+    { name: 'harvest_product', args: { product_name: 'copper-ore' } },
+    { name: 'mine_entity', args: { entity_name: 'copper-ore' } },
+    { name: 'mine_entity_exact', args: { unit_number: 7 } },
+    { name: 'supply_entity', args: { items: [{ item_name: 'copper-ore', count: 1 }] } },
+    ...['move_items', 'move_items_exact'].map(name => ({ name, args: { item_name: 'copper-ore', to_entity: true } })),
+    { name: 'move_items_with_player', args: { item_name: 'copper-ore', to_player: false } }]
+  const allowed = [gather('coal', 1), gather('stone', 5),
+    { name: 'supply_entity', args: { items: [{ item_name: 'coal', count: 2 }] } },
+    { name: 'move_items_exact', args: { item_name: 'copper-plate', to_entity: false } },
+    { name: 'mine_entity_exact', args: { unit_number: 8 } }]
+  assert.deepEqual(manualSupplyDrift(supplyBrief('direct_feed'), [...blocked, ...allowed], id => ({ name: id === 7 ? 'copper-ore' : 'stone-furnace' })), blocked)
+  assert.deepEqual(manualSupplyDrift(brief(), blocked), [], 'legacy persisted briefs do not acquire new constraints')
+  assert.throws(() => normalizeExecutionGuidance([{ ...brief(), materialSupply: { mode: 'mandatory_cells', resource: 'copper-ore' } }], 1))
+})
+
+test('recorded Run AB legacy BLOCKED becomes one advisory review instead of seven failed requests', async () => {
+  let before
+  const w = world([draft(), ({ memory }) => {
+    before = structuredClone(memory.planningState(KEY))
+    return { ...runAB.legacy_reply, stepId: getActivePlan(before).steps[0].step_id }
+  }])
+  let freshAttempts = 0
+  w.agent.tryFreshContextActionRecovery = async () => { freshAttempts++; return { attempted: false } }
+  const result = await w.say()
+  assert.equal(result.blocker.class, 'planner_review_required')
+  assert.equal(freshAttempts, 0)
+  assert.equal(w.calls.length, 2)
+  assert.equal(w.game.mutations.length, 0)
+  assert.deepEqual(w.plan().steps, getActivePlan(before).steps)
+  assert.notEqual(w.plan().status, 'BLOCKED')
+  assert.equal(w.memory.planningState(KEY).goal.fresh_context_recovery_used, before.goal.fresh_context_recovery_used)
+  assert.equal(w.agent.providerBudgetGeneration, 1)
+  const routed = w.events.find(row => row.event === 'executor.legacy_blocker_review')
+  assert.ok(routed.data.request_id)
+  assert.equal(routed.data.world_blocker_proven, false)
+  assert.ok(w.events.some(row => row.event === 'outcome.rejected'))
+  assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 1)
+  assert.equal(w.events.filter(row => row.event === 'plan.replacement_wake').length, 0)
+})
+
+test('a supersession while review returns cannot complete or overwrite the new request', async () => {
+  const w = world([draft(), ({ memory }) => ({ stepId: getActivePlan(memory.planningState(KEY)).steps[0].step_id,
+    operations: [], plannerReview: { reason: 'scope_change', rationale: 'Needs strategic review.' } })])
+  const original = w.agent.returnControlToPlannerWithRetry.bind(w.agent)
+  w.agent.returnControlToPlannerWithRetry = async options => {
+    const result = await original(options)
+    w.agent.generation++
+    return result
+  }
+  await assert.rejects(w.say(), /superseded|stale|cancelled/i)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.events.filter(row => row.event === 'request.completed' && row.data.outcome === 'planner_review_required').length, 0)
+})
+
+test('ordinary, compact, closed and repair protocol 3 wires advertise review without legacy BLOCKED directions', async () => {
+  const actual = world([]).agent.rolePrefixMessages('executor')[0]
+  assert.doesNotMatch(actual.content, /start chatMessage with "BLOCKED|say so with an explicit BLOCKED/)
+  assert.match(actual.content, /plannerReview/)
+  assert.match(world([], { completionProtocolVersion: 2 }).agent.rolePrefixMessages('executor')[0].content, /start chatMessage with "BLOCKED/)
+  for (const allowTools of [true, false]) for (const compact of [true, false]) {
+    let sent
+    await providerRequest({ base: 'https://fixture.example.test/v1', key: 'fixture', model: 'gpt-6-luna', profile: 'cli-proxy' }, [
+      actual,
+      { role: 'user', content: '[HARNESS] Otherwise keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or truthful blocker.' },
+      { role: 'user', content: compact ? '[MOD] Autorio operation batch completed.' : '[CHAT] Louis: continue' },
+    ], { role: 'executor', completionProtocolVersion: 3, allowTools, promptTraceFile: null,
+      fetchImpl: async (_url, options) => {
+        sent = JSON.parse(options.body)
+        return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{}' } }] }))
+      } })
+    const instructions = sent.messages.map(row => row.content).join('\n')
+    assert.match(instructions, /plannerReview/)
+    assert.match(instructions, /direct_feed/)
+    assert.doesNotMatch(instructions, /start chatMessage with "BLOCKED|say so with an explicit BLOCKED/)
+    assert.ok(sent.tools.find(tool => tool.function.name === 'submitPlan').function.parameters.properties.plannerReview)
+    if (!allowTools) assert.match(instructions, /timeReview or plannerReview/)
+  }
+})
+
+test('actual act-or-review repair and the existing single fresh recovery both retain review guidance', async () => {
+  const empty = ({ memory }) => ({ stepId: getActivePlan(memory.planningState(KEY)).steps[0].step_id, operations: [] })
+  const w = world([draft(), empty, ({ messages, memory }) => {
+    assert.ok(messages.some(row => row.role === 'user' && /Finite canonical work remains/.test(row.content) && /plannerReview/.test(row.content)))
+    return empty({ memory })
+  }, ({ messages, memory }) => {
+    const fresh = messages.find(row => row.role === 'user' && row.content.includes('one fresh-context recovery'))
+    assert.ok(fresh)
+    assert.match(fresh.content, /plannerReview/)
+    assert.doesNotMatch(fresh.content, /state BLOCKED:/)
+    return { ...empty({ memory }), plannerReview: { reason: 'local_recovery_exhausted', rationale: 'No grounded next action in the existing recovery budget.' } }
+  }])
+  const result = await w.say()
+  assert.equal(result.blocker.class, 'planner_review_required')
+  assert.equal(w.calls.length, 4)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.events.filter(row => row.event === 'recovery.fresh_context_started').length, 1)
+})
+
+test('protocol 3 accepted deterministic blockers and uncertain-effect holds cannot become advisory review', async () => {
+  for (const uncertain of [false, true]) {
+    const w = world([draft(), action])
+    await w.say()
+    w.game.taskState = 'idle'; w.game.queueLength = 0; w.agent.batchInFlight = false
+    for (const record of w.memory.pendingOperations(KEY)) w.memory.clearPendingOperation(KEY, { operationKey: record.operation_key })
+    let pending
+    if (uncertain) {
+      pending = buildPendingOperation({ requestId: 'uncertain', operationKey: 'uncertain/batch',
+        goalId: w.memory.planningState(KEY).goal.goal_id, planId: w.plan().plan_id, stepId: w.plan().steps[0].step_id,
+        actor: w.game.status, operations: [gather('copper-ore', 10)] })
+      assert.ok(w.memory.recordPendingOperation(KEY, { ...pending, effect: EFFECT.PARTIAL_UNKNOWN }))
+      w.agent.duplicateEffectHold = { operation_key: pending.operation_key }
+    }
+    w.agent.traceRequest = { id: 'blocked-current', usage: {} }
+    const before = await w.agent.assertCurrent()
+    const result = await w.agent.finishNoOperationBlock({ ...runAB.legacy_reply, plan: ['Gather ten copper ore'], currentStep: 0 }, before,
+      'native_structural_blocker', 'Native evidence requires a hold.', uncertain ? 'provider_blocker' : 'deterministic_preflight')
+    assert.equal(result.goalStatus, 'blocked')
+    assert.equal(w.plan().status, 'BLOCKED')
+    assert.equal(w.events.filter(row => row.event === 'executor.legacy_blocker_review').length, 0)
+    assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 0)
+    if (uncertain) assert.equal(w.memory.pendingOperation(KEY).effect, EFFECT.PARTIAL_UNKNOWN)
+  }
+})
+
+test('a stale actor legacy blocker cannot pause or review the replacement actor', async () => {
+  const w = world([draft(), ({ game, memory }) => {
+    game.status.epoch++
+    return { ...runAB.legacy_reply, stepId: getActivePlan(memory.planningState(KEY)).steps[0].step_id }
+  }])
+  await assert.rejects(w.say(), /epoch|superseded|cancelled/i)
+  assert.equal(w.events.filter(row => row.event === 'executor.legacy_blocker_review').length, 0)
+  assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 0)
 })

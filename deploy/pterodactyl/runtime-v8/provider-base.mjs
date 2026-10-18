@@ -7,7 +7,7 @@ import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLay
 import { EXECUTOR_ROLE } from './agent-roles.mjs'
 import { stepContractMessages, STEP_CONTRACT_TOOL_DEFINITIONS, STEP_CONTRACT_TRIGGER } from './luna-step-contracts.mjs'
 import { approvedOperationListText, executionOnlyProviderToolDefinitions, executorProviderToolDefinitions, parsePlan, planningOnlyProviderToolDefinitions, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
-import { EXECUTION_ONLY_PROMPT, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
 
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
 const FAILURE_MARKER = '[MOD] Autorio operation error:'
@@ -1455,9 +1455,12 @@ export async function providerRequest(config, messages, {
   const styledMessages = interactionRouter || stepContractRound
     ? controlledMessages
     : applyProviderStylePrompt(roleMessages, capability.style_profile ?? capability.id)
+  const separatedMessages = separatedRound && executorRound ? styledMessages.map(message => message.role === 'system'
+    || (message.role === 'user' && /^\[(?:STEERING|HARNESS|ACTION_OMISSION_RECOVERY)\]/.test(String(message.content)))
+    ? { ...message, content: executionOnlyPrompt(message.content) } : message) : styledMessages
   const cacheBreakpoints = interactionRouter
-    ? { messages: styledMessages, breakpoints: 0 }
-    : applyAnthropicCacheBreakpoints(styledMessages, capability)
+    ? { messages: separatedMessages, breakpoints: 0 }
+    : applyAnthropicCacheBreakpoints(separatedMessages, capability)
   const body = {
     model: config.model,
     messages: cacheBreakpoints.messages,
