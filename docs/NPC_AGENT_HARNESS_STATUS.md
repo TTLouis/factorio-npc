@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 18: Native landfill preparation validated; Run Z ready for release checks
+
+- **Capability.** Water-first pump preparation can reclaim a single native landfill layer directly over water through real tile-proxy mining. Actor-bound references, native mining time, inventory, reach, footing and protected/foreign-work checks constrain removal. Completion, interruption, restart and actor loss preserve real effects and clean only owned work. The job boundary permits future robot execution; this release exposes actor work only.
+- **Pump authority.** Preparation is a separate task/receipt. It invalidates the actor's old water observations and pump candidates; fresh water and legal candidate-ID placement are required afterward. Preparing terrain never proves a working pump or power.
+- **Proof.** Reviewed production merge `b2019034`, including the concurrently published post-batch inventory/recipe fact improvement. Merged Docker gate passes 2,566 runtime/staging and 1,223 mod tests, typecheck/Lua/generated-Lua, lint and nine payload tests. All 26 native lanes and 92 Python checks pass. Focused native proof reclaims six landfill and builds a water-sourcing pump with zero humans, including cancellation, foreign marks, saved pending work/restart and actual actor death. [Validation checkpoint](validation/PUMP_LANDFILL_REMOVAL_2026-10-18.md).
+- **Boundary.** Prior archived evidence remains unchanged. The owner authorized one fresh Run Z after actual release-byte, proxy and role-routing verification, with the existing 60-minute construction and five-wall-minute automated-throughput measurement rules. Approximately 5% usage is reserved; live stop threshold is 7%. Autonomous red-science throughput is still unproven before that trial.
+
 ## October 17: Run X partial-transfer, completion and stop regressions fixed offline
 
 - **Recovery.** Fully accounted native transfer refusals now settle as known partial work, preserving completed effects and refusing original-batch replay. Fresh same-step repairs share the existing two-attempt allowance. Missing receipts, changed actors/epochs and cancelled tails retain uncertainty and the duplicate guard.
