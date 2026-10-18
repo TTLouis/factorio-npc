@@ -678,6 +678,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
 
     let moved_total = 0
+    let source_removed_total = 0
     let held_count = 0
     if (task.to_entity) {
       const available = actor_inventory.get_item_count(task.item_name)
@@ -713,6 +714,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
           if (!actor_inventory.can_insert({ name: task.item_name })) return
           const removed = inventory.remove({ name: task.item_name, count: task.max_count - moved_total })
           if (removed <= 0) return
+          source_removed_total += removed
           const inserted = actor_inventory.insert({ name: task.item_name, count: removed })
           if (inserted < removed) inventory.insert({ name: task.item_name, count: removed - inserted })
           moved_total += inserted
@@ -733,7 +735,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
         })
         return 0
       }
-      controller.fail(actor, task, 'nothing_moved', { moved_count: 0 })
+      controller.fail(actor, task, 'nothing_moved', { moved_count: 0, source_removed_count: source_removed_total })
       return 0
     }
     const target_label = task.target_unit_number !== undefined ? ` entity unit ${task.target_unit_number}` : ''

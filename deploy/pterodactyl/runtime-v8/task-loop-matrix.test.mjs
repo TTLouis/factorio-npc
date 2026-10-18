@@ -696,6 +696,44 @@ test('a cancelled placement WITHOUT the mod first-task proof preserves the plan 
   assert.equal(held.data.reason, 'unresolved_operation_scope_conflict')
 })
 
+for (const proven of [true, false]) test(`Run AA: zero extraction ${proven ? 'with native no-mutation proof repairs the same step' : 'without native proof keeps its uncertainty hold'}`, async () => {
+  const steps = ['Recover the copper output and smelt fifty iron plates in the furnace']
+  const prompts = []
+  const trace = []
+  const world = harness({ provider: async messages => {
+    prompts.push(messages.map(m => String(m.content ?? '')).join('\n'))
+    return planReply({ plan: steps, currentStep: 0, checkpoint: inventoryCheckpoint('iron-plate', 50),
+      operations: prompts.length === 1
+        ? [{ name: 'move_items', args: { item_name: 'iron-plate', entity_name: 'stone-furnace', max_count: 50, to_entity: false } }]
+        : [{ name: 'move_items', args: { item_name: 'copper-plate', entity_name: 'stone-furnace', max_count: 10, to_entity: false } }],
+      chatMessage: 'Observe the counts and clear the copper output for this step.' })
+  } })
+  world.agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  await world.say('smelt fifty iron plates in the furnace after copper', 'new_goal')
+  const committed = structuredClone(world.reducerPlan())
+  const reason = world.game.failLastBatch({ type: 'moving_items', code: 'nothing_moved', accepted: false, completed: false,
+    item_name: 'iron-plate', entity_name: 'stone-furnace', requested_count: 50, to_entity: false, moved_count: 0, source_removed_count: 0 })
+  if (proven) Object.assign(world.game.cancelledBatch, { failed_before_mutation: true, tasks_started: 1, failed_task_index: 0 })
+  await world.agent.failed(reason)
+  assert.equal(world.reducerPlan().plan_id, committed.plan_id)
+  assert.deepEqual(world.reducerPlan().steps.map(s => s.completion_contract), committed.steps.map(s => s.completion_contract))
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.ok(trace.some(r => r.event === 'transfer.extraction_classified' && r.request_id
+    && r.data.reason === 'native_zero_source_removal_same_step_candidate' && r.data.grants_mutation_authority === false))
+  if (proven) {
+    assert.equal(world.memory.currentPlan(KEY).status, 'active')
+    assert.equal(world.game.mutations.length, 2)
+    assert.equal(world.memory.pendingOperations(KEY).some(p => p.ordinal === 1), false)
+    assert.equal(trace.some(r => r.event === 'operation.uncertainty_blocked'), false)
+    assert.ok(trace.some(r => r.event === 'transfer.extraction_classified' && r.data.attempt === 1 && r.data.retry_budget === 2))
+    assert.match(prompts[1], /recoverable supply dependency inside the same committed step/)
+  } else {
+    assert.equal(world.game.mutations.length, 1)
+    assert.ok(world.memory.pendingOperations(KEY).some(p => p.effect === 'partial_unknown'))
+    assert.equal(trace.some(r => r.event === 'operation.reconciled' && r.data.verdict === 'refused_before_mutation'), false)
+  }
+})
+
 test('Run Z batch 21: a later placement refused after an earlier one was built settles with the built one applied, not held', async () => {
   const STEPS = ['Place a boiler and a steam engine at the offshore pump', 'Connect the steam engine with a small electric pole']
   const prompts = []
