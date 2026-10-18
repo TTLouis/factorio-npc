@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
-import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText } from './topology-context.mjs'
+import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, deduplicateTopologySkillRefs } from './topology-context.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory, toolSignature } from '../staging/npc-agent-loop.mjs'
 import {
@@ -12020,6 +12020,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       providerMessages = providerMessages.map(row => typeof row.content === 'string' && row.content.includes(`\n${TOPOLOGY_PREFIX}`)
         ? { ...row, content: row.content.split('\n').filter(line => !line.startsWith(TOPOLOGY_PREFIX)).join('\n') } : row)
         .filter(row => !String(row.content).startsWith(TOPOLOGY_PREFIX))
+      const deduplicated = deduplicateTopologySkillRefs(providerMessages, this.skillContext())
+      providerMessages = deduplicated.messages
+      if (deduplicated.removed) await this.traceEvent('context.skill_refs_deduplicated', {
+        request_id: this.traceRequest?.id, reason: 'loaded_details_already_in_prefix',
+        removed_chars: deduplicated.removed, packet_char_limit: 6000,
+      })
       const handoffChars = providerMessages.filter(row => String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
         .reduce((sum, row) => sum + String(row.content).length + 1, 0)
       const room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars

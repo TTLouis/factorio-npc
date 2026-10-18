@@ -82,6 +82,8 @@ function entity(messages, name) {
 }
 function contextFacts(messages, role) {
   const text = messages.map(row => String(row.content)).join('\n')
+  const skills = messages.find(row => String(row.content).startsWith('[SKILL_CONTEXT]'))
+  assert.ok(skills && String(skills.content).includes('steam-power-bootstrap'), `${role} keeps the loaded production guidance alongside live topology`)
   const line = text.split('\n').findLast(row => row.startsWith('fresh_topology: '))
   assert.ok(line, `${role} must receive the fresh bounded topology context`)
   assert.ok(line.length <= 1950, `${role} topology must stay lean`)
@@ -263,6 +265,9 @@ try {
   assert.equal(world.named('goal.evaluated').at(-1).satisfied, true)
   assert.equal(world.memory.currentPlan(KEY), undefined)
   assert.ok(world.named('step.candidate_placement_receipt_checked').length >= 4)
+  const deduplicated = world.named('context.skill_refs_deduplicated')
+  assert.ok(deduplicated.length > 0, 'loaded skill refs must yield packet space to live topology in this regression')
+  assert.ok(deduplicated.every(row => row.request_id && row.reason === 'loaded_details_already_in_prefix' && row.removed_chars > 0 && row.packet_char_limit === 6000))
   assert.deepEqual(model.remaining, []); assert.deepEqual(jevContractLog.filter(row => !row.ok), []); assert.equal(fetchCalls, 0)
   assert.equal(world.modelRequests[0].model, PLANNER_MODEL); assert.ok(world.modelRequests.slice(1).every(row => row.model === EXECUTOR_MODEL))
   assert.deepEqual(world.named('recovery.auto_resume_started'), [], 'fresh native facts do not buy extra resumes')

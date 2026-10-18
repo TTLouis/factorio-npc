@@ -1,6 +1,32 @@
 // Bounded native facts, never placement authority or an instruction to modify a plan.
 export const TOPOLOGY_PREFIX = 'fresh_topology: '
 export const TOPOLOGY_LIMITS = Object.freeze({ chars: 1950, rawChars: 49152, entities: 4, radius: 32, scan: 16, reads: 3 })
+
+// Loaded details live in the task prefix. Under packet pressure their duplicate
+// ID-only record must not evict live geometry from the separate topology slot.
+export function deduplicateTopologySkillRefs(messages, skillContext) {
+  const packet = row => row.role === 'user' && (String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
+  const chars = messages.filter(packet).reduce((sum, row) => sum + row.content.length + 1, 0)
+  if (!chars || chars + TOPOLOGY_LIMITS.chars <= 6000 || !skillContext?.startsWith('[SKILL_CONTEXT]')) return { messages, removed: 0 }
+  let details
+  try { details = JSON.parse(skillContext.slice(skillContext.indexOf('\n') + 1)) }
+  catch { return { messages, removed: 0 } }
+  if (!Array.isArray(details)) return { messages, removed: 0 }
+  const loaded = new Set(details.map(skill => skill?.id).filter(id => typeof id === 'string'))
+  let removed = 0
+  const result = messages.map(row => {
+    if (!packet(row) || !row.content.startsWith('--- step block ---')) return row
+    const content = row.content.split('\n').filter(line => {
+      if (!line.startsWith('loaded_skills: ')) return true
+      const ids = line.slice('loaded_skills: '.length).split(', ')
+      if (!ids.length || !ids.every(id => loaded.has(id))) return true
+      removed += line.length + 1
+      return false
+    }).join('\n')
+    return content === row.content ? row : { ...row, content }
+  })
+  return { messages: result, removed }
+}
 const name = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(value) ? value : undefined
 const number = value => typeof value === 'number' && Number.isFinite(value) ? value : undefined
 const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined

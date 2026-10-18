@@ -79,3 +79,27 @@ The historical Run AA report remains untracked and unchanged (SHA256
 Checkpoint: merged offline checks complete; published-head CI pending. These
 checks prove context delivery and matching; autonomous layout choice and sustained
 red science still require a separately authorized live trial.
+
+## CI topology follow-up
+
+Initial published CI `39150833598` passed six jobs and the default real-engine
+harness, but failed its separate fresh-topology lane. Package `39150833538` and
+Security `39150833537` passed. Local exact-code reproduction found the same
+failure: a 4,092-character executor packet left 1,908 characters for the native
+topology record. Three newly loaded skill IDs occupied 88 redundant characters;
+the topology serializer dropped the boiler rather than exceed its limit.
+
+The follow-up removes that ID-only line from the provider copy only when the
+packet is under size pressure and every ID already has full details in the actual
+rendered skill prefix. It preserves the canonical packet, loaded details, live
+facts, 6,000-character handoff cap, 1,950-character topology cap and read limits.
+The request-correlated `context.skill_refs_deduplicated` trace states the reason
+and released space. Missing/malformed/partial skill context never removes IDs.
+
+The unchanged native geometry/output assertions fail before the fix and pass
+with the fixed runtime: two pipes, the held engine, powered inserter, three stable
+generation samples, unchanged poles and immutable goal, zero inference fetches.
+The native lane additionally asserts full loaded guidance reaches both roles and
+checks the deduplication trace. Evidence and original failure saves are retained
+under `test-results/production-skills-ci-followup/`; frozen rerun, review and
+repromotion pending.
