@@ -15495,6 +15495,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           'provider_action_omission_repair_failed: bounded act-or-block repair returned no executable operation and no explicit BLOCKED: reason',
         )
       }
+      if (this.roleCannotAuthorOperations()) {
+        // A planner cannot act, so an act-or-block repair cannot apply to it. End the request visibly (model_recoverable):
+        // the supervisor pauses the plan and a fresh restage resumes it, instead of the reply ending quietly as no_operations.
+        throw new AgentLoopError(
+          'provider_action_omission_repair_failed: planner reply left remaining canonical work without a committable plan or BLOCKED: reason',
+        )
+      }
       const state = await this.beginActionOmissionRepair(plan, 'no_operation_for_remaining_plan')
       if (state?.status === 'active') {
         this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
@@ -16624,7 +16631,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     const observationDecisionComplete = /(?:single targeted observation allowed|targeted observation budget allowed) by decision pressure is complete/i.test(reasonText)
     const currentState = this.memory.currentPlan?.(this.activePlanKey())
-    if (observationDecisionComplete && !this.actionOmissionRepairActive) {
+    // A planner's forced decision is the no-tools recovery round below; executor repair flags would outlive its handoff.
+    if (observationDecisionComplete && !this.actionOmissionRepairActive && !this.roleCannotAuthorOperations()) {
       if (canonicalWorkRemains(currentState)) {
         await this.beginActionOmissionRepair({
           chatMessage: '',

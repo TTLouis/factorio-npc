@@ -3,12 +3,13 @@ import test from 'node:test'
 import fs from 'node:fs/promises'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { AgentLoopError, NpcAgentLoop } from './npc-agent-loop.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
 import { applyPlanningEvent, getActivePlan, MAX_REVIEW_CONTINUATIONS_PER_GOAL, PLANNING_EVENT } from './planning-state.mjs'
 import { POST_BATCH_COVERAGE_REASON } from './post-batch-facts.mjs'
 import { buildPendingOperation, EFFECT } from './operation-reconciliation.mjs'
 import { manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview } from './role-contracts.mjs'
+import { classifyRequestFailure } from './pause-class.mjs'
 import { providerRequest } from './provider.mjs'
 import { executionOnlyControlToolDefinitions, planningOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
@@ -344,8 +345,8 @@ test('Run AF: a planner review-round reply is never met with executor continuati
     assert.equal(ctx.context.allowTools, true, 'ordinary read budget, not the action-omission single-read round')
     assert.equal(ctx.memory.currentPlan(KEY).admission_status === 'action_omission_repair', false)
     assert.equal(ctx.agent.actionOmissionRepairActive, false)
-    assert.match(afOutgoing(ctx.messages), /[PLANNER_REVIEW_NOTES].*Iron ore candidates/)
-    assert.doesNotMatch(afOutgoing(ctx.messages), /act-or-block|1 act-or-block/i)
+    assert.match(afOutgoing(ctx.messages), /\[PLANNER_REVIEW_NOTES\].*Iron ore candidates/)
+    assert.doesNotMatch(afOutgoing(ctx.messages), /act-or-block/i)
     return readNearby('af-read-1', 'iron-ore')
   }, ctx => {
     assert.equal(ctx.context.allowTools, true, 'a second read is still open after the first')
@@ -376,6 +377,7 @@ test('Run AF: the planner role cannot begin an executor action-omission repair o
     const held = ctx.memory.currentPlan(KEY)
     assert.equal(held.status, 'active')
     assert.equal(held.last_mutation_verified, true, 'every other finite-pressure precondition holds')
+    assert.ok(held.task_board.evidence.some(item => item?.kind === 'deterministic_verification'), 'the verification evidence precondition holds')
     const noOperations = { chatMessage: '', plan: held.plan, currentStep: held.current_step, operations: [] }
     assert.equal(ctx.agent.planUpdateReason, 'completion')
     assert.equal(ctx.agent.finiteNoOperationPressure(noOperations), '')
@@ -400,7 +402,7 @@ test('Run AF: an executor no-operation reply after a verified step still gets co
   const w = world([copperThenIron(), action, ctx => ({ stepId: activeStepId(ctx.memory), plan: ['Gather ten copper ore', 'Gather ten iron ore'], currentStep: 1, operations: [] }),
     ctx => {
       assert.equal(ctx.context.role, 'executor')
-      assert.match(afOutgoing(ctx.messages), /[HARNESS]/)
+      assert.match(afOutgoing(ctx.messages), /\[HARNESS\]/)
       return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
     }])
   await w.say()
@@ -412,6 +414,50 @@ test('Run AF: an executor no-operation reply after a verified step still gets co
   assert.equal(started.length, 1)
   assert.equal(started[0].data.reason_code, 'finite_goal_continuation_pressure')
   assert.equal(w.game.mutations.length, 2)
+})
+
+test('Run AF: a planner reply that is not a committable draft ends visibly as a model_recoverable failure, not a quiet no-operation finish', async () => {
+  // A valid draft while the actor is not idle is not admitted as a planner-only draft (initialPlannerAdmission needs an idle
+  // actor), so it reaches the remaining-canonical-work branch that used to begin an executor repair on the planner.
+  const w = world([({ game }) => { game.status.idle = false; return copperThenIron() }])
+  await assert.rejects(w.say(), error => {
+    assert.match(error.message, /^provider_action_omission_repair_failed: planner reply left remaining canonical work/)
+    assert.deepEqual(classifyRequestFailure(error).pause_class, 'model_recoverable', 'the supervisor pauses this class and auto-resumes it')
+    return true
+  })
+  assert.equal(w.calls.length, 1, 'no second planner call carrying an executor repair prompt')
+  assert.equal(w.events.filter(row => row.event === 'recovery.action_omission_started').length, 0)
+  assert.equal(w.events.filter(row => row.event === 'request.completed').length, 0, 'it did not end as a quiet no-operation finish')
+  assert.notEqual(w.memory.currentPlan(KEY)?.admission_status, 'action_omission_repair')
+})
+
+test('Run AF: observation-decision pressure on a planner forces the no-tools decision without executor repair flags, so the next executor can observe', async () => {
+  const w = world([async ctx => {
+    assert.equal(ctx.context.role, 'planner')
+    const spent = new AgentLoopError('The targeted observation budget allowed by decision pressure is complete. Stop observing. Reuse the live evidence already collected and return the next executable action, or a truthful blocker.')
+    await assert.rejects(ctx.agent.recoverPlan(ctx.agent.generation, spent, 1), /forced decision test stop/)
+    assert.equal(ctx.agent.actionOmissionRepairActive, false)
+    assert.equal(ctx.agent.actionOmissionObservationUsed, false)
+    assert.equal(ctx.agent.actionOmissionForceNoTools, false)
+    return copperThenIron()
+  }, ctx => {
+    assert.equal(ctx.context.role, 'planner')
+    assert.equal(ctx.context.allowTools, false, 'the recovery decision is the no-tools round')
+    throw new Error('forced decision test stop')
+  }, ctx => {
+    assert.equal(ctx.context.role, 'executor')
+    assert.equal(ctx.context.allowTools, true)
+    assert.equal(ctx.agent.actionOmissionRepairActive, false)
+    assert.equal(ctx.agent.actionOmissionObservationUsed, false)
+    return readNearby('b-read-1', 'copper-ore')
+  }, ctx => {
+    assert.equal(ctx.messages.findLast(row => row.role === 'tool') !== undefined, true, 'the first targeted observation ran')
+    return action(ctx)
+  }])
+  await w.say()
+  assert.equal(w.events.filter(row => row.event === 'recovery.action_omission_started').length, 0)
+  assert.equal(w.events.some(row => row.event === 'recovery.classified' && row.data.reason_code === 'action_omission_observation_budget'), false)
+  assert.equal(w.game.mutations.length, 1)
 })
 
 test('Run AC: a review from a read phase the harness closed reopens reads once instead of pausing', async () => {
