@@ -168,7 +168,7 @@ test('lifecycleEnter returns the refusal and traces it, under a named request wh
   const refusal = agent.lifecycleEnter('restage', { role: 'executor', checkpoint: 'C7' }, { requestId: 'recovery_1' })
   assert.deepEqual(refusal, { reason: 'executor_restage_on_closed_goal', axis: 'goal', value: 'paused' })
   assert.deepEqual(rows.map(row => [row.event, row.options?.requestId]), [['lifecycle.entered', 'recovery_1'], ['lifecycle.refused', 'recovery_1']])
-  assert.equal(rows[1].data.reason, 'executor_restage_on_closed_goal')
+  assert.equal(rows[1].data.refusal, 'executor_restage_on_closed_goal')
   agent.toolValidationRetries = 2
   agent.planCategoryRetries = 1
   agent.finiteNoOperationPressureUsed = true

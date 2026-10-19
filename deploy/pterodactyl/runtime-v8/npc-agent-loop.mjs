@@ -3579,7 +3579,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (requestId || this.traceRequest) {
       const options = requestId ? { requestId } : undefined
       void this.traceEvent('lifecycle.entered', { event, ...details, state }, options)
-      if (refusal) void this.traceEvent('lifecycle.refused', { event, ...details, ...refusal }, options)
+      // `refusal`, not `reason`: a site's own details may carry a reason (the recovery's) that must survive.
+      if (refusal) void this.traceEvent('lifecycle.refused', { event, ...details, refusal: refusal.reason, axis: refusal.axis, value: refusal.value }, options)
     }
     return refusal
   }
