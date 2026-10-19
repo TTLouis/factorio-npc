@@ -1047,7 +1047,9 @@ export function plannerControlPayloadFromMessage(message) {
     ...(args.executionGuidance !== undefined ? { executionGuidance: args.executionGuidance } : {}),
     ...(args.plannerReview !== undefined ? { plannerReview: args.plannerReview } : {}),
     ...(stepIdGiven ? { stepId: args.stepId.trim() } : {}),
-    ...(args.observationRequest !== undefined ? { observationRequest: normalizeObservationRequest(args.observationRequest) } : {}),
+    // Parsing the transport cannot decide whether reads are open. The loop
+    // applies the closed grammar or ordinary tool policy using that round's state.
+    ...(args.observationRequest !== undefined ? { observationRequest: normalizeObservationRequest(args.observationRequest, { normalTools: true }) } : {}),
     ...(args.assessmentOnly !== undefined ? { assessmentOnly: args.assessmentOnly } : {}),
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
     ...(args.stepCompletions !== undefined ? { stepCompletions: args.stepCompletions } : {}),
@@ -1146,6 +1148,10 @@ export const toolDefinitions = [
   constructionIntentDefinition,
   researchPathDefinition,
 ]
+
+// Open typed requests may name any ordinary observation. This schema is shared
+// across phases; the runtime still restricts closed requests to targeted facts.
+plannerControlToolDefinitions[0].function.parameters.properties.observationRequest.properties.tool.enum = toolDefinitions.map(tool => tool.function.name)
 
 export const providerToolDefinitions = [
   ...toolDefinitions,

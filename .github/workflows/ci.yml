@@ -223,5 +223,8 @@ jobs:
       - name: Run topology context full-loop regression
         run: docker run --rm --network none -e NPC_TEST_LANES=fresh-topology factorio-npc-test
 
+      - name: Run direct-feed observation full-loop regression
+        run: docker run --rm --network none -e NPC_TEST_LANES=direct-feed-observation factorio-npc-test
+
       - name: Run partial transfer recovery full-loop regression
         run: docker run --rm --network none -e NPC_TEST_LANES=partial-transfer factorio-npc-test
