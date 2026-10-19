@@ -1,5 +1,6 @@
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, PathfinderWaypoint } from 'factorio:runtime'
+import type { GroundItem } from './placement_ground_items'
 
 export enum TaskStates {
   IDLE = 'idle',
@@ -156,6 +157,14 @@ export interface PlayerParametersPlaceEntity {
   position?: MapPositionStruct
   /** Factorio direction value (0..15) for precise placement. */
   direction?: number
+  /**
+   * Ground items this placement has picked up from its footprint, as measured
+   * by the inventory insert. Any entry means the task changed the world, so no
+   * later failure of it is a refusal before mutation.
+   */
+  ground_items_picked_up?: GroundItem[]
+  /** An item stack was inserted but its ground entity could not be removed. */
+  ground_item_pickup_uncertain?: boolean
 }
 
 export interface PlayerParametersRotateEntity {

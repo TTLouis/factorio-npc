@@ -172,6 +172,11 @@ case "$LANE" in
   direct-feed-observation)
     run_node direct_feed_observation_factorio.mjs
     ;;
+  ground-item-pickup)
+    printf '[npc-test][ground-item-pickup] Running drill spill, furnace pickup build and partial-pickup receipts against the real engine...
+'
+    run_node ground_item_pickup_factorio.mjs
+    ;;
   local-transfer-target)
     run_node local_transfer_target_factorio.mjs --mode recovery
     stop_factorio

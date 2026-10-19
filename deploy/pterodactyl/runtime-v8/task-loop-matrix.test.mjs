@@ -802,6 +802,62 @@ test('Run Z batch 21 without the failing-task proof keeps the uncertainty guard'
   assert.equal(world.game.mutations.length, 1)
 })
 
+// Run AF preflight review: a placement can pick up ground items from its footprint before it fails. Only a measured
+// zero pickup keeps the native no-mutation proof; any pickup leaves the batch unproven, so reconciliation keeps it as an
+// uncertain effect instead of a refusal, and the pickup details still reach the next decision.
+const DROP = { x: -33.5, y: -35.296875 }
+const PICKUP_FAILURES = [
+  ['a measured zero pickup', { code: 'ground_items_inventory_full', ground_item_left: { name: 'copper-ore', count: 3, position: DROP } }, true],
+  ['a partial pickup', { code: 'ground_items_inventory_full', ground_items_picked_up: [{ name: 'copper-ore', count: 1, quality: 'normal', position: DROP }],
+    ground_item_left: { name: 'copper-ore', count: 2, quality: 'normal', position: DROP } }, false],
+  ['a pickup the native check then refuses', { code: 'not_placeable', ground_items_picked_up: [{ name: 'copper-ore', count: 1, quality: 'normal', position: DROP }] }, false],
+  ['a pickup whose entity creation fails', { code: 'create_failed', ground_items_picked_up: [{ name: 'copper-ore', count: 2, quality: 'normal', position: DROP }] }, false],
+]
+for (const [label, failure, proven] of PICKUP_FAILURES) test(`Run AF: ${label} ${proven ? 'settles as a refusal before mutation' : 'is never reconciled as a refusal before mutation'}`, async () => {
+  const STEPS = ['Place a stone furnace on the burner drill output', 'Smelt copper plates']
+  const prompts = []
+  const trace = []
+  const world = harness({
+    provider: async messages => {
+      prompts.push(messages.map(message => String(message.content ?? '')).join('\n'))
+      return planReply({ plan: STEPS, currentStep: 0, operations: prompts.length === 1
+        ? [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: -34, y: -36, direction: 0 } }]
+        : [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: -33, y: -36, direction: 0 } }] })
+    },
+  })
+  world.agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  await world.say('build a furnace on the copper drill output', 'new_goal')
+  const committed = world.reducerPlan()
+  assert.deepEqual(world.game.lastTaskTypes, ['placing'])
+  const reason = world.game.failLastBatch({ type: 'placing', entity_name: 'stone-furnace', ...failure })
+  assert.equal(world.game.cancelledBatch.failed_before_mutation, proven ? true : undefined)
+  await world.agent.failed(reason)
+
+  assert.equal(world.reducerPlan().plan_id, committed.plan_id)
+  const reconciled = trace.filter(record => record.event === 'operation.reconciled' && record.data.verdict === 'refused_before_mutation')
+  if (proven) {
+    assert.equal(reconciled.length >= 1, true)
+    assert.equal(reconciled[0].data.effect, 'not_happened')
+    assert.equal(world.memory.pendingOperations(KEY).some(pending => pending.ordinal === 1), false)
+    // The corrected placement is admitted for the same step.
+    assert.equal(world.game.mutations.length, 2)
+    return
+  }
+  assert.equal(reconciled.length, 0)
+  const held = world.memory.pendingOperations(KEY).find(pending => pending.ordinal === 1)
+  assert.ok(held, 'the batch that picked items up stays held')
+  assert.equal(held.effect, 'partial_unknown')
+  assert.equal(world.game.admissionJournal()[0].state, 'uncertain')
+  assert.equal(world.game.admissionJournal()[0].proven_refusal, undefined)
+  // No placement is retried over a footprint whose items may have moved.
+  assert.equal(world.game.mutations.length, 1)
+  assert.match(prompts.join('\n'), /ground_items_picked_up/)
+  // The duplicate-effect guard keeps refusing a retry until the effect is settled, and the goal pauses visibly.
+  assert.ok(trace.some(record => record.event === 'operation.duplicate_suppressed'))
+  assert.equal(world.memory.currentPlan(KEY).blocker, 'operation_preflight_failed:duplicate_effect_suppressed')
+  assert.ok(trace.some(record => record.event === 'goal.paused'))
+})
+
 // ---------------------------------------------------------------------------
 // Item 1.5, widened (owner, 2026-09-28): any provider failure that pauses a
 // goal leaves it visibly paused -- one chat line, a Resume, and a goal.paused

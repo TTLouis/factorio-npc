@@ -1,0 +1,552 @@
+{
+  "fixture": {
+    "ox": 8,
+    "oy": 0,
+    "humans": 0,
+    "speed": 1,
+    "actor_unit": 1
+  },
+  "drill_lookup": {
+    "found": true,
+    "drop": {
+      "y": -1.296875,
+      "x": 12.5
+    },
+    "unit": 6,
+    "drill_units": [
+      6
+    ],
+    "by_unit": false
+  },
+  "spill": {
+    "drill": {
+      "found": true,
+      "drop": {
+        "y": -1.296875,
+        "x": 12.5
+      },
+      "unit": 6,
+      "drill_units": [
+        6
+      ],
+      "by_unit": false
+    },
+    "items": [
+      {
+        "name": "copper-ore",
+        "count": 1,
+        "x": 12.5,
+        "y": -1.296875
+      }
+    ],
+    "candidate": {
+      "id": "candidate-1",
+      "position": {
+        "x": 12,
+        "y": -2
+      },
+      "direction": 0,
+      "distance_from_center": 0.8627773557674077,
+      "footprint": {
+        "tile_width": 2,
+        "tile_height": 2,
+        "grid": {
+          "x_offset": 0,
+          "y_offset": 0
+        },
+        "tile_box": {
+          "left_top": {
+            "x": 11,
+            "y": -3
+          },
+          "right_bottom": {
+            "x": 13,
+            "y": -1
+          }
+        },
+        "world_box": {
+          "left_top": {
+            "x": 11.30078125,
+            "y": -2.69921875
+          },
+          "right_bottom": {
+            "x": 12.69921875,
+            "y": -1.30078125
+          }
+        }
+      },
+      "ground_items": [
+        {
+          "name": "copper-ore",
+          "count": 1,
+          "quality": "normal",
+          "position": {
+            "x": 12.5,
+            "y": -1.296875
+          }
+        }
+      ]
+    },
+    "native_check_before": {
+      "can_place": false
+    }
+  },
+  "built": {
+    "before": {
+      "ground": 1,
+      "stacks": [
+        {
+          "count": 1,
+          "x": 12.5,
+          "y": -1.296875
+        }
+      ],
+      "held_ore": 0,
+      "held_furnaces": 1,
+      "furnaces": 0,
+      "contents": [
+        {
+          "name": "stone-furnace",
+          "quality": "normal",
+          "count": 1
+        },
+        {
+          "name": "coal",
+          "quality": "normal",
+          "count": 2
+        }
+      ],
+      "insertable": 3900,
+      "humans": 0,
+      "speed": 1
+    },
+    "after": {
+      "ground": 0,
+      "stacks": {},
+      "held_ore": 1,
+      "held_furnaces": 0,
+      "furnaces": 1,
+      "contents": [
+        {
+          "name": "coal",
+          "quality": "normal",
+          "count": 2
+        },
+        {
+          "name": "copper-ore",
+          "quality": "normal",
+          "count": 1
+        }
+      ],
+      "insertable": 3949,
+      "humans": 0,
+      "speed": 1
+    },
+    "feed": {
+      "tick": 1168,
+      "drop_target": 7,
+      "furnace": 7,
+      "ore": 1,
+      "plates": 0
+    },
+    "result": {
+      "operation_id": 5,
+      "type": "placing",
+      "accepted": true,
+      "completed": true,
+      "code": "completed",
+      "tick": 940,
+      "actor_id": 1,
+      "actor_kind": "standalone_character",
+      "force_index": 1,
+      "entity_name": "stone-furnace",
+      "requested_position": {
+        "x": 12,
+        "y": -2
+      },
+      "direction": 0,
+      "placed_unit_number": 7,
+      "placed_entity_type": "furnace",
+      "placed_position": {
+        "x": 12,
+        "y": -2
+      },
+      "placed_surface_index": 1,
+      "placed_direction": 0,
+      "ground_items_picked_up": [
+        {
+          "name": "copper-ore",
+          "count": 1,
+          "quality": "normal",
+          "position": {
+            "x": 12.5,
+            "y": -1.296875
+          }
+        }
+      ]
+    },
+    "record": {
+      "operation_key": "ground-pickup/furnace",
+      "attempt_id": "furnace-1",
+      "actor_id": 1,
+      "epoch": 1,
+      "signature": "ground-pickup-furnace",
+      "ordinal": 3,
+      "operation_count": 1,
+      "state": "completed",
+      "generation": 1,
+      "tick": 940,
+      "slots": [
+        {
+          "index": 1,
+          "ok": true,
+          "operation": "place_candidate",
+          "batch_refs": [
+            {
+              "batch_id": 7,
+              "batch_generation": 1,
+              "batch_ref": "batch-g1-7"
+            }
+          ],
+          "queued_tasks": 1
+        }
+      ],
+      "work_mark": 7,
+      "ok": true
+    },
+    "receipt": {
+      "batch_id": 7,
+      "batch_generation": 1,
+      "batch_ref": "batch-g1-7",
+      "task_count": 1,
+      "task_types": [
+        "placing"
+      ],
+      "tick": 940,
+      "started_count": 1,
+      "tasks_started": 1,
+      "state": "completed"
+    },
+    "verdict": {
+      "verdict": "admitted_completed",
+      "effect": "happened",
+      "reason": "exact_receipts_completed",
+      "batch_id": 7
+    }
+  },
+  "partial": {
+    "before": {
+      "ground": 3,
+      "stacks": [
+        {
+          "count": 3,
+          "x": 4.296875,
+          "y": 4.296875
+        }
+      ],
+      "held_ore": 49,
+      "held_furnaces": 1,
+      "furnaces": 0,
+      "contents": [
+        {
+          "name": "stone-furnace",
+          "quality": "normal",
+          "count": 1
+        },
+        {
+          "name": "copper-ore",
+          "quality": "normal",
+          "count": 49
+        },
+        {
+          "name": "iron-plate",
+          "quality": "normal",
+          "count": 7800
+        }
+      ],
+      "insertable": 1,
+      "humans": 0,
+      "speed": 1
+    },
+    "after": {
+      "ground": 2,
+      "stacks": [
+        {
+          "count": 2,
+          "x": 4.296875,
+          "y": 4.296875
+        }
+      ],
+      "held_ore": 50,
+      "held_furnaces": 1,
+      "furnaces": 0,
+      "contents": [
+        {
+          "name": "stone-furnace",
+          "quality": "normal",
+          "count": 1
+        },
+        {
+          "name": "copper-ore",
+          "quality": "normal",
+          "count": 50
+        },
+        {
+          "name": "iron-plate",
+          "quality": "normal",
+          "count": 7800
+        }
+      ],
+      "insertable": 0,
+      "humans": 0,
+      "speed": 1
+    },
+    "result": {
+      "operation_id": 6,
+      "type": "placing",
+      "accepted": false,
+      "completed": false,
+      "code": "ground_items_inventory_full",
+      "tick": 1172,
+      "actor_id": 1,
+      "actor_kind": "standalone_character",
+      "force_index": 1,
+      "entity_name": "stone-furnace",
+      "requested_position": {
+        "x": 4,
+        "y": 4
+      },
+      "direction": 0,
+      "ground_item_left": {
+        "name": "copper-ore",
+        "count": 2,
+        "quality": "normal",
+        "position": {
+          "x": 4.296875,
+          "y": 4.296875
+        }
+      },
+      "ground_items_picked_up": [
+        {
+          "name": "copper-ore",
+          "count": 1,
+          "quality": "normal",
+          "position": {
+            "x": 4.296875,
+            "y": 4.296875
+          }
+        }
+      ]
+    },
+    "record": {
+      "operation_key": "ground-pickup/partial",
+      "attempt_id": "partial-1",
+      "actor_id": 1,
+      "epoch": 1,
+      "signature": "ground-pickup-partial",
+      "ordinal": 4,
+      "operation_count": 1,
+      "state": "uncertain",
+      "generation": 1,
+      "tick": 1172,
+      "slots": [
+        {
+          "index": 1,
+          "ok": true,
+          "result": true,
+          "operation": "place_entity",
+          "batch_refs": [
+            {
+              "batch_id": 8,
+              "batch_generation": 1,
+              "batch_ref": "batch-g1-8"
+            }
+          ],
+          "queued_tasks": 1
+        }
+      ],
+      "work_mark": 8,
+      "ok": true,
+      "error": "batch_reconciliation_required"
+    },
+    "receipt": {
+      "batch_id": 8,
+      "batch_generation": 1,
+      "batch_ref": "batch-g1-8",
+      "task_count": 1,
+      "task_types": [
+        "placing"
+      ],
+      "tick": 1172,
+      "reason": "placing:ground_items_inventory_full",
+      "started_count": 1,
+      "tasks_started": 1,
+      "state": "cancelled"
+    },
+    "verdict": {
+      "verdict": "admitted_cancelled",
+      "effect": "partial_unknown",
+      "reason": "exact_batch_cancelled"
+    }
+  },
+  "zero": {
+    "before": {
+      "ground": 2,
+      "stacks": [
+        {
+          "count": 2,
+          "x": 4.296875,
+          "y": 4.296875
+        }
+      ],
+      "held_ore": 50,
+      "held_furnaces": 1,
+      "furnaces": 0,
+      "contents": [
+        {
+          "name": "stone-furnace",
+          "quality": "normal",
+          "count": 1
+        },
+        {
+          "name": "copper-ore",
+          "quality": "normal",
+          "count": 50
+        },
+        {
+          "name": "iron-plate",
+          "quality": "normal",
+          "count": 7800
+        }
+      ],
+      "insertable": 0,
+      "humans": 0,
+      "speed": 1
+    },
+    "after": {
+      "ground": 2,
+      "stacks": [
+        {
+          "count": 2,
+          "x": 4.296875,
+          "y": 4.296875
+        }
+      ],
+      "held_ore": 50,
+      "held_furnaces": 1,
+      "furnaces": 0,
+      "contents": [
+        {
+          "name": "stone-furnace",
+          "quality": "normal",
+          "count": 1
+        },
+        {
+          "name": "copper-ore",
+          "quality": "normal",
+          "count": 50
+        },
+        {
+          "name": "iron-plate",
+          "quality": "normal",
+          "count": 7800
+        }
+      ],
+      "insertable": 0,
+      "humans": 0,
+      "speed": 1
+    },
+    "result": {
+      "operation_id": 7,
+      "type": "placing",
+      "accepted": false,
+      "completed": false,
+      "code": "ground_items_inventory_full",
+      "tick": 1179,
+      "actor_id": 1,
+      "actor_kind": "standalone_character",
+      "force_index": 1,
+      "entity_name": "stone-furnace",
+      "requested_position": {
+        "x": 4,
+        "y": 4
+      },
+      "direction": 0,
+      "ground_item_left": {
+        "name": "copper-ore",
+        "count": 2,
+        "quality": "normal",
+        "position": {
+          "x": 4.296875,
+          "y": 4.296875
+        }
+      }
+    },
+    "record": {
+      "operation_key": "ground-pickup/zero",
+      "attempt_id": "zero-1",
+      "actor_id": 1,
+      "epoch": 1,
+      "signature": "ground-pickup-zero",
+      "ordinal": 5,
+      "operation_count": 1,
+      "state": "failed",
+      "generation": 1,
+      "tick": 1179,
+      "slots": [
+        {
+          "index": 1,
+          "ok": true,
+          "result": true,
+          "operation": "place_entity",
+          "batch_refs": [
+            {
+              "batch_id": 9,
+              "batch_generation": 1,
+              "batch_ref": "batch-g1-9"
+            }
+          ],
+          "queued_tasks": 1
+        }
+      ],
+      "work_mark": 9,
+      "ok": false,
+      "proven_refusal": true,
+      "error": "refused_before_mutation"
+    },
+    "receipt": {
+      "batch_id": 9,
+      "batch_generation": 1,
+      "batch_ref": "batch-g1-9",
+      "task_count": 1,
+      "task_types": [
+        "placing"
+      ],
+      "tick": 1179,
+      "reason": "placing:ground_items_inventory_full",
+      "started_count": 1,
+      "tasks_started": 1,
+      "failed_before_mutation": true,
+      "failed_task_index": 0,
+      "state": "cancelled"
+    },
+    "verdict": {
+      "verdict": "refused_before_mutation",
+      "effect": "not_happened",
+      "reason": "exact_refusal_before_mutation",
+      "applied_slots": [],
+      "refused_slots": [
+        1
+      ],
+      "refusal_codes": [
+        "placing:ground_items_inventory_full"
+      ],
+      "unrun_slots": 0
+    }
+  },
+  "closing": {
+    "humans": 0,
+    "speed": 1,
+    "forbidden_fetch_calls": 0
+  }
+}

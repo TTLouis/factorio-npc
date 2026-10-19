@@ -21,7 +21,7 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
-  | 'item_missing' | 'no_position' | 'not_placeable' | 'ground_items_inventory_full' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
+  | 'item_missing' | 'no_position' | 'not_placeable' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
@@ -70,6 +70,8 @@ export interface BasicOperationResult {
   // Ground items a placement picked up from its footprint, and one that did not fit.
   ground_items_picked_up?: GroundItem[]
   ground_item_left?: GroundItem
+  /** A picked-up stack's ground entity remained; the item count may be duplicated. */
+  ground_item_pickup_uncertain?: boolean
   previous_direction?: number
   reverse?: boolean
   rocket_silo_status?: number
@@ -546,9 +548,17 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
   function fail(actor: ControlledActor | undefined, task: BasicTask, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
     refusal_results = {}
     suppress_cancel_receipt = true
-    // A placement is only created after every check below passes, so each
-    // placing failure (including create_failed, which creates nothing) changed
-    // nothing in the world.
+    // A placement is only created after every check passes, so a placing
+    // failure (including create_failed, which creates nothing) changed nothing
+    // in the world unless the task picked up ground items from its footprint
+    // first. Those pickups live on the task, so every failure after one
+    // reports them and gives no proof that nothing changed.
+    const placement_mutated = task.type === TaskStates.PLACING
+      && ((task.ground_items_picked_up?.length ?? 0) > 0 || task.ground_item_pickup_uncertain === true)
+    if (placement_mutated) {
+      details = { ...details, ground_items_picked_up: task.ground_items_picked_up }
+      if (task.ground_item_pickup_uncertain === true) details.ground_item_pickup_uncertain = true
+    }
     // entity_targets refuses a legacy move with no local match before touching
     // any inventory. This proves only this task changed nothing; the admission
     // journal still requires started_count === 1 to settle a whole batch.
@@ -560,7 +570,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     const empty_extraction = task.type === TaskStates.MOVING_ITEMS && code === 'nothing_moved'
       && task.to_entity === false && task.player_name === undefined
       && details.moved_count === 0 && details.source_removed_count === 0
-    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING || local_transfer_miss || empty_extraction, task_index: batch_task_index(task) })
+    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: (task.type === TaskStates.PLACING && !placement_mutated) || local_transfer_miss || empty_extraction, task_index: batch_task_index(task) })
     suppress_cancel_receipt = false
     result_for(actor, task, false, false, code, details)
     log(`[AUTORIO] [ERROR] ${task.type} failed: ${code}; dependent operations cancelled`)

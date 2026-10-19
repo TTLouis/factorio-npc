@@ -2,6 +2,7 @@ import type { ControlledActor } from './actors/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
+import { new_operation_admission } from './operation_admission'
 import { create_placement_candidate_set, execute_placement_candidate } from './placement_candidates'
 import { placement_footprint } from './placement_geometry'
 import { ground_item_blockers } from './placement_ground_items'
@@ -210,5 +211,188 @@ describe('ground items in a placement footprint (Run AE)', () => {
     const surface = world([ground_item('copper-ore', 1, DROP)])
     expect(ground_item_blockers(npc(surface, inventory_with(10)), FURNACE, 'offshore-pump', { x: -34, y: -36 }, 0)).toBeUndefined()
     expect(ground_item_blockers(npc(surface, inventory_with(10)), FURNACE, 'stone-furnace', { x: -34, y: -36 }, 0)).toHaveLength(1)
+  })
+})
+
+// Run AF preflight review: a placement that picked up ground items changed the
+// actor inventory and the ground before it failed, so its cancelled batch must
+// not carry the no-mutation proof that admission and runtime reconciliation
+// settle as a refusal. These drive the real task manager, receipt journal and
+// admission journal, and check that items are conserved.
+describe('placement pickup mutation accounting (Run AF)', () => {
+  const originalPairs = (globalThis as any).pairs
+  const originalEntityPrototypes = (globalThis as any).prototypes.entity
+  const originalItemPrototypes = (globalThis as any).prototypes.item
+  const originalRemote = (globalThis as any).remote
+  const identity = { operation_key: 'request/place-furnace', attempt_id: 'attempt-1', actor_id: 7, epoch: 3, signature: 'hash-1', ordinal: 1, operation_count: 1 }
+
+  beforeEach(() => {
+    ;(globalThis as any).pairs = Object.entries
+    ;(globalThis as any).storage = {}
+    ;(globalThis as any).game.tick = 100
+    ;(globalThis as any).prototypes.entity = { 'stone-furnace': FURNACE }
+    ;(globalThis as any).prototypes.item = { 'stone-furnace': {} }
+    ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { authorize: true } }, call: vi.fn((_name: string, _method: string, epoch: number) => epoch === 3) }
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).pairs = originalPairs
+    ;(globalThis as any).prototypes.entity = originalEntityPrototypes
+    ;(globalThis as any).prototypes.item = originalItemPrototypes
+    ;(globalThis as any).remote = originalRemote
+  })
+
+  // One admitted place_entity operation, journaled the way the remote interface does it.
+  function admitted_placement(surface: any, inventory: any) {
+    const actor = npc(surface, inventory)
+    const manager = new_task_manager(() => actor)
+    const controller = new_basic_operation_controller(() => actor, manager)
+    const runtime = new_basic_operation_runtime(manager, controller)
+    const admission = new_operation_admission(() => actor, () => manager.get_status_snapshot())
+    expect(admission.begin(identity)).toMatchObject({ ok: true })
+    expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+    const active = (globalThis as any).storage.sgluna_task_active_batch
+    const ref = { batch_id: active.batch_id, batch_generation: active.batch_generation, batch_ref: active.batch_ref }
+    expect(admission.slot(identity.operation_key, 1, { ok: true, operation: 'place_entity', queued_tasks: 1, batch_refs: [ref] })).toMatchObject({ ok: true })
+    admission.finish(identity.operation_key, { ok: true })
+    expect(admission.status().records[0].state).toBe('admitted')
+    const place = () => runtime.state_placing(actor)
+    const receipt = () => manager.get_status_snapshot().receipt_journal.find((entry: any) => entry.batch_ref === ref.batch_ref)
+    const record = () => admission.status().records[0]
+    return { controller, place, receipt, record }
+  }
+
+  function ground_count(entities: any[], name: string) {
+    return entities.filter(entity => entity.valid).reduce((sum, entity) => sum + (entity.stack.name === name ? entity.stack.count : 0), 0)
+  }
+
+  it('keeps the no-mutation proof when the inventory took nothing from the ground', () => {
+    const entities = [ground_item('copper-ore', 3, DROP)]
+    const surface = world(entities)
+    surface.create_entity = vi.fn()
+    const inventory = inventory_with(0)
+    const run = admitted_placement(surface, inventory)
+
+    expect(run.place()?.[0]).toBe(false)
+
+    expect(run.controller.status().last_result).toMatchObject({ code: 'ground_items_inventory_full', ground_item_left: { name: 'copper-ore', count: 3 } })
+    expect(run.controller.status().last_result?.ground_items_picked_up).toBeUndefined()
+    expect(run.receipt()).toMatchObject({ state: 'cancelled', reason: 'placing:ground_items_inventory_full', started_count: 1, failed_before_mutation: true })
+    expect(run.record()).toMatchObject({ state: 'failed', proven_refusal: true, error: 'refused_before_mutation' })
+    expect(ground_count(entities, 'copper-ore')).toBe(3)
+    expect(inventory.held['copper-ore'] ?? 0).toBe(0)
+    expect(surface.create_entity).not.toHaveBeenCalled()
+  })
+
+  it('leaves a partial pickup uncertain, with the picked-up and remaining items conserved', () => {
+    const entities = [ground_item('copper-ore', 3, DROP)]
+    const surface = world(entities)
+    surface.create_entity = vi.fn()
+    const inventory = inventory_with(1)
+    const run = admitted_placement(surface, inventory)
+
+    expect(run.place()?.[0]).toBe(false)
+
+    const result = run.controller.status().last_result
+    expect(result).toMatchObject({
+      code: 'ground_items_inventory_full',
+      ground_items_picked_up: [{ name: 'copper-ore', count: 1, position: DROP }],
+      ground_item_left: { name: 'copper-ore', count: 2, position: DROP },
+    })
+    const receipt = run.receipt()
+    expect(receipt).toMatchObject({ state: 'cancelled', reason: 'placing:ground_items_inventory_full', started_count: 1 })
+    expect(receipt?.failed_before_mutation).toBeUndefined()
+    expect(receipt?.failed_task_index).toBeUndefined()
+    expect(run.record()).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+    expect(run.record().proven_refusal).toBeUndefined()
+    // 3 ore before: 1 in the inventory and 2 still on the ground, as reported.
+    expect(inventory.held['copper-ore']).toBe(result?.ground_items_picked_up?.[0].count)
+    expect(ground_count(entities, 'copper-ore')).toBe(result?.ground_item_left?.count)
+    expect(inventory.held['copper-ore']! + ground_count(entities, 'copper-ore')).toBe(3)
+    expect(inventory.held['stone-furnace']).toBe(1)
+    expect(surface.create_entity).not.toHaveBeenCalled()
+  })
+
+  it('reports the pickup and withholds the proof when the native check still refuses after it', () => {
+    const entities = [ground_item('copper-ore', 1, DROP)]
+    const surface = world(entities)
+    surface.create_entity = vi.fn()
+    // Something the obstruction sample cannot see refuses the second check.
+    surface.can_place_entity.mockReturnValue(false)
+    const inventory = inventory_with(10)
+    const run = admitted_placement(surface, inventory)
+
+    expect(run.place()?.[0]).toBe(false)
+
+    expect(surface.can_place_entity).toHaveBeenCalledTimes(2)
+    expect(run.controller.status().last_result).toMatchObject({
+      code: 'not_placeable',
+      ground_items_picked_up: [{ name: 'copper-ore', count: 1, position: DROP }],
+    })
+    expect(run.receipt()?.failed_before_mutation).toBeUndefined()
+    expect(run.record()).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+    expect(inventory.held['copper-ore']).toBe(1)
+    expect(ground_count(entities, 'copper-ore')).toBe(0)
+    expect(inventory.held['stone-furnace']).toBe(1)
+  })
+
+  it('keeps the pickup on a creation failure and withholds the proof', () => {
+    const entities = [ground_item('copper-ore', 2, DROP)]
+    const surface = world(entities)
+    surface.create_entity = vi.fn(() => undefined)
+    const inventory = inventory_with(10)
+    const run = admitted_placement(surface, inventory)
+
+    expect(run.place()?.[0]).toBe(false)
+
+    expect(run.controller.status().last_result).toMatchObject({
+      code: 'create_failed',
+      ground_items_picked_up: [{ name: 'copper-ore', count: 2, position: DROP }],
+    })
+    expect(run.receipt()).toMatchObject({ state: 'cancelled', reason: 'placing:create_failed' })
+    expect(run.receipt()?.failed_before_mutation).toBeUndefined()
+    expect(run.record()).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+    expect(inventory.held['copper-ore']).toBe(2)
+    expect(ground_count(entities, 'copper-ore')).toBe(0)
+    // Creation failed, so the furnace item was not consumed.
+    expect(inventory.held['stone-furnace']).toBe(1)
+  })
+
+  it('fails without a proof when a picked-up stack stays on the ground', () => {
+    const ore = ground_item('copper-ore', 1, DROP)
+    ore.destroy = vi.fn()
+    const surface = world([ore])
+    surface.create_entity = vi.fn()
+    const run = admitted_placement(surface, inventory_with(10))
+
+    expect(run.place()?.[0]).toBe(false)
+
+    expect(run.controller.status().last_result).toMatchObject({
+      code: 'ground_item_pickup_failed',
+      ground_item_pickup_uncertain: true,
+      ground_items_picked_up: [{ name: 'copper-ore', count: 1 }],
+    })
+    expect(run.receipt()?.failed_before_mutation).toBeUndefined()
+    expect(run.record()).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+    expect(surface.create_entity).not.toHaveBeenCalled()
+  })
+
+  it('completes a pickup and build with a receipt that matches the inventory change', () => {
+    const entities = [ground_item('copper-ore', 2, DROP)]
+    const surface = world(entities)
+    surface.create_entity = vi.fn((args: any) => ({ valid: true, name: args.name, type: 'furnace', unit_number: 21, position: args.position, direction: 0, surface, force: { index: 1 } }))
+    const inventory = inventory_with(10)
+    const run = admitted_placement(surface, inventory)
+
+    expect(run.place()?.[0]).toBe(true)
+
+    const result = run.controller.status().last_result
+    expect(result).toMatchObject({ code: 'completed', placed_unit_number: 21 })
+    expect(result?.ground_items_picked_up).toEqual([{ name: 'copper-ore', count: 2, quality: 'normal', position: DROP }])
+    expect(inventory.held['copper-ore']).toBe(2)
+    expect(ground_count(entities, 'copper-ore')).toBe(0)
+    expect(inventory.held['stone-furnace']).toBe(0)
+    expect(run.receipt()).toMatchObject({ state: 'completed' })
+    expect(run.record()).toMatchObject({ state: 'completed' })
   })
 })

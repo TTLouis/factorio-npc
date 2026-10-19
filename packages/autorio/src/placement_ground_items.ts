@@ -69,7 +69,9 @@ export function placeable_or_ground_items_only(actor: ControlledActor, prototype
 /**
  * Picks up every ground item in the footprint into the actor inventory, as a
  * player's build does. A stack that does not fit stays on the ground with what
- * was not inserted, and the result says the inventory is full.
+ * was not inserted, and the result says the inventory is full. picked_up holds
+ * only what the inventory insert measured, so an empty list means nothing
+ * changed. uncertain: a stack was inserted but its ground entity remained.
  */
 export function pick_up_ground_items(actor: ControlledActor, inventory: LuaInventory, prototype: any, position: { x: number, y: number }, direction: number | undefined) {
   const box = placement_footprint(prototype, position, direction).world_box
@@ -82,6 +84,7 @@ export function pick_up_ground_items(actor: ControlledActor, inventory: LuaInven
     if (inserted >= item.count) {
       entity.destroy()
       picked_up.push(item)
+      if (entity.valid) return { ok: false as const, uncertain: true, picked_up, left: item }
       continue
     }
     if (inserted > 0) {

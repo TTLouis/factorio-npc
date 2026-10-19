@@ -1060,6 +1060,7 @@ function compactBasicOperationResult(result) {
     ground_item_left: result.ground_item_left && typeof result.ground_item_left === 'object'
       ? sanitizeDurableModelValue(result.ground_item_left)
       : undefined,
+    ground_item_pickup_uncertain: result.ground_item_pickup_uncertain === true ? true : undefined,
     to_entity: typeof result.to_entity === 'boolean' ? result.to_entity : undefined,
     to_player: typeof result.to_player === 'boolean' ? result.to_player : undefined,
     rocket_parts: Number.isSafeInteger(result.rocket_parts) ? result.rocket_parts : undefined,
