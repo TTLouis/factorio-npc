@@ -73,3 +73,79 @@ Out of scope: the decision-pressure counters (A3 finding 4) and the lifecycle tr
 - **Golden.** The no-restage steam replay loses its one `context.dangling_reference` row. Three provider bodies change, and only in a single task receipt (`diff` → `full`, same fields). One repeat read after the continuation is no longer flagged `unchanged_fact`. Calls and the event order are otherwise identical.
 - **Gates.** The full suite passed 2700 of 2700, and `build-payload` passed 9 of 9. The payload is repinned to `4f7af235`, which ships B1 as well.
 - **Not done.** No live run. A2 was not rerun on new prompts, and A1 has no corpus of post-B prompts yet. The next live run's `run-check` should show `dangling_task_receipt_diff` at zero.
+
+## C results: one lifecycle table (static gates only, not live-tested)
+
+Option C: the lifecycle is one tuple read from existing fields. Each entry point traces it, and one table decides which transitions are refused. C4 (moving the tuple into the reducer) waits until after the release.
+
+### C1: lifecycle snapshot and trace (`lifecycle.mjs`, `lifecycle-scan.mjs`), `0ebeb9f8`
+
+`lifecycleSnapshot` projects these existing fields into one tuple, stores nothing, and reads `unknown` when an axis cannot be read:
+- goal (legacy board status);
+- run and pause class (reducer);
+- plan status and step (reducer);
+- role and parked planner (AgentContext);
+- batch in flight;
+- pending operation;
+- request;
+- provider recovery.
+
+All 12 entry points call `lifecycleEnter`, which traces `lifecycle.entered` with that state: request start, reset, restage, planner return, epoch rebuild, continuation, checkpoint persist, slice close, batch send, plan recovery, task resume and supervisor recovery. A static test proves that each listed site calls it with its own event. The no-restage golden gains seven trace rows only.
+
+The advisory `lifecycle-scan.mjs` projects the same tuple offline from retained behaviour traces. Over the 10-14g…10-19af runs:
+- `executor_restage_while_paused` fired at:
+  - Run G (10-14g) row 149;
+  - Run H (10-14h) rows 456 and 490.
+  Each was an automatic resume that restaged the executor onto a `model_recoverable` paused plan.
+- One `batch_send_while_paused`, in Run G (row 192): the goal read active while the reducer run still read paused. That is a goal/run disagreement and is left open.
+- Run J (10-15j) persisted a plan on a completed board just before `request.failed`. The inline checkpoint guard refused it.
+
+Every other restage, checkpoint, batch, planner return and recovery in the corpus ran on an active goal. Some `restage.executor` rows (8 in the corpus) carried a batch still in flight; that case is not refused yet.
+
+### C2: the transition table (`LIFECYCLE_TABLE`), `7e12867b`
+
+The table has one entry per event: the states that refuse it, and the per-decision counters it resets. A rule refuses only on positive evidence: an axis that reads `unknown` never matches a `refuse` list. An event with no rule records why none is enforced, so no event can be added unexamined. `lifecycleEnter` returns the refusal and traces `lifecycle.refused`, and the site then refuses through its existing path, before acting.
+
+| event | refused when | site path | evidence |
+|---|---|---|---|
+| restage (executor) | goal paused, completed or cancelled | `context.restage_refused`, `{restaged:false}` | runs G, H |
+| checkpoint.persist | goal not active (unknown fails closed, as before) | `checkpoint_requires_active_step` (replaces the inline status check) | run J |
+| recovery.interrupted (step boundary) | goal paused, completed or cancelled | `{recovered:false, reason:'lifecycle_refused'}` | runs G, H; supervisor rule |
+
+These events have no rule yet, each with its reason recorded in the table:
+- request start, reset, planner return (the MW5 replacement may return to a blocked plan);
+- epoch rebuild, continuation, slice close;
+- batch send (one-off requests act outside a running goal; the Run G goal/run disagreement stays open);
+- plan recovery, task resume.
+
+**Counter resets (A3 finding 4).** A successful restage, a parked-planner return and a planner epoch rebuild now reset three counters, as a continuation already did: `finiteNoOperationPressureUsed`, `toolValidationRetries` and `planCategoryRetries`. The model in the new conversation never saw the rejections those counters counted. The state-scope reset matrix counts these resets.
+
+**Static proofs:**
+- every rule's site consumes the refusal, and no rule-less site does;
+- every resetting event applies its resets at its own site, and they are declared loop fields.
+
+**Gates:** the full suite passed 2736 of 2736, and `build-payload` passed 9 of 9. The payload was pinned to `7e12867b` (`1cda841a`). The golden is unchanged.
+
+### C3: scenario matrix and regressions (`lifecycle-scenarios.test.mjs`), `e073e0f1`
+
+- **Generated matrix.** Each `LIFECYCLE_TABLE` rule gets refuse and pass cases. Every refusing value refuses; a `require` rule refuses both `unknown` and `none`; allowed values pass; a mismatched `when` passes. A new rule gets cases automatically.
+- **Site scenarios on a real `NpcAgentLoop` with canonical memory:**
+  - An executor restage onto a paused goal is refused before anything changes: messages, role, handoff id and reducer state are untouched. It is traced as `context.restage_refused` and `lifecycle.refused`. The planner on that same goal is not refused.
+  - A restage on an active goal succeeds and resets the counters.
+  - A checkpoint on a completed goal throws `checkpoint_requires_active_step`, from the table.
+  - A planner return and a planner epoch rebuild reset the counters. An executor epoch bump does not.
+  - A supervisor recovery whose reactivation left the goal paused returns `lifecycle_refused` and never rebuilds or runs a turn.
+- **Regressions.** A scrubbed fixture holds the states from Run G row 149, Run H rows 456 and 490, and Run J rows 689 and 691. It contains ids, statuses and pause classes only, and a test enforces that. The scanner still flags G and H, and the real sites refuse them. Run J's raw trace has no flag, because the refused persist wrote no row. The test therefore pairs J's completed `plan.persisted` row with the `lifecycle.entered` row the site now writes.
+- **Coverage lint.** Each rule reason and each resetting event must have exactly one site scenario.
+- **Fix found along the way.** `lifecycle.refused` used to let the rule's reason overwrite a site's own `reason` detail. The rule now goes in `refusal`.
+- **Gates.** The full suite passed 2768 of 2768, and `build-payload` passed 9 of 9. The payload is pinned to `e073e0f1` (`2ed59612`).
+
+### Still open after C
+
+- No live run.
+  - The next run should show `lifecycle.entered` rows, and `lifecycle.refused` rows only if a G/H/J shape recurs.
+  - Rerun `lifecycle-scan.mjs` on it: the runtime rows replace the projection.
+- Candidates for rules with no evidence yet:
+  - batch send while the reducer run is paused (Run G row 192);
+  - executor restage with a batch still in flight (8 corpus rows).
+- C4, moving the tuple into the reducer, is planned for after the release.
