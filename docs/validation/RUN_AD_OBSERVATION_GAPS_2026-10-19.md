@@ -29,7 +29,8 @@ Progress:
 - [x] Inspect exact Run AD traces and isolate both failures.
 - [x] Implement channel and coverage corrections with full-loop regressions.
 - [x] Validate candidate and original-code controls offline.
-- [ ] Independent review, integration and merged validation.
+- [x] Independent source and evidence review.
+- [ ] Authorized integration handoff, merge and merged validation.
 
 ## Implementation and evidence
 
@@ -76,3 +77,24 @@ the original-code controls, full gate logs and the native image build log.
 The native lane is registered in the runner and CI. Live autonomous selection of
 the right placement observations remains a separate E2E question; this task
 validates capability and continuation offline and does not run another trial.
+
+## Frozen checkpoint
+
+Code `54f2f18fdd221fe5fdbbf73743625d58bb69df0a` passed independent review without
+corroborated merge blockers. Payload commit
+`128765edd11a9c261d8cfe6f42896329198bc822` pins that source; all nine payload
+tests, changed-file lint, workflow YAML and runner shell syntax passed.
+
+The native image was built before the commit existed, so the native proof's
+candidate field is null. A separate provenance check compared all **69 runtime
+and staging source modules** in that image against the frozen source and found
+identical normalized contents. The **186-file / 29,805,961-byte** evidence archive
+was sealed and all entries reverified. Manifest SHA256:
+`24cabc3626342950422d7ea86b1ae278cb840421d1666e491ac962ae257e9d6a`.
+
+All task-owned containers and the unique native test image were removed;
+unrelated containers and shared images were retained. Integration remains
+pending an explicit ownership handoff: the workspace registry still assigns
+the integration checkout to session `01a14fa4`. The task branch is clean and
+validated; no integration checkout, shared branch or live E2E is changed by
+this checkpoint.
