@@ -334,6 +334,22 @@ describe('prototype build knowledge', () => {
     })
   })
 
+  it('Run AE: drill details read only keys the 2.0 LuaEntityPrototype has', () => {
+    // The live 2.0.77 prototype threw on require_resources_to_place, which made
+    // getPrototypeDetails fail for every mining drill.
+    const drill = (globalThis as any).prototypes.entity['burner-mining-drill']
+    const strict = new Proxy(drill, {
+      get(target, key) {
+        if (key === 'require_resources_to_place') throw new Error(`LuaEntityPrototype doesn't contain key ${String(key)}.`)
+        return target[key]
+      },
+    })
+    ;(globalThis as any).prototypes.entity['burner-mining-drill'] = strict
+    ;(globalThis as any).prototypes.item['burner-mining-drill'].place_result = strict
+    const result = prototype_details('burner-mining-drill') as any
+    expect(result).toMatchObject({ found: true, entity: { type: 'mining-drill', mining: { speed: 0.25, radius: 1.99 } } })
+  })
+
   it('describes crafting capability and bounded fluidbox roles without dumping Lua objects', () => {
     const result = prototype_details('chemical-plant') as any
     expect(result.entity).toMatchObject({

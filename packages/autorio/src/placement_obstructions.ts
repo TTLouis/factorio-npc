@@ -4,7 +4,9 @@ import { placement_footprint } from './placement_geometry'
 import { find_world_entities } from './npc_vision'
 
 // Diagnostics explain a few rejected footprints. They are observations, never
-// alternative placement admission or authority to clear an obstruction.
+// alternative placement admission or authority to clear an obstruction. The one
+// clearance a build may do, picking up ground items as a player's build does,
+// is decided in placement_ground_items.
 export function placement_obstruction_sample(actor: ControlledActor, prototype: any, position: { x: number, y: number }, direction: number) {
   const footprint = placement_footprint(prototype, position, direction)
   const terrain_tiles: Array<Record<string, unknown>> = []

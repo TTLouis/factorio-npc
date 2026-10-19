@@ -9,6 +9,7 @@ import { find_world_entities } from './npc_vision'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { placement_obstruction_sample } from './placement_obstructions'
 import { get_recent_fluid_source_observation } from './fluid_source_observation'
+import { ground_item_blockers, placeable_or_ground_items_only, type GroundItem } from './placement_ground_items'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -69,6 +70,8 @@ export interface PlacementCandidate {
   connects_to?: PlacementCandidateJoin
   // Electric-pole candidates only: wire links and supply coverage at this spot.
   electric?: Record<string, unknown>
+  // Items lying in the footprint; placing this candidate picks them up first.
+  ground_items?: GroundItem[]
 }
 
 interface PlacementCandidateSet {
@@ -516,6 +519,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       for (const port of candidate_fluid_ports(prototype, position, direction) ?? []) if (fluid_ports_join(target, port)) joins = true
       if (!joins) return undefined
     }
+    let ground_items: GroundItem[] | undefined
     if (!actor.surface.can_place_entity({
       name: request.entity_name,
       position,
@@ -523,9 +527,12 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       force: actor.force,
       ...check_args,
     })) {
-      rejected++
-      if (obstruction_samples.length < 3) obstruction_samples.push(placement_obstruction_sample(actor, prototype, position, direction))
-      return undefined
+      ground_items = ground_item_blockers(actor, prototype, request.entity_name, position, direction)
+      if (ground_items === undefined) {
+        rejected++
+        if (obstruction_samples.length < 3) obstruction_samples.push(placement_obstruction_sample(actor, prototype, position, direction))
+        return undefined
+      }
     }
     if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) return undefined
 
@@ -549,6 +556,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     const fluid_ports = candidate_fluid_ports(prototype, position, direction)
     if (fluid_ports !== undefined) candidate.fluid_ports = fluid_ports
     if (coverage !== undefined && coverage.length > 0) candidate.resource_coverage = coverage
+    if (ground_items !== undefined) candidate.ground_items = ground_items
     return candidate
   }
 
@@ -742,13 +750,9 @@ function resolve_placement_candidate(
     const changed = join_change(target, prototype, candidate)
     if (changed !== undefined) return { ok: false as const, code: 'connects_to_port_changed', error: `connects_to_port_changed: ${changed}` }
   }
-  if (!actor.surface.can_place_entity({
-    name: set.entity_name,
-    position: candidate.position,
-    direction: candidate.direction,
-    force: actor.force,
-    ...placement_check_args(set.entity_name),
-  })) return { ok: false as const, error: 'placement candidate is no longer placeable' }
+  if (!placeable_or_ground_items_only(actor, prototype, set.entity_name, candidate.position, candidate.direction)) {
+    return { ok: false as const, error: 'placement candidate is no longer placeable' }
+  }
 
   if (set.target_resource !== undefined) {
     const coverage = resource_coverage(actor, prototype, candidate.position, candidate.direction, set.target_resource)

@@ -261,7 +261,6 @@ function entity_details(prototype: any) {
       radius: prototype.mining_drill_radius,
       resource_categories: dictionary_keys(prototype.resource_categories),
       energy_usage: prototype.energy_usage,
-      require_resources_to_place: prototype.require_resources_to_place,
       vector_to_place_result: position_details(prototype.vector_to_place_result),
     }
   }

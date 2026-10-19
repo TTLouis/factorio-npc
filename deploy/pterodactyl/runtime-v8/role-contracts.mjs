@@ -73,6 +73,19 @@ export function normalizePlannerReview(value) {
   return { reason: value.reason, rationale: text(value.rationale, 400) }
 }
 
+// The parts of a reply that keep a plannerReview from being a review, named so
+// a refusal says which one to drop.
+export function plannerReviewConflicts(raw, protocolVersion, role) {
+  const conflicts = []
+  if (protocolVersion < 3) conflicts.push(`completion protocol ${protocolVersion}`)
+  if (role !== 'executor') conflicts.push(`role ${role}`)
+  if (raw.operations?.length !== 0) conflicts.push(Array.isArray(raw.operations) ? `${raw.operations.length} operations` : 'no operations array')
+  if (raw.semanticCompletion) conflicts.push('semanticCompletion')
+  if (raw.checkpoint) conflicts.push('checkpoint')
+  if (!raw.stepId) conflicts.push('no stepId')
+  return conflicts
+}
+
 export const PLANNING_ONLY_PROMPT = [
   '[ROLE: PLANNER] Choose the approach, dependencies, build order, quantities and worthwhile investments for a bounded slice. Compare relevant loaded skills and deterministic recipe/rate/cost facts. Explain optional investments as possible time savings with setup costs; they are not mandatory layouts.',
   'You do not submit gameplay actions. In submitPlan or assistant JSON always use operations: []. For a new execution slice use currentStep:0, aligned stepCompletions (first checkpoint now; later deterministic checkpoints bind when active), and executionGuidance aligned with plan: {approach,rationale,constraints,skillIds,materialSupply}. Reference only skills whose details you have loaded. For a resource-supply step select materialSupply:{mode:"direct_feed"|"manual_bootstrap",resource:"<native resource name>"}; use null for other work. Selecting a skill alone does not select its method. If selecting direct-miner-smelting, explicitly choose the method: compare remaining work, held machines, setup, travel, manual mining and hand-supply time using live facts. Reusing a held miner/furnace can still mean direct feeding; it does not mean manual smelting. Dedicated additional cells remain optional time savings. Explain why a manual bootstrap pays back sooner when choosing it. Keep the first slice actionable from known facts; the executor reads fresh geometry and inventory and chooses approved operations.',

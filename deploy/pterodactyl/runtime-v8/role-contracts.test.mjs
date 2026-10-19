@@ -352,6 +352,30 @@ test('Run AC: a review from a read phase the harness closed reopens reads once i
   assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 1)
 })
 
+test('Run AE: a review that echoes the committed checkpoint reaches the planner round without a refused round', async () => {
+  const echoed = { mode: 'all', requirements: [{ id: 'requirement_1', kind: 'inventory_count', item_name: 'copper-plate', minimum: 10 }] }
+  const w = world([draft(), ctx => ({ ...review('local_recovery_exhausted', RUN_AC_RATIONALE)(ctx), checkpoint: echoed }), ctx => {
+    assert.equal(ctx.context.role, 'planner')
+    return plannerRound
+  }, action])
+  await w.say()
+  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'planner', 'executor'])
+  assert.equal(w.events.filter(row => row.event === 'role.contract_refused').length, 0)
+  const ignored = w.events.find(row => row.event === 'executor.review_checkpoint_ignored')
+  assert.equal(ignored.data.reason, 'committed_completion_contract_is_immutable')
+  assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 1)
+  assert.equal(w.game.mutations.length, 1)
+})
+
+test('Run AE: a refused review names what made it invalid', async () => {
+  const w = world([draft(), () => ({ operations: [], plannerReview: { reason: 'scope_change', rationale: 'A strategic decision is needed.' } }),
+    review('scope_change'), plannerRound, action])
+  await w.say()
+  const refused = w.events.find(row => row.event === 'recovery.classified' && row.data.reason_code === 'invalid_planner_review')
+  assert.match(refused.data.reason, /this reply has no stepId$/)
+  assert.equal(w.game.mutations.length, 1)
+})
+
 test('the review round allowance is durable, runtime-only and capped per goal', async () => {
   const w = world([draft(), review('scope_change'), plannerRound, review('scope_change')])
   await w.say()

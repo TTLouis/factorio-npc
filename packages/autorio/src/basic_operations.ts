@@ -13,6 +13,7 @@ import type {
 } from './types'
 import { TaskStates } from './types'
 import { placement_candidate_matches } from './placement_candidates'
+import type { GroundItem } from './placement_ground_items'
 import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
 
 type BasicTask = PlayerParametersMineEntity | PlayerParametersPreparePumpSite | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
@@ -20,7 +21,7 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
-  | 'item_missing' | 'no_position' | 'not_placeable' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
+  | 'item_missing' | 'no_position' | 'not_placeable' | 'ground_items_inventory_full' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
@@ -66,6 +67,9 @@ export interface BasicOperationResult {
   }
   placement_grid?: { x_offset: number, y_offset: number, nearest_valid_center?: { x: number, y: number } }
   placement_blockers?: Array<{ name: string, type: string, unit_number?: number, position: { x: number, y: number } }>
+  // Ground items a placement picked up from its footprint, and one that did not fit.
+  ground_items_picked_up?: GroundItem[]
+  ground_item_left?: GroundItem
   previous_direction?: number
   reverse?: boolean
   rocket_silo_status?: number

@@ -263,7 +263,8 @@ function stateHasUnverifiedTransferIntent(state) {
 // committed step unchanged, and becomes a world blocker only when the same
 // step has been refused this many times in a row.
 export const CORRECTABLE_PLACEMENT_RETRY_BUDGET = 2
-const CORRECTABLE_PLACEMENT_CODES = new Set(['not_placeable'])
+// ground_items_inventory_full: the footprint holds ground items the actor has no room to pick up.
+const CORRECTABLE_PLACEMENT_CODES = new Set(['not_placeable', 'ground_items_inventory_full'])
 
 function correctablePlacementRefusal(evidence) {
   if (evidence?.kind !== 'operation_error_receipt') return undefined

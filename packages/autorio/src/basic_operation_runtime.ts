@@ -11,6 +11,7 @@ import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation
 import { resolve_entity_placement_item } from './placement_item'
 import { placement_candidate_matches } from './placement_candidates'
 import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
+import { ground_item_blockers, pick_up_ground_items, type GroundItem } from './placement_ground_items'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
@@ -480,15 +481,30 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     // create_entity itself does not test collisions, so every placement is
     // gated here. placement_check_args adds the manual build check where the
     // default (script) check is too loose, e.g. offshore pumps off the shore.
-    if (!surface.can_place_entity({
+    const placeable = () => surface.can_place_entity({
       name: task.entity_name,
       position,
       direction: task.direction,
       force: actor.force,
       ...placement_check_args(task.entity_name),
-    })) {
+    })
+    let can_place = placeable()
+    // Like a player's build, ground items in the footprint are picked up
+    // rather than blocking it; the native check then decides again.
+    let ground_items_picked_up: GroundItem[] | undefined
+    if (!can_place && ground_item_blockers(actor, prototype, task.entity_name, position, task.direction) !== undefined) {
+      const pickup = pick_up_ground_items(actor, inventory, prototype, position, task.direction)
+      ground_items_picked_up = pickup.picked_up
+      if (!pickup.ok) {
+        controller.fail(actor, task, 'ground_items_inventory_full', { ground_items_picked_up, ground_item_left: pickup.left })
+        return [false, `Cannot pick up ${pickup.left.count} ${pickup.left.name} lying in the footprint: actor inventory is full`]
+      }
+      can_place = placeable()
+    }
+    if (!can_place) {
       const blockers = placement_blocker_summaries(actor, footprint.world_box)
       controller.fail(actor, task, 'not_placeable', {
+        ground_items_picked_up,
         placement_footprint: {
           tile_width: footprint.tile_width,
           tile_height: footprint.tile_height,
@@ -543,6 +559,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       // MW1: the engine's last_user right after placement (nil for the standalone
       // NPC). A later human last_user on this entity means a player changed it.
       placed_last_user: entity_last_user(entity)?.name,
+      ground_items_picked_up,
     })
     return [true, 'Entity placed successfully', entity]
   }

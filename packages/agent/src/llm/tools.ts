@@ -207,7 +207,7 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getPlacementCandidates',
-    description: 'Ask the local Factorio harness to enumerate a small set of live legal placement candidates for an entity using the running game prototype and surface.can_place_entity. For resource-bound mining placement, provide target_resource so candidates without live target-resource coverage are rejected and remaining candidates include current coverage. Use this instead of manually guessing coordinates for terrain/resource-constrained placement.',
+    description: 'Ask the local Factorio harness to enumerate a small set of live legal placement candidates for an entity using the running game prototype and surface.can_place_entity. For resource-bound mining placement, provide target_resource so candidates without live target-resource coverage are rejected and remaining candidates include current coverage. Use this instead of manually guessing coordinates for terrain/resource-constrained placement. Items lying on the ground do not block a candidate: its ground_items lists them, and placing it picks them up into the NPC inventory first, the way a player build does.',
     schema: placementCandidatesSchema,
     fn: async ({ parameters }) => {
       const parsed = placementCandidatesSchema.parse(parameters ?? {})

@@ -20,7 +20,7 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
-import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
@@ -1053,6 +1053,12 @@ function compactBasicOperationResult(result) {
       : undefined,
     placement_blockers: Array.isArray(result.placement_blockers)
       ? sanitizeDurableModelValue(result.placement_blockers.slice(0, 8))
+      : undefined,
+    ground_items_picked_up: Array.isArray(result.ground_items_picked_up)
+      ? sanitizeDurableModelValue(result.ground_items_picked_up.slice(0, 16))
+      : undefined,
+    ground_item_left: result.ground_item_left && typeof result.ground_item_left === 'object'
+      ? sanitizeDurableModelValue(result.ground_item_left)
       : undefined,
     to_entity: typeof result.to_entity === 'boolean' ? result.to_entity : undefined,
     to_player: typeof result.to_player === 'boolean' ? result.to_player : undefined,
@@ -3445,6 +3451,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw this.roleContractError('invalid_planner_review', 'Review requires the exact active step and an idle safe point with no unsettled operation')
     }
     const requestId = this.traceRequest?.id
+    if (plan.reviewCheckpointIgnored) {
+      await this.traceEvent('executor.review_checkpoint_ignored', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
+        reason: 'committed_completion_contract_is_immutable' }, { requestId })
+    }
     if (!harnessRaised) {
       const reopened = await this.reopenReadsForReview(plan, held, activeStep, review)
       if (reopened !== undefined) return reopened
@@ -12789,6 +12799,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let stepId
     let executionGuidance
     let plannerReview
+    let reviewCheckpointIgnored = false
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
@@ -12803,8 +12814,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (Object.hasOwn(raw, 'plannerReview')) {
           try { plannerReview = normalizePlannerReview(raw.plannerReview) }
           catch (cause) { throw this.roleContractError('invalid_planner_review', cause.message) }
-          if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE || raw.operations?.length !== 0 || raw.semanticCompletion || raw.checkpoint || !raw.stepId) {
-            throw this.roleContractError('invalid_planner_review', 'plannerReview requires an executor active stepId, empty operations and no completion claim')
+          // A committed step's completion contract is immutable, so a checkpoint
+          // sent with the review cannot change it: it is ignored, as commitPlan
+          // ignores any resent contract, instead of costing a refused round.
+          if (raw.checkpoint !== undefined && this.agentContext.role === EXECUTOR_ROLE && this.activePlanFrozen()) {
+            const { checkpoint: _ignored, ...rest } = raw
+            raw = rest
+            reviewCheckpointIgnored = true
+          }
+          const conflicts = plannerReviewConflicts(raw, this.completionProtocolVersion, this.agentContext.role)
+          if (conflicts.length) {
+            throw this.roleContractError('invalid_planner_review', `plannerReview requires an executor active stepId, empty operations and no completion claim; this reply has ${conflicts.join(', ')}`)
           }
         }
         if (Object.prototype.hasOwnProperty.call(raw, 'assessmentOnly')) {
@@ -12934,6 +12954,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (stepId !== undefined) plan.stepId = stepId
     if (executionGuidance) plan.executionGuidance = executionGuidance
     if (plannerReview) plan.plannerReview = plannerReview
+    if (reviewCheckpointIgnored) plan.reviewCheckpointIgnored = true
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
       // on; refused in commitPlan, it failed the request (live, 2026-09-25).

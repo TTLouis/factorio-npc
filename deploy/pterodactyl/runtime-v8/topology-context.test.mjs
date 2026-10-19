@@ -146,6 +146,26 @@ test('native capacity is conditional and uses modded prototype rates rather than
   assert.deepEqual(topologyCapacity(topologyEntities(nativeNearby()), hot), [])
 })
 
+test('Run AE: fresh topology keeps a placed drill unit number and its open output point', () => {
+  // The fresh executor after the planner handback saw the drill without either,
+  // so its first read failed on a missing unit_number and the read budget went
+  // to finding the drill again instead of validating the furnace site.
+  const source = nativeNearby()
+  source.entities = [{ name: 'burner-mining-drill', type: 'mining-drill', unit_number: 19, position: { x: -33, y: -34 }, direction: 4,
+    status_name: 'waiting_for_space_in_destination',
+    spatial: { item_io: { drop_position: { x: -32.5, y: -32.703125 } }, power: { stored_energy_joules: 2666, prototype: { power: { consumption_watts: 150000 } } } } }]
+  const [drill] = topologyEntities(source).entities
+  assert.equal(drill.unit_number, 19)
+  assert.deepEqual(drill.drop_position, { x: -32.5, y: -32.703125 })
+  assert.equal(drill.drop_target, undefined, 'nothing receives the output yet')
+  source.entities[0].spatial.item_io.drop_target = { name: 'stone-furnace', unit_number: 21, position: { x: -33, y: -32 } }
+  assert.deepEqual(topologyEntities(source).entities[0].drop_target, { name: 'stone-furnace', unit_number: 21 })
+  const inserterOnly = nativeNearby()
+  inserterOnly.entities = [{ name: 'burner-inserter', type: 'inserter', unit_number: 30, position: { x: 1.5, y: 1.5 }, spatial: { item_io: { drop_position: { x: 1.5, y: 2.3 } } } }]
+  assert.equal(topologyEntities(inserterOnly).entities[0].unit_number, 30, 'item output alone makes an entity relevant')
+  assert.ok(topologyText(topologyEntities(source)).length <= 1950)
+})
+
 test('malformed and oversized reads never produce authoritative fresh topology; serialization stays whole and bounded', () => {
   for (const raw of ['no-json', '[]', 'x'.repeat(50000)]) assert.equal(topologyJson(raw), undefined)
   assert.equal(topologyEntities({ entities: [] }), undefined)
