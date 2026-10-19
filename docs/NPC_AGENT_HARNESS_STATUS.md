@@ -8,6 +8,15 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 19: Run AE placement gaps fixed offline
+
+- **Ground items.** Run AE stalled because a burner drill, fueled before its furnace existed, dropped ore on its drop point, and the script build check rejected all 52 furnace footprints over it. A footprint blocked only by ground items is now a candidate that lists `ground_items`. Placing it picks them up into the NPC inventory, re-checks natively, then builds. If the inventory is full, it fails with correctable `ground_items_inventory_full`. Tile-rule entities keep the strict check. This was the owner's "pick up on build" choice.
+- **Smaller gaps.**
+  - `fresh_topology` keeps `unit_number` and the item drop point.
+  - Drill `getPrototypeDetails` no longer reads a key the 2.0 prototype lacks.
+  - A checkpoint echoed with `plannerReview` under a frozen plan is ignored and traced, not refused. A refused review names its conflict.
+- **Proof.** Code `8f1ffcf4`, payload `a40d5fb5`. Passed: 2,658 runtime tests, 1,241 mod tests, typecheck/Lua, ESLint, and the 9 payload tests. Not live-tested. [Work note](validation/RUN_AE_PLACEMENT_GAPS_2026-10-19.md).
+
 ## October 19: Run AD direct-feed observation gaps fixed and validated offline
 
 - **Open observations.** Typed JSON and `submitPlan` observation requests can use the ordinary approved spatial/resource tools when reads are open. Normal argument validation, cache, budgets and actor/epoch/cancellation fences apply. Closed rounds retain their narrower fact grammar and durable one-read allowance.
