@@ -838,6 +838,7 @@ const SIGNATURES = [
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
   { id: 'harness_state_fault', label: 'harness state invariant failed (a harness fault, not a model or guard stop)', detect: detectHarnessStateFault },
+  { id: 'dangling_context_reference', label: 'diff/unchanged observation sent without its baseline', detect: detectDanglingContextReferences },
   { id: 'intake_retry_exhausted', label: 'intake retry of a goal lost to a transport failure exhausted', detect: detectIntakeRetryExhausted },
   { id: 'rejected_blocker_pause', label: 'unverified world blocker relabelled as provider pause', detect: detectRejectedBlockerPause },
   { id: 'semantic_contract_dead_end', label: 'delegated semantic contract dead end before gameplay', detect: detectSemanticContractDeadEnd },
@@ -971,6 +972,28 @@ function detectContractsBoundJustInTime(rows) {
   }
 }
 
+// Restage detector A1 (context-references.mjs): a relative observation went to
+// the provider without the baseline it refers to. High severity is a finding;
+// a task-receipt diff without a full receipt is informational.
+function danglingReferenceSummary(matches) {
+  const keys = [...new Set(matches.map(row => `${nonEmptyString(row.data?.kind) ?? 'unknown'}:${nonEmptyString(row.data?.key) ?? '?'}`))]
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `${keys.slice(0, 4).join(', ')}${keys.length > 4 ? ` (+${keys.length - 4} more)` : ''} referenced without a baseline in the request`,
+  }
+}
+
+function detectDanglingContextReferences(rows) {
+  const matches = rows.filter(row => row?.event === 'context.dangling_reference' && row.data?.severity !== 'low')
+  return matches.length > 0 ? danglingReferenceSummary(matches) : undefined
+}
+
+function detectDanglingTaskReceiptDiffs(rows) {
+  const matches = rows.filter(row => row?.event === 'context.dangling_reference' && row.data?.severity === 'low')
+  return matches.length > 0 ? danglingReferenceSummary(matches) : undefined
+}
+
 // A request that failed at goal intake on transport and was kept as an intake retry: not lost, so not a finding.
 function detectIntakeRetryPending(rows) {
   const matches = rows.filter(row => row?.event === 'recovery.intake_retry_scheduled')
@@ -984,6 +1007,11 @@ function detectIntakeRetryPending(rows) {
 }
 
 const INFORMATIONAL_SIGNATURES = [
+  {
+    id: 'dangling_task_receipt_diff',
+    label: 'task receipt diff sent without a full receipt in the request',
+    detect: detectDanglingTaskReceiptDiffs,
+  },
   {
     id: 'intake_retry_scheduled',
     label: 'transport failure at goal intake kept as an automatic retry',

@@ -181,6 +181,7 @@ import {
 } from './jev-typed-projection.mjs'
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
 import { insertTailBlock, TAIL_BLOCKS } from './prompt-prefix.mjs'
+import { findDanglingReferences } from './context-references.mjs'
 import { repairControlJson } from './control-json-repair.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
@@ -3133,6 +3134,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.requestLifecycle = 'new_goal'
     this.pendingInteractionAmendment = null
     this.lastTaskStatusView = null
+    this.danglingReferencesTraced = new Set() // A1 trace dedupe: conversationSeq + kind + key
     this.lastHandledRuntimeReceipt = { completion: null, failure: null }
     this.outputBudgetRecoveryUsed = false
     this.outputBudgetRecoveryGuard = null
@@ -12287,6 +12289,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (sequenceViolation) {
       await this.traceEvent('provider.message_sequence_invalid', { round, ...sequenceViolation })
       throw new AgentLoopError(`provider_message_sequence_invalid: assistant tool_calls at message ${sequenceViolation.index} lack tool replies for ${sequenceViolation.unanswered.join(', ')} (next role: ${sequenceViolation.next_role ?? 'none'})`)
+    }
+    // Restage detector A1: a diff/unchanged observation whose baseline is no
+    // longer in the request. Traced once per conversation and key, never repaired.
+    for (const dangling of findDanglingReferences(providerMessages)) {
+      const traced = `${this.agentContext.conversationSeq} ${dangling.kind} ${dangling.key}`
+      if (this.danglingReferencesTraced.has(traced)) continue
+      if (this.danglingReferencesTraced.size >= 256) this.danglingReferencesTraced.clear()
+      this.danglingReferencesTraced.add(traced)
+      await this.traceEvent('context.dangling_reference', { round, conversation_seq: this.agentContext.conversationSeq, ...dangling })
     }
     const startedAt = Date.now()
     if (recoveryAttempt > 0 && this.traceRequest) {

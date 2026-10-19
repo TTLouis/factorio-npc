@@ -546,104 +546,108 @@
       "sha": "20df18ad3279a533"
     },
     {
+      "event": "context.dangling_reference",
+      "sha": "3af4c26e90b56395"
+    },
+    {
       "event": "provider.request",
-      "sha": "0e6e704b401d372b"
+      "sha": "104208f4ca44193b"
     },
     {
       "event": "provider.round_policy",
-      "sha": "25c1797b22d4a776"
+      "sha": "53111d09571ec2bc"
     },
     {
       "event": "provider.response",
-      "sha": "7b989ca814311228"
+      "sha": "66479f0a488f4b3d"
     },
     {
       "event": "tool.call",
-      "sha": "93ac3d020424ce72"
+      "sha": "095ac7d5133a6142"
     },
     {
       "event": "tool.call",
-      "sha": "1f3de445496b3c69"
+      "sha": "9f376c2ecd3a70b5"
     },
     {
       "event": "tool.result",
-      "sha": "f96d7966814f529d"
+      "sha": "f61041532c65b43f"
     },
     {
       "event": "tool.result",
-      "sha": "c2e1d675c3a0b563"
+      "sha": "1ab3c1356d6af994"
     },
     {
       "event": "budget.reserved",
-      "sha": "d1001c3b43ec2904"
+      "sha": "d64f4c1467b39e51"
     },
     {
       "event": "control.decision_state",
-      "sha": "5dc9c4add5bd0e1b"
+      "sha": "864e1c95387c8060"
     },
     {
       "event": "provider.request",
-      "sha": "decc7517971a7a5d"
+      "sha": "12a2c725b9fc8911"
     },
     {
       "event": "provider.round_policy",
-      "sha": "13b1159f622b848e"
+      "sha": "626267f914de56a6"
     },
     {
       "event": "provider.response",
-      "sha": "10f99b2a6566204e"
+      "sha": "04d0e79f3026428b"
     },
     {
       "event": "tool.call",
-      "sha": "54189b52993d3050"
+      "sha": "9956f07aa7e09e80"
     },
     {
       "event": "tool.call",
-      "sha": "800f7ba0d6615250"
+      "sha": "f171d9756c9b750b"
     },
     {
       "event": "tool.result",
-      "sha": "4020ad844687608b"
+      "sha": "217fdf1fe0c0a44b"
     },
     {
       "event": "tool.result",
-      "sha": "8f6e8120d3d6d935"
+      "sha": "a400dc2eb956b9a7"
     },
     {
       "event": "budget.reserved",
-      "sha": "9964087860c76699"
+      "sha": "facad6a27a7ba904"
     },
     {
       "event": "control.decision_state",
-      "sha": "b6dfcb63d2b40bac"
+      "sha": "6b952edee5245e97"
     },
     {
       "event": "provider.request",
-      "sha": "35dd6def154b039e"
+      "sha": "8acc5da60d7382bc"
     },
     {
       "event": "provider.round_policy",
-      "sha": "63e5c3236c045c80"
+      "sha": "9bfa99141dd3f0b3"
     },
     {
       "event": "provider.response",
-      "sha": "10dd6cb6a53fbc25"
+      "sha": "a1e9762d35c16a7f"
     },
     {
       "event": "plan.accepted",
-      "sha": "b5d8c13b4f1951cf"
+      "sha": "6d2b841bb89df2e4"
     },
     {
       "event": "plan.persisted",
-      "sha": "67238b8b3dff9f62"
+      "sha": "15db58d67b46ed52"
     },
     {
       "event": "request.time_split",
-      "sha": "0a6c8499fb333c0f"
+      "sha": "999f66953ef204c7"
     },
     {
       "event": "request.completed",
-      "sha": "0acbd08aa1271482"
+      "sha": "ca55e2ede8914abc"
     }
   ]
 }
