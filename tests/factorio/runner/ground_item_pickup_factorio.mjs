@@ -210,8 +210,10 @@ async function main() {
   const footprintB = furnaceBox(site)
   const setupB = await lua(`s.create_entity{name="item-on-ground",position={${site.x + 0.3},${site.y + 0.3}},stack={name="copper-ore",count=3}}; `
     + 'inv.clear(); inv.insert{name="stone-furnace",count=1}; inv.insert{name="copper-ore",count=49}; inv.insert{name="iron-plate",count=100000}; '
-    + 'rcon.print(helpers.table_to_json({insertable=inv.get_insertable_count("copper-ore")}))')
+    + `rcon.print(helpers.table_to_json({insertable=inv.get_insertable_count("copper-ore"),characters=#s.find_entities_filtered{area=${box(footprintB)},type="character"}}))`)
   assert.equal(setupB.insertable, 1, 'fixture leaves room for exactly one ore')
+  // Only the ground stack may block this site, or the failure is not a pickup failure.
+  assert.equal(setupB.characters, 0, 'the NPC stands clear of the partial-pickup site')
   const beforeB = await world(footprintB)
   assert.equal(beforeB.ground, 3)
   const partial = await admitted('partial', { name: 'place_entity', args: { entity_name: 'stone-furnace', x: site.x, y: site.y, direction: 0 } })

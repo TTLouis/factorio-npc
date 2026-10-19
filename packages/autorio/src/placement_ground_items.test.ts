@@ -259,7 +259,8 @@ describe('placement pickup mutation accounting (Run AF)', () => {
     const place = () => runtime.state_placing(actor)
     const receipt = () => manager.get_status_snapshot().receipt_journal.find((entry: any) => entry.batch_ref === ref.batch_ref)
     const record = () => admission.status().records[0]
-    return { controller, place, receipt, record }
+    const receipts = () => manager.get_status_snapshot().receipt_journal as any[]
+    return { controller, place, receipt, receipts, record }
   }
 
   function ground_count(entities: any[], name: string) {
@@ -311,6 +312,51 @@ describe('placement pickup mutation accounting (Run AF)', () => {
     expect(inventory.held['copper-ore']! + ground_count(entities, 'copper-ore')).toBe(3)
     expect(inventory.held['stone-furnace']).toBe(1)
     expect(surface.create_entity).not.toHaveBeenCalled()
+  })
+
+  it('records every stack picked up before a later stack only partly fits', () => {
+    const SECOND = { x: -34.5, y: -35.5 }
+    const entities = [ground_item('copper-ore', 2, DROP), ground_item('copper-ore', 3, SECOND)]
+    const surface = world(entities)
+    surface.create_entity = vi.fn()
+    const inventory = inventory_with(3)
+    const run = admitted_placement(surface, inventory)
+
+    expect(run.place()?.[0]).toBe(false)
+
+    const result = run.controller.status().last_result
+    expect(result).toMatchObject({
+      code: 'ground_items_inventory_full',
+      ground_items_picked_up: [{ name: 'copper-ore', count: 2, position: DROP }, { name: 'copper-ore', count: 1, position: SECOND }],
+      ground_item_left: { name: 'copper-ore', count: 2, position: SECOND },
+    })
+    expect(run.receipt()?.failed_before_mutation).toBeUndefined()
+    expect(run.record()).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+    // 5 ore before: 3 in the inventory, the first stack gone and 2 left of the second.
+    expect(entities[0].valid).toBe(false)
+    expect(entities[1].stack.count).toBe(2)
+    expect(inventory.held['copper-ore']).toBe(3)
+    expect(inventory.held['copper-ore']! + ground_count(entities, 'copper-ore')).toBe(5)
+  })
+
+  it('does not carry one placement\'s pickup into the next placement\'s proof', () => {
+    const entities = [ground_item('copper-ore', 3, DROP)]
+    const surface = world(entities)
+    surface.create_entity = vi.fn()
+    const inventory = inventory_with(1)
+    const run = admitted_placement(surface, inventory)
+    expect(run.place()?.[0]).toBe(false)
+    expect(run.controller.status().last_result?.ground_items_picked_up).toHaveLength(1)
+
+    // A second placement onto the same, still blocked tile with a full inventory
+    // picks nothing up, so its own refusal keeps the proof.
+    expect(run.controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+    expect(run.place()?.[0]).toBe(false)
+    const second = run.controller.status().last_result
+    expect(second).toMatchObject({ code: 'ground_items_inventory_full', ground_item_left: { count: 2 } })
+    expect(second?.ground_items_picked_up).toBeUndefined()
+    const latest = run.receipts().at(-1)
+    expect(latest).toMatchObject({ state: 'cancelled', failed_before_mutation: true })
   })
 
   it('reports the pickup and withholds the proof when the native check still refuses after it', () => {
