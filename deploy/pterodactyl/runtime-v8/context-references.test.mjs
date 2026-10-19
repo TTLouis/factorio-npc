@@ -185,12 +185,12 @@ test('a run without a conversation swap never sends a dangling reference', async
   assert.equal(world.trace.filter(row => row.event === 'context.dangling_reference').length, 0)
 })
 
-// The latent bug the 10-19 analysis found by reading: a restage keeps the
-// request's prototype refs but its conversation has no [STATIC_PROTOTYPE_CACHE],
-// so a repeat read answers "already present" about nothing. Unit B2 owns the
-// fix; until then the scenario records whichever way the loop behaves and the
-// detector must agree with the prompt.
-test('after a restage, a repeat prototype read is either re-grounded or traced as dangling, never silent', async (t) => {
+// The latent bug the 10-19 analysis found by reading: a restage kept the
+// request's prototype refs although its conversation had no
+// [STATIC_PROTOTYPE_CACHE], so a repeat read could answer "already present"
+// about nothing. B1 binds the refs to the conversation: the repeat read in the
+// new conversation answers with the full cached facts.
+test('after a restage, a repeat prototype read answers with full cached facts and nothing dangles', async (t) => {
   const world = harness([
     prototypeRead('p1'),
     planReply({ plan: PLAN, currentStep: 0, operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) }),
@@ -220,5 +220,8 @@ test('after a restage, a repeat prototype read is either re-grounded or traced a
   assert.ok(repeatCall, 'the repeat read reached the provider after the restage')
   const repeat = repeatCall.find(message => message.tool_call_id === 'p2').content
   const cacheVisible = repeatCall.some(message => String(message.content ?? '').startsWith('[STATIC_PROTOTYPE_CACHE]'))
+  assert.equal(JSON.parse(repeat).observation_mode, 'cached_static')
+  assert.equal(JSON.parse(repeat).reference, 'prototype:offshore-pump')
+  assert.deepEqual(traced.filter(row => row.data.severity === 'high'), [])
   t.diagnostic(`prototype after restage: repeat=${JSON.parse(repeat).observation_mode ?? 'raw'} cache_block=${cacheVisible} dangling=${[...sentKeys].join(', ') || 'none'}`)
 })

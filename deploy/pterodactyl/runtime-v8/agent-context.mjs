@@ -88,6 +88,9 @@ export class AgentContext {
     this.baseMessages = []
     this.lineageSequence = 0
     this.conversationSeq = 0 // monotonic for the life of this object: every lineage start and every restage is a new conversation
+    // conversationState: facts that only mean something while the conversation
+    // that delivered them is the one being sent (an "already shown" cache, a diff
+    // baseline). Each new conversation starts empty; a parked planner keeps its own.
     this.beginLineage(role)
   }
 
@@ -105,6 +108,7 @@ export class AgentContext {
     this.usedHandoffIds = new Set([this.handoffId])
     this.restageCount = 0
     this.parkedPlanner = null // U6: the planner conversation set aside while an executor conversation acts; a new lineage starts with none
+    this.conversationState = new Map()
     this.resetCounters()
   }
 
@@ -296,6 +300,7 @@ export class AgentContext {
           counters: this.counters,
           size: this.size,
           requestCharsHighWater: this.requestCharsHighWater,
+          conversationState: this.conversationState,
         }
       : undefined
     const previous = {
@@ -319,6 +324,7 @@ export class AgentContext {
     this.handoffId = packet.handoff_id
     this.usedHandoffIds.add(packet.handoff_id)
     this.conversationSeq += 1
+    this.conversationState = new Map()
     this.restageCount += 1
     this.resetCounters()
     return {
@@ -377,6 +383,7 @@ export class AgentContext {
     this.counters = parked.counters
     this.size = parked.size
     this.requestCharsHighWater = parked.requestCharsHighWater
+    this.conversationState = parked.conversationState
     this.parkedPlanner = null
     this.conversationSeq += 1
     return {

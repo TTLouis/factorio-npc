@@ -123,7 +123,7 @@ test('a read that is never delivered is not remembered', async () => {
   rcon.onInventoryRead = () => { rcon.epoch = 4 }
   await assert.rejects(agent.handleToolBatch({ tool_calls: [inventoryCall('stale')] }), /epoch changed/)
   assert.deepEqual(executed(agent), [])
-  assert.equal(agent.unchangedFactReads.delivered.size, 0)
+  assert.equal(agent.unchangedFactReads?.delivered.size ?? 0, 0, 'nothing remembered (B1: an actor change starts a new conversation)')
 })
 
 test('the closed observation phase does not read facts at all', async () => {

@@ -3230,6 +3230,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   set messages(value) { this.agentContext.messages = value }
   get baseMessages() { return this.agentContext.baseMessages }
   set baseMessages(value) { this.agentContext.baseMessages = value }
+  // B1: state that describes what the current conversation has shown the model
+  // lives on its AgentContext conversation, so every conversation swap drops it
+  // and a resumed planner gets its own back. Same accessor pattern as messages.
+  conversationSlot(name, create) {
+    const state = this.agentContext.conversationState
+    if (!state.has(name) && create) state.set(name, create())
+    return state.get(name)
+  }
+  get toolCache() { return this.conversationSlot('toolCache', () => new Map()) }
+  set toolCache(value) { this.agentContext.conversationState.set('toolCache', value) }
+  get prototypeRefsThisRequest() { return this.conversationSlot('prototypeRefs', () => []) }
+  set prototypeRefsThisRequest(value) { this.agentContext.conversationState.set('prototypeRefs', value) }
+  get unchangedFactReads() { return this.conversationSlot('unchangedFactReads') }
+  set unchangedFactReads(value) { this.agentContext.conversationState.set('unchangedFactReads', value) }
+  get taskStatusDiffBaseline() { return this.conversationSlot('taskStatusDiffBaseline') ?? null }
+  set taskStatusDiffBaseline(value) { this.agentContext.conversationState.set('taskStatusDiffBaseline', value) }
 
   reset() {
     this.abortStepContractCalls()
@@ -9748,6 +9764,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.planningHorizonOverride = plannerShape.planning_horizon ?? null
     }
     this.lastTaskStatusView = null
+    this.taskStatusDiffBaseline = null
     this.lastHandledRuntimeReceipt = { completion: null, failure: null }
     this.outputBudgetRecoveryUsed = false
     this.outputBudgetRecoveryGuard = null
@@ -10001,6 +10018,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.requestLifecycle = 'new_goal'
     this.pendingInteractionAmendment = null
     this.lastTaskStatusView = null
+    this.taskStatusDiffBaseline = null
     this.lastHandledRuntimeReceipt = { completion: null, failure: null }
     this.outputBudgetRecoveryUsed = false
     this.outputBudgetRecoveryGuard = null
@@ -10856,8 +10874,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const taskBoard = this.memory.recordBoardEvidence?.(this.activePlanKey(), admission ? { ...evidence, ...admission } : evidence)
       if (taskBoard) await this.persistState()
       const view = taskStatusDecisionView(raw)
-      const providerStatus = taskStatusDelta(this.lastTaskStatusView, view)
+      // The diff is relative to the receipt this conversation last showed;
+      // lastTaskStatusView stays the request's latest world receipt.
+      const providerStatus = taskStatusDelta(this.taskStatusDiffBaseline, view)
       this.lastTaskStatusView = view
+      this.taskStatusDiffBaseline = view
       // The UI refresh must observe the board after receipt reconciliation. Emitting
       // factorio.status before recordBoardEvidence let the console snapshot the old
       // active_index and leave Plan Tracker one step behind until a later event.
@@ -10871,8 +10892,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const view = { status_error: message }
-      const providerStatus = taskStatusDelta(this.lastTaskStatusView, view)
+      const providerStatus = taskStatusDelta(this.taskStatusDiffBaseline, view)
       this.lastTaskStatusView = view
+      this.taskStatusDiffBaseline = view
       await this.traceEvent('factorio.status_error', { message })
       return { raw: JSON.stringify(view), view, providerStatus }
     }
