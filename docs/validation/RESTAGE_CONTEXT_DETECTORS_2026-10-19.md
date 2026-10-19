@@ -56,3 +56,20 @@ All 197 loop and helper fields now declare a scope, model visibility and owner. 
 - **B2 — one swap path plus carry-forward.** Every site that replaces the conversation wholesale goes through one loop method, which installs a fresh ConversationState. Every rebuild of `messages` (continuation, swap) then runs one carry-forward registry. Each producer of relative observations either re-delivers its baseline (static prototypes; entity and nearby baselines stay with the adapter) or forgets it, so its next answer is full (task receipts). A1 is the gate: no `context.dangling_reference` in any scenario.
 
 Out of scope: the decision-pressure counters (A3 finding 4) and the lifecycle transition table (option C).
+
+## B results (static gates only, not live-tested)
+
+- **B1** (`7d8f6009`). `AgentContext.conversationState` holds `toolCache`, `prototypeRefs`, `unchangedFactReads` and a new `taskStatusDiffBaseline`. A restage or a new lineage starts it empty, and a parked planner gets its own back on resume. `lastTaskStatusView` stays request-scoped: it is the latest world receipt and feeds the tick fences, so only the diff baseline moved. In the C3 scenario, a repeat `getPrototypeDetails` after the restage now returns full `cached_static` facts and nothing dangles.
+- **B2** (`4f7af235`). The epoch rebuild, the capsule fallback and both supervisor recovery paths call `replaceConversation`, which closes A3 findings 1–3 at those sites. `CONVERSATION_SLOT_CARRY` sets keep or forget per slot for the two in-place rebuilds:
+
+  | slot | continuation | fold |
+  |---|---|---|
+  | toolCache | keep (the continuation path clears it itself) | keep |
+  | prototypeRefs | keep (re-delivered) | forget |
+  | unchangedFactReads | forget | forget |
+  | taskStatusDiffBaseline | forget (the rebuild drops the last receipt) | keep |
+
+  A slot read without a carry rule throws. Handoff packets carry the full receipt view. The state-scope lint now treats `replaceConversation` as a swap.
+- **Golden.** The no-restage steam replay loses its one `context.dangling_reference` row. Three provider bodies change, and only in a single task receipt (`diff` → `full`, same fields). One repeat read after the continuation is no longer flagged `unchanged_fact`. Calls and the event order are otherwise identical.
+- **Gates.** The full suite passed 2700 of 2700, and `build-payload` passed 9 of 9. The payload is repinned to `4f7af235`, which ships B1 as well.
+- **Not done.** No live run. A2 was not rerun on new prompts, and A1 has no corpus of post-B prompts yet. The next live run's `run-check` should show `dangling_task_receipt_diff` at zero.
