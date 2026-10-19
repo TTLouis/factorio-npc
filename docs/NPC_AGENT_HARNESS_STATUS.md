@@ -8,6 +8,24 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 19: Run AF placement pickup receipts fixed and verified natively
+
+- **Blocker.** The Run AF preflight review of `3fe2bcbf` found a false no-effect proof. A placement could pick spilled ground items into the NPC inventory and then fail, but its batch still carried `failed_before_mutation`. Admission and runtime reconciliation then settled it as a refusal.
+- **Fix.**
+  - Measured pickups are tracked on the task across every later failure: inventory full, native recheck, `create_failed`, and an uncertain destroy.
+  - The pickup details are reported in each failure result.
+  - The proof is withheld after any pickup. A measured zero pickup keeps it.
+  - Mutated placements now become `uncertain` / `partial_unknown`. Actor/epoch, cancellation, admission and duplicate guards are unchanged.
+- **Proof.**
+  - Code `10948bf7`, payload repin `bb9a6cb8`, test nits `f3975f85`.
+  - Passed: 2,662 runtime tests, 1,249 mod tests, typecheck/Lua, ESLint and the 9 payload tests.
+  - New native Factorio 2.0.77 lane `ground-item-pickup`:
+    - A fuelled drill spills ore, and the approved placement picks it up and builds the furnace over the drop point. The pickup equals the inventory change.
+    - A partially fitting stack fails for real, with no proof, `uncertain` admission and `partial_unknown`.
+    - A zero pickup keeps the proof.
+  - Independent review: approve with nits (fixed). [Validation note](validation/RUN_AF_PLACEMENT_PICKUP_RECEIPTS_2026-10-19.md).
+- **Boundary.** After a pickup failure the goal pauses on `duplicate_effect_suppressed` and does not replan. Not live-tested; Codex's next E2E checks the live path.
+
 ## October 19: Run AE placement gaps fixed offline
 
 - **Ground items.** Run AE stalled because a burner drill, fueled before its furnace existed, dropped ore on its drop point, and the script build check rejected all 52 furnace footprints over it. A footprint blocked only by ground items is now a candidate that lists `ground_items`. Placing it picks them up into the NPC inventory, re-checks natively, then builds. If the inventory is full, it fails with correctable `ground_items_inventory_full`. Tile-rule entities keep the strict check. This was the owner's "pick up on build" choice.
