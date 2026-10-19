@@ -319,6 +319,101 @@ test('Run AC: the planner review round returns the unchanged step to a fresh exe
   assert.equal(w.events.find(row => row.event === 'planner.review_round').data.authority, 'advisory_only')
 })
 
+// Run AF (2026-10-19, req_mvfhjjj8_1): after a verified first step the executor asked for a review of the second, and the
+// planner's contract reply (a plan, no operations) was met with finite-goal continuation pressure, which began an
+// executor action-omission repair that the next executor restage resumed with a one-read budget.
+const copperThenIron = overrides => draft({ plan: ['Gather ten copper ore', 'Gather ten iron ore'],
+  goal: { scope: 'finite', summary: 'Gather copper and iron.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }] },
+  stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('copper-ore', 10) }, { kind: 'deterministic', checkpoint: inventoryCheckpoint('iron-ore', 10) }],
+  executionGuidance: [brief(), { ...brief(), approach: 'Gather iron for the next build.' }], ...overrides })
+const activeStepId = memory => { const held = getActivePlan(memory.planningState(KEY)); return held.steps[held.active_step_index].step_id }
+const readNearby = (id, name) => ({ content: '', tool_calls: [{ id, type: 'function',
+  function: { name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 32, name, limit: 4 }) } }] })
+const afOutgoing = messages => messages.map(row => row.content ?? '').join('\n')
+
+async function runToSecondStepReview(extra = []) {
+  const w = world([copperThenIron(), action, ({ memory }) => ({ stepId: activeStepId(memory), operations: [],
+    plannerReview: { reason: 'local_recovery_exhausted', rationale: RUN_AC_RATIONALE } }),
+  copperThenIron({ chatMessage: 'Iron ore candidates must be re-read near the actor.', currentStep: 1 }), ...extra])
+  return w
+}
+
+test('Run AF: a planner review-round reply is never met with executor continuation pressure and hands back a normal executor', async () => {
+  const w = await runToSecondStepReview([ctx => {
+    assert.equal(ctx.context.role, 'executor')
+    assert.equal(ctx.context.allowTools, true, 'ordinary read budget, not the action-omission single-read round')
+    assert.equal(ctx.memory.currentPlan(KEY).admission_status === 'action_omission_repair', false)
+    assert.equal(ctx.agent.actionOmissionRepairActive, false)
+    assert.match(afOutgoing(ctx.messages), /[PLANNER_REVIEW_NOTES].*Iron ore candidates/)
+    assert.doesNotMatch(afOutgoing(ctx.messages), /act-or-block|1 act-or-block/i)
+    return readNearby('af-read-1', 'iron-ore')
+  }, ctx => {
+    assert.equal(ctx.context.allowTools, true, 'a second read is still open after the first')
+    return readNearby('af-read-2', 'copper-ore')
+  }, ctx => {
+    assert.equal(ctx.context.allowTools, true)
+    return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
+  }])
+  await w.say()
+  w.game.inventory['copper-ore'] = 10
+  await w.agent.completed()
+  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'executor', 'planner', 'executor', 'executor', 'executor'], JSON.stringify(w.events.slice(-8)))
+  assert.equal(w.events.filter(row => row.event === 'recovery.action_omission_started').length, 0)
+  assert.equal(w.events.filter(row => row.event === 'recovery.classified' && row.data.reason_code === 'finite_goal_continuation_pressure').length, 0)
+  assert.equal(w.events.filter(row => row.event === 'planner.committed_slice_returned').length, 1)
+  assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 1)
+  assert.notEqual(w.memory.currentPlan(KEY).admission_status, 'action_omission_repair')
+  assert.equal(w.game.mutations.length, 2, 'the executor read twice and then acted on the same step')
+  assert.equal(w.memory.currentPlan(KEY).status !== 'paused', true)
+})
+
+test('Run AF: the planner role cannot begin an executor action-omission repair on any path', async () => {
+  let probed = false
+  const w = world([copperThenIron(), action, ({ memory }) => ({ stepId: activeStepId(memory), operations: [],
+    plannerReview: { reason: 'local_recovery_exhausted', rationale: RUN_AC_RATIONALE } }),
+  async ctx => {
+    assert.equal(ctx.context.role, 'planner')
+    const held = ctx.memory.currentPlan(KEY)
+    assert.equal(held.status, 'active')
+    assert.equal(held.last_mutation_verified, true, 'every other finite-pressure precondition holds')
+    const noOperations = { chatMessage: '', plan: held.plan, currentStep: held.current_step, operations: [] }
+    assert.equal(ctx.agent.planUpdateReason, 'completion')
+    assert.equal(ctx.agent.finiteNoOperationPressure(noOperations), '')
+    assert.equal(ctx.agent.pendingFiniteNoOperationPlan, null)
+    for (const reason of ['finite_goal_continuation_pressure', 'no_operation_for_remaining_plan', 'observation_decision_pressure_complete']) {
+      assert.equal(await ctx.agent.beginActionOmissionRepair(noOperations, reason), undefined, reason)
+    }
+    assert.equal(ctx.agent.actionOmissionRepairActive, false)
+    assert.notEqual(ctx.memory.currentPlan(KEY).admission_status, 'action_omission_repair')
+    probed = true
+    return copperThenIron({ chatMessage: 'The step stands.', currentStep: 1 })
+  }, ctx => ({ stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] })])
+  await w.say()
+  w.game.inventory['copper-ore'] = 10
+  await w.agent.completed()
+  assert.equal(probed, true)
+  assert.equal(w.events.filter(row => row.event === 'recovery.action_omission_started').length, 0)
+  assert.equal(w.game.mutations.length, 2)
+})
+
+test('Run AF: an executor no-operation reply after a verified step still gets continuation pressure and repair', async () => {
+  const w = world([copperThenIron(), action, ctx => ({ stepId: activeStepId(ctx.memory), plan: ['Gather ten copper ore', 'Gather ten iron ore'], currentStep: 1, operations: [] }),
+    ctx => {
+      assert.equal(ctx.context.role, 'executor')
+      assert.match(afOutgoing(ctx.messages), /[HARNESS]/)
+      return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
+    }])
+  await w.say()
+  w.game.inventory['copper-ore'] = 10
+  await w.agent.completed()
+  const pressure = w.events.filter(row => row.event === 'recovery.classified' && row.data.reason_code === 'finite_goal_continuation_pressure')
+  assert.equal(pressure.length, 1, JSON.stringify(w.events.slice(-8)))
+  const started = w.events.filter(row => row.event === 'recovery.action_omission_started')
+  assert.equal(started.length, 1)
+  assert.equal(started[0].data.reason_code, 'finite_goal_continuation_pressure')
+  assert.equal(w.game.mutations.length, 2)
+})
+
 test('Run AC: a review from a read phase the harness closed reopens reads once instead of pausing', async () => {
   const closedByCoverage = ({ agent }) => {
     agent.observationDecisionPressure = true

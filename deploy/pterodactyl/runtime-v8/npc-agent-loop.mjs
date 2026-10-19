@@ -3414,8 +3414,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE ? executionOnlyPrompt(text) : text
   }
 
+  // True when this loop's current role is barred from authoring gameplay operations (protocol 3 planner). Continuation
+  // pressure and action-omission repair both demand "act or block", which only a role that may act can honour.
+  roleCannotAuthorOperations() {
+    return this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
+  }
+
   validatePlannerRoleOutput(plan) {
-    if (this.completionProtocolVersion < 3 || this.agentContext.role !== PLANNER_ROLE) return
+    if (!this.roleCannotAuthorOperations()) return
     if (Array.isArray(plan.operations) && plan.operations.length > 0) throw this.roleContractError('planner_cannot_mutate',
       'The planner chooses strategy and completion conditions, never gameplay operations. Resubmit operations:[] with the plan and aligned executionGuidance; the executor chooses actions after commit.')
     if (plan.plannerReview !== undefined) throw this.roleContractError('invalid_planner_review', 'Only an executor may request plannerReview')
@@ -13695,6 +13701,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async beginActionOmissionRepair(plan, reasonCode) {
     if (!this.requestInfo) return undefined
+    // An executor repair is persisted (admission_status) and resumed by the next executor restage, so a planner-role
+    // reply (which can never submit operations) must not be able to start one.
+    if (this.roleCannotAuthorOperations()) return undefined
     const state = this.memory.beginActionOmissionRecovery?.(this.requestInfo.memoryKey, this.requestInfo, plan)
     if (!state || state.status !== 'active') return state
     this.actionOmissionRepairActive = true
@@ -13755,6 +13764,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   finiteNoOperationPressure(plan) {
+    if (this.roleCannotAuthorOperations()) return ''
     if (plan?.operations?.length > 0 || !Array.isArray(plan?.plan) || plan.plan.length === 0) return ''
     if (providerBlockerReason(plan)) return ''
     const state = this.memory.currentPlan?.(this.activePlanKey())
