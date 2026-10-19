@@ -2020,6 +2020,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
       if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state: resumed.state }
     }
   }
+  agent.lifecycleEnter?.('recovery.interrupted', { reason: uiText(reason, 80), boundary: awaitingNextSlice ? 'plan_slice' : 'step' })
   const memoryContext = agent.memory?.context?.(key) ?? ''
   const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
   if (awaitingNextSlice) {

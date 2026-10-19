@@ -184,6 +184,7 @@ import {
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
 import { insertTailBlock, TAIL_BLOCKS } from './prompt-prefix.mjs'
 import { findDanglingReferences } from './context-references.mjs'
+import { lifecycleSnapshot } from './lifecycle.mjs'
 import { repairControlJson } from './control-json-repair.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
@@ -3270,6 +3271,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   reset() {
+    this.lifecycleEnter('reset')
     this.abortStepContractCalls()
     this.turnConversation = null
     this.executorStepMark = null
@@ -3327,6 +3329,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       prefixMessages: this.rolePrefixMessages(role ?? packet?.event?.role ?? this.agentContext.role),
       parkPlanner,
     })
+    this.lifecycleEnter('restage', { role: prepared.role, checkpoint })
     const refuse = async (why) => {
       await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet.handoff_id, reason: why }, { requestId })
       return { restaged: false, reason: why }
@@ -3560,6 +3563,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { chatMessage, operations: [], plan: state?.plan ?? [], currentStep: state?.current_step ?? 0,
       epoch: before.epoch, actorId: before.actor_id, goalId: state?.goal_id, goalStatus: state?.status,
       taskBoard: visibleTaskBoard(state?.task_board), blocker: { class: 'planner_review_required', reason: review.reason } }
+  }
+
+  // Option C: every lifecycle entry point (lifecycle.mjs LIFECYCLE_SITES) passes here first and traces the state it
+  // acted in. The trace write is not awaited, so a synchronous entry point (reset, the epoch rebuild) can call it too.
+  // Outside a request (a reset before the first one) there is no request id to file the row under, so none is written.
+  lifecycleEnter(event, details = {}) {
+    if (this.traceRequest) void this.traceEvent('lifecycle.entered', { event, ...details, state: lifecycleSnapshot(this) })
+    return undefined
   }
 
   // The one place that decides whether the conversation may be swapped right now: not
@@ -4030,6 +4041,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const allowBlockedFor = reason === 'replacement' ? 'replacement' : undefined
     const rid = requestId ?? this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
     const fromHandoffId = this.agentContext.handoffId
+    this.lifecycleEnter('planner.return', { reason, route })
     const refusal = this.restageGuardRefusal(withinTurn ? (this.turnToken ?? undefined) : undefined)
     if (refusal) {
       await this.traceEvent('context.planner_resume_refused', { request_id: rid, role: PLANNER_ROLE, from_role: this.agentContext.role, from_handoff_id: fromHandoffId, reason: refusal, route }, { requestId: rid })
@@ -4998,6 +5010,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previous = this.planningReasoningEpochSeen.get(key)
     this.planningReasoningEpochSeen.set(key, epoch)
     if (previous === undefined || previous === epoch || !this.requestInfo) return false
+    this.lifecycleEnter('epoch.rebuild', { reasoning_epoch: epoch })
 
     // U6: the executor's conversation IS a rebuild from durable state (its packet), and its prefix carries
     // the executor role suffix: a planner-shaped rebuild here would wipe the packet and the role. It keeps
@@ -7920,6 +7933,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!plan?.checkpoint || !this.requestInfo?.memoryKey) {
       return { state: this.memory.currentPlan?.(this.activePlanKey()) }
     }
+    this.lifecycleEnter('checkpoint.persist')
     const key = this.requestInfo.memoryKey
     const state = this.memory.currentPlan?.(key)
     const board = state?.task_board
@@ -9559,6 +9573,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async resumeInterruptedTask({ taskId, reason, requestId } = {}) {
     if (typeof this.memory.resumeTask !== 'function') return undefined
     await this.loadPersistentState()
+    this.lifecycleEnter('task.resume', { reason })
     const memoryKey = this.activePlanKey()
     const result = this.memory.resumeTask(memoryKey, {
       taskId,
@@ -9909,6 +9924,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // planner round. A player request only: recovery runs never enter here.
     const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
     if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
+    this.lifecycleEnter('request.start', { interaction_intent: intent })
 
     // Goal admission is the reducer's (GOAL_ACCEPTED), and it happens at
     // `new_goal` whether or not a steering provider is configured. Steering
@@ -10987,6 +11003,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // every other in-turn correction is, not started as a second guarded run.
   async continueFromModMessage(modMessage, traceEventName, { withinTurn = false, factBundle } = {}) {
     if (!this.active || !this.epoch) return null
+    this.lifecycleEnter('continuation', { source: traceEventName, within_turn: withinTurn === true })
     const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
     const continuationLimit = currentPlan?.status === 'active' ? 64 : this.maxContinuations
     const sliceContinuations = this.continuations - (this.sliceContinuationBaseline ?? 0)
@@ -11754,6 +11771,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return false
   }
   async closeOutputSlice(route) {
+    this.lifecycleEnter('slice.close', { route })
     await this.closeContinuationSlice(route)
     const before = this.sliceOutputCeiling()
     const baseline = markRequestSliceClosed(this.traceRequest)
@@ -16222,6 +16240,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       let reconciledAdmitted = false
       try {
+        this.lifecycleEnter('batch.send', { operations: operations.length })
         this.batchInFlightBeforeSend = this.batchInFlight // restored if the game provably never saw this send
         this.noteWorldMutation({ sent: true }) // D2: observations taken before this send date from before the batch; the batch is in flight until its receipt is read
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
@@ -16669,6 +16688,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       attempt: 0,
     }
     if (this.traceRequest) this.traceRequest.recovery = recovery
+    this.lifecycleEnter('plan.recover')
     await this.traceEvent('replan.started', recovery)
 
     const providerBudgetFailure = recoveryFailureClassHint(reasonText) === 'provider_budget'
