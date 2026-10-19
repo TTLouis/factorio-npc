@@ -24,7 +24,7 @@ const draft = (overrides = {}) => ({ chatMessage: '', plan: ['Gather ten copper 
   ...overrides })
 
 function world(script, options = {}) {
-  const game = new FakeFactorio()
+  const { game = new FakeFactorio(), objective = 'Gather ten copper ore.', ...loopOptions } = options
   const memory = new CanonicalTaskBoardMemory()
   const calls = []
   const events = []
@@ -39,9 +39,9 @@ function world(script, options = {}) {
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     systemPrompt: 'Scripted role separation fixture.', npcId: 'sgluna',
     stateFile: null, traceFile: null, decisionTraceFile: null,
-    onActivity: (event, data) => events.push({ event, data }), ...options,
+    onActivity: (event, data) => events.push({ event, data }), ...loopOptions,
   })
-  return { agent, game, memory, calls, events, say: () => agent.request('Gather ten copper ore.', { sender: 'Louis' }),
+  return { agent, game, memory, calls, events, say: () => agent.request(objective, { sender: 'Louis' }),
     plan: () => getActivePlan(memory.planningState(KEY)) }
 }
 
@@ -206,6 +206,93 @@ for (const reason of ['approach_infeasible', 'scope_change', 'local_recovery_exh
 // Run AC (2026-10-19, b1da8392): the executor's local_recovery_exhausted review ended the request in a guard pause and
 // zero provider calls followed. The rationale below is the run's; the replies are scripted.
 const RUN_AC_RATIONALE = 'The committed direct-feed approach requires live iron-ore location, drill coverage and output geometry. Current evidence provides none of those facts.'
+
+test('Run AD: research-only post-batch coverage permits drill and output-covering furnace facts and same-step placements within one-read decisions', async () => {
+  const game = new FakeFactorio({ inventory: { 'burner-mining-drill': 1, 'stone-furnace': 1, coal: 7, 'iron-plate': 8 } })
+  game.status.connected_players = 0
+  const native = game.command.bind(game)
+  const placed = []
+  const candidateReads = []
+  const resource = { x: -47.5, y: -12.5 }
+  const output = { x: -45.5, y: -12.5 }
+  game.nearby = { source: 'live_factorio_nearby_entities', matched_count: 1,
+    entities: [{ name: 'iron-ore', type: 'resource', position: resource, amount: 44 }] }
+  game.command = async command => {
+    if (command.includes("remote.call('autorio_preflight','operation','place_candidate'")) return '{"ok":true}'
+    if (command.includes('"get_placement_candidates"')) {
+      candidateReads.push(command)
+      const drill = command.includes("entity_name='burner-mining-drill'")
+      if (drill) assert.ok(command.includes("target_resource='iron-ore'"))
+      else { assert.equal(placed[0], 'burner-mining-drill'); assert.ok(command.includes('covers_position={x=-45.5,y=-12.5}')) }
+      return JSON.stringify({ ok: true, entity_name: drill ? 'burner-mining-drill' : 'stone-furnace',
+        candidate_set_id: drill ? 'placement-11' : 'placement-12', legal_candidate_count: 1, returned_candidate_count: 1,
+        candidates: [{ id: 'candidate-1', position: drill ? resource : output, direction: 4,
+          ...(drill ? { resource_coverage: { resource_name: 'iron-ore', entity_count: 1, total_amount: 44 }, item_output_position: output } : { covers_position: output }) }] })
+    }
+    if (command.includes('"autorio_research","status"')) return '{"current":null,"queue":[]}'
+    return native(command)
+  }
+  game.onMutation = command => {
+    if (!command.includes("'place_candidate'")) return
+    const name = command.includes("'placement-11'") ? 'burner-mining-drill' : 'stone-furnace'
+    assert.equal(game.inventory[name], 1); game.inventory[name]--; placed.push(name)
+    game.lastTaskTypes = ['placing']
+  }
+  const typed = (ctx, tool, args, transport = 'submit') => {
+    assert.equal(ctx.context.allowTools, true)
+    const stepId = ctx.agent.targetedObservationIdentity().data.stepId
+    const intent = { stepId, operations: [], observationRequest: { stepId, tool, args, rationale: 'Need live resource coverage and direct-output placement facts.' } }
+    return transport === 'submit' ? submit(intent) : intent
+  }
+  const lastFact = messages => JSON.parse(messages.findLast(row => row.role === 'tool').content)
+  const place = ctx => {
+    const fact = lastFact(ctx.messages)
+    assert.equal(ctx.context.allowTools, false, 'the ordinary one-read budget still closes after its fresh fact')
+    assert.equal(ctx.agent.observationBudgetRemaining, 0)
+    assert.equal(fact.candidates.length, 1)
+    return { stepId: ctx.agent.targetedObservationIdentity().data.stepId, operations: [{ name: 'place_candidate',
+      args: { candidate_set_id: fact.candidate_set_id, candidate_id: fact.candidates[0].id } }] }
+  }
+  const w = world([
+    draft({ plan: ['Produce fifty iron plates with the held direct-fed miner and furnace'],
+      goal: { scope: 'finite', summary: 'Produce fifty iron plates', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 50 }] },
+      stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('iron-plate', 50) }],
+      executionGuidance: [{ ...brief(), materialSupply: { mode: 'direct_feed', resource: 'iron-ore' } }] }),
+    ctx => typed(ctx, 'getNearbyEntities', { name: 'iron-ore', radius: 32, limit: 1 }, 'json'),
+    ctx => {
+      assert.deepEqual(lastFact(ctx.messages).entities[0].position, resource)
+      return { stepId: ctx.agent.targetedObservationIdentity().data.stepId, operations: [{ name: 'walk_to_entity', args: { entity_name: 'iron-ore', search_radius: 32 } }] }
+    },
+    ctx => typed(ctx, 'getPlacementCandidates', { entity_name: 'burner-mining-drill', target_resource: 'iron-ore', center: resource, radius: 4, limit: 1 }),
+    ctx => { assert.deepEqual(lastFact(ctx.messages).candidates[0].item_output_position, output); return place(ctx) },
+    ctx => typed(ctx, 'getPlacementCandidates', { entity_name: 'stone-furnace', center: output, covers_position: output, radius: 4, limit: 1 }, 'json'),
+    place,
+    ctx => ({ stepId: ctx.agent.targetedObservationIdentity().data.stepId, operations: [{ name: 'wait', args: { ticks: 60 } }] }),
+  ], { game, objective: 'Produce fifty iron plates using the held direct-fed miner and furnace.' })
+  w.agent.routePostStepDecision = async () => ({ route: 'targeted_observation', decision_called: true,
+    steering: { observation_budget: 1, observation_relevance: { source: 'typed_relevance', threshold: 0.5,
+      selected_families: ['research_state'], budget: 1 } } })
+  await w.say()
+  const before = structuredClone(w.plan())
+  assert.equal(w.calls.length, 3, JSON.stringify(w.events.slice(-6)))
+  await w.agent.completed()
+  assert.equal(w.calls.length, 5, JSON.stringify(w.events.slice(-8)))
+  assert.equal(game.mutations.length, 2, JSON.stringify(w.events.slice(-10)))
+  await w.agent.completed(); await w.agent.completed()
+  assert.deepEqual(placed, ['burner-mining-drill', 'stone-furnace'], JSON.stringify(game.mutations))
+  assert.equal(candidateReads.length, 2)
+  assert.equal(game.mutations.length, 4, 'walk, drill placement, furnace placement and subsequent work were admitted')
+  assert.equal(w.calls.length, 8)
+  assert.deepEqual(w.plan().steps, before.steps, 'observations cannot rewrite or complete the committed step')
+  assert.equal(w.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(w.memory.targetedObservationLedger?.size ?? 0, 0)
+  assert.equal(w.agent.closedRoundObservationUsed, false)
+  assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 0)
+  const opened = w.events.filter(row => row.event === 'observation.phase_kept_open')
+  assert.equal(opened.length, 3)
+  assert.ok(opened.every(row => row.data.request_id && row.data.step_id === before.steps[0].step_id
+    && row.data.reason_code === 'direct_feed_requires_spatial_facts' && row.data.observation_budget_remaining === 1))
+})
 
 test('Run AC: the planner review round returns the unchanged step to a fresh executor with its notes, and execution continues', async () => {
   let before

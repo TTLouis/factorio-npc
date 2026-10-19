@@ -8,6 +8,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { FurnaceFactorio, ScriptedModel, recoveryWorld, recoverySession, settle, completeAndReport, KEY } from './recovery-loop-fixtures.mjs'
 import { FakeFactorio, planReply, contractCheckedJev } from './task-loop-fixtures.mjs'
+import { executorProviderToolDefinitions, plannerControlPayloadFromMessage, toolCommand, toolDefinitions } from './structured-policy.mjs'
 
 const captured = JSON.parse(await fs.readFile(new URL('./fixtures/run-t-normal-observation.json', import.meta.url)))
 const saved = JSON.parse(await fs.readFile(new URL('./fixtures/luna-furnace-state-2026-10-07.json', import.meta.url)))
@@ -180,7 +181,7 @@ test('Run T full loop: open redundant research read stays cached; model clears i
   assert.equal(game.pendingBatch, null); assert.equal(game.queueLength, 0)
 })
 
-function focusedFixture() {
+function focusedFixture({ toolName = 'getInventoryItems', args = {} } = {}) {
   const memory = new CanonicalTaskBoardMemory(); memory.restore(structuredClone(saved))
   const key = saved.planning_states[0].key; const state = memory.currentPlan(key)
   state.status = 'active'; memory.recordRunResume(key, state, 'scripted_fixture_resume')
@@ -189,7 +190,7 @@ function focusedFixture() {
   let reads = 0
   const original = game.command.bind(game)
   game.command = async text => {
-    if (text.includes('"get_inventory_items"')) { reads++; await game.duringRead?.(); if (game.readError) throw new Error('declared fixture read failure') }
+    if (text === toolCommand(toolName, args)) { reads++; await game.duringRead?.(); if (game.readError) throw new Error('declared fixture read failure') }
     return original(text)
   }
   const events = []; const agent = new NpcAgentLoop({ rcon: game, memory, traceFile: null, decisionTraceFile: null,
@@ -200,16 +201,70 @@ function focusedFixture() {
   agent.observationBudgetRemaining = 3; agent.observationDecisionForced = false
   const context = { generation: agent.generation, attribution: agent.turnConversation, current: game.status, round: 0, recoveryAttempt: 0, allowTools: true }
   const request = () => ({ content: JSON.stringify({ plan: state.plan, currentStep: state.current_step, operations: [], observationRequest: {
-    stepId: agent.targetedObservationIdentity().data.stepId, tool: 'getInventoryItems', args: {}, rationale: 'Need exact held ingredients.' } }) })
+    stepId: agent.targetedObservationIdentity().data.stepId, tool: toolName, args, rationale: 'Need exact current prerequisite facts.' } }) })
   return { agent, memory, game, events, context, request, reads: () => reads }
 }
 
 async function ordinary(world, alias = true) {
-  const message = alias ? await world.agent.handleObservationRequest(world.request(), world.context) : tool('getInventoryItems')
+  const request = JSON.parse(world.request().content).observationRequest
+  const message = alias ? await world.agent.handleObservationRequest(world.request(), world.context) : tool(request.tool, request.args)
   assert.equal(message._sglunaObservationRefusal, undefined)
   await world.agent.handleToolBatch(message)
   return message
 }
+
+// Run AD's reopened provider phase still rejected discovery in the typed
+// transport. Include the spatial queries needed for actual direct feeding.
+for (const [toolName, args] of [
+  ['getNearbyEntities', { name: 'iron-ore', radius: 20, limit: 20 }],
+  ['getEntityStatus', { name: 'stone-furnace', radius: 32 }],
+  ['findLongRangeEntities', { name: 'iron-ore', max_radius: 1024, limit: 1 }],
+  ['getMiningDetails', { resource_or_item: 'iron-ore', fuel_name: 'coal' }],
+  ['getPlacementCandidates', { entity_name: 'burner-mining-drill', target_resource: 'iron-ore', radius: 24, limit: 1 }],
+  ['getPlacementCandidates', { entity_name: 'stone-furnace', covers_position: { x: -45.5, y: -12.5 }, radius: 4, limit: 1 }],
+]) test(`Run AD open typed ${toolName} uses ordinary validation, cache and budget: ${JSON.stringify(args)}`, async () => {
+  const alias = focusedFixture({ toolName, args })
+  const direct = focusedFixture({ toolName, args })
+  const intent = JSON.parse(alias.request().content)
+  const parsed = plannerControlPayloadFromMessage(submit(intent))
+  assert.deepEqual(parsed.observationRequest, intent.observationRequest, 'submitPlan transport accepts the same open request')
+  await ordinary(alias); await ordinary(direct, false)
+  assert.equal(alias.reads(), 1)
+  assert.equal(alias.reads(), direct.reads())
+  assert.equal(alias.agent.observationBudgetRemaining, direct.agent.observationBudgetRemaining)
+  assert.equal(alias.agent.observationDecisionForced, direct.agent.observationDecisionForced)
+  await ordinary(alias); await ordinary(direct, false)
+  assert.equal(alias.reads(), direct.reads(), 'the alias also retains ordinary caching')
+  assert.equal(alias.memory.targetedObservationLedger?.size ?? 0, 0)
+  assert.equal(alias.agent.closedRoundObservationUsed, false)
+  assert.ok(alias.events.some(row => row.event === 'observation.normal_from_control' && row.data.tool === toolName && row.data.request_id))
+  const closed = await alias.agent.handleObservationRequest(alias.request(), { ...alias.context, allowTools: false })
+  assert.ok(closed._sglunaObservationRefusal, 'open transport does not widen the closed-round grammar/grounding')
+})
+
+test('open typed schema advertises ordinary observations but never gameplay actions', () => {
+  const schema = executorProviderToolDefinitions.find(row => row.function.name === 'submitPlan').function.parameters.properties.observationRequest
+  assert.deepEqual(schema.properties.tool.enum, toolDefinitions.map(row => row.function.name))
+  assert.equal(schema.properties.tool.enum.includes('place_candidate'), false)
+})
+
+for (const [toolName, args] of [
+  ['place_candidate', { candidate_set_id: 's', candidate_id: 'c' }],
+  ['submitPlan', {}], ['unknownRead', {}],
+  ['getPlacementCandidates', { entity_name: 'burner-mining-drill', radius: 25 }],
+  ['getNearbyEntities', { radius: 20, execute: 'unbounded' }],
+]) test(`open typed request rejects non-observations or invalid arguments: ${toolName} ${JSON.stringify(args)}`, async () => {
+  const world = focusedFixture()
+  const message = world.request()
+  const intent = JSON.parse(message.content)
+  intent.observationRequest.tool = toolName; intent.observationRequest.args = args
+  message.content = JSON.stringify(intent)
+  const result = await world.agent.handleObservationRequest(message, world.context)
+  assert.ok(result._sglunaObservationRefusal)
+  assert.equal(world.reads(), 0)
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.memory.targetedObservationLedger?.size ?? 0, 0)
+})
 
 for (const mode of ['fresh', 'cached', 'excluded-family', 'exhausted-open-tier', 'forced-closed-budget']) test(`normal typed observation has ordinary tool budget/cache semantics: ${mode}`, async () => {
   const alias = focusedFixture(); const direct = focusedFixture()
@@ -300,8 +355,8 @@ for (const invalid of ['mixed', 'stale-step', 'ungrounded']) test(`open typed re
   assert.equal(world.memory.targetedObservationLedger?.size ?? 0, 0)
 })
 
-for (const boundary of ['actor-before', 'epoch-before', 'cancel-before', 'actor-during', 'epoch-during', 'cancel-during', 'read-failure']) test(`open alias retains ordinary safety boundary: ${boundary}`, async () => {
-  const world = focusedFixture()
+for (const spatial of [false, true]) for (const boundary of ['actor-before', 'epoch-before', 'cancel-before', 'actor-during', 'epoch-during', 'cancel-during', 'read-failure']) test(`open ${spatial ? 'placement' : 'inventory'} alias retains ordinary safety boundary: ${boundary}`, async () => {
+  const world = focusedFixture(spatial ? { toolName: 'getPlacementCandidates', args: { entity_name: 'burner-mining-drill', target_resource: 'iron-ore' } } : {})
   if (boundary === 'actor-before') world.game.status.actor_id++
   if (boundary === 'epoch-before') world.game.status.epoch++
   if (boundary === 'cancel-before') world.agent.generation++

@@ -6772,6 +6772,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!selected.every(family => factBundle.covered.includes(family)) || this.observationDecisionForced === true) return
     const decision = Array.isArray(this.observationRelevanceOverride) ? [...new Set(this.observationRelevanceOverride)] : []
     if (decision.length !== selected.length || !decision.every(family => selected.includes(family)) || !this.postBatchFactsText()) return
+    const plan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const step = plan?.steps?.[plan.active_step_index]
+    // Predicted-family coverage is not proof that the direct-feed brief has
+    // its resource coverage and output alignment. Those reads need model-chosen
+    // arguments. Keep the ordinary phase (and its existing budget) available
+    // after each receipt rather than spending review recovery to obtain them.
+    if (this.agentContext?.role === EXECUTOR_ROLE && step?.execution_guidance?.materialSupply?.mode === 'direct_feed') {
+      await this.traceEvent('observation.phase_kept_open', {
+        request_id: this.traceRequest?.id, reason_code: 'direct_feed_requires_spatial_facts',
+        plan_id: plan.plan_id, step_id: step.step_id, resource: step.execution_guidance.materialSupply.resource,
+        selected_families: selected, tools_enabled: true,
+        observation_budget_remaining: this.observationBudgetRemaining,
+      })
+      return
+    }
     this.observationDecisionPressure = true
     this.observationDecisionPressureRemaining = 0
     this.observationDecisionForced = true
@@ -11878,7 +11893,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       } })
     }
     let request
-    try { request = normalizeObservationRequest(intent.observationRequest) } catch (error) { return reject(error.message) }
+    try {
+      request = normalizeObservationRequest(intent.observationRequest, { normalTools: allowTools === true })
+      if (allowTools === true) {
+        if (!isObservationToolName(request.tool)) return reject('not_an_observation_tool')
+        toolCommand(request.tool, request.args) // Validate as an ordinary call; never execute here.
+      }
+    } catch (error) { return reject(error.message) }
     if (!this.requestInfo || !initial.step || initial.planning?.goal?.status !== GOAL_STATUS.ACTIVE
       || !(initial.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(initial.plan?.status))
       || initial.state?.status !== 'active' || this.currentPendingAmendment()) return reject('no_eligible_active_step')
@@ -11904,9 +11925,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (JSON.stringify(declared) !== JSON.stringify(held)) return reject('read_cannot_edit_or_complete_plan')
       } catch { return reject('read_cannot_edit_or_complete_plan') }
     }
-    if (request.tool === 'getEntityStatus' && !this.liveObservedExactTarget(request.args.unit_number)
+    if (request.tool === 'getEntityStatus' && request.args.unit_number !== undefined && !this.liveObservedExactTarget(request.args.unit_number)
       && !initial.step.completion_contract?.requirements?.some(row => row.unit_number === request.args.unit_number)) return reject('entity_not_grounded')
-    if (request.tool === 'findLongRangeEntities' && !this.targetedResourceSearchNames().includes(request.args.name)) return reject('resource_source_not_grounded')
+    if (allowTools !== true && request.tool === 'findLongRangeEntities' && !this.targetedResourceSearchNames().includes(request.args.name)) return reject('resource_source_not_grounded')
     // The typed control form names the model's requested fact, not a separate
     // admission allowance. While tools are open, return that same call to the
     // ordinary turn/recovery loop, which owns cache, budget and actor fences.

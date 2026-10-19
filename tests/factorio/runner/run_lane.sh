@@ -169,6 +169,9 @@ case "$LANE" in
   normal-observation)
     run_node normal_observation_factorio.mjs
     ;;
+  direct-feed-observation)
+    run_node direct_feed_observation_factorio.mjs
+    ;;
   local-transfer-target)
     run_node local_transfer_target_factorio.mjs --mode recovery
     stop_factorio
