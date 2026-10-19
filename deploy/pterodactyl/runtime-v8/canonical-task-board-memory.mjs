@@ -1102,6 +1102,19 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return claimed
   }
 
+  // One planner round per step after an executor review, durable across restarts.
+  claimReviewContinuation(key, stepId, { now = Date.now(), requestId } = {}) {
+    const before = this.planningState(key)
+    if (before?.goal?.status !== GOAL_STATUS.ACTIVE || typeof stepId !== 'string' || before.goal.review_continuation_steps?.includes(stepId)) return false
+    const after = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED,
+      source: 'runtime', goal_id: before.goal.goal_id, step_id: stepId, now,
+    })
+    const claimed = after?.goal?.review_continuation_steps?.includes(stepId) === true
+    if (claimed) this.#authTrace('recovery.review_continuation_claimed', { goal_id: before.goal.goal_id, step_id: stepId, reason: 'one_planner_round_per_step_after_review' }, requestId)
+    return claimed
+  }
+
   /**
    * Record the advisory steering mode at a planning boundary (roadmap 4.3).
    *

@@ -303,6 +303,9 @@ export const DEADLOCK_REPEATED_FAILURE_LIMIT = 3
 // backstop for prose-only steps, which have no contract and are therefore
 // invisible to signals (a) and (c). Hard ceiling on operation batches.
 export const PROSE_ONLY_STEP_OPERATION_CEILING = 12
+// After an executor review the planner gets one in-turn round per step; this bounds how many steps of one goal can
+// claim it, so review rounds never become an unbounded planner loop.
+export const MAX_REVIEW_CONTINUATIONS_PER_GOAL = 8
 
 export const DEADLOCK_SIGNAL_KIND = Object.freeze({
   EVIDENCE_STALL: 'evidence_stall',
@@ -377,6 +380,8 @@ export const PLANNING_EVENT = Object.freeze({
   // amount of completed plans or reached frontiers produces it implicitly.
   GOAL_SATISFIED: 'GOAL_SATISFIED',
   FRESH_CONTEXT_RECOVERY_CLAIMED: 'FRESH_CONTEXT_RECOVERY_CLAIMED',
+  // One planner round per step after an executor review (Run AC), counted durably per goal.
+  REVIEW_CONTINUATION_CLAIMED: 'REVIEW_CONTINUATION_CLAIMED',
   // The system's structured understanding of the goal (scope + game-checkable
   // done_when conditions). Authored once by the Main LLM on the goal's first
   // plan; only the user may replace it afterwards.
@@ -558,6 +563,11 @@ export function reasoningWasReset(before, after) {
 function text(value, max = 500) {
   const cleaned = String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
   return cleaned.length <= max ? cleaned : cleaned.slice(0, max)
+}
+
+function reviewContinuationSteps(value) {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.map(stepId => text(stepId, 200)).filter(Boolean))].slice(0, MAX_REVIEW_CONTINUATIONS_PER_GOAL)
 }
 
 function finiteNumber(value) {
@@ -771,6 +781,7 @@ function sanitizeGoal(raw) {
     ...(satisfaction ? { satisfaction, satisfied_at: finiteNumber(raw.satisfied_at) ?? satisfaction.at } : {}),
     ...(definition ? { definition } : {}),
     ...(raw.fresh_context_recovery_used === true ? { fresh_context_recovery_used: true } : {}),
+    ...(reviewContinuationSteps(raw.review_continuation_steps).length > 0 ? { review_continuation_steps: reviewContinuationSteps(raw.review_continuation_steps) } : {}),
     // MW5: accepted replacement plans this goal has used (the durable cap counter; independent of retained plans and grants).
     ...(Number.isSafeInteger(raw.replacements_accepted) && raw.replacements_accepted > 0 ? { replacements_accepted: Math.min(raw.replacements_accepted, 1000) } : {}),
     owner: text(raw.owner, 128) || 'unknown',
@@ -3099,6 +3110,19 @@ Object.assign(HANDLERS, {
       },
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.GOAL_SATISFIED, at: now, goal_id: state.goal.goal_id }),
+    }
+  },
+
+  [PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED](state, event, now) {
+    const stepId = text(event.step_id, 200)
+    const claimed = reviewContinuationSteps(state.goal?.review_continuation_steps)
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE || event.goal_id !== state.goal.goal_id
+      || !stepId || claimed.includes(stepId) || claimed.length >= MAX_REVIEW_CONTINUATIONS_PER_GOAL) return state
+    return {
+      ...state,
+      goal: { ...state.goal, review_continuation_steps: [...claimed, stepId], updated_at: now },
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED, at: now, goal_id: state.goal.goal_id, step_id: stepId }),
     }
   },
 

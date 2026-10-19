@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 19: Run AC review gaps fixed offline
+
+- **Read reopen.** When an executor review comes from a read phase that the harness closed on post-batch coverage, reads reopen once per step. In Run AC, only `research_state` was predicted after the walk to iron ore, so no ore-site or placement read was available.
+- **Planner review round.** Each step gets one in-turn planner round after a review. The allowance is durable, runtime-only and capped at 8 steps per goal. The committed plan cannot change. An empty reply returns the same step to a fresh executor with `[PLANNER_REVIEW_NOTES]`. A second review pauses as before.
+- **Unchanged.** Advisory authority and the replacement-wake requirements are unchanged.
+- **Evidence.** 2,635 runtime tests passed in Docker. Not live-tested. [Work note](validation/RUN_AC_REVIEW_GAPS_2026-10-19.md).
+
 ## October 19: Run AC respects supply method and requests review; guard pause stops progress
 
 - **Result.** One cold trial at `b1da8392` stopped after 7.5161 minutes with ten new copper plates, zero new iron plates and zero red science. All 19 provider calls returned (Sol5/Luna14), all 23 Jev calls returned, no errors. One committed slice and eight admitted batches; all admissions followed executor replies.

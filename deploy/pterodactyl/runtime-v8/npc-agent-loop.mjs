@@ -284,6 +284,11 @@ const LOST_ACK_RETRY_BUDGET = 1
 // apart from the shared plan_category corrections so neither spends the other's allowance.
 const EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT = 2
 const EXECUTOR_STEP_IDENTITY_LEDGER_MAX = 128
+// Steps remembered for the once-per-step read reopen after a review from a harness-closed read phase (reopenReadsForReview).
+const REVIEW_READ_REOPEN_STEP_LIMIT = 64
+const REVIEW_NOTES_CHARS = 1200
+// What the planner's one review round can do (handlePlannerReview). Facts about the harness, not strategy advice.
+const REVIEW_ROUND_FACT = '[HARNESS] This is the one planner review round for this step. The committed plan and its execution_guidance cannot change in it. A reply with operations:[] returns the same active step to a fresh executor, and that reply\'s chatMessage reaches the executor as planner notes. Read tools are available before replying. Another review of this step pauses the goal.'
 // Board evidence kind for an executed operation the engine refused in a way the
 // planner can correct (a placement refused at its chosen coordinate). The board
 // memory records it instead of freezing the plan and blocks once the bounded
@@ -3398,10 +3403,34 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       resource: step.execution_guidance.materialSupply.resource, refused_operations: drift.map(op => op.name),
       authority: 'advisory_only', world_blocker_proven: false })
     return this.handlePlannerReview({ operations: [], plannerReview: { reason: 'scope_change',
-      rationale: 'Proposed manual resource supply would replace the planner-selected direct_feed method. Review the method and its setup/time tradeoff; no operation from this batch ran.' } }, step.step_id)
+      rationale: 'Proposed manual resource supply would replace the planner-selected direct_feed method. Review the method and its setup/time tradeoff; no operation from this batch ran.' } }, step.step_id, { harnessRaised: true })
   }
 
-  async handlePlannerReview(plan, stepId) {
+  // Run AC (2026-10-19): the decision after a walk opened with its reads closed because the post-batch facts covered
+  // the one family Jev selected (research_state); the executor then asked for review because it had no ore-site or
+  // placement facts. A review raised from a read phase the harness closed is answered, once per step, by reopening
+  // that phase for the same decision instead of pausing. Returns undefined when this does not apply.
+  async reopenReadsForReview(plan, held, activeStep, review) {
+    if (this.observationPhaseClosedBy !== POST_BATCH_COVERAGE_REASON) return undefined
+    const stepKey = this.postBatchStepKey()
+    this.reviewReadReopenedSteps ??= new Set()
+    if (!stepKey || this.reviewReadReopenedSteps.has(stepKey)) return undefined
+    this.reviewReadReopenedSteps.add(stepKey)
+    while (this.reviewReadReopenedSteps.size > REVIEW_READ_REOPEN_STEP_LIMIT) this.reviewReadReopenedSteps.delete(this.reviewReadReopenedSteps.values().next().value)
+    const covered = Array.isArray(this.postBatchFacts?.covered) ? this.postBatchFacts.covered : []
+    this.observationDecisionPressure = false
+    this.observationDecisionPressureRemaining = 0
+    this.observationDecisionForced = false
+    this.observationPhaseClosedBy = undefined
+    await this.traceEvent('observation.phase_reopened_for_review', { request_id: this.traceRequest?.id, plan_id: held.plan_id,
+      step_id: activeStep.step_id, review_reason: review.reason, closed_by: POST_BATCH_COVERAGE_REASON,
+      covered_families: covered, bound: 'once_per_step', tools_enabled: true })
+    this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+    this.messages.push({ role: 'user', content: `[HARNESS] Review not sent. This decision began with read tools closed because the post-batch facts covered the predicted observation families (${covered.join(', ') || 'none'}); no read for the facts named in the review was available. Read tools are now open for this decision. The active step, its execution_guidance and materialSupply are unchanged, and plannerReview remains available.` })
+    return this.runTurn()
+  }
+
+  async handlePlannerReview(plan, stepId, { harnessRaised = false } = {}) {
     const review = normalizePlannerReview(plan.plannerReview)
     if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE || plan.operations?.length !== 0 || plan.semanticCompletion || plan.checkpoint) {
       throw this.roleContractError('invalid_planner_review', 'plannerReview must be an executor decision with empty operations and no completion claim')
@@ -3416,6 +3445,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw this.roleContractError('invalid_planner_review', 'Review requires the exact active step and an idle safe point with no unsettled operation')
     }
     const requestId = this.traceRequest?.id
+    if (!harnessRaised) {
+      const reopened = await this.reopenReadsForReview(plan, held, activeStep, review)
+      if (reopened !== undefined) return reopened
+    }
     await this.traceEvent('executor.planner_review_requested', { request_id: requestId, plan_id: held.plan_id,
       step_id: activeStep.step_id, reason: review.reason, rationale: review.rationale,
       authority: 'advisory_only', world_blocker_proven: false })
@@ -3426,15 +3459,39 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (woke !== undefined) return woke
     }
     await this.assertCurrent()
-    if (held.status !== PLAN_STATUS.BLOCKED) this.memory.pausePlan(key, `executor_review:${review.reason}`, { pause_class: PAUSE_CLASS.GUARD })
-    const chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
+    // Run AC: a review used to end the request in a guard pause that nothing resumes. Each step now gets one
+    // in-turn planner round (durable, capped per goal). The committed plan cannot change in it; an empty reply
+    // returns the same step to a fresh executor with the planner's notes. A second review of the step pauses.
+    const continuing = held.status !== PLAN_STATUS.BLOCKED
+      && this.memory.claimReviewContinuation?.(key, activeStep.step_id, { requestId }) === true
+    const pause = () => {
+      if (held.status !== PLAN_STATUS.BLOCKED) this.memory.pausePlan(key, `executor_review:${review.reason}`, { pause_class: PAUSE_CLASS.GUARD })
+    }
+    if (!continuing) pause()
+    let chatMessage = continuing
+      ? `Asking the planner to review the current step (${review.reason}): ${review.rationale}`
+      : `Execution paused for planner review (${review.reason}): ${review.rationale}`
     this.memory.remember(key, this.requestInfo.turnId, { sender: this.requestInfo.sender, user: this.requestInfo.text,
       assistant: `[Executor advisory; unverified] ${chatMessage}`, operations: [] })
     await this.persistState()
     await this.assertCurrent()
     const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId })
     await this.assertCurrent()
-    if (returned.returned) this.messages.push({ role: 'user', content: `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}` })
+    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}`
+    if (continuing && returned.returned) {
+      this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id }
+      await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
+        reason: review.reason, bound: 'one_planner_round_per_step', authority: 'advisory_only' })
+      const continued = await this.continueFromModMessage(`${reviewMessage}\n${REVIEW_ROUND_FACT}`, 'planner.review_round_continuation', { withinTurn: true })
+      if (continued !== null) return continued
+      this.reviewContinuation = null
+    }
+    if (continuing) {
+      pause()
+      chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
+      await this.persistState()
+    }
+    if (returned.returned) this.messages.push({ role: 'user', content: reviewMessage })
     this.active = false
     const state = this.memory.currentPlan?.(key)
     await this.traceEvent('request.completed', { request_id: requestId, outcome: 'planner_review_required', reason: review.reason,
@@ -14981,10 +15038,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // healthy slice and cannot act on it. Return its existing contract to
       // execution without recording the proposed plan or replenishing budgets.
       await this.assertCurrent()
+      const review = this.reviewContinuation
+      this.reviewContinuation = null
+      const reviewRound = review?.request_id === this.traceRequest?.id && review?.plan_id === heldForRoleHandoff.plan_id
+        && review?.step_id === heldForRoleHandoff.steps[heldForRoleHandoff.active_step_index]?.step_id
+      const notes = reviewRound ? cleanMemoryText(String(plan.chatMessage ?? ''), REVIEW_NOTES_CHARS) : ''
       await this.traceEvent('planner.committed_slice_returned', { request_id: this.traceRequest?.id,
-        plan_id: heldForRoleHandoff.plan_id, reason: 'healthy_committed_semantics_preserved' })
+        plan_id: heldForRoleHandoff.plan_id, reason: reviewRound ? 'review_round_returned_same_step' : 'healthy_committed_semantics_preserved',
+        ...(reviewRound ? { step_id: review.step_id, notes_chars: notes.length } : {}) })
       const handoff = await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
       if (!handoff.restaged) throw new AgentLoopError(`planner_execution_handoff_refused:${handoff.reason}`)
+      if (notes) this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
       return this.runTurn()
     }
     const timeReview = await this.reviewPlanTime(plan)
