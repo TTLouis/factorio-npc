@@ -53,3 +53,58 @@ test('the loop reads its conversation-scoped caches through the active conversat
   assert.equal(agent.taskStatusDiffBaseline, null, 'the next task receipt in the new conversation is full')
   assert.deepEqual(agent.lastTaskStatusView, { task_state: 'idle' }, 'the latest world receipt is not conversation state')
 })
+
+// ---------------------------------------------------------------------------------------
+// B2: one swap path, and one carry table for in-place rebuilds
+// ---------------------------------------------------------------------------------------
+
+const quietAgent = () => new NpcAgentLoop({ rcon: { command: async () => '' }, provider: async () => ({ content: '' }), systemPrompt: 'x', stateFile: null, traceFile: null, decisionTraceFile: null })
+
+const seedConversationState = (agent) => {
+  agent.toolCache.set('sig', 'shown')
+  agent.prototypeRefsThisRequest.push('prototype-sig')
+  agent.unchangedFactReads = { delivered: new Map([['read', 'fact']]) }
+  agent.taskStatusDiffBaseline = { task_state: 'idle' }
+}
+
+test('replaceConversation swaps messages and installs fresh conversation state', () => {
+  const agent = quietAgent()
+  seedConversationState(agent)
+  const before = agent.agentContext.conversationState
+  agent.replaceConversation({ baseMessages: [{ role: 'system', content: 'NEW' }] })
+
+  assert.notStrictEqual(agent.agentContext.conversationState, before)
+  assert.deepEqual(agent.messages, [{ role: 'system', content: 'NEW' }])
+  assert.notStrictEqual(agent.messages[0], agent.baseMessages[0], 'messages is a copy of the new base')
+  assert.equal(agent.toolCache.size, 0)
+  assert.deepEqual(agent.prototypeRefsThisRequest, [])
+  assert.equal(agent.unchangedFactReads, undefined)
+  assert.equal(agent.taskStatusDiffBaseline, null)
+})
+
+test('a continuation rebuild keeps re-delivered prototypes but forgets diff and repeat-read baselines', () => {
+  const agent = quietAgent()
+  seedConversationState(agent)
+  agent.carryConversationState('continuation')
+
+  assert.equal(agent.toolCache.get('sig'), 'shown', 'the continuation path clears the tool cache itself')
+  assert.deepEqual(agent.prototypeRefsThisRequest, ['prototype-sig'], 'the continuation re-delivers [STATIC_PROTOTYPE_CACHE]')
+  assert.equal(agent.unchangedFactReads, undefined)
+  assert.equal(agent.taskStatusDiffBaseline, null, 'the next task receipt is full: the rebuild dropped the last one')
+})
+
+test('a fold keeps the receipt baseline but forgets the folded prototype payloads', () => {
+  const agent = quietAgent()
+  seedConversationState(agent)
+  agent.carryConversationState('fold')
+
+  assert.equal(agent.toolCache.get('sig'), 'shown')
+  assert.deepEqual(agent.prototypeRefsThisRequest, [])
+  assert.equal(agent.unchangedFactReads, undefined)
+  assert.deepEqual(agent.taskStatusDiffBaseline, { task_state: 'idle' }, 'the fold keeps the latest receipt in view')
+})
+
+test('a conversation slot without a carry rule is refused', () => {
+  const agent = quietAgent()
+  assert.throws(() => agent.conversationSlot('somethingNew', () => 1), /has no carry rule/)
+})

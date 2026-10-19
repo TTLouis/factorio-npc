@@ -279,24 +279,29 @@ const CLASS_OWNERS = new Set([V8, ST])
 // `receiver` is how the body reaches the loop; `fn` marks a top-level function;
 // `noHelpers` skips helper resolution (runGuardedTurn only calls reset() on its failure path);
 // `delegates` names swap sites this one reaches through a restage wrapper (more than one call deep).
+// B1: the fields the v8 loop keeps in AgentContext.conversationState (accessors
+// in npc-agent-loop.mjs). Every conversation swap starts them empty, and
+// CONVERSATION_SLOT_CARRY there decides what an in-place rebuild keeps.
+export const CONVERSATION_STATE_SLOTS = Object.freeze(['toolCache', 'prototypeRefsThisRequest', 'unchangedFactReads', 'taskStatusDiffBaseline'])
+
 export const CONVERSATION_SWAP_SITES = Object.freeze([
   { site: 'reset', owner: V8, kind: 'reset', note: 'new lineage via agentContext.beginLineage, then super.reset()' },
   { site: 'reset', owner: ST, kind: 'reset', note: 'messages/baseMessages emptied; also run on cancel and actor change' },
   { site: 'request', owner: ST, kind: 'request_start', note: 'builds a fresh baseMessages/messages after reset()' },
   { site: 'restageContext', owner: V8, kind: 'restage', note: 'agentContext.commitRestage swaps in the packet conversation' },
   { site: 'returnControlToPlanner', owner: V8, kind: 'planner_resume', note: 'agentContext.resumePlanner drops the executor conversation and restores the parked planner' },
-  { site: 'refreshPlanningReasoningEpoch', owner: V8, kind: 'epoch_rebuild', note: 'planner rebuild from durable memory when the reasoning epoch moved' },
+  { site: 'refreshPlanningReasoningEpoch', owner: V8, kind: 'epoch_rebuild', note: 'planner rebuild from durable memory when the reasoning epoch moved, through replaceConversation (B2)' },
   { site: 'prepareContinuationContext', owner: V8, kind: 'continuation', note: 'epoch rebuild, else super + planContext; the adapter wrapper then appends baseline blocks' },
   { site: 'prepareContinuationContext', owner: ST, kind: 'continuation', note: 'messages = baseMessages + prototype context + latest plan' },
   { site: 'completed', owner: ST, kind: 'continuation', note: 'base completed() builds the continuation conversation (v8 uses continueFromModMessage)' },
   { site: 'continueFromModMessage', owner: V8, kind: 'continuation', note: 'v8 slice continuation: prepareContinuationContext plus its own counter resets' },
   { site: 'applyStartRestage', owner: V8, kind: 'start_restage', delegates: ['restageContext'], note: 'C5 restage on Resume via restageBetweenTurns; budget.handoff_restage_fallback keeps the built conversation when refused' },
-  { site: 'recoverPlanRoute', owner: V8, kind: 'capsule_fallback', delegates: ['restageContext'], note: 'provider-budget handoff: restageInTurn, else messages = role prefix + capsule (budget.handoff_restage_fallback)' },
+  { site: 'recoverPlanRoute', owner: V8, kind: 'capsule_fallback', delegates: ['restageContext'], note: 'provider-budget handoff: restageInTurn, else replaceConversation with role prefix + capsule (budget.handoff_restage_fallback, B2)' },
   { site: 'compactWorkingContext', owner: V8, kind: 'compaction', note: 'folds old tool exchanges into [OBSERVATIONS COMPACTED]' },
   { site: 'compactWorkingContext', owner: ST, kind: 'compaction', note: 'base compaction of old tool exchanges' },
   { site: 'executorFactsRefreshText', owner: V8, kind: 'in_place_rewrite', note: 'replaces the volatile step block in baseMessages and messages, keeps conversation identity' },
   { site: 'runGuardedTurn', owner: V8, kind: 'prefix_rewrite', noHelpers: true, note: 'rewrites the system prefix of a fresh chat lineage with the role prefix' },
-  { site: 'recoverInterruptedAgentPlan', owner: SUPERVISOR, receiver: 'agent', fn: true, kind: 'recovery_rebuild', delegates: ['restageContext'], note: 'supervisor recovery assigns agent.baseMessages/messages wholesale, then restageRecoveryConversation' },
+  { site: 'recoverInterruptedAgentPlan', owner: SUPERVISOR, receiver: 'agent', fn: true, kind: 'recovery_rebuild', delegates: ['restageContext'], note: 'supervisor recovery replaces the conversation through agent.replaceConversation (B2), then restageRecoveryConversation' },
 ])
 
 // --- scanning ------------------------------------------------------------------------------------------------
@@ -503,10 +508,12 @@ function directResets(body, receivers, names) {
       }
     }
   }
-  // The AgentContext owns the conversation: its swap calls replace both arrays.
-  if (/\bagentContext\.(commitRestage|restage|resumePlanner)\(/.test(body)) {
+  // The AgentContext owns the conversation: its swap calls replace both arrays
+  // and, since B1/B2, the conversation-state slots with them.
+  if (/\bagentContext\.(commitRestage|restage|resumePlanner|beginLineage|replaceConversation)\(|\b(?:this|agent)\.replaceConversation\(/.test(body)) {
     found.add('messages')
     found.add('baseMessages')
+    for (const slot of CONVERSATION_STATE_SLOTS) found.add(slot)
   }
   return found
 }

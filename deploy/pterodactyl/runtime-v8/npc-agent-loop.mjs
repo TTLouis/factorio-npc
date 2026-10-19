@@ -2561,6 +2561,17 @@ function latestRecoverableOperationFailure(state) {
   catch { return undefined }
 }
 
+// B2: what a conversation rebuilt in place (a continuation, a compaction fold)
+// keeps of what it had shown. 'keep' when the baseline is still, or again, in
+// the conversation; 'forget' so the next answer is full. Every conversation
+// slot needs a rule (conversationSlot enforces it).
+const CONVERSATION_SLOT_CARRY = Object.freeze({
+  toolCache: { continuation: 'keep', fold: 'keep' }, // continuations clear it themselves; a hit inlines the cached payload
+  prototypeRefs: { continuation: 'keep', fold: 'forget' }, // continuations re-deliver [STATIC_PROTOTYPE_CACHE]; a fold may drop the read
+  unchangedFactReads: { continuation: 'forget', fold: 'forget' },
+  taskStatusDiffBaseline: { continuation: 'forget', fold: 'keep' }, // receipts are user messages: a fold never removes one
+})
+
 function taskStatusDelta(previous, current) {
   if (!previous) return { observation_mode: 'full', ...current }
   const delta = {
@@ -3234,6 +3245,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // lives on its AgentContext conversation, so every conversation swap drops it
   // and a resumed planner gets its own back. Same accessor pattern as messages.
   conversationSlot(name, create) {
+    if (!Object.hasOwn(CONVERSATION_SLOT_CARRY, name)) throw new AgentLoopError(`conversation slot ${name} has no carry rule`)
     const state = this.agentContext.conversationState
     if (!state.has(name) && create) state.set(name, create())
     return state.get(name)
@@ -3246,6 +3258,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   set unchangedFactReads(value) { this.agentContext.conversationState.set('unchangedFactReads', value) }
   get taskStatusDiffBaseline() { return this.conversationSlot('taskStatusDiffBaseline') ?? null }
   set taskStatusDiffBaseline(value) { this.agentContext.conversationState.set('taskStatusDiffBaseline', value) }
+  replaceConversation(contents) { this.agentContext.replaceConversation(contents) }
+  // B2: a conversation rebuilt in place drops what its rules say to forget.
+  carryConversationState(rebuild) {
+    const state = this.agentContext.conversationState
+    for (const [name, rules] of Object.entries(CONVERSATION_SLOT_CARRY)) {
+      if (rules[rebuild] === 'forget') state.delete(name)
+    }
+  }
 
   reset() {
     this.abortStepContractCalls()
@@ -4906,6 +4926,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       let end = start + 1
       while (end < this.messages.length && this.messages[end].role === 'tool') end++
       const removed = this.messages.splice(start, end - start)
+      this.carryConversationState('fold')
       const summary = this.summarizeToolExchange(removed)
       const previous = this.messages[start - 1]
       if (previous?.role === 'user' && typeof previous.content === 'string' && previous.content.startsWith('[OBSERVATIONS COMPACTED]')) {
@@ -4991,13 +5012,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // never carry tool/scratch exchanges that argued for the predecessor plan.
     this.clearLoadedSkillContext()
     const memoryContext = this.memory.context?.(key) ?? ''
-    this.baseMessages = [
-      ...this.rolePrefixMessages(this.agentContext.role),
-      ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
-      { role: 'user', content: `[CHAT] ${this.requestInfo.sender}: ${this.requestInfo.text}` },
-    ]
-    this.messages = this.baseMessages.map(message => ({ ...message }))
-    this.toolCache.clear()
+    this.replaceConversation({
+      baseMessages: [
+        ...this.rolePrefixMessages(this.agentContext.role),
+        ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+        { role: 'user', content: `[CHAT] ${this.requestInfo.sender}: ${this.requestInfo.text}` },
+      ],
+    })
     this.duplicateToolRounds = 0
     this.observationRecoveryRounds = 0
     this.observationOnlyRounds = 0
@@ -5014,6 +5035,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reset = this.refreshPlanningReasoningEpoch()
     if (!reset) {
       super.prepareContinuationContext()
+      this.carryConversationState('continuation')
       const planContext = this.memory.planContext?.(this.activePlanKey())
       if (planContext) this.messages.push({ role: 'user', content: planContext })
     }
@@ -8525,7 +8547,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             })),
           }
         : null,
-      verified_world: sanitizeDurableModelValue(receipt?.providerStatus ?? receipt?.view ?? world),
+      // A packet starts a new conversation, so its receipt is full, never a diff.
+      verified_world: sanitizeDurableModelValue(receipt?.view ? taskStatusDelta(null, receipt.view) : (receipt?.providerStatus ?? world)),
       save_progress: (await this.readGoalProgressFacts()) ?? null,
     }
 
@@ -16848,10 +16871,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             request: this.requestInfo,
           },
         )
-        this.messages = [
-          ...this.rolePrefixMessages(this.agentContext.role),
-          { role: 'user', content: capsule },
-        ]
+        this.replaceConversation({
+          messages: [
+            ...this.rolePrefixMessages(this.agentContext.role),
+            { role: 'user', content: capsule },
+          ],
+        })
         // The capsule fallback replaces the conversation too: a staged amendment rides it.
         const held = this.currentPendingAmendment()
         if (held) this.messages.push({ role: 'user', content: `[CHAT] ${held.sender}: ${held.text}` })

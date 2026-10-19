@@ -174,6 +174,10 @@ test('interrupted-plan recovery creates a continuation turn that requires live r
     },
     captureEpoch: async () => ({ actor_id: 99, epoch: 8 }),
     traceEvent: async () => {},
+    replaceConversation({ baseMessages }) {
+      this.baseMessages = baseMessages
+      this.messages = baseMessages.map(message => ({ ...message }))
+    },
     async runGuarded() {
       observed = {
         messages: this.messages,

@@ -41,17 +41,17 @@
       "messages": 16
     },
     {
-      "body": "8e931faefd5da8f3",
+      "body": "091d9240a44f95dd",
       "context": "762450d8ff62934a",
       "messages": 11
     },
     {
-      "body": "2bde85a4cc3ed789",
+      "body": "9775395f280239ec",
       "context": "7217558eeb84fb0c",
       "messages": 14
     },
     {
-      "body": "47474b39fabfad24",
+      "body": "87798200db4fab16",
       "context": "69e185a12395f799",
       "messages": 15
     }
@@ -527,7 +527,7 @@
     },
     {
       "event": "factorio.status",
-      "sha": "3afd547d51901465"
+      "sha": "6317817cb149c4eb"
     },
     {
       "event": "factorio.error_continuation",
@@ -546,108 +546,104 @@
       "sha": "20df18ad3279a533"
     },
     {
-      "event": "context.dangling_reference",
-      "sha": "3af4c26e90b56395"
-    },
-    {
       "event": "provider.request",
-      "sha": "104208f4ca44193b"
+      "sha": "0e6e704b401d372b"
     },
     {
       "event": "provider.round_policy",
-      "sha": "53111d09571ec2bc"
+      "sha": "25c1797b22d4a776"
     },
     {
       "event": "provider.response",
-      "sha": "66479f0a488f4b3d"
+      "sha": "7b989ca814311228"
     },
     {
       "event": "tool.call",
-      "sha": "095ac7d5133a6142"
+      "sha": "4b0d866a5caa0a26"
     },
     {
       "event": "tool.call",
-      "sha": "9f376c2ecd3a70b5"
+      "sha": "1f3de445496b3c69"
     },
     {
       "event": "tool.result",
-      "sha": "f61041532c65b43f"
+      "sha": "e7527d219a5229f7"
     },
     {
       "event": "tool.result",
-      "sha": "1ab3c1356d6af994"
+      "sha": "c2e1d675c3a0b563"
     },
     {
       "event": "budget.reserved",
-      "sha": "d64f4c1467b39e51"
+      "sha": "d1001c3b43ec2904"
     },
     {
       "event": "control.decision_state",
-      "sha": "864e1c95387c8060"
+      "sha": "5dc9c4add5bd0e1b"
     },
     {
       "event": "provider.request",
-      "sha": "12a2c725b9fc8911"
+      "sha": "decc7517971a7a5d"
     },
     {
       "event": "provider.round_policy",
-      "sha": "626267f914de56a6"
+      "sha": "13b1159f622b848e"
     },
     {
       "event": "provider.response",
-      "sha": "04d0e79f3026428b"
+      "sha": "10f99b2a6566204e"
     },
     {
       "event": "tool.call",
-      "sha": "9956f07aa7e09e80"
+      "sha": "54189b52993d3050"
     },
     {
       "event": "tool.call",
-      "sha": "f171d9756c9b750b"
+      "sha": "800f7ba0d6615250"
     },
     {
       "event": "tool.result",
-      "sha": "217fdf1fe0c0a44b"
+      "sha": "4020ad844687608b"
     },
     {
       "event": "tool.result",
-      "sha": "a400dc2eb956b9a7"
+      "sha": "8f6e8120d3d6d935"
     },
     {
       "event": "budget.reserved",
-      "sha": "facad6a27a7ba904"
+      "sha": "9964087860c76699"
     },
     {
       "event": "control.decision_state",
-      "sha": "6b952edee5245e97"
+      "sha": "b6dfcb63d2b40bac"
     },
     {
       "event": "provider.request",
-      "sha": "8acc5da60d7382bc"
+      "sha": "35dd6def154b039e"
     },
     {
       "event": "provider.round_policy",
-      "sha": "9bfa99141dd3f0b3"
+      "sha": "63e5c3236c045c80"
     },
     {
       "event": "provider.response",
-      "sha": "a1e9762d35c16a7f"
+      "sha": "10dd6cb6a53fbc25"
     },
     {
       "event": "plan.accepted",
-      "sha": "6d2b841bb89df2e4"
+      "sha": "b5d8c13b4f1951cf"
     },
     {
       "event": "plan.persisted",
-      "sha": "15db58d67b46ed52"
+      "sha": "67238b8b3dff9f62"
     },
     {
       "event": "request.time_split",
-      "sha": "999f66953ef204c7"
+      "sha": "0a6c8499fb333c0f"
     },
     {
       "event": "request.completed",
-      "sha": "ca55e2ede8914abc"
+      "sha": "0acbd08aa1271482"
     }
   ]
 }

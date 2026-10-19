@@ -491,6 +491,12 @@ export class NpcAgentLoop {
     return 'one strict-JSON plan'
   }
 
+  // B2: the one way to replace the conversation wholesale.
+  replaceConversation({ baseMessages = this.baseMessages, messages = baseMessages.map(message => ({ ...message })) } = {}) {
+    this.baseMessages = baseMessages
+    this.messages = messages
+  }
+
   prepareContinuationContext() {
     const latestPlan = [...this.messages].reverse().find(message => message.role === 'assistant' && message.tool_calls === undefined)
     const prototypeContext = this.prototypeContext()

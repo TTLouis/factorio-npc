@@ -2030,12 +2030,13 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     agent.lastMemoryKey = key
     agent.planUpdateReason = 'completion'
     agent.reasoningTriggerSource = null
-    agent.baseMessages = [
-      { role: 'system', content: agent.systemPrompt },
-      ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
-      { role: 'user', content: `[HARNESS] Runtime recovery after ${uiText(reason, 120)} at a plan-slice boundary: the last plan slice was already verified complete and the user goal is still active. Recovery details: ${recoveryDetails}` },
-    ]
-    agent.messages = agent.baseMessages.map(message => ({ ...message }))
+    agent.replaceConversation({
+      baseMessages: [
+        { role: 'system', content: agent.systemPrompt },
+        ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+        { role: 'user', content: `[HARNESS] Runtime recovery after ${uiText(reason, 120)} at a plan-slice boundary: the last plan slice was already verified complete and the user goal is still active. Recovery details: ${recoveryDetails}` },
+      ],
+    })
     agent.requestInfo = {
       memoryKey: key,
       turnId: ++agent.turnSequence,
@@ -2059,12 +2060,13 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   // it re-observes the world and continues the committed plan.
   agent.planUpdateReason = 'recovery'
   agent.reasoningTriggerSource = null
-  agent.baseMessages = [
-    { role: 'system', content: agent.systemPrompt },
-    ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
-    { role: 'user', content: recoveryMessage },
-  ]
-  agent.messages = agent.baseMessages.map(message => ({ ...message }))
+  agent.replaceConversation({
+    baseMessages: [
+      { role: 'system', content: agent.systemPrompt },
+      ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+      { role: 'user', content: recoveryMessage },
+    ],
+  })
   agent.requestInfo = {
     memoryKey: key,
     turnId: ++agent.turnSequence,

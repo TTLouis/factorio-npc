@@ -340,6 +340,19 @@ export class AgentContext {
     }
   }
 
+  /**
+   * B2: replace what the conversation holds without starting a new one (an
+   * epoch rebuild, a capsule fallback, a recovered plan). Role, handoff id,
+   * counters and the conversation sequence stand, so a reply in flight is
+   * admitted or dropped exactly as before; what the old messages had shown is
+   * forgotten with them.
+   */
+  replaceConversation({ baseMessages = this.baseMessages, messages = copyMessages(baseMessages) } = {}) {
+    this.baseMessages = baseMessages
+    this.messages = messages
+    this.conversationState = new Map()
+  }
+
   /** prepareRestage + commitRestage. */
   restage(args) {
     return this.commitRestage(this.prepareRestage(args))

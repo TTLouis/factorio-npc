@@ -298,6 +298,10 @@ test('interrupted plan recovery always uses the plain runtime-recovery path', as
     cancel: () => {},
     captureEpoch: async () => ({ actor_id: 3, epoch: 8 }),
     traceEvent: async () => {},
+    replaceConversation({ baseMessages }) {
+      this.baseMessages = baseMessages
+      this.messages = baseMessages.map(message => ({ ...message }))
+    },
     async runGuarded() {
       seen.planUpdateReason = this.planUpdateReason
       seen.reasoningTriggerSource = this.reasoningTriggerSource
