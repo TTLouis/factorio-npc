@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 19: Run AC respects supply method and requests review; guard pause stops progress
+
+- **Result.** One cold trial at `b1da8392` stopped after 7.5161 minutes with ten new copper plates, zero new iron plates and zero red science. All 19 provider calls returned (Sol5/Luna14), all 23 Jev calls returned, no errors. One committed slice and eight admitted batches; all admissions followed executor replies.
+- **Method.** Planner chose manual startup coal/copper and direct-fed iron with explicit setup/time rationale. All 14 executor requests carried the active guidance and selected details. Iron preparation admitted only wait/navigation, with no manual iron supply. Extra cells remained optional time savings; direct-fed production was not built or proven.
+- **Review boundary.** Executor explicitly requested advisory `local_recovery_exhausted` review for missing iron-site/output geometry evidence. Planner context returned, then a guard pause ended the request; zero provider calls followed. The prior post-batch bundle covered only the selected research family and closed reads. Investigate observation-family sufficiency and bounded planner continuation; the review does not establish physical infeasibility or authorize replacement.
+- **Closeout.** Strict paired stop, fresh579,452Bsave/all55CRC/exact2.0.77 pristine load pass. All owned stack/proof containers, network, volumes, unique image and tunnel removed; shared build alias and sealed evidence retained. No corrections/resumes/resets/second trial. [Run AC evidence](validation/RED_AUTOMATION_LIVE_RUN_AC_2026-10-19.md).
+
 ## October 18: Executor supply strategy and advisory review fixed offline
 
 - **Strategy.** New planner briefs explicitly choose direct feeding, manual bootstrap or no resource method. Selected direct-miner-smelting details require that choice before commit. An explicitly chosen direct-feed method rejects manual supply of that resource before the whole batch is admitted and returns advisory review. Startup fuel and unrelated materials remain allowed. Additional dedicated cells remain optional investments justified by time savings.
