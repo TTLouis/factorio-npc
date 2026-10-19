@@ -2020,7 +2020,9 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
       if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state: resumed.state }
     }
   }
-  agent.lifecycleEnter?.('recovery.interrupted', { reason: uiText(reason, 80), boundary: awaitingNextSlice ? 'plan_slice' : 'step' })
+  // LIFECYCLE_TABLE: a step recovery never runs on a closed goal (the reactivation above made a paused one active, or returned).
+  const lifecycle = agent.lifecycleEnter?.('recovery.interrupted', { reason: uiText(reason, 80), boundary: awaitingNextSlice ? 'plan_slice' : 'step' }, { requestId: recoveryRequestId })
+  if (lifecycle) return { recovered: false, reason: 'lifecycle_refused', refusal: lifecycle.reason, state: agent.memory?.currentPlan?.(key) ?? state }
   const memoryContext = agent.memory?.context?.(key) ?? ''
   const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
   if (awaitingNextSlice) {

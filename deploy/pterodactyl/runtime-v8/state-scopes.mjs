@@ -15,6 +15,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { LIFECYCLE_SITES, lifecycleResets } from './lifecycle.mjs'
+
 export const STATE_SCOPES = Object.freeze([
   'construction', // injected deps/config/options, set once in the constructor
   'process', // stable game/prototype data valid for this server runtime
@@ -191,9 +193,9 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   duplicateToolRounds: f('decision', true, ST, 'duplicate-observation rounds: reset in staging reset/completed, v8 continueFromModMessage/restageContext/returnControlToPlanner/epoch refresh'),
   observationRecoveryRounds: f('decision', true, ST, 'observation-recovery rounds: same reset sites as duplicateToolRounds'),
   observationOnlyRounds: f('decision', true, ST, 'observation-only rounds: same reset sites as duplicateToolRounds'),
-  finiteNoOperationPressureUsed: f('decision', true, ST, 'no-operation pressure spent: staging reset/completed, v8 continueFromModMessage'),
-  toolValidationRetries: f('decision', true, ST, 'tool validation retries: staging reset/completed/runTurn, v8 continueFromModMessage'),
-  planCategoryRetries: f('decision', true, ST, 'plan category retries: staging reset/completed/runTurn, v8 continueFromModMessage'),
+  finiteNoOperationPressureUsed: f('decision', true, ST, 'no-operation pressure spent: staging reset/completed, v8 continueFromModMessage, lifecycle resets (restage, planner.return, epoch.rebuild)'),
+  toolValidationRetries: f('decision', true, ST, 'tool validation retries: staging reset/completed/runTurn, v8 continueFromModMessage, lifecycle resets (restage, planner.return, epoch.rebuild)'),
+  planCategoryRetries: f('decision', true, ST, 'plan category retries: staging reset/completed/runTurn, v8 continueFromModMessage, lifecycle resets (restage, planner.return, epoch.rebuild)'),
   observationDecisionPressure: f('decision', true, ST, 'observation phase closing pressure, cleared by resetObservationDecisionState'),
   observationDecisionPressureRemaining: f('decision', true, ST, 'rounds left before the phase closes, cleared by resetObservationDecisionState'),
   observationDecisionForced: f('decision', true, ST, 'phase closed (tools off), cleared by resetObservationDecisionState'),
@@ -536,6 +538,12 @@ export function conversationResetMatrix(sources, registry = LOOP_STATE_FIELDS, s
     const body = bodyOf(site.owner, site.site, site.fn === true)
     if (body === null) return { tracked, resets: new Set(), error: 'method_not_found' }
     const resets = directResets(body, receivers, tracked)
+    // C2: a lifecycle site's applyLifecycleResets() sets the counters its LIFECYCLE_TABLE entry lists (lifecycle.test.mjs
+    // proves the call names that site's own event).
+    const lifecycle = LIFECYCLE_SITES.find(entry => entry.owner === site.owner && entry.site === site.site)
+    if (lifecycle && /\bapplyLifecycleResets\s*\(/.test(body)) {
+      for (const name of Object.keys(lifecycleResets(lifecycle.event))) if (tracked.includes(name)) resets.add(name)
+    }
     // One level deep: helpers called as this.x() / super.x(). A subclass helper may live in either class.
     if (site.fn !== true && site.noHelpers !== true) {
       const helperRe = /\b(?:this|super)\.([A-Za-z_$][\w$]*)\s*\(/g

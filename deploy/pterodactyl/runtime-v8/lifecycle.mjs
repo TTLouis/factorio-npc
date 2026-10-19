@@ -60,3 +60,76 @@ export function lifecycleSnapshot(agent) {
     provider_recovery: short(legacy?.provider_recovery?.phase ?? run?.provider_recovery?.phase, 60),
   }
 }
+
+// ---------------------------------------------------------------------------------------
+// C2: the transition table
+// ---------------------------------------------------------------------------------------
+//
+// One entry per event. `rules` say when the event is refused; `resets` are the per-decision counters a fresh
+// conversation starts over (the model in it never saw the rejections they counted). A rule refuses only on positive
+// evidence of a wrong state: `refuse` lists the values that refuse it (an axis that reads 'unknown' never matches),
+// `require` lists the only values that pass (used where the site already failed closed on an unreadable state).
+// `when` narrows a rule to the entry point's details (the restaged role, the recovery boundary). An event with no
+// rule is listed with an empty list and the reason none is enforced (`open`), so no event is added unexamined.
+
+const CLOSED_GOALS = Object.freeze(['paused', 'completed', 'cancelled'])
+
+// A3 finding 4: these counted retries against messages a restage, a planner return or an epoch rebuild discards.
+const DECISION_COUNTERS = Object.freeze({ finiteNoOperationPressureUsed: false, toolValidationRetries: 0, planCategoryRetries: 0 })
+
+const NONE = Object.freeze({})
+
+export const LIFECYCLE_TABLE = Object.freeze({
+  'request.start': { rules: [], resets: NONE, open: 'a player request decides the goal itself (new goal, continue, amend)' },
+  'reset': { rules: [], resets: NONE, open: 'discarding the request lineage is always allowed' },
+  'restage': {
+    rules: [{
+      when: { role: 'executor' },
+      axis: 'goal',
+      refuse: CLOSED_GOALS,
+      reason: 'executor_restage_on_closed_goal',
+      evidence: 'runs G and H: an automatic resume restaged the executor onto a paused plan, whose next checkpoint was refused',
+    }],
+    resets: DECISION_COUNTERS,
+  },
+  'planner.return': { rules: [], resets: DECISION_COUNTERS, open: 'the replacement wake may return to a blocked plan (MW5); no wrong state was seen' },
+  'epoch.rebuild': { rules: [], resets: DECISION_COUNTERS, open: 'the rebuild follows a reducer epoch bump the reducer already admitted' },
+  'continuation': { rules: [], resets: NONE, open: 'the continuation resets these counters itself (continueFromModMessage)' },
+  'checkpoint.persist': {
+    rules: [{
+      axis: 'goal',
+      require: ['active'],
+      reason: 'checkpoint_requires_active_step',
+      evidence: 'run J: a checkpoint reached a completed plan; the inline goal check this replaces failed closed the same way',
+    }],
+    resets: NONE,
+  },
+  'slice.close': { rules: [], resets: NONE, open: 'the reducer settles the slice; no wrong state was seen' },
+  'batch.send': { rules: [], resets: NONE, open: 'one-off requests act outside a running goal; run G sent one batch with the reducer run still paused (open)' },
+  'plan.recover': { rules: [], resets: NONE, open: 'recovery inside a live request; no wrong state was seen' },
+  'task.resume': { rules: [], resets: NONE, open: 'memory.resumeTask checks the ledger itself' },
+  'recovery.interrupted': {
+    rules: [{
+      when: { boundary: 'step' },
+      axis: 'goal',
+      refuse: CLOSED_GOALS,
+      reason: 'recovery_on_closed_goal',
+      evidence: 'runs G and H: a step recovery runs on an active plan (a paused one is reactivated first, or the recovery ends)',
+    }],
+    resets: NONE,
+  },
+})
+
+// The first rule the state breaks, or undefined when the event may run.
+export function lifecycleRefusal(event, state, details = {}) {
+  for (const rule of LIFECYCLE_TABLE[event]?.rules ?? []) {
+    if (rule.when && Object.entries(rule.when).some(([name, value]) => details?.[name] !== value)) continue
+    const value = state?.[rule.axis] ?? 'unknown'
+    if (rule.refuse?.includes(value) || (rule.require && !rule.require.includes(value))) return { reason: rule.reason, axis: rule.axis, value }
+  }
+  return undefined
+}
+
+export function lifecycleResets(event) {
+  return LIFECYCLE_TABLE[event]?.resets ?? NONE
+}

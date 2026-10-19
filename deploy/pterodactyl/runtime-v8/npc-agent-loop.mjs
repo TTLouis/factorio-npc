@@ -184,7 +184,7 @@ import {
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
 import { insertTailBlock, TAIL_BLOCKS } from './prompt-prefix.mjs'
 import { findDanglingReferences } from './context-references.mjs'
-import { lifecycleSnapshot } from './lifecycle.mjs'
+import { lifecycleRefusal, lifecycleResets, lifecycleSnapshot } from './lifecycle.mjs'
 import { repairControlJson } from './control-json-repair.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
@@ -3329,11 +3329,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       prefixMessages: this.rolePrefixMessages(role ?? packet?.event?.role ?? this.agentContext.role),
       parkPlanner,
     })
-    this.lifecycleEnter('restage', { role: prepared.role, checkpoint })
     const refuse = async (why) => {
       await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet.handoff_id, reason: why }, { requestId })
       return { restaged: false, reason: why }
     }
+    const lifecycle = this.lifecycleEnter('restage', { role: prepared.role, checkpoint }, { requestId })
+    if (lifecycle) return refuse(lifecycle.reason)
     const guard = this.restageGuardRefusal(safePoint)
     if (guard) return refuse(guard)
     const before = this.memory.planningState?.(key)
@@ -3349,6 +3350,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationRecoveryRounds = 0
     this.observationOnlyRounds = 0
     this.resetObservationDecisionState()
+    this.applyLifecycleResets('restage')
     // The conversation is swapped from here on: whatever follows is reported
     // separately and can never turn this restage into a failure (a C5 caller
     // would then overwrite the fresh messages with the capsule).
@@ -3567,10 +3569,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Option C: every lifecycle entry point (lifecycle.mjs LIFECYCLE_SITES) passes here first and traces the state it
   // acted in. The trace write is not awaited, so a synchronous entry point (reset, the epoch rebuild) can call it too.
-  // Outside a request (a reset before the first one) there is no request id to file the row under, so none is written.
-  lifecycleEnter(event, details = {}) {
-    if (this.traceRequest) void this.traceEvent('lifecycle.entered', { event, ...details, state: lifecycleSnapshot(this) })
-    return undefined
+  // Outside a request (a reset before the first one) there is no request id to file the row under, so none is written
+  // unless the caller names the request (`requestId`: a restage between turns, a supervisor recovery).
+  // Returns the LIFECYCLE_TABLE refusal ({ reason, axis, value }) when the state breaks a rule, else undefined; the
+  // site then refuses through its own existing path, before it acts.
+  lifecycleEnter(event, details = {}, { requestId } = {}) {
+    const state = lifecycleSnapshot(this)
+    const refusal = lifecycleRefusal(event, state, details)
+    if (requestId || this.traceRequest) {
+      const options = requestId ? { requestId } : undefined
+      void this.traceEvent('lifecycle.entered', { event, ...details, state }, options)
+      if (refusal) void this.traceEvent('lifecycle.refused', { event, ...details, ...refusal }, options)
+    }
+    return refusal
+  }
+
+  // The counters LIFECYCLE_TABLE resets once `event` has replaced the conversation (A3 finding 4).
+  applyLifecycleResets(event) {
+    for (const [field, value] of Object.entries(lifecycleResets(event))) this[field] = value
   }
 
   // The one place that decides whether the conversation may be swapped right now: not
@@ -4062,6 +4078,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.observationRecoveryRounds = 0
       this.observationOnlyRounds = 0
       this.resetObservationDecisionState()
+      this.applyLifecycleResets('planner.return')
       this.executorStepMark = null
       const scope = this.turnScope.getStore()
       if (scope) { scope.role = this.agentContext.role; scope.handoffId = this.agentContext.handoffId }
@@ -5047,6 +5064,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationRecoveryRounds = 0
     this.observationOnlyRounds = 0
     this.resetObservationDecisionState()
+    this.applyLifecycleResets('epoch.rebuild')
     void this.traceEvent('planning.reasoning_epoch_reset', {
       previous_epoch: previous,
       reasoning_epoch: epoch,
@@ -7933,13 +7951,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!plan?.checkpoint || !this.requestInfo?.memoryKey) {
       return { state: this.memory.currentPlan?.(this.activePlanKey()) }
     }
-    this.lifecycleEnter('checkpoint.persist')
+    // The goal must be active (LIFECYCLE_TABLE, run J); the step must exist for what follows.
+    const refusal = this.lifecycleEnter('checkpoint.persist')
     const key = this.requestInfo.memoryKey
     const state = this.memory.currentPlan?.(key)
     const board = state?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!state || state.status !== 'active' || !step) {
+    if (refusal || !state || !step) {
       throw new AgentLoopError('checkpoint_requires_active_step')
     }
 
