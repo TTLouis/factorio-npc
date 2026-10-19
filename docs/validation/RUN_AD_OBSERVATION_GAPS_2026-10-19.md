@@ -30,7 +30,7 @@ Progress:
 - [x] Implement channel and coverage corrections with full-loop regressions.
 - [x] Validate candidate and original-code controls offline.
 - [x] Independent source and evidence review.
-- [ ] Authorized integration handoff, merge and merged validation.
+- [x] Authorized integration handoff, merge and merged validation.
 
 ## Implementation and evidence
 
@@ -98,3 +98,18 @@ pending an explicit ownership handoff: the workspace registry still assigns
 the integration checkout to session `01a14fa4`. The task branch is clean and
 validated; no integration checkout, shared branch or live E2E is changed by
 this checkpoint.
+
+## Integration
+
+The owner explicitly transferred integration ownership to session `01a153de` on
+October 19. No-ff merge `021a361a97bdbe802472cb3a9896903116a35fe7` has the exact
+same file tree as the validated task tip `1fa2dcb5`. Its required offline gate
+passed **2,655 runtime tests, 1,234 mod tests, typecheck and Lua checks**. The
+merged payload check and all **nine payload tests** also passed; the installer
+continues to pin the reviewed source `54f2f18f`.
+
+The previously untracked Run AA and Run AD reports stayed byte-identical.
+Integration evidence is retained separately in
+`test-results/direct-feed-observation-integration`; the frozen 186-file task
+archive remains unchanged. No live provider/Jev calls, new E2E or deployment
+were performed by this integration.

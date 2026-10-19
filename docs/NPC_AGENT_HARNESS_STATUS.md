@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 19: Run AD direct-feed observation gaps fixed and validated offline
+
+- **Open observations.** Typed JSON and `submitPlan` observation requests can use the ordinary approved spatial/resource tools when reads are open. Normal argument validation, cache, budgets and actor/epoch/cancellation fences apply. Closed rounds retain their narrower fact grammar and durable one-read allowance.
+- **Post-batch coverage.** Research/inventory-only predicted coverage cannot close ordinary reads for an active explicit direct-feed brief. The existing fresh-read budget still closes the decision when spent; plan/review authority and numeric allowances are unchanged.
+- **Proof.** Reviewed code `54f2f18f`, payload `128765ed`, local no-ff merge `021a361a`: merged 2,655 runtime and 1,234 mod tests, typecheck/Lua and payload9 pass. Native Factorio 2.0.77 uses the real Session, provider serializer and candidate admission to place/fuel a direct-fed pair, produce two iron plates and collect one. Original-runtime and coverage-only controls fail as expected; the prior normal-observation native canary also passes. [Validation checkpoint](validation/RUN_AD_OBSERVATION_GAPS_2026-10-19.md).
+- **Boundary.** The native replies and research-only route are scripted. This proves fact access and continuation, not autonomous live selection or red-science throughput. No new E2E or deployment ran. Owned test resources are removed; sealed evidence and historical reports are retained.
+
 ## October 19: Run AC review gaps fixed offline
 
 - **Read reopen.** When an executor review comes from a read phase that the harness closed on post-batch coverage, reads reopen once per step. In Run AC, only `research_state` was predicted after the walk to iron ore, so no ore-site or placement read was available.
