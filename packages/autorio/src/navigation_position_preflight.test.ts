@@ -14,9 +14,11 @@ function fixture() {
   const find = vi.fn((_name: string, center: { x: number, y: number }, _radius?: number, _precision?: number) => ({ x: center.x, y: center.y }) as { x: number, y: number } | undefined)
   const get_tile = vi.fn((_x: number, _y: number) => ({ name: 'grass-1', prototype: { collision_mask: { layers: { ground_tile: true } } as { layers: Record<string, boolean> } | undefined } }))
   const can_place = vi.fn((_args: { name: string, position: { x: number, y: number }, force: unknown }) => true)
-  const surface = { find_entities_filtered: scan, find_non_colliding_position: find, get_tile, can_place_entity: can_place }
-  const actor = { is_valid: true, character, surface, force: { index: 1 } } as unknown as ControlledActor
-  return { actor, character, furnace, scan, find, get_tile, can_place }
+  const is_generated = vi.fn((_chunk: { x: number, y: number }) => true)
+  const surface = { find_entities_filtered: scan, find_non_colliding_position: find, get_tile, can_place_entity: can_place, is_chunk_generated: is_generated }
+  // Far from every goal below, so no test is accidentally inside the reach.
+  const actor = { is_valid: true, character, surface, force: { index: 1 }, position: { x: -500, y: 500 } } as unknown as ControlledActor
+  return { actor, character, furnace, scan, find, get_tile, can_place, is_generated }
 }
 
 it('refuses a goal circle entirely inside a furnace/character collision expansion', () => {
@@ -91,6 +93,40 @@ describe('goal on a tile the character collides with', () => {
     expect(f.get_tile).toHaveBeenCalledWith(60, -36)
     expect(f.can_place).toHaveBeenCalledWith({ name: 'character', position: water, force: { index: 1 } })
     expect(f.find).toHaveBeenCalledWith('character', water, 16, 0.5)
+  })
+
+  it('states the nearest standing position as a fact in the correction message, and says when there is none', () => {
+    const f = fixture(); drowned(f)
+    const message = (navigation_position_preflight(f.actor, water) as any).correction_message as string
+    expect(message).toContain('deepwater')
+    expect(message).toContain('(60, -36)')
+    expect(message).toContain('(59.5, -36.5)')
+    const none = fixture(); drowned(none, null)
+    const without = (navigation_position_preflight(none.actor, water) as any).correction_message as string
+    expect(without).toContain('deepwater')
+    expect(without).toContain('within 16 tiles')
+    expect(without).not.toContain('(59.5')
+  })
+
+  // navigation.ts completes a position task as soon as the actor is within reach of the goal, before any path request.
+  it('lets the walk through when the actor is already within reach of the goal, as navigation completes it at once', () => {
+    const f = fixture(); drowned(f)
+    ;(f.actor as any).position = { x: 57, y: -36 } // 3 tiles from the water goal, reach 4
+    expect(navigation_position_preflight(f.actor, { ...water, reach_distance: 4 })).toEqual({ ok: true, operation: 'walk_to_position' })
+    ;(f.actor as any).position = { x: 56, y: -36 } // exactly the reach
+    expect(navigation_position_preflight(f.actor, { ...water, reach_distance: 4 })).toEqual({ ok: true, operation: 'walk_to_position' })
+    ;(f.actor as any).position = { x: 54, y: -36 } // 6 tiles away: the doomed path request
+    expect(navigation_position_preflight(f.actor, { ...water, reach_distance: 4 })).toMatchObject({ ok: false, code: 'navigation_position_inside_tile_collision' })
+    expect(f.get_tile).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves goals in chunks that are not generated to the native path request instead of reading an out-of-map tile', () => {
+    const f = fixture(); drowned(f)
+    f.is_generated.mockReturnValue(false)
+    expect(navigation_position_preflight(f.actor, { x: 60, y: -36, reach_distance: 4 })).toEqual({ ok: true, operation: 'walk_to_position' })
+    expect(f.is_generated).toHaveBeenCalledWith({ x: 1, y: -2 })
+    expect(f.get_tile).not.toHaveBeenCalled()
+    expect(f.can_place).not.toHaveBeenCalled()
   })
 
   it('accepts a shoreline tile of a colliding kind when the engine says the character fits there (tile transitions)', () => {
