@@ -149,3 +149,14 @@ These events have no rule yet, each with its reason recorded in the table:
   - batch send while the reducer run is paused (Run G row 192);
   - executor restage with a batch still in flight (8 corpus rows).
 - C4, moving the tuple into the reducer, is planned for after the release.
+
+### Landing on jev-arch, 2026-10-20 (owner-authorized)
+
+- **Rebase.** The C commits were replayed onto jev-arch `ef0fd7d8`, which by then carried the overnight cause-1/3 fixes. `git patch-id` is identical for each pair, so nothing was dropped. The commits are now C1 `49653442`, C2 `923b5931`, C3 `ec5a29e3` and doc `9c7aa9df`.
+- **X-1 check.** C2's executor restage rule does not interfere with X-1's automatic resume of a second review. That resume makes the plan active (`resumePausedPlan`) before its C7 restage.
+- **Review fix (Sonnet), `df0729ce`.** The snapshot called `memory.currentPlan()`. On canonical memory that call retires a completed goal and builds a missing board, so a trace-only read could change state. The snapshot now peeks at the plan map, as `peekPlanState` does, and the refusal outcomes are unchanged. Nit, left open: a `lifecycle_refused` supervisor recovery ends with only the `lifecycle.refused` trace row and no chat line. It is reachable only through a player pause in the middle of an await.
+- **Gates on the head `c1ae034c`:**
+  - full Docker suite 2815/2815, including `composed-delegation` and `role-contracts`; the golden is unchanged;
+  - `build-payload` 9/9, with the payload pinned to `df0729ce`;
+  - all 14 native lanes pass: fresh-topology, direct-feed-observation, ground-item-pickup, partial-transfer, zero-transfer, closed-action, normal-observation, observation-baseline, step-contract, local-transfer-target, core, research-combat, resilience and production.
+- **Open leads unchanged.** There is still no new evidence for a rule on either lead. Both remain single-run or projection-only observations: the Run G batch sent while the run was paused, and the executor restage with a batch still in flight.
