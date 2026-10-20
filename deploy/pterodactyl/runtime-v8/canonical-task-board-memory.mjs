@@ -1116,6 +1116,17 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return claimed
   }
 
+  // The planner's reply in that round, kept per step so a restage that discards the conversation can still hand it to the executor.
+  recordReviewNotes(key, stepId, notes, { now = Date.now() } = {}) {
+    const before = this.planningState(key)
+    if (before?.goal?.status !== GOAL_STATUS.ACTIVE || typeof stepId !== 'string') return false
+    const after = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.REVIEW_NOTES_RECORDED,
+      source: 'runtime', goal_id: before.goal.goal_id, step_id: stepId, notes, now,
+    })
+    return typeof after?.goal?.review_notes?.[stepId] === 'string'
+  }
+
   /**
    * Record the advisory steering mode at a planning boundary (roadmap 4.3).
    *

@@ -117,6 +117,7 @@ import {
   getActivePlan as getActivePlanningPlan,
   GOAL_STATUS,
   isStepContractPending,
+  MAX_REVIEW_NOTES_CHARS,
   PLAN_STATUS,
   PLANNING_EVENT,
   STEP_CONTRACT_PENDING_CODE,
@@ -287,7 +288,7 @@ const EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT = 2
 const EXECUTOR_STEP_IDENTITY_LEDGER_MAX = 128
 // Steps remembered for the once-per-step read reopen after a review from a harness-closed read phase (reopenReadsForReview).
 const REVIEW_READ_REOPEN_STEP_LIMIT = 64
-const REVIEW_NOTES_CHARS = 1200
+const REVIEW_NOTES_CHARS = MAX_REVIEW_NOTES_CHARS
 // What the planner's one review round can do (handlePlannerReview). Facts about the harness, not strategy advice.
 const REVIEW_ROUND_FACT = '[HARNESS] This is the one planner review round for this step. The committed plan and its execution_guidance cannot change in it. A reply with operations:[] returns the same active step to a fresh executor, and that reply\'s chatMessage reaches the executor as planner notes. Read tools are available before replying. Another review of this step pauses the goal.'
 // Board evidence kind for an executed operation the engine refused in a way the
@@ -15160,6 +15161,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('planner.committed_slice_returned', { request_id: this.traceRequest?.id,
         plan_id: heldForRoleHandoff.plan_id, reason: reviewRound ? 'review_round_returned_same_step' : 'healthy_committed_semantics_preserved',
         ...(reviewRound ? { step_id: review.step_id, notes_chars: notes.length } : {}) })
+      // Durable before the handoff: a later restage of this step (the supervisor's resume after a second review) rebuilds the
+      // executor from the planning state and would otherwise lose them with the conversation.
+      if (notes) this.memory.recordReviewNotes?.(this.activePlanKey(), review.step_id, notes)
       const handoff = await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
       if (!handoff.restaged) throw new AgentLoopError(`planner_execution_handoff_refused:${handoff.reason}`)
       if (notes) this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })

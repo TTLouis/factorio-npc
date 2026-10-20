@@ -44,6 +44,7 @@ import {
   CONTEXT_RESTAGE_CHECKPOINTS,
   CONTEXT_RESTAGE_ROLES,
   getActivePlan,
+  MAX_REVIEW_NOTES_CHARS,
   nearestShelfRefinementTarget,
 } from './planning-state.mjs'
 
@@ -64,6 +65,8 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   contractChars: 300,
   runtimeChars: 200,
   amendmentChars: 500,
+  // The planner's notes from the one review round of the active step (executor role only).
+  reviewNotesChars: MAX_REVIEW_NOTES_CHARS,
   // U11 advisory: what Jev's observation families may ADD. Bounded by count and length, and the first records dropped
   // when the packet is over its limit (they are never mandatory).
   jevFacts: 4,
@@ -94,6 +97,9 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   // Unit 14: a placed machine's own inventories (fuel, source, output). They outlast the machine_energy annotation because they
   // are the live state the step acts on, and drop before the residual arithmetic.
   'placed_machines',
+  // The planner's notes for the active step. Advisory, so after the facts the step acts on are kept in part, but they serve
+  // the step the executor is on and are the only copy once the conversation that held them is replaced.
+  'review_notes',
   'residual_needs',
   // Intentionally after residual_needs (unit 6): acquisition is its own record so the raw-leaf mining sources and nearest
   // locations survive a long intermediate chain being dropped from the arithmetic.
@@ -1799,6 +1805,9 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
       if (role === 'executor' && step.execution_guidance) records.push({ key: 'execution_brief', block: 'step',
         text: `execution_guidance (planner choice; revalidate live facts): ${JSON.stringify(step.execution_guidance)}` })
       if (contract) records.push({ key: 'contract', block: 'step', drop: 'contract', text: `active_step_contract: ${contract}` })
+      const reviewNotes = role === 'executor' ? sanitizeHandoffNote(state?.goal?.review_notes?.[step.step_id], limits.reviewNotesChars) : ''
+      if (reviewNotes) records.push({ key: 'review_notes', block: 'step', drop: 'review_notes',
+        text: `planner_review_notes (the planner's reply to your review of this step; the plan is unchanged; advisory, not world evidence): ${reviewNotes}` })
       const held = plan.execution?.receipts?.[step.step_id]
       const tail = (Array.isArray(held) ? held : []).slice(-limits.receiptTail)
       tail.forEach((entry, index) => {

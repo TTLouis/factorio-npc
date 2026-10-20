@@ -42,11 +42,13 @@ import {
   rawLeafFromRecipeDetails,
   rawLeafSourceFromRead,
 } from './handoff-packet.mjs'
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
   getActivePlan,
   getContextRestages,
+  MAX_REVIEW_NOTES_CHARS,
   PLANNING_EVENT,
 } from './planning-state.mjs'
 
@@ -1450,4 +1452,41 @@ test('unit 15: a trigger production row never nets machine stock, while its ingr
   assert.deepEqual({ required: ore.required, held: ore.held, missing: ore.missing, before: ore.missing_before_machine }, { required: 10, held: 4, missing: 3, before: 6 })
   const text = buildHandoffPacket({ planningState: circuitState(), ...ARGS, limits: { maxChars: 100000 }, executorFacts: { recipes: [SMELT_COPPER], counts: { items: [{ item: 'copper-ore', count: 4, state: 'fresh' }], unavailable: [], as_of: TAG }, residual: { roots: [], production, rows: stocked.rows } } }).text
   assert.match(text.split('\n').find(line => line.startsWith('residual_needs')), /trigger craft-item copper-plate count=10 for electronics \(counts new crafts; held stock not counted\) held=0 crafts=10 via copper-plate \| copper-ore required=10 held=4 in_machine_output=3@stone-furnace unit=13 missing_after_machine=3$/)
+})
+
+test('the planner review notes of the active step reach the executor packet, survive a snapshot restore and never cross steps', () => {
+  const KEY = 'npc'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planningByNpc.set(KEY, committedState())
+  const [first, second] = getActivePlan(memory.planningState(KEY)).steps.map(step => step.step_id)
+  const NOTES = 'Planner notes: read the furnace footprint first.'
+  assert.equal(memory.recordReviewNotes(KEY, first, NOTES), false, 'notes need the review round to have been claimed for the step')
+  assert.equal(memory.claimReviewContinuation(KEY, first), true)
+  assert.equal(memory.recordReviewNotes(KEY, first, NOTES), true)
+  assert.equal(memory.recordReviewNotes(KEY, second, 'Notes for a step with no round'), false)
+  const notesLine = packet => packet.text.split('\n').find(line => line.startsWith('planner_review_notes'))
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(memory.snapshot())))
+  assert.deepEqual(restored.planningState(KEY).goal.review_notes, { [first]: NOTES })
+  const packet = buildHandoffPacket({ planningState: restored.planningState(KEY), ...ARGS, limits: { maxChars: 100000 } })
+  assert.equal(notesLine(packet), `planner_review_notes (the planner's reply to your review of this step; the plan is unchanged; advisory, not world evidence): ${NOTES}`)
+  assert.equal(notesLine(buildHandoffPacket({ planningState: restored.planningState(KEY), ...ARGS, role: 'planner', limits: { maxChars: 100000 } })), undefined, 'executor role only')
+
+  // The same notes do not follow the goal to another active step.
+  const advanced = closeActiveStep(restored.planningState(KEY), 600)
+  assert.equal(getActivePlan(advanced).steps[getActivePlan(advanced).active_step_index].step_id, second)
+  assert.equal(notesLine(buildHandoffPacket({ planningState: advanced, ...ARGS, limits: { maxChars: 100000 } })), undefined)
+
+  // Bounded, and a size-limited packet keeps them after the records that serve less of the step.
+  const long = new CanonicalTaskBoardMemory()
+  long.planningByNpc.set(KEY, committedState())
+  long.claimReviewContinuation(KEY, first)
+  long.recordReviewNotes(KEY, first, 'x'.repeat(MAX_REVIEW_NOTES_CHARS * 2))
+  assert.equal(long.planningState(KEY).goal.review_notes[first].length, MAX_REVIEW_NOTES_CHARS)
+  const order = HANDOFF_DROP_ORDER
+  assert.ok(order.indexOf('review_notes') > order.indexOf('contract') && order.indexOf('review_notes') > order.indexOf('receipt'))
+  assert.ok(order.indexOf('review_notes') < order.indexOf('step_pending'))
+  const tiny = buildHandoffPacket({ planningState: restored.planningState(KEY), ...ARGS, limits: { maxChars: 1 } })
+  assert.ok(tiny.dropped.includes('review_notes'), 'a packet over its limit still drops the record by its named key')
 })

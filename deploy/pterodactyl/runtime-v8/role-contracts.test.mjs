@@ -206,13 +206,19 @@ for (const reason of ['approach_infeasible', 'scope_change', 'local_recovery_exh
   })
 }
 
+const PLANNER_NOTES = 'Planner notes: read the furnace footprint first.'
+
 // Runs AD-AF (2026-10-19): the second review of a step was a guard pause and the unattended goal ended there. The pause is
 // model_recoverable now: the supervisor schedules its bounded resume and a fresh executor acts on the same step, goal active.
 test('a second executor review of the step is auto-resumed by the supervisor and the restaged executor acts on the same step', async t => {
   let planId
-  const w = world([draft(), review('local_recovery_exhausted'), draft({ chatMessage: 'Planner notes: the step stands.' }),
+  const w = world([draft(), review('local_recovery_exhausted'), draft({ chatMessage: PLANNER_NOTES }),
     review('local_recovery_exhausted', 'Still blocked after the planner round.'), ctx => {
       assert.equal(ctx.context.role, 'executor')
+      // The restage replaced the conversation that held the planner's reply; the durable notes ride in the handoff packet.
+      const carried = ctx.messages.filter(message => typeof message.content === 'string' && message.content.includes(PLANNER_NOTES))
+      assert.ok(carried.length > 0, 'the resumed executor still sees the planner notes for this step')
+      assert.ok(carried.every(message => message.content.includes('planner_review_notes') && message.content.includes('advisory, not world evidence')))
       assert.equal(ctx.memory.currentPlan(KEY).status, 'active', 'the resume reactivates the goal before the executor restage')
       assert.equal(getActivePlan(ctx.memory.planningState(KEY)).plan_id, planId)
       return action(ctx)
