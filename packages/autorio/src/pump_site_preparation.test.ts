@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { cleanup_pump_preparation, get_pump_site_preparation, pump_site_preflight, tick_pump_preparation } from './pump_site_preparation'
 import { TaskStates } from './types'
-import { get_recent_fluid_source_observation } from './fluid_source_observation'
+import { fluid_source_observation, get_recent_fluid_source_observation } from './fluid_source_observation'
 import { new_task_manager } from './task_manager'
 
 beforeEach(() => {
@@ -183,4 +183,28 @@ it.each(['startup','actor-loss'] as const)('cleans serialized owned marks withou
   expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
   expect(f.held()).toBe(0)
   if(lifecycle==='startup') expect(pump_site_preflight(f.actor,p.preparation_id)).toMatchObject({ok:false,code:'pump_preparation_unavailable'})
+})
+
+// AB-3: a kept positive read must not hide the cover hints of a newer read, or preparation fails until the positive expires.
+it('prepares from the cover hints of a newer empty re-read while a positive read is kept', () => {
+  const f = fixture()
+  const proto = (globalThis as any).prototypes
+  proto.fluid = { water: {} }
+  proto.tile['alien-water'] = proto.tile.water
+  const covered = proto.tile.landfill
+  const far = { name: 'water', position: { x: 300, y: 300 }, prototype: proto.tile.water, surface: { index: 1 } }
+  const hint = { name: 'landfill', position: { x: 0, y: -1 }, prototype: covered, hidden_tile: 'water', surface: { index: 1 } }
+  let positive = true
+  f.surface.find_tiles_filtered = vi.fn((args: any) => args.has_hidden_tile ? (positive ? [] : [hint]) : (positive ? [far] : []))
+  f.actor.force = { index: 1, manual_mining_speed_modifier: 0 }
+  // The first read finds exposed water far away; the second, from beside the landfilled shore, finds none and sees the covered water.
+  fluid_source_observation(f.actor, { fluid_name: 'water', search_radius: 256 })
+  expect(f.plan()).toMatchObject({ ok: false, code: 'covered_water_not_observed' })
+  positive = false
+  ;(globalThis as any).game.tick = 110
+  f.actor.position = { x: 0.5, y: 2.5 }
+  const later = fluid_source_observation(f.actor, { fluid_name: 'water', search_radius: 8 }) as any
+  expect(later.returned_count).toBe(0)
+  expect(get_recent_fluid_source_observation(f.actor, 'water')).toMatchObject({ samples: [expect.objectContaining({ position: { x: 300, y: 300 } })] })
+  expect(f.plan()).toMatchObject({ ok: true, placement_authority: false })
 })

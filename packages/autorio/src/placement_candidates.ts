@@ -8,7 +8,8 @@ import { pole_candidate_facts, pole_reach, protected_read } from './electric_fac
 import { find_world_entities } from './npc_vision'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { placement_obstruction_sample } from './placement_obstructions'
-import { get_recent_fluid_source_observation } from './fluid_source_observation'
+import { get_recent_fluid_source_observation, get_recent_fluid_source_observation_for } from './fluid_source_observation'
+import { fluid_io_names } from './prototype_knowledge'
 import { type ClearableEntity, type ClearanceMemo, placeable_or_clearable, placement_clearance } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 
@@ -553,7 +554,10 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   let terrain_preparation: ReturnType<typeof pump_terrain_preparation> | undefined
   if (prototype.type === 'offshore-pump') {
     terrain_preparation = pump_terrain_preparation(prototype)
-    const water = get_recent_fluid_source_observation(actor)
+    // The read of the fluid this pump draws (from its own prototype data), not whichever fluid was read last: a newer read of
+    // another fluid must not shadow the water that was found. A prototype that names no fluid keeps the newest read.
+    const drawn = fluid_io_names(prototype)
+    const water = drawn.length > 0 ? get_recent_fluid_source_observation_for(actor, drawn) : get_recent_fluid_source_observation(actor)
     if (!water) return { ok: false as const, code: 'water_search_required', entity_name: request.entity_name, terrain_preparation,
       error: 'Read getFluidSourceTiles for water before searching pump candidates; check its covered_fluid_hints before selecting a site.' }
     const samples = water.samples

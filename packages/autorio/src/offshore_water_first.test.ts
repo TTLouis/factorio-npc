@@ -116,3 +116,26 @@ it('reports bounded native super-force terrain rules as preparation hints withou
   expect(result.terrain_preparation.rules[0].required_tiles.layers).toEqual(['water_tile'])
   expect(f.surface.can_place_entity).not.toHaveBeenCalled()
 })
+// AB-3: the pump draws the fluid of the tile it sits on; a newer read of another fluid must not shadow the water that was found.
+it('looks up the water read by the fluids the pump draws, not the newest read of any fluid', () => {
+  const f = fixture(); f.read()
+  const prototypes = (globalThis as any).prototypes
+  prototypes.fluid.lava = {}
+  prototypes.tile.lava = { fluid: { name: 'lava' } }
+  prototypes.entity['test-pump'].fluidbox_prototypes = [{ index: 1, production_type: 'output', pipe_connections: [] }]
+  f.surface.find_tiles_filtered.mockImplementation(() => [])
+  expect(fluid_source_observation(f.actor, { fluid_name: 'lava' })).toMatchObject({ ok: true, returned_count: 0 })
+  const result = f.candidates()
+  expect(result.ok).toBe(true)
+  expect(result.center).toEqual({ x: 46, y: 23 })
+})
+it('still refuses when the pump draws no fluid that was ever read', () => {
+  const f = fixture()
+  const prototypes = (globalThis as any).prototypes
+  prototypes.fluid.lava = {}
+  prototypes.tile.lava = { fluid: { name: 'lava' } }
+  prototypes.entity['test-pump'].fluidbox_prototypes = [{ index: 1, production_type: 'output', filter: { name: 'steam' }, pipe_connections: [] }]
+  prototypes.fluid.steam = {}
+  f.read()
+  expect(f.candidates()).toMatchObject({ ok: false, code: 'water_search_required' })
+})

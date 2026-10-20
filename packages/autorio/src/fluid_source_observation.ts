@@ -13,9 +13,10 @@ const MAX_SCANNED_TILES = 256
 const MAX_REPORTED_UNGENERATED_CHUNKS = 8
 const RECENT_FLUID_TTL_TICKS = 60 * 60
 const MAX_RECENT_FLUID_READS = 16
-// Where a character could stand near a water sample: asked of the engine for the actor's own character prototype.
-const APPROACH_SEARCH_RADIUS = 16
-const APPROACH_PRECISION = 0.5
+// Where a character could stand near a tile: asked of the engine for the actor's own character prototype. The walk preflight
+// searches its correction position with the same numbers.
+export const STANDING_SEARCH_RADIUS = 16
+export const STANDING_SEARCH_PRECISION = 0.5
 const MAX_LATER_READS = 3
 
 interface FluidSourceSample {
@@ -24,8 +25,10 @@ interface FluidSourceSample {
   position: { x: number, y: number }
   surface_index: number
   distance: number
-  // A position the actor's character can stand on within APPROACH_SEARCH_RADIUS of the tile; absent when the engine found none.
-  // The sample itself is a tile of the fluid, so walking onto it is walking into collision.
+  // A position the actor's character can stand on within STANDING_SEARCH_RADIUS of the tile; absent when the engine found none.
+  // The sample itself is a tile of the fluid, so walking onto it is walking into collision. The approach is the nearest standing
+  // room, not a reach or a route: it may lie up to the search radius from the tile, and the engine does not say it is connected
+  // to where the actor stands.
   approach?: { x: number, y: number }
 }
 
@@ -47,8 +50,15 @@ interface RecentFluidSourceObservation {
   search_radius: number
   samples: FluidSourceSample[]
   covered_fluid_hints: CoveredFluidHint[]
+  returned_count: number
+  scan_truncated: boolean
+  covered_returned_count?: number
   covered_scan_truncated: boolean
+  covered_scanned_tile_limit?: number
+  covered_truncated?: boolean
   covered_empty_result_is_conclusive: boolean
+  covered_ordering?: string
+  covered_hint_requires_native_mining_validation?: boolean
   coverage_complete: boolean
   empty_result_is_conclusive: boolean
   // Newer reads that did not replace this one (see remember_fluid_read), newest first.
@@ -62,6 +72,8 @@ interface LaterFluidRead {
   returned_count: number
   coverage_complete: boolean
   empty_result_is_conclusive: boolean
+  // How many remembered samples this read contradicted (they lay inside its scanned circle); absent when none.
+  pruned_samples?: number
 }
 
 interface RecentFluidRead {
@@ -72,36 +84,62 @@ interface RecentFluidRead {
 
 declare const storage: { sgluna_recent_fluid_reads?: RecentFluidRead[] }
 
-/** A recent bounded fact, never placement authority. Re-read after movement/terrain changes. */
-export function get_recent_fluid_source_observation(actor: ControlledActor | undefined, fluid_name?: string) {
-  if (!actor?.is_valid) return undefined
+/** The recent reads of this actor, newest first, that are still inside the clock window, in the actor's own scope. */
+function recent_reads(actor: ControlledActor | undefined) {
+  const facts: RecentFluidSourceObservation[] = []
+  if (!actor?.is_valid) return facts
   const actor_id = actor.status_snapshot().actor_id
-  if (actor_id === undefined) return undefined
+  if (actor_id === undefined) return facts
   for (const read of storage.sgluna_recent_fluid_reads ?? []) {
     const fact = read.observation
     if (read.actor_id === actor_id && read.force_index === actor.force.index && fact.surface_index === actor.surface.index
-      && (fluid_name === undefined || fact.fluid_name === fluid_name) && game.tick >= fact.observed_tick && game.tick - fact.observed_tick <= RECENT_FLUID_TTL_TICKS) return fact
+      && game.tick >= fact.observed_tick && game.tick - fact.observed_tick <= RECENT_FLUID_TTL_TICKS) facts.push(fact)
+  }
+  return facts
+}
+
+/** A recent bounded fact, never placement authority. Re-read after movement/terrain changes. */
+export function get_recent_fluid_source_observation(actor: ControlledActor | undefined, fluid_name?: string) {
+  for (const fact of recent_reads(actor)) {
+    if (fluid_name === undefined || fact.fluid_name === fluid_name) return fact
   }
   return undefined
 }
 
-// True when a read proves the remembered samples are gone: it is an empty answer that is conclusive (every chunk of its square
-// generated, nothing left unscanned), at least as wide as the remembered read, and its circle contains every remembered sample.
-function read_shows_samples_gone(remembered: RecentFluidSourceObservation, read: RecentFluidSourceObservation) {
-  if (read.samples.length > 0 || !read.empty_result_is_conclusive || read.search_radius < remembered.search_radius) return false
-  for (const sample of remembered.samples) {
-    if (squared_distance(read.actor_position, sample.position) > read.search_radius ** 2) return false
+/** The recent read for any of these fluids: the newest one that has samples, else the newest one without. Never a read of another fluid. */
+export function get_recent_fluid_source_observation_for(actor: ControlledActor | undefined, fluid_names: string[]) {
+  let without_samples: RecentFluidSourceObservation | undefined
+  for (const fact of recent_reads(actor)) {
+    if (!fluid_names.includes(fact.fluid_name)) continue
+    if (fact.samples.length > 0) return fact
+    without_samples = without_samples ?? fact
   }
-  return true
+  return without_samples
+}
+
+// The remembered samples a newer empty read does not contradict. A sample is contradicted when it lies inside the read's circle
+// and the read was not truncated: the engine scanned that tile and found no such fluid there. The circle test errs towards
+// keeping: find_tiles_filtered and a centre-distance test can disagree by up to a tile at the edge, so only samples at least
+// one tile inside the radius count as scanned. A truncated scan proves nothing about any tile.
+function samples_not_contradicted(remembered: RecentFluidSourceObservation, read: RecentFluidSourceObservation) {
+  const scanned_radius = read.search_radius - 1
+  if (read.scan_truncated || scanned_radius <= 0) return remembered.samples
+  const kept: FluidSourceSample[] = []
+  for (const sample of remembered.samples) {
+    if (squared_distance(read.actor_position, sample.position) > scanned_radius ** 2) kept.push(sample)
+  }
+  return kept
 }
 
 // One remembered read per actor, surface and fluid. A positive read (it has samples) is a fact about terrain, and terrain does
 // not move unless something mutates it (which calls invalidate_actor_fluid_source_observations). A newer read is not more
 // truthful about tiles it did not see, so an empty or smaller re-read never evicts a positive one (AB-3: a radius-128 empty
-// read replaced the radius-256 find, and placement then said no water was exposed). The newer read is recorded beside the
-// positive one instead, newest first and bounded, and the positive keeps its own observed_tick so it still expires by TTL.
-// A positive is replaced by a newer positive read, or dropped when an empty read proves the samples gone
-// (read_shows_samples_gone: conclusive, at least as wide, covering every remembered sample).
+// read replaced the radius-256 find, and placement then said no water was exposed). It evicts only what it contradicts: the
+// samples inside its scanned circle (samples_not_contradicted); the rest stay. A newer positive read replaces the old one.
+// What a kept positive describes (its samples, radius, position, tick) is the old read's, and it still expires by TTL from its
+// own observed_tick. Everything about cover (covered_*) belongs to the newest read, because cover is exactly what an actor
+// beside a landfilled shore sees and an old read does not. The newer read is noted beside the positive one, newest first and
+// bounded, so a later diagnosis sees that it happened and what it covered.
 function remember_fluid_read(actor: ControlledActor, observation: RecentFluidSourceObservation) {
   const actor_id = actor.status_snapshot().actor_id
   if (actor_id === undefined) return
@@ -113,15 +151,23 @@ function remember_fluid_read(actor: ControlledActor, observation: RecentFluidSou
     if (same_scope(read)) remembered = read.observation
   }
   if (remembered && remembered.samples.length > 0 && observation.samples.length === 0
-    && game.tick >= remembered.observed_tick && game.tick - remembered.observed_tick <= RECENT_FLUID_TTL_TICKS
-    && !read_shows_samples_gone(remembered, observation)) {
-    const later_reads: LaterFluidRead[] = [{ observed_tick: observation.observed_tick, search_radius: observation.search_radius,
-      actor_position: observation.actor_position, returned_count: 0, coverage_complete: observation.coverage_complete,
-      empty_result_is_conclusive: observation.empty_result_is_conclusive }]
-    for (const earlier of remembered.later_reads ?? []) {
-      if (later_reads.length < MAX_LATER_READS) later_reads.push(earlier)
+    && game.tick >= remembered.observed_tick && game.tick - remembered.observed_tick <= RECENT_FLUID_TTL_TICKS) {
+    const kept = samples_not_contradicted(remembered, observation)
+    if (kept.length > 0) {
+      const pruned = remembered.samples.length - kept.length
+      const later_reads: LaterFluidRead[] = [{ observed_tick: observation.observed_tick, search_radius: observation.search_radius,
+        actor_position: observation.actor_position, returned_count: 0, coverage_complete: observation.coverage_complete,
+        empty_result_is_conclusive: observation.empty_result_is_conclusive, ...(pruned > 0 ? { pruned_samples: pruned } : {}) }]
+      for (const earlier of remembered.later_reads ?? []) {
+        if (later_reads.length < MAX_LATER_READS) later_reads.push(earlier)
+      }
+      observation = { ...remembered, samples: kept, returned_count: kept.length, later_reads,
+        covered_fluid_hints: observation.covered_fluid_hints, covered_returned_count: observation.covered_returned_count,
+        covered_scan_truncated: observation.covered_scan_truncated, covered_scanned_tile_limit: observation.covered_scanned_tile_limit,
+        covered_truncated: observation.covered_truncated, covered_empty_result_is_conclusive: observation.covered_empty_result_is_conclusive,
+        covered_ordering: observation.covered_ordering,
+        covered_hint_requires_native_mining_validation: observation.covered_hint_requires_native_mining_validation }
     }
-    observation = { ...remembered, later_reads }
   }
   reads.unshift({ actor_id, force_index: actor.force.index, observation })
   if (reads.length > MAX_RECENT_FLUID_READS) reads.pop()
@@ -226,7 +272,7 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
     // Ask the engine where this actor's own character fits near the tile centre (its collision mask decides, not a tile list).
     const character = actor.character
     const standing = character?.valid
-      ? surface.find_non_colliding_position(character.name, { x: tile.position.x + 0.5, y: tile.position.y + 0.5 }, APPROACH_SEARCH_RADIUS, APPROACH_PRECISION)
+      ? surface.find_non_colliding_position(character.name, { x: tile.position.x + 0.5, y: tile.position.y + 0.5 }, STANDING_SEARCH_RADIUS, STANDING_SEARCH_PRECISION)
       : undefined
     samples.push({ name: tile.name, fluid_name: request.fluid_name, position: tile.position, surface_index: surface.index,
       distance: math.floor(math.sqrt(tile.distance_squared) * 10 + 0.5) / 10,
@@ -265,7 +311,7 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
     empty_result_is_conclusive: coverage_complete && !scan_truncated,
     matching_tile_prototypes: names.length, samples, returned_count: samples.length, truncated: found.length > samples.length || scan_truncated,
     // Present when the samples could be given an approach: how far from each tile the engine was asked to look for standing room.
-    ...(actor.character?.valid ? { approach_search_radius: APPROACH_SEARCH_RADIUS } : {}),
+    ...(actor.character?.valid ? { approach_search_radius: STANDING_SEARCH_RADIUS } : {}),
     scanned_tile_limit: MAX_SCANNED_TILES, scan_truncated,
     ordering: scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first',
     covered_fluid_hints, covered_returned_count: covered_fluid_hints.length,
