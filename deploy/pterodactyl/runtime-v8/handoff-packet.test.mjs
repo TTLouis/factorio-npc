@@ -42,6 +42,8 @@ import {
   rawLeafFromRecipeDetails,
   rawLeafSourceFromRead,
   withoutRawLeafRecipes,
+  placingItemFromDetails,
+  buildFluidsFromBill,
 } from './handoff-packet.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import {
@@ -1582,3 +1584,50 @@ test('Run AB: at the protocol-3 cap the held counts and the placed furnaces surv
   assert.deepEqual(packet.executor_facts.placed_machines, 2)
 })
 
+// Run V (16v): the step builds a water-to-boiler-to-steam-engine chain, the pump, boiler and engine are all in hand, and the
+// size cap dropped the only record of where water had been seen while stone-furnace facts stayed.
+test('Run V: the prototype data names the fluids of the entities still to place, and the hints for those fluids outlast the re-readable records', () => {
+  const details = (name, filters) => ({ found: true, query: name, entity: { name, type: 'x', place_items: [{ name, count: 1 }], fluidboxes: filters.map((filter, index) => ({ index: index + 1, production_type: 'input-output', filter })) } })
+  const placing = new Map([['boiler', placingItemFromDetails(details('boiler', ['water', 'steam']), 'boiler')], ['steam-engine', placingItemFromDetails(details('steam-engine', ['steam']), 'steam-engine')],
+    ['stone-furnace', placingItemFromDetails(details('stone-furnace', []), 'stone-furnace')]])
+  assert.deepEqual(placing.get('boiler'), { prototype: 'boiler', item: 'boiler', count: 1, fluids: ['water', 'steam'] })
+  assert.deepEqual(placing.get('stone-furnace'), { prototype: 'stone-furnace', item: 'stone-furnace', count: 1 }, 'an entity without fluidboxes keeps its shape')
+  const row = (prototype, remaining) => ({ prototype, item: prototype, per_entity: 1, minimum: 1, placed: 1 - remaining, remaining })
+  assert.deepEqual(buildFluidsFromBill([row('boiler', 1), row('steam-engine', 1), row('stone-furnace', 1)], placing), ['steam', 'water'])
+  assert.deepEqual(buildFluidsFromBill([row('boiler', 0), row('steam-engine', 1)], placing), ['steam'], 'an entity already placed asks for no fluid')
+  assert.deepEqual(buildFluidsFromBill([row('boiler', 1)], new Map()), [], 'an unread prototype names nothing')
+
+  const hints = learnWater(waterAnswer([waterSample(22, 8), waterSample(-82, -19)])).anchors
+  const args = runAbPacketArgs()
+  const facts = { ...args.executorFacts, fluid_source_hints: hints }
+  const run = (buildFluids, maxChars) => buildHandoffPacket({ ...args, executorFacts: { ...facts, ...(buildFluids ? { build_fluids: buildFluids } : {}) }, limits: { maxChars } })
+  const full = run(undefined, 100000)
+  const readAgain = full.text.split('\n').filter(line => /^(recipe_fact |held_counts|placed_machines|active_step_contract)/.test(line))
+  const room = full.chars - readAgain.reduce((sum, line) => sum + line.length + 1, 0) // all the executor can read again is over the limit
+
+  const serving = run(['steam', 'water'], room)
+  assert.equal(serving.over_limit, false)
+  assert.ok(!serving.dropped.includes('fluid_source_hints'), `the hints for the step's fluid survive: ${serving.dropped.join(', ')}`)
+  assert.ok(serving.dropped.includes('held_counts') && serving.dropped.includes('placed_machines') && serving.dropped.includes('recipe_fact_0'), 'the records the executor can read again drop first')
+  assert.equal(serving.executor_facts.fluid_source_hints, 2)
+  assert.match(serving.text, /water:water@\(22,8\) surface=1/)
+  for (const unrelated of [undefined, [], ['crude-oil']]) {
+    const packet = run(unrelated, room)
+    assert.ok(packet.dropped.includes('fluid_source_hints'), `hints serving no unmet need drop in the early tier: ${JSON.stringify(unrelated)}`)
+    assert.equal(packet.dropped.indexOf('fluid_source_hints') < packet.dropped.indexOf('recipe_fact_0'), true, 'before the recipe facts')
+  }
+
+  // Order: after every record the executor can read again, before the planner's notes and the arithmetic.
+  const order = HANDOFF_DROP_ORDER
+  for (const earlier of ['fluid_source_hints', 'recipe_facts', 'fresh_counts', 'machine_energy', 'fuel_needs', 'placed_machines']) {
+    assert.ok(order.indexOf(earlier) < order.indexOf('fluid_source_hints_for_step'), earlier)
+  }
+  for (const later of ['review_notes', 'residual_needs', 'raw_leaf_acquisition']) assert.ok(order.indexOf('fluid_source_hints_for_step') < order.indexOf(later), later)
+
+  // A crowded record shows the anchors of the needed fluid first.
+  const oil = { name: 'crude-oil', fluid_name: 'crude-oil', surface_index: 1, position: { x: 500, y: 500 }, as_of: hints[0].as_of }
+  const mixed = run(['water'], 100000).volatileText
+  assert.ok(mixed.includes('water:water@('))
+  const ordered = buildHandoffPacket({ ...args, executorFacts: { ...facts, fluid_source_hints: [oil, ...hints], build_fluids: ['water'] }, limits: { maxChars: 100000 } })
+  assert.match(ordered.volatileText.split('\n').find(line => line.startsWith('fluid_source_hints')), /: water:water@\(22,8\).*\| water:water@\(-82,-19\).*\| crude-oil:crude-oil@\(500,500\)/)
+})

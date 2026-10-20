@@ -71,6 +71,7 @@ function liveGame({ inventory = {}, recipes = {}, fuels, researchNodes } = {}) {
   game.fluidReads = []
   // Unit 9: prototype details (placing items), live entity counts, technology progress, lab discovery, harvest sources.
   game.protos = {}
+  game.protoFluids = {} // prototype -> the fluids its fluidboxes are filtered to (the mod's fluidboxes[].filter)
   game.placed = {}
   game.technologies = {}
   game.labs = undefined
@@ -100,7 +101,7 @@ function liveGame({ inventory = {}, recipes = {}, fuels, researchNodes } = {}) {
       game.prototypeReads.push(name)
       const items = game.failDetails.has(name) ? undefined : game.protos[name]
       // The mod's prototype_details shape: an entity prototype with its placing items (entity_details place_items).
-      return JSON.stringify(items ? { found: true, query: name, entity: { name, type: 'x', place_items: items.map(([item, count]) => ({ name: item, count })) } }
+      return JSON.stringify(items ? { found: true, query: name, entity: { name, type: 'x', place_items: items.map(([item, count]) => ({ name: item, count })), ...(game.protoFluids[name] ? { fluidboxes: game.protoFluids[name].map((filter, index) => ({ index: index + 1, production_type: 'input-output', filter })) } : {}) } }
         : { found: false, query: name, error: 'prototype not found as item, fluid, or entity' })
     }
     if (text.includes('"autorio_research","technology"')) {
@@ -1956,6 +1957,7 @@ test('protocol 3: the packet leaves the geometry block its real size (none when 
 // Run V (16v): the pump, the boiler and the engine were all in hand, yet the closure expanded the boiler through a stone furnace into
 // iron plates, and the stone-furnace facts crowded out the record of where water had been seen.
 const WATER_STEP_CONTRACT = { mode: 'all', requirements: [entityCount('pump', 'offshore-pump', 1), entityCount('boiler', 'boiler', 1), entityCount('engine', 'steam-engine', 1)] }
+const WATER_FLUIDS = { 'offshore-pump': ['water'], boiler: ['water', 'steam'], 'steam-engine': ['steam'] }
 const closureItems = ['stone-furnace', 'stone', 'pipe', 'iron-plate', 'iron-gear-wheel', 'electronic-circuit', 'iron-ore']
 
 test('Run V: build roots already in hand stay out of the recipe closure, and are read and shown as covered', async () => {
@@ -1984,3 +1986,16 @@ test('Run V: build roots already in hand stay out of the recipe closure, and are
   assert.ok(partial.game.recipeReads.includes('iron-gear-wheel'), 'one engine held of one still to place, none left over: the closure of the second is read')
 })
 
+test('Run V: the fluids of the entities still to place come from the prototype data and ride with the executor facts', async () => {
+  const world = await runSteamWorld({ inventory: { 'offshore-pump': 1, boiler: 1, 'steam-engine': 1 }, placed: { boiler: 1 }, contract: WATER_STEP_CONTRACT, mutate: (game) => { game.protoFluids = structuredClone(WATER_FLUIDS) } })
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch })
+  assert.deepEqual(gathered.facts.build_fluids, ['steam', 'water'], 'the pump (water) and the engine (steam) are still to place; the placed boiler adds nothing')
+  assert.deepEqual(world.agent.handoffPlacingItems.get('boiler').fluids, ['water', 'steam'])
+  world.agent.recordHandoffToolFacts('getFluidSourceTiles', JSON.stringify(WATER_FAR), { fluid_name: 'water' })
+  const restaged = await restageToFreshExecutor(world)
+  assert.equal(restaged.restaged, true, JSON.stringify(restaged))
+  assert.match(stepLine(world, 'fluid_source_hints'), /water:water@\(-82,-19\)/)
+  // Nothing to place, or prototypes that carry no fluid: no field.
+  const bare = await runSteamWorld({ inventory: { 'offshore-pump': 1 }, placed: {}, contract: WATER_STEP_CONTRACT })
+  assert.equal((await bare.agent.gatherExecutorHandoffFacts({ state: bare.memory.planningState(KEY), actor: bare.agent.epoch })).facts.build_fluids, undefined)
+})

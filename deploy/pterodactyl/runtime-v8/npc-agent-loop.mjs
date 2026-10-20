@@ -62,6 +62,7 @@ import {
   rawLeafFromRecipeDetails,
   rawLeafSourceFromRead,
   withoutRawLeafRecipes,
+  buildFluidsFromBill,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
@@ -5789,6 +5790,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const machineRequirement = checkpointMachineRequirements(step.completion_contract)[0]
       const historical = this.historicalEntityFacts()
       const fluidHints = [...this.handoffFluidHints.values()].reverse() // newest first
+      const buildFluids = buildFluidsFromBill(buildBill.rows, placing) // the fluids of the entities the step still has to place
 
       meta.read_items = readItems
       const fresh = new Map()
@@ -6126,7 +6128,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical, machine_energy: machineEnergy, fuel_needs: fuelNeeds, placed_machines: placedMachines } : undefined, meta }
       }
       const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || machineEnergy || historical.length > 0 || fluidHints.length > 0 || placedMachines.length > 0
-      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints, machine_energy: machineEnergy, fuel_needs: fuelNeeds, placed_machines: placedMachines } : undefined, meta }
+      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints, ...(buildFluids.length > 0 ? { build_fluids: buildFluids } : {}), machine_energy: machineEnergy, fuel_needs: fuelNeeds, placed_machines: placedMachines } : undefined, meta }
     }
     catch (error) {
       this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)

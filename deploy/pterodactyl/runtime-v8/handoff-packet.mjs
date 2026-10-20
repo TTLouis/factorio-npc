@@ -98,6 +98,10 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   // Unit 14: a placed machine's own inventories (fuel, source, output). They outlast the machine_energy annotation because they
   // are the live state the step acts on, and drop before the residual arithmetic.
   'placed_machines',
+  // Fluid-source hints for a fluid the step's own unplaced entities carry (their fluidbox filters). Every record above can be read
+  // again from the game by the executor; these positions cannot once the actor has left them (the read is bounded around the actor),
+  // so they outlast those records. Hints that serve no unmet need of the step stay in the early 'fluid_source_hints' tier.
+  'fluid_source_hints_for_step',
   // The planner's notes for the active step. They outlast the contract and placed-machine records, which the executor can
   // re-read from the game, because they are the only copy once the conversation that held them is replaced.
   'review_notes',
@@ -1060,7 +1064,17 @@ export function placingItemFromDetails(parsed, prototype) {
   if (items.length === 0) return unresolved('no_placing_item')
   if (items.length > 1) return unresolved('several_placing_items')
   const count = Number.isSafeInteger(items[0].count) && items[0].count >= 1 ? items[0].count : undefined
-  return count ? { prototype, item: items[0].name, count } : unresolved('placing_item_count_unreadable')
+  // The fluids the prototype's own fluidboxes are filtered to (the mod's fluidboxes[].filter): what the entity takes in or gives out.
+  const fluids = [...new Set(asList(entity.fluidboxes).map(box => factName(box?.filter)).filter(Boolean))].slice(0, 4)
+  return count ? { prototype, item: items[0].name, count, ...(fluids.length > 0 ? { fluids } : {}) } : unresolved('placing_item_count_unreadable')
+}
+
+/**
+ * The fluids the entities a build step still has to place carry in their fluidboxes: the sorted union over the bill rows with
+ * entities remaining of the `fluids` of that prototype's placing item. Derived from prototype data; no fluid or entity is named.
+ */
+export function buildFluidsFromBill(rows, placing) {
+  return [...new Set(asList(rows).filter(row => row.remaining > 0).flatMap(row => asList(placing instanceof Map ? placing.get(row.prototype)?.fluids : undefined)))].sort()
 }
 
 /** An observed placed count out of a parsed entity_count condition answer, or undefined (never zero for an unreadable answer). */
@@ -1669,9 +1683,13 @@ export function rememberFluidHints(store, anchors, limits = EXECUTOR_FACT_LIMITS
   return evicted
 }
 
-function fluidHintsRecord(hints, limits) {
+// `buildFluids` names the fluids the entities the step still has to place carry (buildFluidsFromBill). Anchors of one of those
+// fluids serve an unmet need of the step and come first; a record with such an anchor drops with its own, later tier.
+function fluidHintsRecord(hints, limits, buildFluids) {
+  const needed = new Set(asList(buildFluids))
   const list = asList(hints).filter(anchor => isPlainObject(anchor) && factName(anchor.name) && factName(anchor.fluid_name)
-    && Number.isSafeInteger(anchor.surface_index) && Number.isInteger(anchor.position?.x) && Number.isInteger(anchor.position?.y)).slice(0, limits.fluidHints)
+    && Number.isSafeInteger(anchor.surface_index) && Number.isInteger(anchor.position?.x) && Number.isInteger(anchor.position?.y))
+    .sort((left, right) => Number(needed.has(right.fluid_name)) - Number(needed.has(left.fluid_name))).slice(0, limits.fluidHints)
   if (list.length === 0) return undefined
   const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y}) surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}${anchor.coverage_complete === false ? ` coverage=INCOMPLETE${Number.isSafeInteger(anchor.ungenerated_chunk_count) ? `(${anchor.ungenerated_chunk_count} chunks ungenerated; nearer water may exist)` : '(nearer water may exist)'}` : ''}`)
   const kept = boundedKept(parts, ' | ', limits.fluidHintChars)
@@ -1679,7 +1697,7 @@ function fluidHintsRecord(hints, limits) {
   return {
     key: 'fluid_source_hints',
     block: 'step',
-    drop: 'fluid_source_hints',
+    drop: list.some(anchor => needed.has(anchor.fluid_name)) ? 'fluid_source_hints_for_step' : 'fluid_source_hints',
     shown: kept.length,
     text: `fluid_source_hints (HISTORICAL: positions where native fluid tiles were observed earlier, newest first; NOT current, not nearest, not a reachable or legal placement; re-check with getFluidSourceTiles before placing anything): ${kept.join(' | ')}${more > 0 ? ` | (+${more} more)` : ''}`,
   }
@@ -1732,7 +1750,7 @@ function executorFactRecords(facts, plan, step, limits) {
   })
   const historical = historicalRecord(facts.historical_entities, limits)
   if (historical) records.push(historical)
-  const fluidHints = fluidHintsRecord(facts.fluid_source_hints, limits)
+  const fluidHints = fluidHintsRecord(facts.fluid_source_hints, limits, facts.build_fluids)
   if (fluidHints) records.push(fluidHints)
   return records
 }
