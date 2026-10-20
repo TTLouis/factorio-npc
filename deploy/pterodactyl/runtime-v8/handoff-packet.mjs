@@ -66,7 +66,8 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   runtimeChars: 200,
   amendmentChars: 500,
   // The planner's notes from the one review round of the active step (executor role only).
-  reviewNotesChars: MAX_REVIEW_NOTES_CHARS,
+  // The store keeps MAX_REVIEW_NOTES_CHARS; the packet shows the head, sized like the other model-authored notes.
+  reviewNotesChars: Math.min(500, MAX_REVIEW_NOTES_CHARS),
   // U11 advisory: what Jev's observation families may ADD. Bounded by count and length, and the first records dropped
   // when the packet is over its limit (they are never mandatory).
   jevFacts: 4,
@@ -97,8 +98,8 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   // Unit 14: a placed machine's own inventories (fuel, source, output). They outlast the machine_energy annotation because they
   // are the live state the step acts on, and drop before the residual arithmetic.
   'placed_machines',
-  // The planner's notes for the active step. Advisory, so after the facts the step acts on are kept in part, but they serve
-  // the step the executor is on and are the only copy once the conversation that held them is replaced.
+  // The planner's notes for the active step. They outlast the contract and placed-machine records, which the executor can
+  // re-read from the game, because they are the only copy once the conversation that held them is replaced.
   'review_notes',
   'residual_needs',
   // Intentionally after residual_needs (unit 6): acquisition is its own record so the raw-leaf mining sources and nearest
