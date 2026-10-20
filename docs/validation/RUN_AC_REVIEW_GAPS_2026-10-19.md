@@ -41,6 +41,10 @@ no gameplay trial and no deployment.
   same step, or an unavailable planner, pauses exactly as before. BLOCKED plans
   still go only through the replacement wake. Trace: `planner.review_round`.
 
+  2026-10-20 (X-1, after Runs AD to AF): that pause is model_recoverable now,
+  so the supervisor's bounded auto-resume (2 per step, 6 per goal) restages a
+  fresh executor instead of leaving the goal at a guard pause.
+
 Unchanged: review authority stays advisory, `world_blocker_proven:false`; no
 replacement without the existing world-evidence and grant checks; no reset of
 fresh-recovery, provider-budget or continuation allowances.

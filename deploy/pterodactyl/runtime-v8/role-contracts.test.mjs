@@ -220,6 +220,7 @@ test('a second executor review of the step is auto-resumed by the supervisor and
   const result = await w.say()
   assert.equal(result.blocker.class, 'planner_review_required')
   planId = w.plan().plan_id
+  const stepId = w.plan().steps[0].step_id
   const record = w.memory.pauseRecord(KEY)
   assert.equal(record.pause_class, 'model_recoverable')
   const chat = []
@@ -238,6 +239,8 @@ test('a second executor review of the step is auto-resumed by the supervisor and
   assert.equal(w.game.mutations.length, 1, 'the resumed executor acted without a human')
   assert.notEqual(w.memory.currentPlan(KEY).status, 'paused')
   assert.equal(w.plan().plan_id, planId, 'no plan was created or replaced')
+  assert.equal(w.plan().steps[0].step_id, stepId)
+  assert.equal(w.memory.autoResumeAllowance(KEY).goal_attempts, 1, 'the resume is counted against the goal cap')
   assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 1, 'the step keeps its one planner round')
 })
 

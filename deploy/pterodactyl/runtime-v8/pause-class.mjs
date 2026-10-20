@@ -5,7 +5,8 @@
 //   transport          the provider could not be reached or answered with a temporary condition. Waiting fixes it. Subkinds:
 //                      budget | rate_limited | server_error | timeout | transport. Backs off and resumes (supervisor.mjs).
 //   model_recoverable  the model answered but produced no usable action (action omission exhausted, an unverified blocker rejected,
-//                      output budget exhausted without evidence). A FRESH executor restage with a rebuilt handoff packet can fix it.
+//                      output budget exhausted without evidence, a second advisory review of one step). A FRESH executor restage
+//                      with a rebuilt handoff packet can fix it.
 //                      Resumes a bounded number of times (MODEL_RECOVERABLE_RESUME_LIMITS) through interrupted-plan recovery.
 //   authority          a person must decide: a question, permission, reserved supplies, a structural blocker that froze the plan.
 //   operator           an explicit stop or pause by a person (chat stop, UI pause or follow, terminate).
