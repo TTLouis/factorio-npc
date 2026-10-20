@@ -1631,3 +1631,31 @@ test('Run V: the prototype data names the fluids of the entities still to place,
   const ordered = buildHandoffPacket({ ...args, executorFacts: { ...facts, fluid_source_hints: [oil, ...hints], build_fluids: ['water'] }, limits: { maxChars: 100000 } })
   assert.match(ordered.volatileText.split('\n').find(line => line.startsWith('fluid_source_hints')), /: water:water@\(22,8\).*\| water:water@\(-82,-19\).*\| crude-oil:crude-oil@\(500,500\)/)
 })
+
+// AB-3 (18ab): the offshore pump's fluidbox has no filter, so its water came only from the tile; the pump fell to the early-drop tier.
+test('AB-3: a sample approach (the land position beside the water tile) is kept with the hint and rendered next to it', () => {
+  const learned = learnWater(waterAnswer([waterSample(60, -36, { approach: { x: 52.5, y: -35.5 } }), waterSample(61, -36), waterSample(62, -36, { approach: { x: 'x', y: 1 } })]))
+  assert.deepEqual(learned.anchors.map(anchor => anchor.approach), [{ x: 52.5, y: -35.5 }, undefined, undefined], 'only a finite pair is kept')
+  const args = runAbPacketArgs()
+  const packet = buildHandoffPacket({ ...args, executorFacts: { ...args.executorFacts, fluid_source_hints: learned.anchors }, limits: { maxChars: 100000 } })
+  assert.ok(packet.volatileText.includes('water:water@(60,-36) approach=(52.5,-35.5) surface=1 observed'))
+  assert.ok(packet.volatileText.includes('water:water@(61,-36) surface=1 observed'))
+})
+
+test('AB-3: the native fluid_io field names the fluids of an unfiltered offshore pump, and is preferred over fluidbox filters', () => {
+  const pump = (extra = {}) => ({ found: true, query: 'offshore-pump', entity: { name: 'offshore-pump', type: 'offshore-pump', place_items: [{ name: 'offshore-pump', count: 1 }],
+    fluidboxes: [{ index: 1, production_type: 'output', pipe_connections: [] }], ...extra } })
+  assert.deepEqual(placingItemFromDetails(pump(), 'offshore-pump'), { prototype: 'offshore-pump', item: 'offshore-pump', count: 1 }, 'without the native field there is nothing to name')
+  const native = [{ fluid: 'water', production_type: 'output', fluidbox_index: 1, source: 'tile_fluid' }, { fluid: 'lava', production_type: 'output', fluidbox_index: 1, source: 'tile_fluid' }]
+  assert.deepEqual(placingItemFromDetails(pump({ fluid_io: native }), 'offshore-pump'), { prototype: 'offshore-pump', item: 'offshore-pump', count: 1, fluids: ['water', 'lava'] })
+  // The native field wins when both exist; filters remain the fallback for an older mod answer.
+  const both = pump({ fluid_io: [{ fluid: 'steam', production_type: 'output', fluidbox_index: 1, source: 'fluidbox_filter' }],
+    fluidboxes: [{ index: 1, production_type: 'output', filter: 'water' }] })
+  assert.deepEqual(placingItemFromDetails(both, 'offshore-pump').fluids, ['steam'])
+  const legacy = pump({ fluidboxes: [{ index: 1, production_type: 'output', filter: 'water' }] })
+  assert.deepEqual(placingItemFromDetails(legacy, 'offshore-pump').fluids, ['water'])
+
+  const placing = new Map([['offshore-pump', placingItemFromDetails(pump({ fluid_io: native }), 'offshore-pump')]])
+  const row = { prototype: 'offshore-pump', item: 'offshore-pump', per_entity: 1, minimum: 1, placed: 0, remaining: 1 }
+  assert.deepEqual(buildFluidsFromBill([row], placing), ['lava', 'water'], 'the step now names water, so water hints serve an unmet need and leave the early tier')
+})

@@ -1064,8 +1064,10 @@ export function placingItemFromDetails(parsed, prototype) {
   if (items.length === 0) return unresolved('no_placing_item')
   if (items.length > 1) return unresolved('several_placing_items')
   const count = Number.isSafeInteger(items[0].count) && items[0].count >= 1 ? items[0].count : undefined
-  // The fluids the prototype's own fluidboxes are filtered to (the mod's fluidboxes[].filter): what the entity takes in or gives out.
-  const fluids = [...new Set(asList(entity.fluidboxes).map(box => factName(box?.filter)).filter(Boolean))].slice(0, 4)
+  // The fluids the entity takes in or gives out. The mod's native fluid_io names them (fluidbox filters, and for an offshore pump the
+  // fluids of the tile prototypes, since its own fluidbox has no filter). An older answer without it falls back to fluidboxes[].filter.
+  const native = asList(entity.fluid_io)
+  const fluids = [...new Set((Array.isArray(entity.fluid_io) ? native.map(io => factName(io?.fluid)) : asList(entity.fluidboxes).map(box => factName(box?.filter))).filter(Boolean))].slice(0, 4)
   return count ? { prototype, item: items[0].name, count, ...(fluids.length > 0 ? { fluids } : {}) } : unresolved('placing_item_count_unreadable')
 }
 
@@ -1660,6 +1662,9 @@ export function fluidSourceHintsFromRead(raw, args, tag, limits = EXECUTOR_FACT_
       fluid_name: sample.fluid_name,
       surface_index: sample.surface_index,
       position: { x: sample.position.x, y: sample.position.y },
+      // The land position the mod found for the actor's character beside the tile (absent when it found none). The tile itself is water.
+      ...(Number.isFinite(sample.approach?.x) && Number.isFinite(sample.approach?.y) && Math.abs(sample.approach.x) <= FLUID_COORDINATE_LIMIT && Math.abs(sample.approach.y) <= FLUID_COORDINATE_LIMIT
+        ? { approach: { x: sample.approach.x, y: sample.approach.y } } : {}),
       as_of,
       // A read over partly ungenerated chunks says so; the rendered hint carries it (absent on older reads).
       ...(typeof result.coverage_complete === 'boolean' ? { coverage_complete: result.coverage_complete } : {}),
@@ -1691,7 +1696,7 @@ function fluidHintsRecord(hints, limits, buildFluids) {
     && Number.isSafeInteger(anchor.surface_index) && Number.isInteger(anchor.position?.x) && Number.isInteger(anchor.position?.y))
     .sort((left, right) => Number(needed.has(right.fluid_name)) - Number(needed.has(left.fluid_name))).slice(0, limits.fluidHints)
   if (list.length === 0) return undefined
-  const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y}) surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}${anchor.coverage_complete === false ? ` coverage=INCOMPLETE${Number.isSafeInteger(anchor.ungenerated_chunk_count) ? `(${anchor.ungenerated_chunk_count} chunks ungenerated; nearer water may exist)` : '(nearer water may exist)'}` : ''}`)
+  const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y})${isPlainObject(anchor.approach) && Number.isFinite(anchor.approach.x) && Number.isFinite(anchor.approach.y) ? ` approach=(${anchor.approach.x},${anchor.approach.y})` : ''} surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}${anchor.coverage_complete === false ? ` coverage=INCOMPLETE${Number.isSafeInteger(anchor.ungenerated_chunk_count) ? `(${anchor.ungenerated_chunk_count} chunks ungenerated; nearer water may exist)` : '(nearer water may exist)'}` : ''}`)
   const kept = boundedKept(parts, ' | ', limits.fluidHintChars)
   const more = parts.length - kept.length
   return {
