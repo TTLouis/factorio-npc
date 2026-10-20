@@ -15240,7 +15240,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const handoff = await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
       if (!handoff.restaged) throw new AgentLoopError(`planner_execution_handoff_refused:${handoff.reason}`)
       // The packet already carries the notes when they fit its record whole; repeat them only when it dropped or shortened them.
-      if (notes && !this.messages.some(row => typeof row.content === 'string' && row.content.includes(notes))) this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
+      const carried = notes && this.messages.some(row => typeof row.content === 'string'
+        && row.content.split('\n').some(line => line.includes('planner_review_notes') && line.includes(notes)))
+      if (notes && !carried) this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
       return this.runTurn()
     }
     const timeReview = await this.reviewPlanTime(plan)
