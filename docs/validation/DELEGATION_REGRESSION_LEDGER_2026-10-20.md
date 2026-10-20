@@ -130,6 +130,8 @@ Every unit was merged to `experiment/jev-agent-architecture` after a negative co
 | Y-refusal | U6 `fix/raw-leaf-craft-path` | `a57d87cd` | `9485d806` | merged. An item is a raw leaf only when it is mined, or harvested with no certain craft output. Recycling recipes do not count. |
 | AE-5 and the composed gates | `test/composed-delegation-scenario` | `79035f4f`, `2fa33ffc` | test only | merged. It covers placement and pickup, direct feed, a review round, the auto-resume restage, and delegation back to the planner. The gates are zero `dangling_context_reference`, no silent stall, and a review round that runs. The only finding allowed is one `restage_loop` on step 2 (C8, C3, C7), which is real restage cost and stays visible. |
 
+Gates on the head `217737ce`: the Docker runtime suite passes 2746/2746 (including `composed-delegation.test.mjs`), and the build-payload check passes. The native lanes all pass: the ten delegation lanes (fresh-topology, direct-feed-observation, ground-item-pickup, partial-transfer, zero-transfer, closed-action, normal-observation, observation-baseline, step-contract, local-transfer-target) and the default set (core, research-combat, resilience, production).
+
 Still open: AF-2 and AB-3 (class 0, not delegation), and proposal P1 below. The lifecycle smalls stay with option C.
 
 ## Proposals that need the owner
