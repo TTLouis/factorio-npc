@@ -289,7 +289,8 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(observed.afterRound.plan_id, observed.beforeReview.plan_id)
     const back = calls[6]
     assert.equal(back.role, 'executor')
-    assert.match(textOf(back.messages), /\[PLANNER_REVIEW_NOTES\][^]*fuel the drill with 5 coal/)
+    assert.equal(textOf(back.messages).split('fuel the drill with 5 coal').length - 1, 1, 'the handed-back executor sees the planner notes once')
+    assert.match(textOf(back.messages), /planner_review_notes[^\n]*fuel the drill with 5 coal/, 'notes that fit ride in the packet record')
     assert.equal(back.messages.some(message => String(message.content).startsWith('[EXECUTOR_REVIEW]')), false, 'the planner conversation stays parked')
     assert.equal(back.context.allowTools, true, 'a normal executor, not an action-omission repair round')
     assert.equal(rows('recovery.action_omission_started').length, 0)

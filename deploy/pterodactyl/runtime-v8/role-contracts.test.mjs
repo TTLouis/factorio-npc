@@ -348,8 +348,9 @@ test('Run AC: the planner review round returns the unchanged step to a fresh exe
     return review('local_recovery_exhausted', RUN_AC_RATIONALE)(ctx)
   }, draft({ chatMessage: 'Copper ore is 12 tiles east of the actor.', plan: ['A tempting different strategy'] }), ctx => {
     assert.equal(ctx.context.role, 'executor')
-    const notes = ctx.messages.find(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]'))
-    assert.match(notes.content, /Copper ore is 12 tiles east/)
+    const carrying = ctx.messages.filter(row => String(row.content).includes('Copper ore is 12 tiles east'))
+    assert.equal(carrying.length, 1, 'the executor sees the planner notes once')
+    assert.match(carrying[0].content, /planner_review_notes/, 'notes that fit the packet ride in its record, not a second message')
     assert.equal(ctx.messages.some(row => String(row.content).startsWith('[EXECUTOR_REVIEW]')), false, 'the planner conversation stays parked')
     return action(ctx)
   }])
@@ -385,13 +386,26 @@ async function runToSecondStepReview(extra = []) {
   return w
 }
 
+test('review notes the packet shortens still reach the executor whole, as one message', async () => {
+  const long = `Copper ore is 12 tiles east of the actor. ${'Keep the furnace fed before reading again. '.repeat(14)}`.trim()
+  const w = world([draft(), review('local_recovery_exhausted', RUN_AC_RATIONALE), draft({ chatMessage: long, plan: ['A tempting different strategy'] }), ctx => {
+    assert.equal(ctx.context.role, 'executor')
+    const message = ctx.messages.filter(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]'))
+    assert.equal(message.length, 1, 'the packet record holds at most 500 chars, so the full notes follow once')
+    assert.ok(message[0].content.includes(long.slice(-60)), 'the end of the notes is not lost')
+    return action(ctx)
+  }])
+  await w.say()
+  assert.equal(w.game.mutations.length, 1)
+})
+
 test('Run AF: a planner review-round reply is never met with executor continuation pressure and hands back a normal executor', async () => {
   const w = await runToSecondStepReview([ctx => {
     assert.equal(ctx.context.role, 'executor')
     assert.equal(ctx.context.allowTools, true, 'ordinary read budget, not the action-omission single-read round')
     assert.equal(ctx.memory.currentPlan(KEY).admission_status === 'action_omission_repair', false)
     assert.equal(ctx.agent.actionOmissionRepairActive, false)
-    assert.match(afOutgoing(ctx.messages), /\[PLANNER_REVIEW_NOTES\].*Iron ore candidates/)
+    assert.match(afOutgoing(ctx.messages), /planner_review_notes.*Iron ore candidates/)
     assert.doesNotMatch(afOutgoing(ctx.messages), /act-or-block/i)
     return readNearby('af-read-1', 'iron-ore')
   }, ctx => {
