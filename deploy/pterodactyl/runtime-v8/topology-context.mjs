@@ -147,3 +147,11 @@ export function topologyReserve(facts) {
   if (facts.state !== 'fresh') return TOPOLOGY_LIMITS.chars
   return Math.min(TOPOLOGY_LIMITS.chars, topologyText(facts).length + 1)
 }
+
+// The block a request sends in the room the packet left. The packet was sized from the block measured at its restage, and a later
+// read can be larger (an obstruction sample, a re-read), so the trimmed or omitted share is reported for a trace, never silent.
+export function fitTopologyBlock(facts, room) {
+  const full = topologyText(facts)
+  const text = room >= 120 ? topologyText(facts, room) : ''
+  return { text, full_chars: full.length, sent_chars: text.length, trimmed: text !== full, omitted: !text }
+}

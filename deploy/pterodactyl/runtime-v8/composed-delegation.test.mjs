@@ -320,6 +320,8 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     // Protocol 3 keeps the packet and the fresh_topology block of the same request inside the same 6,000 characters.
     const topologyChars = lineStarting(calls[7].messages, 'fresh_topology: ').length
     assert.ok(c7.packet_chars + 1 + topologyChars <= 6000, `the protocol 3 packet and its topology block fit 6,000 characters (${c7.packet_chars} + ${topologyChars})`)
+    assert.doesNotMatch(lineStarting(calls[7].messages, 'fresh_topology: '), /size_limit/, 'the C7 request sent the topology block, not the size stub')
+    assert.deepEqual(data('context.topology_trimmed'), [], 'no request trimmed or omitted its topology block')
     assert.deepEqual(calls.map(call => call.label), [
       'planner:draft', 's1:read-drill-candidates', 's1:read-furnace-candidates', 's1:place-drill-and-furnace',
       's2:first-review', 's2:planner-review-round', 's2:second-review', 'c7:observe', 'c7:fuel-both-machines', 'c7:collect-plates',

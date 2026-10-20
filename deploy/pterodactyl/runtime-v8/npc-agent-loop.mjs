@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
-import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, deduplicateTopologySkillRefs } from './topology-context.mjs'
+import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, fitTopologyBlock, deduplicateTopologySkillRefs } from './topology-context.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory, toolSignature } from '../staging/npc-agent-loop.mjs'
 import {
@@ -12325,7 +12325,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const handoffChars = providerMessages.filter(row => String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
         .reduce((sum, row) => sum + String(row.content).length + 1, 0)
       const room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars
-      if (room >= 120) providerMessages = insertTailBlock(providerMessages, { role: 'user', content: topologyText(topology, room) })
+      const fitted = fitTopologyBlock(topology, room)
+      if (fitted.text) providerMessages = insertTailBlock(providerMessages, { role: 'user', content: fitted.text })
+      if (fitted.trimmed) await this.traceEvent('context.topology_trimmed', { request_id: this.traceRequest?.id, state: topology.state,
+        room, handoff_chars: handoffChars, full_chars: fitted.full_chars, sent_chars: fitted.sent_chars, omitted: fitted.omitted })
     }
     const controlState = this.controlDecisionState(effectiveAllowTools)
     const controlText = `[CONTROL_DECISION_STATE] ${JSON.stringify(controlState)}\n${controlState.phase === 'draft'

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { topologyCapacity, topologyEntities, topologyJson, topologyObstruction, topologyReserve, topologyText, TOPOLOGY_LIMITS, TOPOLOGY_PREFIX, deduplicateTopologySkillRefs } from './topology-context.mjs'
+import { topologyCapacity, topologyEntities, topologyJson, topologyObstruction, topologyReserve, fitTopologyBlock, topologyText, TOPOLOGY_LIMITS, TOPOLOGY_PREFIX, deduplicateTopologySkillRefs } from './topology-context.mjs'
 import { KEY, recoveryWorld, recoverySession, ScriptedModel, settle } from './recovery-loop-fixtures.mjs'
 import { FakeFactorio, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 import { getActivePlan } from './planning-state.mjs'
@@ -474,4 +474,16 @@ test('the packet reserve is the topology block\'s own size, none without a block
   for (const state of ['deferred', 'unavailable']) assert.equal(topologyReserve({ state, source: 'native_bounded_reads' }), TOPOLOGY_LIMITS.chars, 'the fresh read the next request takes can be larger')
   const crowded = { ...fresh, entities: Array.from({ length: 4 }, () => ({ ...fresh.entities[0], note: 'x'.repeat(900) })) }
   assert.ok(topologyReserve(crowded) <= TOPOLOGY_LIMITS.chars, 'never above the slot')
+})
+
+test('a topology block larger than the room its packet left is trimmed or omitted, and says so', () => {
+  const fresh = { state: 'fresh', source: 'native_bounded_reads', ...topologyEntities(nativeNearby()), held: { 'steam-engine': 1 }, held_scope: 'complete_main_inventory; unlisted_items_have_count_zero' }
+  const full = topologyText(fresh)
+  assert.deepEqual(fitTopologyBlock(fresh, topologyReserve(fresh)), { text: full, full_chars: full.length, sent_chars: full.length, trimmed: false, omitted: false })
+  // A later read grew the block (an obstruction sample, a re-read) past the reserve measured at the restage.
+  const grown = { ...fresh, obstructions: [1, 2].map(n => ({ entity_name: 'stone-furnace', samples: [], note: 'x'.repeat(200 * n) })) }
+  const trimmed = fitTopologyBlock(grown, topologyReserve(fresh))
+  assert.equal(trimmed.trimmed, true); assert.equal(trimmed.omitted, false)
+  assert.ok(trimmed.sent_chars <= topologyReserve(fresh) && trimmed.sent_chars < trimmed.full_chars)
+  assert.deepEqual(fitTopologyBlock(fresh, 0), { text: '', full_chars: full.length, sent_chars: 0, trimmed: true, omitted: true }, 'a block with no room is omitted, not silently')
 })
