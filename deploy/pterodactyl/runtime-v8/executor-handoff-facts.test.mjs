@@ -1952,3 +1952,35 @@ test('protocol 3: the packet leaves the geometry block its real size (none when 
   const slot = world.agent.buildRestagePacket({ ...args, topology: { state: 'deferred', source: 'native_bounded_reads', reason: 'mutation_pending' } })
   assert.ok(slot.dropped.length > 0 && slot.chars <= 6000 - TOPOLOGY_LIMITS.chars, 'a read that is not fresh holds the whole slot')
 })
+
+// Run V (16v): the pump, the boiler and the engine were all in hand, yet the closure expanded the boiler through a stone furnace into
+// iron plates, and the stone-furnace facts crowded out the record of where water had been seen.
+const WATER_STEP_CONTRACT = { mode: 'all', requirements: [entityCount('pump', 'offshore-pump', 1), entityCount('boiler', 'boiler', 1), entityCount('engine', 'steam-engine', 1)] }
+const closureItems = ['stone-furnace', 'stone', 'pipe', 'iron-plate', 'iron-gear-wheel', 'electronic-circuit', 'iron-ore']
+
+test('Run V: build roots already in hand stay out of the recipe closure, and are read and shown as covered', async () => {
+  const world = await runSteamWorld({ inventory: { 'offshore-pump': 1, boiler: 1, 'steam-engine': 1 }, placed: {}, contract: WATER_STEP_CONTRACT })
+  const held = stepLine(world, 'held_counts')
+  for (const item of ['offshore-pump', 'boiler', 'steam-engine']) assert.ok(held.includes(` ${item}=1`), `${item} is read: ${held}`)
+  const residual = stepLine(world, 'residual_needs')
+  for (const item of ['offshore-pump', 'boiler', 'steam-engine']) assert.match(residual, new RegExp(`${item} required=1 held=1 missing=0 `), `${item} is covered`)
+  assert.doesNotMatch(residual, /stone-furnace|iron-plate|pipe /, 'nothing is derived under a root that is in hand')
+  const step = textOf(stepBlock(world.agent.messages))
+  assert.doesNotMatch(step, /^(machine_energy|fuel_needs)/m, 'no machine or fuel facts for crafts nobody has to make')
+  assert.doesNotMatch(step, /^recipe_fact (stone-furnace|iron-plate|pipe) /m)
+  assert.deepEqual(world.game.recipeReads.filter(name => closureItems.includes(name)), [], 'no recipe is read for the ingredients of what is in hand')
+  const carried = world.rows('context.executor_facts_carried').at(-1).data
+  assert.deepEqual(carried.roots_in_hand, ['offshore-pump', 'boiler', 'steam-engine'])
+  assert.equal(carried.reads_failed, 0)
+  // A root still short expands, and only its own closure: the pump and the engine are in hand, the boiler is not.
+  const short = await runSteamWorld({ inventory: { 'offshore-pump': 1, 'steam-engine': 1 }, placed: {}, contract: WATER_STEP_CONTRACT })
+  assert.deepEqual(short.rows('context.executor_facts_carried').at(-1).data.roots_in_hand, ['offshore-pump', 'steam-engine'])
+  assert.ok(short.game.recipeReads.includes('stone-furnace') && short.game.recipeReads.includes('pipe'), `the boiler's closure is read: ${short.game.recipeReads}`)
+  assert.ok(!short.game.recipeReads.includes('electronic-circuit') && !short.game.recipeReads.includes('iron-gear-wheel'), 'the pump and the engine ingredients are not')
+  assert.match(stepLine(short, 'residual_needs'), /boiler required=1 held=0 missing=1 crafts=1 via boiler/)
+  // A partly held root is still short.
+  const partial = await runSteamWorld({ inventory: { 'offshore-pump': 1, boiler: 1, 'steam-engine': 1 }, placed: {}, contract: { mode: 'all', requirements: [entityCount('engine', 'steam-engine', 2)] } })
+  assert.equal(partial.rows('context.executor_facts_carried').at(-1).data.roots_in_hand, undefined)
+  assert.ok(partial.game.recipeReads.includes('iron-gear-wheel'), 'one engine held of one still to place, none left over: the closure of the second is read')
+})
+

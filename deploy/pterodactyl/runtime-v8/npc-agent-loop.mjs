@@ -5666,7 +5666,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const labNames = (labCandidates ?? []).map(lab => lab.name)
       const scienceBill = scienceProductionRoots(sciences, progress, labNames)
       const inventoryRoots = [...needs.roots, ...buildBill.roots, ...scienceBill.flatMap(entry => entry.roots)]
-      const closureRoots = [...inventoryRoots, ...triggerRoots.map(root => ({ item: root.item, count: root.count }))]
+      // A root the actor already holds in full has nothing left to make: the recipe closure follows only the roots still short, so
+      // the recipe reads, the machine and fuel facts and the count list do not chase an item that is in hand. The held counts are
+      // read here under the fence and reused by the count reads below; a root whose count cannot be read stays short.
+      const rootDemand = new Map()
+      for (const root of inventoryRoots) rootDemand.set(root.item, (rootDemand.get(root.item) ?? 0) + root.count)
+      const rootHeld = new Map()
+      if (!inFlight && fence && rootDemand.size > 0) {
+        try {
+          await this.handoffFenceCheck(fence, 'before')
+          for (const item of [...rootDemand.keys()].slice(0, limits.countItemsMax)) {
+            meta.reads_attempted += 1
+            const current = await this.readActorItemCount(item)
+            if (current === undefined) meta.reads_failed += 1
+            else rootHeld.set(item, current)
+          }
+          await this.handoffFenceCheck(fence, 'during')
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          rootHeld.clear()
+        }
+      }
+      const inHand = item => rootHeld.get(item) >= rootDemand.get(item)
+      const rootsInHand = [...rootDemand.keys()].filter(inHand)
+      if (rootsInHand.length > 0) meta.roots_in_hand = rootsInHand
+      const closureRoots = [...inventoryRoots.filter(root => !inHand(root.item)), ...triggerRoots.map(root => ({ item: root.item, count: root.count }))]
       // Once per restage: the deferred refresh re-derives the same root and does not announce it again.
       if (mode === 'packet') for (const root of triggerRoots) {
         await this.traceEvent('context.trigger_production_derived', {
@@ -5704,7 +5729,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       const researchItems = researchFactItems(research)
       const wanted = [...new Set([...needs.items, ...requirementTargets(state.goal?.definition).items.map(item => item.name)])]
-      wanted.unshift(...researchItems, ...buildBill.rows.map(row => row.item))
+      wanted.unshift(...researchItems, ...buildBill.rows.map(row => row.item).filter(item => !inHand(item)))
       const cached = withoutRawLeafRecipes([...this.handoffRecipeFacts.values()], this.handoffRawLeaves)
       // Unit 9: the closure may hold a build bill's worth of items (a steam-power build is about 15); the cap is sized from it.
       const closure = neededItems(closureRoots, cached, limits.countItemsMax)
@@ -5744,6 +5769,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       const addTail = item => addItem(item, Math.min(readCap, limits.countItems))
       closure.items.forEach(item => addItem(item))
+      // The roots in hand are read too: the residual shows them as covered, from a count, not from silence.
+      rootsInHand.forEach(item => addItem(item))
       needs.items.forEach(item => addItem(item))
       researchItems.forEach(item => addItem(item))
       refreshItems.forEach(item => addItem(item))
@@ -5774,6 +5801,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         try {
           await this.handoffFenceCheck(fence, 'before')
           for (const item of readItems) {
+            if (rootHeld.has(item)) { fresh.set(item, rootHeld.get(item)); continue } // read above, under the same fence
             meta.reads_attempted += 1
             const current = await this.readActorItemCount(item)
             if (current === undefined) meta.reads_failed += 1
@@ -6207,6 +6235,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         stale_items: summary.stale_items,
         residual_needs: summary.residual_needs,
         residual_machine_stock_credited: meta?.residual_machine_stock_credited?.length ?? 0,
+        ...(meta?.roots_in_hand ? { roots_in_hand: meta.roots_in_hand } : {}),
         residual_omitted_reason: summary.residual_needs === 0 ? meta?.residual_omitted : undefined,
         machine_energy: summary.machine_energy,
         fuel_needs: summary.fuel_needs,
