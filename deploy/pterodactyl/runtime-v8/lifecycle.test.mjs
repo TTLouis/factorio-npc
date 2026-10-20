@@ -178,3 +178,15 @@ test('lifecycleEnter returns the refusal and traces it, under a named request wh
   agent.applyLifecycleResets('continuation')
   assert.equal(agent.toolValidationRetries, 2, 'the continuation resets its counters itself')
 })
+
+test('the snapshot peeks at the legacy plan and never calls currentPlan when the plan map is there', () => {
+  const plans = new Map([['npc:x', { status: 'completed', task_board: { active_index: 0, steps: [{ id: 'step_1' }] } }]])
+  let calls = 0
+  const memory = { planByNpc: plans, currentPlan: () => { calls++; plans.delete('npc:x') } }
+  const state = lifecycleSnapshot({ activePlanKey: () => 'npc:x', memory })
+  assert.equal(state.goal, 'completed')
+  assert.equal(state.board_step, 'step_1')
+  assert.equal(calls, 0, 'a trace-only read must not retire the completed goal')
+  assert.ok(plans.has('npc:x'))
+  assert.equal(lifecycleSnapshot({ activePlanKey: () => 'npc:y', memory }).goal, 'none')
+})

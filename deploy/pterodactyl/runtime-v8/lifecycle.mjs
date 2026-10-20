@@ -38,7 +38,11 @@ const short = (value, limit = 120) => typeof value === 'string' && value ? value
 export function lifecycleSnapshot(agent) {
   const memory = agent?.memory
   const key = typeof agent?.activePlanKey === 'function' ? agent.activePlanKey() : agent?.npcId ? `npc:${agent.npcId}` : undefined
-  const legacy = key && typeof memory?.currentPlan === 'function' ? memory.currentPlan(key) : undefined
+  // Peek, never memory.currentPlan(): the canonical memory's currentPlan retires a completed goal and builds a missing
+  // board, so a trace-only read would change the state it reports. A memory without the map (a test fake) is read through
+  // currentPlan, which has no side effects there.
+  const peekable = typeof memory?.planByNpc?.get === 'function'
+  const legacy = !key ? undefined : peekable ? memory.planByNpc.get(key) : typeof memory?.currentPlan === 'function' ? memory.currentPlan(key) : undefined
   const planning = key && typeof memory?.planningState === 'function' ? memory.planningState(key) : undefined
   const plan = planning ? getActivePlan(planning) : undefined
   const run = planning?.run
@@ -46,7 +50,7 @@ export function lifecycleSnapshot(agent) {
   const boardStep = Number.isSafeInteger(board?.active_index) ? board?.steps?.[board.active_index] : undefined
   const context = agent?.agentContext
   return {
-    goal: legacy ? (GOAL_STATUSES.has(legacy.status) ? legacy.status : 'other') : typeof memory?.currentPlan === 'function' ? 'none' : 'unknown',
+    goal: legacy ? (GOAL_STATUSES.has(legacy.status) ? legacy.status : 'other') : peekable || typeof memory?.currentPlan === 'function' ? 'none' : 'unknown',
     board_step: short(boardStep?.id),
     run: run ? (run.paused ? 'paused' : 'running') : 'unknown',
     pause_class: run?.paused ? short(run.pause_class) : null,
