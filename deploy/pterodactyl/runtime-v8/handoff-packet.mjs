@@ -741,21 +741,29 @@ function researchRecords(paths) {
     text: `research_path (authoritative getResearchPath; current read or explicit missing fact${path.nodes?.some(node => node.trigger_crafting) ? '; trigger_crafting is cached/historical, not current admission proof' : ''}): ${JSON.stringify(path)}` }))
 }
 
+// The certain output amount of `item` from one complete recipe fact, or undefined when the recipe cannot be counted exactly:
+// probabilistic or ranged output, several item products, no ingredients, or an ingredient that is a fluid or the item itself
+// (recycling and crushing recipes fail here, so only a recipe that really makes the item passes).
+export function certainItemOutput(recipe, item) {
+  if (!recipe?.complete) return undefined
+  const product = recipe.products.find(entry => entry.name === item && entry.type === 'item')
+  const output = product?.amount
+  if (!(output > 0) || product.amount_min !== undefined || product.amount_max !== undefined) return undefined
+  // A recipe with several item products yields them together: counting crafts for one product would double count the other.
+  if (recipe.products.filter(entry => entry.type === 'item').length !== 1) return undefined
+  if (product.probability !== undefined && product.probability !== 1) return undefined
+  if (recipe.ingredients.length === 0) return undefined
+  const usable = recipe.ingredients.every(ingredient => ingredient.type === 'item' && ingredient.amount > 0 && ingredient.name !== item)
+  return usable ? output : undefined
+}
+
 // The recipe the derivation may use to make `item`: one deterministic, complete recipe with a certain item output.
 export function expandableRecipe(item, recipes) {
   const candidates = recipes.filter(recipe => recipe.complete && recipe.products.some(product => product.name === item && product.type === 'item'))
   const chosen = candidates.length === 1 ? candidates[0] : candidates.find(recipe => recipe.name === item)
   if (!chosen) return undefined
-  const product = chosen.products.find(entry => entry.name === item && entry.type === 'item')
-  const output = product?.amount
-  if (!(output > 0) || product.amount_min !== undefined || product.amount_max !== undefined) return undefined
-  // A recipe with several item products yields them together: counting crafts for one product would double count the other.
-  if (chosen.products.filter(entry => entry.type === 'item').length !== 1) return undefined
-  if (product.probability !== undefined && product.probability !== 1) return undefined
-  if (chosen.ingredients.length === 0) return undefined
-  const usable = chosen.ingredients.every(ingredient => ingredient.type === 'item' && ingredient.amount > 0 && ingredient.name !== item)
-  if (!usable) return undefined
-  return { recipe: chosen, output }
+  const output = certainItemOutput(chosen, item)
+  return output === undefined ? undefined : { recipe: chosen, output }
 }
 
 /**
@@ -777,7 +785,10 @@ export function expandableIngredients(item, recipes, rawLeaves) {
 /**
  * The raw-leaf declaration of a parsed getRecipeDetails answer: `{ item, mined_from, harvested_from? }`, or undefined when it has
  * neither. `mined_from` names the resource prototypes that mine into the item; `harvested_from` (unit 9) names the natural trees and
- * rocks the harvest operation mines for it (wood from trees). `harvested_from` is present only when the answer listed some.
+ * rocks the harvest operation mines for it (wood from trees). `harvested_from` is present only when the answer listed some, and it
+ * makes the item raw only when none of the answered recipes really makes it: a recipe that lists the item among probabilistic or
+ * several products (recycling, crushing) is not a craft route, so wood stays raw beside them, while an item with a plain recipe
+ * keeps its craft path. `mined_from` still wins.
  */
 export function rawLeafFromRecipeDetails(parsed, limits = EXECUTOR_FACT_LIMITS) {
   if (!parsed || typeof parsed !== 'object') return undefined
@@ -786,7 +797,10 @@ export function rawLeafFromRecipeDetails(parsed, limits = EXECUTOR_FACT_LIMITS) 
   if (!item) return undefined
   const minedFrom = [...new Set(asList(parsed.mined_from).map(factName).filter(Boolean))].slice(0, limits.rawLeafMinedFrom)
   const harvestedFrom = [...new Set(asList(parsed.harvested_from).map(factName).filter(Boolean))].slice(0, limits.rawLeafHarvestedFrom)
-  if (minedFrom.length === 0 && harvestedFrom.length === 0) return undefined
+  // A resource mines into the item whatever recipes also list it. A harvest source alone does not make it raw when an answered
+  // recipe really makes the item: it is made, and harvesting is only what its prototype's natural sources happen to yield.
+  const crafted = recipeFactsFromDetails(parsed, { limits }).some(recipe => certainItemOutput(recipe, item) !== undefined)
+  if (minedFrom.length === 0 && (harvestedFrom.length === 0 || crafted)) return undefined
   return { item, mined_from: minedFrom, ...(harvestedFrom.length > 0 ? { harvested_from: harvestedFrom } : {}) }
 }
 

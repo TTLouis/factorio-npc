@@ -75,6 +75,7 @@ function liveGame({ inventory = {}, recipes = {}, fuels, researchNodes } = {}) {
   game.labs = undefined
   game.minedFrom = {}
   game.harvestedFrom = {}
+  game.recyclingRecipes = {} // Space Age: item -> recipe entries that list it only as a probabilistic product (recipe_candidates returns them)
   game.entityTypes = {}
   game.prototypeReads = []
   game.entityCountReads = []
@@ -133,6 +134,7 @@ function liveGame({ inventory = {}, recipes = {}, fuels, researchNodes } = {}) {
       // declared; mined_from is present only for an item a resource yields.
       const mined = game.minedFrom[name] ?? MINED_FROM[name]
       const harvested = game.harvestedFrom[name]
+      if (!table[name] && game.recyclingRecipes[name]) return JSON.stringify({ found: true, query: name, truncated: false, recipes: game.recyclingRecipes[name], ...(mined ? { mined_from: mined } : {}), ...(harvested ? { harvested_from: harvested } : {}) })
       return JSON.stringify(table[name]
         ? { found: true, query: name, truncated: false, recipes: [table[name]], ...(mined ? { mined_from: mined } : {}), ...(harvested ? { harvested_from: harvested } : {}),
             ...(game.burnerFuels && table[name].crafting_machines.some(machine => machine.energy_source === 'burner') ? { burner_fuels: game.burnerFuels } : {}) }
@@ -1890,4 +1892,38 @@ test('unit 15: a furnace with an empty output changes nothing and traces no cred
   await restageToFreshExecutor(world)
   assert.match(stepLine(world, 'residual_needs'), /copper-plate required=10 held=9 missing=1 crafts=1 via copper-plate/)
   assert.equal(world.rows('context.residual_machine_stock_credited').length, 0)
+})
+
+// Run Y: a crafted item whose prototype also lists natural harvest sources (copper-cable beside two ruin entities) is still made by its
+// recipe. The harvest source never replaces the craft path; wood (no recipe) stays a raw leaf.
+test('Run Y: an item with a crafting recipe keeps its craft path when the details also list harvest sources', async () => {
+  const world = await runSteamWorld({ inventory: { 'copper-plate': 10, 'iron-plate': 0 }, placed: {}, contract: { mode: 'all', requirements: [entityCount('poles', 'small-electric-pole', 2)] },
+    mutate: (game) => {
+      game.harvestedFrom['copper-cable'] = ['fulgoran-ruin-small', 'fulgoran-ruin-medium']
+      game.entityTypes['fulgoran-ruin-small'] = 'simple-entity'
+      game.entityTypes['fulgoran-ruin-medium'] = 'simple-entity'
+    } })
+  assert.ok(world.game.recipeReads.includes('copper-cable'), 'the recipe was read')
+  assert.equal(world.agent.handoffRawLeaves.has('copper-cable'), false)
+  assert.equal(world.agent.handoffRawLeaves.has('wood'), true, 'a harvested item with no recipe is still a raw leaf')
+  const text = textOf(stepBlock(world.agent.messages))
+  assert.match(text, /^recipe_fact copper-cable .*ingredients=1 copper-plate \| products=2 copper-cable/m, 'the craft recipe is carried')
+  assert.match(stepLine(world, 'residual_needs'), /copper-cable required=1 held=0 missing=1 crafts=1 via copper-cable/)
+  assert.doesNotMatch(stepLine(world, 'raw_leaf_acquisition') ?? '', /copper-cable|fulgoran-ruin/)
+  assert.doesNotMatch(text, /fulgoran-ruin/, 'no ruin entity is presented as an acquisition route')
+  assert.deepEqual(world.game.sourceReads.filter(name => name.startsWith('fulgoran-ruin')), [], 'no harvest source is read for a crafted item')
+  assert.match(stepLine(world, 'raw_leaf_acquisition'), /wood missing=1 harvest: harvested_from=tree-01,tree-02/)
+})
+
+test('Run Y: a harvest-only item whose only answered recipes are recycling products stays a raw leaf with its tree sources', async () => {
+  const recycling = (name, ingredient, product) => ({ ...detail(name, [[ingredient, 1]], [[product, 1]], ['recycler'], { categories: ['recycling'] }),
+    products: [{ type: 'item', name: product, amount: 1, probability: 0.25 }] })
+  const world = await runSteamWorld({ inventory: { 'copper-plate': 10, 'iron-plate': 0 }, placed: {}, contract: { mode: 'all', requirements: [entityCount('poles', 'small-electric-pole', 2)] },
+    mutate: (game) => { game.recyclingRecipes.wood = [recycling('wooden-chest-recycling', 'wooden-chest', 'wood')] } })
+  assert.ok(world.game.recipeReads.includes('wood'), 'the wood recipe was read')
+  assert.equal(world.agent.handoffRawLeaves.has('wood'), true)
+  assert.match(stepLine(world, 'raw_leaf_acquisition'), /wood missing=1 harvest: harvested_from=tree-01,tree-02 .*nearest@tree-01=/)
+  assert.ok(world.game.sourceReads.includes('tree-01') && world.game.sourceReads.includes('tree-02'))
+  assert.ok(world.agent.targetedResourceSearchNames().includes('tree-01'))
+  assert.doesNotMatch(textOf(stepBlock(world.agent.messages)), /wooden-chest-recycling/, 'the recycling recipe is not carried as a way to make wood')
 })

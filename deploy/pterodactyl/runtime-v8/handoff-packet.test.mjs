@@ -41,6 +41,7 @@ import {
   recipeKnownForItem,
   rawLeafFromRecipeDetails,
   rawLeafSourceFromRead,
+  withoutRawLeafRecipes,
 } from './handoff-packet.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import {
@@ -1489,4 +1490,35 @@ test('the planner review notes of the active step reach the executor packet, sur
   assert.ok(order.indexOf('review_notes') < order.indexOf('step_pending'))
   const tiny = buildHandoffPacket({ planningState: restored.planningState(KEY), ...ARGS, limits: { maxChars: 1 } })
   assert.ok(tiny.dropped.includes('review_notes'), 'a packet over its limit still drops the record by its named key')
+})
+
+test('Run Y: harvested_from makes an item raw unless an answered recipe really makes it; mined_from always does', () => {
+  // The mod's getRecipeDetails recipe entries (recipe_candidates lists every force recipe that has the item as a product).
+  const entry = (name, ingredients, products, extra = {}) => ({ name, enabled: true, hidden: false, energy: 0.5, categories: ['crafting'], hand_craftable_category: true,
+    ingredients: ingredients.map(([item, amount]) => ({ type: 'item', name: item, amount })),
+    products: products.map(([item, amount, probability]) => ({ type: 'item', name: item, amount, ...(probability !== undefined ? { probability } : {}) })),
+    crafting_machines: [{ name: 'assembling-machine-1', type: 'assembling-machine', crafting_speed: 0.5, seconds_per_craft: 1 }], crafting_machines_truncated: false, ...extra })
+  const cable = entry('copper-cable', [['copper-plate', 1]], [['copper-cable', 2]])
+  const cableRecycling = entry('copper-cable-recycling', [['copper-cable', 1]], [['copper-plate', 1, 0.25]], { categories: ['recycling'] })
+  const woodRecycling = entry('wooden-chest-recycling', [['wooden-chest', 1]], [['wood', 1, 0.25]], { categories: ['recycling'] })
+  const poleRecycling = entry('small-electric-pole-recycling', [['small-electric-pole', 1]], [['wood', 1, 0.25], ['copper-cable', 1, 0.25]], { categories: ['recycling'] })
+  const ruins = ['fulgoran-ruin-small', 'fulgoran-ruin-medium']
+  const trees = ['tree-01', 'tree-02']
+  // The live Run Y shape: a plain recipe beside two harvest sources. The item is made, so it is not a raw leaf and its recipe stays.
+  const crafted = { found: true, query: 'copper-cable', truncated: false, recipes: [cable], harvested_from: ruins }
+  assert.equal(rawLeafFromRecipeDetails(crafted), undefined)
+  const facts = recipeFactsFromDetails(crafted, { tag: TAG })
+  assert.deepEqual(withoutRawLeafRecipes(facts, new Map()), facts)
+  assert.deepEqual(expandableIngredients('copper-cable', facts, new Map()), ['copper-plate'], 'the craft is still expanded')
+  // A recycling recipe beside the plain recipe does not turn the item into a raw leaf either.
+  assert.equal(rawLeafFromRecipeDetails({ ...crafted, recipes: [cableRecycling, cable] }), undefined)
+  // The Space Age shape of a harvest-only item: found:true, but every answered recipe is a probabilistic recycling product.
+  const wood = { found: true, query: 'wood', truncated: false, recipes: [woodRecycling, poleRecycling], harvested_from: trees }
+  assert.deepEqual(rawLeafFromRecipeDetails(wood), { item: 'wood', mined_from: [], harvested_from: trees })
+  assert.deepEqual(withoutRawLeafRecipes(recipeFactsFromDetails(wood, { tag: TAG }), new Map([['wood', rawLeafFromRecipeDetails(wood)]])), [], 'the recycling recipes are noise beside the harvest source')
+  // The base-game shape: no recipe at all.
+  assert.deepEqual(rawLeafFromRecipeDetails({ found: false, code: 'no_recipe', query: 'wood', harvested_from: trees }), { item: 'wood', mined_from: [], harvested_from: trees })
+  // A resource mines into the item whatever recipes list it, harvest sources or not.
+  assert.deepEqual(rawLeafFromRecipeDetails({ found: true, query: 'stone', recipes: [cable], mined_from: ['stone'], harvested_from: ['big-rock'] }), { item: 'stone', mined_from: ['stone'], harvested_from: ['big-rock'] })
+  assert.equal(rawLeafFromRecipeDetails({ found: false, code: 'no_recipe', query: 'sand' }), undefined)
 })
