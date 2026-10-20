@@ -114,7 +114,7 @@ Status words:
 | X-2 | all | Restage still drops transcript memory: C7 is 49 of 104 executor restages. B1/B2 bound the caches; the transcript itself is gone by design. | 1/2 | measured (A2); see proposal P1 |
 | AF-2 | 19af | `getPlacementCandidates` returned 8 legal drill candidates, but the obstruction samples (footprints overlapping furnace 31) came first, and both roles treated the candidates as blocked. The candidates were also about 15 tiles from the furnace. | 0 | open, not delegation |
 | AB-3 | 18ab, 16v | A radius-128 water read was empty or incomplete, a radius-256 read found water, and the walk to it ended `navigation_unreachable`. | 0 | open, not delegation |
-| lifecycle smalls | 15o, 15r, 15s, 15t, 15u, 17y | an intake retry after terminal; a tool-schema error escalated to a planner wake; a silent BLOCKED stall; a stale `paused_at` after an operator stop; `provider_response_too_large` as a guard pause; transport C7 restages | 2 | handed off to option C |
+| lifecycle smalls | 15o, 15r, 15s, 15t, 15u, 17y | an intake retry after terminal; a tool-schema error escalated to a planner wake; a silent BLOCKED stall; a stale `paused_at` after an operator stop; `provider_response_too_large` as a guard pause; transport C7 restages | 2 | handed off to option C. C merged 2026-10-20: C1 49653442, C2 923b5931, C3 ec5a29e3, snapshot fix df0729ce, at jev-arch 5ca96648. The table refuses the run G/H/J shapes and traces every entry point. None of these six smalls has a rule yet; they stay open as evidence for further LIFECYCLE_TABLE rules |
 
 ## Status after the overnight fix units (2026-10-20)
 
