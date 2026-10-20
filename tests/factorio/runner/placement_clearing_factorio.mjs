@@ -125,6 +125,10 @@ async function main() {
     + 'made.foreign=s.create_entity{name="wooden-chest",position={sx,oy+1.5},force=visitor}; '
     + 'made.loaded=s.create_entity{name="wooden-chest",position={sx,oy+5.5},force=a.force}; made.loaded.insert{name="iron-plate",count=5}; '
     + 'local ok,cliff=pcall(function() return s.create_entity{name="cliff",position={sx,oy+9.5},cliff_orientation="west-to-east"} end); made.cliff=ok and cliff or nil; '
+    + 'local wx=ox-7.5; '
+    + 'made.pole_alone=s.create_entity{name="small-electric-pole",position={wx,oy-6.5},force=a.force}; '
+    + 'made.pole_powering=s.create_entity{name="small-electric-pole",position={wx,oy+1.5},force=a.force}; '
+    + 'made.lab=s.create_entity{name="lab",position={wx-3,oy+1.5},force=a.force}; '
     + 'inv.clear(); inv.insert{name="stone-furnace",count=8}; '
     + 'local info={}; for k,e in pairs(made) do info[k]={name=e.name,type=e.type,force=e.force.name,unit=e.unit_number,x=e.position.x,y=e.position.y,minable=e.minable} end; '
     + 'rcon.print(helpers.table_to_json({ox=ox,oy=oy,humans=#game.connected_players,speed=game.speed,actor_force=a.force.name,made=info}))')
@@ -164,6 +168,16 @@ async function main() {
     assert.equal(read.obstructions.label, 'rejected_footprint_samples_not_candidates')
     blocked[label] = { rejected: read.obstructions.rejected_count, samples: read.obstructions.samples?.length }
   }
+  // A pole is part of a chain once anything stands in its supply area; a lone one is not.
+  const poleAloneRead = await candidatesAt(made.pole_alone)
+  assert.ok(poleAloneRead.candidates.length > 0, `a lone pole's footprint is a candidate: ${JSON.stringify(poleAloneRead).slice(0, 600)}`)
+  assert.ok(poleAloneRead.candidates.every(candidate => candidate.clears?.some(entry => entry.name === 'small-electric-pole' && entry.reason === 'own_idle_entity')))
+  const polePoweringRead = await candidatesAt(made.pole_powering)
+  assert.equal(polePoweringRead.returned_candidate_count, 0, `a pole supplying a lab keeps its footprint blocked: ${JSON.stringify(polePoweringRead.candidates)}`)
+  const labRead = await candidatesAt(made.lab)
+  assert.equal(labRead.returned_candidate_count, 0, 'a lab on an electric network keeps its footprint blocked')
+  blocked.pole_powering = { rejected: polePoweringRead.obstructions.rejected_count }
+  blocked.lab = { rejected: labRead.obstructions.rejected_count }
   const raw = await admitted('foreign-raw', { name: 'place_entity', args: { entity_name: 'stone-furnace', x: made.foreign.x + 0.5, y: made.foreign.y + 0.5, direction: 0 } })
   assert.equal(raw.result?.code, 'not_placeable', JSON.stringify(raw.result))
   assert.equal(raw.result.entities_cleared, undefined)
@@ -233,11 +247,18 @@ async function main() {
   assert.equal(anchored.ok, true, JSON.stringify(anchored).slice(0, 600))
   assert.equal(anchored.ordering, 'nearest_to_anchor_first')
   assert.equal(anchored.anchor?.unit_number, made.loaded.unit)
-  const distances = anchored.candidates.map(candidate => candidate.distance_from_anchor)
-  assert.ok(distances.length > 1 && distances.every(value => Number.isFinite(value)), JSON.stringify(distances))
+  // Candidates that clear nothing come first, nearest the anchor first among them; the furnaces built above stand in this window.
+  const clean = anchored.candidates.filter(candidate => !candidate.clears?.length)
+  assert.ok(clean.length > 1, JSON.stringify(anchored.candidates.map(candidate => candidate.clears)))
+  assert.deepEqual(anchored.candidates.slice(0, clean.length), clean, 'no clearing candidate ranks ahead of a clean one')
+  const distances = clean.map(candidate => candidate.distance_from_anchor)
+  assert.ok(distances.every(value => Number.isFinite(value)), JSON.stringify(distances))
   assert.deepEqual([...distances].sort((left, right) => left - right), distances)
-  evidence.anchor = { ordering: anchored.ordering, distances }
-  console.log('PASS: ANCHOR - candidates ranked nearest the anchor entity')
+  // The shipped place_candidate entry takes the anchored candidate and builds it.
+  const placed = await admitted('anchored-candidate', { name: 'place_candidate', args: { candidate_set_id: anchored.candidate_set_id, candidate_id: clean[0].id } })
+  assert.equal(placed.result?.code, 'completed', JSON.stringify(placed.result))
+  evidence.anchor = { ordering: anchored.ordering, distances, placed: placed.result }
+  console.log('PASS: ANCHOR - clean candidates ranked nearest the anchor entity, and an anchored candidate places through place_candidate')
 
   const closing = await lua('rcon.print(helpers.table_to_json({humans=#game.connected_players,speed=game.speed}))')
   assert.equal(closing.humans, 0)
