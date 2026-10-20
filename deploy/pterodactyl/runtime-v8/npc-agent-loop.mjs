@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
-import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, deduplicateTopologySkillRefs } from './topology-context.mjs'
+import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, deduplicateTopologySkillRefs } from './topology-context.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory, toolSignature } from '../staging/npc-agent-loop.mjs'
 import {
@@ -3601,10 +3601,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       jevFacts, // U11 advisory: bounded facts Jev's observation families add (never replacing a mandatory record)
       jevHints,
       executorFacts: packetRole === EXECUTOR_ROLE ? executorFacts : undefined, // D2: harness-read facts for a fresh executor, labelled fresh / stale / historical
-      // Reserve the native geometry slot; callProvider replaces it with fresh
-      // topology. A mandatory execution brief must not crowd that slot out.
+      // Reserve the native geometry room; callProvider replaces it with fresh topology. A mandatory execution brief must not
+      // crowd that block out, and the room is the block's real size (none when no block is produced), not the whole slot.
       topology: this.completionProtocolVersion >= 3 ? undefined : topology,
-      ...(this.completionProtocolVersion >= 3 ? { limits: { maxChars: 6000 - TOPOLOGY_LIMITS.chars } } : {}),
+      ...(this.completionProtocolVersion >= 3 ? { limits: { maxChars: 6000 - topologyReserve(topology) } } : {}),
       // A staged user amendment belongs to the planner: it rides the packet of a planner restage (C5,
       // C1/C2) so the restage that replaces the conversation holding its text does not drop it. The
       // executor never gets it.
@@ -6153,6 +6153,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         checkpoint: pending.checkpoint ?? 'C3', role: EXECUTOR_ROLE,
         reason: 'correlated_receipt_refresh', planningState: after,
         actor: this.epoch, runtime: this.lastRuntimeView(), executorFacts: gathered.facts, jevFacts, jevHints,
+        topology: this.currentTopologyFacts(), // the block the next request inserts keeps its room
       })
       // Keep the immutable plan prefix and conversation identity. Replace the
       // volatile snapshot so the next decision cannot read superseded claims.

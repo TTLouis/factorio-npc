@@ -40,9 +40,9 @@ import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 //                            timer fires, a C7 restage hands the step to a fresh executor, which acts (fuel, wait, collect); the
 //                            goal completes and is verified by the harness (goal.evaluated satisfied).
 // Gates at the end: no dangling context reference (f36e837c), no silent stall, no unresumed model_recoverable pause, one review
-// round, a strict boundary. The C7 packet must carry the step contract, held counts and placed machines (U4: protocol 3 packets
-// have a 4,050-character window; this run's C7 packet is ~3,850 of it, so the assertions hold today and fail first when a plan or
-// receipt grows), and the planner's review notes (X-1b, a90c3d52).
+// round, a strict boundary. The C7 packet must carry the step contract, held counts and placed machines (U4), and the planner's review
+// notes (X-1b, a90c3d52). A protocol 3 packet and its topology block share 6,000 characters and the packet limit follows the block's real
+// size; this run's C7 packet was ~3,850 characters under a fixed 4,050 window, so the assertions failed first when a plan or receipt grew.
 //
 // A second test runs the same scenario with the first placement batch refused after its first task (Run Z batch 21 / Run AA): the
 // drill is built, the furnace is refused with the mod's native no-mutation proof, the settled prefix is stated as a fact, and the
@@ -317,7 +317,9 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(c7.role, 'executor')
     assert.equal(c7.step_id, scheduled.step_id)
     assert.match(c7.reason, /auto_resume_after_model_recoverable_pause/)
-    assert.ok(c7.packet_chars <= 6000 - 1950, `the protocol 3 packet fits its 4,050-character window (${c7.packet_chars})`)
+    // Protocol 3 keeps the packet and the fresh_topology block of the same request inside the same 6,000 characters.
+    const topologyChars = lineStarting(calls[7].messages, 'fresh_topology: ').length
+    assert.ok(c7.packet_chars + 1 + topologyChars <= 6000, `the protocol 3 packet and its topology block fit 6,000 characters (${c7.packet_chars} + ${topologyChars})`)
     assert.deepEqual(calls.map(call => call.label), [
       'planner:draft', 's1:read-drill-candidates', 's1:read-furnace-candidates', 's1:place-drill-and-furnace',
       's2:first-review', 's2:planner-review-round', 's2:second-review', 'c7:observe', 'c7:fuel-both-machines', 'c7:collect-plates',

@@ -6,6 +6,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { parseGoalRequirements } from './goal-requirements.mjs'
 import { EXECUTOR_FACT_LIMITS, executorFactsRefreshMessage } from './handoff-packet.mjs'
 import { NpcAgentLoop, requiresMachineFacts } from './npc-agent-loop.mjs'
+import { TOPOLOGY_LIMITS, topologyReserve } from './topology-context.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { deployment, FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
@@ -1926,4 +1927,28 @@ test('Run Y: a harvest-only item whose only answered recipes are recycling produ
   assert.ok(world.game.sourceReads.includes('tree-01') && world.game.sourceReads.includes('tree-02'))
   assert.ok(world.agent.targetedResourceSearchNames().includes('tree-01'))
   assert.doesNotMatch(textOf(stepBlock(world.agent.messages)), /wooden-chest-recycling/, 'the recycling recipe is not carried as a way to make wood')
+})
+
+// --- Budget tiers: the protocol-3 packet limit follows the topology block that rides after it ---------------------------------
+
+test('protocol 3: the packet leaves the geometry block its real size (none when no block is produced, the whole slot while the read is not fresh)', async () => {
+  const world = await plannerCollectedTenCopper()
+  const facts = (await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch })).facts
+  const topology = { state: 'fresh', source: 'native_bounded_reads', actor_id: 18, epoch: 3, observed_tick: 600, surface_index: 1, force_index: 1, entities: [{ name: 'boiler', type: 'boiler', status: 'no_fuel' }], held: { coal: 3 } }
+  const reserve = topologyReserve(topology)
+  assert.ok(reserve > 0 && reserve < TOPOLOGY_LIMITS.chars)
+  // Advisory facts and a note pad the packet into the window the old constant slot cut: past 6000 - 1950, within 6000 - the block.
+  const pad = Array.from({ length: 4 }, (_, index) => ({ family: `family_${index}`, text: 'x'.repeat(290) }))
+  const args = { checkpoint: 'C7', role: 'executor', reason: 'recovery:test', actor: world.agent.epoch, executorFacts: facts, jevFacts: pad, note: 'n'.repeat(400), budget: 'effort low' }
+  const open = world.agent.buildRestagePacket(args) // protocol 2: the whole 6000
+  assert.deepEqual(open.dropped, [])
+  assert.ok(open.chars > 6000 - TOPOLOGY_LIMITS.chars && open.chars + reserve <= 6000, `${open.chars} chars must sit between ${6000 - TOPOLOGY_LIMITS.chars} and ${6000 - reserve}`)
+
+  world.agent.completionProtocolVersion = 3
+  const real = world.agent.buildRestagePacket({ ...args, topology })
+  assert.deepEqual(real.dropped, [], 'the packet fits next to the block it actually carries')
+  assert.ok(real.chars + 1 + reserve <= 6000 + 1, 'and the two together stay inside the same 6000')
+  assert.equal(world.agent.buildRestagePacket({ ...args }).dropped.length, 0, 'no block is produced: no room is held back')
+  const slot = world.agent.buildRestagePacket({ ...args, topology: { state: 'deferred', source: 'native_bounded_reads', reason: 'mutation_pending' } })
+  assert.ok(slot.dropped.length > 0 && slot.chars <= 6000 - TOPOLOGY_LIMITS.chars, 'a read that is not fresh holds the whole slot')
 })

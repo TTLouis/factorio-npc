@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { topologyCapacity, topologyEntities, topologyJson, topologyObstruction, topologyText, TOPOLOGY_PREFIX, deduplicateTopologySkillRefs } from './topology-context.mjs'
+import { topologyCapacity, topologyEntities, topologyJson, topologyObstruction, topologyReserve, topologyText, TOPOLOGY_LIMITS, TOPOLOGY_PREFIX, deduplicateTopologySkillRefs } from './topology-context.mjs'
 import { KEY, recoveryWorld, recoverySession, ScriptedModel, settle } from './recovery-loop-fixtures.mjs'
 import { FakeFactorio, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 import { getActivePlan } from './planning-state.mjs'
@@ -463,4 +463,15 @@ test('C7 common recovery restage refreshes topology after a real receipt and pre
   assert.deepEqual(ctx.model.violations, []); assert.deepEqual(ctx.world.named('request.failed'), []); assert.deepEqual(ctx.model.remaining, [])
   assert.equal(ctx.world.named('goal.evaluated').at(-1).satisfied, true)
   assert.equal(ctx.game.mutations.length, 2)
+})
+
+test('the packet reserve is the topology block\'s own size, none without a block, and the whole slot while the read is not fresh', () => {
+  const fresh = { state: 'fresh', source: 'native_bounded_reads', ...topologyEntities(nativeNearby()), held: { 'steam-engine': 1 }, held_scope: 'complete_main_inventory; unlisted_items_have_count_zero' }
+  const text = topologyText(fresh)
+  assert.ok(text.length > 120 && text.length < 1950, `${text.length}`)
+  assert.equal(topologyReserve(fresh), text.length + 1, 'the block and the line break that joins it')
+  assert.equal(topologyReserve(undefined), 0)
+  for (const state of ['deferred', 'unavailable']) assert.equal(topologyReserve({ state, source: 'native_bounded_reads' }), TOPOLOGY_LIMITS.chars, 'the fresh read the next request takes can be larger')
+  const crowded = { ...fresh, entities: Array.from({ length: 4 }, () => ({ ...fresh.entities[0], note: 'x'.repeat(900) })) }
+  assert.ok(topologyReserve(crowded) <= TOPOLOGY_LIMITS.chars, 'never above the slot')
 })

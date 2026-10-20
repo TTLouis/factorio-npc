@@ -137,3 +137,13 @@ export function topologyText(facts, maxChars = TOPOLOGY_LIMITS.chars) {
   if (text.length > maxChars) return TOPOLOGY_PREFIX + JSON.stringify({ state: 'unavailable', reason: 'size_limit', truncated: true })
   return text
 }
+
+// Room a restage packet leaves for the fresh_topology block the next provider request inserts after it (protocol 3 keeps the
+// geometry slot out of the packet). None when no block is produced; the block's own length plus the line break that joins it when a
+// fresh read is in hand; the whole slot when the read was deferred or unavailable, because the request takes a fresh read that
+// can be larger. Never above the slot, so packet and block together stay within the same 6000 characters.
+export function topologyReserve(facts) {
+  if (!facts) return 0
+  if (facts.state !== 'fresh') return TOPOLOGY_LIMITS.chars
+  return Math.min(TOPOLOGY_LIMITS.chars, topologyText(facts).length + 1)
+}
