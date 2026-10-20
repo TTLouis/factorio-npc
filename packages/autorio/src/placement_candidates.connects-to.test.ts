@@ -380,7 +380,7 @@ describe('shoreline placement ordering', () => {
       surface: { index: 1, can_place_entity: () => true, find_entities_filtered: () => [] },
     } as any
     const result = placement_candidates_for_actor(actor, { entity_name: 'plain-box', radius: 2, limit: 3 }) as any
-    expect(result.ordering).toBe('resource_coverage_then_nearest_to_center')
+    expect(result.ordering).toBe('fewest_clears_then_resource_coverage_then_nearest_to_center')
     expect(result.candidates[0].distance_from_actor).toBeUndefined()
   })
 })

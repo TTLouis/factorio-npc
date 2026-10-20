@@ -73,7 +73,7 @@ describe('electric-pole placement candidates', () => {
     }) as any
 
     expect(result.electric_pole).toEqual({ supply_area_distance: 2.5, max_wire_distance: 7.5 })
-    expect(result.ordering).toBe('resource_coverage_then_nearest_to_center')
+    expect(result.ordering).toBe('fewest_clears_then_resource_coverage_then_nearest_to_center')
     expect(result.candidates.map((candidate: any) => candidate.position)).toEqual([{ x: 3.5, y: 0.5 }, { x: 0.5, y: 5.5 }])
 
     const [beside_lab, away] = result.candidates

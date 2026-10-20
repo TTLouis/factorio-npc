@@ -5,7 +5,7 @@
 
 export const REJECTED_FOOTPRINTS_LABEL = 'rejected_footprint_samples_not_candidates'
 
-const LEADING_KEYS = ['ok', 'code', 'error', 'entity_name', 'ordering', 'legal_candidate_count', 'returned_candidate_count', 'candidates']
+const LEADING_KEYS = ['ok', 'code', 'error', 'entity_name', 'ordering', 'legal_candidate_count', 'returned_candidate_count', 'candidates', 'candidates_may_be_incomplete', 'candidates_incomplete_reason']
 const MAX_PARSED_CHARS = 200_000
 
 function plainObject(value) {
@@ -48,6 +48,7 @@ export function renderPlacementCandidatesResult(raw, maxChars) {
     while (kept.length > 0 && text.length > maxChars) {
       kept.pop()
       ordered.candidates = kept
+      ordered.returned_candidate_count = kept.length
       ordered.candidates_omitted_for_size = all.length - kept.length
       text = JSON.stringify(ordered)
     }

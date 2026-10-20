@@ -56,6 +56,9 @@ export interface ClearableEntity {
 export interface ClearedEntity extends ClearableEntity {
   // What the inventory measured it gained from mining this entity.
   items: Array<{ name: string, count: number }>
+  // cleared: the entity is gone. items_taken_entity_remained: the mine call failed after items arrived and the entity
+  // still stands. entity_gone_call_failed: the call reported failure but the entity is gone.
+  state: 'cleared' | 'items_taken_entity_remained' | 'entity_gone_call_failed'
 }
 
 export interface ClearBlocker {
@@ -111,8 +114,10 @@ function holds_items(entity: LuaEntity) {
 
 // A neighbour scan that fills its bound could have missed the entity that feeds
 // this one, so it counts as a link (fail closed).
-function neighbour_link(entity: LuaEntity, surface: ControlledActor['surface']) {
-  const nearby = protected_read(() => find_world_entities(surface, { area: area_around(entity, MAX_CHAIN_NEIGHBOUR_SEARCH), limit: MAX_CHAIN_SCAN })) ?? []
+// Only entities of the actor force are searched: a neutral tree, rock or ore tile cannot feed or power an NPC machine, and
+// counting them would fill the bound on every ore patch and in every forest.
+function neighbour_link(entity: LuaEntity, actor: ControlledActor) {
+  const nearby = protected_read(() => find_world_entities(actor.surface, { area: area_around(entity, MAX_CHAIN_NEIGHBOUR_SEARCH), force: actor.force, limit: MAX_CHAIN_SCAN })) ?? []
   if (nearby.length >= MAX_CHAIN_SCAN) return 'neighbour_scan_truncated'
   for (const other of nearby) {
     if (!other.valid || other === entity) continue
@@ -125,11 +130,11 @@ function neighbour_link(entity: LuaEntity, surface: ControlledActor['surface']) 
 // electric network id is covered by a pole (an unconnected entity has none). A
 // lone pole nothing stands under, and an electric entity no pole covers, are
 // not part of a chain.
-function electric_link(entity: LuaEntity, surface: ControlledActor['surface']) {
+function electric_link(entity: LuaEntity, actor: ControlledActor) {
   const reach = pole_reach(protected_read(() => entity.prototype))
   if (reach === undefined) return protected_read(() => entity.electric_network_id) !== undefined ? 'electric_network_member' : undefined
   const supply = area_around(entity, reach.supply_area_distance)
-  const nearby = protected_read(() => find_world_entities(surface, { area: supply, limit: MAX_CHAIN_SCAN })) ?? []
+  const nearby = protected_read(() => find_world_entities(actor.surface, { area: supply, force: actor.force, limit: MAX_CHAIN_SCAN })) ?? []
   if (nearby.length >= MAX_CHAIN_SCAN) return 'neighbour_scan_truncated'
   for (const other of nearby) {
     if (other.valid && other !== entity && has_electric_energy_source(other)) return 'powers_entity'
@@ -146,7 +151,7 @@ function electric_link(entity: LuaEntity, surface: ControlledActor['surface']) {
  * neighbour), is covered by or supplies electric power, or another entity drops
  * into it or picks from it.
  */
-export function running_chain_reason(entity: LuaEntity, surface: ControlledActor['surface']): string | undefined {
+export function running_chain_reason(entity: LuaEntity, actor: ControlledActor): string | undefined {
   const status = protected_read(() => entity.status)
   if (status !== undefined && status === defines.entity_status.working) return 'working'
   if (holds_items(entity)) return 'holds_items'
@@ -161,7 +166,7 @@ export function running_chain_reason(entity: LuaEntity, surface: ControlledActor
   if (protected_read(() => entity.pickup_target) !== undefined) return 'picks_from_entity'
   if (has_links(protected_read(() => entity.neighbours))) return 'neighbour_linked'
   if (has_links(protected_read(() => entity.belt_neighbours))) return 'belt_linked'
-  return electric_link(entity, surface) ?? neighbour_link(entity, surface)
+  return electric_link(entity, actor) ?? neighbour_link(entity, actor)
 }
 
 function memo_key(entity: LuaEntity) {
@@ -179,7 +184,7 @@ function evaluate_blocker(actor: ControlledActor, entity: LuaEntity): ClearReaso
   if (!is_placed_building_entity(entity) || entity.minable !== true) return undefined
   if (protected_read(() => entity.prototype.mineable_properties.minable) !== true) return undefined
   if (!entity_has_no_last_user(entity)) return undefined
-  if (running_chain_reason(entity, actor.surface) !== undefined) return undefined
+  if (running_chain_reason(entity, actor) !== undefined) return undefined
   return 'own_idle_entity'
 }
 
@@ -280,9 +285,12 @@ export function mining_products_fit(inventory: LuaInventory, entity: LuaEntity) 
 
 /**
  * True when the inventory can take the combined yield of every blocker and every
- * ground item at once. The totals are probed with real inserts, which are taken
- * straight back out, so the answer covers stack sizes and slots shared by
- * several items; the inventory is left as it was found.
+ * ground item at once, from reads only (the inventory is never written, so no
+ * inventory event fires and nothing can be left behind). Per item the room is
+ * what get_insertable_count reports; whatever exceeds the space left in that
+ * item's partly filled stacks needs whole empty stacks, and the empty stacks the
+ * items need together must not exceed the empty stacks there are. Conservative:
+ * it never says yes to a yield that cannot fit, and an unknown stack size says no.
  */
 export function yields_fit(inventory: LuaInventory, blockers: ClearBlocker[], ground_items: GroundItem[]) {
   const totals: Array<{ name: string, count: number, quality?: string }> = []
@@ -297,17 +305,17 @@ export function yields_fit(inventory: LuaInventory, blockers: ClearBlocker[], gr
   }
   for (const blocker of blockers) for (const product of mining_products(blocker.entity)) add(product.name, product.count)
   for (const item of ground_items) add(item.name, item.count, item.quality)
-  const inserted: number[] = []
-  let fits = true
+  const empty = inventory.count_empty_stacks()
+  let stacks_needed = 0
   for (const total of totals) {
-    const count = inventory.insert({ name: total.name, count: total.count, quality: total.quality as any })
-    inserted.push(count)
-    if (count < total.count) fits = false
+    const stack_size = protected_read(() => prototypes.item[total.name].stack_size)
+    if (stack_size === undefined || !(stack_size > 0)) return false
+    const room = inventory.get_insertable_count(total.quality === undefined ? total.name : { name: total.name, quality: total.quality as any })
+    if (room < total.count) return false
+    const partial_room = math.max(0, room - empty * stack_size)
+    stacks_needed += math.ceil(math.max(0, total.count - partial_room) / stack_size)
   }
-  for (let index = 0; index < totals.length; index++) {
-    if (inserted[index] > 0) inventory.remove({ name: totals[index].name, count: inserted[index], quality: totals[index].quality as any })
-  }
-  return fits
+  return stacks_needed <= empty
 }
 
 /**
@@ -330,9 +338,9 @@ export function clear_blocker(actor: ControlledActor, inventory: LuaInventory, b
       record_hand_mined_item(actor.force.index, name)
     }
   }
-  const cleared: ClearedEntity = { ...blocker.info, items }
-  if (mined && gone) return { ok: true as const, cleared }
+  if (mined && gone) return { ok: true as const, cleared: { ...blocker.info, items, state: 'cleared' as const } }
   const changed = gone || items.length > 0
+  const partial: ClearedEntity = { ...blocker.info, items, state: gone ? 'entity_gone_call_failed' : 'items_taken_entity_remained' }
   const code = !changed && !mined && !mining_products_fit(inventory, blocker.entity) ? 'clearing_inventory_full' as const : 'clearing_failed' as const
-  return { ok: false as const, code, partial: changed ? cleared : undefined }
+  return { ok: false as const, code, partial: changed ? partial : undefined }
 }

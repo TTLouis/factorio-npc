@@ -89,7 +89,14 @@ test('candidates that alone exceed the message limit are trimmed from the tail, 
   assert.ok(rendered.candidates.length > 0 && rendered.candidates.length < 8)
   assert.deepEqual(rendered.candidates, heavy.candidates.slice(0, rendered.candidates.length), 'the highest-ranked candidates are the ones kept')
   assert.equal(rendered.candidates_omitted_for_size, 8 - rendered.candidates.length)
-  assert.equal(rendered.returned_candidate_count, 8)
+  assert.equal(rendered.returned_candidate_count, rendered.candidates.length, 'the count tracks what is listed')
+  assert.equal(rendered.legal_candidate_count, 30)
+})
+
+test('the incompleteness flag stays beside the candidates, ahead of the rejected samples', () => {
+  const flagged = hashOrdered({ candidates_may_be_incomplete: true, candidates_incomplete_reason: 'clearance_check_limit' })
+  const keys = Object.keys(JSON.parse(renderPlacementCandidatesResult(JSON.stringify(flagged), LIMIT)))
+  assert.deepEqual(keys.slice(5, 8), ['candidates', 'candidates_may_be_incomplete', 'candidates_incomplete_reason'])
 })
 
 test('an answer whose headline alone cannot fit still degrades to valid JSON', () => {
@@ -117,7 +124,7 @@ test('getPlacementCandidates takes an anchor entity, renders it into the remote 
   assert.equal(tool.function.parameters.properties.anchor.additionalProperties, false)
   assert.match(tool.function.description, /anchor/)
   assert.match(tool.function.description, /clears/)
-  assert.match(tool.function.description, /clear nothing are listed before/)
+  assert.match(tool.function.description, /ordered by distance to it and, at equal distance, the one that clears less comes first/)
   assert.match(tool.function.description, /rejected_footprint_samples_not_candidates/)
   assert.equal(toolCommand('getPlacementCandidates', { entity_name: 'burner-mining-drill', target_resource: 'copper-ore', anchor: { unit_number: 31 }, limit: 4 }),
     `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",{entity_name='burner-mining-drill',target_resource='copper-ore',anchor={unit_number=31},limit=4})))`)

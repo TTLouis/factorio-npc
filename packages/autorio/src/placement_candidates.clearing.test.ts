@@ -112,7 +112,8 @@ function ground_item(name: string, count: number, position: Pos) {
 
 function world(entities: any[]) {
   const live = () => entities.filter(value => value.valid)
-  const in_area = (filters: any) => live().filter(value => (!filters.type || value.type === filters.type) && (!filters.area || inside(filters.area, value.position)))
+  const in_area = (filters: any) => live().filter(value => (!filters.type || value.type === filters.type) && (!filters.area || inside(filters.area, value.position))
+    && (!filters.force || value.force?.index === filters.force.index))
   const surface: any = {
     index: 1,
     get_tile: () => ({ name: 'grass-1', collides_with: () => false }),
@@ -137,12 +138,32 @@ function inventory_with(slots: number) {
       return removed
     }),
     can_insert: vi.fn(({ count }: any) => count <= slots),
+    // Item units free, with no whole empty stacks: the room check then reduces to a per-item comparison.
+    get_insertable_count: vi.fn(() => slots),
+    count_empty_stacks: vi.fn(() => 0),
     insert: vi.fn((stack: any) => {
       const inserted = Math.min(stack.count, slots)
       slots -= inserted
       held[stack.name] = (held[stack.name] ?? 0) + inserted
       return inserted
     }),
+  }
+  return inventory
+}
+
+// An inventory described the way the engine answers the room check: whole empty stacks plus room left in partly filled stacks.
+function slot_inventory(empty: number, partial: Record<string, number> = {}) {
+  const sizes: Record<string, number> = { wood: 100, stone: 50, coal: 50, 'copper-ore': 50, 'stone-furnace': 50, 'wooden-chest': 50 }
+  const held: Record<string, number> = { 'stone-furnace': 1 }
+  const name_of = (filter: any) => typeof filter === 'string' ? filter : filter.name
+  const inventory: any = {
+    held,
+    count_empty_stacks: vi.fn(() => empty),
+    get_insertable_count: vi.fn((filter: any) => (partial[name_of(filter)] ?? 0) + empty * (sizes[name_of(filter)] ?? 0)),
+    get_item_count: vi.fn((name: string) => held[name] ?? 0),
+    remove: vi.fn(({ name, count }: any) => { held[name] = (held[name] ?? 0) - count; return count }),
+    can_insert: vi.fn(() => true),
+    insert: vi.fn((stack: any) => { held[stack.name] = (held[stack.name] ?? 0) + stack.count; return stack.count }),
   }
   return inventory
 }
@@ -187,7 +208,7 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
     ;(globalThis as any).storage = {}
     ;(globalThis as any).game.tick = 100
     ;(globalThis as any).prototypes.entity = { 'stone-furnace': FURNACE }
-    ;(globalThis as any).prototypes.item = { 'stone-furnace': {} }
+    ;(globalThis as any).prototypes.item = { 'stone-furnace': { stack_size: 50 }, wood: { stack_size: 100 }, stone: { stack_size: 50 }, coal: { stack_size: 50 }, 'copper-ore': { stack_size: 50 }, 'wooden-chest': { stack_size: 50 } }
     ;(globalThis as any).defines = { ...originalDefines, entity_status: STATUS }
     by_unit = {}
     ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => by_unit[unit]
@@ -243,7 +264,7 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       expect([...distances].sort((left: number, right: number) => left - right)).toEqual(distances)
       for (const candidate of anchored.candidates) expect(candidate.distance_from_anchor).toBeCloseTo(Math.hypot(candidate.position.x + 39, candidate.position.y + 30), 6)
       // With no anchor the existing ordering stands, nearest the search centre.
-      expect(plain.ordering).toBe('resource_coverage_then_nearest_to_center')
+      expect(plain.ordering).toBe('fewest_clears_then_resource_coverage_then_nearest_to_center')
       expect(plain.candidates[0].distance_from_anchor).toBeUndefined()
       expect(anchored.candidates[0].position).not.toEqual(plain.candidates[0].position)
     })
@@ -404,21 +425,68 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       const actor = npc(surface, inventory_with(10))
       const result = create_placement_candidate_set(actor, request({ center: { x: -20, y: -20 }, radius: 2 })) as any
       // Every footprint in this window is dropped by covers_position, so none is probed or sampled.
-      expect(result.obstructions.clearance_probes).toBe(0)
+      expect(result.clearance_probes).toBe(0)
       expect(result.obstructions.rejected_count).toBe(0)
+      expect(result.candidates_may_be_incomplete).toBeUndefined()
     })
 
-    it('ranks a footprint that clears nothing ahead of one that clears something, anchor or not', () => {
+    it('spends the clearance budget outward from the centre and says beside the candidates when it ran out', () => {
+      const wood = tree({ x: -33.5, y: -35.5 })
+      register(wood)
+      const surface = world([wood, chest({ x: -10, y: -10 }, { force: OTHER_FORCE })])
+      surface.can_place_entity = vi.fn(() => false)
+      const result = create_placement_candidate_set(npc(surface, inventory_with(10)), { entity_name: 'stone-furnace', center: { x: -33, y: -35 }, radius: 24, limit: 3 }) as any
+
+      expect(result.clearance_probes).toBe(400)
+      expect(result).toMatchObject({ candidates_may_be_incomplete: true, candidates_incomplete_reason: 'clearance_check_limit' })
+      expect(Object.keys(result).indexOf('candidates_may_be_incomplete')).toBeLessThan(Object.keys(result).indexOf('obstructions'))
+      expect(result.obstructions.candidates_may_be_incomplete).toBeUndefined()
+      // The tree stands at the centre, in the first rings, so the budget reached it although most of the window is refused.
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'tree-01' }])
+    })
+
+    it('clears an idle own drill standing among many neutral trees and ore tiles', () => {
+      const drill = chest(SPOT, { name: 'burner-mining-drill', type: 'mining-drill' })
+      // Neutral entities cannot feed or power an NPC machine, so they never fill the neighbour scan.
+      const crowd = Array.from({ length: 80 }, (_unused, index) => tree({ x: SPOT.x + 2.9, y: SPOT.y - 1 + index * 0.02 }))
+      const result = candidates_over([drill, ...crowd])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'burner-mining-drill', reason: 'own_idle_entity' }])
+    })
+
+    it('with an anchor, an adjacent footprint that needs one tree cleared still comes first', () => {
+      const anchor = register(chest({ x: -33.5, y: -35.5 }, { unit_number: 31, status: STATUS.working }))
+      const wood = register(tree({ x: -31.5, y: -35.5 }))
+      const surface = world([anchor, wood])
+      // Only footprints over the tree are clearable near the anchor; clean spots exist 13+ tiles east of it.
+      surface.can_place_entity = vi.fn((args: any) => args.position.x > -33.5 + 13)
+      const result = create_placement_candidate_set(npc(surface, inventory_with(10)), { entity_name: 'stone-furnace', radius: 18, limit: 5, anchor: { unit_number: 31 } } as any) as any
+
+      expect(result.ordering).toBe('nearest_to_anchor_first')
+      expect(result.legal_candidate_count).toBeGreaterThan(5)
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'tree-01' }])
+      expect(result.candidates[0].distance_from_anchor).toBeLessThan(4)
+      expect(result.candidates.slice(1).some((candidate: any) => candidate.clears === undefined && candidate.distance_from_anchor > 12)).toBe(true)
+    })
+
+    it('ranks by anchor distance first with the clear count as tie-break, and by clear count first without an anchor', () => {
       const base = { id: '', direction: 0, distance_from_center: 1, footprint: {} as any }
       const near_clearing: any = { ...base, position: { x: 1, y: 1 }, clears: [{ name: 'wooden-chest', type: 'container', position: { x: 1, y: 1 }, reason: 'own_idle_entity' }] }
       const far_clean: any = { ...base, position: { x: 9, y: 9 }, distance_from_center: 9 }
       const grounded: any = { ...base, position: { x: 5, y: 5 }, distance_from_center: 5, ground_items: [{ name: 'copper-ore', count: 1, position: { x: 5, y: 5 } }] }
       const plain: any = { ...base, position: { x: 5, y: 7 }, distance_from_center: 5 }
-      for (const anchor of [undefined, { x: 1, y: 1 }]) {
-        const values = [near_clearing, far_clean]
-        sort_candidates(values, undefined, undefined, anchor)
-        expect(values[0]).toBe(far_clean)
-      }
+      const without_anchor = [near_clearing, far_clean]
+      sort_candidates(without_anchor)
+      expect(without_anchor[0]).toBe(far_clean)
+      const with_anchor = [far_clean, near_clearing]
+      sort_candidates(with_anchor, undefined, undefined, { x: 1, y: 1 })
+      expect(with_anchor[0]).toBe(near_clearing)
+      // At equal anchor distance, the one that clears nothing wins.
+      const equal_clearing: any = { ...base, position: { x: 3, y: 1 }, clears: near_clearing.clears }
+      const equal_clean: any = { ...base, position: { x: -1, y: 1 } }
+      const equal = [equal_clearing, equal_clean]
+      sort_candidates(equal, undefined, undefined, { x: 1, y: 1 })
+      expect(equal[0]).toBe(equal_clean)
       // At equal distance, fewer ground items first.
       const tied = [grounded, plain]
       sort_candidates(tied)
@@ -435,8 +503,8 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
   })
 
   describe('placing over clearable entities', () => {
-    function build(blockers: any[], slots = 10, position: Pos = { x: -33, y: -37 }) {
-      const inventory = inventory_with(slots)
+    function build(blockers: any[], slots: number | object = 10, position: Pos = { x: -33, y: -37 }) {
+      const inventory = typeof slots === 'number' ? inventory_with(slots) : slots as any
       for (const blocker of blockers) if (blocker.type !== 'item-entity') mineable(blocker)
       register(...blockers)
       const surface = world(blockers)
@@ -471,7 +539,7 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       expect(controller.status().last_result).toMatchObject({
         code: 'completed',
         placed_unit_number: 21,
-        entities_cleared: [{ name: 'tree-01', type: 'tree', reason: 'natural_obstruction', position: SPOT, items: [{ name: 'wood', count: 4 }] }],
+        entities_cleared: [{ name: 'tree-01', type: 'tree', reason: 'natural_obstruction', position: SPOT, state: 'cleared', items: [{ name: 'wood', count: 4 }] }],
       })
     })
 
@@ -542,32 +610,53 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       expect(cancelled).toHaveBeenCalledWith('placing:clearing_inventory_full', expect.objectContaining({ failed_before_mutation: true }))
     })
 
-    it('counts every product of a blocker and the ground items in the room it needs', () => {
+    function stone_and_coal() {
       const rubble = rock(SPOT)
       rubble.prototype.mineable_properties.products = [{ type: 'item', name: 'stone', amount: 5 }, { type: 'item', name: 'coal', amount: 5 }]
-      const { actor, controller, runtime } = build([rubble], 6)
+      return rubble
+    }
+
+    it('counts every product of a blocker: one empty stack cannot take stone and coal together', () => {
+      const rubble = stone_and_coal()
+      const { actor, controller, runtime } = build([rubble], slot_inventory(1))
       expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
       expect(runtime.state_placing(actor)?.[0]).toBe(false)
       expect(rubble.mine).not.toHaveBeenCalled()
       expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
-
-      const wood = tree(SPOT)
-      const ore = ground_item('copper-ore', 3, { x: -33.2, y: -35.2 })
-      const second = build([wood, ore], 5)
-      expect(second.controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
-      expect(second.runtime.state_placing(second.actor)?.[0]).toBe(false)
-      expect(wood.mine).not.toHaveBeenCalled()
-      expect(ore.valid).toBe(true)
-      expect(second.controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
     })
 
-    it('leaves the inventory exactly as it was after the room check', () => {
+    it.each([
+      ['two empty stacks', () => slot_inventory(2)],
+      ['room left in the stacks already held', () => slot_inventory(0, { stone: 5, coal: 5 })],
+    ])('takes both products with %s', (_label, inventory) => {
+      const rubble = stone_and_coal()
+      const { actor, controller, runtime } = build([rubble], inventory())
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      expect(runtime.state_placing(actor)).toBeUndefined()
+      expect(rubble.mine).not.toHaveBeenCalled()
+      expect(controller.status().last_result?.code).not.toBe('clearing_inventory_full')
+    })
+
+    it('counts the ground items with the blockers in the room it needs', () => {
+      const wood = tree(SPOT)
+      const ore = ground_item('copper-ore', 3, { x: -33.2, y: -35.2 })
+      const { actor, controller, runtime } = build([wood, ore], slot_inventory(1))
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      expect(runtime.state_placing(actor)?.[0]).toBe(false)
+      expect(wood.mine).not.toHaveBeenCalled()
+      expect(ore.valid).toBe(true)
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
+    })
+
+    it('never writes the inventory while it checks that the yield fits', () => {
       const wood = tree(SPOT)
       const { actor, inventory, controller, runtime } = build([wood], 10)
       expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
       runtime.state_placing(actor)
+      expect(inventory.insert).not.toHaveBeenCalled()
+      expect(inventory.remove).not.toHaveBeenCalled()
+      expect(inventory.get_insertable_count).toHaveBeenCalled()
       expect(inventory.held.wood ?? 0).toBe(0)
-      expect(inventory.get_item_count('stone-furnace')).toBe(1)
     })
 
     it('records what a failed mine call changed: items that arrived although it returned false', () => {
@@ -582,7 +671,7 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
 
       expect(result?.[0]).toBe(false)
       expect(inventory.held.wood).toBe(2)
-      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', items: [{ name: 'wood', count: 2 }] }] })
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', state: 'items_taken_entity_remained', items: [{ name: 'wood', count: 2 }] }] })
       expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
     })
 
@@ -596,7 +685,7 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       ;(globalThis as any).game.tick = 100 + 1000
       runtime.state_placing(actor)
 
-      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', items: [] }] })
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', state: 'entity_gone_call_failed', items: [] }] })
       expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
     })
 

@@ -261,8 +261,10 @@ function coverage_score(candidate: PlacementCandidate, target_resource?: string)
   return { entities, amount }
 }
 
-// A footprint that needs nothing cleared outranks one that does: clearing costs hand-mining time and inventory
-// room, and may take the NPC's own earlier work. Fewer entities to clear come first, then fewer ground items.
+// Clearing costs hand-mining time and inventory room, and may take the NPC's own earlier work, so a footprint that
+// needs nothing cleared outranks an otherwise equal one. With an anchor, distance to it still decides first (the
+// new machine belongs beside what it serves) and the clear count only breaks ties; without one, fewer entities to
+// clear come first. Fewer ground items is the last tie-break before position.
 function clear_count(candidate: PlacementCandidate) {
   return candidate.clears === undefined ? 0 : candidate.clears.length
 }
@@ -272,12 +274,12 @@ function ground_count(candidate: PlacementCandidate) {
 }
 
 function better(left: PlacementCandidate, right: PlacementCandidate, target_resource?: string, origin?: { x: number, y: number }, anchor?: { x: number, y: number }) {
-  if (clear_count(left) !== clear_count(right)) return clear_count(left) < clear_count(right)
   if (anchor !== undefined) {
     const left_anchor = squared_distance(left.position, anchor)
     const right_anchor = squared_distance(right.position, anchor)
     if (left_anchor !== right_anchor) return left_anchor < right_anchor
   }
+  if (clear_count(left) !== clear_count(right)) return clear_count(left) < clear_count(right)
   const left_coverage = coverage_score(left, target_resource)
   const right_coverage = coverage_score(right, target_resource)
   if (left_coverage.entities !== right_coverage.entities) return left_coverage.entities > right_coverage.entities
@@ -672,25 +674,38 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     }
   }
   else {
-    for (const direction of directions) {
-      const snapped_center = snap_placement_center(prototype, center, direction)
-      for (let dy = -radius; dy <= radius; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          const position = { x: snapped_center.x + dx, y: snapped_center.y + dy }
+    // Square rings outward from the search centre, every direction at each ring, so the scan and clearance
+    // budgets are spent where the request is centred (the anchor, when it has one) and not on one corner or one direction.
+    const snapped_centers: Array<{ x: number, y: number }> = []
+    for (const direction of directions) snapped_centers.push(snap_placement_center(prototype, center, direction))
+    const scan_ring = (direction: number, snapped_center: { x: number, y: number }, ring: number) => {
+      for (let dy = -ring; dy <= ring; dy++) {
+        const edge = dy === -ring || dy === ring
+        for (let dx = -ring; dx <= ring; dx += edge || ring === 0 ? 1 : 2 * ring) {
           scanned += 1
-          if (scanned > MAX_SCANNED_POSITIONS) break
-          const candidate = consider(position, direction)
+          if (scanned > MAX_SCANNED_POSITIONS) return false
+          const candidate = consider({ x: snapped_center.x + dx, y: snapped_center.y + dy }, direction)
           if (candidate !== undefined) candidates.push(candidate)
         }
-        if (scanned > MAX_SCANNED_POSITIONS) break
       }
-      if (scanned > MAX_SCANNED_POSITIONS) break
+      return true
+    }
+    for (let ring = 0; ring <= radius; ring++) {
+      let within_scan_limit = true
+      for (let index = 0; index < directions.length; index++) {
+        if (!scan_ring(directions[index], snapped_centers[index], ring)) { within_scan_limit = false; break }
+      }
+      if (!within_scan_limit) break
     }
   }
 
   sort_candidates(candidates, request.target_resource, distance_origin, anchor?.position)
   const selected = diverse_top(candidates, limit)
   for (let index = 0; index < selected.length; index++) selected[index].id = `candidate-${index + 1}`
+
+  const incomplete_reason = clearance_probes_capped
+    ? 'clearance_check_limit'
+    : scanned > MAX_SCANNED_POSITIONS ? 'scan_limit' : undefined
 
   const reach = pole_reach(prototype)
   if (reach !== undefined) {
@@ -701,10 +716,15 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   return {
     ok: true as const,
     entity_name: request.entity_name,
-    ordering: anchor !== undefined ? 'nearest_to_anchor_first' : nearest_first ? 'nearest_to_actor_first' : 'resource_coverage_then_nearest_to_center',
+    ordering: anchor !== undefined
+      ? 'nearest_to_anchor_first'
+      : nearest_first ? 'nearest_to_actor_first' : 'fewest_clears_then_resource_coverage_then_nearest_to_center',
     legal_candidate_count: candidates.length,
     returned_candidate_count: selected.length,
     candidates: selected,
+    // Set beside the candidates, not among the rejected samples: more legal candidates may exist than were found.
+    ...(incomplete_reason !== undefined ? { candidates_may_be_incomplete: true, candidates_incomplete_reason: incomplete_reason } : {}),
+    clearance_probes,
     center,
     radius,
     target_resource: request.target_resource,
@@ -741,8 +761,6 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       unknown_count: obstruction_samples.filter(sample => sample.unknown).length,
       samples: obstruction_samples,
       truncated: rejected > obstruction_samples.length || obstruction_samples.some(sample => sample.truncated),
-      clearance_probes,
-      clearance_probes_capped,
     },
   }
 }
