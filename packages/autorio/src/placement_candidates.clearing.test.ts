@@ -159,7 +159,7 @@ function npc(surface: any, inventory: any, position: Pos = { x: -33, y: -37 }) {
 }
 
 // Native mining as the engine does it: the products go into the given inventory and the entity is gone.
-function mineable(value: any, inventory: any) {
+function mineable(value: any) {
   value.mine = vi.fn(({ inventory: target }: any) => {
     for (const product of value.prototype.mineable_properties.products) target.insert({ name: product.name, count: product.amount ?? product.amount_max })
     value.valid = false
@@ -350,7 +350,7 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
   describe('placing over clearable entities', () => {
     function build(blockers: any[], slots = 10, position: Pos = { x: -33, y: -37 }) {
       const inventory = inventory_with(slots)
-      for (const blocker of blockers) if (blocker.type !== 'item-entity') mineable(blocker, inventory)
+      for (const blocker of blockers) if (blocker.type !== 'item-entity') mineable(blocker)
       register(...blockers)
       const surface = world(blockers)
       surface.create_entity = vi.fn((args: any) => ({ valid: true, name: args.name, type: 'furnace', unit_number: 21, position: args.position, direction: 0, surface, force: { index: 1 } }))

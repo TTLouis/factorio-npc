@@ -126,8 +126,8 @@ export class FakeFactorio {
     const tick = 600 + this.batchId
     // Like the mod (basic_operations.ts fail): only a placement failure claims it changed nothing, and the receipt records how
     // many tasks had started. A failing first task with that claim proves no task of the batch had any effect. A placement
-    // that picked up ground items first changed the world, so it makes no claim.
-    const placing = result.type === 'placing' && !(result.ground_items_picked_up?.length > 0) && result.ground_item_pickup_uncertain !== true
+    // that picked up ground items or cleared entities first changed the world, so it makes no claim.
+    const placing = result.type === 'placing' && !(result.ground_items_picked_up?.length > 0) && !(result.entities_cleared?.length > 0) && result.ground_item_pickup_uncertain !== true
     this.cancelledBatch = { batch_id: this.batchId, batch_generation: this.generation ?? 1, batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}`,
       task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick, reason,
       started_count: this.lastTaskTypes.length > 0 && this.lastTaskTypes[0] === result.type ? 1 : 2,

@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
+import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, fitTopologyBlock, deduplicateTopologySkillRefs } from './topology-context.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory, toolSignature } from '../staging/npc-agent-loop.mjs'
@@ -1065,6 +1066,12 @@ function compactBasicOperationResult(result) {
       ? sanitizeDurableModelValue(result.ground_item_left)
       : undefined,
     ground_item_pickup_uncertain: result.ground_item_pickup_uncertain === true ? true : undefined,
+    entities_cleared: Array.isArray(result.entities_cleared)
+      ? sanitizeDurableModelValue(result.entities_cleared.slice(0, 8))
+      : undefined,
+    clearing_left: result.clearing_left && typeof result.clearing_left === 'object'
+      ? sanitizeDurableModelValue(result.clearing_left)
+      : undefined,
     to_entity: typeof result.to_entity === 'boolean' ? result.to_entity : undefined,
     to_player: typeof result.to_player === 'boolean' ? result.to_player : undefined,
     rocket_parts: Number.isSafeInteger(result.rocket_parts) ? result.rocket_parts : undefined,
@@ -5109,6 +5116,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   observationToolCommand(name, args) {
     return toolCommand(name, args)
+  }
+
+  // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples
+  // labelled and last (placement-candidates-render.mjs); every other answer is delivered as read.
+  renderToolOutput(toolName, raw) {
+    return toolName === 'getPlacementCandidates' ? renderPlacementCandidatesResult(raw) : super.renderToolOutput(toolName, raw)
   }
 
   // --- Repair unit D2: the facts a fresh executor is briefed with ------------------------------------------------

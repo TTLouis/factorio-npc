@@ -803,6 +803,12 @@ export class NpcAgentLoop {
     }
   }
 
+  // The text the model reads for a live tool answer. A subclass reorders or labels a known answer here, never changing its
+  // facts, before it is cached and cut to the message limit; the default delivers the answer as read.
+  renderToolOutput(_toolName, raw) {
+    return raw
+  }
+
   async handleToolBatch(message, prepared = this.prepareToolBatch(message)) {
     this.messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: message.tool_calls })
     let duplicateThisRound = false
@@ -843,7 +849,8 @@ export class NpcAgentLoop {
         }
         else {
           await this.assertCurrent()
-          output = String(await this.rcon.command(entry.command)).slice(0, 12000)
+          const raw = String(await this.rcon.command(entry.command))
+          output = String(this.renderToolOutput(entry.tool.function.name, raw)).slice(0, 12000)
           await this.assertCurrent()
         }
         if (typeof entry._sglunaReadFence === 'function') await entry._sglunaReadFence()

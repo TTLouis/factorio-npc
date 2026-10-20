@@ -812,8 +812,11 @@ const PICKUP_FAILURES = [
     ground_item_left: { name: 'copper-ore', count: 2, quality: 'normal', position: DROP } }, false],
   ['a pickup the native check then refuses', { code: 'not_placeable', ground_items_picked_up: [{ name: 'copper-ore', count: 1, quality: 'normal', position: DROP }] }, false],
   ['a pickup whose entity creation fails', { code: 'create_failed', ground_items_picked_up: [{ name: 'copper-ore', count: 2, quality: 'normal', position: DROP }] }, false],
+  // A placement that mined a tree or its own idle entity out of the footprint changed the world the same way.
+  ['a cleared entity the native check then refuses', { code: 'not_placeable', entities_cleared: [{ name: 'tree-01', type: 'tree', reason: 'natural_obstruction', position: DROP, items: [{ name: 'wood', count: 4 }] }] }, false, /entities_cleared/],
+  ['a zero clearing refusal', { code: 'clearing_inventory_full', clearing_left: { name: 'tree-01', type: 'tree', reason: 'natural_obstruction', position: DROP } }, true],
 ]
-for (const [label, failure, proven] of PICKUP_FAILURES) test(`Run AF: ${label} ${proven ? 'settles as a refusal before mutation' : 'is never reconciled as a refusal before mutation'}`, async () => {
+for (const [label, failure, proven, detail = /ground_items_picked_up/] of PICKUP_FAILURES) test(`Run AF: ${label} ${proven ? 'settles as a refusal before mutation' : 'is never reconciled as a refusal before mutation'}`, async () => {
   const STEPS = ['Place a stone furnace on the burner drill output', 'Smelt copper plates']
   const prompts = []
   const trace = []
@@ -851,7 +854,7 @@ for (const [label, failure, proven] of PICKUP_FAILURES) test(`Run AF: ${label} $
   assert.equal(world.game.admissionJournal()[0].proven_refusal, undefined)
   // No placement is retried over a footprint whose items may have moved.
   assert.equal(world.game.mutations.length, 1)
-  assert.match(prompts.join('\n'), /ground_items_picked_up/)
+  assert.match(prompts.join('\n'), detail)
   // The duplicate-effect guard keeps refusing a retry until the effect is settled, and the goal pauses visibly.
   assert.ok(trace.some(record => record.event === 'operation.duplicate_suppressed'))
   assert.equal(world.memory.currentPlan(KEY).blocker, 'operation_preflight_failed:duplicate_effect_suppressed')

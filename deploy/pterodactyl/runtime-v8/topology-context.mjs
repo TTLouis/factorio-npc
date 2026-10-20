@@ -111,7 +111,7 @@ export function topologyObstruction(answer) {
   const facts = answer?.obstructions
   if (answer?.ok !== true || !facts || facts.source !== 'native_placement_checks' || integer(facts.observed_tick) === undefined
     || integer(facts.surface_index) === undefined || !Array.isArray(facts.samples)) return undefined
-  return { entity_name: name(answer.entity_name), actor_id: integer(facts.actor_id), ...cleanScalars(facts, ['source', 'observed_tick', 'surface_index', 'force_index', 'scope', 'examined_count', 'rejected_count', 'unknown_count']),
+  return { label: 'rejected_footprint_samples_not_candidates', entity_name: name(answer.entity_name), actor_id: integer(facts.actor_id), ...cleanScalars(facts, ['source', 'observed_tick', 'surface_index', 'force_index', 'scope', 'examined_count', 'rejected_count', 'unknown_count']),
     truncated: facts.truncated === true || facts.samples.length > 2 || facts.samples.some(sample => (sample.terrain_tiles?.length ?? 0) > 3 || (sample.entities?.length ?? 0) > 3),
     samples: facts.samples.slice(0, 2).map(sample => ({ position: position(sample.position), direction: integer(sample.direction), unknown: sample.unknown !== false,
       terrain: (Array.isArray(sample.terrain_tiles) ? sample.terrain_tiles : []).slice(0, 3).map(tile => ({ name: name(tile.name), position: position(tile.position) })),

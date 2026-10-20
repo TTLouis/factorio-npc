@@ -240,15 +240,22 @@ function operationArgumentFacts(operation) {
 }
 
 function parsePlacementCandidates(args) {
-  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'covers_position', 'connects_to', 'limit'])
+  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'covers_position', 'connects_to', 'anchor', 'limit'])
   const parsed = { entity_name: base.factorioName(args.entity_name) }
   if (args.center !== undefined) parsed.center = position(args.center)
   if (args.radius !== undefined) parsed.radius = optionalInteger(args.radius, 'radius', 1, 24)
   if (args.target_resource !== undefined) parsed.target_resource = base.factorioName(args.target_resource)
   if (args.covers_position !== undefined) parsed.covers_position = position(args.covers_position)
   if (args.connects_to !== undefined) parsed.connects_to = parseConnectsTo(args.connects_to)
+  if (args.anchor !== undefined) parsed.anchor = parseAnchor(args.anchor)
   if (args.limit !== undefined) parsed.limit = optionalInteger(args.limit, 'limit', 1, 8)
   return parsed
+}
+
+// The live entity a placement serves: candidates rank nearest it and a build never clears it.
+function parseAnchor(value) {
+  exactKeys(value, ['unit_number'])
+  return { unit_number: positiveInteger(value.unit_number, 'anchor.unit_number') }
 }
 
 // A live entity fluid port the new entity must join: unit_number plus the storage and connection indices
@@ -274,6 +281,7 @@ function renderPlacementCandidates(args) {
     if (parsed.connects_to.connection_index !== undefined) join.push(`connection_index=${parsed.connects_to.connection_index}`)
     fields.push(`connects_to={${join.join(',')}}`)
   }
+  if (parsed.anchor !== undefined) fields.push(`anchor={unit_number=${parsed.anchor.unit_number}}`)
   if (parsed.limit !== undefined) fields.push(`limit=${parsed.limit}`)
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",{${fields.join(',')}})))`
 }
@@ -644,7 +652,7 @@ const placementCandidatesDefinition = {
   type: 'function',
   function: {
     name: 'getPlacementCandidates',
-    description: 'Ask the local Factorio harness for a bounded set of live legal placement candidates derived from the current prototype and surface. For resource-bound mining placement, provide target_resource so non-covering placements are rejected; candidates may include live resource coverage, direct item output position, and current-prototype fluid port geometry. For an entity that must receive another entity\'s output (a furnace or chest fed by a drill), pass that candidate\'s item_output_position as covers_position so only placements whose footprint covers it are returned. Use returned candidate ids with place_candidate rather than retyping coordinates. Items lying on the ground do not block a candidate: its ground_items lists them, and placing it (place_candidate or place_entity) picks them up into the NPC inventory first, the way a player build does. connects_to {unit_number, storage_index?, connection_index?} (the indices getEntityStatus lists under spatial.fluid.storages) restricts results to footprints whose pipe connection joins that live entity\'s port: the footprints are solved from the prototype pipe connections, so radius does not limit them, each candidate\'s connects_to names the port it joins, and every open port of the entity is a target when connection_index is omitted. For offshore pumps, FIRST call getFluidSourceTiles for water and inspect covered_fluid_hints (native removable cover over hidden water); do not search pump placements before this read. Covered water requires getPumpSitePreparation and prepare_pump_site, then fresh native water/candidate validation, never immediate placement. With exposed water, use its shoreline as center or omit center to search near the nearest observed water sample. A missing water observation refuses the search without scanning. Offshore pumps MUST use place_candidate; generic place_entity is refused even with coordinates. An entity whose legality is decided by tile rules (a shoreline) is ordered nearest the actor first (result ordering says which). Electric-pole candidates report electric.poles_in_wire_reach (existing poles it could wire to, by distance) and electric.covers_entities (powered or consuming entities its supply area covers), from live positions and the pole prototype reach.',
+    description: 'Ask the local Factorio harness for a bounded set of live legal placement candidates derived from the current prototype and surface. For resource-bound mining placement, provide target_resource so non-covering placements are rejected; candidates may include live resource coverage, direct item output position, and current-prototype fluid port geometry. For an entity that must receive another entity\'s output (a furnace or chest fed by a drill), pass that candidate\'s item_output_position as covers_position so only placements whose footprint covers it are returned. Use returned candidate ids with place_candidate rather than retyping coordinates. A footprint refused only for things a build may clear is still a candidate: its ground_items lists items lying there and its clears lists entities there (natural obstructions such as trees and rocks, and the NPC\'s own idle entities), and placing it (place_candidate or place_entity) picks the items up and mines those entities into the NPC inventory first, which takes hand-mining time and needs inventory room. A player\'s building, a cliff, and an entity that is part of a running machine chain are never cleared, so a footprint holding one is not a candidate. anchor {unit_number} names the live entity the new one must serve (the furnace a drill should feed): candidates are ranked nearest it first (ordering says so), each reports distance_from_anchor, the search centres on it when no center is given, and it is never cleared. The answer lists candidates first; obstructions, labelled rejected_footprint_samples_not_candidates, samples footprints that were rejected and are not candidates. connects_to {unit_number, storage_index?, connection_index?} (the indices getEntityStatus lists under spatial.fluid.storages) restricts results to footprints whose pipe connection joins that live entity\'s port: the footprints are solved from the prototype pipe connections, so radius does not limit them, each candidate\'s connects_to names the port it joins, and every open port of the entity is a target when connection_index is omitted. For offshore pumps, FIRST call getFluidSourceTiles for water and inspect covered_fluid_hints (native removable cover over hidden water); do not search pump placements before this read. Covered water requires getPumpSitePreparation and prepare_pump_site, then fresh native water/candidate validation, never immediate placement. With exposed water, use its shoreline as center or omit center to search near the nearest observed water sample. A missing water observation refuses the search without scanning. Offshore pumps MUST use place_candidate; generic place_entity is refused even with coordinates. An entity whose legality is decided by tile rules (a shoreline) is ordered nearest the actor first (result ordering says which). Electric-pole candidates report electric.poles_in_wire_reach (existing poles it could wire to, by distance) and electric.covers_entities (powered or consuming entities its supply area covers), from live positions and the pole prototype reach.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['entity_name'],
       properties: {
@@ -660,6 +668,10 @@ const placementCandidatesDefinition = {
             storage_index: { type: 'integer', minimum: 1, maximum: 8 },
             connection_index: { type: 'integer', minimum: 1, maximum: 8 },
           },
+        },
+        anchor: {
+          type: 'object', additionalProperties: false, required: ['unit_number'],
+          properties: { unit_number: { type: 'integer', minimum: 1 } },
         },
         limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 },
       },
