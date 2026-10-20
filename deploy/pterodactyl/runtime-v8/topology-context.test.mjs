@@ -251,7 +251,7 @@ test('a complete inventory within the held limit says unlisted items are zero, a
   const game = new TopologyGame()
   game.inventory = { lab: 1, 'iron-plate': 14, 'burner-mining-drill': 2, 'iron-ore': 6, 'copper-ore': 3 }
   const ctx = harness(game)
-  const check = messages => { const facts = contextOf(messages); assert.equal(facts.held['iron-plate'], 14); assert.equal(facts.held_scope, 'complete_inventory; unlisted_items_have_count_zero'); assert.equal(facts.held_omitted, undefined); assert.equal(facts.truncated, false) }
+  const check = messages => { const facts = contextOf(messages); assert.equal(facts.held['iron-plate'], 14); assert.equal(facts.held_scope, 'complete_main_inventory; unlisted_items_have_count_zero'); assert.equal(facts.held_omitted, undefined); assert.equal(facts.truncated, false) }
   ctx.model.push('planner', 'complete inventory', messages => { check(messages); return draft() })
     .push('executor', 'complete inventory survives role handoff', messages => { check(messages); return craft() })
   await begin(ctx); assert.deepEqual(ctx.model.violations, []); assert.deepEqual(ctx.world.named('request.failed'), [])
@@ -274,7 +274,7 @@ test('a complete inventory within the held limit says unlisted items are zero, a
   const next = await ctx.world.agent.gatherTopologyContext()
   assert.equal(reads(), before + 1, 'a step change rebuilds the topology block')
   assert.equal(next.held['iron-plate'], 9)
-  assert.equal(next.held_scope, 'complete_inventory; unlisted_items_have_count_zero')
+  assert.equal(next.held_scope, 'complete_main_inventory; unlisted_items_have_count_zero')
 })
 
 for (const change of ['actor', 'epoch', 'session', 'surface', 'force', 'cancel']) test(`full Session discards a topology refresh superseded during its native await: ${change}`, async t => {

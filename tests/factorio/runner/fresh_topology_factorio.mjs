@@ -189,6 +189,8 @@ const model = new ScriptedModel()
     assert.ok(line)
     seen.futureEngineContext = JSON.parse(line.slice('fresh_topology: '.length))
     if (Object.hasOwn(seen.futureEngineContext.held, 'steam-engine')) assert.equal(seen.futureEngineContext.held['steam-engine'], 0)
+    // Absent from a complete main-inventory list is an authoritative zero; absent from a truncated selection is unknown.
+    else if (seen.futureEngineContext.held_omitted === undefined) assert.match(seen.futureEngineContext.held_scope, /^complete_main_inventory;/)
     else assert.match(seen.futureEngineContext.held_scope, /omitted_counts_unknown/, 'an omitted lean inventory item is not an authoritative zero')
     const native = await snapshot()
     assert.equal(native.inventory.filter(item => item.name === 'steam-engine').reduce((count, item) => count + item.count, 0), 0)

@@ -5438,7 +5438,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const selected = [...(counts ?? [])].sort(([a], [b]) => Number(relevance(b)) - Number(relevance(a)))
           facts.held = counts ? Object.fromEntries(selected.slice(0, 8)) : 'unavailable'
           // Absence only means unknown when the selection actually left items out.
-          facts.held_scope = counts && counts.size <= 8 ? 'complete_inventory; unlisted_items_have_count_zero' : 'selected_inventory_items; omitted_counts_unknown'
+          facts.held_scope = counts && counts.size <= 8 ? 'complete_main_inventory; unlisted_items_have_count_zero' : 'selected_inventory_items; omitted_counts_unknown'
           if (counts && counts.size > 8) { facts.truncated = true; facts.held_omitted = counts.size - 8 }
           // Resolve at most one already named build target, never search the prototype catalogue.
           const words = `${step?.description ?? ''} ${topic}`.toLowerCase()
