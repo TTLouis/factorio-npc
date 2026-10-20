@@ -151,7 +151,8 @@ describe('prototype fluid connection geometry', () => {
     expect(result.entity.fluidboxes[0].pipe_connections).toHaveLength(8)
   })
 
-  // AB-3: an offshore pump's fluidbox has no filter; what it produces is a property of the tile it sits on.
+  // AB-3: an offshore pump's fluidbox has no filter; what it produces is a property of the tile it sits on. The tile fluids are
+  // alternatives (the pump yields one of them, depending on the tile), so they are carried as options of one port, never as products.
   describe('native fluid_io field', () => {
     function addPump(filter?: string) {
       const prototypes = (globalThis as any).prototypes
@@ -171,15 +172,22 @@ describe('prototype fluid connection geometry', () => {
       expect((prototype_details('boiler') as any).entity.fluid_io).toEqual([])
     })
 
-    it('derives an unfiltered offshore pump output from the fluids of the tile prototypes, once per fluid and sorted', () => {
+    it('derives an unfiltered offshore pump output from the tile prototypes as one port with sorted fluid options', () => {
       addPump()
       const result = prototype_details('pump-x') as any
       expect(result.entity.fluidboxes[0].filter).toBeUndefined()
-      expect(result.entity.fluid_io).toEqual([
-        { fluid: 'lava', production_type: 'output', fluidbox_index: 1, source: 'tile_fluid' },
-        { fluid: 'water', production_type: 'output', fluidbox_index: 1, source: 'tile_fluid' },
-      ])
+      expect(result.entity.fluid_io).toEqual([{ production_type: 'output', fluidbox_index: 1, source: 'tile_fluid', fluid_options: ['lava', 'water'] }])
+      expect(result.entity.fluid_io[0].fluid).toBeUndefined() // an alternative, never a product a consumer could mistake for one
       expect(result.entity.fluid_io_truncated).toBe(false)
+    })
+
+    it('keeps every tile fluid as an option, however many there are, with water sorting last', () => {
+      addPump()
+      const names = ['ammoniacal-solution', 'fluorine', 'heavy-oil', 'lava', 'light-oil', 'sulfuric-acid', ...Array.from({ length: 40 }, (_, index) => `modded-${String(index).padStart(2, '0')}`), 'water']
+      ;(globalThis as any).prototypes.tile = Object.fromEntries(names.map((name, index) => [`tile-${index}`, { fluid: { name } }]))
+      const entry = (prototype_details('pump-x') as any).entity.fluid_io[0]
+      expect(entry.fluid_options).toHaveLength(names.length)
+      expect(entry.fluid_options[entry.fluid_options.length - 1]).toBe('water')
     })
 
     it('trusts a pump fluidbox filter over the tiles, and reports an unreadable tile catalog as truncated', () => {

@@ -155,12 +155,31 @@ function tile_fluid_names() {
   return { names: sort_strings(names), truncated: false }
 }
 
+/** Every fluid an entity prototype takes in or gives out by its fluidboxes (filters, and the tile fluids of a tile-fed pump), sorted and unique. */
+export function fluid_io_names(prototype: any) {
+  const names: string[] = []
+  const seen: Record<string, boolean> = {}
+  for (const entry of fluidbox_details(prototype).fluid_io) {
+    const listed: string[] = []
+    if (typeof entry.fluid === 'string') listed.push(entry.fluid)
+    for (const option of (entry.fluid_options as string[] | undefined) ?? []) listed.push(option)
+    for (const name of listed) {
+      if (!seen[name]) {
+        seen[name] = true
+        names.push(name)
+      }
+    }
+  }
+  return sort_strings(names)
+}
+
 function fluidbox_details(prototype: any) {
   const runtime_fluidboxes = bounded_runtime_values(prototype?.fluidbox_prototypes, MAX_FLUIDBOX_PROTOTYPES)
   const fluidboxes: Array<Record<string, unknown>> = []
   // Which fluids the entity takes in or gives out, per port. A fluidbox filter names the fluid itself. An offshore pump's
-  // output box has no filter: its fluid is the fluid of the tile under its intake, so it comes from the tile prototypes.
-  const fluid_io: Array<Record<string, unknown>> = []
+  // output box has no filter: it yields the fluid of the tile under its intake, so the tile prototypes' fluids are the
+  // OPTIONS of that port (one of them, depending on where the pump stands), never several products. The set is not capped.
+  const fluid_io: Array<{ fluid?: string, fluid_options?: string[], production_type: unknown, fluidbox_index: unknown, source: string }> = []
   let fluid_io_truncated = false
   let tile_fluids: ReturnType<typeof tile_fluid_names> | undefined
 
@@ -183,8 +202,8 @@ function fluidbox_details(prototype: any) {
     } else if (prototype.type === 'offshore-pump' && fluidbox.production_type === 'output') {
       tile_fluids = tile_fluids ?? tile_fluid_names()
       if (tile_fluids.truncated) fluid_io_truncated = true
-      for (const fluid_name of tile_fluids.names) {
-        fluid_io.push({ fluid: fluid_name, production_type: fluidbox.production_type, fluidbox_index: fluidbox.index, source: 'tile_fluid' })
+      if (tile_fluids.names.length > 0) {
+        fluid_io.push({ production_type: fluidbox.production_type, fluidbox_index: fluidbox.index, source: 'tile_fluid', fluid_options: tile_fluids.names })
       }
     }
   }
