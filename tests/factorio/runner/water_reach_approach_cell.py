@@ -63,8 +63,8 @@ def run(client, results):
         return command(lua_json(remote_call('autorio_preflight', 'operation', "'walk_to_position'",
                                             f'{{x={x},y={y},reach_distance={reach}}}')), label)
 
-    def walk(x, y, label):
-        started = lua(f"local ok=remote.call('autorio_operations','walk_to_position',{x},{y},{WALK_REACH}); "
+    def walk(x, y, label, reach=WALK_REACH):
+        started = lua(f"local ok=remote.call('autorio_operations','walk_to_position',{x},{y},{reach}); "
                       "rcon.print(helpers.table_to_json({accepted=ok}))", f'{label}: start')
         require(started.get('accepted') is True or (isinstance(started.get('accepted'), list) and started['accepted'][0] is True), started)
         wait_until_idle(lambda ctx: command(operation_status_command(), ctx), label, 90)
@@ -162,6 +162,35 @@ def run(client, results):
         require(shore_result.get('code') == 'reached', {'approach': shore, 'result': shore_result})
         evidence['shoreline_approach_walk'] = {'approach': shore, 'result': shore_result, 'position': shore_position}
 
+    # --- 3b. The shoreline itself: a goal the character fits on is reached, one on the water just past it never is ----
+    # Both points come from the engine: walk from the approach towards the water tile centre; the first point whose tile
+    # collides with the character and where it cannot be placed is the wet goal, the last point before it where the character
+    # can be placed is the land goal.
+    pair = lua(f"local ap={{x={approach['x']},y={approach['y']}}}; local tc={{x={water['x']}+0.5,y={water['y']}+0.5}}; "
+               "local layers=prototypes.entity[a.name].collision_mask.layers; "
+               "local function collides(p) local t=s.get_tile(math.floor(p.x),math.floor(p.y)); "
+               "for l,_ in pairs(layers) do if t.prototype.collision_mask.layers[l] then return true end end return false end; "
+               "local land=nil; local wet=nil; "
+               "for i=0,400 do local f=i/400; local p={x=ap.x+(tc.x-ap.x)*f,y=ap.y+(tc.y-ap.y)*f}; "
+               "local fits=s.can_place_entity{name=a.name,position=p,force=a.force}; "
+               "if fits then land=p elseif collides(p) then wet=p; break end end; "
+               "rcon.print(helpers.table_to_json({land=land,wet=wet}))", 'engine: shoreline points between the approach and the water')
+    require(pair.get('land') and pair.get('wet'), pair)
+    gap = math.hypot(pair['land']['x'] - pair['wet']['x'], pair['land']['y'] - pair['wet']['y'])
+    require(gap < 1.0, pair)
+    shore_reach = 0.5
+    land_reach = 1.0  # the character stops against the shore a little short of a goal at the water's edge
+    place_actor(approach['x'] - 15, approach['y'], 'near the shoreline')
+    require(preflight(pair['land']['x'], pair['land']['y'], land_reach, 'preflight where the character fits').get('ok') is True, pair)
+    wet_verdict = preflight(pair['wet']['x'], pair['wet']['y'], shore_reach, 'preflight just past the shore')
+    require(wet_verdict.get('ok') is False and wet_verdict.get('code') == 'navigation_position_inside_tile_collision', {'pair': pair, 'verdict': wet_verdict})
+    land_result, _ = walk(pair['land']['x'], pair['land']['y'], 'walk to the point where the character fits', land_reach)
+    require(land_result.get('code') == 'reached', {'pair': pair, 'result': land_result})
+    place_actor(approach['x'] - 15, approach['y'], 'near the shoreline again')
+    wet_result, _ = walk(pair['wet']['x'], pair['wet']['y'], 'walk to the point just past the shore (no preflight)', shore_reach)
+    require(wet_result.get('code') == 'unreachable' and wet_result.get('path_attempts') == 4, {'pair': pair, 'result': wet_result})
+    evidence['shoreline_pair'] = {'points': pair, 'gap': gap, 'land_result': land_result, 'wet_result': wet_result, 'wet_verdict': wet_verdict}
+
     # --- 4. The remembered positive survives an empty narrower re-read --------------------------------------
     # The 18ab order, from the original position: the radius-256 read finds water, a radius-128 read is empty,
     # then pump sites are requested.
@@ -184,8 +213,10 @@ def run(client, results):
         details[role] = command(lua_json(remote_call('autorio_prototypes', 'details', repr(types[role]))), f'{role} details')['entity']
     pump = details['pump']
     require(all(not box.get('filter') for box in pump['fluidboxes']), pump)
-    pump_fluids = {io['fluid'] for io in pump['fluid_io']}
-    require(fluid_name in pump_fluids and all(io['source'] == 'tile_fluid' and io['production_type'] == 'output' for io in pump['fluid_io']), pump)
+    # The tile fluids are the options of ONE output port (the pump yields the fluid of the tile it stands on), never several products.
+    require(len(pump['fluid_io']) == 1 and pump['fluid_io'][0]['source'] == 'tile_fluid' and pump['fluid_io'][0]['production_type'] == 'output' and 'fluid' not in pump['fluid_io'][0], pump)
+    pump_fluids = set(pump['fluid_io'][0]['fluid_options'])
+    require(fluid_name in pump_fluids, pump)
     tile_fluids = lua("local out={}; local seen={}; for _,t in pairs(prototypes.tile) do local f=t.fluid and t.fluid.name; if f and not seen[f] then seen[f]=true; out[#out+1]=f end end; "
                       "table.sort(out); rcon.print(helpers.table_to_json({fluids=out}))", 'engine: fluids of the tile prototypes')['fluids']
     require(sorted(pump_fluids) == tile_fluids and pump['fluid_io_truncated'] is False, {'pump': pump['fluid_io'], 'tiles': tile_fluids})

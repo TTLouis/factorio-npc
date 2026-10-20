@@ -153,8 +153,7 @@ case "$LANE" in
     run_py offshore_water_first_cell.py
     ;;
   water-reach-approach)
-    printf '[npc-test][water-reach-approach] Running water approach, collision-refused walk and positive-read gate on the 18ab seed...
-'
+    printf '[npc-test][water-reach-approach] Running water approach, collision-refused walk and positive-read gate on the 18ab seed...\n'
     run_py water_reach_approach_cell.py
     ;;
   partial-transfer)

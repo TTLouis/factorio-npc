@@ -80,7 +80,13 @@ prepare_lane() {
   mkdir -p "$lane_root/results"
   if [[ "$lane" == water-reach-approach ]]; then
     # The 18ab map: default generation at the live seed instead of the shared 256x256 base world.
-    "$FACTORIO_BIN" --create "$lane_root/npc-test.zip"       --map-gen-settings "$TEST_ROOT/fixtures/map-gen-settings-water-reach.json"       >"$RESULTS/$lane-create.log" 2>&1
+    if ! "$FACTORIO_BIN" --create "$lane_root/npc-test.zip" \
+      --map-gen-settings "$TEST_ROOT/fixtures/map-gen-settings-water-reach.json" \
+      >"$RESULTS/$lane-create.log" 2>&1; then
+      printf '[npc-test] Save creation failed for lane %s.\n' "$lane" >&2
+      cat "$RESULTS/$lane-create.log" >&2
+      return 1
+    fi
   else
     cp "$BASE_SAVE" "$lane_root/npc-test.zip"
   fi
