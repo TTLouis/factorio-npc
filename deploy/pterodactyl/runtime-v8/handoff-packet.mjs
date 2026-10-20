@@ -1064,19 +1064,46 @@ export function placingItemFromDetails(parsed, prototype) {
   if (items.length === 0) return unresolved('no_placing_item')
   if (items.length > 1) return unresolved('several_placing_items')
   const count = Number.isSafeInteger(items[0].count) && items[0].count >= 1 ? items[0].count : undefined
-  // The fluids the entity takes in or gives out. The mod's native fluid_io names them (fluidbox filters, and for an offshore pump the
-  // fluids of the tile prototypes, since its own fluidbox has no filter). An older answer without it falls back to fluidboxes[].filter.
-  const native = asList(entity.fluid_io)
-  const fluids = [...new Set((Array.isArray(entity.fluid_io) ? native.map(io => factName(io?.fluid)) : asList(entity.fluidboxes).map(box => factName(box?.filter))).filter(Boolean))].slice(0, 4)
-  return count ? { prototype, item: items[0].name, count, ...(fluids.length > 0 ? { fluids } : {}) } : unresolved('placing_item_count_unreadable')
+  // The fluids the entity takes in or gives out. The mod's native fluid_io names them: a fluidbox filter is a definite fluid
+  // (`fluids`); an offshore pump's unfiltered output yields ONE of the tile prototypes' fluids, which the mod lists as
+  // `fluid_options` of that port (`fluid_options` here, never promoted to `fluids`). An older answer without fluid_io falls back to
+  // fluidboxes[].filter. A truncated native field is carried as `fluids_truncated`: the set is then incomplete, not empty.
+  const nativeIo = Array.isArray(entity.fluid_io)
+  const unique = names => [...new Set(names.filter(Boolean))]
+  const fluids = unique(nativeIo ? entity.fluid_io.map(io => factName(io?.fluid)) : asList(entity.fluidboxes).map(box => factName(box?.filter))).slice(0, 4)
+  const allOptions = unique(nativeIo ? entity.fluid_io.flatMap(io => asList(io?.fluid_options).map(factName)) : []).sort()
+  const options = allOptions.slice(0, MAX_FLUID_OPTIONS)
+  const truncated = entity.fluid_io_truncated === true || allOptions.length > options.length
+  return count ? { prototype, item: items[0].name, count, ...(fluids.length > 0 ? { fluids } : {}), ...(options.length > 0 ? { fluid_options: options } : {}),
+    ...(truncated ? { fluids_truncated: true } : {}) } : unresolved('placing_item_count_unreadable')
 }
+
+// Far above the fluids any real tile set carries; a bigger set is reported as truncated, never cut silently.
+const MAX_FLUID_OPTIONS = 256
+
+const remainingPlacings = (rows, placing) => asList(rows).filter(row => row.remaining > 0).map(row => (placing instanceof Map ? placing.get(row.prototype) : undefined)).filter(Boolean)
 
 /**
  * The fluids the entities a build step still has to place carry in their fluidboxes: the sorted union over the bill rows with
- * entities remaining of the `fluids` of that prototype's placing item. Derived from prototype data; no fluid or entity is named.
+ * entities remaining of the `fluids` (definite, from fluidbox filters) of that prototype's placing item. An entity that yields
+ * one of several fluids (`fluid_options`, an offshore pump on its tile) adds only the options another remaining row of the step
+ * takes in, so a water step never needs lava; when no other row has a fluid (a pump-only step) every option serves it. Derived
+ * from prototype data; no fluid or entity is named.
  */
 export function buildFluidsFromBill(rows, placing) {
-  return [...new Set(asList(rows).filter(row => row.remaining > 0).flatMap(row => asList(placing instanceof Map ? placing.get(row.prototype)?.fluids : undefined)))].sort()
+  const placings = remainingPlacings(rows, placing)
+  const definite = placings.map(entry => asList(entry.fluids))
+  const needed = new Set(definite.flat())
+  placings.forEach((entry, index) => {
+    const others = new Set(definite.filter((_, other) => other !== index).flat())
+    for (const option of asList(entry.fluid_options)) if (others.size === 0 || others.has(option)) needed.add(option)
+  })
+  return [...needed].sort()
+}
+
+/** True when a remaining row's placing item has an incomplete fluid set (the mod's fluid_io was truncated): the build fluids may be short. */
+export function buildFluidsTruncated(rows, placing) {
+  return remainingPlacings(rows, placing).some(entry => entry.fluids_truncated === true)
 }
 
 /** An observed placed count out of a parsed entity_count condition answer, or undefined (never zero for an unreadable answer). */
@@ -1696,7 +1723,7 @@ function fluidHintsRecord(hints, limits, buildFluids) {
     && Number.isSafeInteger(anchor.surface_index) && Number.isInteger(anchor.position?.x) && Number.isInteger(anchor.position?.y))
     .sort((left, right) => Number(needed.has(right.fluid_name)) - Number(needed.has(left.fluid_name))).slice(0, limits.fluidHints)
   if (list.length === 0) return undefined
-  const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y})${isPlainObject(anchor.approach) && Number.isFinite(anchor.approach.x) && Number.isFinite(anchor.approach.y) ? ` approach=(${anchor.approach.x},${anchor.approach.y})` : ''} surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}${anchor.coverage_complete === false ? ` coverage=INCOMPLETE${Number.isSafeInteger(anchor.ungenerated_chunk_count) ? `(${anchor.ungenerated_chunk_count} chunks ungenerated; nearer water may exist)` : '(nearer water may exist)'}` : ''}`)
+  const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y})${isPlainObject(anchor.approach) && Number.isFinite(anchor.approach.x) && Number.isFinite(anchor.approach.y) ? ` approach=(${Math.round(anchor.approach.x * 100) / 100},${Math.round(anchor.approach.y * 100) / 100})` : ''} surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}${anchor.coverage_complete === false ? ` coverage=INCOMPLETE${Number.isSafeInteger(anchor.ungenerated_chunk_count) ? `(${anchor.ungenerated_chunk_count} chunks ungenerated; nearer water may exist)` : '(nearer water may exist)'}` : ''}`)
   const kept = boundedKept(parts, ' | ', limits.fluidHintChars)
   const more = parts.length - kept.length
   return {

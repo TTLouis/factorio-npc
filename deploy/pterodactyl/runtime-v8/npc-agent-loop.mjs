@@ -64,6 +64,7 @@ import {
   rawLeafSourceFromRead,
   withoutRawLeafRecipes,
   buildFluidsFromBill,
+  buildFluidsTruncated,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
@@ -5836,6 +5837,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const historical = this.historicalEntityFacts()
       const fluidHints = [...this.handoffFluidHints.values()].reverse() // newest first
       const buildFluids = buildFluidsFromBill(buildBill.rows, placing) // the fluids of the entities the step still has to place
+      if (buildFluidsTruncated(buildBill.rows, placing)) meta.build_fluids_truncated = true // the mod's fluid_io was cut: the build fluids may be short
 
       meta.read_items = readItems
       const fresh = new Map()
