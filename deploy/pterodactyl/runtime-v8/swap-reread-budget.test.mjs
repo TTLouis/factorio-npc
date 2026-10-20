@@ -99,6 +99,19 @@ test('after a swap the executor re-reads what the step held without spending bud
   assert.equal(world.callRow('w').data.reestablished_read, undefined)
 })
 
+test('a re-established read is still screened for relevance: free of the budget, not of the families Jev selected', async () => {
+  const world = await executorWorld()
+  await world.decide(4, nearby('a1', 9), nearby('b1', 10))
+  await world.restage('C7')
+
+  world.agent.observationRelevanceOverride = ['research_state']
+  await world.decide(2, nearby('a2', 9), nearby('b2', 10))
+  const admission = world.trace.filter(row => row.event === 'observation.partial_admission').at(-1)
+  assert.equal(admission?.data.deferred_by_relevance_count, 1, 'the second unselected discovery read is deferred as a fresh one would be')
+  assert.equal(world.callRow('b2'), undefined)
+  assert.equal(world.agent.observationBudgetRemaining, 2, 'the admitted re-read still costs nothing')
+})
+
 test('a second re-read of the same signature after the same swap is charged', async () => {
   const world = await executorWorld()
   await world.decide(4, actorStatus('x1'))

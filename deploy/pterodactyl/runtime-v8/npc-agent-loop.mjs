@@ -13501,11 +13501,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const name = prepared[index]?.tool?.function?.name
       const family = observationToolFamily(name)
       const tier = observationToolTier(name)
-      const relevant = !fresh || selectedObservationFamilies === null || selectedObservationFamilies.has(family)
+      // A re-established read is free of the budget, not of relevance: it is screened as a fresh read would be.
+      const screened = fresh || reestablishedPrepared[index] === true
+      const relevant = !screened || selectedObservationFamilies === null || selectedObservationFamilies.has(family)
       const withinJev = relevant && (!fresh || freshSlots > 0)
       // Once the budget closed the observation phase, nothing is admitted:
       // that is what bounds the planner's rounds.
-      const tierOverride = fresh && !withinJev && this.observationDecisionForced !== true
+      const tierOverride = screened && !withinJev && this.observationDecisionForced !== true
         && (tier === 'fact' || (tier === 'discovery' && discoveryAdmitted === 0))
       if (withinJev || tierOverride || prepared._sglunaTargetedRecovery === true) {
         admittedPrepared.push(prepared[index])
@@ -13519,7 +13521,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       else {
         deferredPrepared.push(prepared[index])
-        if (fresh && !relevant) deferredByRelevance.push(prepared[index])
+        if (screened && !relevant) deferredByRelevance.push(prepared[index])
       }
     }
 
