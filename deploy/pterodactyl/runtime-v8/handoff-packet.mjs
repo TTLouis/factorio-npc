@@ -708,7 +708,9 @@ export function attachCachedTriggerCrafting(fact, cachedReports) {
   }
   const reports = asList(cachedReports).slice(0, EXECUTOR_FACT_LIMITS.researchNodes)
   const augmented = { ...fact, nodes: fact.nodes.map(node => ({ ...node })) }
-  const craftNodes = augmented.nodes.filter(node => node.research_trigger?.type === 'craft-item' && factName(node.research_trigger.item))
+  // A researched node is history: its trigger can no longer be worked on, so its crafting capability is not carried (it only
+  // spent packet room that an unresearched node, or the facts of the step, need).
+  const craftNodes = augmented.nodes.filter(node => node.researched !== true && node.research_trigger?.type === 'craft-item' && factName(node.research_trigger.item))
   // Reserve explicit unknown markers for all nodes before filling any cached
   // details. An early recipe must not consume the space a later node needs.
   for (const node of craftNodes) node.trigger_crafting = { item: node.research_trigger.item, state: 'unavailable', reason: 'trigger_crafting_not_reported' }
@@ -731,7 +733,8 @@ export function attachCachedTriggerCrafting(fact, cachedReports) {
 }
 
 export function researchFactItems(paths) {
-  return [...new Set(asList(paths).filter(path => path.state === 'fresh').flatMap(path => path.nodes.flatMap(node => [
+  // The items of a researched node are not read: nothing is left to do with them.
+  return [...new Set(asList(paths).filter(path => path.state === 'fresh').flatMap(path => path.nodes.filter(node => node.researched !== true).flatMap(node => [
     node.research_trigger?.item, ...asList(node.science?.ingredients).map(ingredient => ingredient.name),
   ])).map(factName).filter(Boolean))]
 }

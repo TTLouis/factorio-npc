@@ -1522,3 +1522,63 @@ test('Run Y: harvested_from makes an item raw unless an answered recipe really m
   assert.deepEqual(rawLeafFromRecipeDetails({ found: true, query: 'stone', recipes: [cable], mined_from: ['stone'], harvested_from: ['big-rock'] }), { item: 'stone', mined_from: ['stone'], harvested_from: ['big-rock'] })
   assert.equal(rawLeafFromRecipeDetails({ found: false, code: 'no_recipe', query: 'sand' }), undefined)
 })
+
+// --- Budget tiers (Runs AB and V: the protocol-3 cap dropped the facts the hard step needs) --------------------------------
+
+// A plan whose active step is `steps[1]` (step 1 closed), with the planner's execution guidance on that step.
+function activeSecondStepState(steps, guidance) {
+  const drafted = applyPlanningEvent(goalState(), { type: PLANNING_EVENT.DRAFT_CREATED, now: 20, roadmap_node_ids: ['node_power'], steps })
+  const committed = applyPlanningEvent(drafted, { type: PLANNING_EVENT.PLAN_COMMITTED, now: 30, plan_id: getActivePlan(drafted).plan_id, runtime_validation: { passed: true } })
+  const advanced = closeActiveStep(committed, 40)
+  return { ...advanced, plans: advanced.plans.map(plan => ({ ...plan, steps: plan.steps.map((step, index) => index === 1 && guidance ? { ...step, execution_guidance: guidance } : step) })) }
+}
+
+const PROTOCOL_3_LIMIT = 6000 - 1950 // npc-agent-loop.mjs, before the reserve followed the topology block
+
+// The shape of Run AB's C7 restage (ho_bc37c902efe5): three research nodes (two researched, each with a cached trigger_crafting
+// report), seven fresh counts, furnace 42 read fresh and furnace 41 carried stale, five recipe facts, a 667-character brief.
+function runAbPacketArgs(overrides = {}) {
+  const kit = [['offshore-pump', 1], ['boiler', 1], ['steam-engine', 1], ['small-electric-pole', 4], ['pipe', 10], ['coal', 50]]
+  const state = activeSecondStepState([
+    { description: 'Place the lab, load it with automation science packs and start the first research so the factory has a reachable goal' },
+    { description: 'Prepare one offshore pump, one boiler, one steam engine, four small electric poles, ten spare pipes and 50 coal so the steam chain can be placed', completion_contract: { mode: 'all', requirements: kit.map(([item, minimum]) => ({ id: item, kind: 'inventory_count', item_name: item, minimum })) } },
+    { description: 'Build and fuel the water-to-boiler-to-steam-engine chain at a legal shoreline site and connect the poles' },
+  ], { approach: 'Craft the missing steam parts from plates, smelting the ore in the placed furnaces first. '.repeat(3) + 'Keep the boiler fuel in the actor inventory until the chain stands. '.repeat(4), skillIds: [] })
+  const researched = (name, item) => ({ name, researched: true, mode: 'trigger', status: 'researched', prerequisites: [], unresolved_prerequisites: [], research_trigger: { type: 'craft-item', item, count: 10 } })
+  const cache = cacheTriggerCraftingReports(Object.fromEntries([['electronics', 'copper-plate'], ['steam-power', 'iron-plate']].map(([name, item]) => [name, { trigger: { type: 'craft-item', item, count: 10 }, trigger_crafting: {
+    item, recipes: [{ recipe: `${item}-recipe`, enabled: true, categories: ['smelting'], hand_craftable: false, hand_craftable_reason: 'category_unsupported',
+      machines: [{ entity: 'stone-furnace', item: 'stone-furnace', status: 'craftable' }] }],
+  } }])), { tick: 100, actor_id: 19, epoch: 2 })
+  const research = attachCachedTriggerCrafting(researchPathFact({ ok: true, target: 'automation-science-pack', node_count: 3, nodes: [
+    researched('electronics', 'copper-plate'), researched('steam-power', 'iron-plate'),
+    { name: 'automation-science-pack', researched: false, mode: 'science', status: 'ready', prerequisites: ['electronics'], unresolved_prerequisites: [], science: { count: 10, ingredients: [{ name: 'automation-science-pack', amount: 1 }] } },
+  ] }, 'automation-science-pack', TAG), cache)
+  const furnace = (unit, recipe) => ({ unit_number: unit, name: 'stone-furnace', working: true, inventories: { fuel: { coal: 12 }, input: { 'iron-ore': 53 }, output: { [recipe]: 4 } } })
+  const facts = {
+    research: [research],
+    recipes: [recipeFact('boiler', [['stone-furnace', 1], ['pipe', 4]], [['boiler', 1]]), recipeFact('steam-engine', [['iron-gear-wheel', 8], ['iron-plate', 10], ['pipe', 5]], [['steam-engine', 1]]),
+      recipeFact('offshore-pump', [['electronic-circuit', 2], ['pipe', 1], ['iron-gear-wheel', 1]], [['offshore-pump', 1]]), recipeFact('small-electric-pole', [['wood', 1], ['copper-cable', 2]], [['small-electric-pole', 2]]), recipeFact('pipe', [['iron-plate', 1]], [['pipe', 1]])],
+    counts: { items: [['iron-plate', 67], ['copper-plate', 3], ['iron-gear-wheel', 10], ['copper-cable', 20], ['coal', 12], ['stone', 5], ['wood', 8]].map(([item, count]) => ({ item, count, state: 'fresh' })), unavailable: [], as_of: TAG },
+    placed_machines: [{ ...furnace(42, 'iron-plate'), state: 'fresh', as_of: TAG }, { ...furnace(41, 'copper-plate'), state: 'stale', as_of: { tick: 300, epoch: 3 }, reason: 'inventory_unread' }],
+  }
+  return { planningState: state, role: 'executor', checkpoint: 'C7', reason: 'recovery:actor_replaced', now: 500, executorFacts: facts, limits: { maxChars: PROTOCOL_3_LIMIT }, ...overrides }
+}
+
+test('Run AB: a researched node carries no trigger_crafting and its items are not read; the unresearched node keeps its science', () => {
+  const { executorFacts } = runAbPacketArgs()
+  const path = executorFacts.research[0]
+  assert.deepEqual(path.nodes.filter(node => node.researched).map(node => node.trigger_crafting), [undefined, undefined])
+  assert.deepEqual(path.nodes.find(node => !node.researched).science.ingredients, [{ name: 'automation-science-pack', amount: 1 }])
+  assert.deepEqual(researchFactItems([path]), ['automation-science-pack'], 'only the unresearched node names an item to read')
+  assert.match(JSON.stringify(path.nodes[0]), /"researched":true/, 'the history stays as a name and a status')
+})
+
+test('Run AB: at the protocol-3 cap the held counts and the placed furnaces survive the research record', () => {
+  const packet = buildHandoffPacket(runAbPacketArgs())
+  assert.equal(packet.over_limit, false, `${packet.chars} chars: ${packet.dropped.join(', ')}`)
+  for (const key of ['held_counts', 'placed_machines']) assert.ok(!packet.dropped.includes(key), `${key} dropped: ${packet.dropped.join(', ')}`)
+  assert.match(packet.text, /stone-furnace unit=42 \[FRESH/)
+  assert.match(packet.text, /stone-furnace unit=41 \[STALE/)
+  assert.deepEqual(packet.executor_facts.placed_machines, 2)
+})
+
