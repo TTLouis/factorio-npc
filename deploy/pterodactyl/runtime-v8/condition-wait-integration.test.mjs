@@ -114,6 +114,7 @@ class ConditionRcon {
         progressing: this.working,
         progress_known: true,
         entity_status: this.working ? 1 : 0,
+        ...(this.working ? { eta: { recipe: 'iron-plate', seconds_per_craft: 3.2, seconds_until_idle: 12.5 } } : {}),
       })
     }
     return '{}'
@@ -611,6 +612,9 @@ test('healthy passive progress times out at its bounded check limit without fake
       maxChecks: 1,
     },
   )
+
+  // This existing budget was already scheduled; a new ETA must not reset it.
+  durable.condition_wait.eta_scheduled_at = Date.now()
 
   const result = await agent.pollConditionWait()
   assert.equal(result.action, 'timeout')

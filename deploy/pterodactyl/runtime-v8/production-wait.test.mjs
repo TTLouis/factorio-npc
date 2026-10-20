@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { checkpointWaitRequirement, conditionEta, MARGIN_SECONDS, OVERRUN_FACTOR, safeWaitSchedule, scheduleWait } from './production-wait.mjs'
+import { checkpointWaitRequirement, conditionEta, hasFiniteProductionEta, MARGIN_SECONDS, OVERRUN_FACTOR, safeWaitSchedule, scheduleWait } from './production-wait.mjs'
 import { makeConditionWait } from './step-completion.mjs'
 
 const now = 1_000_000
@@ -89,4 +89,15 @@ test('only a single machine-output checkpoint on a working machine becomes a com
   assert.equal(checkpointWaitRequirement({ mode: 'all', requirements: [...one.requirements, { kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 }] }, working), undefined)
   assert.equal(checkpointWaitRequirement({ mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 }] }, working), undefined)
   assert.equal(checkpointWaitRequirement(undefined, working), undefined)
+})
+
+test('passive production proof requires a finite native recipe clock and finish expectation', () => {
+  const eta = { recipe: 'iron-plate', seconds_per_craft: 3.2, seconds_until_idle: 12.5 }
+  assert.equal(hasFiniteProductionEta(eta), true)
+  for (const bad of [undefined, {}, { ...eta, recipe: '' }, { ...eta, recipe: ' ' },
+    { ...eta, seconds_per_craft: 0 }, { ...eta, seconds_per_craft: '3.2' },
+    { ...eta, seconds_until_idle: Infinity }, { ...eta, seconds_until_idle: -1 },
+    { ...eta, seconds_until_idle: 0 }, { ...eta, seconds_until_idle: undefined }]) {
+    assert.equal(hasFiniteProductionEta(bad), false)
+  }
 })
