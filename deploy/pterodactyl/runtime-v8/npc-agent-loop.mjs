@@ -5382,7 +5382,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const lineage = this.agentContext.lineageSequence
     const mutation = this.worldMutationSeq ?? 0
     const key = JSON.stringify([requestId, this.agentContext.conversationSeq, fence.session, fence.actor_id, fence.epoch,
-      this.lastTaskStatusView?.last_completed_batch?.tick, this.lastTaskStatusView?.last_completed_batch?.batch_id, mutation])
+      this.lastTaskStatusView?.last_completed_batch?.tick, this.lastTaskStatusView?.last_completed_batch?.batch_id, mutation,
+      plan?.plan_id, plan?.plan_version, step?.step_id])
     if (this.topologyBoundary?.key === key) {
       const status = await this.handoffFenceCheck(fence, 'before_cached_topology')
       if (generation !== this.generation || lineage !== this.agentContext.lineageSequence) throw new AgentLoopError('Cached topology refresh cancelled or superseded')
@@ -5436,7 +5437,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const relevance = item => topic.toLowerCase().includes(item) || item.split('-').some(token => token.length >= 5 && new RegExp(`\\b${token}\\b`, 'i').test(topic)) || relevantNames.has(item)
           const selected = [...(counts ?? [])].sort(([a], [b]) => Number(relevance(b)) - Number(relevance(a)))
           facts.held = counts ? Object.fromEntries(selected.slice(0, 8)) : 'unavailable'
-          facts.held_scope = 'selected_inventory_items; omitted_counts_unknown'
+          // Absence only means unknown when the selection actually left items out.
+          facts.held_scope = counts && counts.size <= 8 ? 'complete_inventory; unlisted_items_have_count_zero' : 'selected_inventory_items; omitted_counts_unknown'
           if (counts && counts.size > 8) { facts.truncated = true; facts.held_omitted = counts.size - 8 }
           // Resolve at most one already named build target, never search the prototype catalogue.
           const words = `${step?.description ?? ''} ${topic}`.toLowerCase()

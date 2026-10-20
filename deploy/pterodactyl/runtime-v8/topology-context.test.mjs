@@ -245,6 +245,38 @@ test('full Session retains relevant engine count beyond eight held items and lab
   await begin(ctx); assert.deepEqual(ctx.model.violations, []); assert.deepEqual(ctx.world.named('request.failed'), [])
 })
 
+test('a complete inventory within the held limit says unlisted items are zero, and a step change refreshes the block', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // The live Run AB inventory: five items, so every needed kit item really had count zero.
+  const game = new TopologyGame()
+  game.inventory = { lab: 1, 'iron-plate': 14, 'burner-mining-drill': 2, 'iron-ore': 6, 'copper-ore': 3 }
+  const ctx = harness(game)
+  const check = messages => { const facts = contextOf(messages); assert.equal(facts.held['iron-plate'], 14); assert.equal(facts.held_scope, 'complete_inventory; unlisted_items_have_count_zero'); assert.equal(facts.held_omitted, undefined); assert.equal(facts.truncated, false) }
+  ctx.model.push('planner', 'complete inventory', messages => { check(messages); return draft() })
+    .push('executor', 'complete inventory survives role handoff', messages => { check(messages); return craft() })
+  await begin(ctx); assert.deepEqual(ctx.model.violations, []); assert.deepEqual(ctx.world.named('request.failed'), [])
+  ctx.world.agent.batchInFlight = false
+  ctx.world.memory.pendingOperation = () => undefined
+  const reads = () => ctx.game.topologyReads.filter(read => read === 'inventory').length
+  await ctx.world.agent.gatherTopologyContext() // the first call after the batch settles rebuilds; later calls on the same step reuse it
+  const before = reads()
+  assert.equal((await ctx.world.agent.gatherTopologyContext()).held['iron-plate'], 14)
+  assert.equal(reads(), before, 'the same step reuses the cached block')
+  // The next step becomes active with no world mutation in between: the block is rebuilt, not reused.
+  ctx.game.inventory['iron-plate'] = 9
+  const planningState = ctx.world.memory.planningState.bind(ctx.world.memory)
+  ctx.world.memory.planningState = key => {
+    const state = structuredClone(planningState(key))
+    const plan = getActivePlan(state)
+    if (plan?.steps?.[plan.active_step_index]) plan.steps[plan.active_step_index].step_id = 'step-2-after-close'
+    return state
+  }
+  const next = await ctx.world.agent.gatherTopologyContext()
+  assert.equal(reads(), before + 1, 'a step change rebuilds the topology block')
+  assert.equal(next.held['iron-plate'], 9)
+  assert.equal(next.held_scope, 'complete_inventory; unlisted_items_have_count_zero')
+})
+
 for (const change of ['actor', 'epoch', 'session', 'surface', 'force', 'cancel']) test(`full Session discards a topology refresh superseded during its native await: ${change}`, async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const ctx = harness()
