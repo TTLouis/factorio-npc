@@ -197,14 +197,50 @@ test('M11D provider-format recovery bypasses Jev and uses strict/base recovery',
   assert.equal(decisionCalls.length, 0)
 })
 
-test('M9 deterministic final completion bypasses Jev and the main planner entirely', async () => {
-  const { agent, mainCalls, decisionCalls } = makeAgent({ finalProof: true })
+test('recovery never promotes a final batch receipt into semantic or goal completion', async () => {
+  const { agent, memory, mainCalls, decisionCalls } = makeAgent({ finalProof: true })
+  const traces = []
+  agent.traceRequest = { id: 'run_ag_recovery' }
+  agent.traceEvent = async (type, data) => { traces.push({ type, ...data }) }
   const result = await agent.recoverPlan(agent.generation, new Error('invalid provider JSON'), 1)
-  assert.equal(result.goalStatus, 'completed')
-  assert.equal(mainCalls.length, 0)
+  assert.notEqual(result.goalStatus, 'completed')
+  assert.equal(memory.currentPlan('npc:sgluna').task_board.completed_count, 0)
+  assert.equal(mainCalls.length, 1)
   assert.equal(decisionCalls.length, 0)
+  assert.ok(traces.some(event => event.type === 'recovery.batch_proof_not_goal_completion'
+    && event.request_id === 'run_ag_recovery'
+    && event.reason === 'batch_receipt_does_not_prove_semantic_completion'))
 })
 
+test('Run AG same-step supply receipt leaves the committed iron and research contract open during recovery', async () => {
+  const { agent, memory } = makeAgent({ finalProof: true, taskState: 'mining', queueLength: 1 })
+  const key = 'npc:sgluna'
+  const state = memory.planByNpc.get(key)
+  const step = state.task_board.steps[0]
+  step.description = 'Produce 58 iron plates and research steam power'
+  step.completion_contract = {
+    mode: 'all', source: 'main_planner', requirements: [
+      { id: 'iron_total', kind: 'inventory_count', item_name: 'iron-plate', minimum: 58 },
+      { id: 'steam', kind: 'research_completed', technology: 'steam-power' },
+    ],
+  }
+  state.plan = [step.description]
+  const proof = state.task_board.evidence[0]
+  proof.summary = JSON.stringify({
+    verdict: 'verified_complete', batch_id: 13, operations: ['supply_entity'], task_types: ['moving_items'],
+    semantics: 'Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.',
+  })
+  proof.ref = 'batch_13'
+  memory.ensurePlanningDraft(key, state, { now: 100, migrated: true })
+  memory.commitPlanningPlan(key, { now: 110, migrated: true, runtime_validation: { passed: true } })
+  const before = structuredClone(memory.planningState(key))
+  const result = await agent.recoverPlan(agent.generation, new Error('duplicate observation budget exhausted'), 1)
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(agent.active, true)
+  assert.equal(memory.currentPlan(key).task_board.completed_count, 0)
+  assert.deepEqual(memory.planningState(key), before)
+  assert.equal(memory.currentPlan(key).task_board.steps[0].status, 'active')
+})
 test('M11D ambiguous semantic replan uses Jev and high planner reasoning', async () => {
   const { agent, mainCalls, decisionCalls } = makeAgent({ semantic: 'semantic_replan' })
   const result = await agent.recoverPlan(agent.generation, new Error('strategy invalidated by fresh evidence'), 1)

@@ -16786,43 +16786,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
 
+    // Batch verification proves only the operations in that batch. Recovery has
+    // no completion authority: semantic step and goal predicates must still pass
+    // through the ordinary fresh-world checkpoint and goal settlement gates.
     const recoveryState = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
-    const recoveryBoard = recoveryState?.task_board
-    const recoveryActiveIndex = Number.isSafeInteger(recoveryBoard?.active_index) ? recoveryBoard.active_index : undefined
-    const recoveryFinalIndex = Array.isArray(recoveryBoard?.steps) ? recoveryBoard.steps.length - 1 : -1
-    const deterministicFinalCompletion = latestDeterministicCompletionEvidence(recoveryState)
-      && Number.isSafeInteger(recoveryActiveIndex)
-      && recoveryActiveIndex === recoveryFinalIndex
-    if (deterministicFinalCompletion) {
-      const proof = [...(recoveryBoard?.evidence ?? [])].reverse().find(item => item?.kind === 'deterministic_verification')
-      const reduced = this.memory.applyOutcomeAuthority?.(this.activePlanKey(), {
-        kind: 'verified_complete',
-        source: 'deterministic_runtime',
-        reason_code: 'recovery_final_completion_proven',
-        evidence: proof ? [proof] : [],
+    if (latestDeterministicCompletionEvidence(recoveryState)) {
+      await this.traceEvent('recovery.batch_proof_not_goal_completion', {
+        request_id: this.traceRequest?.id,
+        reason: 'batch_receipt_does_not_prove_semantic_completion',
+        goal_id: recoveryState?.goal_id,
+        step_id: recoveryState?.task_board?.active_step_id,
+        evidence_id: recoveryState?.task_board?.evidence?.at(-1)?.id,
       })
-      if (reduced?.decision?.accepted) {
-        await this.persistState()
-        this.active = false
-        await this.traceEvent('planner.skipped', {
-          source: 'deterministic_runtime',
-          contract: 'recovery_route',
-          route: 'deterministic_close',
-        })
-        return {
-          chatMessage: 'The requested goal is verified complete.',
-          plan: [],
-          currentStep: 0,
-          operations: [],
-          epoch: this.epoch?.epoch,
-          actorId: this.epoch?.actor_id,
-          goalId: reduced.state?.goal_id,
-          goalStatus: 'completed',
-          taskBoard: visibleTaskBoard(reduced.state?.task_board),
-        }
-      }
     }
-
     let routed
     try {
       routed = await this.routeRecoveryDecision(reason, roundBase)
