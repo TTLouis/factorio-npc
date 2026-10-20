@@ -9,7 +9,8 @@ import { find_world_entities } from './npc_vision'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { placement_obstruction_sample } from './placement_obstructions'
 import { get_recent_fluid_source_observation } from './fluid_source_observation'
-import { ground_item_blockers, placeable_or_ground_items_only, type GroundItem } from './placement_ground_items'
+import { placeable_or_clearable, placement_clearance, type ClearableEntity } from './placement_clearing'
+import type { GroundItem } from './placement_ground_items'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -30,7 +31,15 @@ export interface PlacementCandidateRequest {
   // footprint is derived from the prototype pipe connections, so it is exact
   // regardless of radius or limit.
   connects_to?: PlacementConnectsTo
+  // The live entity the new one must serve (the furnace a drill should feed).
+  // Candidates are ranked nearest this entity first, the search centres on it
+  // when no centre is given, and a build never clears it.
+  anchor?: PlacementAnchor
   limit?: number
+}
+
+export interface PlacementAnchor {
+  unit_number: number
 }
 
 export interface PlacementConnectsTo {
@@ -67,11 +76,16 @@ export interface PlacementCandidate {
   footprint: PlacementFootprint
   // Set when the placement legality is decided by tile rules (a shoreline).
   distance_from_actor?: number
+  // Set when the request names an anchor entity: how far this spot is from it.
+  distance_from_anchor?: number
   connects_to?: PlacementCandidateJoin
   // Electric-pole candidates only: wire links and supply coverage at this spot.
   electric?: Record<string, unknown>
   // Items lying in the footprint; placing this candidate picks them up first.
   ground_items?: GroundItem[]
+  // Entities in the footprint (natural obstructions, the NPC's own idle entities)
+  // that placing this candidate mines into the actor inventory first.
+  clears?: ClearableEntity[]
 }
 
 interface PlacementCandidateSet {
@@ -82,6 +96,8 @@ interface PlacementCandidateSet {
   force_index: number
   actor_id?: number
   target_resource?: string
+  // Entities placement must never clear: the request's anchor.
+  protected_unit_numbers?: number[]
   candidates: PlacementCandidate[]
 }
 
@@ -242,7 +258,12 @@ function coverage_score(candidate: PlacementCandidate, target_resource?: string)
   return { entities, amount }
 }
 
-function better(left: PlacementCandidate, right: PlacementCandidate, target_resource?: string, origin?: { x: number, y: number }) {
+function better(left: PlacementCandidate, right: PlacementCandidate, target_resource?: string, origin?: { x: number, y: number }, anchor?: { x: number, y: number }) {
+  if (anchor !== undefined) {
+    const left_anchor = squared_distance(left.position, anchor)
+    const right_anchor = squared_distance(right.position, anchor)
+    if (left_anchor !== right_anchor) return left_anchor < right_anchor
+  }
   const left_coverage = coverage_score(left, target_resource)
   const right_coverage = coverage_score(right, target_resource)
   if (left_coverage.entities !== right_coverage.entities) return left_coverage.entities > right_coverage.entities
@@ -258,7 +279,7 @@ function better(left: PlacementCandidate, right: PlacementCandidate, target_reso
   return left.direction < right.direction
 }
 
-export function sort_candidates(values: PlacementCandidate[], target_resource?: string, origin?: { x: number, y: number }) {
+export function sort_candidates(values: PlacementCandidate[], target_resource?: string, origin?: { x: number, y: number }, anchor?: { x: number, y: number }) {
   // Bottom-up stable merge sort: a maximum-radius scan can yield ~10k legal
   // candidates. Quadratic sorting blocked the single simulation thread.
   const scratch: PlacementCandidate[] = []
@@ -269,7 +290,7 @@ export function sort_candidates(values: PlacementCandidate[], target_resource?: 
       let left = start
       let right = middle
       for (let index = start; index < end; index++) {
-        if (left < middle && (right >= end || !better(values[right], values[left], target_resource, origin))) {
+        if (left < middle && (right >= end || !better(values[right], values[left], target_resource, origin, anchor))) {
           scratch[index] = values[left++]
         }
         else scratch[index] = values[right++]
@@ -426,6 +447,18 @@ function resolve_join_target(actor: ControlledActor, request: PlacementConnectsT
   return { ok: true as const, target: { unit_number: request.unit_number, entity_name: entity.name, ports } as JoinTarget }
 }
 
+/** Resolve the live entity an anchor request names: on the actor surface and force, as connects_to requires. */
+function resolve_anchor(actor: ControlledActor, request: PlacementAnchor) {
+  if (typeof request !== 'object' || !bounded_index(request.unit_number, 9007199254740991)) {
+    return join_failure('invalid_anchor', 'anchor.unit_number must be a positive integer')
+  }
+  const entity = resolve_exact_entity(actor, request.unit_number)
+  if (!entity || !entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index) {
+    return join_failure('anchor_entity_not_found', 'anchor entity is not on this surface and force', request.unit_number)
+  }
+  return { ok: true as const, unit_number: request.unit_number, entity_name: entity.name, position: { x: entity.position.x, y: entity.position.y } }
+}
+
 function joining_port(candidate: PlacementCandidate, target: LiveFluidPort) {
   for (const port of candidate.fluid_ports ?? []) {
     if (fluid_ports_join(target, port)) return port
@@ -486,6 +519,15 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     join_target = resolved.target
   }
   const join_origin = join_target !== undefined ? join_target.ports[0].target_position : undefined
+  let anchor: { unit_number: number, entity_name: string, position: { x: number, y: number } } | undefined
+  if (request.anchor !== undefined) {
+    const resolved = resolve_anchor(actor, request.anchor)
+    if (!resolved.ok) return { ok: false as const, error: resolved.error, code: resolved.code, entity_name: request.entity_name, unit_number: resolved.unit_number }
+    anchor = resolved
+  }
+  // A build never clears the entity it serves.
+  const protect: number[] = []
+  if (anchor !== undefined) protect.push(anchor.unit_number)
   let water_center: { x: number, y: number } | undefined
   let terrain_preparation: ReturnType<typeof pump_terrain_preparation> | undefined
   if (prototype.type === 'offshore-pump') {
@@ -499,7 +541,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       water_search: water }
     water_center = samples[0].position
   }
-  const center = request.center ?? covers ?? join_origin ?? water_center ?? actor.position
+  const center = request.center ?? covers ?? join_origin ?? water_center ?? anchor?.position ?? actor.position
   if (!finite(center.x) || !finite(center.y)) return { ok: false as const, error: 'center must be finite', entity_name: request.entity_name }
   const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
@@ -520,6 +562,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       if (!joins) return undefined
     }
     let ground_items: GroundItem[] | undefined
+    let clears: ClearableEntity[] | undefined
     if (!actor.surface.can_place_entity({
       name: request.entity_name,
       position,
@@ -527,11 +570,17 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       force: actor.force,
       ...check_args,
     })) {
-      ground_items = ground_item_blockers(actor, prototype, request.entity_name, position, direction)
-      if (ground_items === undefined) {
+      // Refused only for ground items and clearable entities: still a candidate, and placing it clears them.
+      const clearance = placement_clearance(actor, prototype, request.entity_name, position, direction, protect)
+      if (clearance === undefined) {
         rejected++
         if (obstruction_samples.length < 3) obstruction_samples.push(placement_obstruction_sample(actor, prototype, position, direction))
         return undefined
+      }
+      if (clearance.ground_items.length > 0) ground_items = clearance.ground_items
+      if (clearance.blockers.length > 0) {
+        clears = []
+        for (const blocker of clearance.blockers) clears.push(blocker.info)
       }
     }
     if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) return undefined
@@ -551,12 +600,14 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       footprint: placement_footprint(prototype, position, direction),
     }
     if (distance_origin !== undefined) candidate.distance_from_actor = math.sqrt(squared_distance(position, distance_origin))
+    if (anchor !== undefined) candidate.distance_from_anchor = math.sqrt(squared_distance(position, anchor.position))
     const output = item_output_position(prototype, position, direction)
     if (output !== undefined) candidate.item_output_position = output
     const fluid_ports = candidate_fluid_ports(prototype, position, direction)
     if (fluid_ports !== undefined) candidate.fluid_ports = fluid_ports
     if (coverage !== undefined && coverage.length > 0) candidate.resource_coverage = coverage
     if (ground_items !== undefined) candidate.ground_items = ground_items
+    if (clears !== undefined) candidate.clears = clears
     return candidate
   }
 
@@ -610,7 +661,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     }
   }
 
-  sort_candidates(candidates, request.target_resource, distance_origin)
+  sort_candidates(candidates, request.target_resource, distance_origin, anchor?.position)
   const selected = diverse_top(candidates, limit)
   for (let index = 0; index < selected.length; index++) selected[index].id = `candidate-${index + 1}`
 
@@ -619,13 +670,19 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     for (const candidate of selected) candidate.electric = pole_candidate_facts(actor, prototype, candidate.position)
   }
 
+  // The legal candidates come first and the rejected-footprint samples last, apart from the candidate list.
   return {
     ok: true as const,
     entity_name: request.entity_name,
+    ordering: anchor !== undefined ? 'nearest_to_anchor_first' : nearest_first ? 'nearest_to_actor_first' : 'resource_coverage_then_nearest_to_center',
+    legal_candidate_count: candidates.length,
+    returned_candidate_count: selected.length,
+    candidates: selected,
     center,
     radius,
     target_resource: request.target_resource,
     covers_position: covers,
+    anchor,
     connects_to: join_target === undefined
       ? undefined
       : {
@@ -641,10 +698,10 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
           })),
         },
     terrain_preparation,
-    ordering: nearest_first ? 'nearest_to_actor_first' : 'resource_coverage_then_nearest_to_center',
     electric_pole: reach,
     scanned,
     obstructions: {
+      label: 'rejected_footprint_samples_not_candidates',
       source: 'native_placement_checks',
       observed_tick: game.tick,
       actor_id: protected_read(() => actor.status_snapshot().actor_id),
@@ -658,10 +715,13 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       samples: obstruction_samples,
       truncated: rejected > obstruction_samples.length || obstruction_samples.some(sample => sample.truncated),
     },
-    legal_candidate_count: candidates.length,
-    returned_candidate_count: selected.length,
-    candidates: selected,
   }
+}
+
+function protect_list(result: { anchor?: { unit_number: number } }) {
+  const list: number[] = []
+  if (result.anchor !== undefined) list.push(result.anchor.unit_number)
+  return list
 }
 
 export function create_placement_candidate_set(actor: ControlledActor, request: PlacementCandidateRequest) {
@@ -685,6 +745,7 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
     surface_index: actor.surface.index,
     force_index: actor.force.index,
     target_resource: result.target_resource,
+    protected_unit_numbers: protect_list(result),
     candidates: stored,
   }
   store_candidate_set(set)
@@ -750,7 +811,7 @@ function resolve_placement_candidate(
     const changed = join_change(target, prototype, candidate)
     if (changed !== undefined) return { ok: false as const, code: 'connects_to_port_changed', error: `connects_to_port_changed: ${changed}` }
   }
-  if (!placeable_or_ground_items_only(actor, prototype, set.entity_name, candidate.position, candidate.direction)) {
+  if (!placeable_or_clearable(actor, prototype, set.entity_name, candidate.position, candidate.direction, set.protected_unit_numbers)) {
     return { ok: false as const, error: 'placement candidate is no longer placeable' }
   }
 
@@ -785,14 +846,17 @@ export function execute_placement_candidate(
   actor: ControlledActor,
   candidate_set_id: string,
   candidate_id: string,
-  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }) => boolean,
+  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[]) => boolean,
 ): [boolean, string] {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
   if (!resolved.ok) return [false, resolved.error]
   const { set, candidate } = resolved
+  const protected_unit_numbers = set.protected_unit_numbers !== undefined && set.protected_unit_numbers.length > 0 ? set.protected_unit_numbers : undefined
   const accepted = prototypes.entity[set.entity_name]?.type === 'offshore-pump'
-    ? submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, { candidate_set_id, candidate_id })
-    : submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
+    ? submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, { candidate_set_id, candidate_id }, protected_unit_numbers)
+    : protected_unit_numbers === undefined
+      ? submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
+      : submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, undefined, protected_unit_numbers)
   return accepted
     ? [true, `placement candidate accepted: ${candidate_set_id}/${candidate_id}`]
     : [false, 'placement candidate could not be queued']

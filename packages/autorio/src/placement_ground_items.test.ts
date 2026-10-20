@@ -5,7 +5,7 @@ import { new_basic_operation_controller } from './basic_operations'
 import { new_operation_admission } from './operation_admission'
 import { create_placement_candidate_set, execute_placement_candidate } from './placement_candidates'
 import { placement_footprint } from './placement_geometry'
-import { ground_item_blockers } from './placement_ground_items'
+import { placement_clearance } from './placement_clearing'
 import { new_task_manager } from './task_manager'
 
 // Run AE: a burner drill fueled before its furnace existed dropped one copper
@@ -209,8 +209,8 @@ describe('ground items in a placement footprint (Run AE)', () => {
   it('leaves tile-rule entities on their strict manual check', () => {
     ;(globalThis as any).prototypes.entity['offshore-pump'] = { ...FURNACE, name: 'offshore-pump', type: 'offshore-pump' }
     const surface = world([ground_item('copper-ore', 1, DROP)])
-    expect(ground_item_blockers(npc(surface, inventory_with(10)), FURNACE, 'offshore-pump', { x: -34, y: -36 }, 0)).toBeUndefined()
-    expect(ground_item_blockers(npc(surface, inventory_with(10)), FURNACE, 'stone-furnace', { x: -34, y: -36 }, 0)).toHaveLength(1)
+    expect(placement_clearance(npc(surface, inventory_with(10)), FURNACE, 'offshore-pump', { x: -34, y: -36 }, 0)).toBeUndefined()
+    expect(placement_clearance(npc(surface, inventory_with(10)), FURNACE, 'stone-furnace', { x: -34, y: -36 }, 0)?.ground_items).toHaveLength(1)
   })
 })
 

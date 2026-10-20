@@ -13,6 +13,7 @@ import type {
 } from './types'
 import { TaskStates } from './types'
 import { placement_candidate_matches } from './placement_candidates'
+import type { ClearableEntity, ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
 
@@ -21,7 +22,7 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
-  | 'item_missing' | 'no_position' | 'not_placeable' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
+  | 'item_missing' | 'no_position' | 'not_placeable' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
@@ -72,6 +73,10 @@ export interface BasicOperationResult {
   ground_item_left?: GroundItem
   /** A picked-up stack's ground entity remained; the item count may be duplicated. */
   ground_item_pickup_uncertain?: boolean
+  /** Entities a placement mined out of its footprint (natural obstructions, the NPC's own idle entities), with what the inventory gained. */
+  entities_cleared?: ClearedEntity[]
+  /** The blocker a refused clearing stopped at. */
+  clearing_left?: ClearableEntity
   previous_direction?: number
   reverse?: boolean
   rocket_silo_status?: number
@@ -332,7 +337,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue(task, actor)
   }
 
-  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }) {
+  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[]) {
     const has_x = x !== undefined
     const has_y = y !== undefined
     if (has_x !== has_y || (has_x && (!valid_coordinate(x!) || !valid_coordinate(y!)))) {
@@ -353,6 +358,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     const task: PlayerParametersPlaceEntity = {
       type: TaskStates.PLACING,
       placement_candidate,
+      protected_unit_numbers: protected_unit_numbers !== undefined && protected_unit_numbers.length > 0 ? protected_unit_numbers : undefined,
       entity_name,
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,
@@ -554,9 +560,9 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     // first. Those pickups live on the task, so every failure after one
     // reports them and gives no proof that nothing changed.
     const placement_mutated = task.type === TaskStates.PLACING
-      && ((task.ground_items_picked_up?.length ?? 0) > 0 || task.ground_item_pickup_uncertain === true)
+      && ((task.ground_items_picked_up?.length ?? 0) > 0 || task.ground_item_pickup_uncertain === true || (task.entities_cleared?.length ?? 0) > 0)
     if (placement_mutated) {
-      details = { ...details, ground_items_picked_up: task.ground_items_picked_up }
+      details = { ...details, ground_items_picked_up: task.ground_items_picked_up, entities_cleared: task.entities_cleared }
       if (task.ground_item_pickup_uncertain === true) details.ground_item_pickup_uncertain = true
     }
     // entity_targets refuses a legacy move with no local match before touching

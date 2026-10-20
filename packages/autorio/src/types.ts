@@ -1,5 +1,6 @@
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, PathfinderWaypoint } from 'factorio:runtime'
+import type { ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 
 export enum TaskStates {
@@ -165,6 +166,18 @@ export interface PlayerParametersPlaceEntity {
   ground_items_picked_up?: GroundItem[]
   /** An item stack was inserted but its ground entity could not be removed. */
   ground_item_pickup_uncertain?: boolean
+  /** Entities the build must never clear: the anchor or join target of the candidate it came from. */
+  protected_unit_numbers?: number[]
+  /**
+   * Entities this placement has mined out of its footprint, as measured by the
+   * inventory. Any entry means the task changed the world, like a ground-item
+   * pickup.
+   */
+  entities_cleared?: ClearedEntity[]
+  /** Tick the native mining wait began, once every blocker is within reach. */
+  clearing_started_tick?: number
+  /** Walks begun to bring a blocker within hand-mining reach. */
+  clearing_repositions?: number
 }
 
 export interface PlayerParametersRotateEntity {

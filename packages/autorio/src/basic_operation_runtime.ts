@@ -11,9 +11,10 @@ import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation
 import { resolve_entity_placement_item } from './placement_item'
 import { placement_candidate_matches } from './placement_candidates'
 import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
-import { ground_item_blockers, pick_up_ground_items } from './placement_ground_items'
+import { clear_blocker, clearing_mining_ticks, mining_products_fit, placement_clearance, type ClearBlocker } from './placement_clearing'
+import { pick_up_ground_items } from './placement_ground_items'
 import type { new_task_manager } from './task_manager'
-import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
+import type { PlayerParametersMineEntity, PlayerParametersPlaceEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
 import { find_world_entities } from './npc_vision'
 
@@ -21,6 +22,7 @@ type Manager = ReturnType<typeof new_task_manager>
 type BasicController = ReturnType<typeof new_basic_operation_controller>
 
 const MINING_TARGET_SEARCH_RADIUS = 5
+const MAX_CLEARING_REPOSITIONS = 6
 
 function placement_blocker_summaries(actor: ControlledActor, box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) {
   const matches = find_world_entities(actor.surface, { area: box })
@@ -408,6 +410,59 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (task.count <= 0) finish_mining(actor)
   }
 
+  /**
+   * Hand-mines the footprint's clearable entities into the actor inventory. A
+   * blocker beyond hand-mining reach sends the actor walking to it first (the
+   * same placement resumes afterwards). Once every blocker is in reach the
+   * native mining time elapses before the native mine call, as pump preparation
+   * does; a result that does not fit the inventory is refused before any waiting.
+   * pending: nothing more this tick; failed: the task was failed; cleared: done.
+   */
+  function clear_footprint_blockers(actor: ControlledActor, inventory: LuaInventory, task: PlayerParametersPlaceEntity, blockers: ClearBlocker[]) {
+    for (const blocker of blockers) {
+      if (!mining_products_fit(inventory, blocker.entity)) {
+        controller.fail(actor, task, 'clearing_inventory_full', { clearing_left: blocker.info })
+        return { state: 'failed' as const, message: `Cannot clear ${blocker.info.name} lying in the footprint: actor inventory cannot take what it yields` }
+      }
+    }
+    for (const blocker of blockers) {
+      if (within_mining_reach(actor, blocker.entity)) continue
+      task.clearing_started_tick = undefined
+      task.clearing_repositions = (task.clearing_repositions ?? 0) + 1
+      const navigation = mining_reposition_task(actor, blocker.entity)
+      if (task.clearing_repositions > MAX_CLEARING_REPOSITIONS || !navigation
+        || !mining_navigation_requires_movement(actor, blocker.entity, navigation.reach_distance ?? 0)
+        || !manager.interrupt_current_with(navigation, task)) {
+        controller.fail(actor, task, 'clearing_unreachable', { clearing_left: blocker.info })
+        return { state: 'failed' as const, message: `Cannot reach ${blocker.info.name} lying in the footprint to clear it` }
+      }
+      log(`[AUTORIO] Placement blocker ${blocker.info.name} at ${serpent.line(blocker.info.position)} is outside hand-mining reach; walking to it before clearing (${task.clearing_repositions}/${MAX_CLEARING_REPOSITIONS})`)
+      return { state: 'pending' as const }
+    }
+    let required = 0
+    for (const blocker of blockers) {
+      const ticks = clearing_mining_ticks(actor, blocker.entity)
+      if (ticks === undefined) {
+        controller.fail(actor, task, 'clearing_failed', { clearing_left: blocker.info })
+        return { state: 'failed' as const, message: `Cannot clear ${blocker.info.name}: the actor mining rate is unavailable` }
+      }
+      required += ticks
+    }
+    task.clearing_started_tick ??= game.tick
+    if (game.tick - task.clearing_started_tick < required) return { state: 'pending' as const }
+    for (const blocker of blockers) {
+      const result = clear_blocker(actor, inventory, blocker)
+      if (!result.ok) {
+        controller.fail(actor, task, result.code, { clearing_left: blocker.info })
+        return { state: 'failed' as const, message: `Could not clear ${blocker.info.name} at (${blocker.info.position.x}, ${blocker.info.position.y}): ${result.code}` }
+      }
+      task.entities_cleared = [...(task.entities_cleared ?? []), result.cleared]
+      log(`[AUTORIO] Placement cleared ${blocker.info.name} (${blocker.info.reason}) at ${serpent.line(blocker.info.position)}`)
+    }
+    task.clearing_started_tick = undefined
+    return { state: 'cleared' as const }
+  }
+
   function state_placing(actor: ControlledActor) {
     const task = manager.player_state.parameters_place_entity
     if (!task) {
@@ -489,21 +544,31 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       ...placement_check_args(task.entity_name),
     })
     let can_place = placeable()
-    // Like a player's build, ground items in the footprint are picked up
-    // rather than blocking it; the native check then decides again. What was
-    // picked up is kept on the task, so every later failure reports it and
-    // controller.fail withholds the no-mutation proof.
-    if (!can_place && ground_item_blockers(actor, prototype, task.entity_name, position, task.direction) !== undefined) {
-      const pickup = pick_up_ground_items(actor, inventory, prototype, position, task.direction)
-      if (pickup.picked_up.length > 0) task.ground_items_picked_up = [...(task.ground_items_picked_up ?? []), ...pickup.picked_up]
-      if (!pickup.ok && pickup.uncertain) {
-        task.ground_item_pickup_uncertain = true
-        controller.fail(actor, task, 'ground_item_pickup_failed', { ground_item_left: pickup.left })
-        return [false, `Picked up ${pickup.left.count} ${pickup.left.name} but its ground item remained`]
+    // Like a player's build, what placement_clearance says a footprint may lose
+    // is cleared rather than blocking it: ground items are picked up and
+    // natural or idle own entities are mined into the actor inventory, then the
+    // native check decides again. What was cleared is kept on the task, so every
+    // later failure reports it and controller.fail withholds the no-mutation
+    // proof.
+    const clearance = can_place ? undefined : placement_clearance(actor, prototype, task.entity_name, position, task.direction, task.protected_unit_numbers)
+    if (clearance !== undefined) {
+      if (clearance.blockers.length > 0) {
+        const cleared = clear_footprint_blockers(actor, inventory, task, clearance.blockers)
+        if (cleared.state === 'pending') return
+        if (cleared.state === 'failed') return [false, cleared.message]
       }
-      if (!pickup.ok) {
-        controller.fail(actor, task, 'ground_items_inventory_full', { ground_item_left: pickup.left })
-        return [false, `Cannot pick up ${pickup.left.count} ${pickup.left.name} lying in the footprint: actor inventory is full`]
+      if (clearance.ground_items.length > 0) {
+        const pickup = pick_up_ground_items(actor, inventory, prototype, position, task.direction)
+        if (pickup.picked_up.length > 0) task.ground_items_picked_up = [...(task.ground_items_picked_up ?? []), ...pickup.picked_up]
+        if (!pickup.ok && pickup.uncertain) {
+          task.ground_item_pickup_uncertain = true
+          controller.fail(actor, task, 'ground_item_pickup_failed', { ground_item_left: pickup.left })
+          return [false, `Picked up ${pickup.left.count} ${pickup.left.name} but its ground item remained`]
+        }
+        if (!pickup.ok) {
+          controller.fail(actor, task, 'ground_items_inventory_full', { ground_item_left: pickup.left })
+          return [false, `Cannot pick up ${pickup.left.count} ${pickup.left.name} lying in the footprint: actor inventory is full`]
+        }
       }
       can_place = placeable()
     }
@@ -565,6 +630,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       // NPC). A later human last_user on this entity means a player changed it.
       placed_last_user: entity_last_user(entity)?.name,
       ground_items_picked_up: task.ground_items_picked_up,
+      entities_cleared: task.entities_cleared,
     })
     return [true, 'Entity placed successfully', entity]
   }
