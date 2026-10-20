@@ -161,7 +161,7 @@ function collectBlocks(text, index, facts, nextOrdinal) {
   }
   for (const line of lines) {
     const match = BLOCK_LINE.exec(line)
-    const topology = !match && /^fresh_topology:/.test(line)
+    const topology = !match && line.startsWith('fresh_topology:')
     if (match || topology) {
       flush()
       current = { marker: match ? match[1] : 'fresh_topology', lines: [line] }

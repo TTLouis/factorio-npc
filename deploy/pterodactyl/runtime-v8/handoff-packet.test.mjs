@@ -1602,7 +1602,7 @@ test('Run V: the prototype data names the fluids of the entities still to place,
   const facts = { ...args.executorFacts, fluid_source_hints: hints }
   const run = (buildFluids, maxChars) => buildHandoffPacket({ ...args, executorFacts: { ...facts, ...(buildFluids ? { build_fluids: buildFluids } : {}) }, limits: { maxChars } })
   const full = run(undefined, 100000)
-  const readAgain = full.text.split('\n').filter(line => /^(recipe_fact |held_counts|placed_machines|active_step_contract)/.test(line))
+  const readAgain = full.text.split('\n').filter(line => /^(?:recipe_fact |held_counts|placed_machines|active_step_contract)/.test(line))
   const room = full.chars - readAgain.reduce((sum, line) => sum + line.length + 1, 0) // all the executor can read again is over the limit
 
   const serving = run(['steam', 'water'], room)

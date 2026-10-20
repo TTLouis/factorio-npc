@@ -433,8 +433,7 @@ function collectAssignments(text, receivers, lineOf) {
   const result = new Map()
   for (const receiver of receivers) {
     for (const re of [assignRe(receiver), prefixRe(receiver)]) {
-      let m
-      while ((m = re.exec(text))) {
+      for (const m of text.matchAll(re)) {
         if (!result.has(m[1])) result.set(m[1], [])
         result.get(m[1]).push(lineOf(m.index))
       }
@@ -513,7 +512,7 @@ function directResets(body, receivers, names) {
   }
   // The AgentContext owns the conversation: its swap calls replace both arrays
   // and, since B1/B2, the conversation-state slots with them.
-  if (/\bagentContext\.(commitRestage|restage|resumePlanner|beginLineage|replaceConversation)\(|\b(?:this|agent)\.replaceConversation\(/.test(body)) {
+  if (/\bagentContext\.(?:commitRestage|restage|resumePlanner|beginLineage|replaceConversation)\(|\b(?:this|agent)\.replaceConversation\(/.test(body)) {
     found.add('messages')
     found.add('baseMessages')
     for (const slot of CONVERSATION_STATE_SLOTS) found.add(slot)
@@ -549,8 +548,7 @@ export function conversationResetMatrix(sources, registry = LOOP_STATE_FIELDS, s
     if (site.fn !== true && site.noHelpers !== true) {
       const helperRe = /\b(?:this|super)\.([A-Za-z_$][\w$]*)\s*\(/g
       const helpers = new Set()
-      let m
-      while ((m = helperRe.exec(body))) helpers.add(m[1])
+      for (const m of body.matchAll(helperRe)) helpers.add(m[1])
       const owners = site.owner === V8 ? [V8, ST] : [site.owner]
       for (const helper of helpers) {
         for (const owner of owners) {

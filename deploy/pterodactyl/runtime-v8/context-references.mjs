@@ -143,7 +143,7 @@ function toolCallNames(messages) {
  * not in that request. The leading system messages are skipped: they describe
  * blocks, they never deliver observations.
  * @param {Array<{role: string, content?: unknown, tool_calls?: unknown[], tool_call_id?: string}>} messages
- * @returns {Array<{kind: string, severity: string, key: string, mode: string, message_index: number, role: string}>}
+ * @returns {Array<{kind: string, severity: string, key: string, mode: string, message_index: number, role: string}>} one row per dangling reference
  */
 export function findDanglingReferences(messages) {
   if (!Array.isArray(messages)) return []

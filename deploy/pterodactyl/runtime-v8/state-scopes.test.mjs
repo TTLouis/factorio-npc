@@ -89,7 +89,7 @@ test('scanLoopFields ignores strings, other classes and counts compound assignme
     '  constructor() {',
     '    this.a = 1',
     '    this.note = "this.inString = 1"',
-    '    this.tpl = `this.inTemplate = ${this.fromExpr = 2} text`',
+    '    this.tpl = `this.inTemplate = ${this.fromExpr = 2} text`', // eslint-disable-line no-template-curly-in-string
     '    // this.inComment = 1',
     '  }',
     '  tick() {',

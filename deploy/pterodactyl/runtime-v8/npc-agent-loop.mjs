@@ -13469,11 +13469,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const readKey = this.agentContext.role === EXECUTOR_ROLE && this.observationDecisionForced !== true ? this.stepReadKey() : undefined
     const reestablishedPrepared = []
     const reestablishSeen = new Set()
-    for (let index = 0; index < prepared.length && readKey !== undefined; index++) {
-      const entry = prepared[index]
-      if (cachedPrepared[index] === true || staticCachedPrepared[index] === true || unchangedPrepared[index] === true || reestablishSeen.has(entry.signature)) continue
-      reestablishSeen.add(entry.signature)
-      reestablishedPrepared[index] = this.stepReadLedger.isReestablishing(readKey, entry.signature, readSeq)
+    if (readKey !== undefined) {
+      for (let index = 0; index < prepared.length; index++) {
+        const entry = prepared[index]
+        if (cachedPrepared[index] === true || staticCachedPrepared[index] === true || unchangedPrepared[index] === true || reestablishSeen.has(entry.signature)) continue
+        reestablishSeen.add(entry.signature)
+        reestablishedPrepared[index] = this.stepReadLedger.isReestablishing(readKey, entry.signature, readSeq)
+      }
     }
     const admittedPrepared = []
     const admittedCached = []

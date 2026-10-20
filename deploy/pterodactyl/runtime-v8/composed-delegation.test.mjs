@@ -198,7 +198,6 @@ async function gates(t, ctx) {
 test('composed delegation: planner draft, direct-feed placement with ground pickup, fresh executor, planner review, second review, auto-resume, verified goal', async (t) => {
   const ctx = await runScenario(t)
   const { game, model, world, chat, rows, data, observed } = ctx
-  const { memory } = world
   const calls = model.calls
 
   await t.test('1 planner draft: protocol 3, the planner authors no operation and the executor is restaged fresh at commit', () => {
@@ -379,7 +378,7 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
 // places the furnace alone, picking the spilled ore up. Everything after that is the main scenario.
 test('composed delegation, Z/AA prefix: a refused second placement settles with the built drill applied and only the furnace is placed again', async (t) => {
   const ctx = await runScenario(t, { refusePrefix: true })
-  const { game, model, world, data, rows, observed } = ctx
+  const { game, data, rows, observed } = ctx
 
   await t.test('the game proved the refusal and the harness settled the prefix as a fact', () => {
     assert.equal(observed.refusal.cancelled.failed_before_mutation, true, 'the mod claims the refused placement changed nothing')
@@ -389,7 +388,7 @@ test('composed delegation, Z/AA prefix: a refused second placement settles with 
     assert.equal(more.length, 0)
     assert.deepEqual([reconciled.effect, reconciled.applied_slots, reconciled.refused_slots, reconciled.refusal_codes, reconciled.settled], ['happened', [1], [2], ['placing:not_placeable'], true])
     assert.equal(rows('operation.uncertainty_blocked').length, 0, 'a proven prefix does not hold the step')
-    assert.match(observed.correctionPrompt, /refused operations 2 before changing anything[^]*Operations 1 completed before the refusal; do not repeat them/)
+    assert.match(observed.correctionPrompt, /refused operations 2 before changing anything[\s\S]*Operations 1 completed before the refusal; do not repeat them/)
   })
 
   await t.test('only the furnace is placed again, over the spilled ore, and the drill is never placed twice', () => {
