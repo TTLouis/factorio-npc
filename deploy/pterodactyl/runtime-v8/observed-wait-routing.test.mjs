@@ -4,6 +4,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop, PASSIVE_ROUTE_MIN_WAIT_TICKS } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import { makeConditionWait } from './step-completion.mjs'
 
 // Repair unit B (docs/validation/LUNA_AUTONOMY_FAILURE_ANALYSIS_2026-10-05.md section 3). A batch of only `wait`
 // operations on a machine-output checkpoint is routed to the bounded condition wait (no timer); a blind wait's
@@ -668,4 +669,101 @@ test('pendingBlindWait starts empty and a reset clears it', () => {
   world.agent.pendingBlindWait = { request_id: 'req', reason: 'x', unit_numbers: [1] }
   world.agent.reset()
   assert.equal(world.agent.pendingBlindWait, null)
+})
+
+// Run AH: a pump can report working forever while boiler/engine remain held.
+// That status is neither recipe production nor progress toward this checkpoint.
+function runAhPumpWorld() {
+  const world = makeWorld({ committed: true, checkpoint: {
+    mode: 'all', requirements: [
+      { id: 'boiler', kind: 'entity_count', prototype: 'boiler', minimum: 1, state: 'working' },
+      { id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 1, state: 'working' },
+    ],
+  }, script: [sleepingModel()] })
+  world.rcon.conditionAnswer = () => ({
+    ok: true, kind: 'entity_state', unit_number: 15, satisfied: true,
+    progressing: true, progress_known: true, entity_status: 1,
+  })
+  world.agent.recordLiveEntityObservation({
+    name: 'offshore-pump', type: 'offshore-pump', unit_number: 15,
+    position: { x: -46.5, y: 8.5 }, working: true, status: 1,
+  }, { x: -39.75, y: 15.45 }, 'getEntityStatus')
+  return world
+}
+
+test('Run AH pump status cannot admit or repeatedly re-register a passive wait', async () => {
+  const world = runAhPumpWorld()
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const route = await world.agent.routeWaitOnlyBatch({
+      plan: waitReply(), previousState: world.plan(), remainingCanonicalWork: true, explicitBlocker: '',
+    })
+    assert.equal(route.routed, false)
+    assert.equal(world.plan().condition_wait, undefined)
+    assert.equal(world.plan().task_board.completed_count, 0)
+  }
+  const declined = world.named('runtime.passive_wait_declined')
+  assert.equal(declined.length, 3)
+  assert.ok(declined.every(event => event.request_id === 'req_wait_1'
+    && event.unit_number === 15 && event.reason === 'no_finite_native_production_expectation'))
+  assert.equal(world.named('runtime.condition_registered').length, 0)
+})
+
+test('Run AH zero-operation reply gets fresh pump facts and act-or-block recovery instead of a 30 minute wait', async () => {
+  const world = runAhPumpWorld()
+  await world.agent.commitPlan(waitReply(600, { operations: [] }))
+  assert.equal(world.plan().condition_wait, undefined)
+  assert.equal(world.plan().task_board.completed_count, 0)
+  assert.ok(world.calls.length > 0, 'the ordinary bounded repair gets the decision back')
+  assert.ok(world.calls.some(messages => messages.some(message => /passive wait was declined/.test(message.content))))
+  assert.equal(world.named('runtime.passive_wait_declined').length, 1)
+  assert.equal(world.named('runtime.condition_registered').length, 0)
+})
+
+test('a saved legacy working-pump wait wakes on its first poll and cannot close the step', async () => {
+  const world = runAhPumpWorld()
+  world.plan().condition_wait = makeConditionWait({ kind: 'entity_state', unit_number: 15, expected: 'working' }, {
+    mode: 'passive_progress', goalId: world.plan().goal_id, stepId: 'step_1', actorId: 18, actorEpoch: 3,
+  })
+  const result = await world.agent.pollConditionWait()
+  assert.equal(result.action, 'wake')
+  assert.equal(result.reason, 'passive_progress_not_measurable')
+  assert.equal(world.plan().condition_wait, undefined)
+  assert.equal(world.plan().task_board.completed_count, 0)
+  assert.equal(world.named('step.verified').length, 0)
+})
+
+for (const change of ['actor', 'step', 'generation']) {
+  test(`passive admission rejects ${change} replacement during its fresh read`, async () => {
+    const world = makeWorld({ committed: true, checkpoint: undefined })
+    observeFurnace(world.agent)
+    const command = world.rcon.command.bind(world.rcon)
+    world.rcon.command = async text => {
+      const response = await command(text)
+      if (text.includes('evaluate_condition')) {
+        if (change === 'actor') world.rcon.actorEpoch++
+        if (change === 'step') world.plan().task_board.active_step_id = 'step_replacement'
+        if (change === 'generation') world.agent.cancel('new_task')
+      }
+      return response
+    }
+    const candidate = world.agent.passiveProgressWaitCandidate()
+    await assert.rejects(world.agent.registerCandidateConditionWait(candidate), /epoch changed|cancelled|superseded/i)
+    assert.equal(world.plan().condition_wait, undefined)
+    assert.equal(world.named('runtime.condition_registered').length, 0)
+  })
+}
+test('a supplied fresh passive read is fenced to the canonical version from before that read', async () => {
+  const world = makeWorld({ committed: true, checkpoint: null })
+  observeFurnace(world.agent)
+  const command = world.rcon.command.bind(world.rcon)
+  world.rcon.command = async text => {
+    const response = await command(text)
+    if (text.includes('evaluate_condition')) getActivePlan(world.memory.planningState(KEY)).plan_version++
+    return response
+  }
+  await assert.rejects(world.agent.routeWaitOnlyBatch({
+    plan: waitReply(), previousState: world.plan(), remainingCanonicalWork: true, explicitBlocker: '',
+  }), /cancelled|superseded/i)
+  assert.equal(world.plan().condition_wait, undefined)
+  assert.equal(world.named('runtime.condition_registered').length, 0)
 })

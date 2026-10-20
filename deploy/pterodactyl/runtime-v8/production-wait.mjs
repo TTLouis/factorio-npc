@@ -13,8 +13,9 @@
 //   - a check budget that never ends the wait before that deadline.
 // The wait still ends early when the checkpoint holds (the step closes only on
 // that verified condition) or when the machine stops working. Elapsed time is
-// never proof of production. Without an expectation from the game the
-// existing bounded defaults stay in force; nothing is guessed.
+// never proof of production. Completion waits without an expectation keep the
+// existing bounded defaults; generic passive admission instead requires a finite
+// native recipe-production expectation. Nothing is guessed.
 
 export const OVERRUN_FACTOR = 1.5
 export const MARGIN_SECONDS = 30
@@ -52,6 +53,14 @@ export function conditionEta(observation) {
   }
 }
 
+// A working flag alone is not a finite production task (pumps can report it forever).
+// Only native recipe timing and a bounded input/fuel expectation justify sleeping
+// without an exact completion target. No machine-name/type list or model estimate.
+export function hasFiniteProductionEta(eta) {
+  return typeof eta?.recipe === 'string' && eta.recipe.trim().length > 0
+    && Number.isFinite(eta.seconds_per_craft) && eta.seconds_per_craft > 0
+    && Number.isFinite(eta.seconds_until_idle) && eta.seconds_until_idle > 0
+}
 // Seconds the wait is expected to last from now, for this wait's mode.
 export function expectedSecondsFor(wait, eta) {
   if (!eta) return undefined

@@ -188,7 +188,7 @@ import { lifecycleRefusal, lifecycleResets, lifecycleSnapshot } from './lifecycl
 import { repairControlJson } from './control-json-repair.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
-import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, compactMachineInventories, CRAFTER_TYPES, conditionEta, conditionWakeCause, freshReadCondition, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
+import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, compactMachineInventories, CRAFTER_TYPES, conditionEta, conditionWakeCause, freshReadCondition, hasFiniteProductionEta, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
 import {
   combineGroundingWithChallenge,
   ensureGoalRequirements,
@@ -6658,15 +6658,52 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // committed as runtime-admitted work (there are no operations to preflight). If the reducer will not
   // admit it, no wait is registered and the caller takes its ordinary path instead of waiting on a step
   // that can never close. Returns the updated plan state, or undefined when nothing was registered.
-  async registerCandidateConditionWait(candidate) {
+  async registerCandidateConditionWait(candidate, { freshMachine, readScope } = {}) {
     if (!candidate || !this.requestInfo) return undefined
     const key = this.requestInfo.memoryKey
+    const generation = readScope?.generation ?? this.generation
+    const matchesCandidate = () => {
+      const current = this.memory.currentPlan?.(key)
+      return this.generation === generation && this.activePlanKey() === key
+        && current?.status === 'active' && current.goal_id === candidate.goal_id
+        && current.task_board?.active_step_id === candidate.step_id
+        && this.epoch?.actor_id === candidate.actor_id && this.epoch?.epoch === candidate.actor_epoch
+    }
+    const assertCandidate = () => {
+      if (matchesCandidate()) return
+      const error = new AgentLoopError('Condition wait registration was cancelled or superseded')
+      error.code = STALE_REPLY_ERROR_CODE
+      throw error
+    }
+    if (candidate.mode === 'passive_progress') {
+      assertCandidate()
+      const stepKey = readScope ? readScope.stepKey : this.stepReadKey()
+      const machine = freshMachine ?? await this.readFreshMachine(candidate.condition.unit_number)
+      await this.assertCurrent()
+      assertCandidate()
+      if (this.stepReadKey() !== stepKey) {
+        const error = new AgentLoopError('Condition wait step was cancelled or superseded during the machine read')
+        error.code = STALE_REPLY_ERROR_CODE
+        throw error
+      }
+      if (machine.unit_number !== candidate.condition.unit_number || machine.working !== true || !hasFiniteProductionEta(machine.eta)) {
+        await this.traceEvent('runtime.passive_wait_declined', {
+          request_id: this.traceRequest?.id,
+          goal_id: candidate.goal_id, step_id: candidate.step_id,
+          unit_number: candidate.condition.unit_number,
+          reason: 'no_finite_native_production_expectation', machine,
+        })
+        this.messages.push({ role: 'user', content: `[HARNESS] A passive wait was declined: the fresh exact machine read does not establish a finite recipe-production task to wait for. A working status alone does not establish progress toward this step. Facts: ${JSON.stringify(machine)}` })
+        return undefined
+      }
+    }
     const draft = getActivePlanningPlan(this.memory.planningState?.(key))
     if (draft && [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(draft.status)
       && typeof this.memory.commitPlanningPlan === 'function') {
       this.memory.commitPlanningPlan(key, { now: Date.now(), runtime_validation: { passed: true } })
       await this.persistState()
     }
+    if (candidate.mode === 'passive_progress') assertCandidate()
     const planAfter = getActivePlanningPlan(this.memory.planningState?.(key))
     const admitted = !planAfter || FROZEN_PLAN_STATUSES.has(planAfter.status)
     const waiting = admitted ? this.memory.registerConditionWait?.(key, candidate) : undefined
@@ -6798,6 +6835,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     // The cached working flag may be arbitrarily stale (it dates from whenever the model last looked), so the
     // machine is read once now and that answer decides.
+    const readScope = { generation: this.generation, stepKey: this.stepReadKey() }
     const fresh = await this.readFreshMachine(unitNumber, requirement)
     readUnits = [unitNumber]
     if (fresh.working !== true) return decline(requirement ? 'checkpoint_machine_not_working' : 'machine_not_working')
@@ -6805,7 +6843,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? this.checkpointWaitCandidate(previousState, unit => unit === unitNumber)
       : this.passiveProgressWaitCandidate(previousState, { unitNumber })
     if (!candidate) return decline('no_condition_wait_candidate')
-    const waiting = await this.registerCandidateConditionWait(candidate)
+    const waiting = await this.registerCandidateConditionWait(candidate, { freshMachine: fresh, readScope })
     if (!waiting?.condition_wait) return decline('condition_wait_not_admitted')
     await traceRouted(
       waiting.condition_wait,
@@ -7125,7 +7163,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Plan 2.5: the machine's expected finish from game data sets the wake
     // deadline and the expected finish the planner sees.
     const schedule = scheduleWait(wait, normalizedObservation.eta)
-    const result = applyConditionObservation(schedule.wait, normalizedObservation)
+    // Existing/saved passive waits must pass the same production gate as new
+    // admission; a legacy working pump must wake immediately, never close a step.
+    const result = wait.mode === 'passive_progress' && normalizedObservation.progressing === true
+      && !hasFiniteProductionEta(normalizedObservation.eta)
+      ? { action: 'wake', reason: 'passive_progress_not_measurable', wait: { ...schedule.wait, state: 'failed' } }
+      : applyConditionObservation(schedule.wait, normalizedObservation)
     return {
       action: result.action,
       healthy: result.action === 'waiting',
