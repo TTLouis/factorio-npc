@@ -116,6 +116,22 @@ Status words:
 | AB-3 | 18ab, 16v | A radius-128 water read was empty or incomplete, a radius-256 read found water, and the walk to it ended `navigation_unreachable`. | 0 | open, not delegation |
 | lifecycle smalls | 15o, 15r, 15s, 15t, 15u, 17y | an intake retry after terminal; a tool-schema error escalated to a planner wake; a silent BLOCKED stall; a stale `paused_at` after an operator stop; `provider_response_too_large` as a guard pause; transport C7 restages | 2 | handed off to option C |
 
+## Status after the overnight fix units (2026-10-20)
+
+Every unit was merged to `experiment/jev-agent-architecture` after a negative control on the original code, the full Docker runtime suite, the build-payload check and a Sonnet review. None of them is live-tested.
+
+| item | unit | commits | payload pin | status |
+|---|---|---|---|---|
+| AF-1 | 1 `fix/planner-review-pressure` | `59b5451c`, `36177723` | `12d08afd` | merged |
+| X-1 | 2 `fix/second-review-resume` | `20f652b0`, `7567e7d2` | `b86615e3` | merged. A second review is now a model_recoverable pause, so the supervisor's bounded auto-resume (2 per step, 6 per goal) restages the executor. This widens what auto-resume covers, which is a design call for the owner. |
+| X-1b (found while fixing X-1) | `fix/review-notes-handoff` | `a90c3d52`, `1fec4cf5` | `8c654114` | merged. The planner's review notes are stored on the goal and survive the restage as an advisory packet record. |
+| AB-2 (a) | U3 `fix/held-scope-complete` | `8f8e671c`, `55d4fe52` | `ef93ec6a` | merged. The held list says `complete_main_inventory` when nothing was omitted, and the topology cache key carries the plan and step identity. `postBatchFactsContext` was left unchanged on purpose. |
+| AB-2 (b), V-geometry | U4+U5 `fix/handoff-budget-tiers` | `8abe8b9e`, `f97c6c48`, `b2ed8aab`, `cf37d156`, `33c56285` | `217737ce` | merged. Researched nodes carry no `trigger_crafting`; the protocol-3 reserve is the measured topology block (none without one) instead of a constant 1950; fully held build roots are netted out of the recipe closure; fluid hints for the fluids the step's own prototypes take drop after the re-readable records. A topology block that later outgrows the measured reserve is trimmed and traced as `context.topology_trimmed`, not silent. The fluid tier relies on the mod's `fluidboxes[].filter`; an unfiltered box falls back to the early tier. In the composed scenario the C7 packet went from 3924 chars (4050 cap) to 4299 plus a 911-char block, with nothing dropped. |
+| Y-refusal | U6 `fix/raw-leaf-craft-path` | `a57d87cd` | `9485d806` | merged. An item is a raw leaf only when it is mined, or harvested with no certain craft output. Recycling recipes do not count. |
+| AE-5 and the composed gates | `test/composed-delegation-scenario` | `79035f4f`, `2fa33ffc` | test only | merged. It covers placement and pickup, direct feed, a review round, the auto-resume restage, and delegation back to the planner. The gates are zero `dangling_context_reference`, no silent stall, and a review round that runs. The only finding allowed is one `restage_loop` on step 2 (C8, C3, C7), which is real restage cost and stays visible. |
+
+Still open: AF-2 and AB-3 (class 0, not delegation), and proposal P1 below. The lifecycle smalls stay with option C.
+
 ## Proposals that need the owner
 
 - **P1: free re-establishing reads after a harness swap.** The observation budget limits exploration of new facts in one decision. After a swap, the harness itself discarded the tool results the step held, and B2 now (correctly) forgets `unchangedFactReads` at a swap, so re-reading them costs budget. A data-driven rule would not charge a fresh read whose key was in the dropped conversation's tool cache for the same step identity. That would remove the remaining budget pressure behind BL without a larger budget. It was not built, because 19ac to 19af show no budget-only end once AF-1 is fixed.
