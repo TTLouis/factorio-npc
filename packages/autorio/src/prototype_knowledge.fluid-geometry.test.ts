@@ -150,4 +150,44 @@ describe('prototype fluid connection geometry', () => {
     expect(result.entity.fluidboxes[0].pipe_connections_truncated).toBe(true)
     expect(result.entity.fluidboxes[0].pipe_connections).toHaveLength(8)
   })
+
+  // AB-3: an offshore pump's fluidbox has no filter; what it produces is a property of the tile it sits on.
+  describe('native fluid_io field', () => {
+    function addPump(filter?: string) {
+      const prototypes = (globalThis as any).prototypes
+      const pump = { name: 'pump-x', type: 'offshore-pump', is_building: true, tile_width: 1, tile_height: 2, collision_box: {}, selection_box: {},
+        items_to_place_this: [{ name: 'pump-x', count: 1 }],
+        fluidbox_prototypes: [{ index: 1, production_type: 'output', ...(filter ? { filter: { name: filter } } : {}), pipe_connections: [] }] }
+      prototypes.entity['pump-x'] = pump
+      prototypes.item['pump-x'] = { name: 'pump-x', stack_size: 50, place_result: pump }
+      prototypes.tile = { sea: { fluid: { name: 'water' } }, 'deep-sea': { fluid: { name: 'water' } }, magma: { fluid: { name: 'lava' } }, grass: {} }
+    }
+
+    it('names the fluid of a filtered fluidbox with its port, and nothing for an unfiltered non-pump entity', () => {
+      const result = prototype_details('boiler') as any
+      expect(result.entity.fluid_io).toEqual([{ fluid: 'water', production_type: 'input-output', fluidbox_index: 1, source: 'fluidbox_filter' }])
+      expect(result.entity.fluid_io_truncated).toBe(false)
+      ;(globalThis as any).prototypes.entity.boiler.fluidbox_prototypes[0].filter = undefined
+      expect((prototype_details('boiler') as any).entity.fluid_io).toEqual([])
+    })
+
+    it('derives an unfiltered offshore pump output from the fluids of the tile prototypes, once per fluid and sorted', () => {
+      addPump()
+      const result = prototype_details('pump-x') as any
+      expect(result.entity.fluidboxes[0].filter).toBeUndefined()
+      expect(result.entity.fluid_io).toEqual([
+        { fluid: 'lava', production_type: 'output', fluidbox_index: 1, source: 'tile_fluid' },
+        { fluid: 'water', production_type: 'output', fluidbox_index: 1, source: 'tile_fluid' },
+      ])
+      expect(result.entity.fluid_io_truncated).toBe(false)
+    })
+
+    it('trusts a pump fluidbox filter over the tiles, and reports an unreadable tile catalog as truncated', () => {
+      addPump('steam')
+      expect((prototype_details('pump-x') as any).entity.fluid_io).toEqual([{ fluid: 'steam', production_type: 'output', fluidbox_index: 1, source: 'fluidbox_filter' }])
+      addPump()
+      ;(globalThis as any).prototypes.tile = Object.fromEntries(Array.from({ length: 2049 }, (_, index) => [`dry-${index}`, {}]))
+      expect((prototype_details('pump-x') as any).entity).toMatchObject({ fluid_io: [], fluid_io_truncated: true })
+    })
+  })
 })

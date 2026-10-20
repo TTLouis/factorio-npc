@@ -13,6 +13,7 @@ const DEFAULT_DISCOVERY_LIMIT = 6
 const MAX_DISCOVERY_LIMIT = 12
 const MAX_DISCOVERY_PLACE_ITEMS = 2
 const MAX_MINEABLE_PRODUCTS = 8
+const MAX_TILE_PROTOTYPES = 2048
 
 type PrototypeDiscoveryCapability = 'mining' | 'crafting' | 'entity-type' | 'harvest'
 type PrototypeDiscoveryAvailability = 'force-available' | 'all'
@@ -137,9 +138,31 @@ function pipe_connection_details(connection: any) {
   }
 }
 
+// The fluids the tile prototypes carry: what an entity that pumps from the tile it sits on can produce.
+function tile_fluid_names() {
+  const names: string[] = []
+  const seen: Record<string, boolean> = {}
+  let scanned = 0
+  for (const [, tile] of pairs(prototypes.tile ?? {})) {
+    scanned += 1
+    if (scanned > MAX_TILE_PROTOTYPES) return { names: [] as string[], truncated: true }
+    const fluid_name = tile?.fluid?.name
+    if (typeof fluid_name === 'string' && !seen[fluid_name]) {
+      seen[fluid_name] = true
+      names.push(fluid_name)
+    }
+  }
+  return { names: sort_strings(names), truncated: false }
+}
+
 function fluidbox_details(prototype: any) {
   const runtime_fluidboxes = bounded_runtime_values(prototype?.fluidbox_prototypes, MAX_FLUIDBOX_PROTOTYPES)
   const fluidboxes: Array<Record<string, unknown>> = []
+  // Which fluids the entity takes in or gives out, per port. A fluidbox filter names the fluid itself. An offshore pump's
+  // output box has no filter: its fluid is the fluid of the tile under its intake, so it comes from the tile prototypes.
+  const fluid_io: Array<Record<string, unknown>> = []
+  let fluid_io_truncated = false
+  let tile_fluids: ReturnType<typeof tile_fluid_names> | undefined
 
   for (const fluidbox of runtime_fluidboxes.values) {
     const runtime_connections = bounded_runtime_values(fluidbox?.pipe_connections, MAX_PIPE_CONNECTIONS)
@@ -155,11 +178,22 @@ function fluidbox_details(prototype: any) {
       pipe_connections_truncated: runtime_connections.truncated,
       pipe_connections,
     })
+    if (fluidbox.filter?.name !== undefined) {
+      fluid_io.push({ fluid: fluidbox.filter.name, production_type: fluidbox.production_type, fluidbox_index: fluidbox.index, source: 'fluidbox_filter' })
+    } else if (prototype.type === 'offshore-pump' && fluidbox.production_type === 'output') {
+      tile_fluids = tile_fluids ?? tile_fluid_names()
+      if (tile_fluids.truncated) fluid_io_truncated = true
+      for (const fluid_name of tile_fluids.names) {
+        fluid_io.push({ fluid: fluid_name, production_type: fluidbox.production_type, fluidbox_index: fluidbox.index, source: 'tile_fluid' })
+      }
+    }
   }
 
   return {
     truncated: runtime_fluidboxes.truncated,
     fluidboxes,
+    fluid_io,
+    fluid_io_truncated: fluid_io_truncated || runtime_fluidboxes.truncated,
   }
 }
 
@@ -237,6 +271,9 @@ function entity_details(prototype: any) {
     place_items: place_items(prototype),
     fluidboxes: fluidboxes.fluidboxes,
     fluidboxes_truncated: fluidboxes.truncated,
+    // Native: the fluids this entity takes in or gives out, from fluidbox filters or (offshore pumps) the tile prototypes.
+    fluid_io: fluidboxes.fluid_io,
+    fluid_io_truncated: fluidboxes.fluid_io_truncated,
   }
 
   const mineable = mineable_details(prototype)
