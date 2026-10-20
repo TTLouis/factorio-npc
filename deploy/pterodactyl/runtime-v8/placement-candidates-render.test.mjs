@@ -131,6 +131,7 @@ test('the model reads the answer candidates first, with the anchor in the reques
     traceFile: path.join(dir, 'behavior.jsonl'), provider: async messages => { inputs.push(messages.map(message => ({ ...message }))); return replies.shift() } })
   await agent.request('Put a drill beside the furnace.', { sender: 'TTLouis' })
   await agent.completed()
+  const rows = (await fsp.readFile(path.join(dir, 'behavior.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
 
   assert.match(rcon.commands[0], /anchor=\{unit_number=31\}/)
   const tools = inputs.at(-1).filter(message => message.role === 'tool')
@@ -141,4 +142,12 @@ test('the model reads the answer candidates first, with the anchor in the reques
   assert.equal(first.candidates.length, 8)
   const text = tools.find(message => message.tool_call_id === 'first').content
   assert.ok(text.indexOf('"candidates"') < text.indexOf('"obstructions"'))
+
+  // The read leaves a named, request-correlated trace row saying what it ordered by and what a build would clear.
+  const requestId = rows.find(row => row.event === 'tool.call')?.request_id
+  const observed = rows.filter(row => row.event === 'observation.placement_candidates_observed')
+  assert.equal(observed.length, 1)
+  assert.equal(observed[0].request_id, requestId)
+  assert.deepEqual({ ordering: observed[0].data.ordering, anchor: observed[0].data.anchor_unit_number, clearing: observed[0].data.clearing_candidate_count, ground: observed[0].data.ground_item_candidate_count, returned: observed[0].data.returned_candidate_count },
+    { ordering: 'nearest_to_anchor_first', anchor: 31, clearing: 1, ground: 0, returned: 8 })
 })
