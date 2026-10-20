@@ -168,6 +168,8 @@ export interface PlayerParametersPlaceEntity {
   ground_item_pickup_uncertain?: boolean
   /** Entities the build must never clear: the anchor or join target of the candidate it came from. */
   protected_unit_numbers?: number[]
+  /** The NPC's own entities this placement may mine: set only by place_candidate, from the candidate's recorded clears. */
+  allowed_own_clears?: number[]
   /**
    * Entities this placement has mined out of its footprint, as measured by the
    * inventory. Any entry means the task changed the world, like a ground-item

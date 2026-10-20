@@ -337,7 +337,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue(task, actor)
   }
 
-  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[]) {
+  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[]) {
     const has_x = x !== undefined
     const has_y = y !== undefined
     if (has_x !== has_y || (has_x && (!valid_coordinate(x!) || !valid_coordinate(y!)))) {
@@ -359,6 +359,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       type: TaskStates.PLACING,
       placement_candidate,
       protected_unit_numbers: protected_unit_numbers !== undefined && protected_unit_numbers.length > 0 ? protected_unit_numbers : undefined,
+      allowed_own_clears: allowed_own_clears !== undefined && allowed_own_clears.length > 0 ? allowed_own_clears : undefined,
       entity_name,
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,

@@ -33,6 +33,11 @@ import { describe_ground_item, ground_item_entities, MAX_GROUND_ITEMS, type Grou
 // force, or any last_user, or one whose last_user cannot be read) is never
 // clearable.
 //
+// The NPC's own idle entities are cleared only through place_candidate, and only the ones the candidate the model
+// read listed in its `clears` (allow_own below). A raw place_entity, a construction plan or any other placement path
+// clears ground items and natural obstructions only: a footprint held by the NPC's own build stays refused there,
+// so a placement can never silently replace something the NPC built.
+//
 // "Own" means same force with no recorded user. In a force shared by several NPCs
 // (or with scripted entities), that also covers entities built by another NPC or
 // script: the rule cannot tell them apart, so only the running-chain guard
@@ -69,6 +74,17 @@ export interface ClearBlocker {
 export interface PlacementClearance {
   ground_items: GroundItem[]
   blockers: ClearBlocker[]
+}
+
+/**
+ * Which of the NPC's own idle entities a clearance may take: true while a candidate read lists them (every own entity
+ * with a unit number), or the unit numbers a chosen candidate recorded in its `clears`. Nothing by default.
+ */
+export type AllowOwn = true | number[]
+
+function own_allowed(entity: LuaEntity, allow_own: AllowOwn) {
+  if (entity.unit_number === undefined) return false
+  return allow_own === true || allow_own.includes(entity.unit_number)
 }
 
 /**
@@ -189,15 +205,21 @@ function evaluate_blocker(actor: ControlledActor, entity: LuaEntity): ClearReaso
 }
 
 /** How a build may clear this one colliding entity, or undefined when it may not. */
-export function blocker_clearance(actor: ControlledActor, entity: LuaEntity, protect: number[] = [], memo?: ClearanceMemo): ClearReason | undefined {
+export function blocker_clearance(actor: ControlledActor, entity: LuaEntity, protect: number[] = [], memo?: ClearanceMemo, allow_own: AllowOwn = []): ClearReason | undefined {
   if (!entity.valid) return undefined
   if (entity.unit_number !== undefined && protect.includes(entity.unit_number)) return undefined
-  if (memo === undefined) return evaluate_blocker(actor, entity)
-  const key = memo_key(entity)
-  const known = memo.reasons[key]
-  if (known !== undefined) return known === 'blocked' ? undefined : known
-  const reason = evaluate_blocker(actor, entity)
-  memo.reasons[key] = reason ?? 'blocked'
+  let reason: ClearReason | undefined
+  if (memo === undefined) reason = evaluate_blocker(actor, entity)
+  else {
+    const key = memo_key(entity)
+    const known = memo.reasons[key]
+    if (known !== undefined) reason = known === 'blocked' ? undefined : known
+    else {
+      reason = evaluate_blocker(actor, entity)
+      memo.reasons[key] = reason ?? 'blocked'
+    }
+  }
+  if (reason === 'own_idle_entity' && !own_allowed(entity, allow_own)) return undefined
   return reason
 }
 
@@ -212,7 +234,7 @@ function describe_blocker(entity: LuaEntity, reason: ClearReason): ClearableEnti
  * keep their strict manual check, or nothing collides so there is nothing to
  * clear). Call it only for a footprint the native check refused.
  */
-export function placement_clearance(actor: ControlledActor, prototype: any, entity_name: string, position: { x: number, y: number }, direction: number | undefined, protect: number[] = [], memo?: ClearanceMemo): PlacementClearance | undefined {
+export function placement_clearance(actor: ControlledActor, prototype: any, entity_name: string, position: { x: number, y: number }, direction: number | undefined, protect: number[] = [], memo?: ClearanceMemo, allow_own: AllowOwn = []): PlacementClearance | undefined {
   if (placement_check_args(entity_name).build_check_type !== undefined) return undefined
   const layers = collision_layers(prototype)
   if (layers === undefined) return undefined
@@ -226,7 +248,7 @@ export function placement_clearance(actor: ControlledActor, prototype: any, enti
       if (++items > MAX_GROUND_ITEMS) return undefined
       continue
     }
-    const reason = blocker_clearance(actor, entity, protect, memo)
+    const reason = blocker_clearance(actor, entity, protect, memo, allow_own)
     if (reason === undefined || blockers.length >= MAX_CLEARED_ENTITIES) return undefined
     blockers.push({ entity, info: describe_blocker(entity, reason) })
   }
@@ -245,9 +267,9 @@ export function placement_clearance(actor: ControlledActor, prototype: any, enti
 }
 
 /** True when the native check accepts the footprint, or would once its clearable blockers are cleared. */
-export function placeable_or_clearable(actor: ControlledActor, prototype: any, entity_name: string, position: { x: number, y: number }, direction: number | undefined, protect: number[] = []) {
+export function placeable_or_clearable(actor: ControlledActor, prototype: any, entity_name: string, position: { x: number, y: number }, direction: number | undefined, protect: number[] = [], allow_own: AllowOwn = []) {
   if (actor.surface.can_place_entity({ name: entity_name, position, direction, force: actor.force, ...placement_check_args(entity_name) })) return true
-  return placement_clearance(actor, prototype, entity_name, position, direction, protect) !== undefined
+  return placement_clearance(actor, prototype, entity_name, position, direction, protect, undefined, allow_own) !== undefined
 }
 
 /**

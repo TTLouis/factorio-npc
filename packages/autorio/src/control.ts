@@ -586,7 +586,7 @@ remote.add_interface('autorio_operations', {
       actor,
       candidate_set_id,
       candidate_id,
-      (entity_name, x, y, direction, proof, protected_unit_numbers) => basic_operation_controller.submit_placement(entity_name, x, y, direction, proof, protected_unit_numbers),
+      (...args) => basic_operation_controller.submit_placement(...args),
     )
     if (result[0]) log(`[AUTORIO] New place_candidate task: ${candidate_set_id}/${candidate_id}`)
     return result

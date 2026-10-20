@@ -560,7 +560,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     // native check decides again. What was cleared is kept on the task, so every
     // later failure reports it and controller.fail withholds the no-mutation
     // proof.
-    const clearance = can_place ? undefined : placement_clearance(actor, prototype, task.entity_name, position, task.direction, task.protected_unit_numbers)
+    const clearance = can_place ? undefined : placement_clearance(actor, prototype, task.entity_name, position, task.direction, task.protected_unit_numbers, undefined, task.allowed_own_clears ?? [])
     if (clearance !== undefined) {
       if (clearance.blockers.length > 0) {
         const cleared = clear_footprint_blockers(actor, inventory, task, clearance.blockers, clearance.ground_items)

@@ -543,11 +543,41 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       })
     })
 
-    it('clears the NPC\'s own idle entity the same way and reports it', () => {
+    it('refuses a raw place_entity over the NPC\'s own idle entity instead of clearing it', () => {
       const own = chest(SPOT)
-      const { actor, inventory, controller, runtime } = build([own])
+      const { actor, inventory, surface, controller, runtime, manager } = build([own])
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(own.mine).not.toHaveBeenCalled()
+      expect(own.valid).toBe(true)
+      expect(surface.create_entity).not.toHaveBeenCalled()
+      expect(inventory.held['wooden-chest'] ?? 0).toBe(0)
+      expect(controller.status().last_result).toMatchObject({ code: 'not_placeable', placement_blockers: [{ name: 'wooden-chest' }] })
+      expect(controller.status().last_result?.entities_cleared).toBeUndefined()
+      expect(cancelled).toHaveBeenCalledWith('placing:not_placeable', expect.objectContaining({ failed_before_mutation: true }))
+    })
+
+    it('still clears a tree and ground items on a raw place_entity', () => {
+      const wood = tree(SPOT)
+      const { actor, controller, runtime } = build([wood, ground_item('copper-ore', 1, { x: -33.2, y: -35.2 })])
       expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
       runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      expect(runtime.state_placing(actor)?.[0]).toBe(true)
+      expect(controller.status().last_result).toMatchObject({ code: 'completed', entities_cleared: [{ name: 'tree-01' }] })
+    })
+
+    it('clears the NPC\'s own idle entity only through place_candidate, and reports it', () => {
+      const own = chest(SPOT)
+      const { actor, inventory, controller, runtime } = build([own])
+      const generated = create_placement_candidate_set(actor, request({ limit: 1 })) as any
+      expect(generated.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', unit_number: own.unit_number, reason: 'own_idle_entity' }])
+      const queued = execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, (...args) => controller.submit_placement(...args))
+      expect(queued[0]).toBe(true)
+      expect(runtime.state_placing(actor)).toBeUndefined()
       ;(globalThis as any).game.tick = 100 + 1000
       const result = runtime.state_placing(actor)
 
@@ -714,6 +744,32 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       expect(manager.player_state.task_state).toBe('walking_to_entity')
       expect(wood.mine).not.toHaveBeenCalled()
       expect(manager.player_state.parameters_walk_to_entity?.requested_position).toEqual(SPOT)
+    })
+
+    it('hands place_candidate only the own entities the candidate listed', () => {
+      const own = chest(SPOT)
+      const { actor } = build([own])
+      const generated = create_placement_candidate_set(actor, request({ limit: 1 })) as any
+      const submit = vi.fn(() => true)
+      expect(execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, submit)[0]).toBe(true)
+      expect(submit).toHaveBeenCalledWith('stone-furnace', generated.candidates[0].position.x, generated.candidates[0].position.y, generated.candidates[0].direction, undefined, undefined, [own.unit_number])
+    })
+
+    it('refuses a candidate whose footprint gained an own entity it did not list', () => {
+      const wood = tree(SPOT)
+      const newcomer = chest({ x: -33.2, y: -35.2 })
+      const { actor, surface, controller } = build([wood])
+      const generated = create_placement_candidate_set(actor, request({ limit: 1 })) as any
+      expect(generated.candidates[0].clears).toMatchObject([{ name: 'tree-01' }])
+      mineable(newcomer)
+      register(newcomer)
+      ;(surface.find_entities_filtered as any).mockImplementation((filters: any) => [wood, newcomer].filter(value => value.valid && (!filters.area || inside(filters.area, value.position)) && (!filters.type || value.type === filters.type) && (!filters.force || value.force?.index === filters.force.index)))
+      surface.can_place_entity = vi.fn(() => false)
+      const submit = vi.fn(() => true)
+
+      expect(execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, submit)).toEqual([false, 'placement candidate is no longer placeable'])
+      expect(submit).not.toHaveBeenCalled()
+      void controller
     })
 
     it('does not clear what became unclearable after the candidate was read', () => {

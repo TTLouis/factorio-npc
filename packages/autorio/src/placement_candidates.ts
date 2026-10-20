@@ -606,7 +606,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       let clearance: ReturnType<typeof placement_clearance>
       if (clearance_probes < MAX_CLEARANCE_PROBES) {
         clearance_probes++
-        clearance = placement_clearance(actor, prototype, request.entity_name, position, direction, protect, clearance_memo)
+        clearance = placement_clearance(actor, prototype, request.entity_name, position, direction, protect, clearance_memo, true)
       }
       else clearance_probes_capped = true
       if (clearance === undefined) {
@@ -765,6 +765,15 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   }
 }
 
+/** Unit numbers of the NPC's own entities this candidate listed in its clears; undefined when it lists none. */
+function own_clear_unit_numbers(candidate: PlacementCandidate) {
+  const list: number[] = []
+  for (const entry of candidate.clears ?? []) {
+    if (entry.reason === 'own_idle_entity' && entry.unit_number !== undefined) list.push(entry.unit_number)
+  }
+  return list.length > 0 ? list : undefined
+}
+
 function protect_list(result: { anchor?: { unit_number: number }, connects_to?: { unit_number: number } }) {
   const list: number[] = []
   if (result.anchor !== undefined) list.push(result.anchor.unit_number)
@@ -859,7 +868,8 @@ function resolve_placement_candidate(
     const changed = join_change(target, prototype, candidate)
     if (changed !== undefined) return { ok: false as const, code: 'connects_to_port_changed', error: `connects_to_port_changed: ${changed}` }
   }
-  if (!placeable_or_clearable(actor, prototype, set.entity_name, candidate.position, candidate.direction, set.protected_unit_numbers)) {
+  // The candidate may take only the own entities it listed when it was read, not whatever stands there now.
+  if (!placeable_or_clearable(actor, prototype, set.entity_name, candidate.position, candidate.direction, set.protected_unit_numbers, own_clear_unit_numbers(candidate) ?? [])) {
     return { ok: false as const, error: 'placement candidate is no longer placeable' }
   }
 
@@ -894,17 +904,25 @@ export function execute_placement_candidate(
   actor: ControlledActor,
   candidate_set_id: string,
   candidate_id: string,
-  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[]) => boolean,
+  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[]) => boolean,
 ): [boolean, string] {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
   if (!resolved.ok) return [false, resolved.error]
   const { set, candidate } = resolved
   const protected_unit_numbers = set.protected_unit_numbers !== undefined && set.protected_unit_numbers.length > 0 ? set.protected_unit_numbers : undefined
-  const accepted = prototypes.entity[set.entity_name]?.type === 'offshore-pump'
-    ? submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, { candidate_set_id, candidate_id }, protected_unit_numbers)
-    : protected_unit_numbers === undefined
-      ? submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
-      : submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, undefined, protected_unit_numbers)
+  const own = own_clear_unit_numbers(candidate)
+  let accepted: boolean
+  if (prototypes.entity[set.entity_name]?.type === 'offshore-pump') {
+    accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, { candidate_set_id, candidate_id }, protected_unit_numbers)
+  }
+  else if (own !== undefined) {
+    // Only this path lets a placement take the NPC's own entities, and only the ones this candidate listed.
+    accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, undefined, protected_unit_numbers, own)
+  }
+  else if (protected_unit_numbers !== undefined) {
+    accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, undefined, protected_unit_numbers)
+  }
+  else accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
   return accepted
     ? [true, `placement candidate accepted: ${candidate_set_id}/${candidate_id}`]
     : [false, 'placement candidate could not be queued']
