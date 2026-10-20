@@ -1046,6 +1046,7 @@ export function triggerProductionRoots(research, limits = EXECUTOR_FACT_LIMITS) 
   return roots.slice(0, limits.researchTargets)
 }
 
+const MAX_FLUID_OPTIONS = 256
 // --- Build bills and science residuals (unit 9) ------------------------------------------------------------------------
 //
 // A build step's contract is "N entities of prototype X exist" (entity_count). What it asks the actor to HAVE is the prototype's
@@ -1079,7 +1080,6 @@ export function placingItemFromDetails(parsed, prototype) {
 }
 
 // Far above the fluids any real tile set carries; a bigger set is reported as truncated, never cut silently.
-const MAX_FLUID_OPTIONS = 256
 
 const remainingPlacings = (rows, placing) => asList(rows).filter(row => row.remaining > 0).map(row => (placing instanceof Map ? placing.get(row.prototype) : undefined)).filter(Boolean)
 

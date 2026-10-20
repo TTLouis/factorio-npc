@@ -68,10 +68,10 @@ export function navigation_position_preflight(actor: ControlledActor | undefined
       colliding_layers.sort()
       const nearest = surface.find_non_colliding_position(character.name, { x, y }, STANDING_SEARCH_RADIUS, STANDING_SEARCH_PRECISION)
       // Facts only: what the goal is, what collides, and the nearest place the engine says the character fits.
-      const correction_message = `Goal (${round2(x)}, ${round2(y)}) is on a ${tile.name} tile, which collides with this character (${colliding_layers.join(', ')}) `
-        + 'and has no room for it, so a path request to it cannot succeed. '
-        + (nearest ? `The nearest position the character can stand on is (${round2(nearest.x)}, ${round2(nearest.y)}).`
-          : `No position the character can stand on was found within ${STANDING_SEARCH_RADIUS} tiles.`)
+      const nearest_text = nearest
+        ? `The nearest position the character can stand on is (${round2(nearest.x)}, ${round2(nearest.y)}).`
+        : `No position the character can stand on was found within ${STANDING_SEARCH_RADIUS} tiles.`
+      const correction_message = `Goal (${round2(x)}, ${round2(y)}) is on a ${tile.name} tile, which collides with this character (${colliding_layers.join(', ')}) and has no room for it, so a path request to it cannot succeed. ${nearest_text}`
       return reject('navigation_position_inside_tile_collision', {
         position: { x, y }, reach_distance: reach, tile: tile.name, colliding_layers,
         nearest_walkable_position: nearest ? { x: nearest.x, y: nearest.y } : undefined,
