@@ -152,6 +152,11 @@ case "$LANE" in
   offshore-water-first)
     run_py offshore_water_first_cell.py
     ;;
+  water-reach-approach)
+    printf '[npc-test][water-reach-approach] Running water approach, collision-refused walk and positive-read gate on the 18ab seed...
+'
+    run_py water_reach_approach_cell.py
+    ;;
   partial-transfer)
     run_node partial_transfer_factorio.mjs --mode recovery
     stop_factorio

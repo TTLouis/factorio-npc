@@ -78,7 +78,12 @@ prepare_lane() {
   local lane="$1"
   local lane_root="$LANES_ROOT/$lane"
   mkdir -p "$lane_root/results"
-  cp "$BASE_SAVE" "$lane_root/npc-test.zip"
+  if [[ "$lane" == water-reach-approach ]]; then
+    # The 18ab map: default generation at the live seed instead of the shared 256x256 base world.
+    "$FACTORIO_BIN" --create "$lane_root/npc-test.zip"       --map-gen-settings "$TEST_ROOT/fixtures/map-gen-settings-water-reach.json"       >"$RESULTS/$lane-create.log" 2>&1
+  else
+    cp "$BASE_SAVE" "$lane_root/npc-test.zip"
+  fi
 }
 
 launch_lane() {
@@ -131,6 +136,7 @@ lane_offset() {
     direct-feed-observation) printf '27' ;;
     ground-item-pickup) printf '28' ;;
     placement-clearing) printf '29' ;;
+    water-reach-approach) printf '30' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }
