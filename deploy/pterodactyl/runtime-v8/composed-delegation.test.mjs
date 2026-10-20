@@ -42,14 +42,14 @@ import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 // Gates at the end: no dangling context reference (f36e837c), no silent stall, no unresumed model_recoverable pause, one review
 // round, a strict boundary. The C7 packet must carry the step contract, held counts and placed machines (U4: protocol 3 packets
 // have a 4,050-character window; this run's C7 packet is ~3,850 of it, so the assertions hold today and fail first when a plan or
-// receipt grows), and the planner's review notes (X-1b; known open, marked todo).
+// receipt grows), and the planner's review notes (X-1b, a90c3d52).
 //
 // A second test runs the same scenario with the first placement batch refused after its first task (Run Z batch 21 / Run AA): the
 // drill is built, the furnace is refused with the mod's native no-mutation proof, the settled prefix is stated as a fact, and the
 // corrected batch places the furnace alone over the spilled ore (Run AF).
 //
-// Known findings, marked todo (they fail today and the suite stays green): X-1b (the C7 packet drops the planner's review notes) and
-// run-check's restage_loop, which reads the legitimate C8 + C3 + C7 restages of one step as a loop.
+// One finding is expected: run-check's restage_loop, for step 2's C8 + C3 + C7 restages with no progress between them. That is
+// the price of one review round plus one resume, and the detector reports it as a cost signal; the gates pin its exact shape.
 
 // The executor soft limit that stands in for a live-sized context: the executor conversation after step 1 is ~7,100 tokens, past the
 // hard limit (2 x 3,000), so the verified step close restages the next step (restage-policy C8). With the default limit a
@@ -171,15 +171,18 @@ async function gates(t, ctx) {
     assert.equal(signatures.filter(signature => signature === 'auto_resume_exhausted').length, 0)
   })
 
-  await t.test('gate: no other finding on this healthy run (only the known restage_loop false positive below)', () => {
+  await t.test('gate: no other finding on this healthy run (only the expected restage_loop below)', () => {
     assert.deepEqual(report.findings.filter(finding => finding.signature !== 'restage_loop'), [], 'a healthy composed run has no other findings')
   })
 
-  // run-check's restage_loop counts restages of one step with no step.verified between them. Step 2 here is restaged three times, each
-  // for its own reason (C8 the fresh executor at the step close, C3 the executor handed back after the review round, C7 the resume), and
-  // then verifies: the detector reads that healthy sequence as a loop. Reported as a defect of the analysis tool, not fixed here.
-  await t.test('gate: restage_loop does not fire on the legitimate C8, C3 and C7 restages of one step', { todo: 'run-check restage_loop (threshold 3, run-check.mjs detectRestageLoops) flags the healthy C8 + C3 + C7 sequence of one step' }, () => {
-    assert.equal(signatures.filter(signature => signature === 'restage_loop').length, 0)
+  // run-check's restage_loop counts restages of one step with no step.verified between them. Step 2 is restaged three times, each
+  // for its own reason (C8 the fresh executor at the step close, C3 the executor handed back after the review round, C7 the resume),
+  // and then verifies. The finding stays: three restages without progress is the cost the detector exists to show. Any other
+  // restage of the step, or a second loop, fails here.
+  await t.test('gate: the only restage_loop is step 2 (C8, C3, C7)', () => {
+    const loops = report.findings.filter(finding => finding.signature === 'restage_loop')
+    assert.equal(loops.length, 1, JSON.stringify(loops))
+    assert.match(loops[0].detail ?? JSON.stringify(loops[0]), /restaged 3 times .*checkpoints C8,C3,C7;/)
   })
 
   await t.test('gate: the planner review round happened exactly once', () => {
@@ -356,9 +359,9 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.deepEqual(topology.entities.find(entity => entity.name === 'burner-mining-drill')?.drop_target, { name: 'stone-furnace', unit_number: FURNACE_UNIT })
   })
 
-  // Known open defect (X-1b, being fixed in parallel): the planner's review notes live only in the conversation that the C7 restage
-  // discards, and the packet does not carry them, so the executor that finally acts never sees the planner's advice.
-  await t.test('C7 packet: the planner review notes reach the restaged executor (X-1b)', { todo: 'X-1b: the C7 restage drops the planner review notes, so the resumed executor never sees them' }, () => {
+  // X-1b: the planner's review notes are durable per step and the executor packet carries them, so the executor that finally acts
+  // after the C7 restage still has the planner's advice.
+  await t.test('C7 packet: the planner review notes reach the restaged executor (X-1b)', () => {
     assert.match(textOf(c7Messages), /fuel the drill with 5 coal/)
   })
 
