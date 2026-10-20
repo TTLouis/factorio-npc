@@ -805,7 +805,7 @@ export class NpcAgentLoop {
 
   // The text the model reads for a live tool answer. A subclass reorders or labels a known answer here, never changing its
   // facts, before it is cached and cut to the message limit; the default delivers the answer as read.
-  renderToolOutput(_toolName, raw) {
+  renderToolOutput(_toolName, raw, _limit) {
     return raw
   }
 
@@ -850,7 +850,7 @@ export class NpcAgentLoop {
         else {
           await this.assertCurrent()
           const raw = String(await this.rcon.command(entry.command))
-          output = String(this.renderToolOutput(entry.tool.function.name, raw)).slice(0, 12000)
+          output = String(this.renderToolOutput(entry.tool.function.name, raw, 12000)).slice(0, 12000)
           await this.assertCurrent()
         }
         if (typeof entry._sglunaReadFence === 'function') await entry._sglunaReadFence()

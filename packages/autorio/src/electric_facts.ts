@@ -196,7 +196,7 @@ function pole_summary(pole: LuaEntity, distance: number) {
   return summary
 }
 
-function has_electric_energy_source(entity: LuaEntity) {
+export function has_electric_energy_source(entity: LuaEntity) {
   return protected_read(() => (entity.prototype as any).electric_energy_source_prototype) !== undefined
 }
 

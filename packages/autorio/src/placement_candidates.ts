@@ -9,7 +9,7 @@ import { find_world_entities } from './npc_vision'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { placement_obstruction_sample } from './placement_obstructions'
 import { get_recent_fluid_source_observation } from './fluid_source_observation'
-import { placeable_or_clearable, placement_clearance, type ClearableEntity } from './placement_clearing'
+import { type ClearableEntity, type ClearanceMemo, placeable_or_clearable, placement_clearance } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 
 const MAX_RADIUS = 24
@@ -17,6 +17,9 @@ const MAX_LIMIT = 8
 const MAX_SCANNED_POSITIONS = 10000
 const MAX_CANDIDATE_SETS = 16
 const CANDIDATE_TTL_TICKS = 60 * 60
+// Refused footprints that pass the request's own filters are each checked for clearable blockers; past this
+// many checks the rest count as rejected, so a dense forest or base cannot stall the single simulation thread.
+const MAX_CLEARANCE_PROBES = 400
 const CARDINAL_DIRECTIONS = [0, 4, 8, 12]
 
 export interface PlacementCandidateRequest {
@@ -96,7 +99,7 @@ interface PlacementCandidateSet {
   force_index: number
   actor_id?: number
   target_resource?: string
-  // Entities placement must never clear: the request's anchor.
+  // Entities placement must never clear: the request's anchor and join target.
   protected_unit_numbers?: number[]
   candidates: PlacementCandidate[]
 }
@@ -258,7 +261,18 @@ function coverage_score(candidate: PlacementCandidate, target_resource?: string)
   return { entities, amount }
 }
 
+// A footprint that needs nothing cleared outranks one that does: clearing costs hand-mining time and inventory
+// room, and may take the NPC's own earlier work. Fewer entities to clear come first, then fewer ground items.
+function clear_count(candidate: PlacementCandidate) {
+  return candidate.clears === undefined ? 0 : candidate.clears.length
+}
+
+function ground_count(candidate: PlacementCandidate) {
+  return candidate.ground_items === undefined ? 0 : candidate.ground_items.length
+}
+
 function better(left: PlacementCandidate, right: PlacementCandidate, target_resource?: string, origin?: { x: number, y: number }, anchor?: { x: number, y: number }) {
+  if (clear_count(left) !== clear_count(right)) return clear_count(left) < clear_count(right)
   if (anchor !== undefined) {
     const left_anchor = squared_distance(left.position, anchor)
     const right_anchor = squared_distance(right.position, anchor)
@@ -274,6 +288,7 @@ function better(left: PlacementCandidate, right: PlacementCandidate, target_reso
     if (left_origin !== right_origin) return left_origin < right_origin
   }
   if (left.distance_from_center !== right.distance_from_center) return left.distance_from_center < right.distance_from_center
+  if (ground_count(left) !== ground_count(right)) return ground_count(left) < ground_count(right)
   if (left.position.y !== right.position.y) return left.position.y < right.position.y
   if (left.position.x !== right.position.x) return left.position.x < right.position.x
   return left.direction < right.direction
@@ -525,9 +540,13 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     if (!resolved.ok) return { ok: false as const, error: resolved.error, code: resolved.code, entity_name: request.entity_name, unit_number: resolved.unit_number }
     anchor = resolved
   }
-  // A build never clears the entity it serves.
+  // A build never clears the entity it serves or the one it joins.
   const protect: number[] = []
   if (anchor !== undefined) protect.push(anchor.unit_number)
+  if (join_target !== undefined) protect.push(join_target.unit_number)
+  const clearance_memo: ClearanceMemo = { reasons: {} }
+  let clearance_probes = 0
+  let clearance_probes_capped = false
   let water_center: { x: number, y: number } | undefined
   let terrain_preparation: ReturnType<typeof pump_terrain_preparation> | undefined
   if (prototype.type === 'offshore-pump') {
@@ -561,17 +580,33 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       for (const port of candidate_fluid_ports(prototype, position, direction) ?? []) if (fluid_ports_join(target, port)) joins = true
       if (!joins) return undefined
     }
-    let ground_items: GroundItem[] | undefined
-    let clears: ClearableEntity[] | undefined
-    if (!actor.surface.can_place_entity({
+    const natively_placeable = actor.surface.can_place_entity({
       name: request.entity_name,
       position,
       direction,
       force: actor.force,
       ...check_args,
-    })) {
+    })
+    // The request's own filters come first: a footprint they drop is not worth a clearance check.
+    if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) return undefined
+
+    const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
+    if (request.target_resource !== undefined) {
+      let covered = false
+      for (const value of coverage ?? []) if (value.name === request.target_resource && value.entities > 0) covered = true
+      if (!covered) return undefined
+    }
+
+    let ground_items: GroundItem[] | undefined
+    let clears: ClearableEntity[] | undefined
+    if (!natively_placeable) {
       // Refused only for ground items and clearable entities: still a candidate, and placing it clears them.
-      const clearance = placement_clearance(actor, prototype, request.entity_name, position, direction, protect)
+      let clearance: ReturnType<typeof placement_clearance>
+      if (clearance_probes < MAX_CLEARANCE_PROBES) {
+        clearance_probes++
+        clearance = placement_clearance(actor, prototype, request.entity_name, position, direction, protect, clearance_memo)
+      }
+      else clearance_probes_capped = true
       if (clearance === undefined) {
         rejected++
         if (obstruction_samples.length < 3) obstruction_samples.push(placement_obstruction_sample(actor, prototype, position, direction))
@@ -582,14 +617,6 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
         clears = []
         for (const blocker of clearance.blockers) clears.push(blocker.info)
       }
-    }
-    if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) return undefined
-
-    const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
-    if (request.target_resource !== undefined) {
-      let covered = false
-      for (const value of coverage ?? []) if (value.name === request.target_resource && value.entities > 0) covered = true
-      if (!covered) return undefined
     }
 
     const candidate: PlacementCandidate = {
@@ -714,13 +741,16 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       unknown_count: obstruction_samples.filter(sample => sample.unknown).length,
       samples: obstruction_samples,
       truncated: rejected > obstruction_samples.length || obstruction_samples.some(sample => sample.truncated),
+      clearance_probes,
+      clearance_probes_capped,
     },
   }
 }
 
-function protect_list(result: { anchor?: { unit_number: number } }) {
+function protect_list(result: { anchor?: { unit_number: number }, connects_to?: { unit_number: number } }) {
   const list: number[] = []
   if (result.anchor !== undefined) list.push(result.anchor.unit_number)
+  if (result.connects_to !== undefined) list.push(result.connects_to.unit_number)
   return list
 }
 

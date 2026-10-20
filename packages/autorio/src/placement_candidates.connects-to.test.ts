@@ -289,7 +289,7 @@ describe('placement candidates that join a live fluid port', () => {
     const submitted: any[] = []
     const submit = (...args: any[]) => { submitted.push(args); return true }
     expect(execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)).toEqual([true, `placement candidate accepted: ${set.candidate_set_id}/candidate-1`])
-    expect(submitted).toEqual([['boiler', 10.5, 20, 0]])
+    expect(submitted).toEqual([['boiler', 10.5, 20, 0, undefined, [100]]]) // the join target is protected from clearing
 
     delete world[100]
     expect(execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)).toEqual([false, 'placement candidate connection target is no longer available'])
@@ -332,7 +332,7 @@ describe('placement candidates that join a live fluid port', () => {
     // Unchanged: still executes.
     set = fresh_set()
     expect(execute_placement_candidate(actor, set.candidate_set_id, 'candidate-1', submit)[0]).toBe(true)
-    expect(submitted).toEqual([['boiler', 10.5, 20, 0]])
+    expect(submitted).toEqual([['boiler', 10.5, 20, 0, undefined, [100]]]) // the join target is protected from clearing
   })
 })
 

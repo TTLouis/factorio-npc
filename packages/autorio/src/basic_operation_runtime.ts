@@ -11,8 +11,8 @@ import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation
 import { resolve_entity_placement_item } from './placement_item'
 import { placement_candidate_matches } from './placement_candidates'
 import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
-import { clear_blocker, clearing_mining_ticks, mining_products_fit, placement_clearance, type ClearBlocker } from './placement_clearing'
-import { pick_up_ground_items } from './placement_ground_items'
+import { clear_blocker, clearing_mining_ticks, placement_clearance, yields_fit, type ClearBlocker } from './placement_clearing'
+import { type GroundItem, pick_up_ground_items } from './placement_ground_items'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersPlaceEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
@@ -415,15 +415,20 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
    * blocker beyond hand-mining reach sends the actor walking to it first (the
    * same placement resumes afterwards). Once every blocker is in reach the
    * native mining time elapses before the native mine call, as pump preparation
-   * does; a result that does not fit the inventory is refused before any waiting.
+   * does; a combined yield (blockers and ground items) that does not fit the
+   * inventory is refused before any waiting or mining.
    * pending: nothing more this tick; failed: the task was failed; cleared: done.
    */
-  function clear_footprint_blockers(actor: ControlledActor, inventory: LuaInventory, task: PlayerParametersPlaceEntity, blockers: ClearBlocker[]) {
-    for (const blocker of blockers) {
-      if (!mining_products_fit(inventory, blocker.entity)) {
-        controller.fail(actor, task, 'clearing_inventory_full', { clearing_left: blocker.info })
-        return { state: 'failed' as const, message: `Cannot clear ${blocker.info.name} lying in the footprint: actor inventory cannot take what it yields` }
-      }
+  function clear_footprint_blockers(actor: ControlledActor, inventory: LuaInventory, task: PlayerParametersPlaceEntity, blockers: ClearBlocker[], ground_items: GroundItem[]) {
+    // Checked before waiting starts and again before mining, never once per waiting tick.
+    const refuse_if_unfit = () => {
+      if (yields_fit(inventory, blockers, ground_items)) return undefined
+      controller.fail(actor, task, 'clearing_inventory_full', { clearing_left: blockers[0].info })
+      return { state: 'failed' as const, message: `Cannot clear ${blockers[0].info.name} lying in the footprint: actor inventory cannot take everything the footprint yields` }
+    }
+    if (task.clearing_started_tick === undefined) {
+      const first = refuse_if_unfit()
+      if (first !== undefined) return first
     }
     for (const blocker of blockers) {
       if (within_mining_reach(actor, blocker.entity)) continue
@@ -450,9 +455,14 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
     task.clearing_started_tick ??= game.tick
     if (game.tick - task.clearing_started_tick < required) return { state: 'pending' as const }
+    const unfit = refuse_if_unfit()
+    if (unfit !== undefined) return unfit
     for (const blocker of blockers) {
       const result = clear_blocker(actor, inventory, blocker)
       if (!result.ok) {
+        // A failed call can still have moved items or destroyed the entity: record it before failing, so no
+        // no-mutation proof is claimed.
+        if (result.partial !== undefined) task.entities_cleared = [...(task.entities_cleared ?? []), result.partial]
         controller.fail(actor, task, result.code, { clearing_left: blocker.info })
         return { state: 'failed' as const, message: `Could not clear ${blocker.info.name} at (${blocker.info.position.x}, ${blocker.info.position.y}): ${result.code}` }
       }
@@ -553,7 +563,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     const clearance = can_place ? undefined : placement_clearance(actor, prototype, task.entity_name, position, task.direction, task.protected_unit_numbers)
     if (clearance !== undefined) {
       if (clearance.blockers.length > 0) {
-        const cleared = clear_footprint_blockers(actor, inventory, task, clearance.blockers)
+        const cleared = clear_footprint_blockers(actor, inventory, task, clearance.blockers, clearance.ground_items)
         if (cleared.state === 'pending') return
         if (cleared.state === 'failed') return [false, cleared.message]
       }

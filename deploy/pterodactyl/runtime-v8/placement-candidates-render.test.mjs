@@ -6,6 +6,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { NpcAgentLoop as BaseNpcAgentLoop } from '../staging/npc-agent-loop.mjs'
 import { REJECTED_FOOTPRINTS_LABEL, renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { toolCommand, toolDefinitions } from './structured-policy.mjs'
 import { topologyObstruction } from './topology-context.mjs'
@@ -15,6 +16,7 @@ import { topologyObstruction } from './topology-context.mjs'
 // helpers.table_to_json, whose key order is the Lua hash order, so the runtime fixes what the model reads: candidates
 // first, the rejected footprints last and labelled. The request can name an anchor entity to rank candidates by.
 
+const LIMIT = 12000 // the staging loop's message limit
 const SAMPLE = (x, y) => ({ position: { x, y }, direction: 0, unknown: false, truncated: false,
   footprint: { tile_width: 2, tile_height: 2, tile_box: { left_top: { x: x - 1, y: y - 1 }, right_bottom: { x: x + 1, y: y + 1 } } },
   terrain_tiles: [], entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: 31, position: { x: 3.5, y: 4.5 }, reason: 'entity_collision_mask_overlap' }] })
@@ -41,7 +43,7 @@ function hashOrdered(extra = {}) {
 }
 
 test('legal candidates come first and the rejected-footprint samples last, under a label that says they are not candidates', () => {
-  const rendered = JSON.parse(renderPlacementCandidatesResult(JSON.stringify(hashOrdered())))
+  const rendered = JSON.parse(renderPlacementCandidatesResult(JSON.stringify(hashOrdered()), LIMIT))
   const keys = Object.keys(rendered)
   assert.deepEqual(keys.slice(0, 6), ['ok', 'entity_name', 'ordering', 'legal_candidate_count', 'returned_candidate_count', 'candidates'])
   assert.equal(keys.at(-1), 'obstructions')
@@ -55,11 +57,11 @@ test('legal candidates come first and the rejected-footprint samples last, under
 })
 
 test('a refusal keeps its code and error ahead of the rest and an answer with no sample block gains none', () => {
-  const refusal = JSON.parse(renderPlacementCandidatesResult(JSON.stringify({ unit_number: 5, entity_name: 'boiler', error: 'anchor entity is not on this surface and force', code: 'anchor_entity_not_found', ok: false })))
+  const refusal = JSON.parse(renderPlacementCandidatesResult(JSON.stringify({ unit_number: 5, entity_name: 'boiler', error: 'anchor entity is not on this surface and force', code: 'anchor_entity_not_found', ok: false }), LIMIT))
   assert.deepEqual(Object.keys(refusal), ['ok', 'code', 'error', 'entity_name', 'unit_number'])
   const plain = { ok: true, entity_name: 'steam-engine', candidates: [], scanned: 4 }
-  assert.deepEqual(JSON.parse(renderPlacementCandidatesResult(JSON.stringify(plain))), plain)
-  assert.equal(Object.hasOwn(JSON.parse(renderPlacementCandidatesResult(JSON.stringify(plain))), 'obstructions'), false)
+  assert.deepEqual(JSON.parse(renderPlacementCandidatesResult(JSON.stringify(plain), LIMIT)), plain)
+  assert.equal(Object.hasOwn(JSON.parse(renderPlacementCandidatesResult(JSON.stringify(plain), LIMIT)), 'obstructions'), false)
 })
 
 test('an answer too large for the message keeps its candidates whole and trims the samples, still valid JSON', () => {
@@ -67,7 +69,7 @@ test('an answer too large for the message keeps its candidates whole and trims t
   many.obstructions.samples = Array.from({ length: 3 }, (_, index) => ({ ...SAMPLE(index, 0), note: 'x'.repeat(4000) }))
   const raw = JSON.stringify(many)
   assert.ok(raw.length > 12000)
-  const text = renderPlacementCandidatesResult(raw)
+  const text = renderPlacementCandidatesResult(raw, LIMIT)
   assert.ok(text.length <= 12000)
   const rendered = JSON.parse(text)
   assert.deepEqual(rendered.candidates, CANDIDATES)
@@ -76,8 +78,37 @@ test('an answer too large for the message keeps its candidates whole and trims t
   assert.equal(rendered.obstructions.label, REJECTED_FOOTPRINTS_LABEL)
 })
 
+test('candidates that alone exceed the message limit are trimmed from the tail, counted, and the text stays valid JSON', () => {
+  const heavy = hashOrdered()
+  heavy.candidates = CANDIDATES.map(candidate => ({ ...candidate, resource_coverage: [{ name: 'copper-ore', entities: 9, amount: 1000, note: 'x'.repeat(1800) }] }))
+  const raw = JSON.stringify(heavy)
+  assert.ok(raw.length > LIMIT * 1.5)
+  const text = renderPlacementCandidatesResult(raw, LIMIT)
+  assert.ok(text.length <= LIMIT)
+  const rendered = JSON.parse(text)
+  assert.ok(rendered.candidates.length > 0 && rendered.candidates.length < 8)
+  assert.deepEqual(rendered.candidates, heavy.candidates.slice(0, rendered.candidates.length), 'the highest-ranked candidates are the ones kept')
+  assert.equal(rendered.candidates_omitted_for_size, 8 - rendered.candidates.length)
+  assert.equal(rendered.returned_candidate_count, 8)
+})
+
+test('an answer whose headline alone cannot fit still degrades to valid JSON', () => {
+  const text = renderPlacementCandidatesResult(JSON.stringify({ ok: true, entity_name: 'steam-engine', candidates: [], connects_to: { note: 'y'.repeat(20000) } }), 4000)
+  assert.ok(text.length <= 4000)
+  assert.deepEqual(JSON.parse(text), { ok: true, entity_name: 'steam-engine', truncated_for_size: true })
+})
+
 test('anything that is not a JSON object answer is delivered as read', () => {
-  for (const raw of ['', 'RCON error: boom', '[1,2]', '"text"', '{"ok":true,', undefined, 42]) assert.equal(renderPlacementCandidatesResult(raw), raw)
+  for (const raw of ['', 'RCON error: boom', '[1,2]', '"text"', '{"ok":true,', undefined, 42]) assert.equal(renderPlacementCandidatesResult(raw, LIMIT), raw)
+})
+
+test('the base loop delivers every answer as read and only a placement-candidate read is reshaped', async () => {
+  const agent = new NpcAgentLoop({ rcon: new FakeRcon(hashOrdered()), systemPrompt: 'render hook test', memory: new CanonicalTaskBoardMemory(), stateFile: null,
+    traceFile: path.join(await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-render-hook-')), 'behavior.jsonl'), provider: async () => ({ content: '{}' }) })
+  const raw = JSON.stringify(hashOrdered())
+  for (const name of ['getInventoryItems', 'getNearbyEntities', 'getEntityStatus', 'getPlacementCandidatesX']) assert.equal(agent.renderToolOutput(name, raw, LIMIT), raw)
+  assert.equal(Object.keys(JSON.parse(agent.renderToolOutput('getPlacementCandidates', raw, LIMIT))).at(-1), 'obstructions')
+  assert.equal(BaseNpcAgentLoop.prototype.renderToolOutput.call(agent, 'getPlacementCandidates', raw, LIMIT), raw, 'the base default is the identity')
 })
 
 test('getPlacementCandidates takes an anchor entity, renders it into the remote request, and rejects a malformed one', () => {
@@ -86,6 +117,7 @@ test('getPlacementCandidates takes an anchor entity, renders it into the remote 
   assert.equal(tool.function.parameters.properties.anchor.additionalProperties, false)
   assert.match(tool.function.description, /anchor/)
   assert.match(tool.function.description, /clears/)
+  assert.match(tool.function.description, /clear nothing are listed before/)
   assert.match(tool.function.description, /rejected_footprint_samples_not_candidates/)
   assert.equal(toolCommand('getPlacementCandidates', { entity_name: 'burner-mining-drill', target_resource: 'copper-ore', anchor: { unit_number: 31 }, limit: 4 }),
     `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",{entity_name='burner-mining-drill',target_resource='copper-ore',anchor={unit_number=31},limit=4})))`)

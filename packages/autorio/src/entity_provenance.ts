@@ -30,6 +30,23 @@ function read_last_user(entity: LuaEntity): LuaPlayer | undefined {
   return entity.last_user
 }
 
+/**
+ * True only when the engine says no player ever built or configured this entity.
+ * Unlike entity_last_user (which reports nothing for an unreadable value), an
+ * unreadable last_user or any recorded user, even one that is no longer valid,
+ * answers false, so a caller that must never touch a player's work fails closed.
+ */
+export function entity_has_no_last_user(entity: LuaEntity | undefined): boolean {
+  if (!entity || !entity.valid) return false
+  if (NO_LAST_USER_TYPES.includes(entity.type)) return true
+  try {
+    return entity.last_user === undefined
+  }
+  catch {
+    return false
+  }
+}
+
 export function entity_last_user(entity: LuaEntity | undefined): EntityLastUser | undefined {
   if (!entity || !entity.valid) return undefined
   if (NO_LAST_USER_TYPES.includes(entity.type)) return undefined

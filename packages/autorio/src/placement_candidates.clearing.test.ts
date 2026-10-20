@@ -2,7 +2,7 @@ import type { ControlledActor } from './actors/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
-import { create_placement_candidate_set, execute_placement_candidate } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, sort_candidates } from './placement_candidates'
 import { placement_footprint } from './placement_geometry'
 import { new_task_manager } from './task_manager'
 
@@ -132,6 +132,8 @@ function inventory_with(slots: number) {
     remove: vi.fn(({ name, count }: any) => {
       const removed = Math.min(held[name] ?? 0, count)
       held[name] = (held[name] ?? 0) - removed
+      // Room comes back for everything except the placement item, which was never part of the room under test.
+      if (name !== 'stone-furnace') slots += removed
       return removed
     }),
     can_insert: vi.fn(({ count }: any) => count <= slots),
@@ -338,6 +340,91 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       expect(result.returned_candidate_count).toBe(0)
     })
 
+    // A pole needs the engine's own prototype fields for its supply area and wire reach.
+    function pole(position: Pos, fields: Record<string, any> = {}) {
+      const result = chest(position, { name: 'small-electric-pole', type: 'electric-pole', neighbours: { copper: [] }, ...fields })
+      result.prototype = { ...result.prototype, type: 'electric-pole', supply_area_distance: 2.5, max_wire_distance: 7.5 }
+      return result
+    }
+    // Something a pole could supply: it carries an electric energy source and does not collide with the footprint.
+    function consumer(position: Pos) {
+      return chest(position, { name: 'lab', type: 'lab', prototype: { type: 'lab', is_building: true, is_entity_with_owner: true, items_to_place_this: [{ name: 'lab', count: 1 }],
+        collision_mask: { layers: { ground_tile: true } }, electric_energy_source_prototype: {}, mineable_properties: { minable: true, mining_time: 0.2, products: [] } } })
+    }
+
+    it('keeps a lone pole clearable only while nothing stands in its supply area', () => {
+      const alone = candidates_over([pole(SPOT)])
+      expect(alone.returned_candidate_count).toBeGreaterThan(0)
+      expect(alone.candidates[0].clears).toMatchObject([{ name: 'small-electric-pole', reason: 'own_idle_entity' }])
+      const supplying = candidates_over([pole(SPOT), consumer({ x: SPOT.x + 2.2, y: SPOT.y })])
+      expect(supplying.returned_candidate_count).toBe(0)
+    })
+
+    it.each([
+      ['a solar panel or accumulator on an electric network', () => chest(SPOT, { electric_network_id: 5 })],
+      ['a consumer a pole covers', () => chest(SPOT, { electric_network_id: 9 })],
+    ])('keeps %s blocked', (_label, make) => {
+      expect(candidates_over([make()]).returned_candidate_count).toBe(0)
+    })
+
+    it('treats an unreadable last user as a player\'s work and never clears it', () => {
+      const unreadable = chest(SPOT)
+      Object.defineProperty(unreadable, 'last_user', { get() { throw new Error('last_user is not readable here') } })
+      expect(candidates_over([unreadable]).returned_candidate_count).toBe(0)
+    })
+
+    it('keeps a neutral entity that holds items blocked, like an own one', () => {
+      const holder = tree(SPOT)
+      holder.get_max_inventory_index = () => 1
+      holder.get_inventory = () => ({ is_empty: () => false })
+      expect(candidates_over([holder]).returned_candidate_count).toBe(0)
+    })
+
+    it('fails closed when the neighbour scan fills its bound, since the entity that feeds this one may lie beyond it', () => {
+      const crowd = Array.from({ length: 70 }, (_unused, index) => chest({ x: SPOT.x + 2.9, y: SPOT.y - 1 + index * 0.02 }, {
+        name: 'filler', prototype: { type: 'container', is_building: true, is_entity_with_owner: true, items_to_place_this: [], collision_mask: { layers: { ground_tile: true } }, mineable_properties: { minable: false } },
+      }))
+      expect(candidates_over([chest(SPOT), ...crowd]).returned_candidate_count).toBe(0)
+    })
+
+    it('evaluates an entity once per request however many footprints touch it', () => {
+      const idle = chest(SPOT)
+      const reads = vi.fn(() => 1)
+      idle.get_max_inventory_index = reads
+      const result = candidates_over([idle])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.legal_candidate_count).toBeGreaterThan(1)
+      expect(reads).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not check clearance for footprints the request\'s own covers filter drops', () => {
+      const blockers = [chest({ x: -20, y: -20 })]
+      register(...blockers)
+      const surface = world(blockers)
+      const actor = npc(surface, inventory_with(10))
+      const result = create_placement_candidate_set(actor, request({ center: { x: -20, y: -20 }, radius: 2 })) as any
+      // Every footprint in this window is dropped by covers_position, so none is probed or sampled.
+      expect(result.obstructions.clearance_probes).toBe(0)
+      expect(result.obstructions.rejected_count).toBe(0)
+    })
+
+    it('ranks a footprint that clears nothing ahead of one that clears something, anchor or not', () => {
+      const base = { id: '', direction: 0, distance_from_center: 1, footprint: {} as any }
+      const near_clearing: any = { ...base, position: { x: 1, y: 1 }, clears: [{ name: 'wooden-chest', type: 'container', position: { x: 1, y: 1 }, reason: 'own_idle_entity' }] }
+      const far_clean: any = { ...base, position: { x: 9, y: 9 }, distance_from_center: 9 }
+      const grounded: any = { ...base, position: { x: 5, y: 5 }, distance_from_center: 5, ground_items: [{ name: 'copper-ore', count: 1, position: { x: 5, y: 5 } }] }
+      const plain: any = { ...base, position: { x: 5, y: 7 }, distance_from_center: 5 }
+      for (const anchor of [undefined, { x: 1, y: 1 }]) {
+        const values = [near_clearing, far_clean]
+        sort_candidates(values, undefined, undefined, anchor)
+        expect(values[0]).toBe(far_clean)
+      }
+      // At equal distance, fewer ground items first.
+      const tied = [grounded, plain]
+      sort_candidates(tied)
+      expect(tied[0]).toBe(plain)
+    })
+
     it('keeps terrain that collides blocked even when the entities in it are clearable', () => {
       const blockers = [tree(SPOT)]
       const surface = world(blockers)
@@ -438,6 +525,94 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
         clearing_left: { unit_number: second.unit_number },
       })
       expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
+    })
+
+    it('refuses before mining when the blockers together do not fit, though each would fit alone', () => {
+      const first = tree({ x: -33.2, y: -35.2 })
+      const second = tree({ x: -33.8, y: -35.8 })
+      const { actor, controller, runtime, manager } = build([first, second], 4)
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(first.mine).not.toHaveBeenCalled()
+      expect(second.mine).not.toHaveBeenCalled()
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_inventory_full', expect.objectContaining({ failed_before_mutation: true }))
+    })
+
+    it('counts every product of a blocker and the ground items in the room it needs', () => {
+      const rubble = rock(SPOT)
+      rubble.prototype.mineable_properties.products = [{ type: 'item', name: 'stone', amount: 5 }, { type: 'item', name: 'coal', amount: 5 }]
+      const { actor, controller, runtime } = build([rubble], 6)
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      expect(runtime.state_placing(actor)?.[0]).toBe(false)
+      expect(rubble.mine).not.toHaveBeenCalled()
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
+
+      const wood = tree(SPOT)
+      const ore = ground_item('copper-ore', 3, { x: -33.2, y: -35.2 })
+      const second = build([wood, ore], 5)
+      expect(second.controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      expect(second.runtime.state_placing(second.actor)?.[0]).toBe(false)
+      expect(wood.mine).not.toHaveBeenCalled()
+      expect(ore.valid).toBe(true)
+      expect(second.controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
+    })
+
+    it('leaves the inventory exactly as it was after the room check', () => {
+      const wood = tree(SPOT)
+      const { actor, inventory, controller, runtime } = build([wood], 10)
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      expect(inventory.held.wood ?? 0).toBe(0)
+      expect(inventory.get_item_count('stone-furnace')).toBe(1)
+    })
+
+    it('records what a failed mine call changed: items that arrived although it returned false', () => {
+      const wood = tree(SPOT)
+      const { actor, inventory, controller, runtime, manager } = build([wood])
+      wood.mine = vi.fn(({ inventory: target }: any) => { target.insert({ name: 'wood', count: 2 }); return false })
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(inventory.held.wood).toBe(2)
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', items: [{ name: 'wood', count: 2 }] }] })
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
+    })
+
+    it('records an entity the engine destroyed although the mine call returned false', () => {
+      const wood = tree(SPOT)
+      const { actor, controller, runtime, manager } = build([wood])
+      wood.mine = vi.fn(() => { wood.valid = false; return false })
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      runtime.state_placing(actor)
+
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', items: [] }] })
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
+    })
+
+    it('keeps the no-mutation proof when a failed mine call changed nothing', () => {
+      const wood = tree(SPOT)
+      const { actor, controller, runtime, manager } = build([wood])
+      wood.mine = vi.fn(() => false)
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      runtime.state_placing(actor)
+
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed' })
+      expect(controller.status().last_result?.entities_cleared).toBeUndefined()
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: true }))
     })
 
     it('walks within mining reach of a blocker first, then resumes the same placement', () => {

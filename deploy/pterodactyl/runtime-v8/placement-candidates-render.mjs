@@ -7,7 +7,6 @@ export const REJECTED_FOOTPRINTS_LABEL = 'rejected_footprint_samples_not_candida
 
 const LEADING_KEYS = ['ok', 'code', 'error', 'entity_name', 'ordering', 'legal_candidate_count', 'returned_candidate_count', 'candidates']
 const MAX_PARSED_CHARS = 200_000
-const DEFAULT_MAX_CHARS = 12_000
 
 function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -19,8 +18,9 @@ function labelled(block) {
   return { label: REJECTED_FOOTPRINTS_LABEL, ...block }
 }
 
-export function renderPlacementCandidatesResult(raw, maxChars = DEFAULT_MAX_CHARS) {
-  if (typeof raw !== 'string' || raw.length > MAX_PARSED_CHARS) return raw
+// maxChars is the message limit the caller will cut the text to (the staging loop passes its own constant).
+export function renderPlacementCandidatesResult(raw, maxChars) {
+  if (typeof raw !== 'string' || raw.length > MAX_PARSED_CHARS || !Number.isSafeInteger(maxChars) || maxChars < 200) return raw
   let parsed
   try { parsed = JSON.parse(raw) }
   catch { return raw }
@@ -40,6 +40,23 @@ export function renderPlacementCandidatesResult(raw, maxChars = DEFAULT_MAX_CHAR
       ordered.obstructions = { ...ordered.obstructions, samples: kept, samples_omitted_for_size: samples.length - kept.length }
       text = JSON.stringify(ordered)
     }
+  }
+  // Then the lowest-ranked candidates, from the tail, so what is returned is still whole, valid JSON.
+  if (text.length > maxChars && Array.isArray(ordered.candidates) && ordered.candidates.length > 0) {
+    const all = ordered.candidates
+    const kept = [...all]
+    while (kept.length > 0 && text.length > maxChars) {
+      kept.pop()
+      ordered.candidates = kept
+      ordered.candidates_omitted_for_size = all.length - kept.length
+      text = JSON.stringify(ordered)
+    }
+  }
+  // Last resort: the answer's headline facts, never a cut through the middle of the text.
+  if (text.length > maxChars) {
+    const headline = {}
+    for (const key of LEADING_KEYS) if (key !== 'candidates' && Object.hasOwn(parsed, key)) headline[key] = parsed[key]
+    text = JSON.stringify({ ...headline, truncated_for_size: true })
   }
   return text
 }

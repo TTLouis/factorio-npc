@@ -5120,8 +5120,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples
   // labelled and last (placement-candidates-render.mjs); every other answer is delivered as read.
-  renderToolOutput(toolName, raw) {
-    return toolName === 'getPlacementCandidates' ? renderPlacementCandidatesResult(raw) : super.renderToolOutput(toolName, raw)
+  renderToolOutput(toolName, raw, limit) {
+    return toolName === 'getPlacementCandidates' ? renderPlacementCandidatesResult(raw, limit) : super.renderToolOutput(toolName, raw, limit)
   }
 
   // --- Repair unit D2: the facts a fresh executor is briefed with ------------------------------------------------
