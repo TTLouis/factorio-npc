@@ -3517,10 +3517,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Run AC: a review used to end the request in a guard pause that nothing resumes. Each step now gets one
     // in-turn planner round (durable, capped per goal). The committed plan cannot change in it; an empty reply
     // returns the same step to a fresh executor with the planner's notes. A second review of the step pauses.
+    // Runs AD-AF: that pause was guard, which nothing resumes, so an unattended goal ended about 8 minutes in. A review is
+    // advisory model output, not world evidence, so the pause is model_recoverable: the supervisor's bounded auto-resume
+    // (MODEL_RECOVERABLE_RESUME_LIMITS, per step and per goal) restages a fresh executor onto the same step.
     const continuing = held.status !== PLAN_STATUS.BLOCKED
       && this.memory.claimReviewContinuation?.(key, activeStep.step_id, { requestId }) === true
     const pause = () => {
-      if (held.status !== PLAN_STATUS.BLOCKED) this.memory.pausePlan(key, `executor_review:${review.reason}`, { pause_class: PAUSE_CLASS.GUARD })
+      if (held.status !== PLAN_STATUS.BLOCKED) this.memory.pausePlan(key, `executor_review:${review.reason}`, { pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
     }
     if (!continuing) pause()
     let chatMessage = continuing

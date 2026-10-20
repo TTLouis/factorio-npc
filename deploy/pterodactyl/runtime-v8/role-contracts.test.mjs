@@ -10,6 +10,7 @@ import { POST_BATCH_COVERAGE_REASON } from './post-batch-facts.mjs'
 import { buildPendingOperation, EFFECT } from './operation-reconciliation.mjs'
 import { manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview } from './role-contracts.mjs'
 import { classifyRequestFailure } from './pause-class.mjs'
+import { Session } from './supervisor.mjs'
 import { providerRequest } from './provider.mjs'
 import { executionOnlyControlToolDefinitions, planningOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
@@ -168,7 +169,7 @@ const review = (reason, rationale = 'A strategic decision is needed.') => ({ mem
   ({ stepId: getActivePlan(memory.planningState(KEY)).steps[0].step_id, operations: [], plannerReview: { reason, rationale } })
 
 for (const reason of ['approach_infeasible', 'scope_change', 'local_recovery_exhausted']) {
-  test(`executor ${reason} gets one planner round, then a second review of the step pauses without blocker evidence or allowance reset`, async () => {
+  test(`executor ${reason} gets one planner round, then a second review of the step takes a model_recoverable pause without blocker evidence or allowance reset`, async () => {
     let before
     const w = world([draft(), ctx => {
       before = ctx.memory.planningState(KEY)
@@ -194,6 +195,7 @@ for (const reason of ['approach_infeasible', 'scope_change', 'local_recovery_exh
     assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 1)
     assert.match(JSON.stringify(w.memory.snapshot()), /Executor advisory; unverified/)
     assert.equal(w.memory.currentPlan(KEY).status, 'paused')
+    assert.equal(w.memory.pauseRecord(KEY).pause_class, 'model_recoverable', 'advisory review pauses resume within the model_recoverable caps')
     assert.notEqual(w.plan().status, 'BLOCKED', 'model claim is not world proof')
     assert.equal(w.plan().plan_id, getActivePlan(before).plan_id)
     assert.deepEqual(w.plan().steps, getActivePlan(before).steps)
@@ -203,6 +205,41 @@ for (const reason of ['approach_infeasible', 'scope_change', 'local_recovery_exh
     assert.equal(w.events.filter(row => row.event === 'plan.replacement_wake').length, 0)
   })
 }
+
+// Runs AD-AF (2026-10-19): the second review of a step was a guard pause and the unattended goal ended there. The pause is
+// model_recoverable now: the supervisor schedules its bounded resume and a fresh executor acts on the same step, goal active.
+test('a second executor review of the step is auto-resumed by the supervisor and the restaged executor acts on the same step', async t => {
+  let planId
+  const w = world([draft(), review('local_recovery_exhausted'), draft({ chatMessage: 'Planner notes: the step stands.' }),
+    review('local_recovery_exhausted', 'Still blocked after the planner round.'), ctx => {
+      assert.equal(ctx.context.role, 'executor')
+      assert.equal(ctx.memory.currentPlan(KEY).status, 'active', 'the resume reactivates the goal before the executor restage')
+      assert.equal(getActivePlan(ctx.memory.planningState(KEY)).plan_id, planId)
+      return action(ctx)
+    }])
+  const result = await w.say()
+  assert.equal(result.blocker.class, 'planner_review_required')
+  planId = w.plan().plan_id
+  const record = w.memory.pauseRecord(KEY)
+  assert.equal(record.pause_class, 'model_recoverable')
+  const chat = []
+  const session = Object.create(Session.prototype)
+  Object.assign(session, { agent: w.agent, npcId: 'sgluna', npcName: 'SGLuna', stopping: false, autoResume: null, modelResume: null,
+    lastPauseDecision: '', lastStatus: { actor_id: 18, epoch: 3 }, liveStatus: { actor_id: 18, epoch: 3 }, log: () => {},
+    printChat: async message => { chat.push(message) }, queueEvent: () => Promise.resolve(), eventQueue: Promise.resolve(),
+    rawStatus: async () => ({ ...session.liveStatus }), syncTaskBoardUi: async () => {}, ensureAuthorization: async () => ({}),
+    rcon: { command: async () => '' } })
+  t.after(() => { if (session.modelResume?.timer) clearTimeout(session.modelResume.timer) })
+  assert.equal(await session.considerPauseForAutoResume(), true)
+  assert.match(chat.at(-1), /Resuming automatically in 15 s with a fresh context \(attempt 1\/2 for this step, 1\/6 for this goal\)/)
+  clearTimeout(session.modelResume.timer)
+  await session.runModelRecoverableResume(session.modelResume.correlation, 1)
+  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'planner', 'executor', 'executor'])
+  assert.equal(w.game.mutations.length, 1, 'the resumed executor acted without a human')
+  assert.notEqual(w.memory.currentPlan(KEY).status, 'paused')
+  assert.equal(w.plan().plan_id, planId, 'no plan was created or replaced')
+  assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 1, 'the step keeps its one planner round')
+})
 
 // Run AC (2026-10-19, b1da8392): the executor's local_recovery_exhausted review ended the request in a guard pause and
 // zero provider calls followed. The rationale below is the run's; the replies are scripted.
