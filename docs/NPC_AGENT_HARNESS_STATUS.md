@@ -8,6 +8,16 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 20: Run 19af placement candidates fixed offline (ledger row AF-2)
+
+- **Blocker.** `getPlacementCandidates` returned 8 legal drill candidates, but the rejected-footprint samples (overlapping furnace 31) were listed first, both roles read the answer as blocked, and the candidates sat about 15 tiles from the furnace they should feed.
+- **Fix.**
+  - The runtime renders the answer with the legal candidates first and the rejected footprints last under `obstructions.label = rejected_footprint_samples_not_candidates` (`placement-candidates-render.mjs`, through the new `renderToolOutput` hook).
+  - The request takes `anchor { unit_number }`: candidates rank nearest it (`distance_from_anchor`, `ordering = nearest_to_anchor_first`), the search centres on it with no `center`, and the build never clears it.
+  - `placement_clearing.ts` is the one clearance decision. A footprint refused only for ground items, natural obstructions (neutral-force, hand-minable, not a placed building: trees, rocks) and the NPC's own idle entities is a candidate whose `clears` lists those entities. Players' buildings, cliffs and entities in a running chain stay blocked.
+  - Placing it walks into hand-mining reach, waits the native mining time, mines the entities into the NPC inventory and builds. The receipt carries `entities_cleared` (with the measured items); refusals are `clearing_inventory_full`, `clearing_unreachable` and `clearing_failed`. Once anything was cleared the batch carries no no-mutation proof.
+- **Proof.** Offline only: unit tests with a fake world; not run against the real engine. Not live-tested.
+
 ## October 19: Run AF placement pickup receipts fixed and verified natively
 
 - **Blocker.** The Run AF preflight review of `3fe2bcbf` found a false no-effect proof. A placement could pick spilled ground items into the NPC inventory and then fail, but its batch still carried `failed_before_mutation`. Admission and runtime reconciliation then settled it as a refusal.
