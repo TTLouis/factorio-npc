@@ -201,7 +201,7 @@ import {
   requirementTargets,
   retireGoalRequirements,
 } from './goal-requirements.mjs'
-import { UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
+import { StepReadLedger, stepReadKey, UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
 import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
 import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
@@ -6818,6 +6818,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   postBatchStepKey() {
     const plan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     return postBatchStepKey(unchangedFactScope(this.epoch), plan?.plan_id, plan?.steps?.[plan.active_step_index]?.step_id)
+  }
+
+  // The step identity the swap-surviving read ledger is keyed by (unchanged-fact-reads.mjs): actor/epoch, session, plan id and version, step id.
+  stepReadKey() {
+    const plan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    return stepReadKey(this.epoch, plan, plan?.steps?.[plan.active_step_index])
   }
 
   // The predicted lookups for the executor's next round, read live in one go when the batch receipt lands:
@@ -13456,10 +13462,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.assertCurrent()
       unchangedPrepared[index] = this.unchangedFactReads.isUnchanged(factScope, entry.signature, entry._sglunaPrereadOutput)
     }
+    // A swap dropped the results this step's executor already held. Re-reading one the first time after the swap
+    // spends no budget (the read still runs live); a repeat, or a read the step never made, is charged as before.
+    this.stepReadLedger ??= new StepReadLedger()
+    const readSeq = this.agentContext.conversationSeq
+    const readKey = this.agentContext.role === EXECUTOR_ROLE && this.observationDecisionForced !== true ? this.stepReadKey() : undefined
+    const reestablishedPrepared = []
+    const reestablishSeen = new Set()
+    for (let index = 0; index < prepared.length && readKey !== undefined; index++) {
+      const entry = prepared[index]
+      if (cachedPrepared[index] === true || staticCachedPrepared[index] === true || unchangedPrepared[index] === true || reestablishSeen.has(entry.signature)) continue
+      reestablishSeen.add(entry.signature)
+      reestablishedPrepared[index] = this.stepReadLedger.isReestablishing(readKey, entry.signature, readSeq)
+    }
     const admittedPrepared = []
     const admittedCached = []
     const admittedStaticCached = []
     const admittedUnchanged = []
+    const admittedReestablished = []
     const deferredPrepared = []
     const deferredByRelevance = []
     const selectedObservationFamilies = Array.isArray(this.observationRelevanceOverride)
@@ -13477,7 +13497,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let discoveryAdmitted = 0
 
     for (let index = 0; index < prepared.length; index++) {
-      const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true && unchangedPrepared[index] !== true
+      const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true && unchangedPrepared[index] !== true && reestablishedPrepared[index] !== true
       const name = prepared[index]?.tool?.function?.name
       const family = observationToolFamily(name)
       const tier = observationToolTier(name)
@@ -13492,6 +13512,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         admittedCached.push(cachedPrepared[index])
         admittedStaticCached.push(staticCachedPrepared[index])
         admittedUnchanged.push(unchangedPrepared[index] === true)
+        admittedReestablished.push(reestablishedPrepared[index] === true)
         if (tier === 'discovery') discoveryAdmitted++
         if (tierOverride) tierAdmitted.push({ tool: name, tier })
         else if (fresh && Number.isFinite(freshSlots)) freshSlots--
@@ -13528,7 +13549,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const freshRequestedCount = admittedPrepared.reduce(
-      (total, _entry, index) => total + (admittedCached[index] !== true && admittedStaticCached[index] !== true && admittedUnchanged[index] !== true ? 1 : 0),
+      (total, _entry, index) => total + (admittedCached[index] !== true && admittedStaticCached[index] !== true && admittedUnchanged[index] !== true && admittedReestablished[index] !== true ? 1 : 0),
       0,
     )
     if (admittedPrepared.length === 0) {
@@ -13552,6 +13573,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         args: entry.args,
         cached: admittedCached[index],
         ...(admittedUnchanged[index] ? { unchanged_fact: true } : {}),
+        ...(admittedReestablished[index] ? { reestablished_read: true } : {}),
         ...(this.postBatchFacts?.reads.some(read => read.signature === entry.signature) && this.postBatchFactsText() ? { prefetched: true } : {}),
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
@@ -13579,6 +13601,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const results = this.messages.slice(beforeCount + 1).filter(item => item.role === 'tool')
     for (const entry of admittedPrepared) {
       if (typeof entry._sglunaPrereadOutput === 'string') this.unchangedFactReads.recordDelivered(factScope, entry.signature, entry._sglunaPrereadOutput)
+    }
+    // What this conversation now holds for the step; a swap that landed during the batch dropped these results too.
+    if (readKey !== undefined && readSeq === this.agentContext.conversationSeq) {
+      admittedPrepared.forEach((entry, index) => {
+        if (admittedCached[index] !== true && admittedStaticCached[index] !== true) this.stepReadLedger.recordDelivered(readKey, entry.signature, readSeq)
+      })
     }
     if (!this.actionOmissionRepairActive && Number.isSafeInteger(this.observationBudgetRemaining) && freshRequestedCount > 0) {
       this.observationBudgetRemaining = Math.max(0, this.observationBudgetRemaining - freshRequestedCount)
@@ -13651,6 +13679,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         name: admittedPrepared[index]?.tool.function.name,
         cached: admittedCached[index],
         ...(admittedUnchanged[index] ? { unchanged_fact: true } : {}),
+        ...(admittedReestablished[index] ? { reestablished_read: true } : {}),
         original_output_chars: original.length,
         output_chars: output.length,
       }

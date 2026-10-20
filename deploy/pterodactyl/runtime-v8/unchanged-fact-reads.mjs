@@ -45,3 +45,55 @@ export class UnchangedFactReads {
     this.delivered.clear()
   }
 }
+
+// The reads a step's executor has had delivered, by the conversation that got them.
+// A harness swap (restage, planner resume) replaces the conversation, so the tool
+// results the step already held are gone and B2 forgets UnchangedFactReads with
+// them. The executor then re-reads what it had only because the harness dropped it,
+// and that must not spend the per-decision observation budget. Budget accounting
+// only: the read still runs live and the model gets the fresh answer.
+//
+// The record lives at step scope (it must outlive the conversation) and is keyed by
+// the step identity, so a different step, plan version, actor, epoch or session
+// never matches. Each signature is free once per swap: serving the re-read records
+// it against the new conversation, so a repeat there is charged like any other.
+const STEP_LIMIT = 8
+const READ_LIMIT = 64
+
+export function stepReadKey(epoch, plan, step) {
+  const scope = unchangedFactScope(epoch)
+  if (scope === undefined || typeof step?.step_id !== 'string' || step.step_id.length === 0) return undefined
+  return [scope, epoch.session, plan?.plan_id, plan?.plan_version, step.step_id].map(part => String(part ?? '')).join('\u0000')
+}
+
+export class StepReadLedger {
+  constructor({ stepLimit = STEP_LIMIT, readLimit = READ_LIMIT } = {}) {
+    this.stepLimit = stepLimit
+    this.readLimit = readLimit
+    this.steps = new Map()
+  }
+
+  // True when this signature was delivered to this step by an earlier conversation
+  // and has not been re-established since.
+  isReestablishing(stepKey, signature, conversationSeq) {
+    if (typeof stepKey !== 'string' || typeof signature !== 'string' || !Number.isSafeInteger(conversationSeq)) return false
+    const seq = this.steps.get(stepKey)?.get(signature)
+    return seq !== undefined && seq < conversationSeq
+  }
+
+  // Record only reads the conversation `conversationSeq` actually received.
+  recordDelivered(stepKey, signature, conversationSeq) {
+    if (typeof stepKey !== 'string' || typeof signature !== 'string' || !Number.isSafeInteger(conversationSeq)) return
+    const reads = this.steps.get(stepKey) ?? new Map()
+    reads.delete(signature)
+    reads.set(signature, conversationSeq)
+    while (reads.size > this.readLimit) reads.delete(reads.keys().next().value)
+    this.steps.delete(stepKey)
+    this.steps.set(stepKey, reads)
+    while (this.steps.size > this.stepLimit) this.steps.delete(this.steps.keys().next().value)
+  }
+
+  clear() {
+    this.steps.clear()
+  }
+}
