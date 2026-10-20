@@ -176,6 +176,10 @@ case "$LANE" in
     printf '[npc-test][ground-item-pickup] Running drill spill, furnace pickup build and partial-pickup receipts against the real engine...\n'
     run_node ground_item_pickup_factorio.mjs
     ;;
+  placement-clearing)
+    printf '[npc-test][placement-clearing] Running tree, rock and idle-chest clearing, blocked footprints and the anchor ranking against the real engine...\n'
+    run_node placement_clearing_factorio.mjs
+    ;;
   local-transfer-target)
     run_node local_transfer_target_factorio.mjs --mode recovery
     stop_factorio

@@ -16,7 +16,7 @@ must not be used to reset current integration.
   - The request takes `anchor { unit_number }`: candidates rank nearest it (`distance_from_anchor`, `ordering = nearest_to_anchor_first`), the search centres on it with no `center`, and the build never clears it.
   - `placement_clearing.ts` is the one clearance decision. A footprint refused only for ground items, natural obstructions (neutral-force, hand-minable, not a placed building: trees, rocks) and the NPC's own idle entities is a candidate whose `clears` lists those entities. Players' buildings, cliffs and entities in a running chain stay blocked.
   - Placing it walks into hand-mining reach, waits the native mining time, mines the entities into the NPC inventory and builds. The receipt carries `entities_cleared` (with the measured items); refusals are `clearing_inventory_full`, `clearing_unreachable` and `clearing_failed`. Once anything was cleared the batch carries no no-mutation proof.
-- **Proof.** Offline only: unit tests with a fake world; not run against the real engine. Not live-tested.
+- **Proof.** Unit tests with a fake world, plus the native `placement-clearing` lane in Factorio 2.0.77 (zero humans, real actor): tree, rock and idle own chest are candidates and are cleared after the native mining time (+4 wood, +20 stone, +1 chest, equal to the receipt); another force's chest, a loaded chest and a cliff stay blocked; a full inventory refuses with `clearing_inventory_full` and keeps the no-mutation proof; the anchor ranks candidates. Not live-tested.
 
 ## October 19: Run AF placement pickup receipts fixed and verified natively
 

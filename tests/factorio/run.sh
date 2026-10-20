@@ -130,6 +130,7 @@ lane_offset() {
     zero-transfer) printf '26' ;;
     direct-feed-observation) printf '27' ;;
     ground-item-pickup) printf '28' ;;
+    placement-clearing) printf '29' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }
