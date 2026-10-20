@@ -77,6 +77,7 @@ const TASK_TYPES = {
   gather_resource: ['walking_to_entity', 'mining'],
   supply_entity: ['moving_items'],
   move_items_exact: ['moving_items'],
+  place_candidate: ['placing'],
 }
 
 // Every admitted operation in a mutation text, in order, parsed back from the Lua the harness rendered.
@@ -90,6 +91,7 @@ export function parseAdmittedOperations(text) {
       gather_resource: /^'([^']+)',(\d+),(\d+)\)/,
       supply_entity: /^(\d+),\{(.*?)\}\)/,
       move_items_exact: /^'([^']+)',(\d+),(\d+),(true|false)\)/,
+      place_candidate: /^'([^']+)','([^']+)'\)/,
     }
     const match = Object.hasOwn(patterns, name) ? patterns[name].exec(rest) : undefined
     if (name === 'gather_resource' && match) operations.push({ name, args: { resource_name: match[1], count: Number(match[2]) } })
@@ -100,6 +102,7 @@ export function parseAdmittedOperations(text) {
     else if (name === 'move_items_exact' && match) {
       operations.push({ name, args: { item_name: match[1], unit_number: Number(match[2]), max_count: Number(match[3]), to_entity: match[4] === 'true' } })
     }
+    else if (name === 'place_candidate' && match) operations.push({ name, args: { candidate_set_id: match[1], candidate_id: match[2] } })
     else operations.push({ name, args: { raw: rest.slice(0, 80) } })
   }
   return operations
@@ -359,6 +362,8 @@ export class FurnaceFactorio extends FakeFactorio {
     let moved
     for (const operation of batch.operations) {
       const { args } = operation
+      // A subclass models the operations this base world does not (a placement, a supply to another machine).
+      if (this.completeOperation?.(operation, batch)) continue
       if (operation.name === 'gather_resource') {
         this.inventory[args.resource_name] = (this.inventory[args.resource_name] ?? 0) + args.count
         this.effects.push({ batch_id: batch.batch_id, operation: operation.name, item: args.resource_name, moved: args.count })
