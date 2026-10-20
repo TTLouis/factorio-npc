@@ -40,6 +40,7 @@ export const refusal_class_by_code: Record<string, RefusalClass> = {
   invalid_preflight_args: 'argument',
   not_recipe_machine: 'argument',
   navigation_position_inside_furnace_collision: 'argument',
+  navigation_position_inside_tile_collision: 'argument',
   invalid_navigation_position: 'argument',
   invalid_navigation_reach_distance: 'argument',
   invalid_navigation_search_radius: 'argument',

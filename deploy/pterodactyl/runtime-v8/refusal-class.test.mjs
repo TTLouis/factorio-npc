@@ -24,7 +24,7 @@ const OLD_MODEL_CORRECTABLE_PREFLIGHT_CODES = [
 ]
 // Deliberate behaviour changes from the old lists (integrator decision): a wrong technology name is a naming error like unknown_recipe,
 // so these two now get the one bounded correction turn instead of the blocked end. Anything not listed here must match oldPath.
-const INTENTIONAL_CHANGES = { invalid_name: 'argument', unknown_technology: 'argument', placement_candidate_required: 'argument' }
+const INTENTIONAL_CHANGES = { invalid_name: 'argument', unknown_technology: 'argument', placement_candidate_required: 'argument', navigation_position_inside_tile_collision: 'argument' }
 
 // Every admission refusal except authorization_stale (ADMISSION_REFUSAL_CODES minus the stale grant).
 const OLD_AUTHORIZATION_RECOVERABLE_CODES = ['protected_entity_refused', 'reserved_supply_refused', 'reserved_supply_ambiguous_target', 'player_inventory_excluded']

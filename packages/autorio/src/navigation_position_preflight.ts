@@ -3,8 +3,12 @@ import { find_world_entities } from './npc_vision'
 
 const finite = (value: unknown): value is number => typeof value === 'number' && value === value && math.abs(value) !== math.huge
 
-// A narrow negative proof for axis-aligned furnace collisions. This does not
-// establish a route or promise future availability; execution remains native.
+// How far a correction may be searched for: the nearest place the character fits, offered when a goal is refused.
+const CORRECTION_SEARCH_RADIUS = 16
+const CORRECTION_PRECISION = 0.5
+
+// Narrow negative proofs: axis-aligned furnace collisions, and a goal whose own tile collides with the character (the
+// middle of a lake, for example). These do not establish a route or promise future availability; execution remains native.
 export function navigation_position_preflight(actor: ControlledActor | undefined, args: Record<string, any>) {
   const reject = (code: string, details: Record<string, unknown> = {}) => ({ ok: false, operation: 'walk_to_position', code, ...details })
   if (!actor || !actor.is_valid || !actor.character?.valid) return reject('no_actor')
@@ -39,6 +43,29 @@ export function navigation_position_preflight(actor: ControlledActor | undefined
       if (clearance > reach) return reject('navigation_position_inside_furnace_collision', {
         position: { x, y }, reach_distance: reach, minimum_collision_clearance: clearance,
         obstacle: { name: entity.name, unit_number: entity.unit_number, position: entity.position },
+      })
+    }
+  }
+  // AB-3 (18ab): a path request whose goal point lies on a tile the character collides with is answered "no path" within
+  // milliseconds, whatever the reach (checked natively: a land goal 0.2 tiles from water is reached, a water goal 0.25 tiles
+  // from land never is). The tile's collision mask against the character's decides, so nothing here names a tile. The mask
+  // considers tile transitions, so a shoreline tile of a colliding kind can still hold the character: such a goal is only
+  // refused when the engine also says the character cannot be placed at the goal, which keeps this a proof, not a guess.
+  const surface = actor.surface
+  const tile = surface.get_tile(math.floor(x), math.floor(y))
+  const tile_layers = tile.prototype.collision_mask?.layers
+  if (mask?.layers && tile_layers) {
+    const colliding_layers: string[] = []
+    for (const [layer, collides] of pairs(mask.layers)) {
+      if (collides && tile_layers[layer]) colliding_layers.push(layer)
+    }
+    if (colliding_layers.length > 0 && !surface.can_place_entity({ name: character.name, position: { x, y }, force: actor.force })) {
+      colliding_layers.sort()
+      const nearest = surface.find_non_colliding_position(character.name, { x, y }, CORRECTION_SEARCH_RADIUS, CORRECTION_PRECISION)
+      return reject('navigation_position_inside_tile_collision', {
+        position: { x, y }, reach_distance: reach, tile: tile.name, colliding_layers,
+        nearest_walkable_position: nearest ? { x: nearest.x, y: nearest.y } : undefined,
+        nearest_walkable_search_radius: CORRECTION_SEARCH_RADIUS,
       })
     }
   }
