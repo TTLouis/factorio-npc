@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fluid_source_observation, get_recent_fluid_source_observation } from './fluid_source_observation'
+import { fluid_source_observation, get_recent_fluid_source_observation, invalidate_actor_fluid_source_observations } from './fluid_source_observation'
 
 describe('native fluid-bearing tile observation', () => {
   const originalPairs = (globalThis as any).pairs
@@ -17,8 +17,12 @@ describe('native fluid-bearing tile observation', () => {
     const surface = { index: 7, is_chunk_generated: vi.fn(() => true), find_tiles_filtered: vi.fn((args: any) => args.has_hidden_tile ? [] :
       Array.from({ length: Math.min(count, args.limit) }, (_, index) => ({ name: 'alien-liquid-tile', position: { x: index, y: 1 },
         prototype: { fluid: { name: 'modded-fluid' } }, surface: { index: 7 } }))) }
-    const actor = { is_valid: true, position: { x: 0, y: 0 }, surface, force: { index: 2 }, status_snapshot: () => ({ actor_id: 41 }), get_main_inventory: vi.fn() } as any
-    return { actor, surface }
+    // The engine's answer for the actor's own character prototype: stand two tiles west of the tile centre.
+    const find_non_colliding_position = vi.fn((_name: string, center: { x: number, y: number }) => ({ x: center.x - 2, y: center.y }) as { x: number, y: number } | undefined)
+    const surface_with_find = Object.assign(surface, { find_non_colliding_position })
+    const actor = { is_valid: true, position: { x: 0, y: 0 }, surface: surface_with_find, force: { index: 2 }, character: { valid: true, name: 'character' },
+      status_snapshot: () => ({ actor_id: 41 }), get_main_inventory: vi.fn() } as any
+    return { actor, surface: surface_with_find }
   }
   it('derives modded source names and bounds every native query, without reading inventory or granting geometry', () => {
     const { actor, surface } = fixture(9)
@@ -28,7 +32,7 @@ describe('native fluid-bearing tile observation', () => {
     expect(result).toMatchObject({ ok: true, surface_index: 7, observed_tick: 123, returned_count: 8, truncated: true, ordering: 'nearest_first',
       coverage: 'generated_bounding_square', coverage_complete: true, checked_chunks: 81, generated_chunk_count: 81, ungenerated_chunk_count: 0, ungenerated_chunks: [], empty_result_is_conclusive: true })
     expect((result as any).samples).toHaveLength(8)
-    expect((result as any).samples[0]).toEqual({ name: 'alien-liquid-tile', fluid_name: 'modded-fluid', position: { x: 0, y: 1 }, surface_index: 7, distance: 1 })
+    expect((result as any).samples[0]).toEqual({ name: 'alien-liquid-tile', fluid_name: 'modded-fluid', position: { x: 0, y: 1 }, surface_index: 7, distance: 1, approach: { x: -1.5, y: 1.5 } })
     expect((result as any).candidates).toBeUndefined()
   })
   it('refuses missing bodies, invalid fluids/bounds and incomplete coverage before tile search', () => {
@@ -148,5 +152,86 @@ describe('native fluid-bearing tile observation', () => {
     expect(get_recent_fluid_source_observation({ ...actor, status_snapshot: () => ({ actor_id: 1 }) }, 'modded-fluid')).toBeUndefined()
     fluid_source_observation({ ...actor, status_snapshot: () => ({ actor_id: 17 }) }, { fluid_name: 'modded-fluid' })
     expect((globalThis as any).storage.sgluna_recent_fluid_reads).toHaveLength(16)
+  })
+  it("gives every sample a standing position from the engine for the actor's own character, or none when the engine finds nowhere", () => {
+    const { actor, surface } = fixture(2)
+    surface.find_non_colliding_position.mockImplementation((_name: string, center: any) => center.x < 1 ? { x: 9, y: 9 } : undefined)
+    const result = fluid_source_observation(actor, { fluid_name: 'modded-fluid' }) as any
+    expect(result.samples.map((sample: any) => sample.approach)).toEqual([{ x: 9, y: 9 }, undefined]) // none within the radius: absent, never guessed
+    expect(result.approach_search_radius).toBe(16)
+    // Samples are tile corners; the search starts from the tile centre and uses the character prototype the actor really has.
+    expect(surface.find_non_colliding_position).toHaveBeenNthCalledWith(1, 'character', { x: 0.5, y: 1.5 }, 16, 0.5)
+    expect(result.samples[0].position).toEqual({ x: 0, y: 1 })
+  })
+  it('reports no approach for an actor without a character body rather than guessing a prototype', () => {
+    const { actor, surface } = fixture(1)
+    const result = fluid_source_observation({ ...actor, character: undefined }, { fluid_name: 'modded-fluid' }) as any
+    expect(result.samples[0].approach).toBeUndefined()
+    expect(result.approach_search_radius).toBeUndefined()
+    expect(surface.find_non_colliding_position).not.toHaveBeenCalled()
+  })
+
+  // AB-3 (18ab): a radius-128 empty read replaced the radius-256 find, and getPlacementCandidates then said no water was exposed.
+  describe('a remembered positive read', () => {
+    function empty(surface: any) { surface.find_tiles_filtered.mockImplementation(() => []) }
+    it('survives a later empty or narrower read, which is recorded beside it', () => {
+      const { actor, surface } = fixture(3)
+      const positive = fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 256 }) as any
+      expect(positive.returned_count).toBe(3)
+      empty(surface)
+      ;(globalThis as any).game.tick = 200
+      const later = fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 128 }) as any
+      expect(later).toMatchObject({ ok: true, returned_count: 0 }) // the tool call still answers honestly for what it saw
+      const kept = get_recent_fluid_source_observation(actor, 'modded-fluid') as any
+      expect(kept.samples).toHaveLength(3)
+      expect(kept).toMatchObject({ search_radius: 256, observed_tick: 123 })
+      expect(kept.later_reads).toEqual([{ observed_tick: 200, search_radius: 128, actor_position: { x: 0, y: 0 }, returned_count: 0,
+        coverage_complete: true, empty_result_is_conclusive: true }])
+      expect(get_recent_fluid_source_observation(actor)?.samples).toHaveLength(3)
+    })
+    it('is dropped when a read at least as wide, complete and covering every remembered sample shows none', () => {
+      const { actor, surface } = fixture(3)
+      fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 128 })
+      empty(surface)
+      fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 128 })
+      expect(get_recent_fluid_source_observation(actor, 'modded-fluid')?.samples).toEqual([])
+    })
+    it('is kept when the wider empty read is incomplete, truncated, or does not reach the remembered samples', () => {
+      const { actor, surface } = fixture(3)
+      fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 128 })
+      empty(surface)
+      surface.is_chunk_generated.mockImplementation(({ x }: any) => x !== 2)
+      fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 256 })
+      expect(get_recent_fluid_source_observation(actor, 'modded-fluid')?.samples).toHaveLength(3)
+      surface.is_chunk_generated.mockReturnValue(true)
+      // A truncated scan whose tiles all lie in ungenerated chunks leaves no samples and no proof either.
+      surface.is_chunk_generated.mockImplementation(({ x }: any) => x !== 15)
+      surface.find_tiles_filtered.mockImplementation((args: any) => args.has_hidden_tile ? [] : Array.from({ length: 257 }, () => ({ name: 'alien-liquid-tile',
+        position: { x: 500, y: 500 }, prototype: { fluid: { name: 'modded-fluid' } }, surface: { index: 7 } })))
+      expect(fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 256 })).toMatchObject({ returned_count: 0, scan_truncated: true, empty_result_is_conclusive: false })
+      expect(get_recent_fluid_source_observation(actor, 'modded-fluid')?.samples).toHaveLength(3)
+      surface.is_chunk_generated.mockReturnValue(true)
+      empty(surface)
+      // The actor is now 300 tiles away: a read from there does not cover the remembered tiles.
+      fluid_source_observation({ ...actor, position: { x: 300, y: 300 } }, { fluid_name: 'modded-fluid', search_radius: 128 })
+      expect(get_recent_fluid_source_observation(actor, 'modded-fluid')?.samples).toHaveLength(3)
+    })
+    it('is replaced by a newer positive read, bounds the notes it keeps, and still expires and invalidates', () => {
+      const { actor, surface } = fixture(3)
+      fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 256 })
+      surface.find_tiles_filtered.mockImplementation((args: any) => args.has_hidden_tile ? [] : [{ name: 'alien-liquid-tile', position: { x: 5, y: 5 },
+        prototype: { fluid: { name: 'modded-fluid' } }, surface: { index: 7 } }])
+      fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 64 })
+      expect(get_recent_fluid_source_observation(actor, 'modded-fluid')?.samples).toEqual([expect.objectContaining({ position: { x: 5, y: 5 } })])
+      empty(surface)
+      for (let tick = 130; tick < 135; tick++) { (globalThis as any).game.tick = tick; fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 32 }) }
+      const kept = get_recent_fluid_source_observation(actor, 'modded-fluid') as any
+      expect(kept.later_reads.map((read: any) => read.observed_tick)).toEqual([134, 133, 132])
+      ;(globalThis as any).game.tick = 123 + 3600 + 1
+      expect(get_recent_fluid_source_observation(actor, 'modded-fluid')).toBeUndefined() // the clock is the positive read's own
+      ;(globalThis as any).game.tick = 140
+      invalidate_actor_fluid_source_observations(actor)
+      expect(get_recent_fluid_source_observation(actor, 'modded-fluid')).toBeUndefined()
+    })
   })
 })

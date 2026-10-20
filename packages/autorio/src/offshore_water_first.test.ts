@@ -18,7 +18,7 @@ beforeEach(() => {
 function fixture() {
   let actorId = 18
   const surface = { index: 1, is_chunk_generated: () => true, find_entities_filtered: () => [],
-    can_place_entity: vi.fn(() => true), create_entity: vi.fn(),
+    can_place_entity: vi.fn(() => true), create_entity: vi.fn(), find_non_colliding_position: () => undefined,
     find_tiles_filtered: vi.fn((args: any) => args.has_hidden_tile ? [] : [{ name: 'water', position: { x: 46, y: 23 },
       prototype: { fluid: { name: 'water' } }, surface: { index: 1 } }]),
   }

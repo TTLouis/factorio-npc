@@ -13,6 +13,10 @@ const MAX_SCANNED_TILES = 256
 const MAX_REPORTED_UNGENERATED_CHUNKS = 8
 const RECENT_FLUID_TTL_TICKS = 60 * 60
 const MAX_RECENT_FLUID_READS = 16
+// Where a character could stand near a water sample: asked of the engine for the actor's own character prototype.
+const APPROACH_SEARCH_RADIUS = 16
+const APPROACH_PRECISION = 0.5
+const MAX_LATER_READS = 3
 
 interface FluidSourceSample {
   name: string
@@ -20,6 +24,9 @@ interface FluidSourceSample {
   position: { x: number, y: number }
   surface_index: number
   distance: number
+  // A position the actor's character can stand on within APPROACH_SEARCH_RADIUS of the tile; absent when the engine found none.
+  // The sample itself is a tile of the fluid, so walking onto it is walking into collision.
+  approach?: { x: number, y: number }
 }
 
 interface CoveredFluidHint extends FluidSourceSample {
@@ -42,6 +49,19 @@ interface RecentFluidSourceObservation {
   covered_fluid_hints: CoveredFluidHint[]
   covered_scan_truncated: boolean
   covered_empty_result_is_conclusive: boolean
+  coverage_complete: boolean
+  empty_result_is_conclusive: boolean
+  // Newer reads that did not replace this one (see remember_fluid_read), newest first.
+  later_reads?: LaterFluidRead[]
+}
+
+interface LaterFluidRead {
+  observed_tick: number
+  search_radius: number
+  actor_position: { x: number, y: number }
+  returned_count: number
+  coverage_complete: boolean
+  empty_result_is_conclusive: boolean
 }
 
 interface RecentFluidRead {
@@ -65,12 +85,44 @@ export function get_recent_fluid_source_observation(actor: ControlledActor | und
   return undefined
 }
 
+// True when a read proves the remembered samples are gone: it is an empty answer that is conclusive (every chunk of its square
+// generated, nothing left unscanned), at least as wide as the remembered read, and its circle contains every remembered sample.
+function read_shows_samples_gone(remembered: RecentFluidSourceObservation, read: RecentFluidSourceObservation) {
+  if (read.samples.length > 0 || !read.empty_result_is_conclusive || read.search_radius < remembered.search_radius) return false
+  for (const sample of remembered.samples) {
+    if (squared_distance(read.actor_position, sample.position) > read.search_radius ** 2) return false
+  }
+  return true
+}
+
+// One remembered read per actor, surface and fluid. A positive read (it has samples) is a fact about terrain, and terrain does
+// not move unless something mutates it (which calls invalidate_actor_fluid_source_observations). A newer read is not more
+// truthful about tiles it did not see, so an empty or smaller re-read never evicts a positive one (AB-3: a radius-128 empty
+// read replaced the radius-256 find, and placement then said no water was exposed). The newer read is recorded beside the
+// positive one instead, newest first and bounded, and the positive keeps its own observed_tick so it still expires by TTL.
+// A positive is replaced by a newer positive read, or dropped when an empty read proves the samples gone
+// (read_shows_samples_gone: conclusive, at least as wide, covering every remembered sample).
 function remember_fluid_read(actor: ControlledActor, observation: RecentFluidSourceObservation) {
   const actor_id = actor.status_snapshot().actor_id
   if (actor_id === undefined) return
-  const reads = (storage.sgluna_recent_fluid_reads ?? []).filter(read => read.actor_id !== actor_id
-    || read.force_index !== actor.force.index || read.observation.surface_index !== actor.surface.index
-    || read.observation.fluid_name !== observation.fluid_name)
+  const same_scope = (read: RecentFluidRead) => read.actor_id === actor_id && read.force_index === actor.force.index
+    && read.observation.surface_index === actor.surface.index && read.observation.fluid_name === observation.fluid_name
+  const reads = (storage.sgluna_recent_fluid_reads ?? []).filter(read => !same_scope(read))
+  let remembered: RecentFluidSourceObservation | undefined
+  for (const read of storage.sgluna_recent_fluid_reads ?? []) {
+    if (same_scope(read)) remembered = read.observation
+  }
+  if (remembered && remembered.samples.length > 0 && observation.samples.length === 0
+    && game.tick >= remembered.observed_tick && game.tick - remembered.observed_tick <= RECENT_FLUID_TTL_TICKS
+    && !read_shows_samples_gone(remembered, observation)) {
+    const later_reads: LaterFluidRead[] = [{ observed_tick: observation.observed_tick, search_radius: observation.search_radius,
+      actor_position: observation.actor_position, returned_count: 0, coverage_complete: observation.coverage_complete,
+      empty_result_is_conclusive: observation.empty_result_is_conclusive }]
+    for (const earlier of remembered.later_reads ?? []) {
+      if (later_reads.length < MAX_LATER_READS) later_reads.push(earlier)
+    }
+    observation = { ...remembered, later_reads }
+  }
   reads.unshift({ actor_id, force_index: actor.force.index, observation })
   if (reads.length > MAX_RECENT_FLUID_READS) reads.pop()
   storage.sgluna_recent_fluid_reads = reads
@@ -171,8 +223,14 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
   const samples: FluidSourceSample[] = []
   for (let index = 0; index < math.min(found.length, limit); index++) {
     const tile = found[index]
+    // Ask the engine where this actor's own character fits near the tile centre (its collision mask decides, not a tile list).
+    const character = actor.character
+    const standing = character?.valid
+      ? surface.find_non_colliding_position(character.name, { x: tile.position.x + 0.5, y: tile.position.y + 0.5 }, APPROACH_SEARCH_RADIUS, APPROACH_PRECISION)
+      : undefined
     samples.push({ name: tile.name, fluid_name: request.fluid_name, position: tile.position, surface_index: surface.index,
-      distance: math.floor(math.sqrt(tile.distance_squared) * 10 + 0.5) / 10 })
+      distance: math.floor(math.sqrt(tile.distance_squared) * 10 + 0.5) / 10,
+      ...(standing ? { approach: { x: standing.x, y: standing.y } } : {}) })
   }
   // Factorio preserves water beneath removable landfill/foundation in native
   // hidden tile layers. These are recovery hints, not present fluid sources or
@@ -206,6 +264,8 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
     // An empty answer proves there is no such fluid in the square only when coverage is complete and nothing was left unscanned.
     empty_result_is_conclusive: coverage_complete && !scan_truncated,
     matching_tile_prototypes: names.length, samples, returned_count: samples.length, truncated: found.length > samples.length || scan_truncated,
+    // Present when the samples could be given an approach: how far from each tile the engine was asked to look for standing room.
+    ...(actor.character?.valid ? { approach_search_radius: APPROACH_SEARCH_RADIUS } : {}),
     scanned_tile_limit: MAX_SCANNED_TILES, scan_truncated,
     ordering: scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first',
     covered_fluid_hints, covered_returned_count: covered_fluid_hints.length,
