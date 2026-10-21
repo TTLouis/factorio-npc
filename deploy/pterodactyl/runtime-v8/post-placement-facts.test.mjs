@@ -4,7 +4,7 @@ import test from 'node:test'
 import { EXECUTOR_ROLE } from './agent-roles.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { buildHandoffPacket } from './handoff-packet.mjs'
+import { buildHandoffPacket, HANDOFF_PACKET_LIMITS, sanitizeHandoffNote } from './handoff-packet.mjs'
 import { applyPlanningEvent, createEmptyPlanningState, getActivePlan, MAX_REVIEW_NOTES_CHARS, PLANNING_EVENT } from './planning-state.mjs'
 import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACTS_PREFIX, postBatchStepKey } from './post-batch-facts.mjs'
 import * as topologyContext from './topology-context.mjs'
@@ -118,22 +118,59 @@ test('Run AJ: a C7 recovery restage of the reviewed step carries the whole notes
   assert.ok(notesLine(w.agent.baseMessages).includes(NOTES_TAIL))
 })
 
-test('Run AJ: notes the packet record cannot carry verbatim follow as one message that survives the batch continuation', async () => {
-  // The packet sanitizes exact entity ids out of model prose, so this record is not the planner's text; the whole text follows once.
+test('Run AJ: notes the packet record cannot carry verbatim follow as one message, and the continuation keeps the sanitized record once', async () => {
+  // The packet sanitizes exact entity ids out of model prose, so its record is not the planner's text: the raw text follows once as
+  // this round's message, and the base step block keeps only the packet's own sanitized text, the copy a restage would show.
   const NOTES = `Use unit 37 as the water source. ${RUN_AJ_NOTES}`.slice(0, MAX_REVIEW_NOTES_CHARS)
+  const SANITIZED = sanitizeHandoffNote(NOTES, HANDOFF_PACKET_LIMITS.reviewNotesChars)
+  assert.notEqual(SANITIZED, NOTES)
+  assert.doesNotMatch(SANITIZED, /unit 37/)
   const seen = []
   const w = notesWorld([pumpDraft(), askReview, pumpDraft({ chatMessage: NOTES, plan: [PUMP_STEP] }), ctx => {
-    seen.push(occurrences(ctx.messages, NOTES))
+    seen.push({ raw: occurrences(ctx.messages, NOTES), sanitized: occurrences(ctx.messages, SANITIZED) })
     return placePump(ctx)
   }, ctx => {
-    seen.push(occurrences(ctx.messages, NOTES))
+    seen.push({ raw: occurrences(ctx.messages, NOTES), sanitized: occurrences(ctx.messages, SANITIZED), line: notesLine(ctx.messages) })
     return placePump(ctx)
   }])
   await w.say()
+  assert.equal(notesLine(w.agent.baseMessages), `${notesLine(w.agent.baseMessages).slice(0, notesLine(w.agent.baseMessages).indexOf(': ') + 2)}${SANITIZED}`, 'the base record is the sanitized text')
+  assert.equal(occurrences(w.agent.baseMessages, 'unit 37'), 0, 'no exact entity id in the base conversation')
   await w.agent.completed()
-  assert.deepEqual(seen, [1, 1], 'once at the handback, once after the continuation rebuilt the conversation')
+  assert.deepEqual(seen[0], { raw: 1, sanitized: 1 }, 'the handback round: the raw message once, the sanitized record once')
+  assert.deepEqual([seen[1].raw, seen[1].sanitized], [0, 1], 'after the continuation rebuild: the notes once, as the sanitized record')
+  assert.ok(seen[1].line.endsWith(SANITIZED))
   const [delivered] = w.events.filter(row => row.event === 'context.review_notes_delivered').map(row => row.data)
   assert.deepEqual([delivered?.reason, delivered?.carried_by, delivered?.continuation_copy], ['packet_record_shortened_or_dropped', 'conversation_message', 'base_step_block'])
+})
+
+test('notes whose record the packet dropped for size are added to the base step block once, after the step brief', async () => {
+  const seen = []
+  const w = notesWorld([pumpDraft(), askReview, pumpDraft({ chatMessage: RUN_AJ_NOTES, plan: [PUMP_STEP] }), ctx => {
+    seen.push({ whole: occurrences(ctx.messages, RUN_AJ_NOTES), record: notesLine(ctx.messages) })
+    return placePump(ctx)
+  }, ctx => {
+    seen.push({ whole: occurrences(ctx.messages, RUN_AJ_NOTES), record: notesLine(ctx.messages) })
+    return placePump(ctx)
+  }])
+  // Stands in for a packet under pressure: every restage packet comes back without its planner_review_notes record.
+  const build = w.agent.buildRestagePacket.bind(w.agent)
+  w.agent.buildRestagePacket = (args) => {
+    const packet = build(args)
+    if (!packet) return packet
+    const strip = text => text.split('\n').filter(line => !line.startsWith('planner_review_notes')).join('\n')
+    return { ...packet, text: strip(packet.text), volatileText: strip(packet.volatileText), dropped: [...packet.dropped, 'review_notes'] }
+  }
+  await w.say()
+  await w.agent.completed()
+  assert.deepEqual(seen.map(round => round.whole), [1, 1], 'the message at the handback, the base record after the continuation')
+  assert.equal(seen[0].record, '', 'the packet carried no record')
+  assert.ok(seen[1].record.endsWith(RUN_AJ_NOTES))
+  const lines = String(w.agent.baseMessages.find(row => String(row.content).startsWith('--- step block ---'))?.content).split('\n')
+  const at = lines.findIndex(line => line.startsWith('planner_review_notes'))
+  assert.ok(at > lines.findIndex(line => line.startsWith('execution_guidance')), 'after the step brief')
+  const [delivered] = w.events.filter(row => row.event === 'context.review_notes_delivered').map(row => row.data)
+  assert.deepEqual([delivered?.reason, delivered?.continuation_copy], ['packet_record_shortened_or_dropped', 'base_step_block'])
 })
 
 test('Run AJ: under packet pressure the review notes outlast every historical fluid-source hint', () => {

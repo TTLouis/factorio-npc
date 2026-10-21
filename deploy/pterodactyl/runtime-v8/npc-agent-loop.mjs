@@ -65,7 +65,9 @@ import {
   withoutRawLeafRecipes,
   buildFluidsFromBill,
   buildFluidsTruncated,
+  HANDOFF_PACKET_LIMITS,
   PLANNER_REVIEW_NOTES_LABEL,
+  sanitizeHandoffNote,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
@@ -15589,15 +15591,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (notes && !carried) {
         this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
         // That message is in the working messages only, and a batch-receipt continuation rebuilds them from baseMessages: Run AJ lost
-        // the notes at the first continuation. The base copy of the step block gets the whole notes in its planner_review_notes record
+        // the notes at the first continuation. The base copy of the step block gets the notes in its planner_review_notes record
         // instead (replaced, or added after the step's brief), so the rebuilt conversation holds them once and they stay step-scoped:
-        // a later step drops this step block (providerMessages) and a restage rebuilds it from the goal's stored notes.
+        // a later step drops this step block (providerMessages) and a restage rebuilds it from the goal's stored notes. The record is
+        // the packet's own text (same sanitizer and limit), so no exact entity id outlives this round's message, and the base block
+        // matches what a restage would show.
         let stamped = false
         this.baseMessages = this.baseMessages.map((row) => {
           if (stamped || row?.role !== 'user' || typeof row.content !== 'string' || !row.content.startsWith('--- step block ---')) return row
           stamped = true
           const lines = row.content.split('\n')
-          const record = `${PLANNER_REVIEW_NOTES_LABEL}${notes}`
+          const record = `${PLANNER_REVIEW_NOTES_LABEL}${sanitizeHandoffNote(notes, HANDOFF_PACKET_LIMITS.reviewNotesChars)}`
           const at = lines.findIndex(line => line.startsWith('planner_review_notes'))
           if (at >= 0) lines[at] = record
           else {
