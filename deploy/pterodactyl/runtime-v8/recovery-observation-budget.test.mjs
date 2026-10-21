@@ -342,7 +342,7 @@ test('normal C7 runtime recovery still starts a decision and carries the recover
     return result
   }
   const provider = w.agent.provider
-  w.agent.provider = async (...args) => {
+  w.agent.provider = async () => {
     w.agent.provider = provider
     return planReply(act('copper-ore')({ memory: w.memory }))
   }
