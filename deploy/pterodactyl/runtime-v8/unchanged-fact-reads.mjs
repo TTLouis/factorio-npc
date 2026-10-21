@@ -93,6 +93,20 @@ export class StepReadLedger {
     while (this.steps.size > this.stepLimit) this.steps.delete(this.steps.keys().next().value)
   }
 
+  // The conversation that received these reads was set aside and came back as `toSeq` (a folded review handback): its results are
+  // still in the conversation, so they are not dropped. Reads delivered by any earlier conversation stay re-establishing.
+  rebase(stepKey, fromSeq, toSeq) {
+    if (typeof stepKey !== 'string' || !Number.isSafeInteger(fromSeq) || !Number.isSafeInteger(toSeq)) return 0
+    const reads = this.steps.get(stepKey)
+    let moved = 0
+    for (const [signature, seq] of reads ?? []) {
+      if (seq !== fromSeq) continue
+      reads.set(signature, toSeq)
+      moved++
+    }
+    return moved
+  }
+
   clear() {
     this.steps.clear()
   }

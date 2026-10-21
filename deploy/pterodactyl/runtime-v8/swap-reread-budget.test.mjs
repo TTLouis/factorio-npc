@@ -198,3 +198,18 @@ test('the ledger frees a read once per swap, bounded by steps and reads', () => 
   assert.equal(ledger.isReestablishing('s1', 'c', 3), false, 'the oldest step fell out of the bound')
   assert.equal(ledger.isReestablishing('s3', 'a', 3), true)
 })
+
+test('a folded handback rebases the reads of the kept conversation and leaves earlier conversations re-establishing', () => {
+  const ledger = new StepReadLedger()
+  ledger.recordDelivered('s1', 'before-swap', 1)
+  ledger.recordDelivered('s1', 'kept-a', 3)
+  ledger.recordDelivered('s1', 'kept-b', 3)
+  ledger.recordDelivered('s2', 'other-step', 3)
+  assert.equal(ledger.rebase('s1', 3, 5), 2)
+  assert.equal(ledger.isReestablishing('s1', 'kept-a', 5), false, 'its result is still in the resumed conversation')
+  assert.equal(ledger.isReestablishing('s1', 'kept-b', 5), false)
+  assert.equal(ledger.isReestablishing('s1', 'before-swap', 5), true, 'a result an earlier swap dropped is still free once')
+  assert.equal(ledger.isReestablishing('s2', 'other-step', 5), true, 'another step is untouched')
+  assert.equal(ledger.rebase('missing', 3, 5), 0)
+  assert.equal(ledger.rebase(undefined, 3, 5), 0)
+})
