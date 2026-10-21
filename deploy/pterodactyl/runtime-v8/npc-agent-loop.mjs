@@ -3716,6 +3716,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const generation = this.generation
     const lineage = this.agentContext.lineageSequence
     const actorFence = { ...(args.actor ?? this.epoch) }
+    const loopHadEpoch = Boolean(this.epoch) // between turns after a reset the loop holds none while the caller names the actor
     const role = args.role ?? args.packet?.event?.role ?? this.agentContext.role
     const checkpoint = args.checkpoint ?? args.packet?.event?.checkpoint
     try {
@@ -3806,19 +3807,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch, goal_id: state?.goal?.goal_id, read_items: executorFactsMeta.read_items }
         }
       }
-      if (restaged.restaged === true && role === EXECUTOR_ROLE && checkpoint === 'C3' && args.parkPlanner === true) {
+      // Every fresh executor conversation is a new bounded observation decision (Run AJ: a C7 auto-resume executor inherited the
+      // 0 an earlier decision had spent, so its first fresh read closed the phase). C3 when it parks the planner (the commit
+      // handoff), C6 bounded recovery, C7 runtime recovery, C8 the step-close size net (the fold of a review handback seeds its own,
+      // foldReviewHandback). C5 is the same decision continued in a new generation and keeps its own reseed (provider budget
+      // handoff); a planner restage is not an executor handoff. A refused restage never gets here.
+      const freshDecisionReason = role !== EXECUTOR_ROLE ? undefined : {
+        C3: args.parkPlanner === true ? 'new_executor_decision_at_commit' : undefined,
+        C6: 'new_executor_decision_at_bounded_recovery',
+        C7: 'new_executor_decision_at_recovery',
+        C8: 'new_executor_decision_at_step_close',
+      }[checkpoint]
+      if (restaged.restaged === true && freshDecisionReason) {
         const currentState = this.memory.planningState?.(this.activePlanKey())
         const expectedPlan = getActivePlanningPlan(state)
         const currentPlan = currentState && getActivePlanningPlan(currentState)
         if (this.generation !== generation || this.agentContext.lineageSequence !== lineage
           || this.agentContext.handoffId !== restaged.handoff_id || this.agentContext.role !== EXECUTOR_ROLE
-          || this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch
+          || (this.epoch || loopHadEpoch ? this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch : false)
           || currentState?.goal?.goal_id !== state.goal.goal_id || currentState?.goal?.status !== GOAL_STATUS.ACTIVE
           || currentPlan?.plan_id !== expectedPlan?.plan_id || currentPlan?.plan_version !== expectedPlan?.plan_version
           || currentPlan?.active_step_index !== expectedPlan?.active_step_index) {
           return { restaged: false, reason: 'executor_decision_superseded_after_handoff' }
         }
-        await this.startExecutorObservationDecision({ requestId, handoffId: restaged.handoff_id, reason: 'new_executor_decision_at_commit' })
+        await this.startExecutorObservationDecision({ requestId, handoffId: restaged.handoff_id, reason: freshDecisionReason, checkpoint })
       }
       return restaged
     }
@@ -4050,15 +4062,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return result
   }
 
-  // A role handoff starts a new bounded observation decision, not a new provider/campaign allowance.
-  async startExecutorObservationDecision({ requestId, handoffId, reason }) {
+  // A role handoff starts a new bounded observation decision, not a new provider/campaign allowance: only the decision-scoped
+  // observation fields change (provider budgets, auto-resume and step limits and memory.targetedObservationLedger are untouched).
+  // `checkpoint` names the restage that built the conversation (restageThrough); the fold passes none.
+  async startExecutorObservationDecision({ requestId, handoffId, reason, checkpoint }) {
     const previousRemaining = this.observationBudgetRemaining
     this.resetObservationDecisionState()
     this.observationBudgetOverride = 4
     this.observationBudgetRemaining = 4
     this.observationRelevanceOverride = null
     try { await this.traceEvent('context.executor_observation_started', {
-      request_id: requestId, handoff_id: handoffId, previous_remaining: previousRemaining,
+      request_id: requestId, handoff_id: handoffId, checkpoint, previous_remaining: previousRemaining,
       observation_remaining: 4, reason,
     }, { requestId }) } catch {}
   }
@@ -11666,76 +11680,84 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? this.stepStaysOpenHint(stepCompletion.state)
       : ''
     const completionState = stepCompletion?.state
-    const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
-    if (settled) return settled
-    // U6: a step verified inside the slice may put the executor past its hard limit (C8).
-    await this.executorStepCloseBoundary({ withinTurn: false })
-
-    // U11 (C4): is the next committed step clear? In shadow this only records Jev's judgment next to the gate below
-    // (nothing changes); once the family has earned `deciding` and Jev confidently says direct_to_executor, the
-    // gate, the planner-shape call and the observation budget are skipped. The completion gate above already owned
-    // the step close; nothing here advances the tracker.
-    const c4 = pendingAmendment ? undefined : await this.jev.c4Boundary({ stepCompletion, receipt, pendingAmendment })
-    let routed
-    if (c4?.acted) routed = await this.routeDirectToExecutor(c4)
-    else {
-      routed = pendingAmendment
-        ? { route: 'fallback_planner', decision_called: false }
-        : await this.routePostStepDecision(receipt, { inspected: this.jev.takeRuntimeInspection(receipt) })
-      // The Jev decision calls the gate really made here (the gate call, and the planner-shape call when it woke): what a direct
-      // route would not have made. Not LLM wakes.
-      if (c4) await this.jev.noteGateRoute(c4, routed.route, routed.decision_called === true ? (routed.steering?.typed_state_mode ? 2 : 1) : 0)
-    }
-    if (routed.route === 'wait_runtime') {
-      if (c4) await this.jev.discardHandle(c4, 'gate_waits_for_active_runtime')
-      return null
-    }
-
-    // Repair unit B: a finished wait-only batch carries a fresh read of the step's machine, so the model never
-    // plans its next move from a stale narrative observation.
-    const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
-    const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
-    const transitionFact = stepCompletion?.verified === true ? this.stepTransitionFact(stepCompletion.state) : ''
-    const factBundle = pendingAmendment ? undefined : await this.postBatchFactBundle(routed.route, {
-      families: selectedObservationFamilies(routed.steering), view: receipt.view, closeWhenCovered: true })
-
-    this.reasoningTriggerSource = routed.route === 'continue_current'
-      ? 'post_step_continue'
-      : routed.route === 'targeted_observation'
-        ? 'post_step_observe'
-        : routed.route === 'reanchor_plan'
-          ? 'post_step_reanchor'
-          : routed.route === 'replan'
-            ? 'post_step_replan'
-            : null
-    if (routed.route === 'reanchor_plan') this.planUpdateReason = 'reanchor_plan'
+    // The decision-scoped overrides are saved before the step settles and restored on every exit, as failed() and request() do:
+    // a slice close inside settleCompletedStepState can commit the next slice and run its C3 executor decision to the end (Run AJ:
+    // that executor spent its allowance to 0, the settled return skipped the restore, and the 0 reached the next C7 executor).
+    // A decision's budget never outlives the wake that set it.
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
     const previousObservationRelevance = this.observationRelevanceOverride
     const previousPlanningHorizon = this.planningHorizonOverride
-    this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
-    this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
-    this.observationBudgetRemaining = this.observationBudgetOverride
-    this.observationRelevanceOverride = selectedObservationFamilies(routed.steering)
-    this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
-    this.jev.beginWake(c4)
-    let wakeFailed = true
     try {
-      const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}${transitionFact ? `[HARNESS] ${transitionFact} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}${deferredFacts ? ` ${deferredFacts}` : ''}`,
-        'factorio.completion_continuation',
-        { factBundle },
-      )
-      wakeFailed = false
-      if (pendingAmendment) { this.pendingInteractionAmendment = null; this.pendingAmendmentConversationSeq = undefined }
-      return result
+      const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
+      if (settled) return settled
+      // U6: a step verified inside the slice may put the executor past its hard limit (C8).
+      await this.executorStepCloseBoundary({ withinTurn: false })
+
+      // U11 (C4): is the next committed step clear? In shadow this only records Jev's judgment next to the gate below
+      // (nothing changes); once the family has earned `deciding` and Jev confidently says direct_to_executor, the
+      // gate, the planner-shape call and the observation budget are skipped. The completion gate above already owned
+      // the step close; nothing here advances the tracker.
+      const c4 = pendingAmendment ? undefined : await this.jev.c4Boundary({ stepCompletion, receipt, pendingAmendment })
+      let routed
+      if (c4?.acted) routed = await this.routeDirectToExecutor(c4)
+      else {
+        routed = pendingAmendment
+          ? { route: 'fallback_planner', decision_called: false }
+          : await this.routePostStepDecision(receipt, { inspected: this.jev.takeRuntimeInspection(receipt) })
+        // The Jev decision calls the gate really made here (the gate call, and the planner-shape call when it woke): what a direct
+        // route would not have made. Not LLM wakes.
+        if (c4) await this.jev.noteGateRoute(c4, routed.route, routed.decision_called === true ? (routed.steering?.typed_state_mode ? 2 : 1) : 0)
+      }
+      if (routed.route === 'wait_runtime') {
+        if (c4) await this.jev.discardHandle(c4, 'gate_waits_for_active_runtime')
+        return null
+      }
+
+      // Repair unit B: a finished wait-only batch carries a fresh read of the step's machine, so the model never
+      // plans its next move from a stale narrative observation.
+      const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
+      const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
+      const transitionFact = stepCompletion?.verified === true ? this.stepTransitionFact(stepCompletion.state) : ''
+      const factBundle = pendingAmendment ? undefined : await this.postBatchFactBundle(routed.route, {
+        families: selectedObservationFamilies(routed.steering), view: receipt.view, closeWhenCovered: true })
+
+      this.reasoningTriggerSource = routed.route === 'continue_current'
+        ? 'post_step_continue'
+        : routed.route === 'targeted_observation'
+          ? 'post_step_observe'
+          : routed.route === 'reanchor_plan'
+            ? 'post_step_reanchor'
+            : routed.route === 'replan'
+              ? 'post_step_replan'
+              : null
+      if (routed.route === 'reanchor_plan') this.planUpdateReason = 'reanchor_plan'
+      this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
+      this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
+      this.observationBudgetRemaining = this.observationBudgetOverride
+      this.observationRelevanceOverride = selectedObservationFamilies(routed.steering)
+      this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
+      this.jev.beginWake(c4)
+      let wakeFailed = true
+      try {
+        const result = await this.continueFromModMessage(
+          `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}${transitionFact ? `[HARNESS] ${transitionFact} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}${deferredFacts ? ` ${deferredFacts}` : ''}`,
+          'factorio.completion_continuation',
+          { factBundle },
+        )
+        wakeFailed = false
+        if (pendingAmendment) { this.pendingInteractionAmendment = null; this.pendingAmendmentConversationSeq = undefined }
+        return result
+      }
+      finally {
+        // U11: what the wake that ran cost and did (scored when the step verifies). Never masks the wake's own result.
+        try { await this.jev.endWake(c4, { error: wakeFailed }) }
+        catch (error) { this.log(`[jev] wake measurement failed: ${error instanceof Error ? error.message : String(error)}`) }
+        this.reasoningTriggerSource = null
+      }
     }
     finally {
-      // U11: what the wake that ran cost and did (scored when the step verifies). Never masks the wake's own result.
-      try { await this.jev.endWake(c4, { error: wakeFailed }) }
-      catch (error) { this.log(`[jev] wake measurement failed: ${error instanceof Error ? error.message : String(error)}`) }
-      this.reasoningTriggerSource = null
       this.reasoningBudgetOverride = previousReasoningBudget
       this.observationBudgetOverride = previousObservationBudget
       this.observationBudgetRemaining = previousObservationBudgetRemaining
