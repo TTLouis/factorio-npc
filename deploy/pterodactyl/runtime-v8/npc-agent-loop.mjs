@@ -3716,6 +3716,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const generation = this.generation
     const lineage = this.agentContext.lineageSequence
     const actorFence = { ...(args.actor ?? this.epoch) }
+    const loopHadEpoch = Boolean(this.epoch) // between turns after a reset the loop holds none while the caller names the actor
     const role = args.role ?? args.packet?.event?.role ?? this.agentContext.role
     const checkpoint = args.checkpoint ?? args.packet?.event?.checkpoint
     try {
@@ -3823,7 +3824,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const currentPlan = currentState && getActivePlanningPlan(currentState)
         if (this.generation !== generation || this.agentContext.lineageSequence !== lineage
           || this.agentContext.handoffId !== restaged.handoff_id || this.agentContext.role !== EXECUTOR_ROLE
-          || this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch
+          || (this.epoch || loopHadEpoch ? this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch : false)
           || currentState?.goal?.goal_id !== state.goal.goal_id || currentState?.goal?.status !== GOAL_STATUS.ACTIVE
           || currentPlan?.plan_id !== expectedPlan?.plan_id || currentPlan?.plan_version !== expectedPlan?.plan_version
           || currentPlan?.active_step_index !== expectedPlan?.active_step_index) {

@@ -222,3 +222,16 @@ test('a superseded C7 recovery handoff cannot replenish a newer lineage observat
   assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining, w.agent.observationDecisionForced], [1, 1, true])
   assert.equal(w.rows('context.executor_observation_started', w.mark).length, 0)
 })
+
+test('a C7 between turns after a reset (no loop epoch, the caller names the actor) still starts a fresh decision', async () => {
+  const w = await executorWorld()
+  const actor = w.agent.epoch
+  w.agent.reset()
+  assert.equal(w.agent.epoch, null)
+  spend(w.agent)
+  const restaged = await w.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:after_reset', actor, requestId: 'req_after_reset' })
+  assert.equal(restaged.restaged, true, JSON.stringify(restaged))
+  assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining], [4, 4])
+  const [row] = w.rows('context.executor_observation_started', w.mark)
+  assert.deepEqual([row.data.checkpoint, row.data.reason, row.data.handoff_id], ['C7', 'new_executor_decision_at_recovery', restaged.handoff_id])
+})
