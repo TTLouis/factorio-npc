@@ -205,7 +205,7 @@ import {
   retireGoalRequirements,
 } from './goal-requirements.mjs'
 import { StepReadLedger, stepReadKey, UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
-import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
+import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_PLACED_ENTITY_REASON, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchPlacedEntityRead, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
 import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -7096,7 +7096,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // The predicted lookups for the executor's next round, read live in one go when the batch receipt lands:
   // inventory, the default read of each observation family Jev selected (`families`; a completion receipt `view`
-  // names the entity its batch's one placement made), then the recipes it already read for this step (see post-batch-facts.mjs).
+  // names the entity its batch's one placement made), the status of that placed entity whatever Jev selected (a harness read that
+  // credits no family: Run AJ), then the recipes it already read for this step (see post-batch-facts.mjs).
   // `closeWhenCovered` lets a bundle that answers every selected family close the decision's read-only phase.
   async postBatchFactBundle(route, { families = null, view, closeWhenCovered = false } = {}) {
     if (this.agentContext?.role !== EXECUTOR_ROLE || !POST_BATCH_ROUTES.has(route) || this.batchInFlight) return undefined
@@ -7104,12 +7105,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!stepKey) return undefined
     this.stepFactWorkingSet ??= new StepFactWorkingSet()
     const mutation = this.worldMutationSeq ?? 0
-    const familyReads = postBatchFamilyReads(families, { placedUnitNumber: singlePlacedUnitNumber(view, this.epoch?.actor_id) })
+    const placedUnitNumber = singlePlacedUnitNumber(view, this.epoch?.actor_id)
+    const familyReads = postBatchFamilyReads(families, { placedUnitNumber })
+    // After the family reads, so its size can never push out a read that answers a selected family.
+    const placedRead = postBatchPlacedEntityRead(placedUnitNumber)
     const planned = []
-    for (const item of [{ name: 'getInventoryItems', args: {} }, ...familyReads, ...this.stepFactWorkingSet.recipes(stepKey)]) {
+    for (const item of [{ name: 'getInventoryItems', args: {} }, ...familyReads, ...(placedRead ? [placedRead] : []), ...this.stepFactWorkingSet.recipes(stepKey)]) {
       const signature = item.signature ?? toolSignature(item.name, item.args)
       const held = planned.find(entry => entry.signature === signature)
-      if (held) held.family ??= item.family
+      if (held) {
+        held.family ??= item.family
+        held.harness ??= item.harness
+      }
       else planned.push({ ...item, signature })
     }
     const reads = []
@@ -7133,16 +7140,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         continue
       }
       chars += output.length
-      reads.push({ name: item.name, args: item.args, signature: item.signature, output, ...(item.family ? { family: item.family } : {}) })
+      reads.push({ name: item.name, args: item.args, signature: item.signature, output, ...(item.family ? { family: item.family } : {}),
+        ...(item.harness ? { harness: item.harness } : {}) })
     }
     const selected = Array.isArray(families) ? [...new Set(families)] : []
+    // Only a read tagged with a selected family answers it: the placed-entity harness read adds facts, never coverage.
     const covered = selected.filter(family => reads.some(read => read.family === family && postBatchReadAnswers(read)))
+    const placedHeld = placedRead ? reads.find(read => read.harness === 'placed_entity') : undefined
     await this.traceEvent('observation.post_batch_facts', {
       request_id: this.traceRequest?.id,
       route,
       tools: reads.map(read => read.name),
       chars,
       ...(selected.length ? { selected_families: selected, covered_families: covered, uncovered_families: selected.filter(family => !covered.includes(family)) } : {}),
+      ...(placedRead ? { placed_entity: { unit_number: placedUnitNumber, reason: POST_BATCH_PLACED_ENTITY_REASON,
+        family_selected: placedHeld?.family === 'entity_status', answered: placedHeld ? postBatchReadAnswers(placedHeld) : false } } : {}),
       ...(skipped.length ? { skipped } : {}),
     })
     return reads.length ? { reads, mutation, families: selected, covered, closeWhenCovered } : undefined
