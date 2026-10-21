@@ -128,7 +128,8 @@ test('Run AJ: the C7 auto-resume executor starts a fresh traced observation deci
   const started = w.rows('context.executor_observation_started').filter(row => row.data.checkpoint === 'C7')
   assert.equal(started.length, 1)
   assert.deepEqual([started[0].data.handoff_id, started[0].data.reason, started[0].data.previous_remaining, started[0].data.observation_remaining],
-    [restaged.data.handoff_id, 'new_executor_decision_at_recovery', 0, 4])
+    // previous_remaining: what the pause left behind. Run AJ left the spent 0; completed() now restores the value it found (the next test).
+    [restaged.data.handoff_id, 'new_executor_decision_at_recovery', null, 4])
   assert.equal(started[0].request_id ?? started[0].data.request_id, restaged.request_id ?? restaged.data.request_id, 'traced under the recovery request')
   assert.equal(c7First.handoffId, restaged.data.handoff_id)
 
