@@ -37,7 +37,7 @@
 import { createHash } from 'node:crypto'
 
 import { sanitizeDurableModelText } from './durable-text.mjs'
-import { topologyText } from './topology-context.mjs'
+import { FLUID_HINTS_STEP_MARK, topologyText } from './topology-context.mjs'
 import { describeGoalCondition } from './goal-definition.mjs'
 import {
   buildContextRestagedEvent,
@@ -1732,12 +1732,15 @@ function fluidHintsRecord(hints, limits, buildFluids) {
   const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y})${isPlainObject(anchor.approach) && Number.isFinite(anchor.approach.x) && Number.isFinite(anchor.approach.y) ? ` approach=(${Math.round(anchor.approach.x * 100) / 100},${Math.round(anchor.approach.y * 100) / 100})` : ''} surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}${anchor.coverage_complete === false ? ` coverage=INCOMPLETE${Number.isSafeInteger(anchor.ungenerated_chunk_count) ? `(${anchor.ungenerated_chunk_count} chunks ungenerated; nearer water may exist)` : '(nearer water may exist)'}` : ''}`)
   const kept = boundedKept(parts, ' | ', limits.fluidHintChars)
   const more = parts.length - kept.length
+  // The fluids among the shown anchors that the step's unplaced entities carry, named at the end of the line. A provider request
+  // that sheds anchors to fit live topology reads this mark and never sheds those anchors (reclaimTopologyRoom).
+  const stepFluids = [...new Set(list.slice(0, kept.length).map(anchor => anchor.fluid_name).filter(fluid => needed.has(fluid)))].sort()
   return {
     key: 'fluid_source_hints',
     block: 'step',
     drop: list.some(anchor => needed.has(anchor.fluid_name)) ? 'fluid_source_hints_for_step' : 'fluid_source_hints',
     shown: kept.length,
-    text: `fluid_source_hints (HISTORICAL: positions where native fluid tiles were observed earlier, newest first; NOT current, not nearest, not a reachable or legal placement; re-check with getFluidSourceTiles before placing anything): ${kept.join(' | ')}${more > 0 ? ` | (+${more} more)` : ''}`,
+    text: `fluid_source_hints (HISTORICAL: positions where native fluid tiles were observed earlier, newest first; NOT current, not nearest, not a reachable or legal placement; re-check with getFluidSourceTiles before placing anything): ${kept.join(' | ')}${more > 0 ? ` | (+${more} more)` : ''}${stepFluids.length > 0 ? `${FLUID_HINTS_STEP_MARK}${stepFluids.join(',')}]` : ''}`,
   }
 }
 

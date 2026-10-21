@@ -1602,7 +1602,8 @@ test('Run V: the prototype data names the fluids of the entities still to place,
   const args = runAbPacketArgs()
   const facts = { ...args.executorFacts, fluid_source_hints: hints }
   const run = (buildFluids, maxChars) => buildHandoffPacket({ ...args, executorFacts: { ...facts, ...(buildFluids ? { build_fluids: buildFluids } : {}) }, limits: { maxChars } })
-  const full = run(undefined, 100000)
+  // Measured with the step fluids: the serving record ends with the mark naming them (` [serves this step: water]`).
+  const full = run(['steam', 'water'], 100000)
   const readAgain = full.text.split('\n').filter(line => /^(?:recipe_fact |held_counts|placed_machines|active_step_contract)/.test(line))
   const room = full.chars - readAgain.reduce((sum, line) => sum + line.length + 1, 0) // all the executor can read again is over the limit
 
@@ -1685,7 +1686,7 @@ test('AB-3: with five tile fluids and water last, the water hints of a pump-to-b
   const water = learnWater(waterAnswer([waterSample(22, 8), waterSample(-82, -19)])).anchors
   const lava = { name: 'lava', fluid_name: 'lava', surface_index: 1, position: { x: 500, y: 500 }, as_of: water[0].as_of }
   const run = (hints, buildFluids, maxChars) => buildHandoffPacket({ ...args, executorFacts: { ...args.executorFacts, fluid_source_hints: hints, ...(buildFluids ? { build_fluids: buildFluids } : {}) }, limits: { maxChars } })
-  const full = run(water, undefined, 100000)
+  const full = run(water, kit, 100000) // with the step-fluid mark the serving record carries
   const readAgain = full.text.split('\n').filter(line => /^(?:recipe_fact |held_counts|placed_machines|active_step_contract)/.test(line))
   const room = full.chars - readAgain.reduce((sum, line) => sum + line.length + 1, 0)
   const serving = run(water, kit, room)

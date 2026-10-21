@@ -12658,7 +12658,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         .reduce((sum, row) => sum + String(row.content).length + 1, 0)
       let handoffChars = packetChars(providerMessages)
       let room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars
-      let fitted = fitTopologyBlock(topology, room)
+      // The block's held counts can give way to a live entity only when this request already shows the live inventory.
+      const heldShown = providerMessages.some(row => typeof row.content === 'string' && row.content.startsWith(POST_BATCH_FACTS_MARKER)
+        && row.content.includes('\ngetInventoryItems {} => '))
+      let fitted = fitTopologyBlock(topology, room, { heldShown })
       // Run AJ: a packet sized while the block was empty must not evict the entity a later batch placed. Shed historical packet
       // lines from this request's copy first (reclaimTopologyRoom), then fit again in the room that frees (same 6000 total).
       const wanted = Math.min(TOPOLOGY_LIMITS.chars, fitted.full_chars)
@@ -12670,7 +12673,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           providerMessages = reclaim.messages
           handoffChars = packetChars(providerMessages)
           room = Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars)
-          fitted = fitTopologyBlock(topology, room)
+          fitted = fitTopologyBlock(topology, room, { heldShown })
           await this.traceEvent('context.topology_room_reclaimed', { request_id: this.traceRequest?.id, state: topology.state,
             reason: liveEntities > 0 ? 'live_topology_entities_outrank_historical_packet_records' : 'live_topology_outranks_historical_packet_records',
             room_before: roomBefore, room_after: room, handoff_chars: handoffChars, full_chars: fitted.full_chars, reclaimed_chars: reclaim.reclaimed,
@@ -12678,8 +12681,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       if (fitted.text) providerMessages = insertTailBlock(providerMessages, { role: 'user', content: fitted.text })
-      if (fitted.trimmed) await this.traceEvent('context.topology_trimmed', { request_id: this.traceRequest?.id, state: topology.state,
-        room, handoff_chars: handoffChars, full_chars: fitted.full_chars, sent_chars: fitted.sent_chars, omitted: fitted.omitted })
+      if (fitted.trimmed) {
+        let sent
+        try { sent = fitted.text ? JSON.parse(fitted.text.slice(TOPOLOGY_PREFIX.length)) : undefined }
+        catch { sent = undefined }
+        await this.traceEvent('context.topology_trimmed', { request_id: this.traceRequest?.id, state: topology.state,
+          reason: fitted.omitted ? 'no_room_for_topology_block' : 'topology_block_over_packet_room',
+          room, handoff_chars: handoffChars, full_chars: fitted.full_chars, sent_chars: fitted.sent_chars, omitted: fitted.omitted,
+          full_entities: Array.isArray(topology.entities) ? topology.entities.length : 0,
+          sent_entities: Array.isArray(sent?.entities) ? sent.entities.length : 0, held_shown_elsewhere: heldShown,
+          ...(Array.isArray(sent?.fields_omitted) ? { fields_omitted: sent.fields_omitted } : {}) })
+      }
     }
     const controlState = this.controlDecisionState(effectiveAllowTools)
     const controlText = `[CONTROL_DECISION_STATE] ${JSON.stringify(controlState)}\n${controlState.phase === 'draft'

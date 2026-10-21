@@ -30,6 +30,11 @@ const AJ_STEP = "--- step block ---\nrestage: role=executor checkpoint=C3 reason
 // The 679-char block that request sent: the 1,080-char read with unit 37 trimmed out of `entities`.
 const AJ_SENT_TOPOLOGY = "fresh_topology: {\"state\":\"fresh\",\"source\":\"native_bounded_reads\",\"actor_id\":18,\"epoch\":1,\"session\":\"a1c841f8b08d226acfac1cbf01f32725da3e8cce3a98b8cedb1a7e25bbb214ac\",\"reason\":\"bounded_safe_boundary_native_facts\",\"identities\":\"observations_not_execution_authority\",\"observed_tick\":104273,\"surface_index\":1,\"force_index\":1,\"truncated\":true,\"entities\":[],\"held\":{\"wooden-chest\":1,\"inserter\":1,\"small-electric-pole\":4,\"pipe\":8,\"boiler\":1,\"steam-engine\":1,\"copper-plate\":8,\"copper-cable\":1},\"held_scope\":\"selected_inventory_items; omitted_counts_unknown\",\"held_omitted\":2,\"capacity\":[],\"expansion\":\"capacity_unknown; request a bounded relevant prototype fact before assuming a ratio\"}"
 const AJ_STEP_ID = 'goal_19qf4j1_1_p5_v1_s5_1dplaiu'
+// Run AJ's step still had a boiler to place, which carries water, so a current packet marks its 11 water anchors as the step's own
+// (the 'fluid_source_hints_for_step' tier). The verbatim line predates the mark.
+const AJ_HINTS_LINE = AJ_STEP.split('\n').find(line => line.startsWith('fluid_source_hints'))
+const AJ_STEP_MARKED = AJ_STEP.replace(AJ_HINTS_LINE, `${AJ_HINTS_LINE} [serves this step: water]`)
+const anchorsOf = (text, fluid) => (String(text).split('\n').find(line => line.startsWith('fluid_source_hints')) ?? '').split(' | ').filter(part => part.startsWith(`${fluid}:`) || part.includes(`): ${fluid}:`)).length
 const AJ_STEP_TEXT = 'Establish a shoreline pump, connected boiler and steam engine using validated live fluid geometry.'
 
 // Labelled copies only: the legacy [RUNTIME_COMPAT_STATE] projection dumps the goal's whole review_notes map (every step's) as JSON
@@ -186,6 +191,10 @@ test('Run AJ: under packet pressure the review notes outlast every historical fl
   const roomy = packet(6000 - 679)
   assert.ok(notesLine([{ content: roomy.text }]).includes(RUN_AJ_NOTES), 'the whole notes in the record')
   assert.ok(roomy.text.includes('fluid_source_hints (HISTORICAL'))
+  assert.match(roomy.text, /^fluid_source_hints \(HISTORICAL[^\n]* \[serves this step: water\]$/m, 'the record names the step fluids it serves')
+  const unmarked = buildHandoffPacket({ planningState: state, role: 'executor', checkpoint: 'C3', reason: 'executor_fresh_at_plan_commit', now: 1,
+    executorFacts: { fluid_source_hints: hints }, limits: { maxChars: 100000 } })
+  assert.doesNotMatch(unmarked.text, /serves this step/, 'no mark when no anchor serves the step')
   const tight = packet(roomy.chars - 200)
   assert.ok(tight.dropped.includes('fluid_source_hints'), 'the hints drop first')
   assert.ok(notesLine([{ content: tight.text }]).includes(RUN_AJ_NOTES), 'the notes stay whole')
@@ -248,7 +257,7 @@ function legacyPlan() {
       active_step_id: 'step_5', steps: [{ id: 'step_5', description: AJ_STEP_TEXT, status: 'active' }, { id: 'step_6', description: 'Connect electrical distribution', status: 'pending' }], evidence: [] } }
 }
 
-function runAjAgent({ families = ['nearby_world'], route = 'targeted_observation', topology = ajTopology() } = {}) {
+function runAjAgent({ families = ['nearby_world'], route = 'targeted_observation', topology = ajTopology(), stepRow = AJ_STEP } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(KEY, legacyPlan())
   const planning = ajPlanningState()
@@ -275,7 +284,7 @@ function runAjAgent({ families = ['nearby_world'], route = 'targeted_observation
   agent.baseMessages = [
     { role: 'system', content: agent.systemPrompt },
     { role: 'user', content: AJ_STABLE },
-    { role: 'user', content: AJ_STEP.replaceAll(AJ_STEP_ID, stepId) },
+    { role: 'user', content: stepRow.replaceAll(AJ_STEP_ID, stepId) },
   ]
   agent.messages = agent.baseMessages.map(message => ({ ...message }))
   agent.requestInfo = { memoryKey: KEY, turnId: 1, sender: '<server>', text: 'automate red science' }
@@ -338,7 +347,59 @@ test('Run AJ: the placed-entity read never changes which selected families the b
   assert.equal(selected.placed_entity.family_selected, true)
 })
 
-test('Run AJ: fresh_topology keeps the placed offshore pump by shedding historical fluid hints, within the 6000-character total', async () => {
+test('Run AJ: the step\'s own water anchors all survive, and fresh_topology still carries unit 37 by giving up its own summaries', async () => {
+  const topology = ajTopology()
+  const full = topologyText(topology)
+  const { topologyRows, packetChars, stepBlock, named, room } = await firstRound({ topology, stepRow: AJ_STEP_MARKED })
+  assert.ok(room < full.length, `room ${room} < block ${full.length}`)
+  // Nothing in this packet ranks below the live block: no Jev fact, note or historical entity, and every anchor serves the step.
+  assert.equal(named('context.topology_room_reclaimed').length, 0)
+  assert.equal(anchorsOf(stepBlock, 'water'), 11)
+  assert.ok(stepBlock.includes(AJ_HINTS_LINE), 'the hints line is unchanged')
+  assert.equal(topologyRows.length, 1)
+  const sent = JSON.parse(topologyRows[0].slice(TOPOLOGY_PREFIX.length))
+  assert.deepEqual(sent.entities.map(entity => [entity.name, entity.unit_number, entity.position, entity.direction]), [['offshore-pump', 37, { x: 7.5, y: 50.5 }, 4]])
+  assert.deepEqual(sent.entities[0].fluid[0].ports[0].opens, { x: 6.5, y: 50.5 })
+  assert.equal(sent.truncated, true)
+  assert.ok(sent.fields_omitted.includes('held') && sent.fields_omitted.includes('expansion'), JSON.stringify(sent.fields_omitted))
+  assert.equal(sent.identities, 'observations_not_execution_authority', 'the authority label stays')
+  assert.ok(packetChars + topologyRows[0].length <= 6000, `packet ${packetChars} + topology ${topologyRows[0].length}`)
+  const [trimmed] = named('context.topology_trimmed')
+  assert.equal(trimmed?.request_id, 'req_mvi6bs3r_1')
+  assert.deepEqual([trimmed.reason, trimmed.full_entities, trimmed.sent_entities, trimmed.omitted], ['topology_block_over_packet_room', 1, 1, false])
+  assert.equal(trimmed.held_shown_elsewhere, true, 'the held counts gave way because [POST_BATCH_FACTS] shows the live inventory')
+  assert.deepEqual(trimmed.fields_omitted, sent.fields_omitted)
+})
+
+test('anchors of a fluid the step does not need are shed for the live block; the step\'s water anchors stay', async () => {
+  const water = Array.from({ length: 6 }, (_, index) => ({ name: 'water', fluid_name: 'water', surface_index: 1, position: { x: 9, y: 51 - index },
+    approach: { x: 8.5, y: 50.5 - index }, as_of: { tick: 98887, epoch: 1 } }))
+  const oil = Array.from({ length: 5 }, (_, index) => ({ name: 'crude-oil', fluid_name: 'crude-oil', surface_index: 1, position: { x: 300 + index, y: -40 },
+    as_of: { tick: 90000, epoch: 1 } }))
+  let state = applyPlanningEvent(createEmptyPlanningState(), { type: PLANNING_EVENT.GOAL_ACCEPTED, now: 10, goal_id: 'goal_aj', owner: 'louis', objective: 'automate red science' })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.DRAFT_CREATED, now: 20, steps: [{ description: AJ_STEP_TEXT }] })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.PLAN_COMMITTED, now: 30, plan_id: getActivePlan(state).plan_id, runtime_validation: { passed: true } })
+  const packet = buildHandoffPacket({ planningState: state, role: 'executor', checkpoint: 'C3', reason: 'r', now: 1,
+    executorFacts: { fluid_source_hints: [...oil, ...water], build_fluids: ['water'] }, limits: { maxChars: 100000 } })
+  const line = packet.volatileText.split('\n').find(item => item.startsWith('fluid_source_hints'))
+  assert.match(line, / \[serves this step: water\]$/)
+  const topology = ajTopology()
+  const full = topologyText(topology)
+  const { topologyRows, stepBlock, named, room } = await firstRound({ topology, stepRow: AJ_STEP.replace(AJ_HINTS_LINE, line) })
+  assert.ok(room < full.length)
+  const [reclaimed] = named('context.topology_room_reclaimed')
+  assert.equal(reclaimed?.request_id, 'req_mvi6bs3r_1')
+  const [hints] = reclaimed.shed.filter(entry => entry.record === 'fluid_source_hints')
+  assert.ok(hints.hints_removed > 0 && hints.hints_removed <= 5, JSON.stringify(hints))
+  assert.deepEqual([hints.step_fluids, hints.step_anchors_kept, hints.lines_removed], [['water'], 6, 0])
+  assert.equal(anchorsOf(stepBlock, 'water'), 6, 'every water anchor stays')
+  assert.ok(anchorsOf(stepBlock, 'crude-oil') < 5)
+  assert.match(stepBlock, / \[serves this step: water\]$/m)
+  assert.equal(topologyRows[0], full, 'the whole block fits after the shed')
+  assert.equal(named('context.topology_trimmed').length, 0)
+})
+
+test('a hints line without the step mark (it serves no step fluid) sheds tail anchors before the live block loses unit 37', async () => {
   const topology = ajTopology()
   const full = topologyText(topology)
   assert.ok(full.length > 734 && full.length <= TOPOLOGY_LIMITS.chars, `the post-placement block (${full.length}) exceeds the 734-char room Run AJ left`)
@@ -383,4 +444,8 @@ test('the provider-time shed only removes the lines it names from packet rows, n
   assert.match(result.messages[1].content, /\(\+\d+ more\)$/m, 'the cut is reported in the record')
   const none = topologyContext.reclaimTopologyRoom([{ role: 'user', content: AJ_STABLE }, step], 300, { liveEntities: false })
   assert.equal(none.reclaimed, 0, 'historical hints shed only for live entities')
+  const marked = { role: 'user', content: AJ_STEP_MARKED }
+  const kept = topologyContext.reclaimTopologyRoom([{ role: 'user', content: AJ_STABLE }, marked], 300, { liveEntities: true })
+  assert.equal(kept.reclaimed, 0, 'anchors of a step fluid are never shed')
+  assert.equal(kept.messages[1], marked)
 })
