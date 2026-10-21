@@ -119,10 +119,41 @@ export function topologyObstruction(answer) {
     })),
     authority: 'sampled_obstructions_only_not_clearance_or_removal_permission' }
 }
-export function topologyText(facts, maxChars = TOPOLOGY_LIMITS.chars) {
+// What a block over its room gives up before any live entity (Run AJ, 2026-10-21): the block was cut to fit a room its packet left
+// while it was empty, and the entity the batch had just placed was the first thing to go.
+//  1. The lossless part: an entity's empty power/thermal summary and false truncation flags, whose absence says the same thing.
+//  2. Fields that carry no world fact: the expansion advice, the session and the read reason.
+//  3. The held counts with their scope, but only when the same request already shows a live inventory read (`heldShown`: the
+//     post-batch facts after a batch). Otherwise held counts outlast entities, as before.
+// Each dropped group is named in `fields_omitted` and sets `truncated`.
+const TOPOLOGY_SUMMARY_GROUPS = Object.freeze([['expansion'], ['session'], ['reason'], ['held', 'held_scope', 'held_omitted']])
+const isEmptyObject = value => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0
+function compactEntity(entity) {
+  if (!entity || typeof entity !== 'object') return entity
+  const out = { ...entity }
+  for (const key of ['power', 'thermal']) if (isEmptyObject(out[key])) delete out[key]
+  if (out.fluid_truncated === false) delete out.fluid_truncated
+  if (Array.isArray(out.fluid)) out.fluid = out.fluid.map(storage => storage?.truncated === false ? Object.fromEntries(Object.entries(storage).filter(([key]) => key !== 'truncated')) : storage)
+  return out
+}
+
+export function topologyText(facts, maxChars = TOPOLOGY_LIMITS.chars, { heldShown = false } = {}) {
   if (!facts) return ''
   const bounded = structuredClone(facts)
   let text = TOPOLOGY_PREFIX + JSON.stringify(bounded)
+  if (text.length > maxChars && Array.isArray(bounded.entities)) {
+    bounded.entities = bounded.entities.map(compactEntity)
+    text = TOPOLOGY_PREFIX + JSON.stringify(bounded)
+  }
+  for (const group of TOPOLOGY_SUMMARY_GROUPS) {
+    if (text.length <= maxChars) break
+    if (group[0] === 'held' && !heldShown) continue
+    if (!group.some(key => bounded[key] !== undefined)) continue
+    for (const key of group) delete bounded[key]
+    bounded.truncated = true
+    bounded.fields_omitted = [...(bounded.fields_omitted ?? []), group[0]]
+    text = TOPOLOGY_PREFIX + JSON.stringify(bounded)
+  }
   // Keep the first (thermal producer) and sampled obstacles ahead of peripheral entities.
   while (text.length > maxChars && bounded.entities?.length > 1) {
     bounded.entities.pop(); bounded.truncated = true; text = TOPOLOGY_PREFIX + JSON.stringify(bounded)
@@ -150,9 +181,9 @@ export function topologyReserve(facts) {
 
 // The block a request sends in the room the packet left. The packet was sized from the block measured at its restage, and a later
 // read can be larger (an obstruction sample, a re-read), so the trimmed or omitted share is reported for a trace, never silent.
-export function fitTopologyBlock(facts, room) {
+export function fitTopologyBlock(facts, room, options = {}) {
   const full = topologyText(facts)
-  const text = room >= 120 ? topologyText(facts, room) : ''
+  const text = room >= 120 ? topologyText(facts, room, options) : ''
   return { text, full_chars: full.length, sent_chars: text.length, trimmed: text !== full, omitted: !text }
 }
 
@@ -167,32 +198,46 @@ export function fitTopologyBlock(facts, room) {
 //    and the line goes only when no anchor is left.
 // Nothing else is touched: no mandatory record, review notes, residual, receipt or contract. The canonical conversation is not
 // mutated. Packet and block together stay within the same 6,000 characters, because the room is recomputed from what is left.
+// Fluid-source anchors of a fluid the step's own unplaced entities carry are never shed. The packet keeps those in its late
+// 'fluid_source_hints_for_step' tier because they cannot be re-read once the actor leaves (HANDOFF_DROP_ORDER), and it names those
+// fluids at the end of the line (FLUID_HINTS_STEP_MARK). A line without the mark serves no step fluid; its packet tier is the
+// early 'fluid_source_hints' one. When step anchors leave too little room, the block makes room inside itself instead (topologyText).
 const SHED_LINES = Object.freeze([
   { record: 'jev_facts', match: line => line.startsWith('jev_fact[') || line.startsWith('jev_fact_hint ') },
   { record: 'note', match: line => line.startsWith('note (UNVERIFIED') },
   { record: 'historical_entities', match: line => line.startsWith('historical_entities (') },
 ])
 export const FLUID_HINTS_LINE_PREFIX = 'fluid_source_hints (HISTORICAL'
+// Ends a fluid_source_hints line whose anchors include fluids the active step still places entities for: ` [serves this step: water]`.
+export const FLUID_HINTS_STEP_MARK = ' [serves this step: '
+const STEP_MARK = / \[serves this step: ([a-z0-9._-]+(?:,[a-z0-9._-]+)*)\]$/
 const MORE_HINTS = /^\(\+(\d+) more\)$/
 const isPacketRow = row => row?.role === 'user' && typeof row.content === 'string' && (row.content.startsWith('[HANDOFF]') || row.content.startsWith('--- step block ---'))
 
-// The hints line with anchors cut from its tail until `need` characters are saved, or undefined when the whole line must go.
+// The hints line with anchors of no step fluid cut from its tail until `need` characters are saved. `line` is undefined when no
+// anchor is left (only possible without step anchors); `saved` counts the characters freed, `kept_step` the step anchors kept.
 function shorterHintsLine(line, need) {
-  const head = line.indexOf('): ')
-  if (head < 0) return { line: undefined, removed: 0 }
-  const label = line.slice(0, head + 3)
-  const parts = line.slice(head + 3).split(' | ')
+  const mark = STEP_MARK.exec(line)
+  const stepFluids = new Set(mark ? mark[1].split(',') : [])
+  const body = mark ? line.slice(0, mark.index) : line
+  const suffix = mark ? mark[0] : ''
+  const head = body.indexOf('): ')
+  if (head < 0) return { line, removed: 0, saved: 0, kept_step: 0, step_fluids: [...stepFluids] }
+  const label = body.slice(0, head + 3)
+  const parts = body.slice(head + 3).split(' | ')
   let more = 0
   const tail = MORE_HINTS.exec(parts.at(-1) ?? '')
   if (tail) { more = Number(tail[1]); parts.pop() }
+  const fluidOf = part => part.slice(0, Math.max(0, part.indexOf(':')))
   let removed = 0
   let text = line
-  while (line.length - text.length < need && parts.length > 1) {
+  while (line.length - text.length < need && parts.length > 0 && !stepFluids.has(fluidOf(parts.at(-1)))) {
     parts.pop(); removed++; more++
-    text = `${label}${parts.join(' | ')} | (+${more} more)`
+    text = parts.length > 0 ? `${label}${parts.join(' | ')} | (+${more} more)${suffix}` : ''
   }
-  if (line.length - text.length < need) return { line: undefined, removed: removed + parts.length }
-  return { line: text, removed }
+  const keptStep = parts.filter(part => stepFluids.has(fluidOf(part))).length
+  if (parts.length === 0) return { line: undefined, removed, saved: line.length + 1, kept_step: 0, step_fluids: [...stepFluids] }
+  return { line: text, removed, saved: line.length - text.length, kept_step: keptStep, step_fluids: [...stepFluids] }
 }
 
 export function reclaimTopologyRoom(messages, need, { liveEntities = false } = {}) {
@@ -202,8 +247,11 @@ export function reclaimTopologyRoom(messages, need, { liveEntities = false } = {
   const rows = messages.map(row => isPacketRow(row) ? row.content.split('\n') : undefined)
   const note = (record, chars, extra = {}) => {
     const held = shed.find(entry => entry.record === record)
-    if (held) { held.chars += chars; held.lines_removed += extra.lines_removed ?? 0; held.hints_removed = (held.hints_removed ?? 0) + (extra.hints_removed ?? 0) }
-    else shed.push({ record, chars, lines_removed: extra.lines_removed ?? 0, ...(extra.hints_removed !== undefined ? { hints_removed: extra.hints_removed } : {}) })
+    if (held) {
+      held.chars += chars; held.lines_removed += extra.lines_removed ?? 0; held.hints_removed = (held.hints_removed ?? 0) + (extra.hints_removed ?? 0)
+      if (extra.step_anchors_kept !== undefined) held.step_anchors_kept = (held.step_anchors_kept ?? 0) + extra.step_anchors_kept
+    }
+    else shed.push({ record, chars, lines_removed: extra.lines_removed ?? 0, ...extra })
   }
   // Line 0 of a row is its header ([HANDOFF] / --- step block ---) and is never shed.
   for (const { record, match } of SHED_LINES) {
@@ -222,18 +270,13 @@ export function reclaimTopologyRoom(messages, need, { liveEntities = false } = {
       const lines = rows[r]
       for (let i = (lines?.length ?? 0) - 1; i >= 1 && reclaimed < need; i--) {
         if (!lines[i].startsWith(FLUID_HINTS_LINE_PREFIX)) continue
-        const before = lines[i]
-        const cut = shorterHintsLine(before, need - reclaimed)
-        if (cut.line === undefined) {
-          lines.splice(i, 1)
-          reclaimed += before.length + 1
-          note('fluid_source_hints', before.length + 1, { lines_removed: 1, hints_removed: cut.removed })
-        }
-        else {
-          lines[i] = cut.line
-          reclaimed += before.length - cut.line.length
-          note('fluid_source_hints', before.length - cut.line.length, { hints_removed: cut.removed })
-        }
+        const cut = shorterHintsLine(lines[i], need - reclaimed)
+        if (cut.saved <= 0) continue
+        if (cut.line === undefined) lines.splice(i, 1)
+        else lines[i] = cut.line
+        reclaimed += cut.saved
+        note('fluid_source_hints', cut.saved, { lines_removed: cut.line === undefined ? 1 : 0, hints_removed: cut.removed,
+          step_anchors_kept: cut.kept_step, ...(cut.step_fluids.length ? { step_fluids: cut.step_fluids } : {}) })
       }
     }
   }

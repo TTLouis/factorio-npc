@@ -65,7 +65,9 @@ import {
   withoutRawLeafRecipes,
   buildFluidsFromBill,
   buildFluidsTruncated,
+  HANDOFF_PACKET_LIMITS,
   PLANNER_REVIEW_NOTES_LABEL,
+  sanitizeHandoffNote,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
@@ -7131,7 +7133,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const mutation = this.worldMutationSeq ?? 0
     const placedUnitNumber = singlePlacedUnitNumber(view, this.epoch?.actor_id)
     const familyReads = postBatchFamilyReads(families, { placedUnitNumber })
-    // After the family reads, so its size can never push out a read that answers a selected family.
+    // After the family reads, so its size can never push out a read that answers a selected family. It can push the step's
+    // recipe reads out of the POST_BATCH_FACT_CHARS budget instead; each such read is traced in `skipped` with reason 'size'.
     const placedRead = postBatchPlacedEntityRead(placedUnitNumber)
     const planned = []
     for (const item of [{ name: 'getInventoryItems', args: {} }, ...familyReads, ...(placedRead ? [placedRead] : []), ...this.stepFactWorkingSet.recipes(stepKey)]) {
@@ -12692,7 +12695,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         .reduce((sum, row) => sum + String(row.content).length + 1, 0)
       let handoffChars = packetChars(providerMessages)
       let room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars
-      let fitted = fitTopologyBlock(topology, room)
+      // The block's held counts can give way to a live entity only when this request already shows the live inventory.
+      const heldShown = providerMessages.some(row => typeof row.content === 'string' && row.content.startsWith(POST_BATCH_FACTS_MARKER)
+        && row.content.includes('\ngetInventoryItems {} => '))
+      let fitted = fitTopologyBlock(topology, room, { heldShown })
       // Run AJ: a packet sized while the block was empty must not evict the entity a later batch placed. Shed historical packet
       // lines from this request's copy first (reclaimTopologyRoom), then fit again in the room that frees (same 6000 total).
       const wanted = Math.min(TOPOLOGY_LIMITS.chars, fitted.full_chars)
@@ -12704,7 +12710,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           providerMessages = reclaim.messages
           handoffChars = packetChars(providerMessages)
           room = Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars)
-          fitted = fitTopologyBlock(topology, room)
+          fitted = fitTopologyBlock(topology, room, { heldShown })
           await this.traceEvent('context.topology_room_reclaimed', { request_id: this.traceRequest?.id, state: topology.state,
             reason: liveEntities > 0 ? 'live_topology_entities_outrank_historical_packet_records' : 'live_topology_outranks_historical_packet_records',
             room_before: roomBefore, room_after: room, handoff_chars: handoffChars, full_chars: fitted.full_chars, reclaimed_chars: reclaim.reclaimed,
@@ -12712,8 +12718,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       if (fitted.text) providerMessages = insertTailBlock(providerMessages, { role: 'user', content: fitted.text })
-      if (fitted.trimmed) await this.traceEvent('context.topology_trimmed', { request_id: this.traceRequest?.id, state: topology.state,
-        room, handoff_chars: handoffChars, full_chars: fitted.full_chars, sent_chars: fitted.sent_chars, omitted: fitted.omitted })
+      if (fitted.trimmed) {
+        let sent
+        try { sent = fitted.text ? JSON.parse(fitted.text.slice(TOPOLOGY_PREFIX.length)) : undefined }
+        catch { sent = undefined }
+        await this.traceEvent('context.topology_trimmed', { request_id: this.traceRequest?.id, state: topology.state,
+          reason: fitted.omitted ? 'no_room_for_topology_block' : 'topology_block_over_packet_room',
+          room, handoff_chars: handoffChars, full_chars: fitted.full_chars, sent_chars: fitted.sent_chars, omitted: fitted.omitted,
+          full_entities: Array.isArray(topology.entities) ? topology.entities.length : 0,
+          sent_entities: Array.isArray(sent?.entities) ? sent.entities.length : 0, held_shown_elsewhere: heldShown,
+          ...(Array.isArray(sent?.fields_omitted) ? { fields_omitted: sent.fields_omitted } : {}) })
+      }
     }
     const controlState = this.controlDecisionState(effectiveAllowTools)
     const controlText = `[CONTROL_DECISION_STATE] ${JSON.stringify(controlState)}\n${controlState.phase === 'draft'
@@ -15626,15 +15641,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (notes && !carried) {
         this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
         // That message is in the working messages only, and a batch-receipt continuation rebuilds them from baseMessages: Run AJ lost
-        // the notes at the first continuation. The base copy of the step block gets the whole notes in its planner_review_notes record
+        // the notes at the first continuation. The base copy of the step block gets the notes in its planner_review_notes record
         // instead (replaced, or added after the step's brief), so the rebuilt conversation holds them once and they stay step-scoped:
-        // a later step drops this step block (providerMessages) and a restage rebuilds it from the goal's stored notes.
+        // a later step drops this step block (providerMessages) and a restage rebuilds it from the goal's stored notes. The record is
+        // the packet's own text (same sanitizer and limit), so no exact entity id outlives this round's message, and the base block
+        // matches what a restage would show.
         let stamped = false
         this.baseMessages = this.baseMessages.map((row) => {
           if (stamped || row?.role !== 'user' || typeof row.content !== 'string' || !row.content.startsWith('--- step block ---')) return row
           stamped = true
           const lines = row.content.split('\n')
-          const record = `${PLANNER_REVIEW_NOTES_LABEL}${notes}`
+          const record = `${PLANNER_REVIEW_NOTES_LABEL}${sanitizeHandoffNote(notes, HANDOFF_PACKET_LIMITS.reviewNotesChars)}`
           const at = lines.findIndex(line => line.startsWith('planner_review_notes'))
           if (at >= 0) lines[at] = record
           else {
