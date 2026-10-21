@@ -3574,20 +3574,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.assertCurrent()
     // Fold C3 into C8: an executor restaged at a step close that has done nothing since is kept through the round, so the
     // handback resumes it (foldReviewHandback) instead of rebuilding the same packet. Its review request is its last turn.
-    const kept = continuing ? this.foldableReviewMeta(held, activeStep, requestId) : undefined
+    const kept = continuing ? await this.foldableReviewMeta(held, activeStep, requestId) : undefined
     const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId,
       ...(kept ? { keepExecutor: { meta: kept, reply: JSON.stringify(plan) } } : {}) })
     await this.assertCurrent()
-    const reviewMessage =`[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}`
-    if (continuing && returned.returned) {
-      this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id }
-      await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
-        reason: review.reason, bound: 'one_planner_round_per_step', authority: 'advisory_only' })
-      const continued = await this.continueFromModMessage(`${reviewMessage}\n${REVIEW_ROUND_FACT}`, 'planner.review_round_continuation', { withinTurn: true })
-      if (continued !== null) return continued
-      this.reviewContinuation = null
+    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}`
+    try {
+      if (continuing && returned.returned) {
+        this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true }
+        await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
+          reason: review.reason, bound: 'one_planner_round_per_step', authority: 'advisory_only' })
+        const continued = await this.continueFromModMessage(`${reviewMessage}\n${REVIEW_ROUND_FACT}`, 'planner.review_round_continuation', { withinTurn: true })
+        if (continued !== null) return continued
+        this.reviewContinuation = null
+      }
     }
-    this.agentContext.dropParkedExecutor() // no handback is coming: the kept conversation would only go stale
+    finally {
+      this.agentContext.dropParkedExecutor() // the handback took it, or no handback is coming: the kept conversation would only go stale
+    }
     if (continuing) {
       pause()
       chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
@@ -4063,18 +4067,33 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   //
   // Runs Z-AF showed one step restaged twice at its start: C8 at the step close, then C3 when the planner review round handed the
   // same step back, each rebuilding the same packet (owner decision 2026-10-20). When the executor that asked for the review was
-  // restaged at the step close (C8) and nothing has changed since (no batch sent or receipt read, the same plan, step, goal, actor
-  // and reasoning epoch), the planner return keeps its conversation and the handback resumes it with the planner's notes: one
-  // packet, one restage. Every other handback is the C3 restage as before (startExecutorAtCommit).
+  // restaged at the step close (C8) and has sent no batch and read no receipt since, the planner return keeps its conversation and
+  // the handback resumes it: one restage, the same handoff id. The step block of the resumed conversation is rewritten in place
+  // from the packet builder (the executorFactsRefreshText pattern) with the live facts C3 would have re-read and the planner's
+  // notes, so both survive a continuation rebuild from baseMessages. Every other handback is the C3 restage as before
+  // (startExecutorAtCommit). A handback that falls back after a refused fold enters the lifecycle table twice (the refused fold
+  // entry, then the C3 entry): the table is entered by the restage itself, and a refusal there is already traced.
 
-  // The identity of the executor conversation to keep through a review round, or undefined when it is not a C8 conversation that
-  // has done nothing to the world since its restage.
-  foldableReviewMeta(held, activeStep, requestId) {
+  async traceFoldSkipped({ requestId, reason, handoffId, stage }) {
+    try {
+      await this.traceEvent('context.restage_fold_skipped', { request_id: requestId, role: EXECUTOR_ROLE, checkpoint: 'C8', folded_from: 'C3', handoff_id: handoffId, reason, stage }, { requestId })
+    }
+    catch {}
+  }
+
+  // The identity of the executor conversation to keep through a review round, or undefined (traced with its reason) when it is not
+  // a C8 conversation that has done nothing to the world since its restage.
+  async foldableReviewMeta(held, activeStep, requestId) {
     const mark = this.executorStepMark
     const context = this.agentContext
-    if (context.role !== EXECUTOR_ROLE || !context.hasParkedPlanner) return undefined
-    if (mark?.checkpoint !== 'C8' || mark.handoff_id !== context.handoffId || mark.plan_id !== held.plan_id) return undefined
-    if (mark.closed !== completedStepCount(held) || mark.world_mutation_seq !== (this.worldMutationSeq ?? 0)) return undefined
+    const decline = async (reason) => {
+      await this.traceFoldSkipped({ requestId, reason, handoffId: context.handoffId, stage: 'review' })
+      return undefined
+    }
+    if (!context.hasParkedPlanner) return decline('no_parked_planner')
+    if (mark?.checkpoint !== 'C8' || mark.handoff_id !== context.handoffId || mark.plan_id !== held.plan_id) return decline('not_step_close_restage')
+    if (mark.closed !== completedStepCount(held)) return decline('step_closed_since')
+    if (mark.world_mutation_seq !== (this.worldMutationSeq ?? 0)) return decline('world_changed_since_step_close')
     const key = this.activePlanKey()
     return {
       request_id: requestId,
@@ -4088,34 +4107,96 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       closed: mark.closed,
       world_mutation_seq: mark.world_mutation_seq,
       mark: { ...mark },
+      // The round runs on the loop's shared observation fields; the executor gets back what it had, not a fresh allowance.
+      observation: { override: this.observationBudgetOverride, remaining: this.observationBudgetRemaining },
     }
+  }
+
+  // Replace the volatile step block of the active conversation (baseMessages and messages), keeping its `restage:` origin line.
+  replaceExecutorStepBlock(volatileText) {
+    const replaceStep = messages => messages.map(message => {
+      if (message?.role !== 'user' || !String(message.content ?? '').startsWith('--- step block ---')) return message
+      const origin = String(message.content).match(/^restage: .*$/m)?.[0]
+      const content = origin ? volatileText.replace(/^restage: .*$/m, origin) : volatileText
+      return { ...message, content }
+    })
+    this.baseMessages = replaceStep(this.baseMessages)
+    this.messages = replaceStep(this.messages)
+  }
+
+  // The Jev records the step block already carries: they are observations taken at the original restage, so a rewritten block keeps them.
+  retainedJevRecords() {
+    const priorStep = this.messages.find(message => message?.role === 'user' && String(message.content ?? '').startsWith('--- step block ---'))
+    const priorLines = String(priorStep?.content ?? '').split('\n')
+    const jevFacts = priorLines.flatMap(line => {
+      const match = /^jev_fact\[([^\]]+)\] \(harness read at this restage, selected by Jev; advisory, verify before acting\): (.+)$/.exec(line)
+      return match ? [{ family: match[1], text: match[2] }] : []
+    })
+    const jevHints = priorLines.find(line => line.startsWith('jev_fact_hint (Jev, advisory): lookups likely useful here: '))
+      ?.slice('jev_fact_hint (Jev, advisory): lookups likely useful here: '.length).split(', ')
+    return { jevFacts, jevHints }
   }
 
   // The handback: resume the kept executor when everything it was kept for still holds. Returns the restage-shaped result, or
   // undefined (traced as context.restage_fold_skipped, the kept conversation dropped) when the caller must restage as C3.
-  async foldReviewHandback({ planId, requestId, notesChars }) {
+  // `expectedKept`: the review kept an executor, so its absence now is a drop worth a row.
+  async foldReviewHandback({ planId, requestId, notesChars, expectedKept = false }) {
     const context = this.agentContext
     const kept = context.parkedExecutor
-    if (!kept) return undefined
+    if (!kept) {
+      if (expectedKept) await this.traceFoldSkipped({ requestId, reason: 'kept_executor_dropped', stage: 'handback' })
+      return undefined
+    }
     const meta = kept.meta ?? {}
     const skip = async (reason) => {
       context.dropParkedExecutor()
-      await this.traceEvent('context.restage_fold_skipped', { request_id: requestId, role: EXECUTOR_ROLE, checkpoint: 'C8', folded_from: 'C3', handoff_id: kept.handoffId, reason }, { requestId })
+      await this.traceFoldSkipped({ requestId, reason, handoffId: kept.handoffId, stage: 'handback' })
       return undefined
     }
     const key = this.activePlanKey()
-    const state = this.memory.planningState?.(key)
-    const plan = state ? getActivePlanningPlan(state) : undefined
-    if (meta.request_id !== requestId || context.role !== PLANNER_ROLE || kept.handoffId !== meta.handoff_id) return skip('kept_executor_not_resumable')
-    if (!plan || plan.plan_id !== planId || plan.plan_id !== meta.plan_id || !FROZEN_PLAN_STATUSES.has(plan.status)) return skip('plan_moved_on')
-    if (plan.steps[plan.active_step_index]?.step_id !== meta.step_id || completedStepCount(plan) !== meta.closed) return skip('step_moved_on')
-    if (state.goal?.goal_id !== meta.goal_id || state.goal?.status !== GOAL_STATUS.ACTIVE) return skip('goal_moved_on')
-    if ((this.worldMutationSeq ?? 0) !== meta.world_mutation_seq) return skip('world_changed_since_step_close')
-    if (this.epoch?.actor_id !== meta.actor_id || this.epoch?.epoch !== meta.epoch) return skip('actor_or_epoch_changed')
-    if (this.memory.planningReasoningEpoch?.(key) !== meta.reasoning_epoch) return skip('reasoning_epoch_changed')
+    // Everything the kept conversation was kept for, against the state as it is now (synchronous: no await between a check and
+    // the resume that follows it).
+    const moved = () => {
+      const state = this.memory.planningState?.(key)
+      const plan = state ? getActivePlanningPlan(state) : undefined
+      if (meta.request_id !== requestId || context.role !== PLANNER_ROLE || kept.handoffId !== meta.handoff_id) return 'kept_executor_not_resumable'
+      if (!plan || plan.plan_id !== planId || plan.plan_id !== meta.plan_id || !FROZEN_PLAN_STATUSES.has(plan.status)) return 'plan_moved_on'
+      if (plan.steps[plan.active_step_index]?.step_id !== meta.step_id || completedStepCount(plan) !== meta.closed) return 'step_moved_on'
+      if (state.goal?.goal_id !== meta.goal_id || state.goal?.status !== GOAL_STATUS.ACTIVE) return 'goal_moved_on'
+      if ((this.worldMutationSeq ?? 0) !== meta.world_mutation_seq) return 'world_changed_since_step_close'
+      if (this.epoch?.actor_id !== meta.actor_id || this.epoch?.epoch !== meta.epoch) return 'actor_or_epoch_changed'
+      if (this.memory.planningReasoningEpoch?.(key) !== meta.reasoning_epoch) return 'reasoning_epoch_changed'
+      return undefined
+    }
+    let reason = moved()
+    if (reason) return skip(reason)
+    // The live facts a C3 restage would read now (held counts, the step's machine, residual needs): the planner round took wall
+    // clock time in a world that kept running, and a count read at the step close is that old. Fenced by actor and epoch like C3's.
+    const gathered = await this.gatherExecutorHandoffFacts({ state: this.memory.planningState?.(key), actor: this.epoch, runtime: this.lastRuntimeView(), requestId, checkpoint: 'C8' })
+    if (gathered?.refusal) return skip(gathered.refusal)
+    if (gathered?.meta?.counts_deferred) return skip('facts_deferred_behind_batch')
+    reason = moved()
+    if (reason) return skip(reason)
     // The restage entry every restage passes (lifecycle table, guard, resets); a refusal here is the one the C3 restage would meet.
     const resumed = await this.restageContext({ checkpoint: 'C8', reason: 'review_handback_at_step_close', role: EXECUTOR_ROLE, requestId, safePoint: this.turnToken ?? undefined, foldKept: true })
     if (!resumed.restaged) return skip(resumed.reason)
+    // Rewrite the step block in place: current facts and the notes stored on the goal ride in baseMessages, not only in messages.
+    const state = this.memory.planningState?.(key)
+    const plan = getActivePlanningPlan(state)
+    const { jevFacts, jevHints } = this.retainedJevRecords()
+    const refreshed = this.buildRestagePacket({
+      checkpoint: 'C8', role: EXECUTOR_ROLE, reason: 'review_handback_at_step_close', planningState: state,
+      actor: this.epoch, runtime: this.lastRuntimeView(), executorFacts: gathered?.facts, jevFacts, jevHints,
+      topology: this.currentTopologyFacts(), // the block the next request inserts keeps its room
+    })
+    if (refreshed?.volatileText) this.replaceExecutorStepBlock(refreshed.volatileText)
+    if (refreshed?.executor_facts) await this.traceExecutorFactsCarried({ packet: refreshed, restaged: { handoff_id: resumed.handoff_id }, checkpoint: 'C8', requestId, meta: gathered?.meta })
+    // The reads the conversation already held are still in it: they are not dropped results to re-establish for free.
+    const stepKey = this.stepReadKey()
+    const rebased = stepKey ? this.stepReadLedger?.rebase(stepKey, resumed.kept_seq, resumed.seq) ?? 0 : 0
+    // No fresh allowance: the executor continues the decision it asked the review from.
+    if (meta.observation) this.observationBudgetOverride = meta.observation.override
+    if (meta.observation) this.observationBudgetRemaining = meta.observation.remaining
     await this.traceEvent('context.restage_folded', {
       request_id: requestId,
       role: EXECUTOR_ROLE,
@@ -4124,9 +4205,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason: 'review_handback_at_step_close',
       handoff_id: resumed.handoff_id,
       planner_handoff_id: resumed.planner_handoff_id,
-      plan_id: plan.plan_id,
+      plan_id: plan?.plan_id,
       step_id: meta.step_id,
       notes_chars: notesChars,
+      facts_refreshed: Boolean(gathered?.facts),
+      step_block_rewritten: Boolean(refreshed?.volatileText),
+      reads_rebased: rebased,
+      observation_remaining: this.observationBudgetRemaining,
     }, { requestId })
     await this.traceEvent('context.planner_parked', {
       request_id: requestId,
@@ -4136,7 +4221,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason: 'executor_acts_on_committed_plan',
       parked: context.hasParkedPlanner,
     }, { requestId })
-    await this.startExecutorObservationDecision({ requestId, handoffId: resumed.handoff_id, reason: 'new_executor_decision_at_review_handback' })
     return { restaged: true, folded: true, role: EXECUTOR_ROLE, checkpoint: 'C8', handoff_id: resumed.handoff_id }
   }
 
@@ -6333,16 +6417,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (after?.goal?.goal_id !== state.goal.goal_id || afterPlan?.plan_id !== planId || afterPlan?.steps?.[afterPlan.active_step_index]?.step_id !== stepId) return skip('step_changed_during_refresh')
       const text = executorFactsRefreshMessage(gathered?.facts)
       if (!text) return skip('nothing_to_refresh')
-      const priorStep = this.messages.find(message => message?.role === 'user' && String(message.content ?? '').startsWith('--- step block ---'))
-      const priorLines = String(priorStep?.content ?? '').split('\n')
-      // These remain observations taken at the original restage, not fresh reads.
-      // Reuse the packet builder so the retained advisory records keep its usual bounds.
-      const jevFacts = priorLines.flatMap(line => {
-        const match = /^jev_fact\[([^\]]+)\] \(harness read at this restage, selected by Jev; advisory, verify before acting\): (.+)$/.exec(line)
-        return match ? [{ family: match[1], text: match[2] }] : []
-      })
-      const jevHints = priorLines.find(line => line.startsWith('jev_fact_hint (Jev, advisory): lookups likely useful here: '))
-        ?.slice('jev_fact_hint (Jev, advisory): lookups likely useful here: '.length).split(', ')
+      // These remain observations taken at the original restage, not fresh reads; the packet builder keeps their usual bounds.
+      const { jevFacts, jevHints } = this.retainedJevRecords()
       const refreshedPacket = this.buildRestagePacket({
         checkpoint: pending.checkpoint ?? 'C3', role: EXECUTOR_ROLE,
         reason: 'correlated_receipt_refresh', planningState: after,
@@ -6351,16 +6427,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       // Keep the immutable plan prefix and conversation identity. Replace the
       // volatile snapshot so the next decision cannot read superseded claims.
-      if (refreshedPacket?.volatileText) {
-        const replaceStep = messages => messages.map(message => {
-          if (message?.role !== 'user' || !String(message.content ?? '').startsWith('--- step block ---')) return message
-          const origin = String(message.content).match(/^restage: .*$/m)?.[0]
-          const content = origin ? refreshedPacket.volatileText.replace(/^restage: .*$/m, origin) : refreshedPacket.volatileText
-          return { ...message, content }
-        })
-        this.baseMessages = replaceStep(this.baseMessages)
-        this.messages = replaceStep(this.messages)
-      }
+      if (refreshedPacket?.volatileText) this.replaceExecutorStepBlock(refreshedPacket.volatileText)
       const counts = gathered.facts.counts?.items ?? []
       await this.traceEvent('context.executor_facts_refreshed_after_batch', {
         request_id: requestId,
@@ -15450,13 +15517,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (notes) this.memory.recordReviewNotes?.(this.activePlanKey(), review.step_id, notes)
       // Fold C3 into C8: an executor restaged at the step close that asked for this review and has done nothing since resumes its own
       // conversation (one packet, one restage); every other handback restages as C3.
-      const folded = reviewRound ? await this.foldReviewHandback({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id, notesChars: notes.length }) : undefined
+      const folded = reviewRound ? await this.foldReviewHandback({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id, notesChars: notes.length, expectedKept: review?.executor_kept === true }) : undefined
       const handoff = folded ?? await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
       if (!handoff.restaged) throw new AgentLoopError(`planner_execution_handoff_refused:${handoff.reason}`)
       // The packet already carries the notes when they fit its record whole; repeat them only when it dropped or shortened them.
       const carried = notes && this.messages.some(row => typeof row.content === 'string'
         && row.content.split('\n').some(line => line.includes('planner_review_notes') && line.includes(notes)))
       if (notes && !carried) this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
+      // The resumed conversation ends on the executor's own review request: a user turn always follows it, pointing at the step block
+      // rewritten above (the notes live in its planner_review_notes record; no copy here).
+      else if (handoff.folded) this.messages.push({ role: 'user', content: `[HARNESS] The planner reviewed this step and returned it unchanged (the plan is unchanged; advisory, not world evidence). ${notes ? 'Its notes are the planner_review_notes record of the step block above.' : 'It sent no notes.'} That step block was refreshed from the live game just now: act on it.` })
       return this.runTurn()
     }
     const timeReview = await this.reviewPlanTime(plan)

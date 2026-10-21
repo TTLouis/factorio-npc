@@ -778,6 +778,22 @@ test('AgentContext keeps the executor across a planner review return and resumes
   assert.equal(context.resumeExecutor(), undefined)
 })
 
+test('a kept executor that already ends on an assistant turn gets no second one, and the resume reports the sequences the read ledger rebases between', () => {
+  const context = new AgentContext({ config: { models: ['planner-model', 'executor-model'], base: 'https://p.test/v1', key: 'k' } })
+  context.baseMessages = [{ role: 'system', content: 'SYSTEM' }, { role: 'user', content: '[CHAT] Louis: go' }]
+  context.messages = [...context.baseMessages]
+  const packet = { stableText: '[HANDOFF] stable', volatileText: '--- step block ---', handoff_id: 'ho_exec', hash: 'h', chars: 20, estimated_tokens: 5, event: { role: 'executor', checkpoint: 'C8', reason: 'r' } }
+  context.restage({ checkpoint: 'C8', reason: 'r', packet, parkPlanner: true })
+  context.messages.push({ role: 'assistant', content: '{"blocked":true}' })
+  const executorSeq = context.conversationSeq
+  context.resumePlanner({ keepExecutor: { meta: {}, reply: '{"plannerReview":{}}' } })
+  const resumed = context.resumeExecutor()
+  assert.deepEqual(context.messages.map(message => message.role), ['system', 'user', 'user', 'assistant'], 'the real reply stays, the synthetic one is not added')
+  assert.equal(resumed.kept_seq, executorSeq)
+  assert.equal(resumed.seq, context.conversationSeq)
+  assert.ok(resumed.seq > resumed.kept_seq)
+})
+
 // --- U8 carry-overs -----------------------------------------------------------------------------------------------
 
 const contextWindowError = () => Object.assign(new Error('provider_context_window_exceeded: Provider HTTP 400 reported context/input token limit exhaustion'), { code: 'provider_context_window_exceeded', failureClass: 'provider_budget' })

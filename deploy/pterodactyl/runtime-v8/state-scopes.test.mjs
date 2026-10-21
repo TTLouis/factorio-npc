@@ -56,7 +56,7 @@ test('every conversation swap site exists in its owner source', () => {
 test('the swap sites assign or swap the conversation (the method bodies prove it)', () => {
   // A listed site must really touch the conversation, or the list drifted from the code.
   const stripped = Object.fromEntries(Object.entries(sources).map(([owner, text]) => [owner, stripCommentsAndStrings(text)]))
-  const touches = /\b(?:this|agent)\.(?:messages|baseMessages)\b|agentContext\.(?:commitRestage|resumePlanner|beginLineage)\(|replaceConversation\(|prepareContinuationContext\(|super\.reset\(\)|restageInTurn\(|restageBetweenTurns\(/
+  const touches = /\b(?:this|agent)\.(?:messages|baseMessages)\b|agentContext\.(?:commitRestage|resumePlanner|beginLineage)\(|replaceConversation\(|replaceExecutorStepBlock\(|prepareContinuationContext\(|super\.reset\(\)|restageInTurn\(|restageBetweenTurns\(/
   for (const site of CONVERSATION_SWAP_SITES) {
     const body = findMethodBody(stripped[site.owner], site.site, { owner: site.owner, fn: site.fn === true })
     assert.match(body, touches, `${site.owner}#${site.site} does not touch the conversation`)

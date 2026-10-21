@@ -292,10 +292,13 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(back.role, 'executor')
     assert.equal(textOf(back.messages).split('fuel the drill with 5 coal').length - 1, 1, 'the handed-back executor sees the planner notes once')
     // The handback is folded into the step-close restage: the executor that asked for the review resumes with its C8 packet (the
-    // step-close facts) and the notes as one message, instead of a second restage that rebuilds the same packet.
+    // step-close facts) and the notes in that packet's own record (the step block is rewritten in place), instead of a second restage that
+    // rebuilds the same packet. The notes ride in baseMessages, so a later continuation keeps them.
     assert.match(textOf(back.messages), /restage: role=executor checkpoint=C8/)
     assert.doesNotMatch(textOf(back.messages), /restage: role=executor checkpoint=C3/)
-    assert.match(textOf(back.messages), /\[PLANNER_REVIEW_NOTES\][^\n]*fuel the drill with 5 coal/)
+    assert.match(textOf(back.messages), /planner_review_notes[^\n]*fuel the drill with 5 coal/, 'the notes ride the packet record')
+    assert.equal(back.messages.filter(message => String(message.content).startsWith('[PLANNER_REVIEW_NOTES]')).length, 0, 'no second copy as a message')
+    assert.equal(back.messages.at(-1).role, 'user', 'the review request is answered by a user turn')
     assert.match(textOf(back.messages), /fresh_topology: /, 'the step-close topology record is still in the conversation')
     assert.equal(back.messages.filter(message => message.role === 'assistant').length, 1, 'the executor review request is the only earlier executor turn')
     const [folded, ...moreFolded] = data('context.restage_folded')
@@ -306,6 +309,7 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(folded.step_id, round.step_id)
     assert.ok(folded.request_id)
     assert.equal(folded.notes_chars, NOTES.length)
+    assert.deepEqual([folded.facts_refreshed, folded.step_block_rewritten], [true, true], 'the live facts were read again and the step block rewritten')
     assert.equal(data('lifecycle.entered').filter(row => row.event === 'restage' && row.folded_from === 'C3').length, 1, 'the folded entry went through the lifecycle table')
     assert.equal(data('lifecycle.refused').length, 0)
     assert.equal(rows('context.planner_resumed')[0].data.executor_kept, true, 'the planner return kept the C8 executor for the handback')

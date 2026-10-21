@@ -385,6 +385,7 @@ export class AgentContext {
       ? {
           ...this.conversationSnapshot(),
           meta: keepExecutor.meta,
+          seq: this.conversationSeq, // the sequence its reads were delivered under (the step read ledger is rebased from it)
           reply: typeof keepExecutor.reply === 'string' && keepExecutor.reply ? keepExecutor.reply : undefined,
         }
       : null
@@ -441,7 +442,9 @@ export class AgentContext {
     this.parkedPlanner = planner
     this.parkedExecutor = null
     this.messages = kept.messages
-    if (kept.reply) this.messages.push({ role: 'assistant', content: kept.reply })
+    // The review request is the executor's last turn, unless the conversation already ends on an assistant turn (a blocker reply the
+    // review was raised from): two assistant turns in a row are invalid.
+    if (kept.reply && this.messages.at(-1)?.role !== 'assistant') this.messages.push({ role: 'assistant', content: kept.reply })
     this.baseMessages = kept.baseMessages
     this.role = EXECUTOR_ROLE
     this.handoffId = kept.handoffId
@@ -456,6 +459,8 @@ export class AgentContext {
       message_count: this.messages.length,
       meta: kept.meta,
       planner_handoff_id: planner.handoffId,
+      kept_seq: kept.seq,
+      seq: this.conversationSeq,
     }
   }
 

@@ -900,10 +900,12 @@ test('a stale actor legacy blocker cannot pause or review the replacement actor'
 
 // Fold C3 into C8 (owner decision 2026-10-20): the delegation scenario showed a step restaged twice at its start, C8 at the step close
 // and C3 when the planner review round handed the same step back, each rebuilding the same packet. An executor restaged at a step close
-// that asks for a review before doing anything now gets its own conversation back after the round, with the notes, as one folded entry.
+// that asks for a review before doing anything now gets its own conversation back after the round, as one folded entry: the step block
+// is rewritten in place with the live facts and the notes, so both survive every continuation of the step.
 // An executor soft limit of 1 token puts every verified step close past the hard limit, so each one restages (restage-policy C8).
 const FOLD_NOTES = 'Iron ore candidates must be re-read near the actor.'
 const restagedCheckpoints = events => events.filter(row => row.event === 'context.restaged').map(row => row.data.checkpoint)
+const foldRows = (events, name) => events.filter(row => row.event === name).map(row => row.data)
 const stepCloseWorld = script => {
   const w = world(script)
   w.agent.restageSoftLimitOption = { executor: 1 }
@@ -911,96 +913,225 @@ const stepCloseWorld = script => {
 }
 const askReview = ({ memory }) => ({ stepId: activeStepId(memory), operations: [],
   plannerReview: { reason: 'local_recovery_exhausted', rationale: RUN_AC_RATIONALE } })
+const ironAction = ctx => ({ stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] })
+const plannerNotes = (notes = FOLD_NOTES) => copperThenIron({ chatMessage: notes, currentStep: 1 })
+const blockLine = (messages, prefix) => afOutgoing(messages).split('\n').find(line => line.startsWith(prefix)) ?? ''
+const consecutiveAssistants = messages => messages.some((row, index) => index > 0 && row.role === 'assistant' && messages[index - 1].role === 'assistant')
+// Runs the first step to its close, so the next executor is the step-close (C8) one.
+const closeFirstStep = async w => { await w.say(); w.game.inventory['copper-ore'] = 10; await w.agent.completed() }
 
-test('a review handback right after a step-close restage folds into it: one packet, the notes once, no second restage', async () => {
+test('a review handback right after a step-close restage folds into it: one restage, the notes in the refreshed step block, a user turn last', async () => {
   let c8
   const w = stepCloseWorld([copperThenIron(), action, ctx => {
     assert.equal(ctx.agent.agentContext.role, 'executor')
     assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C8/)
     c8 = { handoffId: ctx.agent.agentContext.handoffId, messages: ctx.messages.length }
     return askReview(ctx)
-  }, copperThenIron({ chatMessage: FOLD_NOTES, currentStep: 1 }), ctx => {
+  }, plannerNotes(), ctx => {
     const outgoing = afOutgoing(ctx.messages)
     assert.equal(ctx.context.role, 'executor')
     assert.equal(ctx.agent.agentContext.handoffId, c8.handoffId, 'the conversation that asked for the review is the one that resumes')
     assert.equal(outgoing.split('restage: role=executor').length - 1, 1, 'one packet')
-    assert.match(outgoing, /restage: role=executor checkpoint=C8/, 'the step-close packet, with its facts')
+    assert.match(outgoing, /restage: role=executor checkpoint=C8/, 'the step-close packet, with its origin')
     assert.doesNotMatch(outgoing, /checkpoint=C3/)
     assert.equal(outgoing.split(FOLD_NOTES).length - 1, 1, 'the notes once')
-    assert.equal(ctx.messages.filter(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]')).length, 1, 'the packet of this conversation predates the notes, so they follow as the one message')
-    assert.equal(ctx.messages.filter(row => row.role === 'assistant').length, 1, 'the review request is the executor turn the notes answer')
-    assert.equal(ctx.messages.length, c8.messages + 2, 'the review request and the notes are all that was added')
+    assert.match(blockLine(ctx.messages, 'planner_review_notes'), new RegExp(FOLD_NOTES), 'in the step block record, not a second message')
+    assert.equal(ctx.messages.filter(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]')).length, 0)
+    assert.equal(ctx.messages.filter(row => row.role === 'assistant').length, 1, 'the review request is the executor turn the handback answers')
+    assert.equal(ctx.messages.length, c8.messages + 2, 'the review request and the pointer are all that was added')
+    assert.equal(ctx.messages.at(-1).role, 'user')
+    assert.match(ctx.messages.at(-1).content, /returned it unchanged.*planner_review_notes record/)
+    assert.equal(consecutiveAssistants(ctx.messages), false)
     assert.equal(outgoing.includes('[EXECUTOR_REVIEW]'), false, 'the planner conversation stays parked')
     assert.equal(ctx.agent.agentContext.hasParkedPlanner, true)
     assert.equal(ctx.context.allowTools, true)
-    return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
+    return ironAction(ctx)
+  }, ctx => {
+    // F2: one batch later the conversation is rebuilt from baseMessages; the notes must still be in it.
+    assert.match(blockLine(ctx.messages, 'planner_review_notes'), new RegExp(FOLD_NOTES), 'the notes survive the continuation')
+    return ironAction(ctx)
   }])
-  await w.say()
-  w.game.inventory['copper-ore'] = 10
+  await closeFirstStep(w)
   await w.agent.completed()
-  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'executor', 'planner', 'executor'])
-  assert.equal(w.game.mutations.length, 2, 'the folded executor acted on the same step')
+  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'executor', 'planner', 'executor', 'executor'])
+  assert.equal(w.game.mutations.length, 3, 'the folded executor acted on the same step, twice')
   assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8'], 'no C3 after the C8')
-  const folded = w.events.filter(row => row.event === 'context.restage_folded')
-  assert.equal(folded.length, 1)
-  const [{ data }] = folded
-  assert.deepEqual([data.role, data.checkpoint, data.folded_from, data.reason, data.handoff_id], ['executor', 'C8', 'C3', 'review_handback_at_step_close', c8.handoffId])
-  assert.equal(data.step_id, activeStepId(w.memory))
-  assert.equal(data.notes_chars, FOLD_NOTES.length)
-  assert.ok(data.request_id)
+  const [folded, ...more] = foldRows(w.events, 'context.restage_folded')
+  assert.equal(more.length, 0)
+  assert.deepEqual([folded.role, folded.checkpoint, folded.folded_from, folded.reason, folded.handoff_id], ['executor', 'C8', 'C3', 'review_handback_at_step_close', c8.handoffId])
+  assert.equal(folded.step_id, w.plan().steps[1].step_id)
+  assert.equal(folded.notes_chars, FOLD_NOTES.length)
+  assert.deepEqual([folded.facts_refreshed, folded.step_block_rewritten], [true, true])
+  assert.ok(folded.request_id)
   const entered = w.events.filter(row => row.event === 'lifecycle.entered' && row.data.event === 'restage' && row.data.folded_from === 'C3')
   assert.equal(entered.length, 1, 'the folded entry went through the lifecycle table')
   assert.deepEqual([entered[0].data.role, entered[0].data.checkpoint], ['executor', 'C8'])
   assert.equal(w.events.filter(row => row.event === 'lifecycle.refused').length, 0)
   assert.equal(w.events.find(row => row.event === 'context.planner_resumed').data.executor_kept, true)
   assert.equal(w.events.filter(row => row.event === 'context.restage_fold_skipped').length, 0)
-  assert.equal(w.memory.planningState(KEY).goal.review_notes?.[activeStepId(w.memory)], FOLD_NOTES, 'the notes are also stored on the goal for a later restage')
+  assert.equal(w.memory.planningState(KEY).goal.review_notes?.[w.plan().steps[1].step_id], FOLD_NOTES, 'the notes are also stored on the goal for a later restage')
 })
 
-test('a review handback with no step close before it stays a C3 handback', async () => {
+test('a fact that changed during the planner round shows its current value in the folded executor, as a C3 packet would', async () => {
+  let atReview
+  const w = stepCloseWorld([copperThenIron(), action, ctx => {
+    atReview = blockLine(ctx.messages, 'held_counts')
+    return askReview(ctx)
+  }, ctx => { ctx.game.inventory['iron-ore'] = 7; return plannerNotes() }, ctx => {
+    const now = blockLine(ctx.messages, 'held_counts')
+    assert.notEqual(now, atReview, 'the held counts were read again at the handback')
+    assert.match(now, /iron-ore=7/)
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
+  assert.equal(foldRows(w.events, 'context.restage_folded').length, 1)
+  assert.match(atReview, /^held_counts/)
+  assert.doesNotMatch(atReview, /iron-ore=7/)
+})
+
+test('the pre-review reads stay free of the re-read allowance, and the fold re-seeds no observation budget', async () => {
+  let budget
+  const w = stepCloseWorld([copperThenIron(), action, ctx => readNearby('fold-read-1', 'iron-ore'), ctx => {
+    budget = { override: ctx.agent.observationBudgetOverride, remaining: ctx.agent.observationBudgetRemaining }
+    return askReview(ctx)
+  }, ctx => { ctx.agent.observationBudgetOverride = 9; ctx.agent.observationBudgetRemaining = 9; return plannerNotes() }, ctx => {
+    assert.deepEqual({ override: ctx.agent.observationBudgetOverride, remaining: ctx.agent.observationBudgetRemaining }, budget,
+      'the executor gets back the allowance it had; the planner round does not change it and the fold does not refill it')
+    const ledger = ctx.agent.stepReadLedger
+    const key = ctx.agent.stepReadKey()
+    const signatures = [...ledger.steps.get(key).keys()]
+    assert.equal(signatures.length, 1, 'the executor read once before asking')
+    for (const signature of signatures) assert.equal(ledger.isReestablishing(key, signature, ctx.agent.agentContext.conversationSeq), false, 'the result is still in the conversation')
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
+  assert.equal(foldRows(w.events, 'context.restage_folded')[0].reads_rebased, 1)
+})
+
+test('an empty planner reply still ends the resumed conversation on a user turn', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, plannerNotes(''), ctx => {
+    assert.equal(ctx.messages.at(-1).role, 'user', 'a conversation never ends on the executor review request')
+    assert.match(ctx.messages.at(-1).content, /returned it unchanged.*It sent no notes/)
+    assert.equal(consecutiveAssistants(ctx.messages), false)
+    assert.equal(blockLine(ctx.messages, 'planner_review_notes'), '')
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
+  assert.equal(foldRows(w.events, 'context.restage_folded').length, 1)
+  assert.equal(foldRows(w.events, 'context.restage_folded')[0].notes_chars, 0)
+})
+
+test('a legacy blocker reply that already ends the executor conversation on an assistant turn gets no second one', async () => {
+  const legacy = ({ memory }) => ({ ...runAB.legacy_reply, stepId: activeStepId(memory) })
+  const w = stepCloseWorld([copperThenIron(), action, legacy, plannerNotes(), ctx => {
+    assert.equal(consecutiveAssistants(ctx.messages), false, 'the blocker reply and the synthetic review request are not both assistant turns')
+    assert.equal(ctx.messages.at(-1).role, 'user')
+    return ironAction(ctx)
+  }])
+  w.agent.tryFreshContextActionRecovery = async () => ({ attempted: false })
+  await closeFirstStep(w)
+  assert.equal(foldRows(w.events, 'context.restage_folded').length, 1)
+  assert.equal(foldRows(w.events, 'executor.legacy_blocker_review').length, 1, 'the review was raised from the legacy blocker route')
+})
+
+test('a review handback with no step close before it stays a C3 handback, and says why the fold was not attempted', async () => {
   const w = stepCloseWorld([draft(), review('local_recovery_exhausted', RUN_AC_RATIONALE), draft({ chatMessage: 'Copper ore is 12 tiles east of the actor.', plan: ['A tempting different strategy'] }), ctx => {
     assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/)
     return action(ctx)
   }])
   await w.say()
   assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C3'], 'the plan-commit executor is rebuilt as before')
-  assert.equal(w.events.filter(row => row.event === 'context.restage_folded').length, 0)
+  assert.equal(foldRows(w.events, 'context.restage_folded').length, 0)
   assert.equal(w.events.find(row => row.event === 'context.planner_resumed').data.executor_kept, undefined)
+  const [skipped] = foldRows(w.events, 'context.restage_fold_skipped')
+  assert.deepEqual([skipped.reason, skipped.stage, skipped.folded_from], ['not_step_close_restage', 'review', 'C3'])
+  assert.ok(skipped.request_id)
 })
 
 test('a review handback after the step-close executor already acted stays a C3 handback', async () => {
   const w = stepCloseWorld([copperThenIron(), action, ctx => ({ stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 4)] }),
-    askReview, copperThenIron({ chatMessage: FOLD_NOTES, currentStep: 1 }), ctx => {
+    askReview, plannerNotes(), ctx => {
       assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/)
-      return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
+      return ironAction(ctx)
     }])
-  await w.say()
-  w.game.inventory['copper-ore'] = 10
-  await w.agent.completed()
+  await closeFirstStep(w)
   assert.equal(w.game.mutations.length, 2)
   await w.agent.completed()
   assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'executor', 'executor', 'planner', 'executor'])
   assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'], 'the world changed since the step-close restage, so the executor is rebuilt from the world as it is now')
-  assert.equal(w.events.filter(row => row.event === 'context.restage_folded').length, 0)
+  assert.equal(foldRows(w.events, 'context.restage_folded').length, 0)
+  assert.deepEqual(foldRows(w.events, 'context.restage_fold_skipped').map(row => [row.reason, row.stage]), [['world_changed_since_step_close', 'review']])
 })
 
-test('a folded handback that the world overtook is skipped on the record and restages as C3 with the notes in the packet', async () => {
-  const w = stepCloseWorld([copperThenIron(), action, askReview,
-    ctx => { ctx.agent.worldMutationSeq += 1; return copperThenIron({ chatMessage: FOLD_NOTES, currentStep: 1 }) }, ctx => {
-      const outgoing = afOutgoing(ctx.messages)
-      assert.match(outgoing, /restage: role=executor checkpoint=C3/)
-      assert.equal(outgoing.split(FOLD_NOTES).length - 1, 1, 'the notes once')
-      assert.match(outgoing, /planner_review_notes[^\n]*Iron ore candidates/, 'in the packet record of the rebuilt executor')
-      return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
-    }])
-  await w.say()
-  w.game.inventory['copper-ore'] = 10
-  await w.agent.completed()
+// Every way the kept conversation can stop being the step's: each is traced with its reason and the handback restages as C3.
+for (const [reason, tamper] of [
+  ['plan_moved_on', meta => { meta.plan_id = 'other_plan' }],
+  ['step_moved_on', meta => { meta.step_id = 'other_step' }],
+  ['goal_moved_on', meta => { meta.goal_id = 'other_goal' }],
+  ['actor_or_epoch_changed', meta => { meta.epoch = (meta.epoch ?? 0) + 99 }],
+  ['reasoning_epoch_changed', meta => { meta.reasoning_epoch = (meta.reasoning_epoch ?? 0) + 99 }],
+  ['kept_executor_not_resumable', meta => { meta.request_id = 'another_request' }],
+  ['world_changed_since_step_close', (meta, agent) => { agent.worldMutationSeq += 1 }],
+]) {
+  test(`a folded handback the ${reason} is skipped on the record and restages as a clean C3 with the notes in its packet`, async () => {
+    const w = stepCloseWorld([copperThenIron(), action, askReview,
+      ctx => { tamper(ctx.agent.agentContext.parkedExecutor.meta, ctx.agent); return plannerNotes() }, ctx => {
+        const outgoing = afOutgoing(ctx.messages)
+        assert.match(outgoing, /restage: role=executor checkpoint=C3/)
+        assert.equal(outgoing.split(FOLD_NOTES).length - 1, 1, 'the notes once')
+        assert.match(blockLine(ctx.messages, 'planner_review_notes'), new RegExp(FOLD_NOTES), 'in the packet record of the rebuilt executor')
+        assert.equal(consecutiveAssistants(ctx.messages), false)
+        return ironAction(ctx)
+      }])
+    await closeFirstStep(w)
+    assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'])
+    assert.equal(foldRows(w.events, 'context.restage_folded').length, 0)
+    const [skipped] = foldRows(w.events, 'context.restage_fold_skipped')
+    assert.deepEqual([skipped.role, skipped.checkpoint, skipped.folded_from, skipped.reason, skipped.stage], ['executor', 'C8', 'C3', reason, 'handback'])
+    assert.ok(skipped.request_id)
+    assert.equal(w.agent.agentContext.hasParkedExecutor, false, 'the kept conversation is dropped once it cannot be used')
+    assert.equal(w.game.mutations.length, 2)
+  })
+}
+
+test('a restageContext refusal in fold mode falls back to a clean C3, and the kept conversation is gone', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, ctx => {
+    const original = ctx.agent.restageContext.bind(ctx.agent)
+    ctx.agent.restageContext = async args => (args.foldKept ? { restaged: false, reason: 'round_open' } : original(args))
+    return plannerNotes()
+  }, ctx => {
+    assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/)
+    assert.equal(ctx.agent.agentContext.hasParkedPlanner, true)
+    assert.equal(consecutiveAssistants(ctx.messages), false)
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
   assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'])
-  assert.equal(w.events.filter(row => row.event === 'context.restage_folded').length, 0)
-  const [skipped] = w.events.filter(row => row.event === 'context.restage_fold_skipped')
-  assert.deepEqual([skipped.data.role, skipped.data.checkpoint, skipped.data.folded_from, skipped.data.reason], ['executor', 'C8', 'C3', 'world_changed_since_step_close'])
-  assert.ok(skipped.data.request_id)
-  assert.equal(w.agent.agentContext.hasParkedExecutor, false, 'the kept conversation is dropped once it cannot be used')
-  assert.equal(w.game.mutations.length, 2)
+  assert.deepEqual(foldRows(w.events, 'context.restage_fold_skipped').map(row => [row.reason, row.stage]), [['round_open', 'handback']])
+  assert.equal(foldRows(w.events, 'context.restage_folded').length, 0)
+})
+
+test('restageContext in fold mode with nothing kept refuses before changing the conversation', async () => {
+  const w = stepCloseWorld([draft()])
+  await w.say().catch(() => {})
+  w.agent.lifecycleEnter = () => undefined // the goal is closed after the failed request; this test is about the resume, not the table
+  const before = { role: w.agent.agentContext.role, handoff: w.agent.agentContext.handoffId, seq: w.agent.agentContext.conversationSeq }
+  const result = await w.agent.restageContext({ checkpoint: 'C8', reason: 'r', role: 'executor', foldKept: true })
+  assert.deepEqual([result.restaged, result.reason], [false, 'kept_executor_not_resumable'])
+  assert.deepEqual({ role: w.agent.agentContext.role, handoff: w.agent.agentContext.handoffId, seq: w.agent.agentContext.conversationSeq }, before)
+  assert.equal(foldRows(w.events, 'context.restage_refused').at(-1).reason, 'kept_executor_not_resumable')
+})
+
+test('a kept executor dropped before the handback is traced, and the handback restages as C3', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, ctx => { ctx.agent.agentContext.dropParkedExecutor(); return plannerNotes() },
+    ctx => { assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/); return ironAction(ctx) }])
+  await closeFirstStep(w)
+  assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'])
+  assert.deepEqual(foldRows(w.events, 'context.restage_fold_skipped').map(row => [row.reason, row.stage]), [['kept_executor_dropped', 'handback']])
+})
+
+test('a planner round that never hands back does not leave the kept executor behind', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, () => { throw new Error('forced planner stop') }])
+  await closeFirstStep(w).catch(() => {})
+  assert.equal(w.agent.agentContext.hasParkedExecutor, false)
 })
