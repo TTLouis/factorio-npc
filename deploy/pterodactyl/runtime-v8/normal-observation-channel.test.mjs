@@ -326,10 +326,7 @@ for (const repeatedMissingFact of [false, true]) test(`recoverPlan targeted_obse
     assert.equal(context.allowTools, false, JSON.stringify({ calls: providerCalls, decisions, events: world.events.slice(-16) }))
     assert.equal(world.agent.actionOmissionObservationUsed, true, 'C6 restaging does not renew the route allowance')
     assert.equal(world.agent.actionOmissionForceNoTools, true)
-    // Run AJ fix: the C6 executor is a fresh conversation, so it starts a new bounded observation decision (4, traced); the
-    // route's one-read bound above still closes its tools. (Before the fix it inherited the 2 the ordinary fact left.)
-    assert.equal(world.agent.observationBudgetRemaining, 4)
-    assert.equal(world.events.find(row => row.event === 'context.executor_observation_started' && row.data.checkpoint === 'C6')?.data.reason, 'new_executor_decision_at_bounded_recovery')
+    assert.equal(world.agent.observationBudgetRemaining, 2, 'the ordinary fact spent one of the original three slots')
     const state = world.memory.currentPlan(saved.planning_states[0].key)
     return planReply({ plan: state.plan, currentStep: state.current_step, operations: [{ name: 'wait', args: { ticks: 1 } }] })
   }

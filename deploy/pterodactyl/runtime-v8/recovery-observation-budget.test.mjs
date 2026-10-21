@@ -158,8 +158,9 @@ test('Run AJ: a decision budget set inside the slice close does not outlive the 
   assert.notEqual(w.afterCompleted.remaining, 0)
 })
 
-// The other fresh executor restages. A C5 (provider budget / action-omission fresh context) is the same decision continued in a new
-// generation and keeps its own reseed rule; a planner restage is not an executor handoff.
+// Only the two handoffs that start an executor decision from nothing are seeded: C3 (the commit handoff) and C7 (runtime recovery,
+// between turns, where no wake chose a budget). C6 and a non-folded C8 restage inside a wake whose budget Jev or the planner shape
+// chose, and that budget carries over; C5 continues the same decision; a planner restage is not an executor handoff.
 async function executorWorld() {
   const w = world([slice('copper-ore'), act('copper-ore')])
   await w.agent.request('Gather ten copper ore, then ten iron ore.', { sender: 'Louis' })
@@ -169,29 +170,30 @@ async function executorWorld() {
 }
 const spend = agent => { agent.observationBudgetOverride = 4; agent.observationBudgetRemaining = 0; agent.observationDecisionForced = true }
 
-for (const [checkpoint, reason] of [['C6', 'new_executor_decision_at_bounded_recovery'], ['C7', 'new_executor_decision_at_recovery'], ['C8', 'new_executor_decision_at_step_close']]) {
-  test(`a fresh ${checkpoint} executor conversation starts a new bounded observation decision, traced with its checkpoint`, async () => {
-    const w = await executorWorld()
-    spend(w.agent)
-    const restaged = await w.agent.restageBetweenTurns({ checkpoint, role: 'executor', reason: `test_${checkpoint}`, actor: w.agent.epoch, requestId: 'req_fresh' })
-    assert.equal(restaged.restaged, true)
-    assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining, w.agent.observationDecisionForced], [4, 4, false])
-    const [row, ...extra] = w.rows('context.executor_observation_started', w.mark)
-    assert.equal(extra.length, 0)
-    assert.deepEqual([row.data.checkpoint, row.data.reason, row.data.handoff_id, row.data.previous_remaining, row.data.request_id],
-      [checkpoint, reason, restaged.handoff_id, 0, 'req_fresh'])
-  })
-}
-
-test('a C5 restage and a planner restage do not start an executor observation decision', async () => {
+test('a fresh C7 executor conversation starts a new bounded observation decision, traced with its checkpoint', async () => {
   const w = await executorWorld()
   spend(w.agent)
-  assert.equal((await w.agent.restageBetweenTurns({ checkpoint: 'C5', role: 'executor', reason: 'test_c5', actor: w.agent.epoch, requestId: 'req_c5' })).restaged, true)
-  assert.equal(w.agent.observationBudgetRemaining, 0)
-  assert.equal((await w.agent.restageBetweenTurns({ checkpoint: 'C1', role: 'planner', reason: 'test_c1', actor: w.agent.epoch, requestId: 'req_c1' })).restaged, true)
-  assert.equal(w.agent.observationBudgetRemaining, 0)
-  assert.equal(w.rows('context.executor_observation_started', w.mark).length, 0)
+  const restaged = await w.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'test_C7', actor: w.agent.epoch, requestId: 'req_fresh' })
+  assert.equal(restaged.restaged, true)
+  assert.equal(restaged.decision_started, true)
+  assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining, w.agent.observationDecisionForced], [4, 4, false])
+  const [row, ...extra] = w.rows('context.executor_observation_started', w.mark)
+  assert.equal(extra.length, 0)
+  assert.deepEqual([row.data.checkpoint, row.data.reason, row.data.handoff_id, row.data.previous_remaining, row.data.request_id],
+    ['C7', 'new_executor_decision_at_recovery', restaged.handoff_id, 0, 'req_fresh'])
 })
+
+for (const [checkpoint, role] of [['C6', 'executor'], ['C8', 'executor'], ['C5', 'executor'], ['C1', 'planner']]) {
+  test(`a ${checkpoint} ${role} restage keeps the current decision budget and starts no executor observation decision`, async () => {
+    const w = await executorWorld()
+    spend(w.agent)
+    const restaged = await w.agent.restageBetweenTurns({ checkpoint, role, reason: `test_${checkpoint}`, actor: w.agent.epoch, requestId: `req_${checkpoint}` })
+    assert.equal(restaged.restaged, true, JSON.stringify(restaged))
+    assert.equal(restaged.decision_started, undefined)
+    assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining], [4, 0], 'the wake-chosen budget carries over')
+    assert.equal(w.rows('context.executor_observation_started', w.mark).length, 0)
+  })
+}
 
 test('a refused executor restage grants no new decision', async () => {
   const w = await executorWorld()
@@ -205,7 +207,7 @@ test('a refused executor restage grants no new decision', async () => {
   assert.equal(w.rows('context.executor_observation_started', w.mark).length, 0)
 })
 
-test('a superseded C7 recovery handoff cannot replenish a newer lineage observation allowance', async () => {
+test('a C7 recovery handoff superseded after the swap reports the restage that happened, starts no decision and is traced', async () => {
   const w = await executorWorld()
   const original = w.agent.jev.afterRestage.bind(w.agent.jev)
   w.agent.jev.afterRestage = async (prepared, result) => {
@@ -218,9 +220,17 @@ test('a superseded C7 recovery handoff cannot replenish a newer lineage observat
     }
   }
   const result = await w.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'test_superseded', actor: w.agent.epoch, requestId: 'req_superseded' })
-  assert.deepEqual(result, { restaged: false, reason: 'executor_decision_superseded_after_handoff' })
-  assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining, w.agent.observationDecisionForced], [1, 1, true])
+  // restageContext already replaced the conversation: callers must not act as if nothing was restaged.
+  assert.equal(result.restaged, true)
+  assert.equal(result.checkpoint, 'C7')
+  assert.deepEqual([result.decision_started, result.decision_reason], [false, 'executor_decision_superseded_after_handoff'])
+  assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining, w.agent.observationDecisionForced], [1, 1, true],
+    'the newer lineage keeps its own allowance')
   assert.equal(w.rows('context.executor_observation_started', w.mark).length, 0)
+  const [row, ...extra] = w.rows('context.executor_decision_superseded', w.mark)
+  assert.equal(extra.length, 0)
+  assert.deepEqual([row.data.request_id, row.data.checkpoint, row.data.handoff_id, row.data.reason, row.data.fence],
+    ['req_superseded', 'C7', result.handoff_id, 'executor_decision_superseded_after_handoff', 'generation'])
 })
 
 test('a C7 between turns after a reset (no loop epoch, the caller names the actor) still starts a fresh decision', async () => {
@@ -234,4 +244,22 @@ test('a C7 between turns after a reset (no loop epoch, the caller names the acto
   assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining], [4, 4])
   const [row] = w.rows('context.executor_observation_started', w.mark)
   assert.deepEqual([row.data.checkpoint, row.data.reason, row.data.handoff_id], ['C7', 'new_executor_decision_at_recovery', restaged.handoff_id])
+})
+
+test('completed() does not restore its saved budgets over a newer lineage that superseded it mid-wake', async () => {
+  const newer = { override: 1, remaining: 1, relevance: ['inventory'] }
+  const w = world([slice('copper-ore'), act('copper-ore'), ({ agent }) => {
+    // A player request (or an actor replacement) supersedes the slice-close wake and sets its own decision budgets.
+    agent.reset()
+    agent.observationBudgetOverride = newer.override
+    agent.observationBudgetRemaining = newer.remaining
+    agent.observationRelevanceOverride = newer.relevance
+    return slice('iron-ore')
+  }])
+  await w.agent.request('Gather ten copper ore, then ten iron ore.', { sender: 'Louis' })
+  w.game.inventory['copper-ore'] = 10
+  assert.deepEqual([w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining], [null, null])
+  await w.agent.completed().catch(error => error)
+  assert.deepEqual({ override: w.agent.observationBudgetOverride, remaining: w.agent.observationBudgetRemaining, relevance: w.agent.observationRelevanceOverride },
+    newer, 'the superseded completion wake left the newer lineage\'s budgets alone')
 })

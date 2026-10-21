@@ -3808,30 +3808,40 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch, goal_id: state?.goal?.goal_id, read_items: executorFactsMeta.read_items }
         }
       }
-      // Every fresh executor conversation is a new bounded observation decision (Run AJ: a C7 auto-resume executor inherited the
-      // 0 an earlier decision had spent, so its first fresh read closed the phase). C3 when it parks the planner (the commit
-      // handoff), C6 bounded recovery, C7 runtime recovery, C8 the step-close size net (the fold of a review handback seeds its own,
-      // foldReviewHandback). C5 is the same decision continued in a new generation and keeps its own reseed (provider budget
-      // handoff); a planner restage is not an executor handoff. A refused restage never gets here.
-      const freshDecisionReason = role !== EXECUTOR_ROLE ? undefined : {
-        C3: args.parkPlanner === true ? 'new_executor_decision_at_commit' : undefined,
-        C6: 'new_executor_decision_at_bounded_recovery',
-        C7: 'new_executor_decision_at_recovery',
-        C8: 'new_executor_decision_at_step_close',
-      }[checkpoint]
+      // A role handoff that starts an executor decision from nothing is a new bounded observation decision: C3 when it parks the
+      // planner (the commit handoff) and C7 runtime recovery (Run AJ: a C7 auto-resume executor inherited the 0 an earlier decision
+      // had spent, so its first fresh read closed the phase; between turns no wake chose a budget for it). C6 and a non-folded C8
+      // restage inside a wake whose budget Jev or the planner shape chose, and that budget carries over; C5 continues the same
+      // decision; the fold of a review handback seeds its own (foldReviewHandback); a planner restage is not an executor handoff.
+      // A refused restage never gets here.
+      const freshDecisionReason = role !== EXECUTOR_ROLE ? undefined
+        : checkpoint === 'C3' && args.parkPlanner === true ? 'new_executor_decision_at_commit'
+          : checkpoint === 'C7' ? 'new_executor_decision_at_recovery' : undefined
       if (restaged.restaged === true && freshDecisionReason) {
         const currentState = this.memory.planningState?.(this.activePlanKey())
         const expectedPlan = getActivePlanningPlan(state)
         const currentPlan = currentState && getActivePlanningPlan(currentState)
-        if (this.generation !== generation || this.agentContext.lineageSequence !== lineage
-          || this.agentContext.handoffId !== restaged.handoff_id || this.agentContext.role !== EXECUTOR_ROLE
-          || (this.epoch || loopHadEpoch ? this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch : false)
-          || currentState?.goal?.goal_id !== state.goal.goal_id || currentState?.goal?.status !== GOAL_STATUS.ACTIVE
-          || currentPlan?.plan_id !== expectedPlan?.plan_id || currentPlan?.plan_version !== expectedPlan?.plan_version
-          || currentPlan?.active_step_index !== expectedPlan?.active_step_index) {
-          return { restaged: false, reason: 'executor_decision_superseded_after_handoff' }
+        const fence = [
+          ['generation', this.generation !== generation],
+          ['lineage', this.agentContext.lineageSequence !== lineage],
+          ['handoff', this.agentContext.handoffId !== restaged.handoff_id || this.agentContext.role !== EXECUTOR_ROLE],
+          ['actor_epoch', (this.epoch || loopHadEpoch) && (this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch)],
+          ['goal', currentState?.goal?.goal_id !== state.goal.goal_id || currentState?.goal?.status !== GOAL_STATUS.ACTIVE],
+          ['plan', currentPlan?.plan_id !== expectedPlan?.plan_id || currentPlan?.plan_version !== expectedPlan?.plan_version
+            || currentPlan?.active_step_index !== expectedPlan?.active_step_index],
+        ].find(([, broken]) => broken)?.[0]
+        if (fence) {
+          // restageContext already replaced the conversation, so the restage is reported as it happened; only the decision is
+          // withheld (a newer lineage, actor or plan owns the allowance now).
+          const reason = 'executor_decision_superseded_after_handoff'
+          try {
+            await this.traceEvent('context.executor_decision_superseded', { request_id: requestId, role: EXECUTOR_ROLE, checkpoint, handoff_id: restaged.handoff_id, reason, fence }, { requestId })
+          }
+          catch {}
+          return { ...restaged, decision_started: false, decision_reason: reason }
         }
         await this.startExecutorObservationDecision({ requestId, handoffId: restaged.handoff_id, reason: freshDecisionReason, checkpoint })
+        return { ...restaged, decision_started: true }
       }
       return restaged
     }
@@ -11702,6 +11712,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
     const previousObservationRelevance = this.observationRelevanceOverride
     const previousPlanningHorizon = this.planningHorizonOverride
+    // Restored only into the lineage that saved them (as request() does): a reset or a newer request that superseded this wake
+    // owns the budgets now.
+    const restoreScope = { generation: this.generation, lineage: this.agentContext.lineageSequence }
     try {
       const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
       if (settled) return settled
@@ -11771,11 +11784,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     finally {
-      this.reasoningBudgetOverride = previousReasoningBudget
-      this.observationBudgetOverride = previousObservationBudget
-      this.observationBudgetRemaining = previousObservationBudgetRemaining
-      this.observationRelevanceOverride = previousObservationRelevance
-      this.planningHorizonOverride = previousPlanningHorizon
+      if (this.generation === restoreScope.generation && this.agentContext.lineageSequence === restoreScope.lineage) {
+        this.reasoningBudgetOverride = previousReasoningBudget
+        this.observationBudgetOverride = previousObservationBudget
+        this.observationBudgetRemaining = previousObservationBudgetRemaining
+        this.observationRelevanceOverride = previousObservationRelevance
+        this.planningHorizonOverride = previousPlanningHorizon
+      }
     }
   }
 
