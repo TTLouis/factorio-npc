@@ -7109,7 +7109,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const mutation = this.worldMutationSeq ?? 0
     const placedUnitNumber = singlePlacedUnitNumber(view, this.epoch?.actor_id)
     const familyReads = postBatchFamilyReads(families, { placedUnitNumber })
-    // After the family reads, so its size can never push out a read that answers a selected family.
+    // After the family reads, so its size can never push out a read that answers a selected family. It can push the step's
+    // recipe reads out of the POST_BATCH_FACT_CHARS budget instead; each such read is traced in `skipped` with reason 'size'.
     const placedRead = postBatchPlacedEntityRead(placedUnitNumber)
     const planned = []
     for (const item of [{ name: 'getInventoryItems', args: {} }, ...familyReads, ...(placedRead ? [placedRead] : []), ...this.stepFactWorkingSet.recipes(stepKey)]) {
