@@ -386,13 +386,16 @@ async function runToSecondStepReview(extra = []) {
   return w
 }
 
-test('review notes the packet shortens still reach the executor whole, as one message', async () => {
+test('review notes longer than the old 500-char record reach the executor whole, once, in the packet record', async () => {
+  // Run AJ (2026-10-21): the 500-char record cut the notes, and the whole copy rode a message the next continuation dropped.
   const long = `Copper ore is 12 tiles east of the actor. ${'Keep the furnace fed before reading again. '.repeat(14)}`.trim()
+  assert.ok(long.length > 500)
   const w = world([draft(), review('local_recovery_exhausted', RUN_AC_RATIONALE), draft({ chatMessage: long, plan: ['A tempting different strategy'] }), ctx => {
     assert.equal(ctx.context.role, 'executor')
-    const message = ctx.messages.filter(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]'))
-    assert.equal(message.length, 1, 'the packet record holds at most 500 chars, so the full notes follow once')
-    assert.ok(message[0].content.includes(long.slice(-60)), 'the end of the notes is not lost')
+    assert.equal(ctx.messages.filter(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]')).length, 0, 'no second copy as a message')
+    const record = ctx.messages.flatMap(row => String(row.content).split('\n')).filter(line => line.startsWith('planner_review_notes'))
+    assert.equal(record.length, 1)
+    assert.ok(record[0].endsWith(long), 'the end of the notes is not lost')
     return action(ctx)
   }])
   await w.say()

@@ -44,6 +44,18 @@ export function postBatchFamilyReads(families, context = {}) {
   })
 }
 
+// Run AJ (2026-10-21): batch 32 placed offshore-pump unit 37, Jev selected only nearby_world, and the bundle held only the
+// inventory, so the executor spent its one closed-round targeted read on getEntityStatus(37) to learn the pump's live identity and
+// fluid port. After a batch whose receipt names exactly one placed entity, the harness reads that entity's status whatever Jev
+// selected. It is facts only, with no authority. Unless Jev selected entity_status, it is tagged `harness` and not `family`, so it
+// covers no family. It never closes the read-only phase on its own, and it cannot change which selected families count as answered.
+export const POST_BATCH_PLACED_ENTITY_REASON = 'single_placement_receipt'
+export function postBatchPlacedEntityRead(placedUnitNumber) {
+  return Number.isSafeInteger(placedUnitNumber) && placedUnitNumber > 0
+    ? { name: 'getEntityStatus', args: { unit_number: placedUnitNumber }, harness: 'placed_entity' }
+    : undefined
+}
+
 // A read answers its family only when the game returned the fact: a JSON object that is not an error, and for an
 // exact entity, that entity.
 export function postBatchReadAnswers(read) {
@@ -101,6 +113,7 @@ export function postBatchFactsMessage(reads, covered = []) {
   return [
     POST_BATCH_FACTS_PREFIX,
     ...reads.map(read => `${read.name} ${JSON.stringify(read.args ?? {})} => ${read.output}`),
+    ...reads.filter(read => read.harness === 'placed_entity').map(read => `The entity the last batch placed (unit_number ${read.args?.unit_number}), read by the harness from its receipt: live identity and ports, facts only.`),
     ...(Array.isArray(covered) && covered.length ? [`Selected observation families these reads answer: ${covered.join(', ')}`] : []),
   ].join('\n')
 }

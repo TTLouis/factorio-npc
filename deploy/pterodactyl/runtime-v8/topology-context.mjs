@@ -155,3 +155,92 @@ export function fitTopologyBlock(facts, room) {
   const text = room >= 120 ? topologyText(facts, room) : ''
   return { text, full_chars: full.length, sent_chars: text.length, trimmed: text !== full, omitted: !text }
 }
+
+// Run AJ (2026-10-21): the C3 packet was sized while fresh_topology had no entities (a 679-char reserve). After the batch placed the
+// offshore pump, the block was 1,080 chars in a 734-char room, and fitTopologyBlock trimmed the pump away while the packet still
+// carried 11 historical fluid-source anchors. When the live block does not fit, a provider request may shed these packet lines from
+// its own copy, in this order, until the block fits:
+//  - Jev advisory facts, the ending conversation's note, and historical entity counts. All of them drop before topology in
+//    HANDOFF_DROP_ORDER.
+//  - Then, only when the block carries live entities, fluid-source anchors one at a time from the tail. The record lists the
+//    anchors the step needs first and the newest first, so the tail is the lowest priority. The "(+N more)" count reports the cut,
+//    and the line goes only when no anchor is left.
+// Nothing else is touched: no mandatory record, review notes, residual, receipt or contract. The canonical conversation is not
+// mutated. Packet and block together stay within the same 6,000 characters, because the room is recomputed from what is left.
+const SHED_LINES = Object.freeze([
+  { record: 'jev_facts', match: line => line.startsWith('jev_fact[') || line.startsWith('jev_fact_hint ') },
+  { record: 'note', match: line => line.startsWith('note (UNVERIFIED') },
+  { record: 'historical_entities', match: line => line.startsWith('historical_entities (') },
+])
+export const FLUID_HINTS_LINE_PREFIX = 'fluid_source_hints (HISTORICAL'
+const MORE_HINTS = /^\(\+(\d+) more\)$/
+const isPacketRow = row => row?.role === 'user' && typeof row.content === 'string' && (row.content.startsWith('[HANDOFF]') || row.content.startsWith('--- step block ---'))
+
+// The hints line with anchors cut from its tail until `need` characters are saved, or undefined when the whole line must go.
+function shorterHintsLine(line, need) {
+  const head = line.indexOf('): ')
+  if (head < 0) return { line: undefined, removed: 0 }
+  const label = line.slice(0, head + 3)
+  const parts = line.slice(head + 3).split(' | ')
+  let more = 0
+  const tail = MORE_HINTS.exec(parts.at(-1) ?? '')
+  if (tail) { more = Number(tail[1]); parts.pop() }
+  let removed = 0
+  let text = line
+  while (line.length - text.length < need && parts.length > 1) {
+    parts.pop(); removed++; more++
+    text = `${label}${parts.join(' | ')} | (+${more} more)`
+  }
+  if (line.length - text.length < need) return { line: undefined, removed: removed + parts.length }
+  return { line: text, removed }
+}
+
+export function reclaimTopologyRoom(messages, need, { liveEntities = false } = {}) {
+  const shed = []
+  let reclaimed = 0
+  if (!Array.isArray(messages) || !(need > 0)) return { messages, reclaimed, shed }
+  const rows = messages.map(row => isPacketRow(row) ? row.content.split('\n') : undefined)
+  const note = (record, chars, extra = {}) => {
+    const held = shed.find(entry => entry.record === record)
+    if (held) { held.chars += chars; held.lines_removed += extra.lines_removed ?? 0; held.hints_removed = (held.hints_removed ?? 0) + (extra.hints_removed ?? 0) }
+    else shed.push({ record, chars, lines_removed: extra.lines_removed ?? 0, ...(extra.hints_removed !== undefined ? { hints_removed: extra.hints_removed } : {}) })
+  }
+  // Line 0 of a row is its header ([HANDOFF] / --- step block ---) and is never shed.
+  for (const { record, match } of SHED_LINES) {
+    for (let r = rows.length - 1; r >= 0 && reclaimed < need; r--) {
+      const lines = rows[r]
+      for (let i = (lines?.length ?? 0) - 1; i >= 1 && reclaimed < need; i--) {
+        if (!match(lines[i])) continue
+        reclaimed += lines[i].length + 1
+        note(record, lines[i].length + 1, { lines_removed: 1 })
+        lines.splice(i, 1)
+      }
+    }
+  }
+  if (liveEntities) {
+    for (let r = rows.length - 1; r >= 0 && reclaimed < need; r--) {
+      const lines = rows[r]
+      for (let i = (lines?.length ?? 0) - 1; i >= 1 && reclaimed < need; i--) {
+        if (!lines[i].startsWith(FLUID_HINTS_LINE_PREFIX)) continue
+        const before = lines[i]
+        const cut = shorterHintsLine(before, need - reclaimed)
+        if (cut.line === undefined) {
+          lines.splice(i, 1)
+          reclaimed += before.length + 1
+          note('fluid_source_hints', before.length + 1, { lines_removed: 1, hints_removed: cut.removed })
+        }
+        else {
+          lines[i] = cut.line
+          reclaimed += before.length - cut.line.length
+          note('fluid_source_hints', before.length - cut.line.length, { hints_removed: cut.removed })
+        }
+      }
+    }
+  }
+  if (reclaimed === 0) return { messages, reclaimed, shed }
+  return {
+    messages: messages.map((row, index) => rows[index] && rows[index].join('\n') !== row.content ? { ...row, content: rows[index].join('\n') } : row),
+    reclaimed,
+    shed,
+  }
+}
