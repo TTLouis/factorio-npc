@@ -989,23 +989,24 @@ test('a fact that changed during the planner round shows its current value in th
   assert.doesNotMatch(atReview, /iron-ore=7/)
 })
 
-test('the pre-review reads stay free of the re-read allowance, and the fold re-seeds no observation budget', async () => {
-  let budget
-  const w = stepCloseWorld([copperThenIron(), action, () => readNearby('fold-read-1', 'iron-ore'), ctx => {
-    budget = { override: ctx.agent.observationBudgetOverride, remaining: ctx.agent.observationBudgetRemaining }
-    return askReview(ctx)
-  }, ctx => { ctx.agent.observationBudgetOverride = 9; ctx.agent.observationBudgetRemaining = 9; return plannerNotes() }, ctx => {
-    assert.deepEqual({ override: ctx.agent.observationBudgetOverride, remaining: ctx.agent.observationBudgetRemaining }, budget,
-      'the executor gets back the allowance it had; the planner round does not change it and the fold does not refill it')
-    const ledger = ctx.agent.stepReadLedger
-    const key = ctx.agent.stepReadKey()
-    const signatures = [...ledger.steps.get(key).keys()]
-    assert.equal(signatures.length, 1, 'the executor read once before asking')
-    for (const signature of signatures) assert.equal(ledger.isReestablishing(key, signature, ctx.agent.agentContext.conversationSeq), false, 'the result is still in the conversation')
-    return ironAction(ctx)
-  }])
+test('the pre-review reads stay free of the re-read allowance, and the fold seeds the same fresh allowance a C3 handback does, traced', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, () => readNearby('fold-read-1', 'iron-ore'), askReview,
+    ctx => { ctx.agent.observationBudgetOverride = null; ctx.agent.observationBudgetRemaining = 0; return plannerNotes() }, ctx => {
+      assert.deepEqual({ override: ctx.agent.observationBudgetOverride, remaining: ctx.agent.observationBudgetRemaining }, { override: 4, remaining: 4 },
+        'at least as able to act on the notes as a C3 handback, which seeds 4')
+      const ledger = ctx.agent.stepReadLedger
+      const key = ctx.agent.stepReadKey()
+      const signatures = [...ledger.steps.get(key).keys()]
+      assert.equal(signatures.length, 1, 'the executor read once before asking')
+      for (const signature of signatures) assert.equal(ledger.isReestablishing(key, signature, ctx.agent.agentContext.conversationSeq), false, 'the result is still in the conversation')
+      return ironAction(ctx)
+    }])
   await closeFirstStep(w)
-  assert.equal(foldRows(w.events, 'context.restage_folded')[0].reads_rebased, 1)
+  const [folded] = foldRows(w.events, 'context.restage_folded')
+  assert.equal(folded.reads_rebased, 1)
+  assert.equal(folded.observation_remaining, 4)
+  const started = foldRows(w.events, 'context.executor_observation_started').at(-1)
+  assert.deepEqual([started.handoff_id, started.observation_remaining, started.reason], [folded.handoff_id, 4, 'new_executor_decision_at_review_handback'])
 })
 
 test('an empty planner reply still ends the resumed conversation on a user turn', async () => {
@@ -1134,4 +1135,113 @@ test('a planner round that never hands back does not leave the kept executor beh
   const w = stepCloseWorld([copperThenIron(), action, askReview, () => { throw new Error('forced planner stop') }])
   await closeFirstStep(w).catch(() => {})
   assert.equal(w.agent.agentContext.hasParkedExecutor, false)
+})
+
+// The turn that follows the review request says only what happened to the step block.
+const harnessTurn = messages => messages.findLast(row => String(row.content).startsWith('[HARNESS] The planner reviewed this step'))
+
+test('a step-block rewrite that throws after the swap falls back to the full notes as a user turn, on the record', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, ctx => {
+    ctx.agent.replaceExecutorStepBlock = () => { throw new Error('forced rewrite failure') }
+    return plannerNotes()
+  }, ctx => {
+    const notesTurn = ctx.messages.findLast(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]'))
+    assert.equal(notesTurn?.role, 'user')
+    assert.match(notesTurn.content, /Iron ore candidates must be re-read/, 'the notes follow whole as a message')
+    assert.equal(consecutiveAssistants(ctx.messages), false)
+    assert.equal(blockLine(ctx.messages, 'planner_review_notes'), '', 'the old step block carries none')
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
+  const [failed] = foldRows(w.events, 'context.restage_fold_rewrite_failed')
+  assert.deepEqual([failed.reason, failed.message], ['step_block_rewrite_failed', 'forced rewrite failure'])
+  assert.ok(failed.request_id)
+  const [folded] = foldRows(w.events, 'context.restage_folded')
+  assert.deepEqual([folded.step_block_rewritten, folded.facts_refreshed], [false, false])
+  assert.equal(w.game.mutations.length, 2, 'the request went on')
+})
+
+test('with no notes and a failed rewrite the user turn does not claim a refresh', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, ctx => {
+    ctx.agent.replaceExecutorStepBlock = () => { throw new Error('forced rewrite failure') }
+    return plannerNotes('')
+  }, ctx => {
+    assert.match(harnessTurn(ctx.messages).content, /It sent no notes\. That step block is as it was before the review; its facts were not read again\./)
+    assert.doesNotMatch(harnessTurn(ctx.messages).content, /refreshed from the live game/)
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
+  assert.equal(foldRows(w.events, 'context.restage_folded')[0].step_block_rewritten, false)
+})
+
+test('when no fact was read the rewritten block says so, and the trace agrees', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, ctx => {
+    ctx.agent.gatherExecutorHandoffFacts = async () => undefined
+    return plannerNotes()
+  }, ctx => {
+    assert.match(harnessTurn(ctx.messages).content, /rewritten, but its facts were not read again/)
+    assert.doesNotMatch(harnessTurn(ctx.messages).content, /refreshed from the live game/)
+    assert.match(blockLine(ctx.messages, 'planner_review_notes'), new RegExp(FOLD_NOTES))
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
+  const [folded] = foldRows(w.events, 'context.restage_folded')
+  assert.deepEqual([folded.facts_refreshed, folded.step_block_rewritten], [false, true])
+})
+
+for (const [reason, gathered] of [
+  ['actor_changed_during_handoff', { refusal: 'actor_changed_during_handoff', meta: {} }],
+  ['facts_deferred_behind_batch', { facts: undefined, meta: { counts_deferred: true } }],
+]) {
+  test(`a fact read that ends in ${reason} falls back to a clean C3 and says why`, async () => {
+    const w = stepCloseWorld([copperThenIron(), action, askReview, ctx => {
+      const original = ctx.agent.gatherExecutorHandoffFacts.bind(ctx.agent)
+      let first = true
+      ctx.agent.gatherExecutorHandoffFacts = async args => {
+        if (first) { first = false; return gathered }
+        return original(args)
+      }
+      return plannerNotes()
+    }, ctx => {
+      assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/)
+      assert.match(blockLine(ctx.messages, 'planner_review_notes'), new RegExp(FOLD_NOTES))
+      assert.equal(consecutiveAssistants(ctx.messages), false)
+      return ironAction(ctx)
+    }])
+    await closeFirstStep(w)
+    assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'])
+    assert.equal(foldRows(w.events, 'context.restage_folded').length, 0)
+    assert.deepEqual(foldRows(w.events, 'context.restage_fold_skipped').map(row => [row.reason, row.stage]), [[reason, 'handback']])
+    assert.equal(w.agent.agentContext.hasParkedExecutor, false)
+  })
+}
+
+test('a fold the restage guard would refuse spends no fact reads before falling back', async () => {
+  let reads = 0
+  const w = stepCloseWorld([copperThenIron(), action, askReview, ctx => {
+    const original = ctx.agent.gatherExecutorHandoffFacts.bind(ctx.agent)
+    ctx.agent.gatherExecutorHandoffFacts = async args => { reads++; return original(args) }
+    const guard = ctx.agent.restageGuardRefusal.bind(ctx.agent)
+    let first = true
+    ctx.agent.restageGuardRefusal = safePoint => {
+      if (first) { first = false; return 'round_open' }
+      return guard(safePoint)
+    }
+    return plannerNotes()
+  }, ctx => {
+    assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/)
+    return ironAction(ctx)
+  }])
+  await closeFirstStep(w)
+  assert.equal(reads, 1, 'only the C3 handback read the facts')
+  assert.deepEqual(foldRows(w.events, 'context.restage_fold_skipped').map(row => [row.reason, row.stage]), [['round_open', 'handback']])
+  assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'])
+})
+
+test('the facts a fold carries are traced as a fold, not as a rebuilt context', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview, plannerNotes(), ironAction])
+  await closeFirstStep(w)
+  const carried = foldRows(w.events, 'context.executor_facts_carried')
+  assert.equal(carried.at(-1).reason, 'review_handback_folded_into_the_step_close_conversation')
+  assert.equal(carried.at(-1).checkpoint, 'C8')
 })

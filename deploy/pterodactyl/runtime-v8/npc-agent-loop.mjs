@@ -4107,8 +4107,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       closed: mark.closed,
       world_mutation_seq: mark.world_mutation_seq,
       mark: { ...mark },
-      // The round runs on the loop's shared observation fields; the executor gets back what it had, not a fresh allowance.
-      observation: { override: this.observationBudgetOverride, remaining: this.observationBudgetRemaining },
     }
   }
 
@@ -4170,9 +4168,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     let reason = moved()
     if (reason) return skip(reason)
+    // Refuse early what the restage would refuse anyway, so a doomed fold spends no reads (C3 does the same before its reads).
+    const early = this.restageGuardRefusal(this.turnToken ?? undefined)
+    if (early) return skip(early)
     // The live facts a C3 restage would read now (held counts, the step's machine, residual needs): the planner round took wall
-    // clock time in a world that kept running, and a count read at the step close is that old. Fenced by actor and epoch like C3's.
-    const gathered = await this.gatherExecutorHandoffFacts({ state: this.memory.planningState?.(key), actor: this.epoch, runtime: this.lastRuntimeView(), requestId, checkpoint: 'C8' })
+    // clock time in a world that kept running, and a count read at the step close is that old. Fenced by actor and epoch like C3's;
+    // the same sources as the C3 handback (no cached runtime view).
+    const gathered = await this.gatherExecutorHandoffFacts({ state: this.memory.planningState?.(key), actor: this.epoch, requestId, checkpoint: 'C8' })
     if (gathered?.refusal) return skip(gathered.refusal)
     if (gathered?.meta?.counts_deferred) return skip('facts_deferred_behind_batch')
     reason = moved()
@@ -4180,24 +4182,44 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // The restage entry every restage passes (lifecycle table, guard, resets); a refusal here is the one the C3 restage would meet.
     const resumed = await this.restageContext({ checkpoint: 'C8', reason: 'review_handback_at_step_close', role: EXECUTOR_ROLE, requestId, safePoint: this.turnToken ?? undefined, foldKept: true })
     if (!resumed.restaged) return skip(resumed.reason)
-    // Rewrite the step block in place: current facts and the notes stored on the goal ride in baseMessages, not only in messages.
+    // From here the conversation is swapped: nothing below may fail the handback. A failed rewrite leaves the old step block, and the
+    // caller then sends the full notes as a message, so the conversation still ends on a user turn.
     const state = this.memory.planningState?.(key)
     const plan = getActivePlanningPlan(state)
-    const { jevFacts, jevHints } = this.retainedJevRecords()
-    const refreshed = this.buildRestagePacket({
-      checkpoint: 'C8', role: EXECUTOR_ROLE, reason: 'review_handback_at_step_close', planningState: state,
-      actor: this.epoch, runtime: this.lastRuntimeView(), executorFacts: gathered?.facts, jevFacts, jevHints,
-      topology: this.currentTopologyFacts(), // the block the next request inserts keeps its room
-    })
-    if (refreshed?.volatileText) this.replaceExecutorStepBlock(refreshed.volatileText)
-    if (refreshed?.executor_facts) await this.traceExecutorFactsCarried({ packet: refreshed, restaged: { handoff_id: resumed.handoff_id }, checkpoint: 'C8', requestId, meta: gathered?.meta })
+    let refreshed
+    let rewritten = false
+    try {
+      // Rewrite the step block in place: current facts and the notes stored on the goal ride in baseMessages, not only in messages.
+      const { jevFacts, jevHints } = this.retainedJevRecords()
+      refreshed = this.buildRestagePacket({
+        checkpoint: 'C8', role: EXECUTOR_ROLE, reason: 'review_handback_at_step_close', planningState: state,
+        actor: this.epoch, executorFacts: gathered?.facts, jevFacts, jevHints,
+        topology: this.currentTopologyFacts(), // the block the next request inserts keeps its room
+      })
+      if (refreshed?.volatileText) {
+        this.replaceExecutorStepBlock(refreshed.volatileText)
+        rewritten = true
+      }
+    }
+    catch (error) {
+      await this.safeTrace('context.restage_fold_rewrite_failed', { request_id: requestId, handoff_id: resumed.handoff_id, reason: 'step_block_rewrite_failed',
+        message: cleanMemoryText(error instanceof Error ? error.message : String(error), 300) }, requestId)
+    }
+    if (rewritten && refreshed?.executor_facts) {
+      await this.traceExecutorFactsCarried({ packet: refreshed, restaged: { handoff_id: resumed.handoff_id }, checkpoint: 'C8', requestId, meta: gathered?.meta,
+        reason: 'review_handback_folded_into_the_step_close_conversation' })
+    }
     // The reads the conversation already held are still in it: they are not dropped results to re-establish for free.
-    const stepKey = this.stepReadKey()
-    const rebased = stepKey ? this.stepReadLedger?.rebase(stepKey, resumed.kept_seq, resumed.seq) ?? 0 : 0
-    // No fresh allowance: the executor continues the decision it asked the review from.
-    if (meta.observation) this.observationBudgetOverride = meta.observation.override
-    if (meta.observation) this.observationBudgetRemaining = meta.observation.remaining
-    await this.traceEvent('context.restage_folded', {
+    let rebased = 0
+    try {
+      const stepKey = this.stepReadKey()
+      rebased = stepKey ? this.stepReadLedger?.rebase(stepKey, resumed.kept_seq, resumed.seq) ?? 0 : 0
+    }
+    catch {}
+    // The same new executor decision a C3 handback starts: a fresh observation allowance for acting on the planner's notes (traced).
+    await this.startExecutorObservationDecision({ requestId, handoffId: resumed.handoff_id, reason: 'new_executor_decision_at_review_handback' })
+    const factsRefreshed = rewritten && Boolean(gathered?.facts)
+    await this.safeTrace('context.restage_folded', {
       request_id: requestId,
       role: EXECUTOR_ROLE,
       checkpoint: 'C8',
@@ -4208,20 +4230,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       plan_id: plan?.plan_id,
       step_id: meta.step_id,
       notes_chars: notesChars,
-      facts_refreshed: Boolean(gathered?.facts),
-      step_block_rewritten: Boolean(refreshed?.volatileText),
+      facts_refreshed: factsRefreshed,
+      step_block_rewritten: rewritten,
       reads_rebased: rebased,
       observation_remaining: this.observationBudgetRemaining,
-    }, { requestId })
-    await this.traceEvent('context.planner_parked', {
+    }, requestId)
+    await this.safeTrace('context.planner_parked', {
       request_id: requestId,
       role: PLANNER_ROLE,
       handoff_id: resumed.planner_handoff_id,
       executor_handoff_id: resumed.handoff_id,
       reason: 'executor_acts_on_committed_plan',
       parked: context.hasParkedPlanner,
-    }, { requestId })
-    return { restaged: true, folded: true, role: EXECUTOR_ROLE, checkpoint: 'C8', handoff_id: resumed.handoff_id }
+    }, requestId)
+    return { restaged: true, folded: true, role: EXECUTOR_ROLE, checkpoint: 'C8', handoff_id: resumed.handoff_id, facts_refreshed: factsRefreshed, step_block_rewritten: rewritten }
+  }
+
+  // A trace write after a swap can never fail the handback.
+  async safeTrace(event, data, requestId) {
+    try {
+      await this.traceEvent(event, data, { requestId })
+    }
+    catch {}
   }
 
   // C6: ordinary bounded recovery (Jev routed wake_planner / targeted_observation on a
@@ -6451,7 +6481,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // The trace row of an executor restage that carried facts: what was carried, how fresh it is and why. Never throws
   // (the restage it describes has already happened).
-  async traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta }) {
+  async traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta, reason = 'executor_context_rebuilt_without_the_prior_conversation_reads' }) {
     try {
       const summary = packet.executor_facts
       const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities', 'fluid_source_hints', 'placed_machines'].includes(key)
@@ -6479,7 +6509,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reads_failed: meta?.reads_failed,
         refresh: meta?.refresh,
         dropped_for_size: (packet.dropped ?? []).filter(factRecord),
-        reason: 'executor_context_rebuilt_without_the_prior_conversation_reads',
+        reason,
       }, { requestId })
       if (meta?.residual_machine_stock_credited?.length > 0) {
         await this.traceEvent('context.residual_machine_stock_credited', {
@@ -15526,7 +15556,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (notes && !carried) this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
       // The resumed conversation ends on the executor's own review request: a user turn always follows it, pointing at the step block
       // rewritten above (the notes live in its planner_review_notes record; no copy here).
-      else if (handoff.folded) this.messages.push({ role: 'user', content: `[HARNESS] The planner reviewed this step and returned it unchanged (the plan is unchanged; advisory, not world evidence). ${notes ? 'Its notes are the planner_review_notes record of the step block above.' : 'It sent no notes.'} That step block was refreshed from the live game just now: act on it.` })
+      else if (handoff.folded) {
+        const notesPart = notes ? 'Its notes are the planner_review_notes record of the step block above.' : 'It sent no notes.'
+        const blockPart = handoff.step_block_rewritten && handoff.facts_refreshed ? 'That step block was refreshed from the live game just now: act on it.'
+          : handoff.step_block_rewritten ? 'That step block was rewritten, but its facts were not read again: they are as of before the review.'
+            : 'That step block is as it was before the review; its facts were not read again.'
+        this.messages.push({ role: 'user', content: `[HARNESS] The planner reviewed this step and returned it unchanged (the plan is unchanged; advisory, not world evidence). ${notesPart} ${blockPart}` })
+      }
       return this.runTurn()
     }
     const timeReview = await this.reviewPlanTime(plan)
