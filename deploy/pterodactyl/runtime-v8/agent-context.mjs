@@ -18,6 +18,11 @@
 // close and drops the executor. Parking and resuming both take the next conversation
 // sequence, so a reply still in flight for the other conversation is stale.
 //
+// Executor keeping (fold C3 into C8). A planner review round returns the same step to the executor that asked for it. When that
+// executor was restaged at the step close and has done nothing since, the planner return keeps its conversation (resumePlanner
+// with keepExecutor) and the handback resumes it whole (resumeExecutor) instead of restaging a second, identical packet. Any
+// restage and any new lineage drops a kept executor.
+//
 // Pure: no I/O, no clock. The loop owns the effects (reducer dispatch, trace
 // rows, counter resets outside this object); see NpcAgentLoop.restageContext.
 //
@@ -108,6 +113,7 @@ export class AgentContext {
     this.usedHandoffIds = new Set([this.handoffId])
     this.restageCount = 0
     this.parkedPlanner = null // U6: the planner conversation set aside while an executor conversation acts; a new lineage starts with none
+    this.parkedExecutor = null // an executor conversation kept while the planner answers its review; a new lineage starts with none
     this.conversationState = new Map()
     this.resetCounters()
   }
@@ -292,17 +298,7 @@ export class AgentContext {
    */
   commitRestage(prepared) {
     const { checkpoint, reason, packet, role, prefix, parkPlanner } = prepared
-    const parked = parkPlanner === true && this.role === PLANNER_ROLE && role === EXECUTOR_ROLE
-      ? {
-          messages: this.messages,
-          baseMessages: this.baseMessages,
-          handoffId: this.handoffId,
-          counters: this.counters,
-          size: this.size,
-          requestCharsHighWater: this.requestCharsHighWater,
-          conversationState: this.conversationState,
-        }
-      : undefined
+    const parked = parkPlanner === true && this.role === PLANNER_ROLE && role === EXECUTOR_ROLE ? this.conversationSnapshot() : undefined
     const previous = {
       role: this.role,
       handoff_id: this.handoffId,
@@ -314,6 +310,7 @@ export class AgentContext {
     }
     if (parked) this.parkedPlanner = parked
     else if (role === PLANNER_ROLE) this.parkedPlanner = null
+    this.parkedExecutor = null // a restage is a new conversation: the one kept for a review handback is no longer the step's
     this.baseMessages = [
       ...copyMessages(prefix),
       { role: 'user', content: packet.stableText },
@@ -379,9 +376,18 @@ export class AgentContext {
    * The planner's own size counter comes back with it: executor traffic never
    * counted against it. Returns undefined when nothing is parked.
    */
-  resumePlanner() {
+  resumePlanner({ keepExecutor } = {}) {
     const parked = this.parkedPlanner
     if (!parked || this.role !== EXECUTOR_ROLE) return undefined
+    // Fold C3 into C8: a planner review round hands the same step back to the executor that asked for it. The caller keeps that
+    // conversation (with the review request it sent as its last turn) so resumeExecutor() can bring it back whole.
+    this.parkedExecutor = keepExecutor
+      ? {
+          ...this.conversationSnapshot(),
+          meta: keepExecutor.meta,
+          reply: typeof keepExecutor.reply === 'string' && keepExecutor.reply ? keepExecutor.reply : undefined,
+        }
+      : null
     const dropped = {
       role: this.role,
       handoff_id: this.handoffId,
@@ -404,6 +410,65 @@ export class AgentContext {
       handoff_id: this.handoffId,
       message_count: this.messages.length,
       dropped_executor: dropped,
+      ...(this.parkedExecutor ? { executor_kept: true } : {}),
+    }
+  }
+
+  // --- the executor kept for a planner review handback (fold C3 into C8) ----------------------
+
+  get hasParkedExecutor() {
+    return this.parkedExecutor !== null && this.parkedExecutor !== undefined
+  }
+
+  /** Discard the kept executor (the handback cannot use it). Returns whether one was dropped. */
+  dropParkedExecutor() {
+    const had = this.hasParkedExecutor
+    this.parkedExecutor = null
+    return had
+  }
+
+  /**
+   * The planner round is over and hands the step back: the executor conversation kept by resumePlanner({ keepExecutor }) becomes
+   * the active one again, whole (messages, handoff id, counters, size), with the review request it sent as its last turn, and the
+   * planner conversation is parked again. This is not a restage: no packet, no new handoff id, the restage count stands. The
+   * conversation sequence advances, so a reply still in flight for the planner is stale. Returns undefined when no executor is
+   * kept or the planner is not the active conversation.
+   */
+  resumeExecutor() {
+    const kept = this.parkedExecutor
+    if (!kept || this.role !== PLANNER_ROLE) return undefined
+    const planner = this.conversationSnapshot()
+    this.parkedPlanner = planner
+    this.parkedExecutor = null
+    this.messages = kept.messages
+    if (kept.reply) this.messages.push({ role: 'assistant', content: kept.reply })
+    this.baseMessages = kept.baseMessages
+    this.role = EXECUTOR_ROLE
+    this.handoffId = kept.handoffId
+    this.counters = kept.counters
+    this.size = kept.size
+    this.requestCharsHighWater = kept.requestCharsHighWater
+    this.conversationState = kept.conversationState
+    this.conversationSeq += 1
+    return {
+      role: EXECUTOR_ROLE,
+      handoff_id: this.handoffId,
+      message_count: this.messages.length,
+      meta: kept.meta,
+      planner_handoff_id: planner.handoffId,
+    }
+  }
+
+  /** The active conversation set aside whole (messages, base messages, handoff id, counters, size, per-conversation state). */
+  conversationSnapshot() {
+    return {
+      messages: this.messages,
+      baseMessages: this.baseMessages,
+      handoffId: this.handoffId,
+      counters: this.counters,
+      size: this.size,
+      requestCharsHighWater: this.requestCharsHighWater,
+      conversationState: this.conversationState,
     }
   }
 }

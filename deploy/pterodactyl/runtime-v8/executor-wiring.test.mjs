@@ -712,6 +712,72 @@ test('AgentContext parks the planner at an executor restage, keeps its size coun
   assert.equal(context.role, 'planner')
 })
 
+// Fold C3 into C8: a planner review round hands the step back to the executor that asked for it, so that executor
+// conversation is kept (not dropped) while the planner acts, and comes back whole with the planner parked again.
+test('AgentContext keeps the executor across a planner review return and resumes it whole; a restage, a new lineage or a plain return drops it', () => {
+  const context = new AgentContext({ config: { models: ['planner-model', 'executor-model'], base: 'https://p.test/v1', key: 'k' } })
+  context.baseMessages = [{ role: 'system', content: 'SYSTEM' }, { role: 'user', content: '[CHAT] Louis: go' }]
+  context.messages = [...context.baseMessages, { role: 'assistant', content: 'plan' }]
+  const plannerSized = context.beginRequest(40000)
+  context.observeReply(plannerSized, { input_units: 12000 })
+  const plannerHandoff = context.handoffId
+  const packet = (id, checkpoint = 'C3', role = 'executor') => ({
+    stableText: '[HANDOFF] stable', volatileText: `--- step block ${id} ---`, handoff_id: id, hash: 'h', chars: 20, estimated_tokens: 5,
+    event: { role, checkpoint, reason: 'r' },
+  })
+  const park = (id, checkpoint) => context.restage({ checkpoint, reason: 'r', packet: packet(id, checkpoint), parkPlanner: true })
+
+  park('ho_exec_one', 'C3')
+  park('ho_exec_two', 'C8')
+  const executorRequest = context.beginRequest(5000)
+  context.observeReply(executorRequest, { input_units: 700 })
+  const executorMessages = context.messages.map(message => message.content)
+  const executorSize = context.sizeTokens
+
+  // The review return: the planner comes back, the executor is kept with its caller's meta and the review request it sent.
+  const returned = context.resumePlanner({ keepExecutor: { meta: { request_id: 'req_1', step_id: 'step_2' }, reply: '{"plannerReview":{"reason":"r"}}' } })
+  assert.equal(returned.role, 'planner')
+  assert.equal(returned.handoff_id, plannerHandoff)
+  assert.equal(returned.executor_kept, true)
+  assert.equal(context.hasParkedExecutor, true)
+  assert.equal(context.hasParkedPlanner, false)
+  assert.equal(context.sizeTokens, 12000, 'the planner size counter is back')
+  assert.equal(context.isStale(executorRequest), true)
+  assert.deepEqual(context.parkedExecutor.meta, { request_id: 'req_1', step_id: 'step_2' })
+
+  // The handback: the same executor conversation (its handoff id, messages, size counter) is the active one again, with the planner parked.
+  const restagesBefore = context.restageCount
+  const resumed = context.resumeExecutor()
+  assert.equal(resumed.role, 'executor')
+  assert.equal(resumed.handoff_id, 'ho_exec_two')
+  assert.deepEqual(resumed.meta, { request_id: 'req_1', step_id: 'step_2' })
+  assert.equal(resumed.planner_handoff_id, plannerHandoff)
+  assert.equal(context.role, 'executor')
+  assert.equal(context.handoffId, 'ho_exec_two')
+  assert.deepEqual(context.messages.map(message => message.content), [...executorMessages, '{"plannerReview":{"reason":"r"}}'], 'the review request is the last executor turn')
+  assert.equal(context.messages.at(-1).role, 'assistant')
+  assert.equal(context.sizeTokens, executorSize, 'the executor size counter comes back: the planner round never counted against it')
+  assert.equal(context.restageCount, restagesBefore, 'a resume is not a restage')
+  assert.equal(context.hasParkedExecutor, false)
+  assert.equal(context.hasParkedPlanner, true)
+  assert.equal(context.parkedPlanner.handoffId, plannerHandoff)
+  assert.equal(context.resumeExecutor(), undefined, 'nothing kept')
+
+  // A plain return keeps nothing; a restage or a new lineage drops what was kept.
+  context.resumePlanner()
+  assert.equal(context.hasParkedExecutor, false)
+  park('ho_exec_three', 'C3')
+  context.resumePlanner({ keepExecutor: { meta: {} } })
+  assert.equal(context.hasParkedExecutor, true)
+  context.restage({ checkpoint: 'C1', reason: 'r', packet: packet('ho_planner_fresh', 'C1', 'planner') })
+  assert.equal(context.hasParkedExecutor, false)
+  park('ho_exec_four', 'C3')
+  context.resumePlanner({ keepExecutor: { meta: {} } })
+  context.beginLineage()
+  assert.equal(context.hasParkedExecutor, false)
+  assert.equal(context.resumeExecutor(), undefined)
+})
+
 // --- U8 carry-overs -----------------------------------------------------------------------------------------------
 
 const contextWindowError = () => Object.assign(new Error('provider_context_window_exceeded: Provider HTTP 400 reported context/input token limit exhaustion'), { code: 'provider_context_window_exceeded', failureClass: 'provider_budget' })
