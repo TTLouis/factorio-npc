@@ -991,7 +991,7 @@ test('a fact that changed during the planner round shows its current value in th
 
 test('the pre-review reads stay free of the re-read allowance, and the fold re-seeds no observation budget', async () => {
   let budget
-  const w = stepCloseWorld([copperThenIron(), action, ctx => readNearby('fold-read-1', 'iron-ore'), ctx => {
+  const w = stepCloseWorld([copperThenIron(), action, () => readNearby('fold-read-1', 'iron-ore'), ctx => {
     budget = { override: ctx.agent.observationBudgetOverride, remaining: ctx.agent.observationBudgetRemaining }
     return askReview(ctx)
   }, ctx => { ctx.agent.observationBudgetOverride = 9; ctx.agent.observationBudgetRemaining = 9; return plannerNotes() }, ctx => {
