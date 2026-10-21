@@ -16,7 +16,7 @@ const LEGACY_SOURCE_PIN = '78ef2acf788189981d82aa9e15e9c33b3dedb29c'
 // payload bytes; otherwise the bootstrap checksum and immutable source can diverge.
 // Channel eggs keep this bootstrap immutable, then resolve SGLUNA_SOURCE_REF to an exact
 // commit at reinstall time and patch only the payload's SGLUNA_REF/revision assignments.
-const PAYLOAD_REF = '07288ed466341437152699b8bc77ae4f96f484d8'
+const PAYLOAD_REF = '211b068b85aa648804cbb9c9729770af2b40bdea'
 const CHANNELS = Object.freeze({
   main: {
     name: 'SGLuna Factorio Server (Main)',
