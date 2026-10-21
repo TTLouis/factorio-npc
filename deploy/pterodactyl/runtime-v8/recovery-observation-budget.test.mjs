@@ -263,3 +263,94 @@ test('completed() does not restore its saved budgets over a newer lineage that s
   assert.deepEqual({ override: w.agent.observationBudgetOverride, remaining: w.agent.observationBudgetRemaining, relevance: w.agent.observationRelevanceOverride },
     newer, 'the superseded completion wake left the newer lineage\'s budgets alone')
 })
+
+test('runtime recovery stops after a superseded C7 swap without writing or calling the provider', async () => {
+  const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+  const w = await executorWorld()
+  const callsBefore = w.calls.length
+  const saved = [w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride,
+    w.agent.observationBudgetRemaining, w.agent.planningHorizonOverride]
+  const original = w.agent.jev.afterRestage.bind(w.agent.jev)
+  let swapped = false
+  w.agent.jev.afterRestage = async (prepared, result) => {
+    await original(prepared, result)
+    if (result.restaged && result.checkpoint === 'C7') {
+      swapped = true
+      w.agent.reset()
+      w.agent.observationBudgetOverride = 1
+      w.agent.observationBudgetRemaining = 1
+    }
+  }
+  const result = await recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: 'req_w3_superseded' })
+  assert.equal(swapped, true, 'the C7 conversation swap happened')
+  assert.equal(result.recovered, false, 'a superseded recovery must not report success')
+  assert.equal(result.reason, 'executor_decision_superseded_after_handoff')
+  for (const messages of [w.agent.baseMessages, w.agent.messages]) {
+    assert.equal(messages.some(row => String(row.content).includes('[HARNESS] Runtime recovery after')), false,
+      'no old recovery harness is appended to the swapped conversation')
+  }
+  assert.equal(w.calls.length, callsBefore, 'no provider call after the swap')
+  const [row] = w.rows('runtime.recovery_decision_superseded', w.mark)
+  assert.ok(row, 'the supervisor traces the superseded recovery')
+  assert.deepEqual(row.data, { reason: 'executor_decision_superseded_after_handoff', recovery_reason: 'runtime_restart' })
+  assert.equal(row.request_id ?? row.data.request_id, 'req_w3_superseded')
+  assert.deepEqual([w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride,
+    w.agent.observationBudgetRemaining, w.agent.planningHorizonOverride], saved, 'the early return restores saved budgets')
+})
+
+test('planner review handback rejects a superseded C3 before appending review notes', async () => {
+  let armed = false
+  const notes = `Read the copper facts before acting. ${'Preserve the requested quantity and verify the current step. '.repeat(14)}`
+  const w = world([slice('copper-ore'), review(AJ_RATIONALE), () => {
+    armed = true
+    return slice('copper-ore', { chatMessage: notes })
+  }])
+  const original = w.agent.jev.afterRestage.bind(w.agent.jev)
+  let swapped = false
+  w.agent.jev.afterRestage = async (prepared, result) => {
+    await original(prepared, result)
+    if (armed && result.restaged && result.checkpoint === 'C3') {
+      swapped = true
+      w.agent.reset()
+    }
+  }
+  const commit = w.agent.commitPlan.bind(w.agent)
+  let handback
+  w.agent.commitPlan = function (plan) {
+    const result = commit(plan)
+    if (armed && this.agentContext.role === 'planner') handback = result
+    return result
+  }
+  await w.agent.request('Gather ten copper ore, then ten iron ore.', { sender: 'Louis' }).catch(() => {})
+  assert.equal(swapped, true, 'the planner review used a C3 conversation swap')
+  assert.ok(handback, 'the planner review reached commitPlan')
+  await assert.rejects(handback, /planner_execution_handoff_superseded/)
+  for (const messages of [w.agent.baseMessages, w.agent.messages]) {
+    assert.equal(messages.some(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]')), false,
+      'no old planner notes are appended after supersession')
+  }
+})
+
+test('normal C7 runtime recovery still starts a decision and carries the recovery message once', async () => {
+  const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+  const w = await executorWorld()
+  let restage
+  const original = w.agent.restageBetweenTurns.bind(w.agent)
+  w.agent.restageBetweenTurns = async options => {
+    const result = await original(options)
+    if (options.checkpoint === 'C7') restage = result
+    return result
+  }
+  const provider = w.agent.provider
+  w.agent.provider = async (...args) => {
+    w.agent.provider = provider
+    return planReply(act('copper-ore')({ memory: w.memory }))
+  }
+  const result = await recoverInterruptedAgentPlan(w.agent, 'runtime_restart')
+  assert.equal(result.recovered, true)
+  assert.equal(restage?.decision_started, true)
+  for (const messages of [w.agent.baseMessages, w.agent.messages]) {
+    assert.equal(messages.filter(row => String(row.content).includes('[HARNESS] Runtime recovery after')).length, 1,
+      'the normal recovery harness is present once')
+  }
+})
