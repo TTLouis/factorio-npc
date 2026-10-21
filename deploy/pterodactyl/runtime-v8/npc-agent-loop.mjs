@@ -15587,6 +15587,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const folded = reviewRound ? await this.foldReviewHandback({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id, notesChars: notes.length, expectedKept: review?.executor_kept === true }) : undefined
       const handoff = folded ?? await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
       if (!handoff.restaged) throw new AgentLoopError(`planner_execution_handoff_refused:${handoff.reason}`)
+      if (handoff.decision_started === false) throw new AgentLoopError(`planner_execution_handoff_superseded:${handoff.decision_reason}`)
       // The packet already carries the notes when they fit its record whole; repeat them only when it dropped or shortened them.
       const carried = notes && this.messages.some(row => typeof row.content === 'string'
         && row.content.split('\n').some(line => line.includes('planner_review_notes') && line.includes(notes)))
@@ -16146,6 +16147,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // executor gets its normal tools. The durable per-goal claim stays spent.
       if (this.freshContextRecoveryInProgress) this.clearActionOmissionRecovery()
       const handoff = await this.startExecutorAtCommit({ planId: committed.plan_id, requestId: this.traceRequest?.id })
+      if (handoff.decision_started === false) throw new AgentLoopError(`planner_only_handoff_superseded:${handoff.decision_reason}`)
       if (handoff.restaged) return this.runTurn()
       await this.assertCurrent()
       if (getActivePlanningPlan(this.memory.planningState?.(key))?.plan_id !== committed.plan_id) {

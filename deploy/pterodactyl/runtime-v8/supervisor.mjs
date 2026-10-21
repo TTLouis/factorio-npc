@@ -1902,6 +1902,13 @@ async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
     catch {}
     return result
   }
+  if (result.decision_started === false) {
+    try {
+      await agent.traceEvent?.('runtime.recovery_decision_superseded', { reason: result.decision_reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+    }
+    catch {}
+    return result
+  }
   const harness = { role: 'user', content: recoveryMessage }
   agent.baseMessages = [...agent.baseMessages, harness]
   agent.messages = [...agent.messages, { ...harness }]
@@ -2088,9 +2095,10 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     // A fresh executor context gets its own correction turn for a refusal (unit 13).
     await agent.resetRefusalRecoveryBudgets?.({ requestId: recoveryRequestId })
   }
-  await restageRecoveryConversation(agent, { reason, recoveryMessage })
+  const restage = await restageRecoveryConversation(agent, { reason, recoveryMessage })
   if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
   try {
+    if (restage?.decision_started === false) return { recovered: false, reason: 'executor_decision_superseded_after_handoff', state: agent.memory?.currentPlan?.(key) ?? state }
     const result = await agent.runGuarded()
     return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
   }
