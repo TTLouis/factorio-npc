@@ -11,6 +11,7 @@ import { observationToolFamily } from './structured-policy.mjs'
 const SWAP_EVENTS = {
   'context.restaged': 'restaged',
   'context.planner_resumed': 'planner_resumed',
+  'context.restage_folded': 'restage_folded',
   'planning.reasoning_epoch_reset': 'reasoning_epoch_reset',
   'budget.handoff_restage_fallback': 'handoff_restage_fallback',
 }

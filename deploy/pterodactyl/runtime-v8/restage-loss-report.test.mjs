@@ -178,3 +178,13 @@ test('malformed JSON lines are skipped', async () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('swapEvents reports a folded review handback as its own kind, with the checkpoint it folded into', () => {
+  const events = swapEvents([
+    swapRow('context.restaged', '2026-01-01T00:00:10.000Z', { role: 'executor', checkpoint: 'C8', handoff_id: 'h1', reason: 'context_over_hard_limit_at_step_close' }),
+    swapRow('context.planner_resumed', '2026-01-01T00:00:20.000Z', { role: 'planner', handoff_id: 'h0', executor_kept: true }),
+    swapRow('context.restage_folded', '2026-01-01T00:00:30.000Z', { role: 'executor', checkpoint: 'C8', handoff_id: 'h1', reason: 'review_handback_at_step_close' }),
+  ])
+  assert.deepEqual(events.map(e => e.kind), ['restaged', 'planner_resumed', 'restage_folded'])
+  assert.deepEqual([events[2].role, events[2].checkpoint, events[2].handoff_id], ['executor', 'C8', 'h1'], 'the folded entry is the C8 conversation, resumed')
+})
