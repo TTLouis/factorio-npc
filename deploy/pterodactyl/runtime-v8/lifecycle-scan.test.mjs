@@ -271,3 +271,9 @@ test('a trace with runtime lifecycle.entered rows counts each event once and nam
   assert.equal(projected[1].state.goal, 'blocked', 'the runtime goal values beyond the projection are kept')
   assert.deepEqual(scanLifecycle(rows).flags.map(flag => flag.kind), ['executor_restage_while_paused'])
 })
+
+test('a folded review handback puts the projected role back on the executor, and counts as an executor restage', () => {
+  const items = projectLifecycle([restage('executor'), row('context.planner_resumed'), row('context.restage_folded', { role: 'executor', checkpoint: 'C8', folded_from: 'C3' }), row('request.cancelled')])
+  assert.deepEqual(items.map(item => item.state.role), ['unknown', 'executor', 'planner', 'executor'])
+  assert.deepEqual(items.map(item => item.lifecycle_event).filter(Boolean), ['restage.executor', 'planner.return', 'restage.executor', 'reset'])
+})

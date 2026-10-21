@@ -212,7 +212,7 @@ function parseLines(text) {
   return { rows, errors }
 }
 
-const SWAP_EVENTS = new Set(['context.restaged', 'context.planner_resumed', 'planning.reasoning_epoch_reset', 'budget.handoff_restage_fallback'])
+const SWAP_EVENTS = new Set(['context.restaged', 'context.restage_folded', 'context.planner_resumed', 'planning.reasoning_epoch_reset', 'budget.handoff_restage_fallback'])
 
 /**
  * Scan one run's sgluna-prompts.jsonl rows. A violation repeats in every later

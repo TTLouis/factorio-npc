@@ -17,7 +17,7 @@ import { getActivePlan } from './planning-state.mjs'
 export const LIFECYCLE_SITES = Object.freeze([
   { event: 'request.start', owner: 'runtime-v8/npc-agent-loop', site: 'request', note: 'a player chat request starts' },
   { event: 'reset', owner: 'runtime-v8/npc-agent-loop', site: 'reset', note: 'the request lineage is discarded (new request, actor replaced, death, recovery prepare)' },
-  { event: 'restage', owner: 'runtime-v8/npc-agent-loop', site: 'restageContext', note: 'a role conversation is restaged from a handoff packet (details.role)' },
+  { event: 'restage', owner: 'runtime-v8/npc-agent-loop', site: 'restageContext', note: 'a role conversation is restaged from a handoff packet (details.role), or the executor kept through a review round is resumed (details.folded_from)' },
   { event: 'planner.return', owner: 'runtime-v8/npc-agent-loop', site: 'returnControlToPlanner', note: 'the executor hands control back to the planner' },
   { event: 'epoch.rebuild', owner: 'runtime-v8/npc-agent-loop', site: 'refreshPlanningReasoningEpoch', note: 'a reasoning epoch bump rebuilds the planner conversation' },
   { event: 'continuation', owner: 'runtime-v8/npc-agent-loop', site: 'continueFromModMessage', note: 'a mod message (receipt, error) continues the request' },

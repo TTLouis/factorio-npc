@@ -225,3 +225,13 @@ test('after a restage, a repeat prototype read answers with full cached facts an
   assert.deepEqual(traced.filter(row => row.data.severity === 'high'), [])
   t.diagnostic(`prototype after restage: repeat=${JSON.parse(repeat).observation_mode ?? 'raw'} cache_block=${cacheVisible} dangling=${[...sentKeys].join(', ') || 'none'}`)
 })
+
+test('a dangling reference after a folded review handback is attributed to that swap', () => {
+  const dangling = [SYSTEM, ...toolExchange('b', 'getEntityStatus', {}, entityStatus('unchanged'))]
+  const rows = [{ event: 'provider.request', ts: '2026-10-19T10:00:02.000Z', request_id: 'req_1', round: 2, payload: { messages: dangling } }]
+  const behavior = [
+    { event: 'context.planner_resumed', ts: '2026-10-19T10:00:00.000Z', request_id: 'req_1' },
+    { event: 'context.restage_folded', ts: '2026-10-19T10:00:01.000Z', request_id: 'req_1' },
+  ]
+  assert.equal(scanPromptRows(rows, behavior).findings[0].after_swap, 'context.restage_folded')
+})

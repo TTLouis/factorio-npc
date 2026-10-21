@@ -65,7 +65,7 @@ function lifecycleEventFor(row, entered = false) {
     return data.event === 'restage' && (data.role === 'executor' || data.role === 'planner') ? `restage.${data.role}` : data.event
   }
   if (entered) return null
-  if (row?.event === 'context.restaged') {
+  if (row?.event === 'context.restaged' || row?.event === 'context.restage_folded') {
     return data?.role === 'executor' || data?.role === 'planner' ? `restage.${data.role}` : null
   }
   return SIMPLE_EVENTS[row?.event] ?? null
@@ -92,6 +92,7 @@ function applyRow(state, row) {
       break
     }
     case 'context.restaged':
+    case 'context.restage_folded':
       if (data.role === 'executor' || data.role === 'planner') state.role = data.role
       break
     case 'context.planner_resumed':
