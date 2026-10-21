@@ -4,7 +4,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
-import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, fitTopologyBlock, deduplicateTopologySkillRefs } from './topology-context.mjs'
+import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, fitTopologyBlock, deduplicateTopologySkillRefs, reclaimTopologyRoom } from './topology-context.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory, toolSignature } from '../staging/npc-agent-loop.mjs'
 import {
@@ -12651,10 +12651,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         request_id: this.traceRequest?.id, reason: 'loaded_details_already_in_prefix',
         removed_chars: deduplicated.removed, packet_char_limit: 6000,
       })
-      const handoffChars = providerMessages.filter(row => String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
+      const packetChars = messages => messages.filter(row => String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
         .reduce((sum, row) => sum + String(row.content).length + 1, 0)
-      const room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars
-      const fitted = fitTopologyBlock(topology, room)
+      let handoffChars = packetChars(providerMessages)
+      let room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars
+      let fitted = fitTopologyBlock(topology, room)
+      // Run AJ: a packet sized while the block was empty must not evict the entity a later batch placed. Shed historical packet
+      // lines from this request's copy first (reclaimTopologyRoom), then fit again in the room that frees (same 6000 total).
+      const wanted = Math.min(TOPOLOGY_LIMITS.chars, fitted.full_chars)
+      if (fitted.trimmed && handoffChars && room < wanted) {
+        const liveEntities = Array.isArray(topology.entities) ? topology.entities.length : 0
+        const reclaim = reclaimTopologyRoom(providerMessages, wanted - room, { liveEntities: liveEntities > 0 })
+        if (reclaim.reclaimed > 0) {
+          const roomBefore = room
+          providerMessages = reclaim.messages
+          handoffChars = packetChars(providerMessages)
+          room = Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars)
+          fitted = fitTopologyBlock(topology, room)
+          await this.traceEvent('context.topology_room_reclaimed', { request_id: this.traceRequest?.id, state: topology.state,
+            reason: liveEntities > 0 ? 'live_topology_entities_outrank_historical_packet_records' : 'live_topology_outranks_historical_packet_records',
+            room_before: roomBefore, room_after: room, handoff_chars: handoffChars, full_chars: fitted.full_chars, reclaimed_chars: reclaim.reclaimed,
+            live_entities: liveEntities, shed: reclaim.shed, still_trimmed: fitted.trimmed })
+        }
+      }
       if (fitted.text) providerMessages = insertTailBlock(providerMessages, { role: 'user', content: fitted.text })
       if (fitted.trimmed) await this.traceEvent('context.topology_trimmed', { request_id: this.traceRequest?.id, state: topology.state,
         room, handoff_chars: handoffChars, full_chars: fitted.full_chars, sent_chars: fitted.sent_chars, omitted: fitted.omitted })

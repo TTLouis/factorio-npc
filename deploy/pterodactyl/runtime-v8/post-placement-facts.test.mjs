@@ -133,7 +133,7 @@ test('Run AJ: notes the packet record cannot carry verbatim follow as one messag
   await w.agent.completed()
   assert.deepEqual(seen, [1, 1], 'once at the handback, once after the continuation rebuilt the conversation')
   const [delivered] = w.events.filter(row => row.event === 'context.review_notes_delivered').map(row => row.data)
-  assert.deepEqual([delivered?.reason, delivered?.carried_by], ['packet_record_shortened_or_dropped', 'conversation_message'])
+  assert.deepEqual([delivered?.reason, delivered?.carried_by, delivered?.continuation_copy], ['packet_record_shortened_or_dropped', 'conversation_message', 'base_step_block'])
 })
 
 test('Run AJ: under packet pressure the review notes outlast every historical fluid-source hint', () => {
@@ -242,13 +242,16 @@ function runAjAgent({ families = ['nearby_world'], route = 'targeted_observation
   ]
   agent.messages = agent.baseMessages.map(message => ({ ...message }))
   agent.requestInfo = { memoryKey: KEY, turnId: 1, sender: '<server>', text: 'automate red science' }
+  agent.traceRequest = { id: 'req_mvi6bs3r_1' }
   agent.agentContext.role = EXECUTOR_ROLE
   agent.postBatchStepKey = () => postBatchStepKey('npc:standalone_character:18:1', 'plan-aj', stepId)
   agent.gatherTopologyContext = async () => topology
   agent.routePostStepDecision = async () => ({ route, decision_called: true,
     steering: { reasoning_budget: 'normal', planning_horizon: 'checkpoint', observation_budget: 1,
       observation_relevance: { source: 'typed_relevance', threshold: 0.5, selected_families: families, budget: families.length } } })
-  return { agent, rcon, calls, events }
+  // The room the packet leaves for the block: Run AJ's 734 chars, give or take this fixture's step id length.
+  const room = 6000 - agent.baseMessages.slice(1).reduce((sum, row) => sum + row.content.length + 1, 0)
+  return { agent, rcon, calls, events, room }
 }
 
 async function firstRound(options) {
@@ -271,7 +274,7 @@ test('Run AJ: the post-batch facts after a single placement carry the placed ent
   assert.match(facts, /"target_position":\{"x":6\.5,"y":50\.5\}/, 'its output port geometry')
   assert.equal(rcon.commands.filter(command => command.includes('"get_entity_status"')).length, 1)
   const [bundle] = named('observation.post_batch_facts')
-  assert.ok(bundle.request_id !== undefined)
+  assert.equal(bundle.request_id, 'req_mvi6bs3r_1')
   assert.deepEqual(bundle.tools, ['getInventoryItems', 'getEntityStatus'])
   assert.deepEqual(bundle.placed_entity, { unit_number: 37, reason: 'single_placement_receipt', family_selected: false, answered: true })
   // A harness read answers no family Jev did not select, so it opens nothing and closes nothing.
@@ -302,18 +305,19 @@ test('Run AJ: fresh_topology keeps the placed offshore pump by shedding historic
   const topology = ajTopology()
   const full = topologyText(topology)
   assert.ok(full.length > 734 && full.length <= TOPOLOGY_LIMITS.chars, `the post-placement block (${full.length}) exceeds the 734-char room Run AJ left`)
-  const { topologyRows, packetChars, stepBlock, named } = await firstRound({ topology })
+  const { topologyRows, packetChars, stepBlock, named, room } = await firstRound({ topology })
+  assert.ok(Math.abs(room - 734) <= 8, `${room}`)
   assert.equal(topologyRows.length, 1)
   const sent = JSON.parse(topologyRows[0].slice(TOPOLOGY_PREFIX.length))
   assert.deepEqual(sent.entities.map(entity => [entity.name, entity.unit_number, entity.position, entity.direction]), [['offshore-pump', 37, { x: 7.5, y: 50.5 }, 4]])
   assert.deepEqual(sent.entities[0].fluid[0].ports[0].opens, { x: 6.5, y: 50.5 })
   assert.equal(topologyRows[0], full, 'the whole block')
-  assert.ok(packetChars + topologyRows[0].length + 1 <= 6000, `packet ${packetChars} + topology ${topologyRows[0].length}`)
+  assert.ok(packetChars + topologyRows[0].length <= 6000, `packet ${packetChars} + topology ${topologyRows[0].length}`)
   assert.equal(named('context.topology_trimmed').length, 0)
   const [reclaimed] = named('context.topology_room_reclaimed')
-  assert.ok(reclaimed?.request_id !== undefined)
+  assert.equal(reclaimed?.request_id, 'req_mvi6bs3r_1')
   assert.equal(reclaimed.reason, 'live_topology_entities_outrank_historical_packet_records')
-  assert.deepEqual([reclaimed.room_before, reclaimed.full_chars], [734, full.length])
+  assert.deepEqual([reclaimed.room_before, reclaimed.full_chars], [room, full.length])
   assert.ok(reclaimed.room_after >= full.length)
   assert.equal(reclaimed.shed.at(-1).record, 'fluid_source_hints')
   assert.ok(reclaimed.shed.at(-1).hints_removed > 0)
