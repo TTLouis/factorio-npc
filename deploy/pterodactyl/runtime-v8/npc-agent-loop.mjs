@@ -65,6 +65,7 @@ import {
   withoutRawLeafRecipes,
   buildFluidsFromBill,
   buildFluidsTruncated,
+  PLANNER_REVIEW_NOTES_LABEL,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
@@ -15553,7 +15554,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // The packet already carries the notes when they fit its record whole; repeat them only when it dropped or shortened them.
       const carried = notes && this.messages.some(row => typeof row.content === 'string'
         && row.content.split('\n').some(line => line.includes('planner_review_notes') && line.includes(notes)))
-      if (notes && !carried) this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
+      let continuationCopy
+      if (notes && !carried) {
+        this.messages.push({ role: 'user', content: `[PLANNER_REVIEW_NOTES] The planner's reply to your review of this step (the plan is unchanged; advisory, not world evidence): ${notes}` })
+        // That message is in the working messages only, and a batch-receipt continuation rebuilds them from baseMessages: Run AJ lost
+        // the notes at the first continuation. The base copy of the step block gets the whole notes in its planner_review_notes record
+        // instead (replaced, or added after the step's brief), so the rebuilt conversation holds them once and they stay step-scoped:
+        // a later step drops this step block (providerMessages) and a restage rebuilds it from the goal's stored notes.
+        let stamped = false
+        this.baseMessages = this.baseMessages.map((row) => {
+          if (stamped || row?.role !== 'user' || typeof row.content !== 'string' || !row.content.startsWith('--- step block ---')) return row
+          stamped = true
+          const lines = row.content.split('\n')
+          const record = `${PLANNER_REVIEW_NOTES_LABEL}${notes}`
+          const at = lines.findIndex(line => line.startsWith('planner_review_notes'))
+          if (at >= 0) lines[at] = record
+          else {
+            const after = lines.findLastIndex(line => /^(?:active_step: |execution_guidance |active_step_contract: )/.test(line))
+            lines.splice(after >= 0 ? after + 1 : lines.length, 0, record)
+          }
+          return { ...row, content: lines.join('\n') }
+        })
+        continuationCopy = stamped ? 'base_step_block' : 'none'
+      }
       // The resumed conversation ends on the executor's own review request: a user turn always follows it, pointing at the step block
       // rewritten above (the notes live in its planner_review_notes record; no copy here).
       else if (handoff.folded) {
@@ -15562,6 +15585,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           : handoff.step_block_rewritten ? 'That step block was rewritten, but its facts were not read again: they are as of before the review.'
             : 'That step block is as it was before the review; its facts were not read again.'
         this.messages.push({ role: 'user', content: `[HARNESS] The planner reviewed this step and returned it unchanged (the plan is unchanged; advisory, not world evidence). ${notesPart} ${blockPart}` })
+      }
+      if (notes) {
+        await this.traceEvent('context.review_notes_delivered', { request_id: this.traceRequest?.id, plan_id: heldForRoleHandoff.plan_id,
+          step_id: review.step_id, notes_chars: notes.length, folded: handoff.folded === true,
+          reason: carried ? 'notes_whole_in_step_block_record' : 'packet_record_shortened_or_dropped',
+          carried_by: carried ? 'step_block_record' : 'conversation_message',
+          ...(carried ? {} : { continuation_copy: continuationCopy }) })
       }
       return this.runTurn()
     }

@@ -65,14 +65,20 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   contractChars: 300,
   runtimeChars: 200,
   amendmentChars: 500,
-  // The planner's notes from the one review round of the active step (executor role only).
-  // The store keeps MAX_REVIEW_NOTES_CHARS; the packet shows the head, sized like the other model-authored notes.
-  reviewNotesChars: Math.min(500, MAX_REVIEW_NOTES_CHARS),
+  // The planner's notes from the one review round of the active step (executor role only), whole: the record carries up to the
+  // MAX_REVIEW_NOTES_CHARS the store keeps. Run AJ (2026-10-21): a 500-char head cut 1,122-char notes before their
+  // after-placement instructions, and every later rebuild of the step (the batch continuation, both C7 restages) had only that head.
+  // Packet pressure still drops the record whole and late (HANDOFF_DROP_ORDER: after every historical fluid-source hint).
+  reviewNotesChars: MAX_REVIEW_NOTES_CHARS,
   // U11 advisory: what Jev's observation families may ADD. Bounded by count and length, and the first records dropped
   // when the packet is over its limit (they are never mandatory).
   jevFacts: 4,
   jevFactChars: 300,
 })
+
+// The planner_review_notes record's label. The agent loop writes the same record into a conversation's base step block when the
+// packet could not carry the notes verbatim (commitPlan), so a continuation rebuild keeps them in this step-scoped record.
+export const PLANNER_REVIEW_NOTES_LABEL = "planner_review_notes (the planner's reply to your review of this step; the plan is unchanged; advisory, not world evidence): "
 
 // Drop order when over the limit: first entry is dropped first. Receipts go
 // oldest first inside their group. Steps drop completed (earliest first) before
@@ -1875,7 +1881,7 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
       if (contract) records.push({ key: 'contract', block: 'step', drop: 'contract', text: `active_step_contract: ${contract}` })
       const reviewNotes = role === 'executor' ? sanitizeHandoffNote(state?.goal?.review_notes?.[step.step_id], limits.reviewNotesChars) : ''
       if (reviewNotes) records.push({ key: 'review_notes', block: 'step', drop: 'review_notes',
-        text: `planner_review_notes (the planner's reply to your review of this step; the plan is unchanged; advisory, not world evidence): ${reviewNotes}` })
+        text: `${PLANNER_REVIEW_NOTES_LABEL}${reviewNotes}` })
       const held = plan.execution?.receipts?.[step.step_id]
       const tail = (Array.isArray(held) ? held : []).slice(-limits.receiptTail)
       tail.forEach((entry, index) => {
