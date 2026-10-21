@@ -34,7 +34,9 @@ import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 //                            drill's unit and drop target.
 //   4  planner review        Run AB/AC/AF: the executor asks for plannerReview. The planner review round really runs
 //                            (planner.review_round once; a planner-role provider call carrying [EXECUTOR_REVIEW]); its reply is
-//                            a contract draft, never an action; the unchanged step goes back to an executor with the notes.
+//                            a contract draft, never an action; the unchanged step goes back to the executor with the notes. That
+//                            executor was restaged at the step close (C8) and has done nothing since, so the handback folds into
+//                            that restage (context.restage_folded): the C8 conversation resumes with the notes, no second packet.
 //   5  second review, resume Runs AD-AF: the executor asks for review of the same step again. There is no second planner round: the
 //                            goal takes a model_recoverable pause, the supervisor schedules the bounded auto-resume (X-1), the
 //                            timer fires, a C7 restage hands the step to a fresh executor, which acts (fuel, wait, collect); the
@@ -48,8 +50,8 @@ import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 // drill is built, the furnace is refused with the mod's native no-mutation proof, the settled prefix is stated as a fact, and the
 // corrected batch places the furnace alone over the spilled ore (Run AF).
 //
-// One finding is expected: run-check's restage_loop, for step 2's C8 + C3 + C7 restages with no progress between them. That is
-// the price of one review round plus one resume, and the detector reports it as a cost signal; the gates pin its exact shape.
+// No finding is expected. Step 2 used to show one restage_loop (C8, then C3 for the review handback, then C7 for the resume, no
+// progress between them); the handback folds into the C8 restage now, so step 2 restages twice (C8, C7) and the gates pin that.
 
 // The executor soft limit that stands in for a live-sized context: the executor conversation after step 1 is ~7,100 tokens, past the
 // hard limit (2 x 3,000), so the verified step close restages the next step (restage-policy C8). With the default limit a
@@ -171,18 +173,18 @@ async function gates(t, ctx) {
     assert.equal(signatures.filter(signature => signature === 'auto_resume_exhausted').length, 0)
   })
 
-  await t.test('gate: no other finding on this healthy run (only the expected restage_loop below)', () => {
-    assert.deepEqual(report.findings.filter(finding => finding.signature !== 'restage_loop'), [], 'a healthy composed run has no other findings')
+  await t.test('gate: no finding on this healthy run', () => {
+    assert.deepEqual(report.findings, [], 'a healthy composed run has no findings')
   })
 
-  // run-check's restage_loop counts restages of one step with no step.verified between them. Step 2 is restaged three times, each
-  // for its own reason (C8 the fresh executor at the step close, C3 the executor handed back after the review round, C7 the resume),
-  // and then verifies. The finding stays: three restages without progress is the cost the detector exists to show. Any other
-  // restage of the step, or a second loop, fails here.
-  await t.test('gate: the only restage_loop is step 2 (C8, C3, C7)', () => {
-    const loops = report.findings.filter(finding => finding.signature === 'restage_loop')
-    assert.equal(loops.length, 1, JSON.stringify(loops))
-    assert.match(loops[0].detail ?? JSON.stringify(loops[0]), /restaged 3 times .*checkpoints C8,C3,C7;/)
+  // run-check's restage_loop counts restages of one step with no step.verified between them (three or more is a loop). Step 2 used
+  // to be restaged three times: C8 the fresh executor at the step close, C3 the executor handed back after the review round, C7 the
+  // resume. The handback folds into the C8 restage now, so the step restages twice, for the two reasons that remain, and the detector
+  // stays silent. A C3 after the C8, or any other restage of the step, fails here.
+  await t.test('gate: step 2 restages twice (C8, C7); the review handback is one folded entry, not a restage', () => {
+    assert.deepEqual(rows('context.restaged').map(row => row.data.checkpoint), ['C3', 'C8', 'C7'], 'C3 at the plan commit, then the step close, then the resume')
+    assert.equal(rows('context.restage_folded').length, 1, 'exactly one folded handback')
+    assert.equal(signatures.filter(signature => signature === 'restage_loop').length, 0)
   })
 
   await t.test('gate: the planner review round happened exactly once', () => {
@@ -289,7 +291,24 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     const back = calls[6]
     assert.equal(back.role, 'executor')
     assert.equal(textOf(back.messages).split('fuel the drill with 5 coal').length - 1, 1, 'the handed-back executor sees the planner notes once')
-    assert.match(textOf(back.messages), /planner_review_notes[^\n]*fuel the drill with 5 coal/, 'notes that fit ride in the packet record')
+    // The handback is folded into the step-close restage: the executor that asked for the review resumes with its C8 packet (the
+    // step-close facts) and the notes as one message, instead of a second restage that rebuilds the same packet.
+    assert.match(textOf(back.messages), /restage: role=executor checkpoint=C8/)
+    assert.doesNotMatch(textOf(back.messages), /restage: role=executor checkpoint=C3/)
+    assert.match(textOf(back.messages), /\[PLANNER_REVIEW_NOTES\][^\n]*fuel the drill with 5 coal/)
+    assert.match(textOf(back.messages), /fresh_topology: /, 'the step-close topology record is still in the conversation')
+    assert.equal(back.messages.filter(message => message.role === 'assistant').length, 1, 'the executor review request is the only earlier executor turn')
+    const [folded, ...moreFolded] = data('context.restage_folded')
+    assert.equal(moreFolded.length, 0)
+    const c8 = data('context.restaged').find(row => row.checkpoint === 'C8')
+    assert.deepEqual([folded.role, folded.checkpoint, folded.folded_from, folded.reason], ['executor', 'C8', 'C3', 'review_handback_at_step_close'])
+    assert.equal(folded.handoff_id, c8.handoff_id, 'the folded entry is the C8 conversation, resumed')
+    assert.equal(folded.step_id, round.step_id)
+    assert.ok(folded.request_id)
+    assert.equal(folded.notes_chars, NOTES.length)
+    assert.equal(data('lifecycle.entered').filter(row => row.event === 'restage' && row.folded_from === 'C3').length, 1, 'the folded entry went through the lifecycle table')
+    assert.equal(data('lifecycle.refused').length, 0)
+    assert.equal(rows('context.planner_resumed')[0].data.executor_kept, true, 'the planner return kept the C8 executor for the handback')
     assert.equal(back.messages.some(message => String(message.content).startsWith('[EXECUTOR_REVIEW]')), false, 'the planner conversation stays parked')
     assert.equal(back.context.allowTools, true, 'a normal executor, not an action-omission repair round')
     assert.equal(rows('recovery.action_omission_started').length, 0)

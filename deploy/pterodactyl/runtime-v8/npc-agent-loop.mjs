@@ -3327,30 +3327,44 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // Trace rows carry the current request id when a request is open. Between
   // requests there is none: pass `requestId` (the request the restage belongs
   // to) or the row is ignored by every run-check detector.
-  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint, parkPlanner } = {}) {
+  //
+  // `foldKept` is the fold of a planner review handback into the step-close restage (foldReviewHandback): no packet and no
+  // reducer event, the executor conversation kept through the round resumes whole. It is a restage entry like any other: the
+  // same lifecycle table, guard and resets.
+  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint, parkPlanner, foldKept } = {}) {
     const key = this.activePlanKey()
-    const prepared = this.agentContext.prepareRestage({
-      checkpoint,
-      reason,
-      packet,
-      role,
-      prefixMessages: this.rolePrefixMessages(role ?? packet?.event?.role ?? this.agentContext.role),
-      parkPlanner,
-    })
+    const folding = foldKept === true
+    const prepared = folding
+      ? { role: EXECUTOR_ROLE }
+      : this.agentContext.prepareRestage({
+          checkpoint,
+          reason,
+          packet,
+          role,
+          prefixMessages: this.rolePrefixMessages(role ?? packet?.event?.role ?? this.agentContext.role),
+          parkPlanner,
+        })
     const refuse = async (why) => {
-      await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet.handoff_id, reason: why }, { requestId })
+      await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet?.handoff_id ?? this.agentContext.parkedExecutor?.handoffId, reason: why }, { requestId })
       return { restaged: false, reason: why }
     }
-    const lifecycle = this.lifecycleEnter('restage', { role: prepared.role, checkpoint }, { requestId })
+    const lifecycle = this.lifecycleEnter('restage', { role: prepared.role, checkpoint, ...(folding ? { folded_from: 'C3' } : {}) }, { requestId })
     if (lifecycle) return refuse(lifecycle.reason)
     const guard = this.restageGuardRefusal(safePoint)
     if (guard) return refuse(guard)
-    const before = this.memory.planningState?.(key)
-    if (typeof this.memory.dispatchPlanningEvent !== 'function' || !before) throw new AgentLoopError('context restage needs reducer-backed memory with an admitted goal')
-    if ((packet.event?.plan_id ?? null) !== (before.active_plan_id ?? null)) return refuse('packet_plan_not_active')
-    const event = Number.isFinite(packet.event?.now) ? packet.event : { ...packet.event, now: Date.now() }
-    if (this.memory.dispatchPlanningEvent(key, event) === before) return refuse('reducer_rejected_context_restaged')
-    const result = this.agentContext.commitRestage(prepared)
+    let result
+    if (folding) {
+      result = this.agentContext.resumeExecutor()
+      if (!result) return refuse('kept_executor_not_resumable')
+    }
+    else {
+      const before = this.memory.planningState?.(key)
+      if (typeof this.memory.dispatchPlanningEvent !== 'function' || !before) throw new AgentLoopError('context restage needs reducer-backed memory with an admitted goal')
+      if ((packet.event?.plan_id ?? null) !== (before.active_plan_id ?? null)) return refuse('packet_plan_not_active')
+      const event = Number.isFinite(packet.event?.now) ? packet.event : { ...packet.event, now: Date.now() }
+      if (this.memory.dispatchPlanningEvent(key, event) === before) return refuse('reducer_rejected_context_restaged')
+      result = this.agentContext.commitRestage(prepared)
+    }
     this.turnConversation = null // the flow that restaged reads the new conversation from its next round on
     // A fresh conversation carries none of the old exchanges (same resets as a reasoning-epoch rebuild).
     this.toolCache.clear()
@@ -3359,6 +3373,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationOnlyRounds = 0
     this.resetObservationDecisionState()
     this.applyLifecycleResets('restage')
+    if (folding) {
+      // Nothing in the reducer or the packet changed: the resumed conversation is the step-close one, so its mark is restored and
+      // the caller (foldReviewHandback) writes the folded row. The reasoning epoch is unchanged (it was checked before the resume).
+      this.executorStepMark = { ...result.meta.mark }
+      const foldScope = this.turnScope.getStore()
+      if (foldScope) { foldScope.role = this.agentContext.role; foldScope.handoffId = this.agentContext.handoffId }
+      return { restaged: true, folded: true, ...result }
+    }
     // The conversation is swapped from here on: whatever follows is reported
     // separately and can never turn this restage into a failure (a C5 caller
     // would then overwrite the fresh messages with the capsule).
@@ -3368,7 +3390,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     try {
       const state = this.memory.planningState(key)
       const plan = getActivePlanningPlan(state)
-      if (result.role === EXECUTOR_ROLE && plan) this.executorStepMark = { plan_id: plan.plan_id, closed: completedStepCount(plan) } // step-close restages count closes from here
+      // Step-close restages count closes from here. The checkpoint and the world-mutation count say how this conversation began and
+      // whether the world has changed since: a planner review handback folds into a C8 conversation that has not (foldableReviewMeta).
+      if (result.role === EXECUTOR_ROLE && plan) this.executorStepMark = { plan_id: plan.plan_id, closed: completedStepCount(plan), checkpoint: result.checkpoint, handoff_id: result.handoff_id, world_mutation_seq: this.worldMutationSeq ?? 0 }
       await this.traceEvent('context.restaged', contextRestagedRow(result, {
         planId: packet.event?.plan_id ?? plan?.plan_id,
         stepId: plan?.steps?.[plan.active_step_index]?.step_id,
@@ -3548,9 +3572,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       assistant: `[Executor advisory; unverified] ${chatMessage}`, operations: [] })
     await this.persistState()
     await this.assertCurrent()
-    const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId })
+    // Fold C3 into C8: an executor restaged at a step close that has done nothing since is kept through the round, so the
+    // handback resumes it (foldReviewHandback) instead of rebuilding the same packet. Its review request is its last turn.
+    const kept = continuing ? this.foldableReviewMeta(held, activeStep, requestId) : undefined
+    const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId,
+      ...(kept ? { keepExecutor: { meta: kept, reply: JSON.stringify(plan) } } : {}) })
     await this.assertCurrent()
-    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}`
+    const reviewMessage =`[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}`
     if (continuing && returned.returned) {
       this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id }
       await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
@@ -3559,6 +3587,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (continued !== null) return continued
       this.reviewContinuation = null
     }
+    this.agentContext.dropParkedExecutor() // no handback is coming: the kept conversation would only go stale
     if (continuing) {
       pause()
       chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
@@ -3785,16 +3814,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           || currentPlan?.active_step_index !== expectedPlan?.active_step_index) {
           return { restaged: false, reason: 'executor_decision_superseded_after_handoff' }
         }
-        // A role handoff starts a new bounded observation decision, not a new provider/campaign allowance.
-        const previousRemaining = this.observationBudgetRemaining
-        this.resetObservationDecisionState()
-        this.observationBudgetOverride = 4
-        this.observationBudgetRemaining = 4
-        this.observationRelevanceOverride = null
-        try { await this.traceEvent('context.executor_observation_started', {
-          request_id: requestId, handoff_id: restaged.handoff_id, previous_remaining: previousRemaining,
-          observation_remaining: 4, reason: 'new_executor_decision_at_commit',
-        }, { requestId }) } catch {}
+        await this.startExecutorObservationDecision({ requestId, handoffId: restaged.handoff_id, reason: 'new_executor_decision_at_commit' })
       }
       return restaged
     }
@@ -4026,6 +4046,100 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return result
   }
 
+  // A role handoff starts a new bounded observation decision, not a new provider/campaign allowance.
+  async startExecutorObservationDecision({ requestId, handoffId, reason }) {
+    const previousRemaining = this.observationBudgetRemaining
+    this.resetObservationDecisionState()
+    this.observationBudgetOverride = 4
+    this.observationBudgetRemaining = 4
+    this.observationRelevanceOverride = null
+    try { await this.traceEvent('context.executor_observation_started', {
+      request_id: requestId, handoff_id: handoffId, previous_remaining: previousRemaining,
+      observation_remaining: 4, reason,
+    }, { requestId }) } catch {}
+  }
+
+  // --- fold C3 into C8: a planner review handback that lands on a step-close executor -------------------------------------
+  //
+  // Runs Z-AF showed one step restaged twice at its start: C8 at the step close, then C3 when the planner review round handed the
+  // same step back, each rebuilding the same packet (owner decision 2026-10-20). When the executor that asked for the review was
+  // restaged at the step close (C8) and nothing has changed since (no batch sent or receipt read, the same plan, step, goal, actor
+  // and reasoning epoch), the planner return keeps its conversation and the handback resumes it with the planner's notes: one
+  // packet, one restage. Every other handback is the C3 restage as before (startExecutorAtCommit).
+
+  // The identity of the executor conversation to keep through a review round, or undefined when it is not a C8 conversation that
+  // has done nothing to the world since its restage.
+  foldableReviewMeta(held, activeStep, requestId) {
+    const mark = this.executorStepMark
+    const context = this.agentContext
+    if (context.role !== EXECUTOR_ROLE || !context.hasParkedPlanner) return undefined
+    if (mark?.checkpoint !== 'C8' || mark.handoff_id !== context.handoffId || mark.plan_id !== held.plan_id) return undefined
+    if (mark.closed !== completedStepCount(held) || mark.world_mutation_seq !== (this.worldMutationSeq ?? 0)) return undefined
+    const key = this.activePlanKey()
+    return {
+      request_id: requestId,
+      plan_id: held.plan_id,
+      step_id: activeStep.step_id,
+      handoff_id: context.handoffId,
+      goal_id: this.memory.planningState?.(key)?.goal?.goal_id,
+      actor_id: this.epoch?.actor_id,
+      epoch: this.epoch?.epoch,
+      reasoning_epoch: this.memory.planningReasoningEpoch?.(key),
+      closed: mark.closed,
+      world_mutation_seq: mark.world_mutation_seq,
+      mark: { ...mark },
+    }
+  }
+
+  // The handback: resume the kept executor when everything it was kept for still holds. Returns the restage-shaped result, or
+  // undefined (traced as context.restage_fold_skipped, the kept conversation dropped) when the caller must restage as C3.
+  async foldReviewHandback({ planId, requestId, notesChars }) {
+    const context = this.agentContext
+    const kept = context.parkedExecutor
+    if (!kept) return undefined
+    const meta = kept.meta ?? {}
+    const skip = async (reason) => {
+      context.dropParkedExecutor()
+      await this.traceEvent('context.restage_fold_skipped', { request_id: requestId, role: EXECUTOR_ROLE, checkpoint: 'C8', folded_from: 'C3', handoff_id: kept.handoffId, reason }, { requestId })
+      return undefined
+    }
+    const key = this.activePlanKey()
+    const state = this.memory.planningState?.(key)
+    const plan = state ? getActivePlanningPlan(state) : undefined
+    if (meta.request_id !== requestId || context.role !== PLANNER_ROLE || kept.handoffId !== meta.handoff_id) return skip('kept_executor_not_resumable')
+    if (!plan || plan.plan_id !== planId || plan.plan_id !== meta.plan_id || !FROZEN_PLAN_STATUSES.has(plan.status)) return skip('plan_moved_on')
+    if (plan.steps[plan.active_step_index]?.step_id !== meta.step_id || completedStepCount(plan) !== meta.closed) return skip('step_moved_on')
+    if (state.goal?.goal_id !== meta.goal_id || state.goal?.status !== GOAL_STATUS.ACTIVE) return skip('goal_moved_on')
+    if ((this.worldMutationSeq ?? 0) !== meta.world_mutation_seq) return skip('world_changed_since_step_close')
+    if (this.epoch?.actor_id !== meta.actor_id || this.epoch?.epoch !== meta.epoch) return skip('actor_or_epoch_changed')
+    if (this.memory.planningReasoningEpoch?.(key) !== meta.reasoning_epoch) return skip('reasoning_epoch_changed')
+    // The restage entry every restage passes (lifecycle table, guard, resets); a refusal here is the one the C3 restage would meet.
+    const resumed = await this.restageContext({ checkpoint: 'C8', reason: 'review_handback_at_step_close', role: EXECUTOR_ROLE, requestId, safePoint: this.turnToken ?? undefined, foldKept: true })
+    if (!resumed.restaged) return skip(resumed.reason)
+    await this.traceEvent('context.restage_folded', {
+      request_id: requestId,
+      role: EXECUTOR_ROLE,
+      checkpoint: 'C8',
+      folded_from: 'C3',
+      reason: 'review_handback_at_step_close',
+      handoff_id: resumed.handoff_id,
+      planner_handoff_id: resumed.planner_handoff_id,
+      plan_id: plan.plan_id,
+      step_id: meta.step_id,
+      notes_chars: notesChars,
+    }, { requestId })
+    await this.traceEvent('context.planner_parked', {
+      request_id: requestId,
+      role: PLANNER_ROLE,
+      handoff_id: resumed.planner_handoff_id,
+      executor_handoff_id: resumed.handoff_id,
+      reason: 'executor_acts_on_committed_plan',
+      parked: context.hasParkedPlanner,
+    }, { requestId })
+    await this.startExecutorObservationDecision({ requestId, handoffId: resumed.handoff_id, reason: 'new_executor_decision_at_review_handback' })
+    return { restaged: true, folded: true, role: EXECUTOR_ROLE, checkpoint: 'C8', handoff_id: resumed.handoff_id }
+  }
+
   // C6: ordinary bounded recovery (Jev routed wake_planner / targeted_observation on a
   // failure). Runs inside the recovery's turn chain, after the failed reply is done with.
   async startExecutorForRecovery({ route, reason, runtime }) {
@@ -4061,7 +4175,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // when a shelf node is picked up), exactly as a soft-limit restage would. A round
   // or turn that is open refuses it (the wake then proceeds on the existing
   // conversation and the next slice close retries).
-  async returnControlToPlanner({ route, planningState, withinTurn = false, reason = 'slice_close', requestId, shelfCandidates } = {}) {
+  // `keepExecutor` ({ meta, reply }) is the planner review round: the executor conversation that asked for it is kept, not dropped,
+  // so the handback can resume it (foldReviewHandback).
+  async returnControlToPlanner({ route, planningState, withinTurn = false, reason = 'slice_close', requestId, shelfCandidates, keepExecutor } = {}) {
     // MW5: the replacement wake is the only reason that may restage a planner onto a BLOCKED plan.
     const allowBlockedFor = reason === 'replacement' ? 'replacement' : undefined
     const rid = requestId ?? this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
@@ -4080,7 +4196,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     if (this.agentContext.hasParkedPlanner) {
-      const resumed = this.agentContext.resumePlanner()
+      const resumed = this.agentContext.resumePlanner({ keepExecutor })
       this.turnConversation = null // the flow that returned control reads the planner conversation from its next round on
       this.toolCache.clear()
       this.duplicateToolRounds = 0
@@ -4100,8 +4216,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason,
         route,
         planner_message_count: resumed.message_count,
-        dropped_executor_messages: resumed.dropped_executor.message_count,
-        dropped_executor_chars: resumed.dropped_executor.chars,
+        dropped_executor_messages: resumed.executor_kept ? 0 : resumed.dropped_executor.message_count,
+        dropped_executor_chars: resumed.executor_kept ? 0 : resumed.dropped_executor.chars,
+        ...(resumed.executor_kept ? { executor_kept: true, kept_executor_handoff_id: fromHandoffId, kept_executor_messages: resumed.dropped_executor.message_count } : {}),
       }, { requestId: rid })
       return { returned: true, resumed: true }
     }
@@ -15331,7 +15448,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Durable before the handoff: a later restage of this step (the supervisor's resume after a second review) rebuilds the
       // executor from the planning state and would otherwise lose them with the conversation.
       if (notes) this.memory.recordReviewNotes?.(this.activePlanKey(), review.step_id, notes)
-      const handoff = await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
+      // Fold C3 into C8: an executor restaged at the step close that asked for this review and has done nothing since resumes its own
+      // conversation (one packet, one restage); every other handback restages as C3.
+      const folded = reviewRound ? await this.foldReviewHandback({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id, notesChars: notes.length }) : undefined
+      const handoff = folded ?? await this.startExecutorAtCommit({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id })
       if (!handoff.restaged) throw new AgentLoopError(`planner_execution_handoff_refused:${handoff.reason}`)
       // The packet already carries the notes when they fit its record whole; repeat them only when it dropped or shortened them.
       const carried = notes && this.messages.some(row => typeof row.content === 'string'

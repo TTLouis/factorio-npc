@@ -897,3 +897,110 @@ test('a stale actor legacy blocker cannot pause or review the replacement actor'
   assert.equal(w.events.filter(row => row.event === 'executor.legacy_blocker_review').length, 0)
   assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 0)
 })
+
+// Fold C3 into C8 (owner decision 2026-10-20): the delegation scenario showed a step restaged twice at its start, C8 at the step close
+// and C3 when the planner review round handed the same step back, each rebuilding the same packet. An executor restaged at a step close
+// that asks for a review before doing anything now gets its own conversation back after the round, with the notes, as one folded entry.
+// An executor soft limit of 1 token puts every verified step close past the hard limit, so each one restages (restage-policy C8).
+const FOLD_NOTES = 'Iron ore candidates must be re-read near the actor.'
+const restagedCheckpoints = events => events.filter(row => row.event === 'context.restaged').map(row => row.data.checkpoint)
+const stepCloseWorld = script => {
+  const w = world(script)
+  w.agent.restageSoftLimitOption = { executor: 1 }
+  return w
+}
+const askReview = ({ memory }) => ({ stepId: activeStepId(memory), operations: [],
+  plannerReview: { reason: 'local_recovery_exhausted', rationale: RUN_AC_RATIONALE } })
+
+test('a review handback right after a step-close restage folds into it: one packet, the notes once, no second restage', async () => {
+  let c8
+  const w = stepCloseWorld([copperThenIron(), action, ctx => {
+    assert.equal(ctx.agent.agentContext.role, 'executor')
+    assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C8/)
+    c8 = { handoffId: ctx.agent.agentContext.handoffId, messages: ctx.messages.length }
+    return askReview(ctx)
+  }, copperThenIron({ chatMessage: FOLD_NOTES, currentStep: 1 }), ctx => {
+    const outgoing = afOutgoing(ctx.messages)
+    assert.equal(ctx.context.role, 'executor')
+    assert.equal(ctx.agent.agentContext.handoffId, c8.handoffId, 'the conversation that asked for the review is the one that resumes')
+    assert.equal(outgoing.split('restage: role=executor').length - 1, 1, 'one packet')
+    assert.match(outgoing, /restage: role=executor checkpoint=C8/, 'the step-close packet, with its facts')
+    assert.doesNotMatch(outgoing, /checkpoint=C3/)
+    assert.equal(outgoing.split(FOLD_NOTES).length - 1, 1, 'the notes once')
+    assert.equal(ctx.messages.filter(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]')).length, 1, 'the packet of this conversation predates the notes, so they follow as the one message')
+    assert.equal(ctx.messages.filter(row => row.role === 'assistant').length, 1, 'the review request is the executor turn the notes answer')
+    assert.equal(ctx.messages.length, c8.messages + 2, 'the review request and the notes are all that was added')
+    assert.equal(outgoing.includes('[EXECUTOR_REVIEW]'), false, 'the planner conversation stays parked')
+    assert.equal(ctx.agent.agentContext.hasParkedPlanner, true)
+    assert.equal(ctx.context.allowTools, true)
+    return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
+  }])
+  await w.say()
+  w.game.inventory['copper-ore'] = 10
+  await w.agent.completed()
+  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'executor', 'planner', 'executor'])
+  assert.equal(w.game.mutations.length, 2, 'the folded executor acted on the same step')
+  assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8'], 'no C3 after the C8')
+  const folded = w.events.filter(row => row.event === 'context.restage_folded')
+  assert.equal(folded.length, 1)
+  const [{ data }] = folded
+  assert.deepEqual([data.role, data.checkpoint, data.folded_from, data.reason, data.handoff_id], ['executor', 'C8', 'C3', 'review_handback_at_step_close', c8.handoffId])
+  assert.equal(data.step_id, activeStepId(w.memory))
+  assert.equal(data.notes_chars, FOLD_NOTES.length)
+  assert.ok(data.request_id)
+  const entered = w.events.filter(row => row.event === 'lifecycle.entered' && row.data.event === 'restage' && row.data.folded_from === 'C3')
+  assert.equal(entered.length, 1, 'the folded entry went through the lifecycle table')
+  assert.deepEqual([entered[0].data.role, entered[0].data.checkpoint], ['executor', 'C8'])
+  assert.equal(w.events.filter(row => row.event === 'lifecycle.refused').length, 0)
+  assert.equal(w.events.find(row => row.event === 'context.planner_resumed').data.executor_kept, true)
+  assert.equal(w.events.filter(row => row.event === 'context.restage_fold_skipped').length, 0)
+  assert.equal(w.memory.planningState(KEY).goal.review_notes?.[activeStepId(w.memory)], FOLD_NOTES, 'the notes are also stored on the goal for a later restage')
+})
+
+test('a review handback with no step close before it stays a C3 handback', async () => {
+  const w = stepCloseWorld([draft(), review('local_recovery_exhausted', RUN_AC_RATIONALE), draft({ chatMessage: 'Copper ore is 12 tiles east of the actor.', plan: ['A tempting different strategy'] }), ctx => {
+    assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/)
+    return action(ctx)
+  }])
+  await w.say()
+  assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C3'], 'the plan-commit executor is rebuilt as before')
+  assert.equal(w.events.filter(row => row.event === 'context.restage_folded').length, 0)
+  assert.equal(w.events.find(row => row.event === 'context.planner_resumed').data.executor_kept, undefined)
+})
+
+test('a review handback after the step-close executor already acted stays a C3 handback', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, ctx => ({ stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 4)] }),
+    askReview, copperThenIron({ chatMessage: FOLD_NOTES, currentStep: 1 }), ctx => {
+      assert.match(afOutgoing(ctx.messages), /restage: role=executor checkpoint=C3/)
+      return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
+    }])
+  await w.say()
+  w.game.inventory['copper-ore'] = 10
+  await w.agent.completed()
+  assert.equal(w.game.mutations.length, 2)
+  await w.agent.completed()
+  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'executor', 'executor', 'planner', 'executor'])
+  assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'], 'the world changed since the step-close restage, so the executor is rebuilt from the world as it is now')
+  assert.equal(w.events.filter(row => row.event === 'context.restage_folded').length, 0)
+})
+
+test('a folded handback that the world overtook is skipped on the record and restages as C3 with the notes in the packet', async () => {
+  const w = stepCloseWorld([copperThenIron(), action, askReview,
+    ctx => { ctx.agent.worldMutationSeq += 1; return copperThenIron({ chatMessage: FOLD_NOTES, currentStep: 1 }) }, ctx => {
+      const outgoing = afOutgoing(ctx.messages)
+      assert.match(outgoing, /restage: role=executor checkpoint=C3/)
+      assert.equal(outgoing.split(FOLD_NOTES).length - 1, 1, 'the notes once')
+      assert.match(outgoing, /planner_review_notes[^\n]*Iron ore candidates/, 'in the packet record of the rebuilt executor')
+      return { stepId: activeStepId(ctx.memory), operations: [gather('iron-ore', 10)] }
+    }])
+  await w.say()
+  w.game.inventory['copper-ore'] = 10
+  await w.agent.completed()
+  assert.deepEqual(restagedCheckpoints(w.events), ['C3', 'C8', 'C3'])
+  assert.equal(w.events.filter(row => row.event === 'context.restage_folded').length, 0)
+  const [skipped] = w.events.filter(row => row.event === 'context.restage_fold_skipped')
+  assert.deepEqual([skipped.data.role, skipped.data.checkpoint, skipped.data.folded_from, skipped.data.reason], ['executor', 'C8', 'C3', 'world_changed_since_step_close'])
+  assert.ok(skipped.data.request_id)
+  assert.equal(w.agent.agentContext.hasParkedExecutor, false, 'the kept conversation is dropped once it cannot be used')
+  assert.equal(w.game.mutations.length, 2)
+})
