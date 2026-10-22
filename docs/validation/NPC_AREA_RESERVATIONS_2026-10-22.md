@@ -71,5 +71,26 @@ Proof and remaining scope:
   engine versions/mod combinations, connected factories, filled fluids and
   external mod state remain unpromoted.
 
-Checkpoint: implementation complete; frozen-candidate and merged-head gates,
-payload identity, independent final review and resource cleanup follow.
+Closeout:
+
+- Feature `0f056a4d6da4fe14a41d83e1033a7e36a01ead13`; separate payload repin
+  `db1ceb13b22046f4ae66e06074cc12229373eb7b`, payload SHA256 remains
+  `c026a45de1c1512f1e62dbda673985e7cd494643ff9fe21a6b23817c91803acf`.
+- Local merge `0a5dbf02365bd396b6dce65eaece538fdb130095` has the reviewed task's
+  exact tree. Fresh merged runtime 3,076/mod 1,346/type/Lua/generated-Lua,
+  changed-source lint, installer syntax and payload 9/9 gates pass.
+- `native-frozen` and `native-merged` pass the complete engine lane, including
+  explicit crude-oil refusal with the resource intact. All 440 copied native
+  runtime/staging/assets/runner files match the committed source after line-ending
+  normalization. The compiled control hash and declared test-only fixture prefix
+  are recorded separately. Placement fences outside this lane have unit/static
+  proof; this does not promote an autonomous designer or client-driven approval.
+- Independent final source/evidence review is APPROVED. Test containers are
+  disposable and cleanup is verified against their recorded IDs/names. All 17
+  recorded owned native image IDs and the unique image tag are removed. Shared
+  tooling/base images and host logs/saves remain; no Compose project, owned
+  networks/volumes, tunnel, temporary configuration link or live inference exists.
+- Five historical integration reports remain hash-identical. This is a local
+  candidate only: no push, deployment, additional provider trial or background
+  work. Final source-head gate and exact cleanup receipts are retained in
+  `test-results/npc-area-reservations/final-summary.json`.
