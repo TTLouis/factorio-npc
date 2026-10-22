@@ -98,12 +98,14 @@ function refusalWorld(t, { atExhaustion } = {}) {
     goal: { scope: 'finite', summary: 'Finish the committed construction task.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 999 }] } }))
   const attempts = world.agent.maxToolValidationRetries + 1
   // Isolate the second AM failure from the repaired receipt path. The original
-  // 402-character rationale and tool transport are unchanged; only the current
-  // step ID is rebound and an unmet world predicate keeps this task open.
+  // 402-character rationale and tool transport are unchanged. An invalid reason
+  // makes this control unrepairable by advisory-length clipping. The exact
+  // original review is covered by step-self-correction.test.mjs instead.
   const addInvalidCycle = label => {
     for (let i = 0; i < attempts; i++) model.push('executor', `${label}:${i}`, async () => {
       if (i === attempts - 1) await atExhaustion?.(ctx)
-      const decision = { ...am.refused_decision, stepId: held().steps[0].step_id }
+      const decision = { ...am.refused_decision, stepId: held().steps[0].step_id,
+        plannerReview: { ...am.refused_decision.plannerReview, reason: 'invalid_reason' } }
       return { ...am.refused_reply, tool_calls: [{ ...am.refused_reply.tool_calls[0], function: { name: 'submitPlan', arguments: JSON.stringify(decision) } }] }
     })
   }
@@ -177,7 +179,7 @@ test('the final base terminal status await also fences replacement work', async 
   assert.ok(w.events.some(r => r.event === 'request.blocked_result_dropped' && r.request_id))
 })
 
-test('Run AM exact refused-review exhaustion pauses durably and the real Session resumes only within existing 2/step,6/goal limits', async t => {
+test('unrepairable Run AM-shaped review exhaustion pauses durably and the real Session resumes only within existing 2/step,6/goal limits', async t => {
   const w = refusalWorld(t)
   w.session.queuePlayerRequest('Louis', 'Continue the construction task')
   await settle(w.session)
