@@ -13,8 +13,8 @@ Scope: protocol-3 role prefixes, planner construction-granularity instructions,
 one canonical completion-authoring schema shared by control and JIT calls, and
 scripted regressions. The normalizer keeps historical aliases and rejects
 anchor-without-radius; no scope or completion predicate is silently repaired.
-Execution/admission authority, immutable committed plans and observation/provider
-allowances are unchanged. The eight-requirement authoring limit matches the
+Execution/admission authority, immutable committed plans and provider allowances
+are unchanged. The eight-requirement authoring limit matches the
 existing runtime limit and permits complete kit declarations.
 
 Acceptance:
@@ -27,7 +27,7 @@ Acceptance:
   retain their existing response instructions and native tool/safety rules.
 - [x] Scripted pump/boiler/engine stages use fresh facts at boundaries without
   rewriting committed steps or completing the functional goal from placements.
-- [x] Docker regression gate, lint and payload checks; independent review;
+- [ ] Docker regression gate, lint and payload checks; independent review;
   reviewed local integration if available. No push, deployment or live E2E.
 
 Limits: these tests prove contracts and orchestration, not that a real model will
@@ -40,3 +40,33 @@ Prompt/schema unit: runtime 3062/3062, mod 1332/1332, TypeScript, Lua build, gen
 
 Checkpoint: prompt/schema unit verified; parent owns integration
 and all run-owned Docker cleanup. Evidence: `test-results/construction-planning-contracts/`.
+
+## Additional owner direction: replenishing executor observations
+
+The owner selected a small burst with refill over time. Deployed protocol-3
+executors use four fresh native reads initially and replenish one every 15 seconds,
+capped at four available. The harness waits abortably for credit without another
+provider call or a gameplay wait. The limiter is per NPC, persisted separately
+from goals/actor epochs/conversations, and never reset by handoff, new goal or
+restart. Native unchanged-fact and re-establishing reads cost credit; actual
+cache hits do not. Deferred calls that never reach native code cost nothing.
+Harness topology/prefetch checks keep their existing separate bounded allowance.
+
+The per-decision Jev count remains for planners and historical programmatic
+replays. The supervisor explicitly enables the rate policy for deployed executors.
+Closed rounds, targeted recovery claims, duplicate/no-progress guards, provider
+limits, amendment and operation admission rules remain in force. A token grants
+no new mutation or observation authority. Targeted eligibility is checked again
+after a wait; failed durable writes stop the claim before the native read.
+
+Existing map knowledge records explored/visible chunks; tool/prototype caches
+and scoped topology snapshots also exist. These help avoid repeated discovery,
+but they are not a durable indexed factory layout. Mutable connections and stock
+still need scoped fresh facts. No new map cache or designer agent is added here.
+
+Rate acceptance: deterministic burst/refill/rollback, actual-call accounting,
+cache reuse, persisted restart, no refill on handoff/reset, cancelled/stale waits,
+targeted eligibility changes and strict write failures; full Docker gates, lint,
+installer shipping list and payload repin; separate rate review.
+
+Rate candidate verification: runtime 3073/3073 and mod 1332/1332, TypeScript, Lua build/generated-Lua and changed-file lint PASS in offline Docker. Focused rate/state-scope regressions 24/24 PASS. Independent review resolved both P2 findings (deferred-call charging and targeted eligibility after refill); source review approved. Installer module copying and runtime manifest both include observation-rate.mjs. Source unit 42330385 contains the prompt/schema changes; rate unit follows it. Payload repin and merged-head verification pending.
