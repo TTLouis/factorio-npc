@@ -2,6 +2,7 @@ import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
+import { restoreObservationRates } from './observation-rate.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -2862,6 +2863,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return {
       ...snapshot,
       targeted_observation_ledger: [...(this.targetedObservationLedger ?? new Map()).entries()].slice(0, 128),
+      executor_observation_rates: [...(this.executorObservationRates ?? new Map()).entries()].slice(-128),
       // Executor step-identity corrections spent per goal/plan/step (npc-agent-loop correctExecutorStepIdentity): durable so a
       // restage, a new request or a restart inside the same step cannot renew the allowance.
       executor_step_identity_ledger: [...(this.executorStepIdentityLedger ?? new Map()).entries()].slice(-128),
@@ -3003,6 +3005,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     super.restore(snapshot)
     this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)
+    this.executorObservationRates = restoreObservationRates(snapshot?.executor_observation_rates)
     this.executorStepIdentityLedger = restoreExecutorStepIdentityLedger(snapshot?.executor_step_identity_ledger)
     this.intakeRetryRecord = sanitizeIntakeRetry(snapshot?.intake_retry)
     if (snapshot?.jev_judgment_ledger) {

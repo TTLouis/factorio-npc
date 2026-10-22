@@ -3,6 +3,8 @@ import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { setTimeout as observationDelay } from 'node:timers/promises'
+import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
@@ -23,7 +25,7 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
-import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, EXECUTOR_STATE_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT, protocol3SharedPrompt } from './role-contracts.mjs'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
@@ -649,7 +651,7 @@ For a bounded planning slice, add developmentMode as vertical, horizontal, maint
 
 On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for the step at currentStep of an execution plan and {kind:"deterministic"} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start; {kind:"semantic",rationale:"..."} only in an assessmentOnly:true plan. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
 
-For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, research_completed {technology}, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the step complete. Runtime remains completion authority for supported deterministic contracts. Semantic declarations belong only to assessmentOnly:true plans; unknown current measurements are not a reason to downgrade an intended world result to an assessment.
+For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, research_completed {technology}, entity_inventory_count, entity_count {prototype, minimum, optional radius and state:working|powered}, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. An entity_count anchor {x,y} always requires an explicit radius from 1 to 256; never drop scope to make a predicate valid. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the step complete. Runtime remains completion authority for supported deterministic contracts. Semantic declarations belong only to assessmentOnly:true plans; unknown current measurements are not a reason to downgrade an intended world result to an assessment.
 
 For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally. Keeping the same plan and moving currentStep exactly one step forward with operations for that next step is read as the same claim for the active step, under the same checks.
 
@@ -3090,6 +3092,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     this.stateFile = stateFileFromOptions(options)
     this.completionProtocolVersion = options.completionProtocolVersion ?? 1
+    // Historical programmatic replays retain the old decision cap. The deployed
+    // supervisor explicitly selects the rate policy for protocol-3 executors.
+    this.executorObservationRate = options.executorObservationRate === true
+    this.observationRateClock = options.observationRateClock ?? { now: Date.now, sleep: (ms, signal) => observationDelay(ms, undefined, { signal }) }
+    this.observationRateAbort = null
     this.stateLoaded = false
     this.maxProviderOutputUnits = Number.isSafeInteger(options.maxProviderOutputUnits) ? options.maxProviderOutputUnits : 100000
     if (this.maxProviderOutputUnits < 1000 || this.maxProviderOutputUnits > 200000) {
@@ -3282,6 +3289,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   reset() {
     this.lifecycleEnter('reset')
+    this.observationRateAbort?.abort()
     this.abortStepContractCalls()
     this.turnConversation = null
     this.executorStepMark = null
@@ -3437,7 +3445,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // executor suffix for the executor. The prefix is the same for every conversation of
   // a role, so a restage within a role keeps the provider's cached prefix.
   rolePrefixMessages(role) {
-    if (this.completionProtocolVersion >= 3) return [{ role: 'system', content: `${role === EXECUTOR_ROLE ? executionOnlyPrompt(roleSystemPrompt(this.systemPrompt, role)) : this.systemPrompt}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}` }]
+    if (this.completionProtocolVersion >= 3) {
+      const sharedPrompt = protocol3SharedPrompt(this.systemPrompt)
+      const executorPrompt = sharedPrompt.replace(DURABLE_PLAN_PROMPT,
+        `${EXECUTOR_STATE_PROMPT}\n\n### Complete operation list\n\n${approvedOperationListText()}.`)
+      const ratePrompt = role === EXECUTOR_ROLE && this.executorObservationRate
+        ? '\n[OBSERVATION RATE] Fresh native reads replenish over time; CONTROL_DECISION_STATE reports the burst, refill interval and available tokens. The harness waits for credit without another model call. Reuse cached facts first. Do not poll, change the plan or invent gameplay waits to refill credit. Closed-round, targeted-read, no-progress and total-call guards still apply.' : ''
+      return [{ role: 'system', content: `${role === EXECUTOR_ROLE ? executionOnlyPrompt(roleSystemPrompt(executorPrompt, role)) : sharedPrompt}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}${ratePrompt}` }]
+    }
     const plannerDelegation = this.completionProtocolVersion >= 2 && this.executorHandoffEnabled && role !== EXECUTOR_ROLE
       ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step: a deterministic checkpoint for the first step and {kind:"deterministic"} for each later step, whose checkpoint the harness requests when that step is about to start. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
       : ''
@@ -4089,12 +4104,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async startExecutorObservationDecision({ requestId, handoffId, reason, checkpoint }) {
     const previousRemaining = this.observationBudgetRemaining
     this.resetObservationDecisionState()
-    this.observationBudgetOverride = 4
-    this.observationBudgetRemaining = 4
+    this.observationBudgetOverride = this.usesObservationRateLimit() ? null : 4
+    this.observationBudgetRemaining = this.observationBudgetOverride
     this.observationRelevanceOverride = null
     try { await this.traceEvent('context.executor_observation_started', {
       request_id: requestId, handoff_id: handoffId, checkpoint, previous_remaining: previousRemaining,
-      observation_remaining: 4, reason,
+      observation_remaining: this.observationBudgetRemaining, ...(this.usesObservationRateLimit() ? { observation_policy: 'rate' } : {}), reason,
     }, { requestId }) } catch {}
   }
 
@@ -5138,17 +5153,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async persistState() {
+  async persistState({ strict = false } = {}) {
     if (!this.stateFile || typeof this.memory.snapshot !== 'function') return
     const filename = this.stateFile
     const snapshot = this.memory.snapshot()
-    this.persistQueue = this.persistQueue.then(async () => {
+    const write = this.persistQueue.then(async () => {
       await fsp.mkdir(path.dirname(filename), { recursive: true })
       const temp = `${filename}.${process.pid}.tmp`
       await fsp.writeFile(temp, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
       await fsp.rename(temp, filename)
-    }).catch(error => this.log(`[memory] durable NPC state write failed: ${error instanceof Error ? error.message : String(error)}`))
-    return this.persistQueue
+    })
+    this.persistQueue = write.catch(error => this.log(`[memory] durable NPC state write failed: ${error instanceof Error ? error.message : String(error)}`))
+    return strict ? write : this.persistQueue
   }
 
   activePlanKey() {
@@ -11989,6 +12005,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   cancel(reason = 'cancelled') {
+    this.observationRateAbort?.abort()
     this.abortStepContractCalls()
     this.jev?.abortAll(reason)
     this.interactionAbort?.abort()
@@ -12298,7 +12315,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (this.observationDecisionForced === true) return { phase: 'decide', reason: 'observation_phase_closed' }
     if (this.observationDecisionPressure === true) return { phase: 'decide', reason: 'observation_decision_pressure' }
-    if (Number.isSafeInteger(this.observationBudgetRemaining) && this.observationBudgetRemaining <= 0) {
+    if (!this.usesObservationRateLimit() && Number.isSafeInteger(this.observationBudgetRemaining) && this.observationBudgetRemaining <= 0) {
       return { phase: 'decide', reason: 'observation_budget_spent' }
     }
     return { phase: 'gather', reason: 'observation_phase_open' }
@@ -12360,6 +12377,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       operationSubmission: { channel: this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE ? 'planning_only' : allowTools ? 'submitPlan_or_assistant_json' : 'assistant_json',
         validation: 'required', grantsAuthority: false },
       role: this.agentContext.role, targetedReadEligible: allowTools === false && eligible && !used, targetedAllowanceUsed: used,
+      ...(this.usesObservationRateLimit() ? { observationRate: { burst: OBSERVATION_RATE.burst, refillMs: OBSERVATION_RATE.refillMs,
+        available: observationRateClaim(this.memory.executorObservationRates?.get(this.npcId), 0, this.observationRateClock.now()).state.tokens } } : {}),
       ...(this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE && identity.step?.execution_guidance
         ? { executionGuidance: identity.step.execution_guidance } : {}),
       resourceSearchNames: this.targetedResourceSearchNames(),
@@ -12579,7 +12598,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     // Observation-only.
-    const budgetAllows = this.observationBudgetRemaining === null
+    const budgetAllows = this.usesObservationRateLimit() || this.observationBudgetRemaining === null
       || this.observationBudgetRemaining === undefined
       || (Number.isSafeInteger(this.observationBudgetRemaining) && this.observationBudgetRemaining > 0)
     if (!omissionRepair && this.closedRoundObservationUsed !== true && budgetAllows) {
@@ -12789,7 +12808,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         subgoal: 'Plan only the bounded current milestone/subgoal; do not flatten later milestones into this Plan Tracker.',
         strategic: 'Choose or revise bounded milestone direction, but keep execution plan scoped to the current milestone and keep future milestones tentative.',
       }[this.planningHorizonOverride]
-      const envelope = `[DECISION_ENVELOPE] planning_horizon=${this.planningHorizonOverride}; observation_budget_remaining=${Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : 'runtime-default'}; observation_families=${Array.isArray(this.observationRelevanceOverride) ? this.observationRelevanceOverride.join(',') : 'runtime-default'}. ${horizonGuidance ?? ''}`
+      const envelope = `[DECISION_ENVELOPE] planning_horizon=${this.planningHorizonOverride}; observation_budget_remaining=${this.usesObservationRateLimit() ? 'replenishing-rate-see-CONTROL_DECISION_STATE' : Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : 'runtime-default'}; observation_families=${Array.isArray(this.observationRelevanceOverride) ? this.observationRelevanceOverride.join(',') : 'runtime-default'}. ${horizonGuidance ?? ''}`
       providerMessages = [...providerMessages, { role: 'user', content: envelope }]
     }
     // Heavy planning turns spend the whole output cap, reasoning included,
@@ -13798,8 +13817,52 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   observationDecisionPressureBudget() {
+    if (this.usesObservationRateLimit()) return super.observationDecisionPressureBudget()
     if (Number.isSafeInteger(this.observationBudgetRemaining)) return Math.max(0, Math.min(8, this.observationBudgetRemaining))
     return super.observationDecisionPressureBudget()
+  }
+
+  usesObservationRateLimit() {
+    return this.executorObservationRate && this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE
+  }
+
+  // Wait in the harness, never by polling a provider. Claims are durable and
+  // per NPC, so restaging, new goals, actor replacement or restart cannot refill
+  // the burst. No-progress, closed-round and total-provider guards still apply.
+  async claimExecutorObservationRate(count, assertCurrentBatch, readFence) {
+    if (!this.usesObservationRateLimit() || count === 0) return
+    const controller = new AbortController()
+    this.observationRateAbort?.abort()
+    this.observationRateAbort = controller
+    const requestId = this.traceRequest?.id
+    try {
+      while (true) {
+        assertCurrentBatch()
+        if (controller.signal.aborted) throw new AgentLoopError('Observation rate wait cancelled')
+        if (readFence) await readFence()
+        assertCurrentBatch()
+        if (controller.signal.aborted) throw new AgentLoopError('Observation rate wait cancelled')
+        const ledger = this.memory.executorObservationRates ??= new Map()
+        const claim = observationRateClaim(ledger.get(this.npcId), count, this.observationRateClock.now())
+        ledger.set(this.npcId, claim.state)
+        while (ledger.size > 128) ledger.delete(ledger.keys().next().value)
+        await this.persistState({ strict: true })
+        assertCurrentBatch()
+        if (controller.signal.aborted) throw new AgentLoopError('Observation rate wait cancelled')
+        await this.traceEvent(claim.admitted ? 'observation.rate_admitted' : 'observation.rate_wait', {
+          request_id: requestId, reason: claim.admitted ? 'fresh_native_reads_debited' : 'token_bucket_empty',
+          count, available: claim.state.tokens, retry_after_ms: claim.retryAfterMs,
+          burst: OBSERVATION_RATE.burst, refill_ms: OBSERVATION_RATE.refillMs,
+        }, { requestId })
+        assertCurrentBatch()
+        if (controller.signal.aborted) throw new AgentLoopError('Observation rate wait cancelled')
+        if (claim.admitted) return
+        await this.observationRateClock.sleep(claim.retryAfterMs, controller.signal)
+      }
+    }
+    finally {
+      if (this.observationRateAbort === controller) this.observationRateAbort = null
+    }
   }
 
   async handleToolBatch(message, prepared = this.prepareToolBatch(message)) {
@@ -13841,6 +13904,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const admission = prepared._sglunaObservationAdmission
     const cachedPrepared = prepared.map(entry => this.toolCache.has(entry.signature))
     const staticCachedPrepared = prepared.map(entry => entry.tool.function.name === 'getPrototypeDetails' && this.staticPrototypeCache.has(entry.signature))
+    const rateCharged = new Set()
     // Recipe and inventory facts are read live here; an answer identical to the
     // one last delivered in this actor epoch is admitted without spending budget.
     this.unchangedFactReads ??= new UnchangedFactReads()
@@ -13852,7 +13916,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (this.observationDecisionForced === true || cachedPrepared[index] === true || !UNCHANGED_FACT_TOOLS.has(entry?.tool?.function?.name)) continue
       if (prereadSignatures.has(entry.signature)) continue
       prereadSignatures.add(entry.signature)
+      await this.claimExecutorObservationRate(1, assertBatchCurrent, readFence)
+      rateCharged.add(entry.signature)
       await this.assertCurrent()
+      assertBatchCurrent()
+      if (readFence) await readFence()
+      assertBatchCurrent()
       entry._sglunaPrereadOutput = String(await this.rcon.command(entry.command)).slice(0, 12000)
       await this.assertCurrent()
       unchangedPrepared[index] = this.unchangedFactReads.isUnchanged(factScope, entry.signature, entry._sglunaPrereadOutput)
@@ -13882,7 +13951,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const selectedObservationFamilies = Array.isArray(this.observationRelevanceOverride)
       ? new Set(this.observationRelevanceOverride)
       : null
-    let freshSlots = Number.isSafeInteger(this.observationBudgetRemaining)
+    let freshSlots = !this.usesObservationRateLimit() && Number.isSafeInteger(this.observationBudgetRemaining)
       ? Math.max(0, this.observationBudgetRemaining)
       : Number.POSITIVE_INFINITY
     // Jev's budget bounds planner rounds, not which facts the planner may see
@@ -13959,6 +14028,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return
     }
 
+    // Only admitted live reads spend tokens. Unchanged-fact prereads already
+    // paid above; deferred discovery calls never reach the native adapter.
+    const liveSignatures = new Set(admittedPrepared.filter((entry, index) => !admittedCached[index]
+      && !admittedStaticCached[index] && !rateCharged.has(entry.signature)).map(entry => entry.signature))
+    await this.claimExecutorObservationRate(liveSignatures.size, assertBatchCurrent, readFence)
+    assertBatchCurrent()
+
     for (let index = 0; index < admittedPrepared.length; index++) {
       const entry = admittedPrepared[index]
       if (this.traceRequest?.usage) {
@@ -14008,7 +14084,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (admittedCached[index] !== true && admittedStaticCached[index] !== true) this.stepReadLedger.recordDelivered(readKey, entry.signature, readSeq)
       })
     }
-    if (!this.actionOmissionRepairActive && Number.isSafeInteger(this.observationBudgetRemaining) && freshRequestedCount > 0) {
+    if (!this.usesObservationRateLimit() && !this.actionOmissionRepairActive && Number.isSafeInteger(this.observationBudgetRemaining) && freshRequestedCount > 0) {
       this.observationBudgetRemaining = Math.max(0, this.observationBudgetRemaining - freshRequestedCount)
       if (this.observationBudgetRemaining === 0) {
         await this.forceDecisionFromObservations(
@@ -16964,7 +17040,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       condition_wait: conditionValidation.healthy ? conditionValidation.wait : undefined,
     }
     const observationBudgetAvailable = this.actionOmissionObservationUsed !== true
-      && (!Number.isSafeInteger(this.observationBudgetRemaining) || this.observationBudgetRemaining > 0)
+      && (this.usesObservationRateLimit() || !Number.isSafeInteger(this.observationBudgetRemaining) || this.observationBudgetRemaining > 0)
     const deterministicRoute = deterministicRecoveryRoute({
       failureClass,
       world: recoveryWorld,

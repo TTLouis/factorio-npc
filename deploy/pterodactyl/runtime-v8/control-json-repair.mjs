@@ -58,6 +58,7 @@ export function validatesAgainstSchema(value, schema) {
   if (typeof value === 'string') {
     if (Number.isInteger(schema.minLength) && value.length < schema.minLength) return false
     if (Number.isInteger(schema.maxLength) && value.length > schema.maxLength) return false
+    if (typeof schema.pattern === 'string' && !new RegExp(schema.pattern).test(value)) return false
   }
   if (typeof value === 'number') {
     if (typeof schema.minimum === 'number' && value < schema.minimum) return false
@@ -166,9 +167,18 @@ function branchFor(value, schema) {
   // as a `kind` discriminator, accept the object's own values.
   return branches.find((branch) => {
     const properties = isPlainObject(branch?.properties) ? branch.properties : {}
+    if (branch.additionalProperties === false && Object.keys(value).some(key => !Object.hasOwn(properties, key))) return false
     return Object.entries(properties).every(([key, child]) =>
-      !Array.isArray(child?.enum) || !Object.hasOwn(value, key) || child.enum.includes(value[key]))
+      !Array.isArray(child?.enum) || !Object.hasOwn(value, key) || child.enum.includes(value[key])
+      || (typeof value[key] === 'string' && decodeEnumMember(value[key], child.enum)))
   })
+}
+
+// Branch selection may recognize the same one-level enum encoding the repair
+// already supports. Decoding still happens in repairNode and is traced there.
+function decodeEnumMember(value, members) {
+  try { return members.includes(JSON.parse(value)) }
+  catch { return false }
 }
 
 // `str` as the schema's value, decoded once; undefined when it is not a faithful single-level encoding.

@@ -705,3 +705,53 @@ The production-validation strategy is:
 > Convert each real failure into a deterministic regression before increasing autonomy or complexity.
 
 > Leave SPM/megabase-style optimization for the later maturity phase, after SGLuna has proven it can physically build and verify ordinary production systems.
+
+## Reserved-site layout designer — proposed direction, October 22, 2026
+
+The owner proposed separating site selection, layout design and construction.
+This is a design direction for discussion, not an implemented designer role or
+evidence of autonomous production capability.
+
+The planner would select a bounded site, a target rate, material/power budgets
+and interfaces: input/output corridors, fuel and power access, walking space and
+future expansion. A durable reservation would identify its goal, plan revision,
+surface, bounds, protected assets and release conditions. It must detect overlap
+and changed terrain/buildings; a reservation does not prevent a human from
+changing the world or grant permission to clear their structures.
+
+A bounded designer would receive that snapshot and those constraints and author
+a typed layout proposal, including relative machine slots, directions, recipes,
+input/output connections and construction stages. It would have no live mutation
+or completion authority. Deterministic checks would cover footprints/collisions,
+material bill, reach/access, allowed clearing, fluid/item connectivity, power and
+measured capacity. A disposable native sandbox could test the model-authored
+proposal under the same engine/prototype rules, recording actual output and
+failure evidence. A successful sandbox test remains scoped to its snapshot;
+the live executor must revalidate before admission. Test-only known-good layouts
+remain hidden from production models under the A1/A2/A3 policy above.
+
+The executor would construct validated stages, binding symbolic layout slots to
+the exact identities returned by placement receipts. The harness should supply
+bounded fresh geometry/topology after those stages. Routine readback is necessary
+for correctness, but it need not consume a new model observation attempt per
+building. Group independent placements whose geometry is already validated;
+stop when a new identity, changed terrain, an uncertain result or another unknown
+fact is needed. Revalidate stale stages and reconcile partial effects before
+continuing. Final acceptance still requires real operating connections, automatic
+input/fuel replenishment and measured production, not merely a complete layout.
+
+Existing foundations: `findConstructionSites` searches bounded footprints;
+`planEntityPlacement` describes input/output/power/extension corridors;
+`validateConstructionPlan` and `execute_construction_plan` support at most 16
+exact placements with live validation. Corridor descriptors are advice, not a
+durable exclusive reservation. These tools do not yet provide the proposed
+reservation ledger, designer role, layout-wide functional validation or a
+sandbox-to-live design lifecycle. Batch tokens remain bound to live actor/world
+identity and current admission checks.
+
+Construction robots are explicitly deferred for later discussion. Revisit ghost
+placement, fixed/personal roboport coverage, construction inventory and logistics
+supply, charging, partial-build persistence and native completion evidence after
+the ordinary character-driven build path is reliable. Existing ghost/robot tools
+are not proof that this future workflow is ready; this change does not enable or
+run it.

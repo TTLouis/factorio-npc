@@ -53,10 +53,14 @@ import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 // No finding is expected. Step 2 used to show one restage_loop (C8, then C3 for the review handback, then C7 for the resume, no
 // progress between them); the handback folds into the C8 restage now, so step 2 restages twice (C8, C7) and the gates pin that.
 
-// The executor soft limit that stands in for a live-sized context: the executor conversation after step 1 is ~7,100 tokens, past the
-// hard limit (2 x 3,000), so the verified step close restages the next step (restage-policy C8). With the default limit a
-// conversation this small simply continues into the next step.
+// Exercise C8 from provider-reported context pressure, independent of prompt
+// wording/length. The placement reply reports 7,001 input tokens against this
+// fixture's unchanged 3,000 soft / 6,000 hard limit.
 const EXECUTOR_SOFT_LIMIT_TOKENS = 3000
+const contextPressure = reply => ({
+  ...reply,
+  _sglunaProvider: { usage: { prompt_tokens: 7001, prompt_tokens_details: { cached_tokens: 6000 }, completion_tokens: 1, total_tokens: 7002 } },
+})
 
 const toolCall = (id, name, args) => ({ content: '', tool_calls: [{ id, index: 0, type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
 
@@ -109,10 +113,10 @@ async function runScenario(t, { refusePrefix = false } = {}) {
     .push('executor', 's1:read-drill-candidates', toolCall('s1-drill', 'getPlacementCandidates',
       { entity_name: 'burner-mining-drill', target_resource: 'copper-ore', center: { x: 13.5, y: -5.5 }, radius: 6, limit: 3 }))
     .push('executor', 's1:read-furnace-candidates', toolCall('s1-furnace', 'getPlacementCandidates', { entity_name: 'stone-furnace', covers_position: DRILL_OUTPUT, radius: 4, limit: 3 }))
-    .push('executor', 's1:place-drill-and-furnace', () => { observed.plan = structuredClone(getActivePlan(memory.planningState(KEY))); return act(memory, [placeCandidate(DRILL_SET), placeCandidate(FURNACE_SET)]) })
+    .push('executor', 's1:place-drill-and-furnace', () => { observed.plan = structuredClone(getActivePlan(memory.planningState(KEY))); return contextPressure(act(memory, [placeCandidate(DRILL_SET), placeCandidate(FURNACE_SET)])) })
   // Run Z / AA: the refused-prefix variant. The drill (task 1) is built, the furnace (task 2) is refused before it creates anything, and
   // the corrected batch places the furnace alone.
-  if (refusePrefix) model.push('executor', 's1:place-furnace-alone', (messages) => { observed.correctionPrompt = textOf(messages); return act(memory, [placeCandidate(FURNACE_SET)]) })
+  if (refusePrefix) model.push('executor', 's1:place-furnace-alone', (messages) => { observed.correctionPrompt = textOf(messages); return contextPressure(act(memory, [placeCandidate(FURNACE_SET)])) })
   model
     .push('executor', 's2:first-review', () => { observed.beforeReview = structuredClone(getActivePlan(memory.planningState(KEY))); return review(memory) })
     .push('planner', 's2:planner-review-round', () => draft({ chatMessage: NOTES, currentStep: 1 }))

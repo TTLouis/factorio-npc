@@ -3501,6 +3501,7 @@ export class Session {
       : undefined
     this.agent = new NpcAgentLoop({
       completionProtocolVersion: 3,
+      executorObservationRate: true, // harness-owned replenishing live-read rate
       replacementWake: true, // MW5: player-objective grant at admission and the replacement wake
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
