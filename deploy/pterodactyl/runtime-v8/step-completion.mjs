@@ -312,9 +312,17 @@ function evaluateRequirementFact(requirement, fact) {
   }
   if (requirement.kind === 'authoritative_operation_receipt') {
     const names = Array.isArray(fact.operation_names) ? fact.operation_names : []
-    return { satisfied: fact.authoritative === true && (fact.operation_name === requirement.operation_name || names.includes(requirement.operation_name)) }
+    return { satisfied: fact.stale !== true && fact.authoritative === true
+      && [fact.operation_name, ...names].some(name => operationReceiptMatchesRequirement(name, requirement.operation_name)) }
   }
   return { satisfied: fact.authoritative === true && fact.controller === requirement.controller && fact.state === requirement.expected }
+}
+
+// Candidate placement is a strictly verified placement with a native-selected
+// target. Keep its raw identity; a generic placement does not prove a candidate
+// was used. Shared native task types alone never establish receipt equivalence.
+export function operationReceiptMatchesRequirement(actual, required) {
+  return actual === required || (actual === 'place_candidate' && required === 'place_entity')
 }
 
 export function evaluateCompletionContract(contract, facts = {}) {

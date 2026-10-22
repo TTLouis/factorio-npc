@@ -165,6 +165,7 @@ import {
   completionContractSupported,
   evaluateCompletionContract,
   makeConditionWait,
+  operationReceiptMatchesRequirement,
   sanitizeStepCompletionContract,
 } from './step-completion.mjs'
 import {
@@ -8071,7 +8072,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     if (normalized.kind === 'authoritative_operation_receipt') {
-      if (!allowedReceiptNames.has(normalized.operation_name)) {
+      if (![...allowedReceiptNames].some(name => operationReceiptMatchesRequirement(name, normalized.operation_name))) {
         return { ok: false, reason: 'operation_receipt_not_semantically_grounded' }
       }
       return { ok: true, requirement: normalized }
@@ -8340,7 +8341,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     if (frozen) {
       const deferred = existing?.contract.requirements.filter(requirement => requirement.kind === 'authoritative_operation_receipt'
-        && !plan.operations.some(operation => operation.name === requirement.operation_name)).map(requirement => requirement.operation_name) ?? []
+        && !plan.operations.some(operation => operationReceiptMatchesRequirement(operation.name, requirement.operation_name))).map(requirement => requirement.operation_name) ?? []
       if (deferred.length) await this.traceEvent('step.checkpoint_batch_deferred', {
         request_id: this.traceRequest?.id, plan_id: reducerPlan.plan_id, step_id: step.id,
         reason: 'committed_step_contract_spans_operation_batches', receipt_names: deferred,
@@ -8889,6 +8890,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         continue
       }
       if (requirement.kind === 'authoritative_operation_receipt') {
+        const variant = verifiedNames.find(name => name !== requirement.operation_name && operationReceiptMatchesRequirement(name, requirement.operation_name))
+        if (variant) await this.traceEvent('step.receipt_variant_matched', {
+          request_id: this.traceRequest?.id, reason: 'verified_candidate_satisfies_generic_placement',
+          goal_id: planning?.goal?.goal_id, plan_id: receiptPlan?.plan_id,
+          step_id: receiptPlan?.steps?.[receiptPlan.active_step_index]?.step_id,
+          required_operation: requirement.operation_name, verified_operation: variant,
+        })
         facts[requirement.id] = {
           kind: requirement.kind,
           authoritative: verifiedNames.length > 0,
@@ -10685,22 +10693,81 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return error
   }
 
-  async blockedWithoutMutation(reason, failureClass) {
+  async blockedWithoutMutation(reason, failureClass, { code } = {}) {
+    const owner = decisionBudgetOwner(this)
+    const requestTrace = this.traceRequest
+    const key = this.activePlanKey()
+    const planning = this.memory.planningState?.(key)
+    const plan = getActivePlanningPlan(planning)
+    const goalId = planning?.goal?.goal_id
+    const planId = plan?.plan_id
+    const planVersion = plan?.plan_version
+    const stepIndex = plan?.active_step_index
+    const stepId = plan?.steps?.[plan.active_step_index]?.step_id
+    const owns = () => ownsDecisionBudgets(this, owner) && this.traceRequest === requestTrace
+      && this.activePlanKey() === key && this.memory.planningState?.(key)?.goal?.goal_id === goalId
+      && getActivePlanningPlan(this.memory.planningState?.(key))?.plan_id === planId
+      && getActivePlanningPlan(this.memory.planningState?.(key))?.plan_version === planVersion
+      && getActivePlanningPlan(this.memory.planningState?.(key))?.active_step_index === stepIndex
+      && getActivePlanningPlan(this.memory.planningState?.(key))?.steps?.[stepIndex]?.step_id === stepId
     const goalBlock = this.goalDefinitionBlock
     this.goalDefinitionBlock = null
-    const result = goalBlock
-      ? { ...(await super.blockedWithoutMutation(goalBlock, 'goal_definition_needed')), chatMessage: goalBlock }
-      : await super.blockedWithoutMutation(reason, failureClass)
+    let pausedState
+    // A returned refusal bypasses runGuardedTurn's exception recovery. Reconcile
+    // committed idle work here, before completing the request. Never cancel or
+    // replay native work, and never let an old response pause its replacement.
+    const eligible = () => owns() && canonicalWorkRemains(this.memory.currentPlan?.(key))
+      && Boolean(stepId) && !this.batchInFlight && !this.memory.pendingOperation?.(key)
+      && this.memory.currentPlan?.(key)?.condition_wait?.state !== 'active'
+    if (!goalBlock && eligible()) {
+      const runtime = await this.readInteractionTaskStatus()
+      if (eligible() && idleRuntimeStatus(runtime)) {
+        await this.assertCurrent()
+        if (eligible()) {
+          const state = this.memory.pausePlan?.(key, `blocked_decision:${code ?? failureClass}`, {
+            pause_class: code === 'invalid_planner_review' ? PAUSE_CLASS.MODEL_RECOVERABLE : PAUSE_CLASS.GUARD,
+          })
+          await this.persistState()
+          if (owns()) {
+            await this.traceEvent('request.blocked_plan_paused', {
+              request_id: requestTrace?.id, reason: 'blocked_decision_with_idle_native_runtime', code: code ?? failureClass,
+              goal_id: state?.goal_id, plan_id: plan.plan_id, step_id: stepId,
+              pause_class: this.memory.pauseRecord?.(key)?.pause_class,
+            })
+            pausedState = state
+          }
+        }
+      }
+    }
+    if (!owns()) {
+      await this.traceEvent('request.blocked_result_dropped', {
+        request_id: requestTrace?.id, reason: 'blocked_decision_owner_superseded',
+      }, { requestId: requestTrace?.id })
+      return { chatMessage: '', operations: [], superseded: true }
+    }
+    let result = goalBlock
+      ? await super.blockedWithoutMutation(goalBlock, 'goal_definition_needed', { isCurrent: owns })
+      : await super.blockedWithoutMutation(reason, failureClass, { isCurrent: owns })
+    if (!owns()) {
+      await this.traceEvent('request.blocked_result_dropped', {
+        request_id: requestTrace?.id, reason: 'blocked_decision_owner_superseded',
+      }, { requestId: requestTrace?.id })
+      return result
+    }
+    if (goalBlock) result.chatMessage = goalBlock
+    if (pausedState && owns()) result = this.withPauseNotice({ ...result, goalStatus: pausedState.status,
+      goalId: pausedState.goal_id, taskBoard: visibleTaskBoard(pausedState.task_board) })
     // This ending asks the player instead of acting; without a terminal event
     // the trace reads as a stalled request.
-    if (this.traceRequest) {
+    if (requestTrace && owns()) {
       await this.traceEvent('request.completed', {
         outcome: 'blocked_before_mutation',
         chat_message: result.chatMessage,
         blocker: result.blocker,
-        usage: this.traceRequest.usage,
+        task_board: result.taskBoard,
+        usage: requestTrace.usage,
       })
-      this.traceRequest = null
+      if (owns()) this.traceRequest = null
     }
     return result
   }
