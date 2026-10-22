@@ -14,6 +14,8 @@ const INVENTORY_ONLY = ['inventory_equipment']
 const ENTITY_ONLY = ['entity_status']
 const FOUR_FAMILIES = ['research_state', 'recipe_production', 'runtime_status', 'inventory_equipment']
 const PLACEMENT_ONLY = ['placement_candidates']
+const NATIVE_INVENTORY = '{\n  {\n    count = 14,\n    name = "iron-plate"\n  },\n  {\n    count = 1,\n    name = "boiler"\n  }\n}'
+const INVENTORY_REQUEST_ID = 'req_preventive_native_inventory'
 
 function deployment() {
   return {
@@ -88,7 +90,9 @@ const CRAFTED = {
 }
 
 class RunZRcon {
-  constructor(status) {
+  constructor(status, inventoryOutput = NATIVE_INVENTORY, familyOutputs = {}) {
+    this.familyOutputs = familyOutputs
+    this.inventoryOutput = inventoryOutput
     this.status = status
     this.commands = []
   }
@@ -97,24 +101,24 @@ class RunZRcon {
     this.commands.push(text)
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify(this.status)
-    if (text.includes('"get_inventory_items"')) return JSON.stringify({ items: [{ name: 'iron-plate', count: 14 }, { name: 'boiler', count: 1 }] })
+    if (text.includes('"get_inventory_items"')) return this.inventoryOutput
     if (text.includes('remote.call("autorio_research","status")')) {
-      return JSON.stringify({ current: null, queue: [], last_request: { technology: 'automation', state: 'researched' } })
+      return this.familyOutputs.getResearchStatus ?? JSON.stringify({ current: null, queue: [], last_request: { technology: 'automation', state: 'researched' } })
     }
-    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ mode: 'npc', valid: true, position: { x: 3, y: 4 } })
+    if (text.includes('remote.call("autorio_actor","status")')) return this.familyOutputs.getActorStatus ?? JSON.stringify({ mode: 'npc', valid: true, position: { x: 3, y: 4 } })
     if (text.includes('"get_entity_status"')) {
-      return JSON.stringify({ found: true, entity: { name: 'offshore-pump', unit_number: 35, position: { x: 10.5, y: -4.5 }, status: 'working' } })
+      return this.familyOutputs.getEntityStatus ?? JSON.stringify({ found: true, entity: { name: 'offshore-pump', unit_number: 35, position: { x: 10.5, y: -4.5 }, status: 'working' } })
     }
     return '{}'
   }
 }
 
-function runZAgent({ families, status = CRAFTED, route = 'targeted_observation' }) {
+function runZAgent({ families, status = CRAFTED, route = 'targeted_observation', inventoryOutput, familyOutputs }) {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:sgluna', activePlan())
   const calls = []
   const events = []
-  const rcon = new RunZRcon(status)
+  const rcon = new RunZRcon(status, inventoryOutput, familyOutputs)
   const agent = new NpcAgentLoop({
     rcon,
     memory,
@@ -135,6 +139,7 @@ function runZAgent({ families, status = CRAFTED, route = 'targeted_observation' 
     return traceEvent(event, data)
   }
   agent.active = true
+  agent.traceRequest = { id: INVENTORY_REQUEST_ID }
   agent.epoch = deployment()
   agent.lastMemoryKey = 'npc:sgluna'
   agent.baseMessages = [
@@ -250,3 +255,74 @@ test('a planner, or a continue route without a Jev selection, keeps today\'s rou
   await empty.agent.completed().catch(() => undefined)
   assert.equal(empty.events.some(row => row.event === 'observation.phase_closed'), false)
 })
+
+for (const [label, inventoryOutput] of [
+  ['native nonempty', NATIVE_INVENTORY],
+  ['native empty', '{}'],
+  ['JSON array', '[{"name":"iron-plate","count":14},{"name":"boiler","count":1}]'],
+  ['JSON empty array', '[]'],
+]) {
+  test(`${label} inventory closes the production continuation only with all selected families answered`, async () => {
+    const families = ['inventory_equipment', 'research_state', 'runtime_status', 'entity_status']
+    const { first, events, facts } = await firstRound({ families, status: PLACED_PUMP, inventoryOutput })
+    assert.equal(first.roundPhase, 'decide')
+    assert.equal(first.allowTools, false)
+    assert.ok(facts.includes(`getInventoryItems {} => ${inventoryOutput}`))
+    const closed = events.find(row => row.event === 'observation.phase_closed')
+    assert.equal(closed?.data.request_id, INVENTORY_REQUEST_ID)
+    assert.equal(closed?.data.reason_code, POST_BATCH_COVERAGE_REASON)
+    assert.deepEqual(closed?.data.selected_families, families)
+    const bundle = events.find(row => row.event === 'observation.post_batch_facts')
+    assert.equal(bundle?.data.request_id, INVENTORY_REQUEST_ID)
+    assert.deepEqual(bundle?.data.covered_families, families)
+    assert.deepEqual(bundle?.data.uncovered_families, [])
+  })
+}
+
+for (const inventoryOutput of [
+  'no controlled actor', '{"error":"read_failed"}', '[null]', '[{}]',
+  '[{"name":"coal","count":1},{"error":"partial"}]',
+  '{ { count = 1, name = "coal" }',
+  '{ { count = 1, name = "coal" }, { name = "boiler" } }',
+]) {
+  test(`invalid inventory keeps the production continuation open: ${inventoryOutput}`, async () => {
+    const families = ['inventory_equipment', 'research_state', 'runtime_status']
+    const { first, events } = await firstRound({ families, inventoryOutput })
+    assert.equal(first.roundPhase, 'gather')
+    assert.equal(first.allowTools, true)
+    assert.equal(events.some(row => row.event === 'observation.phase_closed'), false)
+    const bundle = events.find(row => row.event === 'observation.post_batch_facts')
+    assert.deepEqual(bundle?.data.covered_families, ['research_state', 'runtime_status'])
+    assert.deepEqual(bundle?.data.uncovered_families, ['inventory_equipment'])
+  })
+}
+
+test('valid native inventory plus the automatic placed-entity fact leaves unselected and unmatched families uncredited', async () => {
+  const { first, events, facts } = await firstRound({ families: ['inventory_equipment', 'nearby_world'], status: PLACED_PUMP })
+  assert.equal(first.roundPhase, 'gather')
+  assert.equal(first.allowTools, true)
+  assert.match(facts, /getEntityStatus \{"unit_number":35\}/)
+  const bundle = events.find(row => row.event === 'observation.post_batch_facts')
+  assert.deepEqual(bundle?.data.covered_families, ['inventory_equipment'])
+  assert.deepEqual(bundle?.data.uncovered_families, ['nearby_world'])
+  assert.equal(bundle?.data.placed_entity.family_selected, false)
+  assert.equal(bundle?.data.placed_entity.answered, true)
+})
+
+for (const [family, tool, output] of [
+  ['research_state', 'getResearchStatus', '{"ok":false,"error":"no_force"}'],
+  ['runtime_status', 'getActorStatus', '{"error":"no_actor"}'],
+  ['entity_status', 'getEntityStatus', '{"found":true,"entity":{"unit_number":36}}'],
+  ['entity_status', 'getEntityStatus', '{"found":false}'],
+]) {
+  test(`valid native inventory cannot close a continuation whose ${family} read is unanswered: ${output}`, async () => {
+    const families = ['inventory_equipment', family]
+    const { first, events } = await firstRound({ families, status: PLACED_PUMP, familyOutputs: { [tool]: output } })
+    assert.equal(first.roundPhase, 'gather')
+    assert.equal(first.allowTools, true)
+    assert.equal(events.some(row => row.event === 'observation.phase_closed'), false)
+    const bundle = events.find(row => row.event === 'observation.post_batch_facts')
+    assert.deepEqual(bundle?.data.covered_families, ['inventory_equipment'])
+    assert.deepEqual(bundle?.data.uncovered_families, [family])
+  })
+}

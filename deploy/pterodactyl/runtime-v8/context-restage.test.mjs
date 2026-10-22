@@ -53,6 +53,18 @@ async function steamReplayFingerprint() {
   await world.request()
   await world.closeStep1()
   await world.failSupplyBatch()
+  // Each wake restores its decision scope, including the final wake after the
+  // request closes. Cleanup keeps the originating request and explicit reason.
+  const requestId = world.trace.find(row => row.event === 'request.received').request_id
+  assert.ok(requestId)
+  const cleanupRows = world.trace.filter(row => row.event.startsWith('decision.budgets_'))
+  assert.deepEqual(cleanupRows.map(row => ({ event: row.event, request_id: row.request_id,
+    data: row.data, turn: row.turn, seq: row.seq })), [
+    { turn: 1, seq: 65 },
+    { turn: 2, seq: 124 },
+    { turn: undefined, seq: 0 },
+  ].map(boundary => ({ event: 'decision.budgets_restored', request_id: requestId,
+    data: { request_id: requestId, reason: 'decision_scope_finished' }, ...boundary })))
   // Fresh topology is a separately labelled volatile contract. This historical fixture has
   // no actor surface/force scope, so it reports unavailable (or deferred behind its batch), without extra world reads.
   const topologyRows = world.trace.filter(row => row.event === 'context.topology_refreshed')

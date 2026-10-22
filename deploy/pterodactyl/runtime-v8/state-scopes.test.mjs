@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { DECISION_BUDGET_FIELDS } from './decision-budgets.mjs'
 import {
   CONVERSATION_SWAP_SITES,
   LOOP_STATE_FIELDS,
@@ -158,4 +159,16 @@ test('conversationResetMatrix resolves helpers one level deep and ignores ??= in
   assert.deepEqual(row.resets, ['cache', 'phase'])
   assert.deepEqual(row.missing, ['seen', 'quiet'])
   assert.deepEqual(row.missing_model_visible, ['seen'])
+})
+
+
+test('the shared budget cleanup fields have decision lifetime, independent of conversation swap coverage', () => {
+  for (const field of DECISION_BUDGET_FIELDS) {
+    assert.equal(LOOP_STATE_FIELDS[field].scope, 'decision', `${field} lives through same-wake conversation replacement`)
+    assert.equal(LOOP_STATE_FIELDS[field].model_visible, true)
+  }
+  // Reset-matrix rows are an inventory: C5/C6/non-folded C8 must retain their wake's allowance.
+  // Behavioral lifetime gates live in decision-budgets and recovery-observation-budget production-path tests.
+  assert.match(LOOP_STATE_FIELDS.observationBudgetOverride.note, /C6\/C8\/C5 restages keep the wake-chosen value/)
+  assert.match(LOOP_STATE_FIELDS.observationBudgetRemaining.note, /saving generation and lineage still hold/)
 })

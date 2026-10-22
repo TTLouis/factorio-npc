@@ -112,6 +112,36 @@ test('Run AJ: the planner\'s whole review notes reach the executor once at the C
     ['notes_whole_in_step_block_record', 'step_block_record', RUN_AJ_NOTES.length, stepIdOf(w.memory)])
 })
 
+test('1200-character planner review notes reach handback and receipt continuation once', async () => {
+  const notes = `${RUN_AJ_NOTES.padEnd(MAX_REVIEW_NOTES_CHARS - 14, 'x')} final context`
+  assert.equal(notes.length, MAX_REVIEW_NOTES_CHARS)
+  const seen = []
+  const w = notesWorld([pumpDraft(), askReview, pumpDraft({ chatMessage: notes }), ctx => {
+    seen.push(occurrences(ctx.messages, notes))
+    return placePump(ctx)
+  }, ctx => {
+    seen.push(occurrences(ctx.messages, notes))
+    return placePump(ctx)
+  }])
+  await w.say()
+  await w.agent.completed()
+  assert.deepEqual(seen, [1, 1])
+})
+
+test('a review containing only sanitized controls preserves the raw handback and empty continuation label', async () => {
+  const seen = []
+  const w = notesWorld([pumpDraft(), askReview, pumpDraft({ chatMessage: '\u0000' }), ctx => {
+    seen.push(ctx.messages.some(row => String(row.content).startsWith('[PLANNER_REVIEW_NOTES]')))
+    return placePump(ctx)
+  }, ctx => {
+    seen.push(notesLine(ctx.messages).endsWith(': '))
+    return placePump(ctx)
+  }])
+  await w.say()
+  await w.agent.completed()
+  assert.deepEqual(seen, [true, true])
+})
+
 test('Run AJ: a C7 recovery restage of the reviewed step carries the whole notes once', async () => {
   const w = notesWorld([pumpDraft(), askReview, pumpDraft({ chatMessage: RUN_AJ_NOTES, plan: [PUMP_STEP] }), placePump])
   await w.say()
@@ -237,7 +267,7 @@ class RunAjRcon {
     this.commands.push(text)
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify(AJ_RECEIPT)
-    if (text.includes('"get_inventory_items"')) return JSON.stringify({ items: [{ name: 'boiler', count: 1 }, { name: 'steam-engine', count: 1 }, { name: 'pipe', count: 8 }, { name: 'coal', count: 12 }] })
+    if (text.includes('"get_inventory_items"')) return '{ { name = "boiler", count = 1 }, { name = "steam-engine", count = 1 }, { name = "pipe", count = 8 }, { name = "coal", count = 12 } }'
     if (text.includes('"get_entity_status"')) return JSON.stringify(PUMP_STATUS)
     return '{}'
   }

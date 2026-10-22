@@ -37,6 +37,7 @@
 import { createHash } from 'node:crypto'
 
 import { sanitizeDurableModelText } from './durable-text.mjs'
+import { HANDOFF_PACKET_MAX_CHARS, HANDOFF_NOTE_CHARS, plannerReviewNotesRecord, sanitizeHandoffNote } from './handoff-format.mjs'
 import { FLUID_HINTS_STEP_MARK, topologyText } from './topology-context.mjs'
 import { describeGoalCondition } from './goal-definition.mjs'
 import {
@@ -48,11 +49,14 @@ import {
   nearestShelfRefinementTarget,
 } from './planning-state.mjs'
 
+export { PLANNER_REVIEW_NOTES_LABEL, sanitizeHandoffNote } from './handoff-format.mjs'
+export { parseInventoryCounts } from './inventory-facts.mjs'
+
 export const HANDOFF_PACKET_LIMITS = Object.freeze({
   // Design note section 5: start at 6,000 characters; set from the first live run.
-  maxChars: 6000,
+  maxChars: HANDOFF_PACKET_MAX_CHARS,
   receiptTail: 5,
-  noteChars: 500,
+  noteChars: HANDOFF_NOTE_CHARS,
   objectiveChars: 400,
   constraintChars: 200,
   constraints: 8,
@@ -75,10 +79,6 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   jevFacts: 4,
   jevFactChars: 300,
 })
-
-// The planner_review_notes record's label. The agent loop writes the same record into a conversation's base step block when the
-// packet could not carry the notes verbatim (commitPlan), so a continuation rebuild keeps them in this step-scoped record.
-export const PLANNER_REVIEW_NOTES_LABEL = "planner_review_notes (the planner's reply to your review of this step; the plan is unchanged; advisory, not world evidence): "
 
 // Drop order when over the limit: first entry is dropped first. Receipts go
 // oldest first inside their group. Steps drop completed (earliest first) before
@@ -181,14 +181,6 @@ function oneLine(value, max) {
   const flat = String(value ?? '').replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim()
   if (flat.length <= max) return flat
   return `${flat.slice(0, Math.max(0, max - 1))}…`
-}
-
-// The note is the ending conversation's own prose. It goes through the same
-// durable-text sanitizer as the agent loop's memory (historical unit numbers
-// must not steer a fresh conversation to stale entities), after the packet's
-// one-line/control-character normalization.
-export function sanitizeHandoffNote(value, max = HANDOFF_PACKET_LIMITS.noteChars) {
-  return sanitizeDurableModelText(oneLine(value, Math.max(2000, String(value ?? '').length)), max)
 }
 
 // A user amendment staged for the planner (not yet applied). It is the USER's wording, bounded
@@ -556,36 +548,6 @@ export function mergeRecipeFact(existing, incoming) {
     ...(incoming.machine_energy === undefined && existing.machine_energy !== undefined ? { machine_energy: existing.machine_energy } : {}),
     ...(incoming.hand_craftable === undefined && existing.hand_craftable !== undefined ? { hand_craftable: existing.hand_craftable } : {}),
   }
-}
-
-/** Parse the actor inventory the game printed: a JSON array, or the serpent block of {name, count} tables. */
-export function parseInventoryCounts(raw) {
-  const text = String(raw ?? '').trim()
-  if (!text) return undefined
-  const counts = new Map()
-  const add = (name, count) => {
-    const clean = factName(name)
-    if (!clean || !Number.isSafeInteger(count) || count < 0) return
-    counts.set(clean, (counts.get(clean) ?? 0) + count)
-  }
-  try {
-    const parsed = JSON.parse(text)
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed) add(entry?.name, entry?.count)
-      return counts
-    }
-    // An empty Lua table prints as {} (or []): an empty inventory. Any other object is not an inventory.
-    if (parsed && typeof parsed === 'object') return Object.keys(parsed).length === 0 ? counts : undefined
-  }
-  catch {}
-  // serpent.block: fields sorted by key, so `count` precedes `name`; accept either order inside one table.
-  const tables = text.match(/\{[^{}]*\}/g) ?? []
-  for (const table of tables) {
-    const name = /name\s*=\s*"([^"]*)"/.exec(table)?.[1]
-    const count = /count\s*=\s*(-?\d+)/.exec(table)?.[1]
-    if (name !== undefined && count !== undefined) add(name, Number(count))
-  }
-  return counts.size > 0 || /^\{\s*\}$/.test(text) ? counts : undefined
 }
 
 /**
@@ -1882,9 +1844,8 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
       if (role === 'executor' && step.execution_guidance) records.push({ key: 'execution_brief', block: 'step',
         text: `execution_guidance (planner choice; revalidate live facts): ${JSON.stringify(step.execution_guidance)}` })
       if (contract) records.push({ key: 'contract', block: 'step', drop: 'contract', text: `active_step_contract: ${contract}` })
-      const reviewNotes = role === 'executor' ? sanitizeHandoffNote(state?.goal?.review_notes?.[step.step_id], limits.reviewNotesChars) : ''
-      if (reviewNotes) records.push({ key: 'review_notes', block: 'step', drop: 'review_notes',
-        text: `${PLANNER_REVIEW_NOTES_LABEL}${reviewNotes}` })
+      const reviewNotes = role === 'executor' ? plannerReviewNotesRecord(state?.goal?.review_notes?.[step.step_id], limits.reviewNotesChars) : undefined
+      if (reviewNotes) records.push(reviewNotes)
       const held = plan.execution?.receipts?.[step.step_id]
       const tail = (Array.isArray(held) ? held : []).slice(-limits.receiptTail)
       tail.forEach((entry, index) => {

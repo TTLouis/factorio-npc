@@ -1,3 +1,4 @@
+import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -1870,7 +1871,12 @@ export async function pauseStrandedPlanAfterRequestError(session, failure) {
 // A plan that is still a draft has not been handed to an executor yet; its recovery keeps
 // the planner's role. No planner conversation is parked: the one this restart rebuilt is
 // only the recovery scaffolding, so the slice close builds a fresh planner from a packet.
-async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
+async function restageRecoveryConversation(agent, { reason, recoveryMessage, owner, requestId, isCancelled }) {
+  const superseded = () => isCancelled?.() || !ownsDecisionBudgets(agent, owner)
+  const refused = result => result?.restaged
+    ? { ...result, decision_started: false, decision_reason: 'executor_decision_superseded_after_handoff' }
+    : { restaged: false, reason: 'decision_owner_superseded' }
+  if (superseded()) return refused()
   if (typeof agent.restageBetweenTurns !== 'function') return { restaged: false, reason: 'agent_cannot_restage' }
   let runtime
   try {
@@ -1879,6 +1885,7 @@ async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
   catch {
     runtime = undefined
   }
+  if (superseded()) return refused()
   let role = agent.agentContext?.role ?? 'planner'
   try {
     const active = getActivePlan(agent.memory?.planningState?.(`npc:${agent.npcId ?? 'sgluna'}`))
@@ -1891,24 +1898,26 @@ async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
     reason: `recovery:${uiText(reason, 80)}`,
     actor: agent.epoch,
     runtime,
-    requestId: agent.traceRequest?.id,
+    requestId,
   })
+  if (superseded() && result.decision_started !== false) return refused(result)
   if (!result.restaged) {
     // try/await, not a promise chain: a trace writer that throws before it returns a promise
     // would otherwise abort the recovery instead of leaving it on the conversation it has.
     try {
-      await agent.traceEvent?.('runtime.recovery_restage_fallback', { reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+      await agent.traceEvent?.('runtime.recovery_restage_fallback', { request_id: requestId, reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId })
     }
     catch {}
-    return result
+    return superseded() ? refused(result) : result
   }
   if (result.decision_started === false) {
     try {
-      await agent.traceEvent?.('runtime.recovery_decision_superseded', { reason: result.decision_reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+      await agent.traceEvent?.('runtime.recovery_decision_superseded', { request_id: requestId, reason: result.decision_reason, recovery_reason: uiText(reason, 80) }, { requestId })
     }
     catch {}
-    return result
+    return superseded() ? refused(result) : result
   }
+  if (superseded()) return refused(result)
   const harness = { role: 'user', content: recoveryMessage }
   agent.baseMessages = [...agent.baseMessages, harness]
   agent.messages = [...agent.messages, { ...harness }]
@@ -1949,15 +1958,38 @@ export function goalInterruptedBeforeFirstPlan(planning) {
 //   `onResumed(state)` lets the caller refresh its task-board UI.
 export async function recoverInterruptedAgentPlan(agent, reason, details = {}, options = {}) {
   if (!agent) return { recovered: false, reason: 'agent_unavailable' }
-  await agent.loadPersistentState?.()
+  const recoveryRequestId = typeof options.requestId === 'string' && options.requestId ? options.requestId : `recovery_${Date.now().toString(36)}`
+  // Startup has no optional token. Fence the first await too; only our own
+  // synchronous cancel below may intentionally advance this identity.
+  let owner = decisionBudgetOwner(agent)
+  let state
   const key = `npc:${agent.npcId ?? 'sgluna'}`
-  const state = agent.memory?.currentPlan?.(key)
+  const interrupted = () => options.isCancelled?.()
+    ? { recovered: false, reason: 'cancelled_after_fire', state }
+    : !ownsDecisionBudgets(agent, owner)
+      ? { recovered: false, reason: 'decision_owner_superseded', state: agent.memory?.currentPlan?.(key) ?? state }
+      : undefined
+  const cancelled = async (stopped, stage) => {
+    try {
+      await agent.traceEvent?.('runtime.recovery_preparation_cancelled', {
+        request_id: recoveryRequestId, reason: stopped.reason, stage, recovery_reason: uiText(reason, 80),
+      }, { requestId: recoveryRequestId })
+    }
+    catch {}
+    return stopped
+  }
+  await agent.loadPersistentState?.()
+  let stopped = interrupted()
+  if (stopped) return cancelled(stopped, 'load_persistent_state')
+  state = agent.memory?.currentPlan?.(key)
   const awaitingNextSlice = agent.goalAwaitingNextSlice?.(key) === true
   if (!shouldRecoverInterruptedPlan(state, { awaitingNextSlice, allowModelRecoverable: options.allowModelRecoverable === true })) return { recovered: false, reason: 'plan_not_recoverable', state }
   if (options.allowModelRecoverable === true) agent.clearActionOmissionRecovery?.()
 
   if (state?.provider_recovery?.kind === 'output_budget_exhaustion' && state.provider_recovery.phase === 'in_flight') {
     const runtime = await agent.readInteractionTaskStatus?.()
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'output_budget_status')
     const reduced = agent.memory?.applyOutcomeAuthority?.(key, {
       kind: 'recoverable_provider_failure',
       source: 'runtime_restart',
@@ -1967,6 +1999,8 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     })
     agent.memory?.setProviderRecovery?.(key, undefined)
     await agent.persistState?.()
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'output_budget_persist')
     if (reduced?.state?.status === 'paused') agent.cancel?.('runtime_recovery_interrupted_output_budget')
     return {
       recovered: true,
@@ -1976,75 +2010,121 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   }
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
-  const epoch = await agent.captureEpoch()
-  if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
-  // MW2b: before anything is issued again, reconcile any batch that was sent but never settled (a restart, an actor replacement
-  // or a death can lose its acknowledgement and receipt) against the game's own batch records. The model is told what they prove.
-  const recoveryRequestId = typeof options.requestId === 'string' && options.requestId ? options.requestId : `recovery_${Date.now().toString(36)}`
-  const reconciliation = await agent.reconcileOutstandingOperation?.({ trigger: reason, requestId: recoveryRequestId })
-  const reconciliationLine = reconciliation ? ` ${reconciliationGuidance(reconciliation, reconciliation.pending)}` : ''
-  if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
-  // C7: a plan is resumed only when the reducer holds an active plan to carry.
-  // Otherwise the goal is paused (a chat line follows) instead of waking a
-  // model with nothing to execute.
-  if (!awaitingNextSlice && typeof agent.memory?.planningState === 'function' && !getActivePlan(agent.memory.planningState(key))) {
-    await agent.traceEvent?.('runtime.recovery_no_active_plan', { reason: 'reducer_holds_no_active_plan', recovery_reason: uiText(reason, 80) }, { requestId: `recovery_${Date.now().toString(36)}` })
-    const paused = await agent.pausePersistentPlan?.(`runtime_recovery_no_active_plan:${uiText(reason, 80)}`, { pause_class: PAUSE_CLASS.GUARD })
-    return { recovered: false, reason: 'no_active_plan', paused: paused !== undefined, state: paused ?? state }
-  }
-  if (!awaitingNextSlice && agent.memory?.currentPlan?.(key)?.status === 'paused') {
-    const reactivate = options.reactivate ?? { pause_classes: [PAUSE_CLASS.TRANSPORT] }
-    // No await between this check and the resume: a stop that cancelled the token cannot be undone by it.
-    if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
-    const scheduled = reactivate.actor
-    const actorChanged = scheduled && (scheduled.actor_id !== epoch?.actor_id || scheduled.epoch !== epoch?.epoch)
-    const resumed = actorChanged
-      ? { resumed: false, reason: 'actor_or_epoch_changed' }
-      : agent.memory?.resumePausedPlan?.(key, { reason: `auto_resume:${uiText(reason, 80)}`, pauseClasses: reactivate.pause_classes ?? [], identity: reactivate.identity, lifecycle: true })
-    if (!resumed?.resumed) {
-      const refusal = resumed?.reason ?? 'plan_resume_unavailable'
-      await agent.traceEvent?.('recovery.auto_resume_plan_not_resumed', {
-        request_id: recoveryRequestId,
-        reason: refusal,
-        pause_class: resumed?.pause_class,
-        step_id: resumed?.step_id,
-        recovery_reason: uiText(reason, 80),
-        ...(actorChanged ? { scheduled_actor_id: scheduled.actor_id, scheduled_epoch: scheduled.epoch, actor_id: epoch?.actor_id, epoch: epoch?.epoch } : {}),
-      }, { requestId: recoveryRequestId })
-      return { recovered: false, reason: 'plan_not_resumable', refusal, pause_class: resumed?.pause_class, state: agent.memory?.currentPlan?.(key) ?? state }
+  const decisionBudgetScope = captureDecisionBudgets(agent, { requestId: recoveryRequestId })
+  owner = decisionBudgetScope
+  try {
+    const epoch = await agent.captureEpoch()
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'preparation')
+    // MW2b: before anything is issued again, reconcile any batch that was sent but never settled (a restart, an actor replacement
+    // or a death can lose its acknowledgement and receipt) against the game's own batch records. The model is told what they prove.
+    const reconciliation = await agent.reconcileOutstandingOperation?.({ trigger: reason, requestId: recoveryRequestId })
+    const reconciliationLine = reconciliation ? ` ${reconciliationGuidance(reconciliation, reconciliation.pending)}` : ''
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'preparation')
+    // C7: a plan is resumed only when the reducer holds an active plan to carry.
+    // Otherwise the goal is paused (a chat line follows) instead of waking a
+    // model with nothing to execute.
+    if (!awaitingNextSlice && typeof agent.memory?.planningState === 'function' && !getActivePlan(agent.memory.planningState(key))) {
+      await agent.traceEvent?.('runtime.recovery_no_active_plan', { reason: 'reducer_holds_no_active_plan', recovery_reason: uiText(reason, 80) }, { requestId: recoveryRequestId })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'no_active_plan_trace')
+      const paused = await agent.pausePersistentPlan?.(`runtime_recovery_no_active_plan:${uiText(reason, 80)}`, { pause_class: PAUSE_CLASS.GUARD })
+      return { recovered: false, reason: 'no_active_plan', paused: paused !== undefined, state: paused ?? state }
     }
-    else {
-      await agent.persistState?.()
-      await agent.traceEvent?.('recovery.auto_resume_plan_resumed', {
-        request_id: recoveryRequestId,
-        reason: uiText(reason, 80),
-        pause_class: resumed.pause_class,
-        step_id: resumed.step_id,
-        goal_id: resumed.state?.goal_id,
-        pause_reason: uiText(resumed.pause_reason, 160),
-      }, { requestId: recoveryRequestId })
-      await reactivate.onResumed?.(resumed.state)
-      if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state: resumed.state }
+    if (!awaitingNextSlice && agent.memory?.currentPlan?.(key)?.status === 'paused') {
+      const reactivate = options.reactivate ?? { pause_classes: [PAUSE_CLASS.TRANSPORT] }
+      // No await between this check and the resume: a stop that cancelled the token cannot be undone by it.
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'preparation')
+      const scheduled = reactivate.actor
+      const actorChanged = scheduled && (scheduled.actor_id !== epoch?.actor_id || scheduled.epoch !== epoch?.epoch)
+      const resumed = actorChanged
+        ? { resumed: false, reason: 'actor_or_epoch_changed' }
+        : agent.memory?.resumePausedPlan?.(key, { reason: `auto_resume:${uiText(reason, 80)}`, pauseClasses: reactivate.pause_classes ?? [], identity: reactivate.identity, lifecycle: true })
+      if (!resumed?.resumed) {
+        const refusal = resumed?.reason ?? 'plan_resume_unavailable'
+        await agent.traceEvent?.('recovery.auto_resume_plan_not_resumed', {
+          request_id: recoveryRequestId,
+          reason: refusal,
+          pause_class: resumed?.pause_class,
+          step_id: resumed?.step_id,
+          recovery_reason: uiText(reason, 80),
+          ...(actorChanged ? { scheduled_actor_id: scheduled.actor_id, scheduled_epoch: scheduled.epoch, actor_id: epoch?.actor_id, epoch: epoch?.epoch } : {}),
+        }, { requestId: recoveryRequestId })
+        return { recovered: false, reason: 'plan_not_resumable', refusal, pause_class: resumed?.pause_class, state: agent.memory?.currentPlan?.(key) ?? state }
+      }
+      else {
+        await agent.persistState?.()
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'reactivation_persist')
+        await agent.traceEvent?.('recovery.auto_resume_plan_resumed', {
+          request_id: recoveryRequestId,
+          reason: uiText(reason, 80),
+          pause_class: resumed.pause_class,
+          step_id: resumed.step_id,
+          goal_id: resumed.state?.goal_id,
+          pause_reason: uiText(resumed.pause_reason, 160),
+        }, { requestId: recoveryRequestId })
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'reactivation_trace')
+        await reactivate.onResumed?.(resumed.state)
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'reactivation_callback')
+      }
     }
-  }
-  // LIFECYCLE_TABLE: a step recovery never runs on a closed goal (the reactivation above made a paused one active, or returned).
-  const lifecycle = agent.lifecycleEnter?.('recovery.interrupted', { reason: uiText(reason, 80), boundary: awaitingNextSlice ? 'plan_slice' : 'step' }, { requestId: recoveryRequestId })
-  if (lifecycle) return { recovered: false, reason: 'lifecycle_refused', refusal: lifecycle.reason, state: agent.memory?.currentPlan?.(key) ?? state }
-  const memoryContext = agent.memory?.context?.(key) ?? ''
-  const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
-  if (awaitingNextSlice) {
-    // Between slices there is no current step to re-observe: re-check the goal
-    // in game and plan the next slice, exactly as the completed slice would
-    // have done had nothing interrupted it.
+    // LIFECYCLE_TABLE: a step recovery never runs on a closed goal (the reactivation above made a paused one active, or returned).
+    const lifecycle = agent.lifecycleEnter?.('recovery.interrupted', { reason: uiText(reason, 80), boundary: awaitingNextSlice ? 'plan_slice' : 'step' }, { requestId: recoveryRequestId })
+    if (lifecycle) return { recovered: false, reason: 'lifecycle_refused', refusal: lifecycle.reason, state: agent.memory?.currentPlan?.(key) ?? state }
+    const memoryContext = agent.memory?.context?.(key) ?? ''
+    const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'conversation_setup')
+    if (awaitingNextSlice) {
+      // Between slices there is no current step to re-observe: re-check the goal
+      // in game and plan the next slice, exactly as the completed slice would
+      // have done had nothing interrupted it.
+      agent.epoch = epoch
+      agent.lastMemoryKey = key
+      agent.planUpdateReason = 'completion'
+      agent.reasoningTriggerSource = null
+      agent.replaceConversation({
+        baseMessages: [
+          { role: 'system', content: agent.systemPrompt },
+          ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+          { role: 'user', content: `[HARNESS] Runtime recovery after ${uiText(reason, 120)} at a plan-slice boundary: the last plan slice was already verified complete and the user goal is still active. Recovery details: ${recoveryDetails}` },
+        ],
+      })
+      agent.requestInfo = {
+        memoryKey: key,
+        turnId: ++agent.turnSequence,
+        sender: uiText(state.owner || 'runtime-recovery', 128),
+        text: uiText(state.objective || 'Resume interrupted SGLuna goal', 4000),
+      }
+      agent.active = true
+      agent.continuations = 1
+      if (typeof agent.traceEvent === 'function') {
+        agent.traceRequest = { id: recoveryRequestId, seq: 0 }
+        await agent.traceEvent('runtime.recovery_started', { reason, details, boundary: 'plan_slice' })
+      }
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'recovery_trace')
+      const result = await agent.settleCompletedStepState(state)
+      return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
+    }
+    const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations.${reconciliationLine} Recovery details: ${recoveryDetails}`
+
     agent.epoch = epoch
     agent.lastMemoryKey = key
-    agent.planUpdateReason = 'completion'
+    // Ordinary runtime recovery only. This path has never had replan authority:
+    // it re-observes the world and continues the committed plan.
+    agent.planUpdateReason = 'recovery'
     agent.reasoningTriggerSource = null
     agent.replaceConversation({
       baseMessages: [
         { role: 'system', content: agent.systemPrompt },
         ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
-        { role: 'user', content: `[HARNESS] Runtime recovery after ${uiText(reason, 120)} at a plan-slice boundary: the last plan slice was already verified complete and the user goal is still active. Recovery details: ${recoveryDetails}` },
+        { role: 'user', content: recoveryMessage },
       ],
     })
     agent.requestInfo = {
@@ -2057,56 +2137,25 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     agent.continuations = 1
     if (typeof agent.traceEvent === 'function') {
       agent.traceRequest = { id: recoveryRequestId, seq: 0 }
-      await agent.traceEvent('runtime.recovery_started', { reason, details, boundary: 'plan_slice' })
+      await agent.traceEvent('runtime.recovery_started', { reason, details })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'recovery_trace')
+      // A fresh executor context gets its own correction turn for a refusal (unit 13).
+      await agent.resetRefusalRecoveryBudgets?.({ requestId: recoveryRequestId })
     }
-    const result = await agent.settleCompletedStepState(state)
-    return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
-  }
-  const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations.${reconciliationLine} Recovery details: ${recoveryDetails}`
-
-  agent.epoch = epoch
-  agent.lastMemoryKey = key
-  // Ordinary runtime recovery only. This path has never had replan authority:
-  // it re-observes the world and continues the committed plan.
-  agent.planUpdateReason = 'recovery'
-  agent.reasoningTriggerSource = null
-  agent.replaceConversation({
-    baseMessages: [
-      { role: 'system', content: agent.systemPrompt },
-      ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
-      { role: 'user', content: recoveryMessage },
-    ],
-  })
-  agent.requestInfo = {
-    memoryKey: key,
-    turnId: ++agent.turnSequence,
-    sender: uiText(state.owner || 'runtime-recovery', 128),
-    text: uiText(state.objective || 'Resume interrupted SGLuna goal', 4000),
-  }
-  agent.active = true
-  agent.continuations = 1
-  const previousReasoningBudget = agent.reasoningBudgetOverride
-  const previousObservationBudget = agent.observationBudgetOverride
-  const previousObservationBudgetRemaining = agent.observationBudgetRemaining
-  const previousPlanningHorizon = agent.planningHorizonOverride
-  if (typeof agent.traceEvent === 'function') {
-    agent.traceRequest = { id: recoveryRequestId, seq: 0 }
-    await agent.traceEvent('runtime.recovery_started', { reason, details })
-    // A fresh executor context gets its own correction turn for a refusal (unit 13).
-    await agent.resetRefusalRecoveryBudgets?.({ requestId: recoveryRequestId })
-  }
-  const restage = await restageRecoveryConversation(agent, { reason, recoveryMessage })
-  if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
-  try {
-    if (restage?.decision_started === false) return { recovered: false, reason: 'executor_decision_superseded_after_handoff', state: agent.memory?.currentPlan?.(key) ?? state }
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'recovery_trace')
+    const restage = await restageRecoveryConversation(agent, { reason, recoveryMessage, owner, requestId: recoveryRequestId, isCancelled: options.isCancelled })
+    if (restage?.decision_started === false) return cancelled({
+      recovered: false, reason: 'executor_decision_superseded_after_handoff', state: agent.memory?.currentPlan?.(key) ?? state,
+    }, 'recovery_handoff')
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'before_run_guarded')
     const result = await agent.runGuarded()
     return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
   }
   finally {
-    agent.reasoningBudgetOverride = previousReasoningBudget
-    agent.observationBudgetOverride = previousObservationBudget
-    agent.observationBudgetRemaining = previousObservationBudgetRemaining
-    agent.planningHorizonOverride = previousPlanningHorizon
+    await restoreDecisionBudgets(agent, decisionBudgetScope)
   }
 }
 

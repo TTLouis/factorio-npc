@@ -1,4 +1,5 @@
 import { EXECUTOR_ROLE } from './agent-roles.mjs'
+import { parseInventoryCounts } from './inventory-facts.mjs'
 
 // Facts the executor is predicted to need right after a batch: its inventory, the default
 // read of each observation family Jev selected for the next decision, and the recipes it
@@ -56,15 +57,42 @@ export function postBatchPlacedEntityRead(placedUnitNumber) {
     : undefined
 }
 
-// A read answers its family only when the game returned the fact: a JSON object that is not an error, and for an
-// exact entity, that entity.
+// Inventory uses the native Serpent list (also supporting JSON arrays). Other families
+// still require a non-error JSON object; an entity read must match its exact identity.
 export function postBatchReadAnswers(read) {
+  if (read?.name === 'getInventoryItems') return parseInventoryCounts(read.output) !== undefined
   let parsed
   try { parsed = JSON.parse(read?.output) }
   catch { return false }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.ok === false || parsed.error !== undefined) return false
   if (read.name === 'getEntityStatus') return parsed.found === true && parsed.entity?.unit_number === read.args?.unit_number
   return true
+}
+
+// A later delivered full native answer supersedes only the same lookup. Errors and native diff/unchanged
+// references do not replace their full baseline. Dropping the old raw output cannot increase the 8000-char
+// prefetch budget, and never credits a family or opens another observation allowance.
+export function withoutSupersededPostBatchFact(held, read) {
+  if (!Array.isArray(held?.reads) || typeof read?.signature !== 'string' || typeof read.output !== 'string') return undefined
+  const prior = held.reads.find(item => item.signature === read.signature && item.name === read.name)
+  if (!prior || prior.output === read.output) return undefined
+  if (read.name === 'getInventoryItems') {
+    if (parseInventoryCounts(read.output) === undefined) return undefined
+  }
+  else {
+    let parsed
+    try { parsed = JSON.parse(read.output) }
+    catch { return undefined }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.ok === false || parsed.error !== undefined) return undefined
+    if (parsed.observation_mode !== undefined && parsed.observation_mode !== 'full') return undefined
+    if (read.name === 'getEntityStatus') {
+      if (parsed.found !== false && !(parsed.found === true && parsed.entity?.unit_number === read.args?.unit_number)) return undefined
+    }
+    else if (!postBatchReadAnswers(read)) return undefined
+  }
+  const reads = held.reads.filter(item => item.signature !== read.signature)
+  const covered = (held.covered ?? []).filter(family => reads.some(item => item.family === family && postBatchReadAnswers(item)))
+  return { ...held, reads, covered }
 }
 
 const STEP_LIMIT = 8

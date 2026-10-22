@@ -100,7 +100,11 @@ function contextFacts(messages, role) {
   assert.equal(capacity.consumers_per_producer, capacity.producer_units_per_second / capacity.consumer_units_per_second)
   assert.equal(capacity.consumers_per_producer, 2)
   assert.equal(capacity.state, 'conditional_prototype_capacity')
-  assert.match(facts.expansion, /Reserve room/)
+  if (Object.hasOwn(facts, 'expansion')) assert.match(facts.expansion, /Reserve room/)
+  else {
+    assert.equal(facts.truncated, true, 'absent expansion guidance requires explicit truncation')
+    assert.ok(Array.isArray(facts.fields_omitted) && facts.fields_omitted.includes('expansion'), 'absent expansion guidance requires its omission marker')
+  }
   seen[`${role}Context`] = facts
 }
 const model = new ScriptedModel()
