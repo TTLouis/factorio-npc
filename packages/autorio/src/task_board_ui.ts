@@ -1,4 +1,5 @@
 import type { MapPositionStruct } from 'factorio:prototype'
+import { area_reservation_click } from './area_reservation_ui'
 import type { ButtonGuiElement, CameraGuiElement, FrameGuiElement, LuaEntity, LuaGuiElement, LuaInventory, LuaPlayer, LuaSurface, ProgressBarGuiElement, ScrollPaneGuiElement, SpriteButtonGuiElement, SpritePath, TextFieldGuiElement } from 'factorio:runtime'
 
 import * as ui_constants from './task_board_ui_constants'
@@ -1429,6 +1430,7 @@ export function create_task_board_ui_remote_interface() {
     player.print(join_status_line())
   })
   script.on_event(defines.events.on_gui_click, (event: any) => {
+    if (area_reservation_click(event, peek_controlled_actor())) return
     const element = event.element; if (!element?.valid || element.player_index !== event.player_index) return; const player = game.get_player(event.player_index); if (!player?.valid) return
     if (element.name === ui_constants.BUTTON_NAME) { toggle_task_board_ui_open(player.index); render(player); return }
     if (!task_board_ui_is_open(player.index)) return

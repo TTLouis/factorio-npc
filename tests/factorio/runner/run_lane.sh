@@ -152,6 +152,11 @@ case "$LANE" in
   offshore-water-first)
     run_py offshore_water_first_cell.py
     ;;
+  area-reservations)
+    run_node area_reservation_factorio.mjs --phase prepare --save "$SAVE"
+    restart_factorio
+    run_node area_reservation_factorio.mjs --phase verify
+    ;;
   water-reach-approach)
     printf '[npc-test][water-reach-approach] Running water approach, collision-refused walk and positive-read gate on the 18ab seed...\n'
     run_py water_reach_approach_cell.py

@@ -6,8 +6,18 @@
   ],
   "operations": {
     "prepare_pump_site": {
-      "args": ["preparation_id"], "remote": ["autorio_operations", "prepare_pump_site"],
-      "surfaces": ["ordinary-agent", "pterodactyl-runtime-v8"], "pterodactyl_layer": "runtime-v8-extension"
+      "args": [
+        "preparation_id"
+      ],
+      "remote": [
+        "autorio_operations",
+        "prepare_pump_site"
+      ],
+      "surfaces": [
+        "ordinary-agent",
+        "pterodactyl-runtime-v8"
+      ],
+      "pterodactyl_layer": "runtime-v8-extension"
     },
     "walk_to_entity": {
       "args": [
@@ -527,6 +537,20 @@
         "pterodactyl-runtime-v8"
       ],
       "pterodactyl_layer": "staging-base"
+    },
+    "reserve_construction_area": {
+      "args": [
+        "reservation_id",
+        "revision"
+      ],
+      "remote": [
+        "autorio_operations",
+        "reserve_construction_area"
+      ],
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "pterodactyl_layer": "runtime-v8-extension"
     }
   },
   "tools": {
@@ -668,18 +692,36 @@
       "surface_policy": "shared"
     },
     "getPumpSitePreparation": {
-      "remote": ["autorio_tools", "get_pump_site_preparation"],
+      "remote": [
+        "autorio_tools",
+        "get_pump_site_preparation"
+      ],
       "category": "construction",
-      "surfaces": ["pterodactyl-runtime-v8"],
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
       "surface_policy": "runtime-v8-only",
-      "args": ["x", "y", "direction"]
+      "args": [
+        "x",
+        "y",
+        "direction"
+      ]
     },
     "getFluidSourceTiles": {
-      "remote": ["autorio_tools", "get_fluid_source_tiles"],
+      "remote": [
+        "autorio_tools",
+        "get_fluid_source_tiles"
+      ],
       "category": "observation",
-      "surfaces": ["pterodactyl-runtime-v8"],
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
       "surface_policy": "runtime-v8-only",
-      "args": ["fluid_name", "search_radius", "limit"]
+      "args": [
+        "fluid_name",
+        "search_radius",
+        "limit"
+      ]
     },
     "findLongRangeEntities": {
       "remote": [
@@ -994,6 +1036,55 @@
         "pterodactyl-runtime-v8"
       ],
       "surface_policy": "runtime-v8-only"
+    },
+    "validateConstructionReservation": {
+      "remote": [
+        "autorio_reservations",
+        "validate"
+      ],
+      "category": "construction",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only",
+      "args": [
+        "goal_id",
+        "plan_id",
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "getConstructionReservations": {
+      "remote": [
+        "autorio_reservations",
+        "status"
+      ],
+      "category": "construction",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only",
+      "args": [
+        "reservation_id"
+      ]
+    },
+    "getReservationDesignInput": {
+      "remote": [
+        "autorio_reservations",
+        "designer_input"
+      ],
+      "category": "construction",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only",
+      "args": [
+        "reservation_id",
+        "revision",
+        "offset"
+      ]
     }
   },
   "limits": {

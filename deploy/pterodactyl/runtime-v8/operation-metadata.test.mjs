@@ -18,6 +18,7 @@ import {
 } from './structured-policy.mjs'
 
 const fixtures = Object.freeze({
+  reserve_construction_area: { name: 'reserve_construction_area', args: { reservation_id: 1, revision: 1 } },
   prepare_pump_site: { name: 'prepare_pump_site', args: { preparation_id: 'pump-preparation-1' } },
   walk_to_entity: { name: 'walk_to_entity', args: { entity_name: 'stone-furnace', search_radius: 64 } },
   walk_to_entity_exact: { name: 'walk_to_entity_exact', args: { unit_number: 1 } },

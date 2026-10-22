@@ -320,8 +320,8 @@ test('planner prompts and the stepCompletions schema say execution plans declare
   const sha = text => createHash('sha256').update(text).digest('hex')
   // The approved operation catalog now includes bounded pump-site preparation.
   // Both executor variants retain their closed-action completion rules.
-  assert.equal(sha(EXECUTOR_COMPACT_CONTINUATION_PROMPT), '5a11da2ed7ca30757269939d438283f826482824397f9899aec2d32f70975341')
-  assert.equal(sha(EXECUTOR_CLOSED_CONTROL_PROMPT), '038bff7f76859611309fb28dba5a192be9f6174a42ff441339a32a69feb5f84e')
+  assert.equal(sha(EXECUTOR_COMPACT_CONTINUATION_PROMPT), '7870cea100bf8d565ad2a6a742fc60473acf7d5426fc06260e07b47f9d422be9')
+  assert.equal(sha(EXECUTOR_CLOSED_CONTROL_PROMPT), 'efb8ddfce088addac855ddea6769a6f4ae8cd575cd8cf52685c1d24d9f43a536')
 })
 
 test('a submitPlan wrapper in content whose nested object names the step (no plan array) unwraps and binds like a bare stepId reply', async () => {

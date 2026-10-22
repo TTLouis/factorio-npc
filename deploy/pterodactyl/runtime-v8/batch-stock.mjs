@@ -131,6 +131,7 @@ const EQUIP = Object.freeze({
 export const OPERATION_STOCK_EFFECTS = Object.freeze({
   // Navigation, combat posture, research and waiting neither use nor yield items.
   walk_to_entity: NONE,
+  reserve_construction_area: NONE, // native escrow moves world entities, never NPC held stock
   walk_to_entity_exact: NONE,
   walk_to_position: NONE,
   walk_to_player: NONE,

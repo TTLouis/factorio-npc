@@ -19,6 +19,9 @@ function namesForSurface(definitions, surface) {
 }
 
 const toolSamples = {
+  validateConstructionReservation: { goal_id: 'goal-1', plan_id: 'plan-1', x: 2, y: 2, width: 4, height: 4 },
+  getConstructionReservations: {},
+  getReservationDesignInput: { reservation_id: 1, revision: 1 },
   getActorStatus: {},
   getTaskStatus: {},
   getInventoryItems: {},
@@ -78,7 +81,7 @@ test('runtime-v8 delegates base operation behavior while owning place_candidate 
     .filter(([, definition]) => definition.pterodactyl_layer === 'runtime-v8-extension')
     .map(([name]) => name)
     .sort()
-  assert.deepEqual(extensions, ['place_candidate', 'prepare_pump_site'])
+  assert.deepEqual(extensions, ['place_candidate', 'prepare_pump_site', 'reserve_construction_area'])
   const candidate = runtime.parseOperation({ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } })
   assert.equal(candidate.name, 'place_candidate')
   assert.match(runtime.renderOperation(candidate), /remote\.call\(["']autorio_operations["']\s*,\s*["']place_candidate["']/)
@@ -118,16 +121,19 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
   assert.deepEqual(runtimeOnly, [
     'estimateProductionTime',
     'findSkills',
+    'getConstructionReservations',
     'getFluidSourceTiles',
     'getLocalSpatialObservation',
     'getMiningDetails',
     'getPumpSitePreparation',
     'getResearchPath',
     'getResearchRequest',
+    'getReservationDesignInput',
     'getSkillDetails',
     'measureTransportThroughput',
     'planPlacement',
     'validateConstructionPlan',
+    'validateConstructionReservation',
   ])
   for (const name of runtimeOnly) assert.deepEqual(contract.tools[name].surfaces, ['pterodactyl-runtime-v8'])
 })

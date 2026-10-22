@@ -47,6 +47,10 @@ function candidateReference(value, label, prefix) {
 }
 
 const EXPERIMENT_OPERATION_METADATA = Object.freeze({
+  reserve_construction_area: Object.freeze({
+    name: 'reserve_construction_area', scopes: Object.freeze(['construction']), preflight: true, risk: 'high',
+    arguments: Object.freeze(Object.fromEntries(['reservation_id', 'revision'].map(key => [key, Object.freeze({ kind: 'runtime_candidate', required: true, defaulted: false, provenance: 'native_reservation_validation' })]))),
+  }),
   prepare_pump_site: Object.freeze({
     name: 'prepare_pump_site', scopes: Object.freeze(['construction']), preflight: true, risk: 'high',
     arguments: Object.freeze({ preparation_id: Object.freeze({ kind: 'runtime_candidate', required: true, defaulted: false, provenance: 'pump_site_preparation_registry' }) }),
@@ -155,6 +159,10 @@ export function approvedOperationListText() {
 }
 
 export function parseOperation(value) {
+  if (value?.name === 'reserve_construction_area') {
+    exactKeys(value, ['name', 'args']); exactKeys(value.args, ['reservation_id', 'revision'])
+    return { name: value.name, args: { reservation_id: positiveInteger(value.args.reservation_id, 'reservation_id'), revision: positiveInteger(value.args.revision, 'revision') } }
+  }
   if (value?.name === 'prepare_pump_site') {
     exactKeys(value, ['name', 'args']); exactKeys(value.args, ['preparation_id'])
     return { name: 'prepare_pump_site', args: { preparation_id: candidateReference(value.args.preparation_id, 'preparation_id', 'pump-preparation') } }
@@ -174,6 +182,7 @@ export function parseOperation(value) {
 
 export function renderOperation(value) {
   const operation = parseOperation(value)
+  if (operation.name === 'reserve_construction_area') return `remote.call('autorio_operations','reserve_construction_area',${operation.args.reservation_id},${operation.args.revision})`
   if (operation.name === 'prepare_pump_site') return `remote.call('autorio_operations','prepare_pump_site',${base.luaString(operation.args.preparation_id)})`
   if (operation.name === 'place_candidate') {
     return `remote.call('autorio_operations','place_candidate',${base.luaString(operation.args.candidate_set_id)},${base.luaString(operation.args.candidate_id)})`
@@ -183,6 +192,7 @@ export function renderOperation(value) {
 
 export function renderOperationPreflight(value) {
   const operation = parseOperation(value)
+  if (operation.name === 'reserve_construction_area') return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','reserve_construction_area',{reservation_id=${operation.args.reservation_id},revision=${operation.args.revision}})))`
   if (operation.name === 'prepare_pump_site') return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','prepare_pump_site',{preparation_id=${base.luaString(operation.args.preparation_id)}})))`
   if (operation.name === 'place_candidate') {
     return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','place_candidate',{candidate_set_id=${base.luaString(operation.args.candidate_set_id)},candidate_id=${base.luaString(operation.args.candidate_id)}})))`
@@ -763,6 +773,22 @@ const constructionSiteDefinition = {
   },
 }
 
+const reservationDefinitions = [{
+  type: 'function', function: { name: 'validateConstructionReservation',
+    description: 'Validate a 2..32 tile local site for a reversible NPC reservation. Supply the exact active goal_id and plan_id. Does not cut or mark the world. Returns native reservation_id/revision, trusted mode and supported-entity checks. Execute reserve_construction_area with those exact IDs under the committed step. Review mode then waits for actual player approval before designer_input is available. A reservation does not prove a working layout.',
+    parameters: { type: 'object', additionalProperties: false, required: ['goal_id', 'plan_id', 'x', 'y', 'width', 'height'], properties: {
+      goal_id: { type: 'string', minLength: 1, maxLength: 200 }, plan_id: { type: 'string', minLength: 1, maxLength: 200 },
+      x: { type: 'integer', minimum: -1000000, maximum: 1000000 }, y: { type: 'integer', minimum: -1000000, maximum: 1000000 },
+      width: { type: 'integer', minimum: 2, maximum: 32 }, height: { type: 'integer', minimum: 2, maximum: 32 },
+    } } },
+}, {
+  type: 'function', function: { name: 'getConstructionReservations', description: 'Read native reservation state and mode. awaiting_review requires real player review in /npc-spaces; the model cannot approve it. reserved permits the future designer handoff, restored releases the site. Never reuse original entity IDs after a cut/restore; read fresh identities.',
+    parameters: { type: 'object', additionalProperties: false, properties: { reservation_id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } } } },
+}, {
+    type: 'function', function: { name: 'getReservationDesignInput', description: 'Read a bounded page of the immutable original site snapshot for an exact reserved native reservation/revision. Start at offset 0 and follow next_offset until absent; one page is not the whole site. It is unavailable before real player approval in review mode. This read does not invoke a designer or grant layout execution authority.',
+      parameters: { type: 'object', additionalProperties: false, required: ['reservation_id', 'revision'], properties: { reservation_id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, revision: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, offset: { type: 'integer', minimum: 0, maximum: 1088 } } } },
+}]
+
 const constructionPlanValidationDefinition = {
   type: 'function',
   function: {
@@ -1111,6 +1137,7 @@ const researchPathDefinition = {
 
 export const toolDefinitions = [
   ...base.toolDefinitions,
+  ...reservationDefinitions,
   placementCandidatesDefinition,
   fluidSourceTilesDefinition,
   pumpSitePreparationDefinition,
@@ -1258,6 +1285,9 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   planPlacement: 'placement_candidates',
 
   findConstructionSites: 'construction_state',
+  validateConstructionReservation: 'construction_state',
+  getConstructionReservations: 'construction_state',
+  getReservationDesignInput: 'construction_state',
   validateConstructionPlan: 'construction_state',
   inspectConstructionIntent: 'construction_state',
 })
@@ -1311,6 +1341,9 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getFluidSourceTiles: 'discovery',
   planPlacement: 'fact',
   findConstructionSites: 'discovery',
+  validateConstructionReservation: 'discovery',
+  getConstructionReservations: 'fact',
+  getReservationDesignInput: 'fact',
   validateConstructionPlan: 'discovery',
   inspectConstructionIntent: 'discovery',
 
@@ -1370,6 +1403,25 @@ export function isObservationToolName(name) {
 }
 
 export function toolCommand(name, args) {
+  if (name === 'validateConstructionReservation') {
+    exactKeys(args, ['goal_id', 'plan_id', 'x', 'y', 'width', 'height'])
+    check(['x', 'y', 'width', 'height'].every(key => Number.isInteger(args[key])), 'Area coordinates and dimensions are required integers')
+    for (const key of ['goal_id', 'plan_id']) check(typeof args[key] === 'string' && args[key].trim() && args[key].length <= 200, `Invalid ${key}`)
+    for (const key of ['x', 'y']) optionalInteger(args[key], key, -1000000, 1000000)
+    for (const key of ['width', 'height']) optionalInteger(args[key], key, 2, 32)
+    return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_reservations','validate',{goal_id=${base.luaString(args.goal_id)},plan_id=${base.luaString(args.plan_id)},x=${args.x},y=${args.y},width=${args.width},height=${args.height}})))`
+  }
+  if (name === 'getConstructionReservations') {
+    exactKeys(args, ['reservation_id'])
+    if (args.reservation_id !== undefined) positiveInteger(args.reservation_id, 'reservation_id')
+    return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_reservations','status'${args.reservation_id === undefined ? '' : `,${args.reservation_id}`})))`
+  }
+  if (name === 'getReservationDesignInput') {
+    exactKeys(args, ['reservation_id', 'revision', 'offset'])
+    positiveInteger(args.reservation_id, 'reservation_id'); positiveInteger(args.revision, 'revision')
+    optionalInteger(args.offset ?? 0, 'offset', 0, 1088)
+    return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_reservations','designer_input',${args.reservation_id},${args.revision},${args.offset ?? 0})))`
+  }
   if (name === 'getPumpSitePreparation') return renderPumpSitePreparation(args)
   if (name === 'getFluidSourceTiles') return renderFluidSourceTiles(args)
   if (name === 'getPlacementCandidates') return renderPlacementCandidates(args)

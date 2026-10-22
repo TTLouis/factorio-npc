@@ -43,6 +43,7 @@ const SUPPORTED_REQUIREMENT_KINDS = new Set([
   'entity_state',
   'authoritative_operation_receipt',
   'runtime_controller_state',
+  'area_reservation_state',
 ])
 
 // entity_count (a build step): bounds of the optional scope. The mod enforces the same radius bound (tools.ts).
@@ -98,6 +99,7 @@ export const COMPLETION_CONTRACT_SCHEMA = Object.freeze({
           }, ['prototype', 'minimum', 'anchor', 'radius']),
           requirementSchema('entity_inventory_count', { unit_number: countSchema, item_name: namedText(160), minimum: countSchema }),
           requirementSchema('entity_exists', { unit_number: countSchema }),
+          requirementSchema('area_reservation_state', { reservation_id: countSchema, revision: countSchema, expected: { type: 'string', enum: ['reserved', 'awaiting_review', 'restored'] } }),
           requirementSchema('entity_state', { unit_number: countSchema, expected: { type: 'string', enum: ['working', 'not_working', 'exists'] } }),
           requirementSchema('authoritative_operation_receipt', { operation_name: { type: 'string', enum: [...STRICT_TASKS_BY_OPERATION.keys(), 'supply_entity', 'execute_construction_plan'] } }),
           requirementSchema('runtime_controller_state', { controller: namedText(80), expected: { type: 'string', enum: ['active', 'idle', 'healthy'] } }),
@@ -222,6 +224,12 @@ function boundedRequirement(raw, index) {
     return { id, kind, unit_number: unitNumber, expected }
   }
 
+  if (kind === 'area_reservation_state') {
+    const reservationId = positiveInteger(raw.reservation_id)
+    const revision = positiveInteger(raw.revision)
+    if (!reservationId || !revision || !['reserved', 'awaiting_review', 'restored'].includes(raw.expected)) return undefined
+    return { id, kind, reservation_id: reservationId, revision, expected: raw.expected }
+  }
   if (kind === 'authoritative_operation_receipt') {
     const operationName = clean(raw.operation_name ?? raw.operation, 100)
     if (!operationName) return undefined
@@ -278,6 +286,8 @@ export function authoredCompletionContractSupported(contract) {
 function evaluateRequirementFact(requirement, fact) {
   if (!fact || typeof fact !== 'object' || Array.isArray(fact)) return { satisfied: false, missing: true }
   if (fact.kind !== requirement.kind) return { satisfied: false, mismatched: true }
+  if (requirement.kind === 'area_reservation_state') return { satisfied: fact.authoritative === true && fact.reservation_id === requirement.reservation_id
+    && fact.revision === requirement.revision && fact.state === requirement.expected }
   if (requirement.kind === 'inventory_count') {
     return { satisfied: fact.item_name === requirement.item_name && Number.isFinite(fact.current) && fact.current >= requirement.minimum }
   }

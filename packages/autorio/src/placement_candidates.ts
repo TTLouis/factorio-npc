@@ -1,3 +1,4 @@
+import { reservation_intersection } from './area_reservations'
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_features'
@@ -586,6 +587,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       for (const port of candidate_fluid_ports(prototype, position, direction) ?? []) if (fluid_ports_join(target, port)) joins = true
       if (!joins) return undefined
     }
+    if (reservation_intersection(actor.surface, placement_footprint(prototype, position, direction).world_box)) return undefined
     const natively_placeable = actor.surface.can_place_entity({
       name: request.entity_name,
       position,
