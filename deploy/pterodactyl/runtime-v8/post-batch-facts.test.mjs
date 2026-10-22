@@ -38,7 +38,7 @@ class BundleRcon {
         tools: true,
       })
     }
-    if (text.includes('remote.call("autorio_tools","get_inventory_items"')) return JSON.stringify({ items: this.inventory })
+    if (text.includes('remote.call("autorio_tools","get_inventory_items"')) return this.inventory.length ? `{\n${this.inventory.map(({ name, count }) => `  { count = ${count}, name = "${name}" }`).join(',\n')}\n}` : '{}'
     const match = /recipe_details",'([a-z-]+)'/.exec(text)
     if (match) return recipe(match[1], this.recipeFiller)
     return '{}'
@@ -306,4 +306,14 @@ test('the step working set is most recent first, deduplicated and bounded', () =
   assert.deepEqual(set.recipes(key).map(entry => entry.signature), ['sig-c', 'sig-a'])
   set.noteRecipe(undefined, { item_or_recipe: 'd' }, 'sig-d')
   assert.equal(set.steps.size, 1)
+})
+
+test('inventory family validation accepts only complete native lists or supported JSON arrays', () => {
+  for (const output of ['{ { count = 14, name = "iron-plate" } }', '{}', '[]', '[{"name":"coal","count":2}]']) {
+    assert.equal(postBatchReadAnswers({ name: 'getInventoryItems', output }), true, output)
+  }
+  for (const output of ['{"items":[]}', '{"found":false}', '[null]', '[{}]', 'no controlled actor', '{ { count = 1, name = "coal" }']) {
+    assert.equal(postBatchReadAnswers({ name: 'getInventoryItems', output }), false, output)
+  }
+  assert.equal(postBatchReadAnswers({ name: 'getResearchStatus', output: '[]' }), false, 'other family validators still reject arrays')
 })

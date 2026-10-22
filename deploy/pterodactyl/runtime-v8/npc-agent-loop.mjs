@@ -1,9 +1,11 @@
+import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
+import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
 import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, fitTopologyBlock, deduplicateTopologySkillRefs, reclaimTopologyRoom } from './topology-context.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory, toolSignature } from '../staging/npc-agent-loop.mjs'
@@ -65,9 +67,6 @@ import {
   withoutRawLeafRecipes,
   buildFluidsFromBill,
   buildFluidsTruncated,
-  HANDOFF_PACKET_LIMITS,
-  PLANNER_REVIEW_NOTES_LABEL,
-  sanitizeHandoffNote,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
@@ -207,7 +206,7 @@ import {
   retireGoalRequirements,
 } from './goal-requirements.mjs'
 import { StepReadLedger, stepReadKey, UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
-import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_PLACED_ENTITY_REASON, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchPlacedEntityRead, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet } from './post-batch-facts.mjs'
+import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_PLACED_ENTITY_REASON, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchPlacedEntityRead, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet, withoutSupersededPostBatchFact } from './post-batch-facts.mjs'
 import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -3677,7 +3676,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Reserve the native geometry room; callProvider replaces it with fresh topology. A mandatory execution brief must not
       // crowd that block out, and the room is the block's real size (none when no block is produced), not the whole slot.
       topology: this.completionProtocolVersion >= 3 ? undefined : topology,
-      ...(this.completionProtocolVersion >= 3 ? { limits: { maxChars: 6000 - topologyReserve(topology) } } : {}),
+      ...(this.completionProtocolVersion >= 3 ? { limits: { maxChars: HANDOFF_PACKET_MAX_CHARS - topologyReserve(topology) } } : {}),
       // A staged user amendment belongs to the planner: it rides the packet of a planner restage (C5,
       // C1/C2) so the restage that replaces the conversation holding its text does not drop it. The
       // executor never gets it.
@@ -3802,47 +3801,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return { restaged: false, reason: 'no_admitted_goal' }
       }
       const restaged = await this.restageContext({ checkpoint, reason: args.reason, packet, role, softLimitTokens: args.softLimitTokens, requestId, safePoint, parkPlanner: args.parkPlanner })
+      const freshDecisionReason = role !== EXECUTOR_ROLE ? undefined
+        : checkpoint === 'C3' && args.parkPlanner === true ? 'new_executor_decision_at_commit'
+          : checkpoint === 'C7' ? 'new_executor_decision_at_recovery' : undefined
+      const owner = { generation, lineage, actor: actorFence, loopHadEpoch, goalId: state.goal.goal_id,
+        plan: { ...getActivePlanningPlan(state) }, handoffId: restaged.handoff_id }
+      const superseded = () => restaged.restaged === true && freshDecisionReason
+        ? this.supersededExecutorDecision(owner, restaged, requestId, checkpoint) : undefined
       await this.jev.afterRestage(prepared, restaged)
+      let stale = superseded()
+      if (stale) return stale
       if (restaged.restaged === true && packet.executor_facts) {
         await this.traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta: executorFactsMeta })
-        // The counts were deferred behind a batch in flight: the first continuation after its receipt carries them (once).
+        stale = superseded()
+        if (stale) return stale
         if (executorFactsMeta?.counts_deferred) {
           this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch, goal_id: state?.goal?.goal_id, read_items: executorFactsMeta.read_items }
         }
       }
-      // A role handoff that starts an executor decision from nothing is a new bounded observation decision: C3 when it parks the
-      // planner (the commit handoff) and C7 runtime recovery (Run AJ: a C7 auto-resume executor inherited the 0 an earlier decision
-      // had spent, so its first fresh read closed the phase; between turns no wake chose a budget for it). C6 and a non-folded C8
-      // restage inside a wake whose budget Jev or the planner shape chose, and that budget carries over; C5 continues the same
-      // decision; the fold of a review handback seeds its own (foldReviewHandback); a planner restage is not an executor handoff.
-      // A refused restage never gets here.
-      const freshDecisionReason = role !== EXECUTOR_ROLE ? undefined
-        : checkpoint === 'C3' && args.parkPlanner === true ? 'new_executor_decision_at_commit'
-          : checkpoint === 'C7' ? 'new_executor_decision_at_recovery' : undefined
+      // Only a commit/recovery handoff starts an observation decision. C5/C6/non-folded C8 keep the wake's budget.
       if (restaged.restaged === true && freshDecisionReason) {
-        const currentState = this.memory.planningState?.(this.activePlanKey())
-        const expectedPlan = getActivePlanningPlan(state)
-        const currentPlan = currentState && getActivePlanningPlan(currentState)
-        const fence = [
-          ['generation', this.generation !== generation],
-          ['lineage', this.agentContext.lineageSequence !== lineage],
-          ['handoff', this.agentContext.handoffId !== restaged.handoff_id || this.agentContext.role !== EXECUTOR_ROLE],
-          ['actor_epoch', (this.epoch || loopHadEpoch) && (this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch)],
-          ['goal', currentState?.goal?.goal_id !== state.goal.goal_id || currentState?.goal?.status !== GOAL_STATUS.ACTIVE],
-          ['plan', currentPlan?.plan_id !== expectedPlan?.plan_id || currentPlan?.plan_version !== expectedPlan?.plan_version
-            || currentPlan?.active_step_index !== expectedPlan?.active_step_index],
-        ].find(([, broken]) => broken)?.[0]
-        if (fence) {
-          // restageContext already replaced the conversation, so the restage is reported as it happened; only the decision is
-          // withheld (a newer lineage, actor or plan owns the allowance now).
-          const reason = 'executor_decision_superseded_after_handoff'
-          try {
-            await this.traceEvent('context.executor_decision_superseded', { request_id: requestId, role: EXECUTOR_ROLE, checkpoint, handoff_id: restaged.handoff_id, reason, fence }, { requestId })
-          }
-          catch {}
-          return { ...restaged, decision_started: false, decision_reason: reason }
-        }
         await this.startExecutorObservationDecision({ requestId, handoffId: restaged.handoff_id, reason: freshDecisionReason, checkpoint })
+        stale = superseded()
+        if (stale) return stale
         return { ...restaged, decision_started: true }
       }
       return restaged
@@ -4042,6 +4023,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('executor.handoff_skipped', { request_id: requestId, role: EXECUTOR_ROLE, reason: 'plan_not_committed', plan_id: planId }, { requestId })
       return { restaged: false, reason: 'plan_not_committed' }
     }
+    const owner = { ...decisionBudgetOwner(this), actor: { ...this.epoch }, loopHadEpoch: Boolean(this.epoch),
+      goalId: state.goal.goal_id, plan: { ...plan } }
     const softLimitTokens = this.restageSoftLimitTokens(EXECUTOR_ROLE)
     const decision = decideRestage({
       role: EXECUTOR_ROLE,
@@ -4064,6 +4047,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('executor.handoff_failed', { request_id: requestId, role: EXECUTOR_ROLE, reason: result.reason, plan_id: planId }, { requestId })
       return result
     }
+    if (result.decision_started === false) return result
+    owner.handoffId = result.handoff_id
     await this.traceEvent('context.planner_parked', {
       request_id: requestId,
       role: PLANNER_ROLE,
@@ -4072,7 +4057,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason: 'executor_acts_on_committed_plan',
       parked: this.agentContext.hasParkedPlanner,
     }, { requestId })
-    return result
+    return this.supersededExecutorDecision(owner, result, requestId, 'C3') ?? result
+  }
+
+  executorDecisionFence(owner) {
+    const state = this.memory.planningState?.(this.activePlanKey())
+    const plan = state && getActivePlanningPlan(state)
+    return [
+      ['generation', this.generation !== owner.generation],
+      ['lineage', this.agentContext.lineageSequence !== owner.lineage],
+      ['handoff', this.agentContext.handoffId !== owner.handoffId || this.agentContext.role !== EXECUTOR_ROLE],
+      ['actor_epoch', (this.epoch || owner.loopHadEpoch) && (this.epoch?.actor_id !== owner.actor?.actor_id || this.epoch?.epoch !== owner.actor?.epoch)],
+      ['goal', state?.goal?.goal_id !== owner.goalId || state?.goal?.status !== GOAL_STATUS.ACTIVE],
+      ['plan', plan?.plan_id !== owner.plan?.plan_id || plan?.plan_version !== owner.plan?.plan_version
+        || plan?.active_step_index !== owner.plan?.active_step_index],
+    ].find(([, broken]) => broken)?.[0]
+  }
+
+  supersededExecutorDecision(owner, restaged, requestId, checkpoint) {
+    const fence = this.executorDecisionFence(owner)
+    if (!fence) return undefined
+    const reason = 'executor_decision_superseded_after_handoff'
+    return this.safeTrace('context.executor_decision_superseded', {
+      request_id: requestId, role: EXECUTOR_ROLE, checkpoint, handoff_id: restaged.handoff_id, reason, fence,
+    }, requestId).then(() => ({ ...restaged, decision_started: false, decision_reason: reason }))
   }
 
   // A role handoff starts a new bounded observation decision, not a new provider/campaign allowance: only the decision-scoped
@@ -4166,6 +4174,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // undefined (traced as context.restage_fold_skipped, the kept conversation dropped) when the caller must restage as C3.
   // `expectedKept`: the review kept an executor, so its absence now is a drop worth a row.
   async foldReviewHandback({ planId, requestId, notesChars, expectedKept = false }) {
+    const budgetOwner = decisionBudgetOwner(this)
     const context = this.agentContext
     const kept = context.parkedExecutor
     if (!kept) {
@@ -4207,8 +4216,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     reason = moved()
     if (reason) return skip(reason)
     // The restage entry every restage passes (lifecycle table, guard, resets); a refusal here is the one the C3 restage would meet.
+    const owner = { ...budgetOwner, actor: { ...this.epoch }, loopHadEpoch: Boolean(this.epoch),
+      goalId: meta.goal_id, plan: { ...getActivePlanningPlan(this.memory.planningState?.(key)) } }
     const resumed = await this.restageContext({ checkpoint: 'C8', reason: 'review_handback_at_step_close', role: EXECUTOR_ROLE, requestId, safePoint: this.turnToken ?? undefined, foldKept: true })
     if (!resumed.restaged) return skip(resumed.reason)
+    owner.handoffId = resumed.handoff_id
+    const superseded = () => this.supersededExecutorDecision(owner, resumed, requestId, 'C8')
+    let stale = superseded()
+    if (stale) return stale
     // From here the conversation is swapped: nothing below may fail the handback. A failed rewrite leaves the old step block, and the
     // caller then sends the full notes as a message, so the conversation still ends on a user turn.
     const state = this.memory.planningState?.(key)
@@ -4232,10 +4247,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.safeTrace('context.restage_fold_rewrite_failed', { request_id: requestId, handoff_id: resumed.handoff_id, reason: 'step_block_rewrite_failed',
         message: cleanMemoryText(error instanceof Error ? error.message : String(error), 300) }, requestId)
     }
+    stale = superseded()
+    if (stale) return stale
     if (rewritten && refreshed?.executor_facts) {
       await this.traceExecutorFactsCarried({ packet: refreshed, restaged: { handoff_id: resumed.handoff_id }, checkpoint: 'C8', requestId, meta: gathered?.meta,
         reason: 'review_handback_folded_into_the_step_close_conversation' })
     }
+    stale = superseded()
+    if (stale) return stale
     // The reads the conversation already held are still in it: they are not dropped results to re-establish for free.
     let rebased = 0
     try {
@@ -4245,6 +4264,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch {}
     // The same new executor decision a C3 handback starts: a fresh observation allowance for acting on the planner's notes (traced).
     await this.startExecutorObservationDecision({ requestId, handoffId: resumed.handoff_id, reason: 'new_executor_decision_at_review_handback' })
+    stale = superseded()
+    if (stale) return stale
     const factsRefreshed = rewritten && Boolean(gathered?.facts)
     await this.safeTrace('context.restage_folded', {
       request_id: requestId,
@@ -4262,6 +4283,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reads_rebased: rebased,
       observation_remaining: this.observationBudgetRemaining,
     }, requestId)
+    stale = superseded()
+    if (stale) return stale
     await this.safeTrace('context.planner_parked', {
       request_id: requestId,
       role: PLANNER_ROLE,
@@ -4270,7 +4293,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason: 'executor_acts_on_committed_plan',
       parked: context.hasParkedPlanner,
     }, requestId)
-    return { restaged: true, folded: true, role: EXECUTOR_ROLE, checkpoint: 'C8', handoff_id: resumed.handoff_id, facts_refreshed: factsRefreshed, step_block_rewritten: rewritten }
+    stale = superseded()
+    if (stale) return stale
+    return { restaged: true, folded: true, decision_started: true, role: EXECUTOR_ROLE, checkpoint: 'C8', handoff_id: resumed.handoff_id, facts_refreshed: factsRefreshed, step_block_rewritten: rewritten }
   }
 
   // A trace write after a swap can never fail the handback.
@@ -10145,178 +10170,181 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.reasoningTriggerSource = resumeProviderBudgetHandoff
       ? providerBudgetTriggerSource(planBefore.provider_recovery.semantic_scope, planBefore.provider_recovery.route)
       : null
-    const previousReasoningBudget = this.reasoningBudgetOverride
-    const previousObservationBudget = this.observationBudgetOverride
-    const previousObservationBudgetRemaining = this.observationBudgetRemaining
-    const previousObservationRelevance = this.observationRelevanceOverride
-    const previousPlanningHorizon = this.planningHorizonOverride
-    let requestObservationScope = { generation: this.generation, lineage: this.agentContext.lineageSequence }
-    if (plannerShape) {
-      const requestedReasoningBudget = plannerShape.reasoning_budget
-      const requestedObservationBudget = Number.isSafeInteger(plannerShape.observation_budget)
-        ? plannerShape.observation_budget
-        : 0
-      const selectedObservationFamilies = plannerShape.observation_relevance?.source === 'typed_relevance'
-        && Array.isArray(plannerShape.observation_relevance.selected_families)
-        ? plannerShape.observation_relevance.selected_families
-        : []
-
-      if (intent === 'new_goal') {
-        // A fresh goal has no request-local world grounding. Keep the existing
-        // minimum bootstrap reserve and do not let a cheap under-informed
-        // budget judgment starve the first natural-language planner turn.
-        this.reasoningBudgetOverride = requestedReasoningBudget === 'deep' || requestedReasoningBudget === 'strategic'
-          ? requestedReasoningBudget
-          : 'normal'
-        this.observationRelevanceOverride = selectedObservationFamilies.length > 0
-          ? selectedObservationFamilies
-          : null
-        this.observationBudgetOverride = Math.max(3, requestedObservationBudget)
-      }
-      else {
-        this.reasoningBudgetOverride = requestedReasoningBudget ?? null
-        this.observationRelevanceOverride = plannerShape.observation_relevance?.source === 'typed_relevance'
-          ? selectedObservationFamilies
-          : null
-        this.observationBudgetOverride = requestedObservationBudget
-      }
-      this.observationBudgetRemaining = this.observationBudgetOverride
-      this.planningHorizonOverride = plannerShape.planning_horizon ?? null
-    }
-    this.lastTaskStatusView = null
-    this.taskStatusDiffBaseline = null
-    this.lastHandledRuntimeReceipt = { completion: null, failure: null }
-    this.outputBudgetRecoveryUsed = false
-    this.outputBudgetRecoveryGuard = null
-    this.providerBudgetGeneration = Number.isSafeInteger(planBefore?.provider_recovery?.budget_generation)
-      ? planBefore.provider_recovery.budget_generation
-      : 1
-    this.providerBudgetGenerationOutputUnits = 0
-    this.providerBudgetStepMark = providerBudgetStepMark(planBefore)
-    this.providerBudgetHandoffCount = Number.isSafeInteger(planBefore?.provider_recovery?.handoff_count)
-      ? planBefore.provider_recovery.handoff_count
-      : 0
-    const resumeActionOmission = intent === 'continue_current'
-      && planBefore?.status === 'active'
-      && planBefore?.admission_status === 'action_omission_repair'
-      && !healthyRuntime
-    this.actionOmissionRepairActive = resumeActionOmission
-    this.actionOmissionObservationUsed = false
-    this.actionOmissionForceNoTools = false
-    this.pendingFiniteNoOperationPlan = null
-    this.unmetGoalContinuationUsed = false
-    this.inTurnSliceContinuations = 0
-    this.pendingDroppedOperationsNote = ''
-    this.lastGoalEvaluation = null
-    this.freshObservationSinceContinuation = false
-    this.genericRecoveryDecisionActive = false
-    // C5 on Resume: a resumed budget handoff, or a Resume after the request
-    // output ceiling / a generation-cap pause, restages from a handoff packet as
-    // soon as the request's turn starts (applyStartRestage). The legacy capsule
-    // is staged only as the fallback for a refused restage.
-    const resumeAfterBudgetPause = intent === 'continue_current'
-      && planBefore?.status === 'paused'
-      && /^(?:request_output_ceiling|provider_output_budget_exhausted|recoverable_provider_failure:provider_budget)\b/.test(String(planBefore.pause_reason ?? ''))
-    let pendingStartRestage
-    if (resumeProviderBudgetHandoff || resumeAfterBudgetPause) {
-      const recovery = planBefore.provider_recovery
-      const semanticScope = resumeProviderBudgetHandoff ? (recovery.semantic_scope ?? 'keep_target') : 'keep_target'
-      const reason = resumeProviderBudgetHandoff
-        ? (recovery.reason || 'provider_budget_handoff_resume')
-        : String(planBefore.pause_reason)
-      pendingStartRestage = {
-        reason,
-        semanticScope,
-        // The recovery capsule of an action-omission repair rides on top of the packet.
-        extraMessage: resumeActionOmission ? this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus)) : undefined,
-        runtime: taskStatus,
-      }
-      if (resumeProviderBudgetHandoff) {
-        const budgetCapsule = providerBudgetHandoffCapsule(planBefore, taskStatus, reason, semanticScope)
-        const repairCapsule = resumeActionOmission ? `\n${this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus))}` : ''
-        this.memory.setNextContextOverride?.(memoryKey, `${budgetCapsule}${repairCapsule}`)
-      }
-    }
-    else if (resumeActionOmission) {
-      this.memory.setNextContextOverride?.(memoryKey, this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus)))
-    }
-    if (this.traceRequest) await this.traceEvent('request.superseded', { usage: this.traceRequest.usage })
-    this.traceRequest = {
-      id: this.preMintedRequestId ?? `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`,
-      seq: 0,
-      usage: emptyUsageSummary(),
-      // A request that starts on a paused goal and leaves it paused for the
-      // same reason did not pause it (goal.paused is for new pauses).
-      start_status: planBefore?.status,
-      start_pause_reason: planBefore?.pause_reason,
-    }
-    await this.traceEvent('request.received', {
-      sender,
-      text,
-      interaction_intent: intent,
-      action_omission_recovery: resumeActionOmission,
-      provider_budget_handoff_resume: resumeProviderBudgetHandoff,
-      intake_ms: Date.now() - requestStartedAt,
-    })
-    // 2.10: one acknowledgement, from the goal text and route, before any
-    // planner round. A player request only: recovery runs never enter here.
-    const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
-    if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
-    this.lifecycleEnter('request.start', { interaction_intent: intent })
-
-    // Goal admission is the reducer's (GOAL_ACCEPTED), and it happens at
-    // `new_goal` whether or not a steering provider is configured. Steering
-    // advice is the only part that needs a provider.
-    if (intent === 'new_goal' && typeof this.memory.admitPlanningGoal === 'function') {
-      const admitted = this.memory.admitPlanningGoal(memoryKey, {
-        owner: sender,
-        objective: text,
-        now: Date.now(),
-      })
-      // MW5: the player's own objective carries a grant so a replacement can be authorized later. Only a chat-origin
-      // new_goal reaches this point; recovery runs, amendments and chat-only intents never mint one.
-      if (admitted?.goal) await this.grantPlayerObjective(memoryKey, admitted.goal, text)
-      if (admitted?.goal && this.steeringDecisionProvider
-        && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
-        const recommendation = await this.requestBoundarySteeringRecommendation(memoryKey, {
-          boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
-          world: taskStatus,
-        })
-        if (recommendation && typeof this.memory.recordSteeringAdvice === 'function') {
-          this.memory.recordSteeringAdvice(memoryKey, recommendation)
-        }
-        const beforeSequence = admitted.steering?.sequence ?? 0
-        const steered = this.memory.evaluateSteeringAtBoundary(memoryKey, {
-          boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
-          now: Date.now(),
-        }) ?? admitted
-        if ((steered.steering?.sequence ?? 0) > beforeSequence
-          && typeof this.memory.recordSteeringAdvice === 'function') {
-          this.memory.recordSteeringAdvice(memoryKey, null)
-        }
-        await this.persistState()
-        await this.traceEvent('planning.goal_admission_steered', {
-          goal_id: steered.goal?.goal_id,
-          steering_mode: steered.steering?.current_mode,
-          recommended_mode: steered.steering?.recommendation?.recommended_mode,
-        })
-      }
-      else if (admitted?.goal) {
-        // No steering provider: the reducer's default (maintain) steering is
-        // recorded by ensurePlanningDraft at the first draft, as before.
-        await this.persistState()
-        await this.traceEvent('planning.goal_admitted', { goal_id: admitted.goal.goal_id })
-      }
-    }
-
-    await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
-    await ensureGoalRequirements(this, { memoryKey, intent }) // goal-requirements.mjs: reset on a new goal, re-read on a revision
+    const decisionBudgetScope = captureDecisionBudgets(this)
+    const setupTrace = this.traceRequest
+    const setupTraceId = setupTrace?.id
+    let requestTrace
+    // Base request starts a new generation/lineage synchronously below; its updated
+    // budget scope and this exact trace object own failure unwind, across restages.
+    const ownsRequestFailure = () => requestTrace && this.traceRequest === requestTrace
+      && this.traceRequest.id === decisionBudgetScope.requestId && ownsDecisionBudgets(this, decisionBudgetScope)
     try {
+      if (plannerShape) {
+        const requestedReasoningBudget = plannerShape.reasoning_budget
+        const requestedObservationBudget = Number.isSafeInteger(plannerShape.observation_budget)
+          ? plannerShape.observation_budget
+          : 0
+        const selectedObservationFamilies = plannerShape.observation_relevance?.source === 'typed_relevance'
+          && Array.isArray(plannerShape.observation_relevance.selected_families)
+          ? plannerShape.observation_relevance.selected_families
+          : []
+
+        if (intent === 'new_goal') {
+          // A fresh goal has no request-local world grounding. Keep the existing
+          // minimum bootstrap reserve and do not let a cheap under-informed
+          // budget judgment starve the first natural-language planner turn.
+          this.reasoningBudgetOverride = requestedReasoningBudget === 'deep' || requestedReasoningBudget === 'strategic'
+            ? requestedReasoningBudget
+            : 'normal'
+          this.observationRelevanceOverride = selectedObservationFamilies.length > 0
+            ? selectedObservationFamilies
+            : null
+          this.observationBudgetOverride = Math.max(3, requestedObservationBudget)
+        }
+        else {
+          this.reasoningBudgetOverride = requestedReasoningBudget ?? null
+          this.observationRelevanceOverride = plannerShape.observation_relevance?.source === 'typed_relevance'
+            ? selectedObservationFamilies
+            : null
+          this.observationBudgetOverride = requestedObservationBudget
+        }
+        this.observationBudgetRemaining = this.observationBudgetOverride
+        this.planningHorizonOverride = plannerShape.planning_horizon ?? null
+      }
+      this.lastTaskStatusView = null
+      this.taskStatusDiffBaseline = null
+      this.lastHandledRuntimeReceipt = { completion: null, failure: null }
+      this.outputBudgetRecoveryUsed = false
+      this.outputBudgetRecoveryGuard = null
+      this.providerBudgetGeneration = Number.isSafeInteger(planBefore?.provider_recovery?.budget_generation)
+        ? planBefore.provider_recovery.budget_generation
+        : 1
+      this.providerBudgetGenerationOutputUnits = 0
+      this.providerBudgetStepMark = providerBudgetStepMark(planBefore)
+      this.providerBudgetHandoffCount = Number.isSafeInteger(planBefore?.provider_recovery?.handoff_count)
+        ? planBefore.provider_recovery.handoff_count
+        : 0
+      const resumeActionOmission = intent === 'continue_current'
+        && planBefore?.status === 'active'
+        && planBefore?.admission_status === 'action_omission_repair'
+        && !healthyRuntime
+      this.actionOmissionRepairActive = resumeActionOmission
+      this.actionOmissionObservationUsed = false
+      this.actionOmissionForceNoTools = false
+      this.pendingFiniteNoOperationPlan = null
+      this.unmetGoalContinuationUsed = false
+      this.inTurnSliceContinuations = 0
+      this.pendingDroppedOperationsNote = ''
+      this.lastGoalEvaluation = null
+      this.freshObservationSinceContinuation = false
+      this.genericRecoveryDecisionActive = false
+      // C5 on Resume: a resumed budget handoff, or a Resume after the request
+      // output ceiling / a generation-cap pause, restages from a handoff packet as
+      // soon as the request's turn starts (applyStartRestage). The legacy capsule
+      // is staged only as the fallback for a refused restage.
+      const resumeAfterBudgetPause = intent === 'continue_current'
+        && planBefore?.status === 'paused'
+        && /^(?:request_output_ceiling|provider_output_budget_exhausted|recoverable_provider_failure:provider_budget)\b/.test(String(planBefore.pause_reason ?? ''))
+      let pendingStartRestage
+      if (resumeProviderBudgetHandoff || resumeAfterBudgetPause) {
+        const recovery = planBefore.provider_recovery
+        const semanticScope = resumeProviderBudgetHandoff ? (recovery.semantic_scope ?? 'keep_target') : 'keep_target'
+        const reason = resumeProviderBudgetHandoff
+          ? (recovery.reason || 'provider_budget_handoff_resume')
+          : String(planBefore.pause_reason)
+        pendingStartRestage = {
+          reason,
+          semanticScope,
+          // The recovery capsule of an action-omission repair rides on top of the packet.
+          extraMessage: resumeActionOmission ? this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus)) : undefined,
+          runtime: taskStatus,
+        }
+        if (resumeProviderBudgetHandoff) {
+          const budgetCapsule = providerBudgetHandoffCapsule(planBefore, taskStatus, reason, semanticScope)
+          const repairCapsule = resumeActionOmission ? `\n${this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus))}` : ''
+          this.memory.setNextContextOverride?.(memoryKey, `${budgetCapsule}${repairCapsule}`)
+        }
+      }
+      else if (resumeActionOmission) {
+        this.memory.setNextContextOverride?.(memoryKey, this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus)))
+      }
+      if (this.traceRequest) await this.traceEvent('request.superseded', { usage: this.traceRequest.usage })
+      requestTrace = this.traceRequest = {
+        id: this.preMintedRequestId ?? `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`,
+        seq: 0,
+        usage: emptyUsageSummary(),
+        // A request that starts on a paused goal and leaves it paused for the
+        // same reason did not pause it (goal.paused is for new pauses).
+        start_status: planBefore?.status,
+        start_pause_reason: planBefore?.pause_reason,
+      }
+      decisionBudgetScope.requestId = this.traceRequest.id
+      await this.traceEvent('request.received', {
+        sender,
+        text,
+        interaction_intent: intent,
+        action_omission_recovery: resumeActionOmission,
+        provider_budget_handoff_resume: resumeProviderBudgetHandoff,
+        intake_ms: Date.now() - requestStartedAt,
+      })
+      // 2.10: one acknowledgement, from the goal text and route, before any
+      // planner round. A player request only: recovery runs never enter here.
+      const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
+      if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
+      this.lifecycleEnter('request.start', { interaction_intent: intent })
+
+      // Goal admission is the reducer's (GOAL_ACCEPTED), and it happens at
+      // `new_goal` whether or not a steering provider is configured. Steering
+      // advice is the only part that needs a provider.
+      if (intent === 'new_goal' && typeof this.memory.admitPlanningGoal === 'function') {
+        const admitted = this.memory.admitPlanningGoal(memoryKey, {
+          owner: sender,
+          objective: text,
+          now: Date.now(),
+        })
+        // MW5: the player's own objective carries a grant so a replacement can be authorized later. Only a chat-origin
+        // new_goal reaches this point; recovery runs, amendments and chat-only intents never mint one.
+        if (admitted?.goal) await this.grantPlayerObjective(memoryKey, admitted.goal, text)
+        if (admitted?.goal && this.steeringDecisionProvider
+          && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
+          const recommendation = await this.requestBoundarySteeringRecommendation(memoryKey, {
+            boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
+            world: taskStatus,
+          })
+          if (recommendation && typeof this.memory.recordSteeringAdvice === 'function') {
+            this.memory.recordSteeringAdvice(memoryKey, recommendation)
+          }
+          const beforeSequence = admitted.steering?.sequence ?? 0
+          const steered = this.memory.evaluateSteeringAtBoundary(memoryKey, {
+            boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
+            now: Date.now(),
+          }) ?? admitted
+          if ((steered.steering?.sequence ?? 0) > beforeSequence
+            && typeof this.memory.recordSteeringAdvice === 'function') {
+            this.memory.recordSteeringAdvice(memoryKey, null)
+          }
+          await this.persistState()
+          await this.traceEvent('planning.goal_admission_steered', {
+            goal_id: steered.goal?.goal_id,
+            steering_mode: steered.steering?.current_mode,
+            recommended_mode: steered.steering?.recommendation?.recommended_mode,
+          })
+        }
+        else if (admitted?.goal) {
+          // No steering provider: the reducer's default (maintain) steering is
+          // recorded by ensurePlanningDraft at the first draft, as before.
+          await this.persistState()
+          await this.traceEvent('planning.goal_admitted', { goal_id: admitted.goal.goal_id })
+        }
+      }
+
+      await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
+      await ensureGoalRequirements(this, { memoryKey, intent }) // goal-requirements.mjs: reset on a new goal, re-read on a revision
       this.chatRequestPending = true
       this.startRestage = pendingStartRestage // consumed by the first turn (applyStartRestage); cleared in the finally below whatever happens
       const pendingRequest = super.request(text, options)
       // Base request synchronously starts its lineage before its first await.
-      requestObservationScope = { generation: this.generation, lineage: this.agentContext.lineageSequence }
+      Object.assign(decisionBudgetScope, decisionBudgetOwner(this), { requestId: this.traceRequest?.id ?? decisionBudgetScope.requestId })
       const result = await pendingRequest
       if (this.requestInfo?.memoryKey) this.lastMemoryKey = this.requestInfo.memoryKey
       if (resumeProviderBudgetHandoff) {
@@ -10331,29 +10359,31 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { ...result, interactionIntent: intent, routedOnly: false }
     }
     catch (error) {
-      this.chatRequestPending = false
-      if (this.traceRequest) {
+      if (ownsRequestFailure()) {
+        this.chatRequestPending = false
         const message = error instanceof Error ? error.message : String(error)
         await this.traceEvent('request.failed', {
           stage: 'bind',
           message,
           ...transportTraceFields(error),
-          usage: this.traceRequest.usage,
+          usage: requestTrace.usage,
           failure_snapshot: this.failureSnapshot('bind', message),
-        })
-        this.traceRequest = null
+        }, { requestId: decisionBudgetScope.requestId })
+        // Cancellation/replacement can land while the failure trace is queued.
+        if (ownsRequestFailure()) this.traceRequest = null
       }
       throw error
     }
     finally {
-      if (this.generation === requestObservationScope.generation && this.agentContext.lineageSequence === requestObservationScope.lineage) {
-        this.startRestage = undefined
-        this.reasoningBudgetOverride = previousReasoningBudget
-        this.observationBudgetOverride = previousObservationBudget
-        this.observationBudgetRemaining = previousObservationBudgetRemaining
-        this.observationRelevanceOverride = previousObservationRelevance
-        this.planningHorizonOverride = previousPlanningHorizon
-      }
+      // A replacement can already own setup before Base request advances generation.
+      // In that window even the old decision's finally must leave its overrides alone.
+      const sameDecision = ownsDecisionBudgets(this, decisionBudgetScope)
+      const expectedTrace = requestTrace ?? setupTrace
+      const expectedId = requestTrace ? decisionBudgetScope.requestId : setupTraceId
+      const replacedTrace = this.traceRequest
+        && (this.traceRequest !== expectedTrace || this.traceRequest.id !== expectedId)
+      if (sameDecision && !replacedTrace) this.startRestage = undefined
+      if (!sameDecision || !replacedTrace) await restoreDecisionBudgets(this, decisionBudgetScope)
     }
   }
 
@@ -11071,6 +11101,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async runGuardedTurn() {
     const generation = this.generation
+    const requestTrace = this.traceRequest
+    const requestId = requestTrace?.id
+    let failureOwner = decisionBudgetOwner(this)
+    // Conversation/role restages keep this request. Reset/cancel or a new trace
+    // object do not; an old catch must not fail or clean up their replacement.
+    const ownsFailure = () => ownsDecisionBudgets(this, failureOwner)
+      && this.traceRequest === requestTrace && this.traceRequest?.id === requestId
     // The scope of THIS turn, fixed before it starts: the recovery that a failed turn
     // triggers (recoverPlan below) calls the provider, admits tool batches and commits a
     // plan outside any runTurn, so it needs the same identity to be judged against.
@@ -11091,6 +11128,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.withPauseNotice(await this.runTurnRedriving(generation))
     }
     catch (error) {
+      if (!ownsFailure()) throw error
       const message = error instanceof Error ? error.message : String(error)
       const planState = this.memory.currentPlan?.(this.activePlanKey())
       // The request-wide output ceiling (5 per-turn caps) is final for this
@@ -11111,6 +11149,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           return this.withPauseNotice(await this.turnScope.run({ ...scope, role: this.agentContext.role, handoffId: this.agentContext.handoffId }, () => this.recoverPlan(generation, error, 0)))
         }
         catch (recoveryError) {
+          if (!ownsFailure()) throw recoveryError
           // The fresh generations were spent too: pause visibly instead of
           // leaving the request to fail with no message.
           if (!(terminalProviderBudgetFailure(recoveryError) || isRequestOutputCeiling(recoveryError)) || generation !== this.generation || !this.traceRequest) throw recoveryError
@@ -11145,6 +11184,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         && generation === this.generation
         && this.traceRequest) {
         const runtime = await this.readInteractionTaskStatus()
+        if (!ownsFailure()) throw error
         if (idleRuntimeStatus(runtime)) return this.pauseAfterProviderFailure(pauseCause, message)
         await this.traceEvent('goal.pause_skipped', {
           cause: pauseCause,
@@ -11153,14 +11193,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           queue_length: runtime?.queue_length,
           status_error: runtime?.status_error,
         })
+        if (!ownsFailure()) throw error
       }
       const recoverablePlannerFailure = planState?.status === 'active' && RECOVERABLE_PLANNER_FAILURE.test(message)
       // A transport failure on the first planner call of a new goal: no plan exists, so no pause can carry it. The failure is
       // marked here (request id, intent, goal id) and the supervisor keeps the request as a pending intake retry.
       const intakeFailure = !recoverablePlannerFailure ? this.intakeTransportFailure(error) : undefined
       if (intakeFailure && error && typeof error === 'object') error.intake_failure = intakeFailure
-      if (!recoverablePlannerFailure && generation === this.generation) this.reset()
-      if (this.traceRequest) {
+      if (!recoverablePlannerFailure) {
+        this.reset()
+        // Our own synchronous reset intentionally advances generation and lineage.
+        // Keep ownership of this failure, then fence the awaited trace below again.
+        failureOwner = decisionBudgetOwner(this)
+      }
+      if (requestTrace) {
         await this.traceEvent('request.failed', {
           stage: 'runtime',
           message,
@@ -11168,10 +11214,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...transportTraceFields(error),
           ...(harnessStateFaultCode(error) ? { harness_state_fault: harnessStateFaultCode(error), pause_class: PAUSE_CLASS.SYSTEM } : {}),
           ...(intakeFailure ? { intake_retry_candidate: true } : {}),
-          usage: this.traceRequest.usage,
+          usage: requestTrace.usage,
           failure_snapshot: this.failureSnapshot('runtime', message),
-        })
-        this.traceRequest = null
+        }, { requestId })
+        if (ownsFailure()) this.traceRequest = null
       }
       throw error
     }
@@ -11710,14 +11756,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // a slice close inside settleCompletedStepState can commit the next slice and run its C3 executor decision to the end (Run AJ:
     // that executor spent its allowance to 0, the settled return skipped the restore, and the 0 reached the next C7 executor).
     // A decision's budget never outlives the wake that set it.
-    const previousReasoningBudget = this.reasoningBudgetOverride
-    const previousObservationBudget = this.observationBudgetOverride
-    const previousObservationBudgetRemaining = this.observationBudgetRemaining
-    const previousObservationRelevance = this.observationRelevanceOverride
-    const previousPlanningHorizon = this.planningHorizonOverride
+    const decisionBudgetScope = captureDecisionBudgets(this)
     // Restored only into the lineage that saved them (as request() does): a reset or a newer request that superseded this wake
     // owns the budgets now.
-    const restoreScope = { generation: this.generation, lineage: this.agentContext.lineageSequence }
     try {
       const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
       if (settled) return settled
@@ -11787,13 +11828,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     finally {
-      if (this.generation === restoreScope.generation && this.agentContext.lineageSequence === restoreScope.lineage) {
-        this.reasoningBudgetOverride = previousReasoningBudget
-        this.observationBudgetOverride = previousObservationBudget
-        this.observationBudgetRemaining = previousObservationBudgetRemaining
-        this.observationRelevanceOverride = previousObservationRelevance
-        this.planningHorizonOverride = previousPlanningHorizon
-      }
+      await restoreDecisionBudgets(this, decisionBudgetScope)
     }
   }
 
@@ -11858,93 +11893,89 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           : routed.route === 'replan'
             ? 'post_step_replan'
             : null
-    const previousReasoningBudget = this.reasoningBudgetOverride
-    const previousObservationBudget = this.observationBudgetOverride
-    const previousObservationBudgetRemaining = this.observationBudgetRemaining
-    const previousObservationRelevance = this.observationRelevanceOverride
-    const previousPlanningHorizon = this.planningHorizonOverride
-    this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
-    this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
-    this.observationBudgetRemaining = this.observationBudgetOverride
-    this.observationRelevanceOverride = selectedObservationFamilies(routed.steering)
-    this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
-    const recoverable = latestRecoverableOperationFailure(this.memory.currentPlan?.(this.activePlanKey()))
-    if (recoverable) {
-      await this.traceEvent('operations.execution_recoverable', {
-        failure_class: recoverable.failure_class,
-        attempt: recoverable.attempt,
-        retry_budget: recoverable.retry_budget,
-      })
-    }
-    const supplyState = this.memory.currentPlan?.(this.activePlanKey())
-    const supplyRecovery = latestTransferSupplyExecutionRecovery(supplyState)
-    const targetRecovery = supplyRecovery?.recovery === 'local_target_reacquisition'
-    const partialRecovery = supplyRecovery?.recovery === 'terminal_transfer_refusal'
-    if (supplyRecovery) {
-      if (supplyRecovery.code === 'nothing_moved' && supplyRecovery.to_entity === false && supplyRecovery.source_removed_count === 0) {
-        await this.traceEvent('transfer.extraction_classified', {
-          request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
-          attempt: supplyRecovery.attempt, retry_budget: supplyRecovery.retry_budget,
-          reason: 'native_zero_source_removal_same_step_candidate',
-          grants_mutation_authority: false,
+    const decisionBudgetScope = captureDecisionBudgets(this)
+    try {
+      this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
+      this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
+      this.observationBudgetRemaining = this.observationBudgetOverride
+      this.observationRelevanceOverride = selectedObservationFamilies(routed.steering)
+      this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
+      const recoverable = latestRecoverableOperationFailure(this.memory.currentPlan?.(this.activePlanKey()))
+      if (recoverable) {
+        await this.traceEvent('operations.execution_recoverable', {
+          failure_class: recoverable.failure_class,
+          attempt: recoverable.attempt,
+          retry_budget: recoverable.retry_budget,
         })
       }
-      if (partialRecovery) await this.traceEvent('transfer.partial_recovery', {
-        request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
-        operation_key: supplyRecovery.operation_key, attempt: supplyRecovery.attempt,
-        retry_budget: supplyRecovery.retry_budget, reason: 'exact_terminal_target_rejection_same_step',
-      })
-      if (targetRecovery) await this.traceEvent('transfer.target_recovery', {
-        request_id: this.traceRequest?.id,
-        step_id: supplyState?.task_board?.active_step_id,
-        operation_key: supplyRecovery.operation_key,
-        entity_name: supplyRecovery.entity_name,
-        attempt: supplyRecovery.attempt, retry_budget: supplyRecovery.retry_budget,
-        reason: 'correlated_legacy_transfer_local_target_absent',
-      })
-      await this.traceEvent('transfer.supply_recovery', {
-        request_id: this.traceRequest?.id,
-        step_id: supplyState?.task_board?.active_step_id,
-        phase: 'execution',
-        code: supplyRecovery.code,
-        item_name: supplyRecovery.item_name,
-        requested: supplyRecovery.requested_count,
-        to_entity: supplyRecovery.to_entity,
-        target_unit_number: supplyRecovery.target_unit_number,
-        attempt: supplyRecovery.attempt,
-        retry_budget: supplyRecovery.retry_budget,
-        tools_enabled: true,
-        plan_changed: false,
-        reason: `execution_${supplyRecovery.code}`,
-      })
-    }
-    else if (supplyState?.status === 'blocked'
-      && /^transfer_failed:(?:item_missing|nothing_moved|no_target)$/.test(String(supplyState.blocker ?? ''))
-      && transferSupplyRecoveryCount(supplyState.task_board) >= TRANSFER_SUPPLY_RECOVERY_BUDGET) {
-      await this.traceEvent('transfer.supply_recovery_exhausted', {
-        request_id: this.traceRequest?.id,
-        step_id: supplyState.task_board?.active_step_id,
-        phase: 'execution',
-        reason: 'recovery_budget_spent_step_blocked_through_existing_path',
-        blocker: supplyState.blocker,
-        recoveries_used: transferSupplyRecoveryCount(supplyState.task_board),
-        retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
-      })
-    }
-    const supplyGuidance = partialRecovery
-      ? ` [HARNESS] The exact native transfer receipt accounts for the completed tasks and the target_rejects_item refusal without moving that item. The completed prefix remains applied; this is partial work, not success of the whole batch. Do not replay the original batch or its prefix. Re-observe the actual target and held counts, then choose only the missing effects inside this same committed step. A furnace may finish an in-progress craft after its input is cleared; inspect its output before changing ingredients. The committed plan and checkpoint remain unchanged. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer allowance; all other limits remain unchanged.`
-      : targetRecovery
-      ? ` [HARNESS] The legacy name-based transfer found no ${cleanMemoryText(supplyRecovery.entity_name, 200)} within interaction reach (no_target). This is a bounded local target-reacquisition dependency inside the same committed step, not evidence that a historical machine was destroyed or WORLD_BLOCKED. The plan, step contract and requested result are unchanged. Historical coordinates are travel guidance only: choose travel if appropriate, wait for its receipt, then re-observe the actual spatial target and current inventories before proposing an exact transfer. Do not substitute a same-name machine or use a cached unit number as execution authority. The original batch may have a successful prefix; its uncertainty and duplicate-effect guard remain authoritative. Do not replay that batch or its cancelled tail; propose only effects justified by fresh counts. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer recovery allowance; all other limits and authority checks remain unchanged.`
-      : supplyRecovery
-      ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget}; once these are spent the failure is recorded as the step blocker (the plan and step contract stay unchanged).`
-      : ''
-    const recoverableGuidance = recoverable
-      ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
-      : ''
-    const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
-    // A failed batch's receipt has no completed placement of its own (its last completed batch is an older one).
-    const factBundle = await this.postBatchFactBundle(routed.route, { families: selectedObservationFamilies(routed.steering) })
-    try {
+      const supplyState = this.memory.currentPlan?.(this.activePlanKey())
+      const supplyRecovery = latestTransferSupplyExecutionRecovery(supplyState)
+      const targetRecovery = supplyRecovery?.recovery === 'local_target_reacquisition'
+      const partialRecovery = supplyRecovery?.recovery === 'terminal_transfer_refusal'
+      if (supplyRecovery) {
+        if (supplyRecovery.code === 'nothing_moved' && supplyRecovery.to_entity === false && supplyRecovery.source_removed_count === 0) {
+          await this.traceEvent('transfer.extraction_classified', {
+            request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
+            attempt: supplyRecovery.attempt, retry_budget: supplyRecovery.retry_budget,
+            reason: 'native_zero_source_removal_same_step_candidate',
+            grants_mutation_authority: false,
+          })
+        }
+        if (partialRecovery) await this.traceEvent('transfer.partial_recovery', {
+          request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
+          operation_key: supplyRecovery.operation_key, attempt: supplyRecovery.attempt,
+          retry_budget: supplyRecovery.retry_budget, reason: 'exact_terminal_target_rejection_same_step',
+        })
+        if (targetRecovery) await this.traceEvent('transfer.target_recovery', {
+          request_id: this.traceRequest?.id,
+          step_id: supplyState?.task_board?.active_step_id,
+          operation_key: supplyRecovery.operation_key,
+          entity_name: supplyRecovery.entity_name,
+          attempt: supplyRecovery.attempt, retry_budget: supplyRecovery.retry_budget,
+          reason: 'correlated_legacy_transfer_local_target_absent',
+        })
+        await this.traceEvent('transfer.supply_recovery', {
+          request_id: this.traceRequest?.id,
+          step_id: supplyState?.task_board?.active_step_id,
+          phase: 'execution',
+          code: supplyRecovery.code,
+          item_name: supplyRecovery.item_name,
+          requested: supplyRecovery.requested_count,
+          to_entity: supplyRecovery.to_entity,
+          target_unit_number: supplyRecovery.target_unit_number,
+          attempt: supplyRecovery.attempt,
+          retry_budget: supplyRecovery.retry_budget,
+          tools_enabled: true,
+          plan_changed: false,
+          reason: `execution_${supplyRecovery.code}`,
+        })
+      }
+      else if (supplyState?.status === 'blocked'
+        && /^transfer_failed:(?:item_missing|nothing_moved|no_target)$/.test(String(supplyState.blocker ?? ''))
+        && transferSupplyRecoveryCount(supplyState.task_board) >= TRANSFER_SUPPLY_RECOVERY_BUDGET) {
+        await this.traceEvent('transfer.supply_recovery_exhausted', {
+          request_id: this.traceRequest?.id,
+          step_id: supplyState.task_board?.active_step_id,
+          phase: 'execution',
+          reason: 'recovery_budget_spent_step_blocked_through_existing_path',
+          blocker: supplyState.blocker,
+          recoveries_used: transferSupplyRecoveryCount(supplyState.task_board),
+          retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+        })
+      }
+      const supplyGuidance = partialRecovery
+        ? ` [HARNESS] The exact native transfer receipt accounts for the completed tasks and the target_rejects_item refusal without moving that item. The completed prefix remains applied; this is partial work, not success of the whole batch. Do not replay the original batch or its prefix. Re-observe the actual target and held counts, then choose only the missing effects inside this same committed step. A furnace may finish an in-progress craft after its input is cleared; inspect its output before changing ingredients. The committed plan and checkpoint remain unchanged. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer allowance; all other limits remain unchanged.`
+        : targetRecovery
+        ? ` [HARNESS] The legacy name-based transfer found no ${cleanMemoryText(supplyRecovery.entity_name, 200)} within interaction reach (no_target). This is a bounded local target-reacquisition dependency inside the same committed step, not evidence that a historical machine was destroyed or WORLD_BLOCKED. The plan, step contract and requested result are unchanged. Historical coordinates are travel guidance only: choose travel if appropriate, wait for its receipt, then re-observe the actual spatial target and current inventories before proposing an exact transfer. Do not substitute a same-name machine or use a cached unit number as execution authority. The original batch may have a successful prefix; its uncertainty and duplicate-effect guard remain authoritative. Do not replay that batch or its cancelled tail; propose only effects justified by fresh counts. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer recovery allowance; all other limits and authority checks remain unchanged.`
+        : supplyRecovery
+        ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget}; once these are spent the failure is recorded as the step blocker (the plan and step contract stay unchanged).`
+        : ''
+      const recoverableGuidance = recoverable
+        ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
+        : ''
+      const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
+      // A failed batch's receipt has no completed placement of its own (its last completed batch is an older one).
+      const factBundle = await this.postBatchFactBundle(routed.route, { families: selectedObservationFamilies(routed.steering) })
       return await this.continueFromModMessage(
         `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${prefixSettlement ? ` [HARNESS] ${reconciliationGuidance(prefixSettlement.result, prefixSettlement.pending)}` : ''}${recoverableGuidance}${supplyGuidance}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.error_continuation',
@@ -11952,12 +11983,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
     finally {
-      this.reasoningTriggerSource = null
-      this.reasoningBudgetOverride = previousReasoningBudget
-      this.observationBudgetOverride = previousObservationBudget
-      this.observationBudgetRemaining = previousObservationBudgetRemaining
-      this.observationRelevanceOverride = previousObservationRelevance
-      this.planningHorizonOverride = previousPlanningHorizon
+      if (ownsDecisionBudgets(this, decisionBudgetScope)) this.reasoningTriggerSource = null
+      await restoreDecisionBudgets(this, decisionBudgetScope)
     }
   }
 
@@ -12689,12 +12716,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       providerMessages = deduplicated.messages
       if (deduplicated.removed) await this.traceEvent('context.skill_refs_deduplicated', {
         request_id: this.traceRequest?.id, reason: 'loaded_details_already_in_prefix',
-        removed_chars: deduplicated.removed, packet_char_limit: 6000,
+        removed_chars: deduplicated.removed, packet_char_limit: HANDOFF_PACKET_MAX_CHARS,
       })
-      const packetChars = messages => messages.filter(row => String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
-        .reduce((sum, row) => sum + String(row.content).length + 1, 0)
-      let handoffChars = packetChars(providerMessages)
-      let room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars) : TOPOLOGY_LIMITS.chars
+      let handoffChars = handoffPacketChars(providerMessages)
+      let room = handoffChars ? Math.min(TOPOLOGY_LIMITS.chars, HANDOFF_PACKET_MAX_CHARS - handoffChars) : TOPOLOGY_LIMITS.chars
       // The block's held counts can give way to a live entity only when this request already shows the live inventory.
       const heldShown = providerMessages.some(row => typeof row.content === 'string' && row.content.startsWith(POST_BATCH_FACTS_MARKER)
         && row.content.includes('\ngetInventoryItems {} => '))
@@ -12708,8 +12733,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (reclaim.reclaimed > 0) {
           const roomBefore = room
           providerMessages = reclaim.messages
-          handoffChars = packetChars(providerMessages)
-          room = Math.min(TOPOLOGY_LIMITS.chars, 6000 - handoffChars)
+          handoffChars = handoffPacketChars(providerMessages)
+          room = Math.min(TOPOLOGY_LIMITS.chars, HANDOFF_PACKET_MAX_CHARS - handoffChars)
           fitted = fitTopologyBlock(topology, room, { heldShown })
           await this.traceEvent('context.topology_room_reclaimed', { request_id: this.traceRequest?.id, state: topology.state,
             reason: liveEntities > 0 ? 'live_topology_entities_outrank_historical_packet_records' : 'live_topology_outranks_historical_packet_records',
@@ -13778,6 +13803,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async handleToolBatch(message, prepared = this.prepareToolBatch(message)) {
+    // Result traces can wait on queued file writes. Keep the owner from before any await;
+    // never stamp an old native answer with a replacement request's actor or trace state.
+    const batchOwner = { generation: this.generation, lineage: this.agentContext.lineageSequence,
+      seq: this.agentContext.conversationSeq, request: this.traceRequest, requestId: this.traceRequest?.id,
+      actorScope: unchangedFactScope(this.epoch), session: this.epoch?.session }
+    const batchIsCurrent = () => this.generation === batchOwner.generation
+      && this.agentContext.lineageSequence === batchOwner.lineage && this.agentContext.conversationSeq === batchOwner.seq
+      && this.traceRequest === batchOwner.request && this.traceRequest?.id === batchOwner.requestId
+      && unchangedFactScope(this.epoch) === batchOwner.actorScope
+      && this.epoch?.session === batchOwner.session
+    const assertBatchCurrent = () => {
+      // Throw synchronously: a stale-work trace await could itself touch the new trace request.
+      if (!batchIsCurrent()) throw new AgentLoopError('Observation tool batch was cancelled or superseded')
+    }
     const readFence = prepared.find(entry => typeof entry._sglunaReadFence === 'function')?._sglunaReadFence
     if (this.actionOmissionRepairActive && (this.actionOmissionObservationUsed || prepared.length !== 1)) {
       this.actionOmissionForceNoTools = true
@@ -13958,6 +13997,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     finally {
       this.compactionDeferred = false
     }
+    assertBatchCurrent()
     const results = this.messages.slice(beforeCount + 1).filter(item => item.role === 'tool')
     for (const entry of admittedPrepared) {
       if (typeof entry._sglunaPrereadOutput === 'string') this.unchangedFactReads.recordDelivered(factScope, entry.signature, entry._sglunaPrereadOutput)
@@ -13978,7 +14018,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           'jev_observation_budget_complete',
           readFence,
         )
+        assertBatchCurrent()
         if (readFence) await readFence()
+        assertBatchCurrent()
       }
     }
     else if (totalDeferredCount > 0) {
@@ -13997,9 +14039,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.outputBudgetRecoveryGuard.fresh_tool_evidence = true
     }
     for (let index = 0; index < results.length; index++) {
+      assertBatchCurrent()
       const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
       if (admittedCached[index] !== true && admittedStaticCached[index] !== true) {
+        // The base adapter may already have rendered an entity diff in `results`; the cache holds the actual
+        // current raw native answer. Supersede from that answer, never from a partial/diff projection.
+        if (this.postBatchFactsText()) {
+          const entry = admittedPrepared[index]
+          const refreshed = withoutSupersededPostBatchFact(this.postBatchFacts, { name: toolName,
+            args: entry.args, signature: entry.signature, output: this.toolCache.get(entry.signature) })
+          if (refreshed) {
+            this.postBatchFacts = refreshed
+            await this.traceEvent('observation.post_batch_fact_superseded', { request_id: batchOwner.requestId,
+              reason: 'newer_same_signature_full_result_delivered', tool: toolName, signature: entry.signature }, { requestId: batchOwner.requestId })
+            assertBatchCurrent()
+          }
+        }
         if (toolName === 'getPlacementCandidates') {
           const facts = topologyObstruction(topologyJson(original))
           if (facts) this.topologyObservation = { facts, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch,
@@ -14027,8 +14083,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           skill_id: loadedSkill.id,
           revision: loadedSkill.revision,
           loaded_skill_count: this.loadedSkillContext.size,
-        })
+        }, { requestId: batchOwner.requestId })
+        assertBatchCurrent()
         await traceSkillLoaded(this, loadedSkill) // 2.8 hook
+        assertBatchCurrent()
       }
       if (admittedCached[index]) results[index].content = DUPLICATE_OBSERVATION_MESSAGE
       const output = String(results[index].content ?? '')
@@ -14044,12 +14102,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         output_chars: output.length,
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
-      await this.traceEvent('tool.result', { ...toolTrace, output })
+      await this.traceEvent('tool.result', { ...toolTrace, output }, { requestId: batchOwner.requestId })
+      assertBatchCurrent()
       if (admittedCached[index] !== true) await this.traceNativeObservationFact(toolName, admittedPrepared[index]?.args, original)
+      assertBatchCurrent()
       if (readFence) await readFence()
+      assertBatchCurrent()
     }
     this.compactWorkingContext()
     await this.repairObservationBaselines()
+    assertBatchCurrent()
     if (this.actionOmissionRepairActive) {
       this.actionOmissionObservationUsed = true
       this.actionOmissionForceNoTools = true
@@ -14058,7 +14120,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         cached: admittedCached[0] === true,
         observation: admittedPrepared[0]?.tool?.function?.name,
         tools_enabled_next_round: false,
-      })
+      }, { requestId: batchOwner.requestId })
+      assertBatchCurrent()
     }
   }
 
@@ -15652,7 +15715,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (stamped || row?.role !== 'user' || typeof row.content !== 'string' || !row.content.startsWith('--- step block ---')) return row
           stamped = true
           const lines = row.content.split('\n')
-          const record = `${PLANNER_REVIEW_NOTES_LABEL}${sanitizeHandoffNote(notes, HANDOFF_PACKET_LIMITS.reviewNotesChars)}`
+          const record = plannerReviewNotesRecord(notes)?.text ?? PLANNER_REVIEW_NOTES_LABEL
           const at = lines.findIndex(line => line.startsWith('planner_review_notes'))
           if (at >= 0) lines[at] = record
           else {

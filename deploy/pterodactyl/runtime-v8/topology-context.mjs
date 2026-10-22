@@ -1,3 +1,5 @@
+import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, isHandoffPacketRow as isPacketRow } from './handoff-format.mjs'
+
 // Bounded native facts, never placement authority or an instruction to modify a plan.
 export const TOPOLOGY_PREFIX = 'fresh_topology: '
 export const TOPOLOGY_LIMITS = Object.freeze({ chars: 1950, rawChars: 49152, entities: 4, radius: 32, scan: 16, reads: 3 })
@@ -5,10 +7,9 @@ export const TOPOLOGY_LIMITS = Object.freeze({ chars: 1950, rawChars: 49152, ent
 // Loaded details live in the task prefix. Under packet pressure their duplicate
 // ID-only record must not evict live geometry from the separate topology slot.
 export function deduplicateTopologySkillRefs(messages) {
-  const packet = row => row.role === 'user' && (String(row.content).startsWith('[HANDOFF]') || String(row.content).startsWith('--- step block ---'))
-  const chars = messages.filter(packet).reduce((sum, row) => sum + row.content.length + 1, 0)
+  const chars = handoffPacketChars(messages)
   const skillContext = messages.findLast(row => row.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[SKILL_CONTEXT]'))?.content
-  if (!chars || chars + TOPOLOGY_LIMITS.chars <= 6000 || !skillContext?.startsWith('[SKILL_CONTEXT]')) return { messages, removed: 0 }
+  if (!chars || chars + TOPOLOGY_LIMITS.chars <= HANDOFF_PACKET_MAX_CHARS || !skillContext?.startsWith('[SKILL_CONTEXT]')) return { messages, removed: 0 }
   let details
   try { details = JSON.parse(skillContext.slice(skillContext.indexOf('\n') + 1)) }
   catch { return { messages, removed: 0 } }
@@ -16,7 +17,7 @@ export function deduplicateTopologySkillRefs(messages) {
   const loaded = new Set(details.map(skill => skill?.id).filter(id => typeof id === 'string'))
   let removed = 0
   const result = messages.map(row => {
-    if (!packet(row) || !row.content.startsWith('--- step block ---')) return row
+    if (!isPacketRow(row) || !row.content.startsWith('--- step block ---')) return row
     const content = row.content.split('\n').filter(line => {
       if (!line.startsWith('loaded_skills: ')) return true
       const ids = line.slice('loaded_skills: '.length).split(', ')
@@ -212,7 +213,6 @@ export const FLUID_HINTS_LINE_PREFIX = 'fluid_source_hints (HISTORICAL'
 export const FLUID_HINTS_STEP_MARK = ' [serves this step: '
 const STEP_MARK = / \[serves this step: ([a-z0-9._-]+(?:,[a-z0-9._-]+)*)\]$/
 const MORE_HINTS = /^\(\+(\d+) more\)$/
-const isPacketRow = row => row?.role === 'user' && typeof row.content === 'string' && (row.content.startsWith('[HANDOFF]') || row.content.startsWith('--- step block ---'))
 
 // The hints line with anchors of no step fluid cut from its tail until `need` characters are saved. `line` is undefined when no
 // anchor is left (only possible without step anchors); `saved` counts the characters freed, `kept_step` the step anchors kept.

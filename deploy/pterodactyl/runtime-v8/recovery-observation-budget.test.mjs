@@ -268,8 +268,6 @@ test('runtime recovery stops after a superseded C7 swap without writing or calli
   const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
   const w = await executorWorld()
   const callsBefore = w.calls.length
-  const saved = [w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride,
-    w.agent.observationBudgetRemaining, w.agent.planningHorizonOverride]
   const original = w.agent.jev.afterRestage.bind(w.agent.jev)
   let swapped = false
   w.agent.jev.afterRestage = async (prepared, result) => {
@@ -279,6 +277,9 @@ test('runtime recovery stops after a superseded C7 swap without writing or calli
       w.agent.reset()
       w.agent.observationBudgetOverride = 1
       w.agent.observationBudgetRemaining = 1
+      w.agent.observationRelevanceOverride = ['inventory']
+      w.agent.reasoningBudgetOverride = 'deep'
+      w.agent.planningHorizonOverride = 'current_step'
     }
   }
   const result = await recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: 'req_w3_superseded' })
@@ -292,10 +293,14 @@ test('runtime recovery stops after a superseded C7 swap without writing or calli
   assert.equal(w.calls.length, callsBefore, 'no provider call after the swap')
   const [row] = w.rows('runtime.recovery_decision_superseded', w.mark)
   assert.ok(row, 'the supervisor traces the superseded recovery')
-  assert.deepEqual(row.data, { reason: 'executor_decision_superseded_after_handoff', recovery_reason: 'runtime_restart' })
+  assert.deepEqual(row.data, { request_id: 'req_w3_superseded', reason: 'executor_decision_superseded_after_handoff', recovery_reason: 'runtime_restart' })
   assert.equal(row.request_id ?? row.data.request_id, 'req_w3_superseded')
   assert.deepEqual([w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride,
-    w.agent.observationBudgetRemaining, w.agent.planningHorizonOverride], saved, 'the early return restores saved budgets')
+    w.agent.observationBudgetRemaining, w.agent.planningHorizonOverride, w.agent.observationRelevanceOverride],
+  ['deep', 1, 1, 'current_step', ['inventory']], 'the newer lineage owns all decision fields')
+  const [cleanup] = w.rows('decision.budgets_restore_skipped', w.mark)
+  assert.equal(cleanup.data.reason, 'decision_owner_superseded')
+  assert.equal(cleanup.request_id ?? cleanup.data.request_id, 'req_w3_superseded')
 })
 
 test('planner review handback rejects a superseded C3 before appending review notes', async () => {
@@ -354,3 +359,364 @@ test('normal C7 runtime recovery still starts a decision and carries the recover
       'the normal recovery harness is present once')
   }
 })
+
+
+const budgetFields = ['reasoningBudgetOverride', 'observationBudgetOverride', 'observationBudgetRemaining', 'observationRelevanceOverride', 'planningHorizonOverride']
+const budgets = agent => budgetFields.map(field => agent[field])
+const NEWER_BUDGETS = ['deep', 1, 1, ['inventory'], 'current_step']
+function supersede(agent) {
+  agent.reset()
+  for (const [index, field] of budgetFields.entries()) agent[field] = NEWER_BUDGETS[index]
+}
+function holdTrace(w, predicate) {
+  let enter, release
+  const entered = new Promise(resolve => { enter = resolve })
+  const held = new Promise(resolve => { release = resolve })
+  const emit = w.agent.behaviorTrace.emit
+  let armed = true
+  w.agent.behaviorTrace.emit = async record => {
+    await emit(record)
+    if (armed && predicate(record)) { armed = false; enter(record); await held }
+  }
+  return { entered, release }
+}
+
+for (const checkpoint of ['C3', 'C7']) {
+  test(`${checkpoint} cancellation during the awaited decision-start trace preserves the newer owner and reports no decision`, async () => {
+    const w = await executorWorld()
+    const gate = holdTrace(w, row => row.event === 'context.executor_observation_started' && row.data.checkpoint === checkpoint)
+    const pending = w.agent.restageBetweenTurns({ checkpoint, role: 'executor', parkPlanner: checkpoint === 'C3',
+      reason: 'deferred_start_trace', actor: w.agent.epoch, requestId: `req_deferred_${checkpoint}` })
+    await gate.entered
+    supersede(w.agent)
+    const messages = w.agent.messages
+    gate.release()
+    const result = await pending
+    assert.equal(result.restaged, true)
+    assert.equal(result.decision_started, false, 'a swapped conversation does not grant stale work a decision')
+    assert.equal(result.decision_reason, 'executor_decision_superseded_after_handoff')
+    assert.deepEqual(budgets(w.agent), NEWER_BUDGETS)
+    assert.equal(w.agent.messages, messages)
+    const [row] = w.rows('context.executor_decision_superseded', w.mark)
+    assert.equal(row.data.request_id, `req_deferred_${checkpoint}`)
+    assert.equal(row.data.reason, 'executor_decision_superseded_after_handoff')
+  })
+}
+
+for (const event of ['context.executor_facts_carried', 'context.executor_observation_started', 'context.restage_folded', 'context.planner_parked']) {
+  test(`folded handback superseded during ${event} does not reset budgets or append old notes`, async () => {
+    const twoSteps = { ...slice('copper-ore'), plan: ['Gather ten copper ore', 'Gather ten iron ore'],
+      stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('copper-ore', 10) },
+        { kind: 'deterministic', checkpoint: inventoryCheckpoint('iron-ore', 10) }],
+      executionGuidance: [brief('copper-ore'), brief('iron-ore')] }
+    let reviewing = false
+    const w = world([twoSteps, act('copper-ore'), review(AJ_RATIONALE), () => {
+      reviewing = true
+      return { ...twoSteps, currentStep: 1, chatMessage: 'Use the refreshed iron facts before acting.' }
+    }, act('iron-ore')])
+    w.agent.restageSoftLimitOption = { executor: 1 }
+    await w.agent.request('Gather ten copper ore, then ten iron ore.', { sender: 'Louis' })
+    const gate = holdTrace(w, row => reviewing && row.event === event)
+    let handback
+    const fold = w.agent.foldReviewHandback.bind(w.agent)
+    w.agent.foldReviewHandback = async options => { handback = await fold(options); return handback }
+    w.game.inventory['copper-ore'] = 10
+    const pending = w.agent.completed().catch(error => error)
+    const record = await gate.entered
+    const callsBefore = w.calls.length
+    supersede(w.agent)
+    const messages = w.agent.messages
+    gate.release()
+    await pending
+    assert.equal(handback?.restaged, true, 'the fold already swapped the conversation')
+    assert.equal(handback?.decision_started, false, 'a superseded fold must stop its caller')
+    assert.deepEqual(budgets(w.agent), NEWER_BUDGETS)
+    assert.equal(w.agent.messages, messages, 'no old notes appended into the replacement conversation')
+    assert.equal(w.calls.length, callsBefore, 'no stale provider call')
+    const rows = w.rows('context.executor_decision_superseded')
+    assert.equal(rows.at(-1)?.data.reason, 'executor_decision_superseded_after_handoff')
+    assert.equal(rows.at(-1)?.data.request_id, record.request_id ?? record.data.request_id)
+  })
+}
+
+for (const stage of ['provider', 'facts_error']) {
+  test(`failed() cleans its entire decision scope after ${stage}`, async () => {
+    const w = world([slice('copper-ore'), act('copper-ore'), ({ agent }) => {
+      supersede(agent)
+      return act('copper-ore')({ memory: w.memory })
+    }])
+    await w.agent.request('Gather ten copper ore, then ten iron ore.', { sender: 'Louis' })
+    const before = budgets(w.agent)
+    if (stage === 'facts_error') {
+      const route = w.agent.routePostStepDecision.bind(w.agent)
+      w.agent.routePostStepDecision = async (...args) => ({ ...await route(...args), steering: {
+        reasoning_budget: 'deep', observation_budget: 2, planning_horizon: 'current_step',
+        observation_relevance: { source: 'typed_relevance', selected_families: ['inventory'] },
+      } })
+      w.agent.executorFactsRefreshText = async () => { throw new Error('scripted facts failure') }
+    }
+    const failure = w.game.failLastBatch({ type: 'mining', code: 'no_resource' })
+    const result = await w.agent.failed(failure).catch(error => error)
+    if (stage === 'facts_error') {
+      assert.match(result.message, /scripted facts failure/)
+      assert.deepEqual(budgets(w.agent), before, 'errors before continuation still restore the owned scope')
+      assert.equal(w.rows('decision.budgets_restored').at(-1)?.data.reason, 'decision_scope_finished')
+    }
+    else {
+      assert.deepEqual(budgets(w.agent), NEWER_BUDGETS, 'old failure cleanup cannot restore over the replacement')
+      assert.equal(w.rows('decision.budgets_restore_skipped').at(-1)?.data.reason, 'decision_owner_superseded')
+    }
+  })
+}
+
+test('between-slices recovery cannot leak its spent executor budget into later planner observation rounds', async () => {
+  const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+  const longGoal = { scope: 'long_horizon', summary: 'Launch one rocket.', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }
+  const draft = item => slice(item, { goal: longGoal })
+  const w = world([draft('copper-ore'), act('copper-ore'), () => { throw new Error('scripted restart gap') },
+    draft('iron-ore'), reads(nearby('spend1', 'rock-huge'), nearby('spend2', 'tree-01'), nearby('spend3', 'coal'), nearby('spend4', 'stone')),
+    act('iron-ore'), reads(nearby('planner1', 'iron-ore'), nearby('planner2', 'water')),
+    reads(['planner3', 'getPlacementCandidates', { entity_name: 'burner-mining-drill', target_resource: 'iron-ore', radius: 16, limit: 1 }]),
+    draft('coal'), act('coal')])
+  await w.agent.request('Launch one rocket.', { sender: 'Louis' })
+  w.game.inventory['copper-ore'] = 10
+  await assert.rejects(w.agent.completed(), /scripted restart gap/)
+  assert.equal(w.agent.goalAwaitingNextSlice(), true)
+  const before = budgets(w.agent)
+  const allowance = w.memory.autoResumeAllowance(KEY)
+  const recovered = await recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: 'req_slice_budget' })
+  assert.equal(recovered.recovered, true)
+  assert.equal(w.calls[4].remaining, 4)
+  assert.equal(w.calls[5].remaining, 0, 'the recovery C3 executor really spent its four reads')
+  assert.deepEqual(budgets(w.agent), before, 'the between-slices recovery wake restores all decision fields')
+  const afterAllowance = w.memory.autoResumeAllowance(KEY)
+  for (const field of ['per_step', 'per_goal', 'goal_attempts', 'step_attempts']) {
+    assert.equal(afterAllowance[field], allowance[field], `${field} is unchanged by the recovery decision`)
+  }
+  const cleanup = w.rows('decision.budgets_restored').find(row => (row.request_id ?? row.data.request_id) === 'req_slice_budget')
+  assert.equal(cleanup?.data.reason, 'decision_scope_finished')
+  w.game.inventory['iron-ore'] = 10
+  await w.agent.completed()
+  assert.deepEqual(w.calls.slice(6, 9).map(call => [call.role, call.allowTools]), [['planner', true], ['planner', true], ['planner', true]],
+    'the following planner can perform multiple observation rounds')
+  assert.ok(w.rows('tool.call').some(row => row.data.tool_call_id === 'planner3'))
+  assert.equal(w.game.mutations.length, 3)
+})
+
+
+test('recovery cancelled during its start trace cannot restage or call a provider in the newer scope', async () => {
+  const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+  const w = await executorWorld()
+  const before = w.calls.length
+  const gate = holdTrace(w, row => row.event === 'runtime.recovery_started')
+  const pending = recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: 'req_early_recovery' })
+  await gate.entered
+  supersede(w.agent)
+  const messages = w.agent.messages
+  gate.release()
+  const result = await pending
+  assert.equal(result.recovered, false)
+  assert.equal(result.reason, 'decision_owner_superseded')
+  assert.deepEqual(budgets(w.agent), NEWER_BUDGETS)
+  assert.equal(w.agent.messages, messages)
+  assert.equal(w.calls.length, before)
+  const [row] = w.rows('decision.budgets_restore_skipped', w.mark)
+  assert.equal(row.data.reason, 'decision_owner_superseded')
+  assert.equal(row.data.request_id, 'req_early_recovery')
+})
+
+test('recovery restores every owned override when preparation throws before the executor runs', async () => {
+  const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+  const w = await executorWorld()
+  for (const [index, field] of budgetFields.entries()) w.agent[field] = NEWER_BUDGETS[index]
+  const before = budgets(w.agent)
+  w.agent.resetRefusalRecoveryBudgets = async () => {
+    for (const field of budgetFields) w.agent[field] = null
+    throw new Error('scripted preparation error')
+  }
+  await assert.rejects(recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: 'req_prepare_error' }), /scripted preparation error/)
+  assert.deepEqual(budgets(w.agent), before)
+  const [row] = w.rows('decision.budgets_restored', w.mark)
+  assert.equal(row.data.request_id, 'req_prepare_error')
+  assert.equal(row.data.reason, 'decision_scope_finished')
+})
+
+
+test('C3 review handback cancelled during the final planner-park trace cannot append into the newer conversation', async () => {
+  let reviewing = false
+  const w = world([slice('copper-ore'), review(AJ_RATIONALE), () => {
+    reviewing = true
+    return slice('copper-ore', { chatMessage: 'Read the current copper facts before acting.' })
+  }, act('copper-ore')])
+  const gate = holdTrace(w, row => reviewing && row.event === 'context.planner_parked')
+  let handback
+  const start = w.agent.startExecutorAtCommit.bind(w.agent)
+  w.agent.startExecutorAtCommit = async options => { const result = await start(options); if (reviewing) handback = result; return result }
+  const pending = w.agent.request('Gather ten copper ore, then ten iron ore.', { sender: 'Louis' }).catch(error => error)
+  const record = await gate.entered
+  const callsBefore = w.calls.length
+  supersede(w.agent)
+  const messages = w.agent.messages
+  gate.release()
+  await pending
+  assert.equal(handback?.restaged, true)
+  assert.equal(handback?.decision_started, false)
+  assert.equal(w.agent.messages, messages)
+  assert.deepEqual(budgets(w.agent), NEWER_BUDGETS)
+  assert.equal(w.calls.length, callsBefore)
+  assert.equal(w.rows('context.executor_decision_superseded').at(-1)?.data.request_id, record.request_id ?? record.data.request_id)
+})
+
+
+test('request setup failure restores the selected decision overrides before the first planner turn', async () => {
+  const w = world([])
+  for (const [index, field] of budgetFields.entries()) w.agent[field] = NEWER_BUDGETS[index]
+  const before = budgets(w.agent)
+  w.agent.requestInteractionPlannerShape = async () => ({ reasoning_budget: 'normal', observation_budget: 2,
+    planning_horizon: 'next_slice', observation_relevance: { source: 'typed_relevance', selected_families: ['entities'] } })
+  w.memory.admitPlanningGoal = () => { throw new Error('scripted goal admission error') }
+  await assert.rejects(w.agent.request('Gather ten copper ore.', { sender: 'Louis' }), /scripted goal admission error/)
+  assert.deepEqual(budgets(w.agent), before)
+  assert.equal(w.calls.length, 0)
+  const [row] = w.rows('decision.budgets_restored')
+  assert.ok(row.data.request_id)
+  assert.equal(row.data.reason, 'decision_scope_finished')
+})
+
+// Startup recovery has no supervisor token. Hold a production preparation await,
+// deliver the immediate player Stop, and install a newer request before releasing it.
+function holdRecoveryMethod(agent, name, predicate = () => true) {
+  let enter, release
+  const entered = new Promise(resolve => { enter = resolve })
+  const held = new Promise(resolve => { release = resolve })
+  const original = agent[name]?.bind(agent)
+  let armed = true
+  agent[name] = async (...args) => {
+    const result = await original?.(...args)
+    if (armed && predicate(...args)) { armed = false; enter(result); await held }
+    return result
+  }
+  return { entered, release }
+}
+
+async function slicePreparationWorld() {
+  const longGoal = { scope: 'long_horizon', summary: 'Launch one rocket.', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }
+  const w = world([slice('copper-ore', { goal: longGoal }), act('copper-ore'), () => { throw new Error('scripted preparation gap') }])
+  await w.agent.request('Launch one rocket.', { sender: 'Louis' })
+  w.game.inventory['copper-ore'] = 10
+  await assert.rejects(w.agent.completed(), /scripted preparation gap/)
+  assert.equal(w.agent.goalAwaitingNextSlice(), true)
+  w.mark = w.trace.length
+  return w
+}
+
+for (const stage of ['load', 'epoch', 'reconciliation', 'helper_status', 'refusal_budgets', 'helper_return', 'fallback_trace',
+  'reactivation_persist', 'reactivation_trace', 'reactivation_callback', 'slice_load', 'slice_epoch', 'slice_reconciliation', 'slice_trace', 'lineage_epoch', 'superseded_trace', 'token_epoch']) {
+  test(`no-token startup recovery refuses Stop during ${stage} preparation`, { timeout: 10000 }, async () => {
+    const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+    const w = stage.startsWith('slice_') ? await slicePreparationWorld() : await executorWorld()
+    if (stage.startsWith('reactivation_')) await w.agent.pausePersistentPlan('provider_transient: scripted timeout', { pause_class: 'transport' })
+    let tokenCancelled = false
+    const recoveryOptions = { requestId: `req_preparation_${stage}` }
+    if (stage === 'token_epoch') recoveryOptions.isCancelled = () => tokenCancelled
+    let helperReady = false
+    const reset = w.agent.resetRefusalRecoveryBudgets.bind(w.agent)
+    w.agent.resetRefusalRecoveryBudgets = async (...args) => { const result = await reset(...args); helperReady = true; return result }
+    let gate
+    if (stage === 'load' || stage === 'slice_load') gate = holdRecoveryMethod(w.agent, 'loadPersistentState')
+    if (['epoch', 'slice_epoch', 'lineage_epoch', 'token_epoch'].includes(stage)) gate = holdRecoveryMethod(w.agent, 'captureEpoch')
+    if (stage === 'reconciliation' || stage === 'slice_reconciliation') gate = holdRecoveryMethod(w.agent, 'reconcileOutstandingOperation')
+    if (stage === 'helper_status') gate = holdRecoveryMethod(w.agent, 'readInteractionTaskStatus', () => helperReady)
+    if (stage === 'refusal_budgets') gate = holdRecoveryMethod(w.agent, 'resetRefusalRecoveryBudgets')
+    if (stage === 'helper_return') gate = holdRecoveryMethod(w.agent, 'restageBetweenTurns')
+    if (stage === 'fallback_trace') {
+      w.agent.restageBetweenTurns = async () => ({ restaged: false, reason: 'scripted_refusal' })
+      gate = holdTrace(w, row => row.event === 'runtime.recovery_restage_fallback')
+    }
+    if (stage === 'superseded_trace') {
+      const restage = w.agent.restageBetweenTurns.bind(w.agent)
+      w.agent.restageBetweenTurns = async (...args) => ({
+        ...await restage(...args), decision_started: false, decision_reason: 'executor_decision_superseded_after_handoff',
+      })
+      gate = holdTrace(w, row => row.event === 'runtime.recovery_decision_superseded')
+    }
+    if (stage === 'reactivation_persist') gate = holdRecoveryMethod(w.agent, 'persistState')
+    if (stage === 'reactivation_trace') gate = holdTrace(w, row => row.event === 'recovery.auto_resume_plan_resumed')
+    if (stage === 'reactivation_callback') {
+      recoveryOptions.reactivate = { pause_classes: ['transport'], onResumed: async () => {} }
+      gate = holdRecoveryMethod(recoveryOptions.reactivate, 'onResumed')
+    }
+    if (stage === 'slice_trace') gate = holdTrace(w, row => row.event === 'runtime.recovery_started')
+    const requestId = recoveryOptions.requestId
+    const calls = w.calls.length
+    const mutations = w.game.mutations.length
+    const pending = recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, recoveryOptions)
+    try {
+      await gate.entered
+      tokenCancelled = true
+      if (stage === 'lineage_epoch') w.agent.agentContext.lineageSequence += 1
+      else w.agent.cancel('user_stop_immediate')
+      for (const [index, field] of budgetFields.entries()) w.agent[field] = NEWER_BUDGETS[index]
+      w.agent.replaceConversation({ baseMessages: [{ role: 'system', content: `Newer request after ${stage}` }] })
+      const messages = w.agent.messages
+      const baseMessages = w.agent.baseMessages
+      const messageValues = structuredClone(messages)
+      const baseValues = structuredClone(baseMessages)
+      const requestInfo = { memoryKey: KEY, turnId: 999, text: 'Newer request', sender: 'Louis' }
+      w.agent.requestInfo = requestInfo
+      const traceRequest = { id: `req_newer_${stage}`, seq: 0 }
+      w.agent.traceRequest = traceRequest
+      w.agent.active = false
+      gate.release()
+      const result = await pending
+      assert.equal(w.calls.length, calls, 'no stale provider call')
+      assert.equal(w.game.mutations.length, mutations, 'no stale operation admission')
+      assert.equal(w.agent.messages, messages, 'newer messages reference survives')
+      assert.equal(w.agent.baseMessages, baseMessages, 'newer base messages reference survives')
+      assert.deepEqual(messages, messageValues, 'no stale message appended')
+      assert.deepEqual(baseMessages, baseValues, 'no stale base message appended')
+      assert.equal(w.agent.requestInfo, requestInfo, 'newer requestInfo survives')
+      assert.equal(w.agent.traceRequest, traceRequest, 'traces retain the newer request owner')
+      assert.equal(w.agent.active, false, 'Stop remains inactive')
+      assert.deepEqual(budgets(w.agent), NEWER_BUDGETS)
+      assert.equal(result.recovered, false)
+      const expectedReason = ['helper_return', 'superseded_trace'].includes(stage) ? 'executor_decision_superseded_after_handoff'
+        : stage === 'token_epoch' ? 'cancelled_after_fire' : 'decision_owner_superseded'
+      assert.equal(result.reason, expectedReason)
+      const rows = w.rows('runtime.recovery_preparation_cancelled', w.mark)
+      assert.ok(rows.some(row => row.data.reason === expectedReason
+        && row.data.request_id === requestId),
+      'refusal is traced under the original recovery request')
+    }
+    finally { gate.release() }
+  })
+}
+
+for (const stage of ['loadPersistentState', 'captureEpoch', 'readInteractionTaskStatus']) {
+  test(`same-owner startup recovery survives delayed ${stage} and exactly one preparation cancel`, { timeout: 10000 }, async () => {
+    const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+    const w = await executorWorld()
+    w.agent.provider = async () => planReply(act('copper-ore')({ memory: w.memory }))
+    const before = budgets(w.agent)
+    const generation = w.agent.generation
+    const lineage = w.agent.agentContext.lineageSequence
+    const cancel = w.agent.cancel.bind(w.agent)
+    const cancels = []
+    w.agent.cancel = reason => { cancels.push(reason); return cancel(reason) }
+    const gate = holdRecoveryMethod(w.agent, stage)
+    const pending = recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: `req_valid_${stage}` })
+    try {
+      await gate.entered
+      gate.release()
+      const result = await pending
+      assert.equal(result.recovered, true)
+      assert.deepEqual(cancels, ['runtime_recovery_prepare:runtime_restart'])
+      assert.equal(w.agent.generation, generation + 1)
+      assert.equal(w.agent.agentContext.lineageSequence, lineage + 1, 'the intentional cancel starts one lineage')
+      assert.deepEqual(budgets(w.agent), before)
+      assert.equal(w.game.mutations.length, 2, 'same committed step continues normally')
+      assert.equal(w.rows('runtime.recovery_preparation_cancelled', w.mark).length, 0)
+    }
+    finally { gate.release() }
+  })
+}
