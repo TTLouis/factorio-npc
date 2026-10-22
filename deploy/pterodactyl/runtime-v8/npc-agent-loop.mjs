@@ -5415,6 +5415,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   observationToolCommand(name, args) {
+    if (name === 'validateConstructionReservation') {
+      const planning = this.memory.planningState?.(this.activePlanKey())
+      const plan = getActivePlanningPlan(planning)
+      if (!plan || args.goal_id !== planning?.goal?.goal_id || args.plan_id !== plan.plan_id) throw new AgentLoopError('Reservation must name the exact active goal and plan')
+    }
     return toolCommand(name, args)
   }
 
@@ -8846,6 +8851,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           facts[requirement.id] = { kind: requirement.kind, technology: requirement.technology, authoritative: raw?.ok === true, satisfied: raw?.ok === true && raw.satisfied === true }
         }
         catch { facts[requirement.id] = { kind: requirement.kind, authoritative: false, satisfied: false } }
+        continue
+      }
+      if (requirement.kind === 'area_reservation_state') {
+        try {
+          const raw = JSON.parse(String(await this.rcon.command(toolCommand('getConstructionReservations', { reservation_id: requirement.reservation_id }))).trim())
+          const row = raw?.ok === true ? raw.reservations?.find(row => row.id === requirement.reservation_id && row.revision === requirement.revision) : undefined
+          const planning = this.memory.planningState?.(this.activePlanKey())
+          const held = getActivePlanningPlan(planning)
+          facts[requirement.id] = { kind: requirement.kind, authoritative: Boolean(row && row.goal_id === planning?.goal?.goal_id && row.plan_id === held?.plan_id),
+            reservation_id: row?.id, revision: row?.revision, state: row?.state }
+          await this.traceEvent('step.area_reservation_checked', { request_id: this.traceRequest?.id, reason: 'native_reservation_state_not_command_admission',
+            reservation_id: requirement.reservation_id, revision: requirement.revision, state: row?.state, authoritative: facts[requirement.id].authoritative })
+        }
+        catch { facts[requirement.id] = { kind: requirement.kind, authoritative: false } }
         continue
       }
       if (requirement.kind === 'authoritative_operation_receipt') {
@@ -14422,6 +14441,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await assertPreflightCurrent()
       results.push(result)
+      if (operations[index].name === 'reserve_construction_area') {
+        const planning = this.memory.planningState?.(this.activePlanKey())
+        const activePlan = getActivePlanningPlan(planning)
+        if (result?.ok === true && (result.reservation?.goal_id !== planning?.goal?.goal_id || result.reservation?.plan_id !== activePlan?.plan_id)) {
+          result.ok = false; result.code = 'reservation_plan_identity_mismatch'; result.refusal_class = REFUSAL_CLASS.AUTHORITY
+        }
+      }
       if (index > 0 && result?.code === 'supply_missing' && result.transfer?.items?.length > 1) {
         // Source shortage has precedence in the mod's multi-item result. It must not conceal an independent
         // destination refusal or two item kinds competing for the same sole slot when stock is supplied later.

@@ -70,6 +70,17 @@ beforeEach(() => {
 })
 
 describe('precise placement runtime', () => {
+  it('settles a placement queued before its footprint becomes reserved', () => {
+    const f = fixture()
+    expect(f.controller.submit_placement('steel-chest', 4.5, -1.5, 0)).toBe(true)
+    ;(storage as any).sgluna_area_reservations = [{ id: 1, state: 'reserved', surface: f.surface,
+      box: { left_top: { x: 4, y: -2 }, right_bottom: { x: 5, y: -1 } } }]
+    expect(f.runtime.state_placing(f.actor)?.[0]).toBe(false)
+    expect(f.controller.status().last_result).toMatchObject({ code: 'npc_area_reserved' })
+    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.surface.create_entity).not.toHaveBeenCalled()
+    expect(f.item.count).toBe(2)
+  })
   it('places at the exact local coordinate with the requested direction', () => {
     const f = fixture()
     expect(f.controller.submit_placement('steel-chest', 4.5, -1.5, 6)).toBe(true)

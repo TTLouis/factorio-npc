@@ -2,6 +2,18 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 22: temporary native construction reservations
+
+The [reservation checkpoint](validation/NPC_AREA_RESERVATIONS_2026-10-22.md)
+adds purple/black blocking tiles, durable temporary-surface entity escrow,
+verified restoration and a separate blueprint/pin review mode. Native Factorio
+2.0.77 proves auto cut/restore across restart, original tile layers, inventories,
+blueprint metadata, in-progress furnace state, placement refusal, preserved
+intrusions and 37 explicit vanilla prototype round-trips. Review markers and
+missing-player refusal are native-tested; actual player approval and UI event
+provenance have unit-test proof only. The designer handoff is paged and gated;
+no designer inference agent or production capability is promoted.
+
 For the unfinished playable-checkpoint work, preserved candidate refs, review
 blockers and settled owner decisions, read the
 [October 5 handoff](validation/PLAYABLE_HANDOFF_2026-10-05.md). It accounts for later

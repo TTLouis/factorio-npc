@@ -709,15 +709,18 @@ The production-validation strategy is:
 ## Reserved-site layout designer — proposed direction, October 22, 2026
 
 The owner proposed separating site selection, layout design and construction.
-This is a design direction for discussion, not an implemented designer role or
-evidence of autonomous production capability.
+The reservation foundation is implemented in the October 22 checkpoint below.
+The designer role remains a design direction, not evidence of autonomous
+production capability.
 
 The planner would select a bounded site, a target rate, material/power budgets
 and interfaces: input/output corridors, fuel and power access, walking space and
 future expansion. A durable reservation would identify its goal, plan revision,
 surface, bounds, protected assets and release conditions. It must detect overlap
-and changed terrain/buildings; a reservation does not prevent a human from
-changing the world or grant permission to clear their structures.
+and changed terrain/buildings. The owner's subsequent tile request authorizes a
+temporary, verified native cut of eligible entities in full-auto mode. Review
+mode leaves the site unchanged until player approval. Unsupported structures
+remain ineligible; a reservation does not authorize permanent clearing.
 
 A bounded designer would receive that snapshot and those constraints and author
 a typed layout proposal, including relative machine slots, directions, recipes,
@@ -744,10 +747,15 @@ Existing foundations: `findConstructionSites` searches bounded footprints;
 `planEntityPlacement` describes input/output/power/extension corridors;
 `validateConstructionPlan` and `execute_construction_plan` support at most 16
 exact placements with live validation. Corridor descriptors are advice, not a
-durable exclusive reservation. These tools do not yet provide the proposed
-reservation ledger, designer role, layout-wide functional validation or a
-sandbox-to-live design lifecycle. Batch tokens remain bound to live actor/world
-identity and current admission checks.
+durable exclusive reservation. `validateConstructionReservation` and
+`reserve_construction_area` now provide a bounded native reservation ledger:
+full-auto temporary-surface escrow, purple/black blocking tiles, exact-revision
+restore, and a passive blueprint/pin review mode through `/npc-spaces`.
+Designer input is immutable and paged; no designer inference role, layout-wide
+functional validation or sandbox-to-live design lifecycle is implemented.
+Batch tokens remain bound to live actor/world identity and current admission
+checks. See [the reservation checkpoint](validation/NPC_AREA_RESERVATIONS_2026-10-22.md)
+for native evidence and eligibility limits.
 
 Construction robots are explicitly deferred for later discussion. Revisit ghost
 placement, fixed/personal roboport coverage, construction inventory and logistics

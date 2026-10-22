@@ -52,6 +52,8 @@ import { new_task_manager } from './task_manager'
 import { new_operation_admission } from './operation_admission'
 import { create_task_board_ui_remote_interface, set_task_board_world_task_provider } from './task_board_ui'
 import { create_tools_remote_interface } from './tools'
+import { register_area_reservations } from './area_reservation_ui'
+import { reservation_preflight, reserve_area } from './area_reservations'
 import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { get_actor_inventory_items } from './utils/inventory'
@@ -69,6 +71,7 @@ let setup_complete = false
 
 export const task_manager = new_task_manager(get_controlled_actor)
 const operation_admission = new_operation_admission(get_controlled_actor, () => task_manager.get_status_snapshot())
+register_area_reservations(peek_controlled_actor, () => task_manager.player_state.task_state === TaskStates.IDLE)
 type Admission = typeof operation_admission
 // remote.call passes no self: wrap the controller's methods (compiled with a
 // self parameter) in arrow functions, as every other interface does.
@@ -243,6 +246,7 @@ function log_actor_info() {
 
 function operation_preflight(name: string, args: Record<string, any>) {
   const actor = get_controlled_actor()
+  if (name === 'reserve_construction_area') return reservation_preflight(actor, args.reservation_id, args.revision)
   const reject = (code: string, details: Record<string, unknown> = {}) => ({
     ok: false,
     code,
@@ -498,6 +502,11 @@ remote.add_interface('autorio_preflight', {
 })
 
 remote.add_interface('autorio_operations', {
+  reserve_construction_area: (id: number, revision: number): [boolean, string] => {
+    if (task_manager.player_state.task_state !== TaskStates.IDLE) return [false, 'actor_busy']
+    const result = reserve_area(get_controlled_actor(), id, revision)
+    return [result.ok, result.ok ? `reservation:${id}:${revision}` : result.code]
+  },
   reconcile_startup: (deployment_session: string) => task_manager.reconcile_startup(deployment_session),
   walk_to_entity: (entity_name: string, search_radius: number) => {
     log(`[AUTORIO] New walk_to_entity task: ${entity_name}, radius: ${search_radius}`)

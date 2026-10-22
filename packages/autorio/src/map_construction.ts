@@ -1,3 +1,5 @@
+import { placement_footprint } from './placement_geometry'
+import { reservation_intersection } from './area_reservations'
 import type { LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { compact_construction_fulfillment, inspect_construction_fulfillment } from './construction_fulfillment'
@@ -117,6 +119,7 @@ export function inspect_remote_construction(
     count: placement_item.requirement.count,
   }
 
+  if (reservation_intersection(surface, placement_footprint(prototypes.entity[entity_name], position, direction ?? 0).world_box)) return { ok: false, code: 'npc_area_reserved' }
   const can_place_ghost = surface.can_place_entity({
     name: 'entity-ghost',
     inner_name: entity_name,

@@ -1,3 +1,4 @@
+import { reservation_intersection } from './area_reservations'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
@@ -232,6 +233,8 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
     if (squared_distance(actor.position, position) > MAX_LOCAL_DISTANCE ** 2) {
       return { ok: false, error: { code: 'OUTSIDE_LOCAL_BUILD_REACH', message: `placement ${index} is farther than ${MAX_LOCAL_DISTANCE} tiles from the actor`, index } }
     }
+    const reserved_box = rotated_world_box(placement.entity_name, position, placement.direction)
+    if (reserved_box && reservation_intersection(actor.surface, reserved_box)) return { ok: false, error: { code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index } }
     if (!actor.surface.can_place_entity({
       name: placement.entity_name,
       position,

@@ -127,6 +127,7 @@ run_mod() {
   run_container mod \
     -v "$host_root/packages/autorio/src:/src/packages/autorio/src:ro" \
     -v "$host_root/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
+    -v "$host_root/packages/autorio/graphics:/src/packages/autorio/graphics:ro" \
     -v "$host_root/packages/autorio/scripts:/src/packages/autorio/scripts:ro" \
     npc-dev sh -c "cd packages/autorio && npx --no-install vitest run && npx --no-install tsc --noEmit -p . && pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build >/dev/null && pnpm run build && node scripts/check-generated-lua.mjs"
 }

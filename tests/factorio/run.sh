@@ -143,6 +143,7 @@ lane_offset() {
     ground-item-pickup) printf '28' ;;
     placement-clearing) printf '29' ;;
     water-reach-approach) printf '30' ;;
+    area-reservations) printf '31' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

@@ -167,3 +167,19 @@ data:extend({
     -- No graphics, light, sound, smoke, corpse or explosion.
   },
 })
+
+-- NPC reservation signal. It is not a craftable/minable paving item. Both
+-- normal land placement and walking are blocked until the native restore.
+local reserved = table.deepcopy(data.raw.tile["lab-dark-1"])
+reserved.name = "sgluna-reserved-area"
+reserved.localised_name = "NPC reserved space"
+reserved.localised_description = "Temporarily reserved by the NPC. Use /npc-spaces to review or reverse."
+reserved.minable = nil
+reserved.hidden = true
+reserved.can_be_part_of_blueprint = false
+reserved.collision_mask = {layers = {water_tile = true, object = true}}
+reserved.map_color = {r = 0.48, g = 0.12, b = 0.7}
+reserved.variants.main = {{picture = "__autorio__/graphics/tiles/reserved-area.png", count = 1, size = 1, probability = 1}}
+reserved.transitions = nil
+reserved.transitions_between_transitions = nil
+data:extend({reserved})

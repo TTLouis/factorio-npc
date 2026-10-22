@@ -1,3 +1,4 @@
+import { reservation_intersection } from './area_reservations'
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
@@ -541,6 +542,10 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     // requested_position keeps what was asked for.
     const position = snap_placement_center(prototype, task.position, task.direction)
     const footprint = placement_footprint(prototype, position, task.direction)
+    if (reservation_intersection(surface, footprint.world_box)) {
+      controller.fail(actor, task, 'npc_area_reserved')
+      return [false, 'npc_area_reserved']
+    }
     const grid = placement_grid_rule(prototype, task.direction)
 
     // create_entity itself does not test collisions, so every placement is
