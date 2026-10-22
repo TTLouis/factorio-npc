@@ -32,6 +32,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check offline local runner behavior
         run: bash tests/tooling/test-local.test.sh
+      - name: Check native CI evidence and cleanup behavior
+        run: bash tests/tooling/test-factorio-ci.test.sh
 
   lint:
     runs-on: ubuntu-latest
@@ -205,7 +207,9 @@ jobs:
   factorio-npc-deterministic:
     if: github.ref == 'refs/heads/feat/npc-transition-work' || github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.base_ref == 'feat/npc-transition-work' || github.base_ref == 'experiment/jev-agent-architecture'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
+    env:
+      NPC_TEST_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -217,17 +221,35 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Build deterministic Factorio NPC image once
+        run: docker build -f tests/factorio/Dockerfile -t factorio-npc-test .
+
       - name: Run deterministic Factorio NPC harness
-        run: pnpm test:npc
+        run: bash scripts/test-factorio-ci.sh default
 
       - name: Run topology context full-loop regression
-        run: docker run --rm --network none -e NPC_TEST_LANES=fresh-topology factorio-npc-test
+        run: bash scripts/test-factorio-ci.sh fresh-topology fresh-topology
 
       - name: Run direct-feed observation full-loop regression
-        run: docker run --rm --network none -e NPC_TEST_LANES=direct-feed-observation factorio-npc-test
+        run: bash scripts/test-factorio-ci.sh direct-feed-observation direct-feed-observation
 
       - name: Run partial transfer recovery full-loop regression
-        run: docker run --rm --network none -e NPC_TEST_LANES=partial-transfer factorio-npc-test
+        run: bash scripts/test-factorio-ci.sh partial-transfer partial-transfer
 
       - name: Run ground-item pickup placement regression
-        run: docker run --rm --network none -e NPC_TEST_LANES=ground-item-pickup factorio-npc-test
+        run: bash scripts/test-factorio-ci.sh ground-item-pickup ground-item-pickup
+
+      - name: Run placement clearing full-loop regression
+        run: bash scripts/test-factorio-ci.sh placement-clearing placement-clearing
+
+      - name: Run water reach approach regression
+        run: bash scripts/test-factorio-ci.sh water-reach-approach water-reach-approach
+
+      - name: Preserve deterministic native evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: factorio-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/factorio-ci/
+          if-no-files-found: warn
+          retention-days: 14
