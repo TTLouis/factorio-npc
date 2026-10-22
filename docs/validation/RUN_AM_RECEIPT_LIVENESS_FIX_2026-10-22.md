@@ -14,8 +14,8 @@ Acceptance:
 - [x] Reproduce both AM failures with negative controls on exact baseline.
 - [x] Central explicit receipt-variant rule, preserving raw names and native effect verification.
 - [x] Reconcile returned blocked decisions into durable pause at an idle ownership fence.
-- [ ] Exact/composed/boundary regressions, full offline gates, payload repin.
-- [ ] Recurrence audit, independent review and local merged verification.
+- [x] Exact/composed/boundary regressions, full offline gates, payload repin.
+- [x] Recurrence audit, independent review and local merged verification.
 
 Initial checkpoint: fixture extracted from sealed AM without changing historical evidence. Parent owns source; audit agent reads history independently.
 
@@ -38,3 +38,13 @@ No native mechanics changed and no new Factorio/provider/Jev trial ran. Recorded
 See [the independent audit](RUN_AM_RECURRENCE_AUDIT_2026-10-22.md). The older AL multi-batch fix was not reverted: it covers a different receipt seam. AM exposed pre-existing sibling paths: physical receipt variants had separate exact-name comparisons, returned failures bypassed exception-only pause guards, and the diagnostic covered an older event shape. Narrow scripted examples and green suite totals were interpreted more broadly than their proof allowed.
 
 Future closeouts must state separately whether the exact regression, composed offline lifecycle, native engine path and autonomous gameplay goal were verified. No one of those substitutes for the others. The shared receipt rule, returned-outcome pause boundary and diagnostic fixture now enforce the specific missing invariants; this is not a claim that every contract or recovery path is proven.
+
+## Verified closeout
+
+Code: `dbcbd837350e192cced7ad6a18337a6ca95b467f`. Installer repin: `f809527a86dd4d1bb3d2a2f1aff2feb3258bbcc8`; payload bytes unchanged, SHA-256 `c026a45de1c1512f1e62dbda673985e7cd494643ff9fe21a6b23817c91803acf`. Local integration merge: `a826175097eb6a874c8e8eb3d2e6c7aeeeccb4cf`. No push or deployment.
+
+Candidate and fresh merged checks pass: 3100 runtime tests (18 added), 1346 mod tests, TypeScript, Lua build/generated-Lua checks, all changed JavaScript lint, nine payload tests, generated-artifact verification and installer syntax. Independent source/test review approved after its two findings were corrected. Final baseline overlay produces exactly five expected failures with the positive regression selection; production source remains untouched by that overlay.
+
+Evidence: task checkout `test-results/run-am-receipt-liveness/`, including `negative-final.log`, `final-all-gates.log`, `merged-all-gates.log`, `merged-package.log`, `review.md`, `audit-review.md`, and `cleanup-proof.json`. Fifteen exact owned container names and seven captured CIDs are absent, including stopped containers; no task networks, volumes, images or configuration links remain. Shared npc-dev and host evidence are retained. Both reviewers finished; no background work remains.
+
+All 293 sealed AM entries were independently re-hashed unchanged, with the original manifest SHA-256 `201eff81f386fcf702e2bea798faf4d8e596644422f06ae7bbb92c30ce6fa664`. The integration checkout's five historical untracked reports are hash-preserved. The merged shipped-source tree equals the reviewed task candidate; this closeout changes documentation only.
