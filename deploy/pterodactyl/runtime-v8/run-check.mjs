@@ -816,7 +816,7 @@ function detectSilentBlockedStalls(scopedRows) {
   scopedRows.forEach((row, index) => {
     if (row?.event !== 'request.completed') return
     const board = isPlainObject(row.data?.task_board) ? row.data.task_board : undefined
-    if (row.data?.outcome !== 'blocked_preflight' && board?.status !== 'blocked') return
+    if (!['blocked_preflight', 'blocked_before_mutation'].includes(row.data?.outcome) && board?.status !== 'blocked') return
     const goalId = nonEmptyString(board?.goal_id)
     const pausesThisGoal = other => other?.event === 'goal.paused' && (!goalId || !nonEmptyString(other.data?.goal_id) || other.data.goal_id === goalId)
     // The runtime writes goal.paused just before the terminal row of the same request, so a pause of this request counts too.

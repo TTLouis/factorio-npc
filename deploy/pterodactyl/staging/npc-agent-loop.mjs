@@ -874,8 +874,9 @@ export class NpcAgentLoop {
     return ''
   }
 
-  async blockedWithoutMutation(reason, failureClass = 'harness_blocker') {
+  async blockedWithoutMutation(reason, failureClass = 'harness_blocker', { isCurrent = () => true } = {}) {
     const current = await this.assertCurrent()
+    if (!isCurrent()) return { chatMessage: '', operations: [], superseded: true }
     this.active = false
     return {
       chatMessage: `Blocked before mutation: ${cleanMemoryText(reason, 800)}`,
@@ -1050,12 +1051,13 @@ export class NpcAgentLoop {
             return this.blockedWithoutMutation(
               `${reason} The harness stopped this request without changing canonical task state because repeating the same deterministically invalid repair cannot create a live exact-entity binding.`,
               'plan_category',
+              { code: error.code },
             )
           }
           if (this.planCategoryRetries > this.maxToolValidationRetries) {
             return this.blockedWithoutMutation(error?.details?.tool_name !== undefined
               ? `Provider repeatedly placed an observation tool in operations (${error.details.tool_name}).`
-              : `Provider repeatedly returned a plan the harness refused (${error.code ?? 'plan_category'}): ${reason}`, 'plan_category')
+              : `Provider repeatedly returned a plan the harness refused (${error.code ?? 'plan_category'}): ${reason}`, 'plan_category', { code: error.code })
           }
           this.messages.push({ role: 'assistant', content: cleanMemoryText(message.content, 4000) })
           const toolInstruction = !toolsEnabled

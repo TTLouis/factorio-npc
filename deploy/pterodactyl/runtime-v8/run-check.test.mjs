@@ -771,6 +771,18 @@ test('run F trace: a transport failure at goal intake is a finding only until an
 })
 
 // Run G (2026-10-14): a supply_destination_conflict refusal ended the request with the step blocked and nothing woke the NPC again.
+test('Run AM exact returned blocked review without board status is a silent stall; its same-request pause answers it', async () => {
+  const rows = await loadFixtureRows('run-am-blocked-review.jsonl')
+  const terminal = rows.at(-1)
+  assert.equal(terminal.data.outcome, 'blocked_before_mutation')
+  assert.equal(terminal.data.task_board, undefined)
+  const stalls = extra => findingsFor(analyzeBehaviorTrace([...rows, ...extra]), 'silent_blocked_stall')
+  assert.equal(stalls([]).length, 1)
+  assert.equal(stalls([])[0].request_id, terminal.request_id)
+  assert.equal(stalls([{ event: 'goal.paused', request_id: terminal.request_id, ts: terminal.ts, data: { pause_class: 'model_recoverable' } }]).length, 0)
+  assert.equal(stalls([{ event: 'runtime.recovery_started', ts: terminal.ts, data: {} }]).length, 0)
+})
+
 test('run G trace: a blocked_preflight request that nothing follows is a silent_blocked_stall finding', async () => {
   const text = await fsp.readFile(path.join(fixturesDir, 'luna-run-g-blocked-preflight-stall.jsonl'), 'utf8')
   const { rows, errors } = parseJsonl(text)
