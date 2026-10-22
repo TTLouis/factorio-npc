@@ -76,11 +76,24 @@ export function storedExecutionGuidance(value) {
   catch { return undefined }
 }
 
+export const PLANNER_REVIEW_RATIONALE_MAX_CHARS = 400
+
 export function normalizePlannerReview(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !['reason', 'rationale'].includes(key))
     || !['approach_infeasible', 'scope_change', 'local_recovery_exhausted'].includes(value.reason)) throw new Error('Invalid plannerReview reason')
-  return { reason: value.reason, rationale: text(value.rationale, 400) }
+  return { reason: value.reason, rationale: text(value.rationale, PLANNER_REVIEW_RATIONALE_MAX_CHARS) }
+}
+
+// An advisory explanation carries no action or authority. Repair only its small
+// length overflow; strict normalization still checks every key and reason.
+export function repairPlannerReview(value) {
+  const length = typeof value?.rationale === 'string' ? value.rationale.length : 0
+  if (length > PLANNER_REVIEW_RATIONALE_MAX_CHARS && length <= 2 * PLANNER_REVIEW_RATIONALE_MAX_CHARS) {
+    return { review: normalizePlannerReview({ ...value, rationale: value.rationale.slice(0, PLANNER_REVIEW_RATIONALE_MAX_CHARS) }),
+      repaired: true, original_chars: length }
+  }
+  return { review: normalizePlannerReview(value), repaired: false }
 }
 
 // The parts of a reply that keep a plannerReview from being a review, named so

@@ -1,6 +1,7 @@
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
+import { PLANNER_REVIEW_RATIONALE_MAX_CHARS } from './role-contracts.mjs'
 
 export * from '../staging/structured-policy.mjs'
 
@@ -1231,7 +1232,7 @@ executionOnlyControlToolDefinitions[0].function.parameters.properties.plannerRev
   description: 'Request strategic review with empty operations. This is not world evidence or permission to replace a plan.',
   properties: {
     reason: { type: 'string', enum: ['approach_infeasible', 'scope_change', 'local_recovery_exhausted'] },
-    rationale: { type: 'string', minLength: 1, maxLength: 400 },
+    rationale: { type: 'string', minLength: 1, maxLength: PLANNER_REVIEW_RATIONALE_MAX_CHARS },
   },
 }
 export const executionOnlyProviderToolDefinitions = [...toolDefinitions, ...executionOnlyControlToolDefinitions]

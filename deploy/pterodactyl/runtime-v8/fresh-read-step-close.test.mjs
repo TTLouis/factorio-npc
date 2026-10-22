@@ -333,7 +333,7 @@ test('a prose-only step never closes here: no checkpoint, no read, no trace', as
   assert.equal(world.plan().task_board.completed_count, 0)
 })
 
-test('a receipt-based contract is not machine-checkable by a fresh read: it never closes here', async () => {
+test('a legacy-adopted receipt is not fresh runtime proof and cannot close a step', async () => {
   const rcon = new Rcon()
   const receipt = { mode: 'all', requirements: [{ id: 'supplied', kind: 'authoritative_operation_receipt', operation_name: 'supply_entity' }] }
   const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY], { checkpoint: receipt }), planMessage([GEAR])])
@@ -344,7 +344,8 @@ test('a receipt-based contract is not machine-checkable by a fresh read: it neve
 
   assert.equal(rcon.conditionReads(), readsBefore)
   assert.equal(world.named('plan.step_closed_on_fresh_read').length, 0)
-  assert.equal(world.named('plan.step_close_skipped_on_fresh_read').length, 0)
+  assert.equal(world.named('plan.step_close_skipped_on_fresh_read').length, 1)
+  assert.equal(data(world.named('plan.step_close_skipped_on_fresh_read')[0]).reason, 'verified_receipt_missing')
   assert.equal(world.plan().task_board.completed_count, 0)
 })
 

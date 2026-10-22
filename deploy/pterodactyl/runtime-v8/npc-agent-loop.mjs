@@ -25,7 +25,7 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
-import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, EXECUTOR_STATE_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT, protocol3SharedPrompt, SHELF_MILESTONE_GUIDANCE } from './role-contracts.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, EXECUTOR_STATE_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, repairPlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT, protocol3SharedPrompt, SHELF_MILESTONE_GUIDANCE } from './role-contracts.mjs'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
@@ -947,6 +947,13 @@ function worldStateContract(contract) {
     && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
 }
 
+function freshSettlementContract(contract) {
+  return completionContractSupported(contract) && contract.mode !== 'semantic_unknown'
+    && contract.requirements?.length > 0
+    && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind)
+      || requirement?.kind === 'authoritative_operation_receipt')
+}
+
 // Repair unit G: why a fresh read of a committed checkpoint cannot decide the step (undefined when every requirement was
 // read). A stale identity (the exact target is not bound to this request) or a read that returned no count/entity answer
 // never closes a step.
@@ -954,6 +961,10 @@ function freshCheckpointReadGap(contract, facts) {
   for (const requirement of sanitizeStepCompletionContract(contract).requirements ?? []) {
     const fact = facts?.[requirement.id]
     if (!fact || fact.stale === true) return { reason: 'checkpoint_target_stale', requirement_id: requirement.id }
+    if (requirement.kind === 'authoritative_operation_receipt') {
+      if (fact.authoritative !== true) return { reason: 'verified_receipt_missing', requirement_id: requirement.id }
+      continue
+    }
     if (requirement.kind === 'research_completed') {
       if (fact.authoritative !== true) return { reason: 'checkpoint_unreadable', requirement_id: requirement.id }
       continue
@@ -3555,24 +3566,67 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw this.roleContractError('invalid_planner_review', 'Review requires the exact active step and an idle safe point with no unsettled operation')
     }
     const requestId = this.traceRequest?.id
+    const reviewOwner = this.captureCheckpointOwner()
+    const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan?.(key), trigger: 'before_planner_review' })
+    // Contract binding may intentionally cancel this turn after durably pausing
+    // the newly active step. Preserve that terminal receipt, but never a result
+    // outlived by replacement work during its final trace write.
+    if (fresh.contractPause) {
+      if (fresh.terminalOwner?.goalId !== reviewOwner.goalId || fresh.terminalOwner?.planId !== reviewOwner.planId
+        || fresh.terminalOwner?.planVersion !== reviewOwner.planVersion || !this.checkpointOwnerCurrent(fresh.terminalOwner)) {
+        const error = new AgentLoopError('Model turn was cancelled or superseded during checkpoint settlement')
+        error.code = STALE_REPLY_ERROR_CODE
+        throw error
+      }
+      return fresh.contractPause
+    }
+    await this.assertCheckpointOwnerCurrent(reviewOwner, { advanced: fresh.closed === true })
+    if (fresh.reason === 'settlement_identity_changed') {
+      const error = new AgentLoopError('Model turn was cancelled or superseded during checkpoint settlement')
+      error.code = STALE_REPLY_ERROR_CODE
+      throw error
+    }
+    if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+    if (fresh.closed) {
+      await this.traceEvent('executor.review_reconciled', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
+        reason: 'committed_checkpoint_already_satisfied', authority: 'deterministic_runtime' })
+      return this.continueAfterFreshStepClose(fresh, plan, before)
+    }
+    if (interactionRuntimeHealthy(fresh.nativeRuntime) || this.batchInFlight || this.memory.pendingOperation?.(key)) {
+      await this.traceEvent('executor.review_deferred', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
+        reason: 'native_work_or_receipt_in_progress' })
+      await this.assertCheckpointOwnerCurrent(reviewOwner)
+      await this.traceEvent('request.waiting', { request_id: requestId, reason: 'await_native_receipt_before_review', operation_count: 0 })
+      await this.assertCheckpointOwnerCurrent(reviewOwner)
+      const state = this.memory.currentPlan?.(key)
+      // Keep the turn active and its trace attached: completed()/failed() are
+      // the ordinary supervisor entry points for the native work already owned.
+      return { chatMessage: '', operations: [], waitingForNativeReceipt: true, plan: state?.plan ?? [],
+        currentStep: state?.current_step ?? 0, goalId: state?.goal_id, goalStatus: state?.status,
+        epoch: before.epoch, actorId: before.actor_id, taskBoard: visibleTaskBoard(state?.task_board) }
+    }
+    const assertReviewCurrent = () => this.assertCheckpointOwnerCurrent(reviewOwner)
     if (plan.reviewCheckpointIgnored) {
       await this.traceEvent('executor.review_checkpoint_ignored', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
         reason: 'committed_completion_contract_is_immutable' }, { requestId })
     }
+    await assertReviewCurrent()
     if (!harnessRaised) {
       const reopened = await this.reopenReadsForReview(plan, held, activeStep, review)
       if (reopened !== undefined) return reopened
     }
+    await assertReviewCurrent()
     await this.traceEvent('executor.planner_review_requested', { request_id: requestId, plan_id: held.plan_id,
       step_id: activeStep.step_id, reason: review.reason, rationale: review.rationale,
       authority: 'advisory_only', world_blocker_proven: false })
+    await assertReviewCurrent()
     // Only an already-established structural blocker and current grant can
     // launch a replacement. Model rationale never becomes blocker evidence.
     if (held.status === PLAN_STATUS.BLOCKED) {
       const woke = await this.wakePlannerForReplacement({ trigger: 'executor_review' })
       if (woke !== undefined) return woke
     }
-    await this.assertCurrent()
+    await assertReviewCurrent()
     // Run AC: a review used to end the request in a guard pause that nothing resumes. Each step now gets one
     // in-turn planner round (durable, capped per goal). The committed plan cannot change in it; an empty reply
     // returns the same step to a fresh executor with the planner's notes. A second review of the step pauses.
@@ -3591,38 +3645,42 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.memory.remember(key, this.requestInfo.turnId, { sender: this.requestInfo.sender, user: this.requestInfo.text,
       assistant: `[Executor advisory; unverified] ${chatMessage}`, operations: [] })
     await this.persistState()
-    await this.assertCurrent()
+    await assertReviewCurrent()
     // Fold C3 into C8: an executor restaged at a step close that has done nothing since is kept through the round, so the
     // handback resumes it (foldReviewHandback) instead of rebuilding the same packet. Its review request is its last turn.
     const kept = continuing ? await this.foldableReviewMeta(held, activeStep, requestId) : undefined
+    await assertReviewCurrent()
     const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId,
       ...(kept ? { keepExecutor: { meta: kept, reply: JSON.stringify(plan) } } : {}) })
-    await this.assertCurrent()
+    await assertReviewCurrent()
     const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}`
     try {
       if (continuing && returned.returned) {
         this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true }
         await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
           reason: review.reason, bound: 'one_planner_round_per_step', authority: 'advisory_only' })
+        await assertReviewCurrent()
         const continued = await this.continueFromModMessage(`${reviewMessage}\n${REVIEW_ROUND_FACT}`, 'planner.review_round_continuation', { withinTurn: true })
         if (continued !== null) return continued
         this.reviewContinuation = null
       }
     }
     finally {
-      this.agentContext.dropParkedExecutor() // the handback took it, or no handback is coming: the kept conversation would only go stale
+      if (ownsDecisionBudgets(this, reviewOwner) && this.traceRequest === reviewOwner.requestTrace) this.agentContext.dropParkedExecutor()
     }
+    await assertReviewCurrent()
     if (continuing) {
       pause()
       chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
       await this.persistState()
+      await assertReviewCurrent()
     }
     if (returned.returned) this.messages.push({ role: 'user', content: reviewMessage })
     this.active = false
     const state = this.memory.currentPlan?.(key)
     await this.traceEvent('request.completed', { request_id: requestId, outcome: 'planner_review_required', reason: review.reason,
       planner_returned: returned.returned, chat_message: chatMessage, usage: this.traceRequest?.usage })
-    this.traceRequest = null
+    if (this.checkpointOwnerCurrent(reviewOwner)) this.traceRequest = null
     return { chatMessage, operations: [], plan: state?.plan ?? [], currentStep: state?.current_step ?? 0,
       epoch: before.epoch, actorId: before.actor_id, goalId: state?.goal_id, goalStatus: state?.status,
       taskBoard: visibleTaskBoard(state?.task_board), blocker: { class: 'planner_review_required', reason: review.reason } }
@@ -8685,13 +8743,42 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
 
+  captureCheckpointOwner() {
+    const key = this.activePlanKey()
+    const planning = this.memory.planningState?.(key)
+    const plan = getActivePlanningPlan(planning)
+    return { ...decisionBudgetOwner(this), key, requestTrace: this.traceRequest, goalId: planning?.goal?.goal_id,
+      planId: plan?.plan_id, planVersion: plan?.plan_version, stepIndex: plan?.active_step_index,
+      stepId: plan?.steps?.[plan.active_step_index]?.step_id, lastIndex: (plan?.steps?.length ?? 0) - 1 }
+  }
+
+  checkpointOwnerCurrent(owner, { advanced = false } = {}) {
+    const current = this.captureCheckpointOwner()
+    const plan = getActivePlanningPlan(this.memory.planningState?.(owner.key))
+    return ownsDecisionBudgets(this, owner) && current.key === owner.key && current.requestTrace === owner.requestTrace
+      && current.goalId === owner.goalId && current.planId === owner.planId && current.planVersion === owner.planVersion
+      && current.stepIndex === (advanced ? Math.min(owner.stepIndex + 1, owner.lastIndex) : owner.stepIndex)
+      && plan?.steps?.[owner.stepIndex]?.step_id === owner.stepId
+  }
+
+  async assertCheckpointOwnerCurrent(owner, options) {
+    await this.assertCurrent()
+    if (this.checkpointOwnerCurrent(owner, options)) return
+    await this.traceEvent('step.reconciliation_superseded', {
+      request_id: owner.requestTrace?.id, reason: 'checkpoint_owner_changed', plan_id: owner.planId, step_id: owner.stepId,
+    }, { requestId: owner.requestTrace?.id })
+    const error = new AgentLoopError('Model turn was cancelled or superseded during checkpoint settlement')
+    error.code = STALE_REPLY_ERROR_CODE
+    throw error
+  }
+
   // Repair unit G (G1/G2): the harness closes the active step as soon as a FRESH read of its committed, machine-checkable
   // checkpoint shows it already met, before a batch is admitted or a wait runs. It is the ordinary close, not a second
   // one: the same completion facts and evaluation as the post-receipt close (completionFactsForContract +
   // evaluateCompletionContract), and the same reducer entry (applyStepClose -> applyOutcomeAuthority), so only Plan Tracker
   // progress moves, never the committed plan. It closes only on a verified read: an unreadable or stale read, a changed
-  // actor/epoch or a step that moved during the read closes nothing (fail safe, traced). Prose-only steps and contracts
-  // that need a receipt or controller state never close here. The step it closes is always the one active right now, so a
+  // actor/epoch or a step that moved during the read closes nothing (fail safe, traced). Receipt facts come only from
+  // the active step's durable verified ledger. Prose-only and controller-state contracts never close here. The step it closes is always the one active right now, so a
   // second call (or the ordinary close after it) finds the next step and cannot close this one twice.
   async closeActiveStepOnFreshRead({ previousState, trigger, operations = [] }) {
     const key = this.requestInfo?.memoryKey
@@ -8702,7 +8789,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlan = getActivePlanningPlan(this.memory.planningState?.(key))
     if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false }
     const contract = persistedStepCheckpoint(board, step.id)?.contract
-    if (!contract || !worldStateContract(contract)) return { closed: false }
+    if (!contract || !freshSettlementContract(contract)) return { closed: false }
+    const continuationOwner = this.captureCheckpointOwner()
     const identity = {
       goalId: previousState.goal_id, canonicalGoalId: this.memory.planningState?.(key)?.goal?.goal_id,
       planId: reducerPlan.plan_id, planVersion: reducerPlan.plan_version, stepId: step.id,
@@ -8743,7 +8831,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       let runtime
       try { runtime = typeof rawRuntime === 'string' ? JSON.parse(rawRuntime) : rawRuntime }
       catch { return skip('runtime_status_unreadable') }
-      if (!idleRuntimeStatus(runtime)) return skip('runtime_not_idle')
+      if (!idleRuntimeStatus(runtime)) {
+        const skipped = await skip('runtime_not_idle', { task_state: runtime?.task_state, queue_length: runtime?.queue_length })
+        return { ...skipped, nativeRuntime: runtime }
+      }
       if (identityChanged()) return skip('settlement_identity_changed')
       facts = await this.completionFactsForContract(contract, undefined, [], { committedIdentity: true })
       const actorAfter = await this.assertCurrent()
@@ -8760,6 +8851,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch {}
       throw error
     }
+    if (identityChanged()) return skip('settlement_identity_changed')
     const evaluation = evaluateCompletionContract(contract, facts)
     if (!evaluation.satisfied) {
       const gap = freshCheckpointReadGap(contract, facts)
@@ -8786,6 +8878,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       steeringRecommendation,
     })
     if (!closed.closed) return { closed: false, reason: closed.reason, state: closed.state, ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}) }
+    const terminalOwner = closed.contractPause ? this.captureCheckpointOwner() : undefined
     await this.traceEvent('plan.step_closed_on_fresh_read', {
       ...base,
       reason: trigger,
@@ -8794,7 +8887,61 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       evidence: evaluation.results.map(result => ({ id: result.id, kind: result.kind, satisfied: result.satisfied, summary: result.summary })),
       operations_not_run: operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)),
     })
-    return { closed: true, state: closed.state, ...(closed.contractPause ? { contractPause: closed.contractPause } : {}) }
+    return { closed: true, state: closed.state, continuationOwner, ...(closed.contractPause ? { contractPause: closed.contractPause, terminalOwner } : {}) }
+  }
+
+  async continueAfterFreshStepClose(fresh, plan, before) {
+    await this.assertCheckpointOwnerCurrent(fresh.continuationOwner, { advanced: true })
+    const previousState = fresh.state ?? this.memory.currentPlan?.(this.activePlanKey())
+    this.resetRepairAfterClosedStep()
+    const names = plan.operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)).join(', ')
+    const transition = this.stepTransitionFact(previousState)
+    const notRun = plan.plannerReview
+      ? '[HARNESS] Fresh world facts and verified step receipts satisfy the committed checkpoint. The harness closed the step before escalating the review.'
+      : `[HARNESS] A fresh world read shows the committed checkpoint of the active step is already met, so the harness closed that step before running anything. The batch you just sent (${names}) was written for the step that closed and did not run.`
+    if (previousState?.status === 'completed') {
+      // The final step closed. Nothing is left to author for it: the ordinary slice/goal settlement decides what
+      // follows, and when it settles nothing the request ends on the committed state, as a semantic claim that closes
+      // the last step does (the dropped batch is reported, never run).
+      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+      const droppedOperationsNote = `${notRun} It was the final step of the committed slice.`
+      const settled = await this.settleCompletedStepState(previousState, { withinTurn: true, droppedOperationsNote })
+      if (settled) return settled
+      await this.assertCheckpointOwnerCurrent(fresh.continuationOwner, { advanced: true })
+      this.active = false
+      await this.traceEvent('request.completed', {
+        chat_message: droppedOperationsNote,
+        outcome: 'final_step_closed_on_fresh_read',
+        task_board: visibleTaskBoard(previousState.task_board),
+        usage: this.traceRequest?.usage,
+      })
+      if (this.checkpointOwnerCurrent(fresh.continuationOwner, { advanced: true })) this.traceRequest = null
+      return {
+        chatMessage: droppedOperationsNote,
+        plan: [],
+        currentStep: 0,
+        operations: [],
+        epoch: before.epoch,
+        actorId: before.actor_id,
+        goalId: previousState.goal_id,
+        goalStatus: previousState.status,
+        taskBoard: visibleTaskBoard(previousState.task_board),
+      }
+    }
+    // C8: a step closed inside the slice may put the executor past its hard limit. A restage rebuilds the conversation
+    // from a packet that already names the new active step, so the stale reply is then not appended to it.
+    const boundary = this.requestInfo && this.executorHandoffEnabled
+      ? await this.executorStepCloseBoundary({ withinTurn: true, requestId: this.traceRequest?.id })
+      : undefined
+    await this.assertCheckpointOwnerCurrent(fresh.continuationOwner, { advanced: true })
+    if (boundary?.restaged !== true) this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+    this.messages.push({
+      role: 'user',
+      content: transition
+        ? `${notRun} ${transition} Facts only: the committed plan is unchanged and only its progress advanced.`
+        : `${notRun} The committed plan is unchanged and only its progress advanced.`,
+    })
+    return this.runTurn()
   }
 
   async evaluateWorldStateCheckpoint(checkpoint) {
@@ -13467,7 +13614,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           catch (cause) { throw this.roleContractError('invalid_execution_guidance', cause.message) }
         }
         if (Object.hasOwn(raw, 'plannerReview')) {
-          try { plannerReview = normalizePlannerReview(raw.plannerReview) }
+          let repaired
+          try { repaired = repairPlannerReview(raw.plannerReview); plannerReview = repaired.review }
           catch (cause) { throw this.roleContractError('invalid_planner_review', cause.message) }
           // A committed step's completion contract is immutable, so a checkpoint
           // sent with the review cannot change it: it is ignored, as commitPlan
@@ -13481,6 +13629,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (conflicts.length) {
             throw this.roleContractError('invalid_planner_review', `plannerReview requires an executor active stepId, empty operations and no completion claim; this reply has ${conflicts.join(', ')}`)
           }
+          if (repaired.repaired) void this.traceEvent('executor.review_advisory_repaired', {
+            request_id: this.traceRequest?.id, reason: 'advisory_rationale_length_clipped',
+            original_chars: repaired.original_chars, retained_chars: plannerReview.rationale.length,
+          })
         }
         if (Object.prototype.hasOwnProperty.call(raw, 'assessmentOnly')) {
           if (typeof raw.assessmentOnly !== 'boolean') {
@@ -16092,54 +16244,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
       if (fresh.contractPause) return fresh.contractPause
-      if (fresh.closed) {
-        previousState = fresh.state ?? previousState
-        this.resetRepairAfterClosedStep()
-        const names = plan.operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)).join(', ')
-        const transition = this.stepTransitionFact(previousState)
-        const notRun = `[HARNESS] A fresh world read shows the committed checkpoint of the active step is already met, so the harness closed that step before running anything. The batch you just sent (${names}) was written for the step that closed and did not run.`
-        if (previousState?.status === 'completed') {
-          // The final step closed. Nothing is left to author for it: the ordinary slice/goal settlement decides what
-          // follows, and when it settles nothing the request ends on the committed state, as a semantic claim that closes
-          // the last step does (the dropped batch is reported, never run).
-          this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
-          const droppedOperationsNote = `${notRun} It was the final step of the committed slice.`
-          const settled = await this.settleCompletedStepState(previousState, { withinTurn: true, droppedOperationsNote })
-          if (settled) return settled
-          this.active = false
-          await this.traceEvent('request.completed', {
-            chat_message: droppedOperationsNote,
-            outcome: 'final_step_closed_on_fresh_read',
-            task_board: visibleTaskBoard(previousState.task_board),
-            usage: this.traceRequest?.usage,
-          })
-          this.traceRequest = null
-          return {
-            chatMessage: droppedOperationsNote,
-            plan: [],
-            currentStep: 0,
-            operations: [],
-            epoch: before.epoch,
-            actorId: before.actor_id,
-            goalId: previousState.goal_id,
-            goalStatus: previousState.status,
-            taskBoard: visibleTaskBoard(previousState.task_board),
-          }
-        }
-        // C8: a step closed inside the slice may put the executor past its hard limit. A restage rebuilds the conversation
-        // from a packet that already names the new active step, so the stale reply is then not appended to it.
-        const boundary = this.requestInfo && this.executorHandoffEnabled
-          ? await this.executorStepCloseBoundary({ withinTurn: true, requestId: this.traceRequest?.id })
-          : undefined
-        if (boundary?.restaged !== true) this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
-        this.messages.push({
-          role: 'user',
-          content: transition
-            ? `${notRun} ${transition} Facts only: the committed plan is unchanged and only its progress advanced.`
-            : `${notRun} The committed plan is unchanged and only its progress advanced.`,
-        })
-        return this.runTurn()
-      }
+      if (fresh.closed) return this.continueAfterFreshStepClose(fresh, plan, before)
     }
     // The active step's own checkpoint as it stood BEFORE this batch; the
     // checkpoint pass below re-records one shaped by the new batch.
