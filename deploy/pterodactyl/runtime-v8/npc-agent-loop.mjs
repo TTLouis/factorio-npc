@@ -25,7 +25,7 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
-import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, EXECUTOR_STATE_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT, protocol3SharedPrompt } from './role-contracts.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, EXECUTOR_STATE_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT, protocol3SharedPrompt, SHELF_MILESTONE_GUIDANCE } from './role-contracts.mjs'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
@@ -121,6 +121,7 @@ import {
 } from './jev-decision-taxonomy.mjs'
 import { authoritativeRuntimeState, isLifecycleMetaStep, MODEL_RECOVERABLE_OUTCOME_REASONS, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
+  activeStepVerifiedOperationNames,
   getActivePlan as getActivePlanningPlan,
   GOAL_STATUS,
   isStepContractPending,
@@ -640,6 +641,7 @@ For a multi-step request, keep the plan stable enough that the harness can track
 Once a plan is COMMITTED its steps, their order and their completion meaning are frozen. Jev is outside plan-authoring and correctness authority. From that point you are fulfilling committed step checkpoints, not authoring them. Re-proposing different steps during ordinary continuation changes nothing; the committed plan is what runs. A committed plan is replaced only by an explicit user-approved revision, and a structural blocker or detected deadlock freezes it as BLOCKED and asks the user rather than silently replanning.
 
 Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Only the node a slice names in roadmapNodeIds is turned into steps, and only by that slice.
+${SHELF_MILESTONE_GUIDANCE}
 
 Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete, each with exactly these fields and exact Factorio internal names: {"kind":"inventory_count","item_name":"stone-furnace","minimum":1}, {"kind":"items_produced","item_name":"iron-plate","minimum":100}, {"kind":"research_completed","technology":"automation"}, {"kind":"rockets_launched","minimum":1}, {"kind":"space_location_unlocked","name":"vulcanus"}, {"kind":"entity_working","entity_name":"electric-mining-drill","minimum":1}, {"kind":"electric_network_satisfied","entity_name":"electric-mining-drill","minimum":1}, {"kind":"production_rate","item_name":"iron-plate","per_minute":30,"window_minutes":1}. inventory_count is what SGLuna holds when the goal ends, after crafting consumed its ingredients. rockets_launched and items_produced count from when the goal starts (countFrom "goal_start", the default), so "launch a rocket" needs a new launch; use countFrom "save_start" only when the player means the save's lifetime total. A goal to build, power or run something is proven by what is running, never by items produced: "get steam power going and run a drill" is electric_network_satisfied plus entity_working for the drill, not items_produced of a steam engine and a drill, which crafting alone satisfies. entity_working counts entities of that prototype whose game status is working now; electric_network_satisfied counts ones not short of power on a network a real producer (steam engine, solar panel) is powering; the harness reads both a few times over a few seconds. A request to build production of an item ("make 30 iron plates a minute", "set up iron smelting") ends in production_rate: machine output per minute over the last window_minutes (1 or 10), read from the game. What SGLuna mines or crafts by hand never counts, and while SGLuna hand-mines the item, crafts it, or puts anything but fuel into a machine or chest by hand, the window is void, so the line must run on its own for a whole window. Any hand insert other than fuel, even stocking a chest, delays a rate goal by one window, and a machine you hand-fed keeps rate goals void until the input you put in is used up; let inserters and belts feed the line. items_produced is only for a requested quantity. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
 
@@ -8117,7 +8119,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (contradiction) {
       return { accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) }
     }
-    const allowedReceiptNames = new Set(plannerOnlyDraft && draft
+    const allowedReceiptNames = new Set(!draft || plannerOnlyDraft
       ? approvedOperationNames()
       : (Array.isArray(operations) ? operations : [])
         .map(operation => operation?.name)
@@ -8331,15 +8333,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
     const frozen = FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
 
-    const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations, {
-      draft: !frozen, plannerOnlyDraft: this.plannerOnlyDraftCandidate(plan),
-    })
-    if (!validation.accepted) throw await this.checkpointRejectionError(validation, { stepId: step.id })
     const existing = persistedStepCheckpoint(board, step.id)
-    const incomingSignature = JSON.stringify(validation.contract)
+    const incoming = sanitizeStepCompletionContract(plan.checkpoint)
+    const incomingSignature = JSON.stringify(incoming)
     const existingSignature = existing ? JSON.stringify(existing.contract) : ''
 
     if (frozen) {
+      const deferred = existing?.contract.requirements.filter(requirement => requirement.kind === 'authoritative_operation_receipt'
+        && !plan.operations.some(operation => operation.name === requirement.operation_name)).map(requirement => requirement.operation_name) ?? []
+      if (deferred.length) await this.traceEvent('step.checkpoint_batch_deferred', {
+        request_id: this.traceRequest?.id, plan_id: reducerPlan.plan_id, step_id: step.id,
+        reason: 'committed_step_contract_spans_operation_batches', receipt_names: deferred,
+      })
       if (!existing || existingSignature !== incomingSignature) {
         // A committed step's meaning is immutable, so the resent contract is
         // ignored and the committed one (or none) stays authoritative. This
@@ -8350,7 +8355,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           active_step_id: step.id,
           reason: 'committed_completion_contract_is_immutable',
           committed_contract: existing?.contract,
-          proposed_contract: validation.contract,
+          proposed_contract: incoming,
         })
         this.messages.push({
           role: 'user',
@@ -8361,6 +8366,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { state, contract: existing.contract, stepId: step.id }
     }
 
+    const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations, {
+      plannerOnlyDraft: this.plannerOnlyDraftCandidate(plan),
+    })
+    if (!validation.accepted) throw await this.checkpointRejectionError(validation, { stepId: step.id })
     this.memory.setStepCompletionContract?.(key, step.id, validation.contract)
     const updated = this.memory.currentPlan?.(key)
     const persisted = persistedStepCheckpoint(updated?.task_board, step.id)
@@ -8844,6 +8853,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async completionFactsForContract(contract, verification, operationNames, { committedIdentity = false } = {}) {
     const facts = {}
     const normalized = sanitizeStepCompletionContract(contract)
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const receiptPlan = getActivePlanningPlan(planning)
+    const durableNames = activeStepVerifiedOperationNames(planning)
+    const verifiedNames = [...new Set([...durableNames, ...(verification ? operationNames : [])])]
+    if (normalized.requirements.some(requirement => requirement.kind === 'authoritative_operation_receipt')) {
+      await this.traceEvent('step.receipt_progress_checked', {
+        request_id: this.traceRequest?.id, reason: 'verified_receipts_accumulate_within_active_step',
+        goal_id: planning?.goal?.goal_id, plan_id: receiptPlan?.plan_id,
+        step_id: receiptPlan?.steps?.[receiptPlan.active_step_index]?.step_id,
+        operation_names: verifiedNames,
+      })
+    }
     for (const requirement of normalized.requirements ?? []) {
       if (requirement.kind === 'research_completed') {
         try {
@@ -8870,9 +8891,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (requirement.kind === 'authoritative_operation_receipt') {
         facts[requirement.id] = {
           kind: requirement.kind,
-          authoritative: verification !== undefined,
-          operation_name: operationNames.length === 1 ? operationNames[0] : undefined,
-          operation_names: operationNames,
+          authoritative: verifiedNames.length > 0,
+          operation_name: verifiedNames.length === 1 ? verifiedNames[0] : undefined,
+          operation_names: verifiedNames,
           summary: cleanMemoryText(verification?.summary, 600),
         }
         continue

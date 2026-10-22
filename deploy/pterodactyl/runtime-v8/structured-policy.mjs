@@ -983,7 +983,7 @@ export const plannerControlToolDefinitions = [{
             properties: {
               id: { type: 'string', minLength: 1, maxLength: 120, description: 'Stable id. Reuse the previous id when restating a node so its lineage and verified results survive.' },
               intent: { type: 'string', minLength: 1, maxLength: 400 },
-              why_it_matters: { type: 'string', maxLength: 400 },
+              why_it_matters: { type: 'string', maxLength: 400, description: 'Why this one capability milestone matters and its independently verifiable exit boundary. Keep sibling nodes at the same milestone altitude; split distinct production/output chains and shared utilities instead of bundling a whole factory.' },
               depends_on: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 120 } },
               assumptions: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 300 } },
               derived_from_node_id: { type: 'string', minLength: 1, maxLength: 120, description: 'The coarser node this one refines, when it is a refinement.' },

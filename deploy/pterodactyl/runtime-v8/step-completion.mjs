@@ -75,7 +75,7 @@ function requirementSchema(kind, properties, required = Object.keys(properties))
   }
 }
 
-export const COMPLETION_CONTRACT_GUIDANCE = 'Declare every outcome promised by the step, using mode all when all are required. A placed count proves presence only, not fluid connectivity, powered operation or automated supply. entity_count uses prototype and minimum; anchor {x,y} ALWAYS requires an explicit radius from 1 to 256. Never drop an anchor or invent a radius to repair a rejected predicate. entity_exists/entity_state require a live observed unit_number. Keep the committed contract unchanged during execution.'
+export const COMPLETION_CONTRACT_GUIDANCE = 'Declare every outcome promised by the step, using mode all when all are required. The checkpoint covers the whole step, which may require several operation batches: fueling can precede production and later collection. Prefer live inventory/research/world results over redundant action receipts. When an action receipt is necessary, only verified operations from this same plan and step count across batches; admission or a failed operation is not completion. A placed count proves presence only, not fluid connectivity, powered operation or automated supply. entity_count uses prototype and minimum; anchor {x,y} ALWAYS requires an explicit radius from 1 to 256. Never drop an anchor or invent a radius to repair a rejected predicate. entity_exists/entity_state require a live observed unit_number. Keep the committed contract unchanged during execution.'
 
 export const COMPLETION_CONTRACT_SCHEMA = Object.freeze({
   type: 'object', additionalProperties: false,

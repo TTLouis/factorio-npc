@@ -66,6 +66,7 @@ const TASK_TYPES_BY_OPERATION = {
   craft_item: ['crafting'],
   place_entity: ['placing'],
   move_items: ['moving_items'],
+  move_items_exact: ['moving_items'],
   supply_entity: ['moving_items'],
   walk_to_entity: ['walking_to_entity'],
   launch_rocket: ['launching_rocket'],

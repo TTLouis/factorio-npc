@@ -469,15 +469,16 @@ test('the hard limit is 2x the soft limit: a slice close past either limit resta
 })
 
 test('provider-reported input tokens drive the size; chars/4 is the fallback before the first reply', async () => {
-  // Reported: 6,000 tokens for a small conversation. chars/4 alone (a few hundred tokens) would not restage.
-  const reported = plannerHarness({ shelf: false, softLimit: 5000, tokens: call => call * 3000 })
+  // Keep the synthetic provider usage clearly above the evolving fixed prompt:
+  // 60,000 reported tokens restage; chars/4 alone remains below the 50,000 limit.
+  const reported = plannerHarness({ shelf: false, softLimit: 50000, tokens: call => call * 30000 })
   await reported.say()
-  assert.ok(reported.agent.agentContext.sizeTokens >= 3000, 'the first reply reported 3,000 input tokens')
-  assert.ok(reported.agent.agentContext.sizeTokens < 5000)
+  assert.ok(reported.agent.agentContext.sizeTokens >= 30000, 'the first reply reported 30,000 input tokens')
+  assert.ok(reported.agent.agentContext.sizeTokens < 50000)
   await reported.closeSlice()
   assert.equal(reported.rows('context.restaged').length, 1)
   const chars = reported.rows('provider.request')[0].data.message_chars
-  assert.ok(Math.ceil(chars / 4) < 5000, `chars/4 of the first request (${Math.ceil(chars / 4)}) is below the limit`)
+  assert.ok(Math.ceil(chars / 4) < 50000, `chars/4 of the first request (${Math.ceil(chars / 4)}) is below the limit`)
 
   // No usage at all: the size is the chars/4 estimate of what was sent.
   const estimated = plannerHarness({ shelf: false, softLimit: 100, tokens: () => undefined })
@@ -535,6 +536,9 @@ test('time reaches the planner as harness facts only: the system prompt carries 
 
 test('a plan slice is scoped to the shelf node it names, and shelf intents are short outline labels', async () => {
   const prompt = plannerHarness({ systemPrompt: await realSystemPrompt() }).agent.systemPrompt
+  assert.match(prompt, /\[SHELF SCOPE\].*independently verifiable capability.*exit boundary/)
+  assert.match(prompt, /Similar altitude does not mean equal duration, word count or number of steps/)
+  assert.match(prompt, /separate iron supply, copper supply and fuel-delivery milestones/)
   assert.match(prompt, /a plan slice holds only the steps for the node it names in roadmapNodeIds, normally the next one: its steps end when that node's intent is true/)
   assert.match(prompt, /Do not restate the whole roadmap as steps\. On the first long-horizon submission, send the shelf in roadmap, plan only its first node, and name that node in roadmapNodeIds\./)
   assert.match(prompt, /Write intent as a short label of about six words or fewer/)
