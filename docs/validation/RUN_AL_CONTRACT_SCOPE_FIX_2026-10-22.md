@@ -24,7 +24,7 @@ satisfy or weaken it. No native gameplay mechanic or permission gate changes.
 - [x] Audit Shelf scope and deliver one consistent milestone rule through planner/schema guidance.
 - [x] Docker gates (3082 runtime; 1346 mod/types/Lua), lint and two failing baseline controls; prompt golden refreshed. Payload repin follows in its own commit.
 - [x] Independent review APPROVED; evidence `test-results/multi-batch-step-contracts/review.md`.
-- [ ] Local integration and fresh merged verification; no push or live trial.
+- [x] Local integration `47e807027e91577d902544e8dba78f2e0fa1c018`; fresh merged 3082 runtime / 1346 mod / types / Lua / lint / payload 9 / installer syntax PASS. No push or live trial.
 
 ## Scope audit of the actual Run AL Shelf
 
@@ -79,3 +79,11 @@ completion fails conservatively rather than inventing it; historical snapshots
 without structured verified names do not gain proof by parsing display prose.
 This does not claim new native engine capability or successful autonomous
 red-science production.
+
+## Verified closeout
+
+Code commit: `3e937fe9641079504605218f585b1518f4cf11fc`. Separate payload repin: `410c2e15aa5f26c869fd48876263a6608e618964` (payload bytes unchanged, SHA-256 `c026a45de1c1512f1e62dbda673985e7cd494643ff9fe21a6b23817c91803acf`).
+
+The exact baseline NPC overlay fails both positive AL regressions: the resent checkpoint is rejected with requirement_2, and omitting the resend still cannot combine the later receipt with fueling. The fixed candidate and merged candidate pass all six new cases. Initial prompt-fingerprint expectations were refreshed for the deliberate policy/schema change; the synthetic usage-threshold test retains its provider-versus-character distinction at a larger test-only scale. Production budget limits are unchanged.
+
+Evidence is retained in the task checkout under `test-results/multi-batch-step-contracts/`: `negative-final.log`, `targeted-pass.log`, `all-gates.log`, `merged-all-gates.log`, `merged-package.log`, `review.md` and `final-summary.json`. All tests are offline/scripted. No real provider/Jev or engine trial was started. Owned Docker containers are removed; shared npc-dev is retained. The five integration historical reports and all sealed Run AL evidence are preserved.
