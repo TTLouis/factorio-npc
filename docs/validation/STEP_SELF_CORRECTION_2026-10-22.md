@@ -10,8 +10,8 @@ Acceptance: exact restored Run AM active step advances from its durable verified
 - [x] Exact AM and composed automatic continuation regressions fail on baseline.
 - [x] Shared fresh settlement supports durable verified receipts before repeat work/review.
 - [x] Advisory-only bounded repair; unrepaired errors retain bounded pause/recovery.
-- [ ] Negative/fence cases, full offline gates, independent review, payload repin.
-- [ ] Reviewed local integration and fresh merged checks; owned resources absent.
+- [x] Negative/fence cases, full offline gates, independent review, payload repin.
+- [x] Reviewed local integration and fresh merged checks; owned resources absent.
 
 Evidence: test-results/step-self-correction/. Prior Run AM and prior-fix evidence stay sealed.
 
@@ -36,3 +36,11 @@ The previous AM refusal-exhaustion fixture now uses an invalid reason while reta
 Four selected positive regressions fail against the previous candidate's unchanged NPC-loop overlay: exact review recovery, signal-free mixed-contract settlement, redundant-placement suppression and final-slice continuation. No new engine semantics or live model/Jev trial is claimed; all new behavior is tested offline against recorded/scripted evidence. The frozen historical run remains unchanged.
 
 Independent review found three issues during implementation: unmet settlement could escalate after ownership changed; the active-owner assertion could discard an intentional next-contract pause; and a newer busy native reading could still fall through to review. Each was corrected in source and receives a direct review-path regression. The final reviewer reports no remaining blocker, subject to fresh complete gates and payload verification.
+
+## Verified closeout
+
+Code `19c4c42fbee3c74baf194401faa9b2a1fc62de85`; separate installer repin `5e79c53f1892cc5fd7a761bf5a1d96eb04cd7630`; local integration merge `095eb958571899d52a90f06cd93f7685445ef543`. Installer payload bytes are unchanged, SHA-256 `c026a45de1c1512f1e62dbda673985e7cd494643ff9fe21a6b23817c91803acf`. No push, deployment or live provider/Jev trial.
+
+The reviewed candidate and fresh merged candidate pass3123runtime tests (23added),1346mod tests, TypeScript, Lua/generated-Lua checks, changed-JavaScript lint, nine payload tests, generated-artifact verification and installer syntax. The four selected baseline controls fail as expected. Independent source/test review is approved after all three findings were corrected. Initial fixture/schema mistakes and earlier failed checks are retained in the evidence; the closeout uses `reviewed-all-gates.log`, `merged-all-gates.log`, `merged-package.log`, their exit files, `negative-final.log` and `review.md`.
+
+All22exact owned container names and15captured CIDs are absent, including stopped containers; no task networks/volumes/images, live stack, tunnel or temporary configuration links remain. Shared npc-dev and host source/evidence are retained. The reviewer finished and no background work remains. The five integration historical reports, all293sealed Run AM entries and all39prior-fix evidence entries were re-hashed unchanged. The merged shipped-source tree equals the reviewed task candidate; this final closeout changes documentation only.
