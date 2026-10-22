@@ -3833,6 +3833,17 @@ function sanitizeReceiptEntry(item, { source, now }) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return undefined
   const kind = text(item.kind, RECEIPT_LEDGER_LIMITS.kind)
   if (!kind) return undefined
+  // Preserve machine-readable completion proof before the display summary is
+  // shortened. Prose, admission receipts and legacy digests cannot mint proof.
+  let verifiedOperations
+  if (kind === 'deterministic_verification' && source === 'runtime') {
+    try {
+      const parsed = JSON.parse(item.summary)
+      if (parsed?.verdict === 'verified_complete') verifiedOperations = parsed.operations
+    }
+    catch {}
+    verifiedOperations ??= item.verified_operation_names // already-verified durable entry on restore
+  }
   return {
     batch_id: receiptBatchId(item),
     kind,
@@ -3840,7 +3851,19 @@ function sanitizeReceiptEntry(item, { source, now }) {
     summary: shortReceiptSummary(item.summary),
     at: finiteNumber(item.at) ?? finiteNumber(item.now) ?? now,
     source,
+    ...(Array.isArray(verifiedOperations) ? { verified_operation_names: stringList(verifiedOperations, { max: 8, maxLength: 100 }) } : {}),
   }
+}
+
+// Only the active immutable plan's active step contributes. Receipt ingestion
+// already checks native completion/correlation and rejects superseded plans.
+export function activeStepVerifiedOperationNames(state) {
+  const plan = getActivePlan(state)
+  const step = plan?.steps?.[plan.active_step_index]
+  if (!step || plan.goal_id !== state.goal?.goal_id || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return []
+  return [...new Set((plan.execution?.receipts?.[step.step_id] ?? [])
+    .filter(entry => entry.kind === 'deterministic_verification' && entry.source === 'runtime')
+    .flatMap(entry => entry.verified_operation_names ?? []))]
 }
 
 function runEventAllowed(state, event) {

@@ -291,6 +291,33 @@ Shelf nodes may contain:
 
 Shelf nodes should remain coarse enough that they do not pretend to know future world state.
 
+### Consistent milestone scope (Run AL follow-up, 2026-10-22)
+
+Sibling Shelf nodes use the same **capability-milestone** level: one independently
+verifiable capability or result per node, with its exit boundary explained in
+`why_it_matters`. Consistency means comparable abstraction, not equal word counts,
+duration, machine counts or number of executable steps. Exact construction and
+observation boundaries belong to the Active Plan, not separate Shelf nodes.
+
+Audit siblings together before the initial commitment. Split a bundle when its
+parts have independent outputs, useful completion boundaries or prerequisite
+chains. In production, distinguish iron supply, copper supply and shared fuel
+delivery rather than one broad "automate mining, fuel and smelting" node. Gear
+supply, science assembly and sustained final throughput can likewise have
+distinct milestone boundaries. A single output chain can still include mining,
+smelting and its local transport; do not atomize it into one node per building.
+Use actual prerequisites in `depends_on`, not an arbitrary serial order.
+
+This is planner authoring guidance, not a deterministic semantic classifier or
+Jev approval gate. Existing shelves and committed plans retain their authority,
+lineage and revision rules; cosmetic consistency does not authorize rewriting
+them. See the Run AL follow-up task note for the concrete scope audit.
+
+Step contracts also cover the entire semantic step, not only its next operation
+batch. Verified action receipts may accumulate within that same committed plan
+and step; stock, research and other mutable world outcomes are still read fresh.
+Fueling, waiting for production and collecting plates need not share a batch.
+
 Example:
 
 ```json
