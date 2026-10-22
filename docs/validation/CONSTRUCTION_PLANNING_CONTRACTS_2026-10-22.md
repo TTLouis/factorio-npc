@@ -27,7 +27,7 @@ Acceptance:
   retain their existing response instructions and native tool/safety rules.
 - [x] Scripted pump/boiler/engine stages use fresh facts at boundaries without
   rewriting committed steps or completing the functional goal from placements.
-- [ ] Docker regression gate, lint and payload checks; independent review;
+- [x] Docker regression gate, lint and payload checks; independent review;
   reviewed local integration if available. No push, deployment or live E2E.
 
 Limits: these tests prove contracts and orchestration, not that a real model will
@@ -36,9 +36,9 @@ AK compact-recovery validation-repair and packet-continuity units remain separat
 from this prompt/schema task. The designer is a proposal in
 `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md`; no additional runtime agent is added.
 
-Prompt/schema unit: runtime 3062/3062, mod 1332/1332, TypeScript, Lua build, generated-Lua and changed-file lint PASS (Docker, offline). Independent review APPROVED after fixing encoded-anyOf repair selection. Golden request hashes changed with prompts/schema; context fingerprints and message counts are unchanged. Payload repin and local integration follow the additional owner-requested observation-rate unit. No live engine/model claim.
+Prompt/schema unit: runtime 3062/3062, mod 1332/1332, TypeScript, Lua build, generated-Lua and changed-file lint PASS (Docker, offline). Independent review APPROVED after fixing encoded-anyOf repair selection. Golden request hashes changed with prompts/schema; context fingerprints and message counts are unchanged. Payload repin and local integration completed after the additional owner-requested observation-rate unit. No live engine/model claim.
 
-Checkpoint: prompt/schema unit verified; parent owns integration
+Checkpoint: runtime candidate c3c6c8d0 verified and locally integrated; parent owns closeout
 and all run-owned Docker cleanup. Evidence: `test-results/construction-planning-contracts/`.
 
 ## Additional owner direction: replenishing executor observations
@@ -69,4 +69,8 @@ cache reuse, persisted restart, no refill on handoff/reset, cancelled/stale wait
 targeted eligibility changes and strict write failures; full Docker gates, lint,
 installer shipping list and payload repin; separate rate review.
 
-Rate candidate verification: runtime 3073/3073 and mod 1332/1332, TypeScript, Lua build/generated-Lua and changed-file lint PASS in offline Docker. Focused rate/state-scope regressions 24/24 PASS. Independent review resolved both P2 findings (deferred-call charging and targeted eligibility after refill); source review approved. Installer module copying and runtime manifest both include observation-rate.mjs. Source unit 42330385 contains the prompt/schema changes; rate unit follows it. Payload repin and merged-head verification pending.
+Rate candidate verification: runtime 3073/3073 and mod 1332/1332, TypeScript, Lua build/generated-Lua and changed-file lint PASS in offline Docker. Focused rate/state-scope regressions 24/24 PASS. Independent review resolved both P2 findings (deferred-call charging and targeted eligibility after refill); source review approved. Installer module copying and runtime manifest both include observation-rate.mjs. Source unit 42330385 contains the prompt/schema changes; rate unit follows it. Payload pinned by c52ea40e to runtime d0e00005 (installer SHA256 c026a45de1c1512f1e62dbda673985e7cd494643ff9fe21a6b23817c91803acf). Merged runtime candidate c3c6c8d0 passed fresh runtime3073/mod1332/type/Lua gates, payload9/9, installer syntax and all changed JavaScript lint. Both independent reviews APPROVED.
+
+Local integration is complete; no push, deployment or additional live E2E was performed. Five historical untracked reports were hash-preserved and the reviewed task tree matched the merged runtime candidate. Evidence includes merged-offline-gate.log, merged-artifacts.log, integration-before.json, integration-after.json, review.md and rate-review.md. All checks used existing npc-dev with no network/dependency install; run-owned containers are removed and final absence is recorded in cleanup.json. The shared npc-dev image is retained.
+
+Exercised paths: planner/executor delivered prefixes; control/JIT completion schemas and encoding repair; scripted construction admission and native-checkpoint protocol; rate refill/wait/cancellation/stale/targeted/read-cache/durable-snapshot paths; installer generation/contracts. The full mod suite is a regression gate, not native construction proof. Real provider compliance and the next autonomous factory attempt remain unverified on this candidate. The reserved-site designer is still a proposal, and construction robots remain deferred.
