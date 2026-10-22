@@ -50,6 +50,62 @@ export const ENTITY_COUNT_MAX_RADIUS = 256
 export const ENTITY_COUNT_STATES = Object.freeze(['working', 'powered'])
 const ENTITY_PROTOTYPE_NAME = /^[a-z0-9][a-z0-9_-]{0,99}$/
 const MAX_ANCHOR_COORDINATE = 10000256
+export const COMPLETION_REQUIREMENT_LIMIT = 8
+
+// One canonical authoring schema for planner tools, executor JSON and JIT
+// contracts. Historical aliases remain readable by the normalizer below.
+const namedText = maxLength => ({ type: 'string', minLength: 1, maxLength, pattern: '\\S' })
+const countSchema = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }
+const entityCountProperties = {
+  prototype: { ...namedText(100), pattern: ENTITY_PROTOTYPE_NAME.source },
+  minimum: countSchema,
+  radius: { type: 'integer', minimum: 1, maximum: ENTITY_COUNT_MAX_RADIUS },
+  state: { type: 'string', enum: ENTITY_COUNT_STATES },
+}
+function requirementSchema(kind, properties, required = Object.keys(properties)) {
+  return {
+    type: 'object', additionalProperties: false,
+    required: ['kind', ...required],
+    properties: {
+      id: { ...namedText(80), description: 'Unique within this contract; omit to let the harness assign it.' },
+      kind: { type: 'string', enum: [kind] },
+      ...properties,
+    },
+  }
+}
+
+export const COMPLETION_CONTRACT_GUIDANCE = 'Declare every outcome promised by the step, using mode all when all are required. A placed count proves presence only, not fluid connectivity, powered operation or automated supply. entity_count uses prototype and minimum; anchor {x,y} ALWAYS requires an explicit radius from 1 to 256. Never drop an anchor or invent a radius to repair a rejected predicate. entity_exists/entity_state require a live observed unit_number. Keep the committed contract unchanged during execution.'
+
+export const COMPLETION_CONTRACT_SCHEMA = Object.freeze({
+  type: 'object', additionalProperties: false,
+  description: `Deterministic world-result checkpoint, not a completion claim or mutation authority. ${COMPLETION_CONTRACT_GUIDANCE}`,
+  required: ['mode', 'requirements'],
+  properties: {
+    mode: { type: 'string', enum: ['all', 'any'] },
+    requirements: {
+      type: 'array', minItems: 1, maxItems: COMPLETION_REQUIREMENT_LIMIT,
+      items: {
+        anyOf: [
+          requirementSchema('inventory_count', { item_name: namedText(160), minimum: countSchema }),
+          requirementSchema('research_completed', { technology: { ...namedText(160), pattern: '^[a-z0-9][a-z0-9_-]*$' } }),
+          requirementSchema('entity_count', entityCountProperties, ['prototype', 'minimum']),
+          requirementSchema('entity_count', {
+            ...entityCountProperties,
+            anchor: {
+              type: 'object', additionalProperties: false, required: ['x', 'y'],
+              properties: Object.fromEntries(['x', 'y'].map(axis => [axis, { type: 'number', minimum: -MAX_ANCHOR_COORDINATE, maximum: MAX_ANCHOR_COORDINATE }])),
+            },
+          }, ['prototype', 'minimum', 'anchor', 'radius']),
+          requirementSchema('entity_inventory_count', { unit_number: countSchema, item_name: namedText(160), minimum: countSchema }),
+          requirementSchema('entity_exists', { unit_number: countSchema }),
+          requirementSchema('entity_state', { unit_number: countSchema, expected: { type: 'string', enum: ['working', 'not_working', 'exists'] } }),
+          requirementSchema('authoritative_operation_receipt', { operation_name: { type: 'string', enum: [...STRICT_TASKS_BY_OPERATION.keys(), 'supply_entity', 'execute_construction_plan'] } }),
+          requirementSchema('runtime_controller_state', { controller: namedText(80), expected: { type: 'string', enum: ['active', 'idle', 'healthy'] } }),
+        ],
+      },
+    },
+  },
+})
 
 function boundedAnchor(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
@@ -188,7 +244,7 @@ export function sanitizeStepCompletionContract(raw) {
   if (raw.mode === 'semantic_unknown') return { mode: 'semantic_unknown', requirements: [], confidence }
   if (!['all', 'any'].includes(raw.mode)) return { mode: 'semantic_unknown', requirements: [], confidence }
   const rawRequirements = Array.isArray(raw.requirements) ? raw.requirements : []
-  if (rawRequirements.length === 0 || rawRequirements.length > 8) {
+  if (rawRequirements.length === 0 || rawRequirements.length > COMPLETION_REQUIREMENT_LIMIT) {
     return { mode: 'semantic_unknown', requirements: [], confidence }
   }
   const requirements = rawRequirements.map(boundedRequirement)

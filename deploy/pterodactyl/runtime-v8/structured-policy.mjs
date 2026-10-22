@@ -1,5 +1,6 @@
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
+import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
 
 export * from '../staging/structured-policy.mjs'
 
@@ -862,42 +863,7 @@ export const plannerControlToolDefinitions = [{
             },
           },
         },
-        checkpoint: {
-          type: 'object',
-          description: 'Optional deterministic completion contract authored by the Main LLM for the active step. It states what world state proves the step complete; the harness validates and evaluates it. Quantities are always lower bounds named "minimum".',
-          required: ['mode', 'requirements'],
-          properties: {
-            mode: { type: 'string', enum: ['all', 'any'] },
-            requirements: {
-              type: 'array',
-              minItems: 1,
-              maxItems: 4,
-              items: {
-                type: 'object',
-                required: ['kind'],
-                properties: {
-                  id: { type: 'string', maxLength: 80 },
-                  kind: {
-                    type: 'string',
-                    enum: ['inventory_count', 'entity_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'research_completed', 'authoritative_operation_receipt', 'runtime_controller_state'],
-                    description: 'inventory_count {item_name, minimum}; entity_count {prototype, minimum, optional radius around the actor or around anchor {x, y}, optional state: working|powered} (at least minimum placed entities of that prototype exist now, read from the live world and not from a placement receipt); research_completed {technology} (actual completed research, including trigger technologies; combine requirements with mode all); entity_inventory_count {unit_number, item_name, minimum}; entity_exists {unit_number}; entity_state {unit_number, expected: working|not_working|exists}; authoritative_operation_receipt {operation_name}; runtime_controller_state {controller: follow, expected: active|idle|healthy}.',
-                  },
-                  item_name: { type: 'string', maxLength: 160 },
-                  technology: { type: 'string', maxLength: 160 },
-                  minimum: { type: 'integer', minimum: 1, description: 'Inclusive lower bound: the step is complete when the count is at least this.' },
-                  unit_number: { type: 'integer', minimum: 1 },
-                  prototype: { type: 'string', maxLength: 100 },
-                  radius: { type: 'integer', minimum: 1, maximum: 256 },
-                  anchor: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } },
-                  state: { type: 'string', enum: ['working', 'powered'] },
-                  expected: { type: 'string', maxLength: 80 },
-                  operation_name: { type: 'string', maxLength: 100 },
-                  controller: { type: 'string', maxLength: 80 },
-                },
-              },
-            },
-          },
-        },
+        checkpoint: COMPLETION_CONTRACT_SCHEMA,
         semanticCompletion: {
           type: 'object',
           additionalProperties: false,
