@@ -149,13 +149,14 @@ export function batchWatermark(rawStatus) {
 }
 
 /** The durable record written before a batch is sent. `baseline` is `batchWatermark` of the status read just before. */
-export function buildPendingOperation({ requestId, operationKey, attemptId, ordinal, protocolVersion, operations, goalId, planId, stepId, actor, baseline, now } = {}) {
+export function buildPendingOperation({ requestId, operationKey, attemptId, ordinal, protocolVersion, operations, goalId, planId, stepId, actor, baseline, now, surfaceIndex } = {}) {
   const list = (Array.isArray(operations) ? operations : []).slice(0, PENDING_OPERATION_LIMITS.operations)
   return {
     operation_key: text(operationKey ?? `${requestId ?? 'request'}/batch`, PENDING_OPERATION_LIMITS.operation_key),
     request_id: text(requestId, 120),
     attempt_id: text(attemptId ?? operationKey ?? `${requestId ?? 'request'}/batch`, 200),
     protocol_version: protocolVersion === 2 ? 2 : 1,
+    ...(Number.isSafeInteger(surfaceIndex) && surfaceIndex > 0 ? { surface_index: surfaceIndex } : {}),
     ordinal: Number.isSafeInteger(ordinal) && ordinal > 0 ? ordinal : null,
     scopes: [...new Set(list.flatMap(effectScopes))],
     state: PENDING_STATE.SENT,
@@ -170,6 +171,7 @@ export function buildPendingOperation({ requestId, operationKey, attemptId, ordi
     operations: list.map((operation, index) => ({
       trace_operation_id: text(operation?.trace_operation_id ?? `${requestId ?? 'request'}/op_${index + 1}`, PENDING_OPERATION_LIMITS.ref),
       name: text(operation?.name, 80),
+      ...(['gather_resource', 'mine_resource_at'].includes(operation?.name) && isRecord(operation.args) ? { args: { ...operation.args } } : {}),
       effect_class: effectClassOf(operation?.name),
     })),
     baseline: baseline ?? null,
@@ -303,6 +305,30 @@ function terminalTransferRefusal(admission, status, pending) {
  *   not_admitted         nothing newer exists and nothing is queued: the batch never reached the game; reissuing is safe.
  *   unknown              the status could not be read or has no baseline to compare with.
  */
+export function terminalGatherCancellation(admission, status, pending) {
+  const slots = admission?.slots
+  if (!['admitted', 'uncertain', 'partial'].includes(admission?.state) || status?.status_error || status?.error
+    || status?.task_state !== 'idle' || status.queue_length !== 0 || status.active_batch
+    || admission.generation !== status.batch_generation || !Array.isArray(slots) || !slots.length
+    || slots.length !== admission.operation_count || slots.length !== pending.operations.length) return null
+  const ref = slots[0]?.batch_refs?.[0]
+  if (!ref || !Number.isSafeInteger(ref.batch_id) || ref.batch_id < 1 || ref.batch_generation !== admission.generation
+    || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return null
+  const types = slots.flatMap(slot => slot.operation === 'gather_resource' ? ['walking_to_entity', 'mining'] : ['mining'])
+  if (!slots.every((slot, i) => slot.index === i + 1 && slot.ok === true && ['gather_resource', 'mine_resource_at'].includes(slot.operation)
+    && pending.operations[i].name === slot.operation && slot.queued_tasks === (slot.operation === 'gather_resource' ? 2 : 1) && slot.batch_refs?.length === 1
+    && slot.batch_refs[0].batch_id === ref.batch_id && slot.batch_refs[0].batch_generation === ref.batch_generation
+    && slot.batch_refs[0].batch_ref === ref.batch_ref)) return null
+  const receipt = status.receipt_journal?.find(r => r.batch_id === ref.batch_id && r.batch_generation === ref.batch_generation && r.batch_ref === ref.batch_ref)
+  if (!receipt || receipt.state !== 'cancelled' || receipt.task_count !== types.length
+    || !Array.isArray(receipt.task_types) || receipt.task_types.length !== receipt.task_count
+    || !receipt.task_types.every((type, i) => type === types[i])
+    || !Number.isSafeInteger(receipt.tick) || receipt.tick < admission.tick
+    || !/^mining:(?:mining_rejected|no_target)$/.test(receipt.reason ?? '')
+    || receipt.outcome || receipt.refused_count || receipt.refusals?.length) return null
+  return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'gather' }
+}
+
 export function reconcilePendingOperation(pending, { status, actor } = {}) {
   if (typeof status === 'string') { try { status = JSON.parse(status) } catch { status = null } }
   const lineage = pending?.actor ?? {}
@@ -345,6 +371,9 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     // A sealed exact receipt describes historical work by its original actor.
     // Unfinished work from an old actor is never resumed or assumed complete.
     if (staleActor) return staleActor
+    const gather = terminalGatherCancellation(admission, status, pending)
+    if (gather) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
+      reason: 'exact_terminal_gather_cancelled', ...gather }
     const partial = terminalTransferRefusal(admission, status, pending)
     if (partial) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
       reason: 'exact_terminal_transfer_refusal', ...partial }
@@ -439,7 +468,8 @@ export function reconciliationFacts(result, pending) {
     batch_id: result?.batch_id ?? null,
     operations: (pending?.operations ?? []).map(operation => operation.name),
     effect_classes: [...new Set((pending?.operations ?? []).map(operation => operation.effect_class))],
-    ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL
+    ...(result?.recovery_kind === 'gather' ? { recovery_kind: 'gather', receipt_tick: result.receipt_tick, batch_ref: result.batch_ref } : {}),
+    ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && result?.recovery_kind !== 'gather'
       ? { completed_tasks: result.completed_tasks, refused_tasks: result.refused_tasks } : {}),
     ...(result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
       ? { applied_slots: result.applied_slots ?? [], refused_slots: result.refused_slots ?? [], refusal_codes: result.refusal_codes ?? [], unrun_slots: result.unrun_slots ?? 0 }
@@ -450,6 +480,7 @@ export function reconciliationFacts(result, pending) {
 /** One sentence for the model: what the game's batch records prove, and what that allows. Never says "succeeded" for an uncertain effect. */
 export function reconciliationGuidance(result, pending) {
   const facts = JSON.stringify(reconciliationFacts(result, pending))
+  if (result?.reason === 'exact_terminal_gather_cancelled') return `Operation reconciliation: the exact gather-only batch terminated with partial acquisition. No slot quantity is assumed complete or absent. Keep the effect hold until the harness reads fresh inventory and computes only the unchanged checkpoint deficit; do not replay the batch. Facts: ${facts}`
   if (result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL) {
     return `Operation reconciliation: the exact native receipt accounts for every transfer task: ${result.completed_tasks} completed and ${result.refused_tasks} refused without moving anything. This is partial work, not batch success. Do not replay the completed prefix or the original batch. Re-observe current inventories and the target, then choose only the missing effects for the same committed step. Facts: ${facts}`
   }
@@ -504,6 +535,7 @@ export function sanitizePendingOperation(raw) {
     request_id: text(raw.request_id, 120),
     attempt_id: text(raw.attempt_id ?? key, 200),
     protocol_version: raw.protocol_version === 2 ? 2 : 1,
+    ...(Number.isSafeInteger(raw.surface_index) && raw.surface_index > 0 ? { surface_index: raw.surface_index } : {}),
     ...(raw.legacy === true ? { legacy: true } : {}),
     ordinal: Number.isSafeInteger(raw.ordinal) && raw.ordinal > 0 ? raw.ordinal : null,
     scopes: Array.isArray(raw.scopes) ? raw.scopes.filter(value => typeof value === 'string').slice(0, 96).map(value => text(value, 240)) : ['*'],
@@ -519,6 +551,10 @@ export function sanitizePendingOperation(raw) {
     operations: (Array.isArray(raw.operations) ? raw.operations : []).slice(0, PENDING_OPERATION_LIMITS.operations).filter(isRecord).map(operation => ({
       trace_operation_id: text(operation.trace_operation_id, PENDING_OPERATION_LIMITS.ref),
       name: text(operation.name, 80),
+      ...(['gather_resource', 'mine_resource_at'].includes(operation.name) && isRecord(operation.args) ? { args: {
+        resource_name: text(operation.args.resource_name, 200), count: operation.args.count,
+        ...(operation.name === 'gather_resource' ? { search_radius: operation.args.search_radius } : { x: operation.args.x, y: operation.args.y }),
+      } } : {}),
       effect_class: ['delivery', 'craft', 'place', 'world', 'other'].includes(operation.effect_class) ? operation.effect_class : 'other',
     })),
     baseline,

@@ -102,15 +102,16 @@ export function select_exact_mining_target(actor: ControlledActor, target: LuaEn
   }
   // Dense natural selection boxes can cover every probe. LuaControl.selected
   // supports exact native selection; it grants no mining reach or yield.
-  // Harvest opts in with a callback and checks identity again on mining start.
-  // Other mining paths and connected players retain their existing behavior.
+  // Harvest opts in with a callback; resources use the same exact binding by
+  // default. Connected players retain their existing selection behavior.
   const character = actor.character
-  if (on_native_recovery && natural && actor.is_valid && character?.valid && target.valid
+  if (((on_native_recovery && natural) || target.type === 'resource') && actor.is_valid && character?.valid && target.valid
     && actor.status_snapshot().kind === 'standalone_character'
     && target.surface.index === actor.surface.index && within_mining_reach(actor, target)) {
     character.selected = target
     if (mining_target_selected(actor, target)) {
-      log(`[AUTORIO] mining.exact_selection_recovered reason=native_exact_natural_selection actor_id=${actor.status_snapshot().actor_id} entity=${target.name} position=${serpent.line(target.position)}`)
+      const reason = target.type === 'resource' ? 'native_exact_resource_selection' : 'native_exact_natural_selection'
+      log(`[AUTORIO] mining.exact_selection_recovered reason=${reason} actor_id=${actor.status_snapshot().actor_id} entity=${target.name} position=${serpent.line(target.position)}`)
       on_native_recovery?.()
       return true
     }

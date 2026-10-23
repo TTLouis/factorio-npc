@@ -50,7 +50,15 @@ export function conflictingOperation(state, proposed) {
   }
   // A known partial batch is no longer uncertain, but its successful tasks
   // must never be replayed as the original batch for the same committed step.
-  for (const record of operationLedger(state?.operation_ledger).closed) {
+  const closed = operationLedger(state?.operation_ledger).closed
+  const gatherRecovery = proposed.gatherRecoveryKey && proposed.operations?.every(op => ['gather_resource', 'mine_resource_at'].includes(op.name))
+    && closed.some(record => record.operation_key === proposed.gatherRecoveryKey && record.reason === 'exact_terminal_gather_cancelled'
+      && record.plan_id === proposed.planId && record.step_id === proposed.stepId && record.effect === EFFECT.PARTIAL_KNOWN)
+  for (const record of closed) {
+    // Only the harness's fresh checkpoint-deficit path can retry a terminal
+    // acquisition with the same signature (including a zero-yield attempt).
+    // Ordinary model batches and all transfer/mixed batches retain the fence.
+    if (gatherRecovery && record.reason === 'exact_terminal_gather_cancelled') continue
     if (record.effect === EFFECT.PARTIAL_KNOWN && record.plan_id === proposed.planId && record.step_id === proposed.stepId
       && record.signature === operationSignature(proposed.operations)) {
       return { refuse: true, reason: 'terminal_partial_batch_replay', operation_key: record.operation_key,

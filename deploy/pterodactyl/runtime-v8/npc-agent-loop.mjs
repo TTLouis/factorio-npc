@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { setTimeout as observationDelay } from 'node:timers/promises'
 import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeProductionIntent } from './production-task.mjs'
+import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
@@ -5142,6 +5143,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // against (see dropIfStale); a nested turn keeps it.
       const scope = this.currentTurnScope()
       return await this.turnScope.run(scope, async () => {
+        const gather = await recoverGatherFailure(this)
+        if (gather !== undefined) return gather
         const production = await continueProductionTask(this)
         return production === undefined ? super.runTurn() : production
       })
@@ -9996,6 +9999,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
       protocolVersion: 2,
+      surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.gatherAdmission?.surfaceIndex,
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -10147,7 +10151,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         actor = { actor_id: current.actor_id, epoch: current.epoch }
         result = reconcilePendingOperation(pending, { status: rawStatus, actor })
       }
-      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_PARTIAL, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
+      const provable = result.reason !== 'exact_terminal_gather_cancelled'
+        && [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_PARTIAL, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
       if (provable && result.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL) {
         this.memory.updatePendingOperation?.(key, {
           state: PENDING_STATE.ADMITTED, effect: result.effect, verdict: result.verdict,
@@ -12276,6 +12281,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return null
     }
     this.lastHandledRuntimeReceipt.failure = receiptKey
+    const gather = await recoverGatherFailure(this, { failureBoundary: true })
+    if (gather !== undefined) return gather
     const production = await recoverProductionFailure(this)
     if (production !== undefined) return production
 
@@ -16142,6 +16149,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.validatePlannerRoleOutput(plan)
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
     const productionStepId = plan.productionTask ? plan.stepId : undefined
+    const miningStepId = plan.stepId
     await this.validatePreflightCorrectionScope(plan)
     try {
       plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
@@ -16262,6 +16270,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await retireGoalRequirements(this, plan)
 
     const before = await this.assertCurrent()
+    if (this.gatherAdmission) {
+      await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
+      if (before.surface_index !== this.gatherAdmission.surfaceIndex) throw new AgentLoopError('gather_admission_surface_changed')
+    }
     const persistentRuntime = commands.length === 0 && plan.plan.length > 0
       ? await this.persistentRuntimeStatus()
       : undefined
@@ -16827,7 +16839,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         // Uncertain target/material effects remain fenced across plans and goals.
         if (this.requestInfo && typeof this.memory.checkDuplicateEffect === 'function') {
-          const duplicate = this.memory.checkDuplicateEffect(this.requestInfo.memoryKey, { operations: plan.operations }, { requestId: this.traceRequest?.id })
+          const duplicate = this.memory.checkDuplicateEffect(this.requestInfo.memoryKey, { operations: plan.operations, gatherRecoveryKey: this.gatherAdmission?.reconciledOperationKey }, { requestId: this.traceRequest?.id })
           if (duplicate?.refuse) {
             const failure = new AgentLoopError('Operation admission refused: conflicting unresolved work may already have taken effect')
             failure.preflight = {
@@ -16881,6 +16893,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (caughtError) {
         let error = caughtError
         if (!error?.preflight) throw error
+        const miningCorrection = await correctMiningLocation(this, { ...plan, stepId: miningStepId }, error.preflight)
+        if (miningCorrection?.handled) return miningCorrection.result
+        if (this.gatherAdmission) {
+          await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
+          error.gatherNotAdmitted = true
+          throw error
+        }
         if (this.productionAdmission) {
           await this.assertCheckpointOwnerCurrent(this.productionAdmission)
           // Only proven pre-admission material/quantity misses earn a bounded
@@ -17205,7 +17224,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // (outside the try below: a stale drop is not an admission failure).
       try {
         await this.traceEvent('operations.admit', { operations })
-        await this.assertCurrent()
+        const beforeSend = await this.assertCurrent()
+        if (this.gatherAdmission) {
+          await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
+          if (beforeSend.surface_index !== this.gatherAdmission.surfaceIndex) throw new AgentLoopError('gather_admission_surface_changed')
+        }
       }
       catch (error) {
         // Transport has not been invoked. This local boundary proves this exact
@@ -17237,6 +17260,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         // MW2b: the command was sent but no valid acknowledgement came back. Ask the game what really happened (exact batch,
+        if (this.gatherAdmission) await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
         // actor and epoch correlation) before anything is issued again or the goal is blocked.
         // Rejected before the first byte reached RCON, or refused by the game before it recorded anything: provably not sent.
         if (pendingAdmission && (error?.notSent === true || error?.notAdmitted === true)) {
@@ -17244,7 +17268,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         let reconciliation
         if ((isLostAcknowledgement(error) || error?.admission) && this.requestInfo && typeof this.memory.pendingOperation === 'function') {
-          reconciliation = await this.reconcileOutstandingOperation({ trigger: 'lost_acknowledgement', operationKey: pendingAdmission?.operation_key })
+          reconciliation = await this.reconcileOutstandingOperation({ trigger: 'lost_acknowledgement', operationKey: pendingAdmission?.operation_key,
+            requestId: this.gatherAdmission?.requestTrace?.id })
+        }
+        if (this.gatherAdmission) {
+          await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
+          if (!reconciliation?.admitted) {
+            this.batchInFlight = this.batchInFlightBeforeSend === true
+            this.batchInFlightBeforeSend = undefined
+            error.gatherNotAdmitted = true
+            error.gatherDisposition = 'native'
+            error.preflight = { code: error.notSent || error.notAdmitted ? 'admission_refused' : 'outcome_unproven' }
+            throw error
+          }
         }
         if (reconciliation?.admitted) {
           // The game took the batch; only its receipt is outstanding. Carry on as acknowledged: nothing is sent again.

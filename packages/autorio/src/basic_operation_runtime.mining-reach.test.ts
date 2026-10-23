@@ -61,6 +61,43 @@ function fixture(target_x: number) {
   return { actor, character, resource, surface, set_mining_state, manager, controller, runtime, set_mining: (value: boolean) => { mining = value } }
 }
 
+describe('Run AR coal obscured by tree-08-red', () => {
+  function ar_fixture() {
+    const f = fixture(0)
+    Object.assign(f.actor, { position: { x: -90.07421875, y: -30.41015625 } })
+    Object.assign(f.resource, { name: 'coal', position: { x: -90.5, y: -30.5 },
+      selection_box: { left_top: { x: -91, y: -31 }, right_bottom: { x: -90, y: -30 } } })
+    const tree = { valid: true, name: 'tree-08-red', unit_number: 92, position: { x: -90.9375, y: -29.625 } }
+    vi.mocked(f.actor.update_selected_entity).mockImplementation(() => { f.character.selected = tree })
+    ;(globalThis as any).prototypes.entity.coal = { type: 'resource' }
+    return { ...f, tree }
+  }
+
+  it('AR coal: all nine native position probes select the tree, exact binding starts the same resource task', () => {
+    const trace = vi.spyOn(globalThis, 'log')
+    const f = ar_fixture()
+    expect(f.controller.submit_mining('coal', 10)).toBe(true)
+    f.runtime.state_mining(f.actor)
+    expect(f.actor.update_selected_entity).toHaveBeenCalledTimes(9)
+    expect(f.character.selected).toBe(f.resource)
+    expect(f.set_mining_state).toHaveBeenCalledWith({ mining: true, position: f.resource.position })
+    expect(f.manager.player_state.task_state).toBe(TaskStates.MINING)
+    expect(f.manager.player_state.parameters_mine_entity?.count).toBe(10)
+    expect(trace).toHaveBeenCalledWith(expect.stringContaining('native_exact_resource_selection'))
+    trace.mockRestore()
+  })
+
+  it.each(['player', 'wrong_surface', 'out_of_reach', 'invalid'] as const)('AR coal exact fallback fences %s', (mode) => {
+    const f = ar_fixture()
+    if (mode === 'player') Object.assign(f.actor, { status_snapshot: () => ({ actor_id: 42, kind: 'player' }) })
+    if (mode === 'wrong_surface') f.resource.surface = { index: 2 } as any
+    if (mode === 'out_of_reach') Object.assign(f.actor, { position: { x: 100, y: 100 } })
+    if (mode === 'invalid') f.resource.valid = false
+    expect(select_exact_mining_target(f.actor, f.resource as any)).toBe(false)
+    expect(f.character.selected).not.toBe(f.resource)
+  })
+})
+
 beforeEach(() => {
   ;(globalThis as any).storage = {}
   ;(globalThis as any).game.tick = 100
@@ -150,7 +187,7 @@ describe('mining reach recovery', () => {
     trace.mockRestore()
   })
 
-  it('never mines a same-name substitute when every bounded resource selection point misses the exact target', () => {
+  it('binds the same exact resource natively when every position probe selects a same-name substitute', () => {
     const f = fixture(2)
     Object.assign(f.resource, { selection_box: { left_top: { x: 1.5, y: -0.5 }, right_bottom: { x: 2.5, y: 0.5 } } })
     const other = { ...f.resource, unit_number: 92 }
@@ -159,11 +196,21 @@ describe('mining reach recovery', () => {
     expect(f.controller.submit_mining('iron-ore', 1)).toBe(true)
     f.runtime.state_mining(f.actor)
     expect(select).toHaveBeenCalledTimes(9)
-    expect(f.set_mining_state).not.toHaveBeenCalledWith(expect.objectContaining({ mining: true }))
+    expect(f.character.selected).toBe(f.resource)
+    expect(f.set_mining_state).toHaveBeenCalledWith({ mining: true, position: f.resource.position })
     for (const [point] of select.mock.calls.slice(1)) {
       expect(point.x).toBeGreaterThan(1.5); expect(point.x).toBeLessThan(2.5)
       expect(point.y).toBeGreaterThan(-0.5); expect(point.y).toBeLessThan(0.5)
     }
+  })
+
+  it('cannot continue a resource task after same-actor surface replacement', () => {
+    const f = fixture(2)
+    expect(f.controller.submit_mining('iron-ore', 1)).toBe(true)
+    f.surface.index = 2
+    f.runtime.state_mining(f.actor)
+    expect(f.controller.status().last_result).toMatchObject({ code: 'actor_changed', completed: false })
+    expect(f.set_mining_state).not.toHaveBeenCalledWith(expect.objectContaining({ mining: true }))
   })
 
   it('temporarily pathfinds closer when the next resource is outside real resource reach', () => {

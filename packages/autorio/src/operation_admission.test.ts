@@ -1,11 +1,47 @@
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { new_operation_admission, pinned_operation_batch_refs } from './operation_admission'
+import { new_operation_admission, pinned_operation_batch_refs, terminal_gather_cancellation } from './operation_admission'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
 const identity = { operation_key: 'request/operation', attempt_id: 'attempt-1', actor_id: 7, epoch: 3, signature: 'hash-1', ordinal: 1, operation_count: 1 }
 const ref = { batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1' }
+
+describe('AR terminal partial gather accounting', () => {
+  function fixture() {
+    let added = 0
+    const receipt = { ...ref, state: 'cancelled', task_count: 4, task_types: ['walking_to_entity', 'mining', 'walking_to_entity', 'mining'],
+      tick: 15306, reason: 'mining:mining_rejected', started_count: 12, tasks_started: 4 }
+    let receipts: any[] = []
+    const status = () => ({ batch_generation: 1, tasks_added: added, receipt_journal: receipts })
+    const admission = new_operation_admission(actor, status)
+    admission.begin({ ...identity, operation_count: 2 })
+    for (let index = 1; index <= 2; index++) {
+      added += 2
+      admission.slot(identity.operation_key, index, { ok: true, operation: 'gather_resource', batch_refs: [ref] })
+    }
+    admission.finish(identity.operation_key, { ok: true })
+    receipts = [receipt]
+    return { admission, receipt, status }
+  }
+  it('closes the exact cancelled multi-slot journal as partial and keeps it partial after restore', () => {
+    const f = fixture()
+    expect(f.admission.status().records[0]).toMatchObject({ state: 'partial', error: 'exact_terminal_gather_cancelled', ok: false })
+    const saved = JSON.parse(JSON.stringify((globalThis as any).storage))
+    ;(globalThis as any).storage = saved
+    expect(f.admission.status().records[0].state).toBe('partial')
+  })
+  it.each(['mixed', 'receipt_mismatch', 'generation', 'extra_tasks'] as const)('leaves %s uncertain', (mode) => {
+    const f = fixture()
+    const record = (globalThis as any).storage.sgluna_operation_admissions[0]
+    if (mode === 'mixed') record.slots[0].operation = 'move_items_exact'
+    if (mode === 'receipt_mismatch') f.receipt.batch_ref = 'batch-g1-9'
+    if (mode === 'generation') record.generation++
+    if (mode === 'extra_tasks') f.receipt.task_count++
+    expect(terminal_gather_cancellation(record, f.status() as any)).toBe(false)
+    expect(f.admission.status().records[0].state).not.toBe('partial')
+  })
+})
 function actor() {
   return { is_valid: true, character: { valid: true }, status_snapshot: () => ({ actor_id: 7 }) } as unknown as ControlledActor
 }
