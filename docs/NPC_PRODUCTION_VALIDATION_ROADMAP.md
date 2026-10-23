@@ -33,6 +33,12 @@ The central rule is:
 
 > **Code presence is not gameplay validation.** A deterministic solver, topology candidate, construction validator, throughput API, or fluid-geometry reader can be correct in isolation while the end-to-end production capability remains unproven.
 
+Every fix discovered by these lanes must also satisfy the
+[E2E repair requirements](E2E_REPAIR_REQUIREMENTS.md): shared harness prevention,
+authoritative detection and bounded harness-owned self-correction when a miss
+occurs. An isolated regression fix or model-managed retry does not complete the
+repair. This requirement does not promote unverified gameplay capability.
+
 ## 1. Current capability baseline
 
 The historical validation state must be represented explicitly instead of inferred from the current codebase.
