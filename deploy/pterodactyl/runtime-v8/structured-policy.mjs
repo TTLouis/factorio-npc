@@ -2,6 +2,7 @@ import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
 import { PLANNER_REVIEW_RATIONALE_MAX_CHARS } from './role-contracts.mjs'
+import { PRODUCTION_TASK_SCHEMA, normalizeProductionIntent } from './production-task.mjs'
 
 export * from '../staging/structured-policy.mjs'
 
@@ -1025,7 +1026,7 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview', 'productionTask'])
   // An executor binds its operations to the committed active step by id; plan and currentStep are then not needed.
   const stepIdGiven = typeof args.stepId === 'string' && args.stepId.trim().length > 0
   check(args.stepId === undefined || stepIdGiven, 'submitPlan.stepId must be the active step id')
@@ -1049,6 +1050,7 @@ export function plannerControlPayloadFromMessage(message) {
     plan,
     currentStep,
     operations: args.operations,
+    ...(args.productionTask !== undefined ? { productionTask: normalizeProductionIntent(args.productionTask) } : {}),
     ...(args.executionGuidance !== undefined ? { executionGuidance: args.executionGuidance } : {}),
     ...(args.plannerReview !== undefined ? { plannerReview: args.plannerReview } : {}),
     ...(stepIdGiven ? { stepId: args.stepId.trim() } : {}),
@@ -1227,6 +1229,7 @@ planningOnly.parameters.properties.executionGuidance = {
 export const planningOnlyProviderToolDefinitions = [...toolDefinitions, ...planningOnlyControlToolDefinitions]
 
 export const executionOnlyControlToolDefinitions = structuredClone(executorControlToolDefinitions)
+executionOnlyControlToolDefinitions[0].function.parameters.properties.productionTask = PRODUCTION_TASK_SCHEMA
 executionOnlyControlToolDefinitions[0].function.parameters.properties.plannerReview = {
   type: 'object', additionalProperties: false, required: ['reason', 'rationale'],
   description: 'Request strategic review with empty operations. This is not world evidence or permission to replace a plan.',

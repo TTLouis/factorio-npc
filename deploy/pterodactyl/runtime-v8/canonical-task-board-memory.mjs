@@ -3,6 +3,7 @@ import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedge
 import { storedExecutionGuidance } from './role-contracts.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { restoreObservationRates } from './observation-rate.mjs'
+import { restoreProductionRecords } from './production-task-runtime.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -2862,6 +2863,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const snapshot = super.snapshot()
     return {
       ...snapshot,
+      production_tasks: [...(this.productionTasks ?? new Map()).entries()],
+      ...(this.productionRestoreFault ? { production_restore_fault: true } : {}),
       targeted_observation_ledger: [...(this.targetedObservationLedger ?? new Map()).entries()].slice(0, 128),
       executor_observation_rates: [...(this.executorObservationRates ?? new Map()).entries()].slice(-128),
       // Executor step-identity corrections spent per goal/plan/step (npc-agent-loop correctExecutorStepIdentity): durable so a
@@ -3004,6 +3007,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         : [],
     )
     super.restore(snapshot)
+    const production = restoreProductionRecords(snapshot?.production_tasks)
+    this.productionTasks = production.records
+    this.productionRestoreFault = production.fault || snapshot?.production_restore_fault === true
     this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)
     this.executorObservationRates = restoreObservationRates(snapshot?.executor_observation_rates)
     this.executorStepIdentityLedger = restoreExecutorStepIdentityLedger(snapshot?.executor_step_identity_ledger)

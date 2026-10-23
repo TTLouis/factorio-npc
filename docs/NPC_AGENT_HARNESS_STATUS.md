@@ -2,6 +2,31 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 23: finite production controller and one-step prediction
+
+The [Run AN repair checkpoint](validation/PRODUCTION_TASK_CONTROLLER_2026-10-23.md)
+adds desired-item quantity compilation, durable material claims/protected checkpoint
+stock, and finite harness-owned production intents. The executor can delegate
+bounded acquisition, hand crafting, exact machine fueling/input, native waits and
+collection. Fresh inventory and exact identities determine each remaining batch;
+queued output is never inventory. Existing admission, receipt and completion gates
+remain authoritative. Proven pre-admission misses and settled native failures can
+recompile automatically within durable limits; uncertain work cannot replay.
+
+One-step contract prediction (P3/P4) is implemented: a single planner side call
+starts after native admission and remains non-executable until the next step
+activates and passes fresh validation. Stale/failed/material-only predictions use
+JIT fallback. It predicts within the current immutable slice; future slices still
+refine the Roadmap Shelf from fresh state. A slice outline is not a complete
+factory plan.
+
+Deterministic Factorio 2.0.77 validation produced two poles with two native craft
+batches, automatically corrected an injected Run AN over-count, and smelted and
+collected two copper plates in separate batches, with zero humans and no external
+inference. This establishes finite production mechanics, not autonomous red-science
+automation. Fluids, multi-output/probabilistic recipes, layout design, machine
+placement/configuration and sustained logistics remain outside this task primitive.
+
 ## October 22: temporary native construction reservations
 
 The [reservation checkpoint](validation/NPC_AREA_RESERVATIONS_2026-10-22.md)
@@ -133,7 +158,7 @@ must not be used to reset current integration.
 ## October 17: Lean fresh topology and placement obstruction context integrated
 
 - **Behavior.** Planner and executor receive a scoped native snapshot capped at 1,950 characters: relevant held stock, fluid/electric connections, conditional prototype capacity ratios and bounded rejected-footprint witnesses from admitted observations. Actor/session/epoch/surface/force changes and pending or intervening mutations invalidate it. Existing plan ownership, admission, observation/recovery limits and the executor's 6,000-character handoff remain intact.
-- **Expansion guidance.** Running vanilla prototypes derive 60 steam/s per fully supplied boiler versus 30/s per engine, so guidance suggests room/access for two compatible engines. This does not add a second engine to the committed task, reserve space or claim actual throughput. Missing/incompatible evidence gives no assumed ratio. Asynchronous next-step prediction remains unbuilt.
+- **Expansion guidance.** Running vanilla prototypes derive 60 steam/s per fully supplied boiler versus 30/s per engine, so guidance suggests room/access for two compatible engines. This does not add a second engine to the committed task, reserve space or claim actual throughput. Missing/incompatible evidence gives no assumed ratio. Asynchronous next-step prediction was unbuilt at this checkpoint; see the October 23 update above.
 - **Proof.** Frozen `f3903af5` passes 2,517 runtime/staging tests, including 33 topology cases. Mod gates pass 1,150 tests, typecheck, Lua build and generated-Lua validation; nine payload tests pass. The native full-loop fixture delivers both actual role serializers, crafts/routes two pipes through normal admission and powers a real inserter at 400 W with both original poles retained. It places exactly one engine and reports a legal connected expansion footprint. All 23 native lanes pass, with final production/fixture rechecks covering shoreline recovery, normal observation and fresh topology. Native source/image mapping and integration results are recorded in the [validation checkpoint](validation/FRESH_TOPOLOGY_CONTEXT_2026-10-17.md).
 - **Integration.** Reviewed no-ff merge `8eadec71`; merged canonical gate passes 2,517 runtime/staging and 1,150 mod tests, typecheck and Lua. Full lint and nine immutable payload tests pass. Publication target is `experiment/jev-agent-architecture`.
 - **Boundary.** Scripted decisions and native mechanics are proven; autonomous red-science throughput remains unproven. The broader E2E goal remains **paused**. No live provider/Jev run or deployment.
@@ -142,7 +167,7 @@ must not be used to reset current integration.
 
 - **Exact boundary.** The captured shoreline has no directly connected engine candidate; its inline footprint crosses water, with additional pole/actor overlap. Pole removal alone is insufficient. A pristine-copy scripted repair crafts two pipes from held iron, clears one natural tree, routes steam inland, places the held engine and crafts/places a real inserter load. Both original poles and the original save remain unchanged.
 - **Proof.** Production structured parsing/rendering and actor/epoch admission, zero humans/artificial power, network-disabled Docker, eight native operations. Three steady samples prove connected boiler/pipes/engine and 400 W supplied to the inserter on a positive shared network. Independent review and 364-file evidence verification passed. This is deterministic mechanics proof, without Session/full-loop autonomous recovery or throughput claims.
-- **Assessment.** Planner had relevant inventory/recipes/research/shoreline reads; executor's final missing-engine claim contradicted delivered inventory. Recommend bounded fresh topology/obstruction facts and planner wake-up summaries. Just-in-time step contracts exist; asynchronous next-step prediction remains unbuilt. Local task branch `test/run-w-saved-layout` only, no production change, provider/Jev calls, goal resume, integration push or deployment. E2E goal remains **paused**. [Replay and audit](validation/RUN_W_SAVED_LAYOUT_REPLAY_2026-10-17.md).
+- **Assessment.** Planner had relevant inventory/recipes/research/shoreline reads; executor's final missing-engine claim contradicted delivered inventory. Recommend bounded fresh topology/obstruction facts and planner wake-up summaries. Just-in-time step contracts exist; asynchronous next-step prediction was unbuilt at this checkpoint; see the October 23 update above. Local task branch `test/run-w-saved-layout` only, no production change, provider/Jev calls, goal resume, integration push or deployment. E2E goal remains **paused**. [Replay and audit](validation/RUN_W_SAVED_LAYOUT_REPLAY_2026-10-17.md).
 
 ## October 16: Run W minimum prompt reaches steam; goal resume limit stops safely
 
@@ -490,12 +515,12 @@ Follows live run F ([checkpoint](validation/LUNA_GREEN_LIVE_RUN_F_2026-10-14.md)
   - A text that names a verified step is refused as `executor_stale_step` with reason `step_text_names_verified_step`.
   - A text-resolved reply is traced as `executor.step_resolved_by_text`, counted by `run-check` as informational.
   - This closes the October 8 open item where a board-index reply paused the goal.
-- **Just-in-time step contracts, P1+P2** (`f111edc9`). Steps after the first are committed with a pending contract and bound by a planner step contract call when they become active. See [the roadmap build status](NPC_PLANNING_ROADMAP.md#one-step-contract-prediction-owner-decision-2026-10-08-p1p2-built-p3p4-not-built).
+- **Just-in-time step contracts, P1+P2** (`f111edc9`). Steps after the first are committed with a pending contract and bound by a planner step contract call when they become active. See [the roadmap build status](NPC_PLANNING_ROADMAP.md#one-step-contract-prediction-owner-decision-2026-10-08-p1p4-implemented-2026-10-23).
   - `run-check` counts deferred and just-in-time contracts and flags `step_contract_unavailable` pauses.
   - The installer payload did not change; the pin check passes.
 - **Gates.** `bash scripts/test-local.sh all` exit 0: 2,066 runtime tests and the mod lane.
 - **Open.**
-  - P3 (prediction lane) and P4 (recorded-reply scenarios) are not built.
+  - P3/P4 were unbuilt at this checkpoint and are implemented in the October 23 update above.
   - The mod's task board parses `contract_kind` but does not render it, so a pending contract is not shown.
   - The next live Haiku run waits for the owner's go.
 
@@ -515,7 +540,7 @@ Follows live run F ([checkpoint](validation/LUNA_GREEN_LIVE_RUN_F_2026-10-14.md)
 - **Gates.** `bash scripts/test-local.sh all` exit 0: 1,974 runtime tests and 120 mod files.
 - **Open.**
   - An executor reply that uses the board's step index instead of `stepId` after a replacement is refused and pauses the goal.
-  - The one-step contract prediction (`docs/NPC_PLANNING_ROADMAP.md`) is designed but not built.
+  - The one-step contract prediction was unbuilt at this checkpoint; see the October 23 update above.
 - **Deterministic control-JSON repair** (`dec23c37`, installer pin `16cc9bcf`).
   - Fixes only stringified arrays, stringified objects, closed-enum strings that were encoded twice, and trailing commas.
   - Runs only after a pure shape failure and before any stateful check. Never on replies with several tool calls.

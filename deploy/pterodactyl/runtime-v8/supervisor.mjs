@@ -3851,7 +3851,10 @@ export class Session {
       return
     }
 
-    if (line.includes('[AUTORIO] All operations completed') && Date.now() - this.lastCompletionAt > 250) {
+    // Distinct native batches can finish less than 250ms apart (finite
+    // production transfers). The loop coalesces exact receipt/batch identity;
+    // wall-clock filtering here could discard the only wake for the next batch.
+    if (line.includes('[AUTORIO] All operations completed')) {
       this.lastCompletionAt = Date.now()
       this.queueEvent(async () => {
         if (!this.agent.active) return

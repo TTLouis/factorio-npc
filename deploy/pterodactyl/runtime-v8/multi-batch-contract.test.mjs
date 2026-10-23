@@ -76,7 +76,8 @@ for (const resend of [true, false]) {
   test(`Run AL exact deferred step-4 contract allows fueling then plate collection in separate batches (checkpoint resent=${resend})`, async () => {
     const w = world({ resend })
     await w.fuel()
-    assert.equal(w.contractCalls(), 1)
+    assert.equal(w.contractCalls(), 1, JSON.stringify(w.events.filter(row => /contract_prediction/.test(row.event))))
+    assert.equal(w.step().contract_binding.binding, 'prediction')
     assert.equal(w.calls(), 4, JSON.stringify(w.events.filter(r => /rejected|refused|failed|recovery|plan.accepted/.test(r.event)).map(r => ({event:r.event,data:r.data}))))
     assert.equal(w.game.mutations.length, 2, 'coal gathering then the exact two-supply batch are admitted')
     assert.match(w.game.mutations[1], /supply_entity',37/)
