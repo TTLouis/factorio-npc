@@ -2,6 +2,18 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 23: Run AO controller liveness repair
+
+The [Run AO repair checkpoint](validation/RUN_AO_CONTROLLER_LIVENESS_2026-10-23.md)
+separates obsolete advisory predictions from fresh activation ownership. A resumed
+activation can author its pending checkpoint JIT; obsolete callbacks and contract
+calls cannot bind, charge, clear or pause replacement work. The supervisor detects
+an unpaused committed step with no owned work, verifies native idle/empty queues
+and persistent-controller status, then reconciles and resumes through the ordinary
+recovery path. Durable limits are two attempts per step and six per goal; uncertain
+effects and exhaustion pause safely. Scripted exact-AO prevention and residual
+recovery pass; this is not a new live gameplay or accelerated-engine validation.
+
 ## October 23: finite production controller and one-step prediction
 
 The [Run AN repair checkpoint](validation/PRODUCTION_TASK_CONTROLLER_2026-10-23.md)

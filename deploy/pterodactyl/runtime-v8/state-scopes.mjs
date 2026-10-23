@@ -234,6 +234,7 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   // --- turn ------------------------------------------------------------------------------------------------------
   turnConversation: f('turn', false, V8, 'attribution of the conversation the running turn last read; null between turns, cleared at restage and planner resume'),
   turnDepth: f('turn', false, V8, 'nested runTurn depth'),
+  controllerBusyCount: f('process', false, V8, 'live owned turn/callback count; finally decrements across request replacement'),
   providerAbort: f('turn', false, ST, 'abort handle of the in-flight provider call (reset() aborts it)'),
   providerCallsInFlight: f('turn', false, V8, 'provider rounds in flight; restageGuardRefusal refuses a restage while it is above zero'),
   providerCallsByGeneration: f('turn', false, V8, 'the same count per loop generation'),

@@ -4,6 +4,7 @@ import { storedExecutionGuidance } from './role-contracts.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { restoreObservationRates } from './observation-rate.mjs'
 import { restoreProductionRecords } from './production-task-runtime.mjs'
+import { restoreControllerRecoveries } from './controller-liveness.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -2864,6 +2865,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return {
       ...snapshot,
       production_tasks: [...(this.productionTasks ?? new Map()).entries()],
+      controller_recoveries: [...(this.controllerRecoveries ?? new Map()).entries()],
+      ...(this.controllerRecoveryFault ? { controller_recovery_fault: true } : {}),
       ...(this.productionRestoreFault ? { production_restore_fault: true } : {}),
       targeted_observation_ledger: [...(this.targetedObservationLedger ?? new Map()).entries()].slice(0, 128),
       executor_observation_rates: [...(this.executorObservationRates ?? new Map()).entries()].slice(-128),
@@ -3007,6 +3010,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         : [],
     )
     super.restore(snapshot)
+    const controller = restoreControllerRecoveries(snapshot?.controller_recoveries)
+    this.controllerRecoveries = controller.records
+    this.controllerRecoveryFault = controller.fault || snapshot?.controller_recovery_fault === true
     const production = restoreProductionRecords(snapshot?.production_tasks)
     this.productionTasks = production.records
     this.productionRestoreFault = production.fault || snapshot?.production_restore_fault === true
