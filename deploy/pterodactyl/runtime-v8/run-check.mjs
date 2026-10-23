@@ -1042,6 +1042,41 @@ const INFORMATIONAL_SIGNATURES = [
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
   {
+    id: 'unpaused_idle_controller',
+    label: 'verified step transition lost its next wake while the goal remained unpaused',
+    detect: (_all, _inScope, rows) => {
+      const end = Math.max(0, ...rows.map(row => toMs(row.ts) ?? 0))
+      return rows.filter(row => (row.event === 'plan.contract_call_failed' && String(row.data?.reason).startsWith('stale_'))
+        || row.event === 'controller.idle_detected').flatMap(row => {
+        const start = toMs(row.ts)
+        if (start === undefined || end - start < 20000) return []
+        const d = row.data ?? {}
+        const goalFor = request => rows.findLast(item => item.request_id === request
+          && (item.data?.goal_id || item.data?.task_board?.goal_id))
+        const goalId = d.goal_id ?? goalFor(row.request_id)?.data?.goal_id ?? goalFor(row.request_id)?.data?.task_board?.goal_id
+        // Cancellation usually precedes the old awaited call returning its
+        // stale result. That obsolete owner is not a stranded live controller.
+        if (rows.some(earlier => earlier.request_id === row.request_id && earlier.event === 'request.cancelled'
+          && (toMs(earlier.ts) ?? Infinity) <= start)) return []
+        const latestGoal = rows.findLast(earlier => earlier.event === 'goal.defined'
+          && (toMs(earlier.ts) ?? Infinity) <= start)?.data?.goal_id
+        if (goalId && latestGoal && latestGoal !== goalId) return []
+        const recovered = rows.some(later => (toMs(later.ts) ?? 0) > start
+          && ((later.event === 'controller.recovery_completed' && later.data?.plan_id === d.plan_id
+            && later.data?.step_id === d.step_id && (!d.goal_id || later.data?.goal_id === d.goal_id))
+            || ((toMs(later.ts) - start <= 20000) && (
+              later.request_id === row.request_id && ['provider.request', 'operations.admit', 'request.cancelled', 'goal.paused'].includes(later.event)
+              || later.event === 'goal.paused' && goalId && later.data?.goal_id === goalId
+              || ['provider.request', 'operations.admit'].includes(later.event) && goalId
+                && (goalFor(later.request_id)?.data?.goal_id ?? goalFor(later.request_id)?.data?.task_board?.goal_id) === goalId
+            ))))
+        if (recovered) return []
+        return [{ request_id: row.request_id, count: 1, first_ts: row.ts,
+          detail: `no verified next wake after ${d.reason ?? 'unpaused idle'} for plan ${d.plan_id ?? 'unknown'} step ${d.step_id ?? 'unknown'}; observed through ${new Date(end).toISOString()}` }]
+      })
+    },
+  },
+  {
     id: 'silent_blocked_stall',
     label: 'request ended with the step blocked and nothing woke the goal again',
     detect: (all, inScope, scopedAll) => detectSilentBlockedStalls(scopedAll),

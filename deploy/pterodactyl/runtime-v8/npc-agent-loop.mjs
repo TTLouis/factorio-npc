@@ -5152,12 +5152,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async runTurnRedriving(generation) {
+    const requestTrace = this.traceRequest
     for (let redrive = 0; ; redrive++) {
       try {
         return await this.runTurn()
       }
       catch (error) {
-        if (error?.code !== STALE_REPLY_ERROR_CODE || generation !== this.generation || !this.active) throw error
+        if (error?.code !== STALE_REPLY_ERROR_CODE || generation !== this.generation || !this.active || this.traceRequest !== requestTrace) throw error
         this.turnConversation = null
         if (redrive >= STALE_REDRIVE_LIMIT) {
           // The request ends here: the normal failure path may pause the goal or reset the loop, so
@@ -5186,7 +5187,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // must not reach admission even after a new turn has started.
   async dropIfStale(attribution) {
     const scope = this.turnScope.getStore()
-    if (scope && (scope.lineage !== this.agentContext.lineageSequence || scope.generation !== this.generation)) {
+    if (scope && (scope.lineage !== this.agentContext.lineageSequence || scope.generation !== this.generation
+      || scope.requestTrace !== undefined && scope.requestTrace !== this.traceRequest)) {
       // The reply's own attribution names the conversation it came from; the scope's role and
       // handoff are those of the turn's first round and go stale after an in-turn restage.
       await this.dropStaleReply({ role: attribution?.role ?? scope.role, handoffId: attribution?.handoffId ?? scope.handoffId }, scope.requestId, 'superseded')
@@ -8567,23 +8569,31 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.stepContractAborts?.clear()
   }
 
-  async runStepContractCall({ key, step, requestId, facts, assumedOutcome, controller, predictionCurrent }) {
+  async runStepContractCall({ key, step, requestId, facts, assumedOutcome, controller, predictionCurrent, activationCurrent }) {
     const usageOwner = this.traceRequest?.usage
+    const callCurrent = async () => !controller.signal.aborted && (!activationCurrent || activationCurrent())
+      && (!predictionCurrent || await predictionCurrent()) && (!activationCurrent || activationCurrent())
     const planning = this.memory.planningState?.(key)
     const packet = buildStepContractPacket({ planningState: planning, stepId: step.step_id, facts, assumedOutcome })
     if (!packet) return { ok: false, reason: 'packet_unavailable', attempts: 0 }
     let status
+    const fence = { lineage: this.agentContext.lineageSequence, generation: this.generation, status: this.epoch }
+    if (!await callCurrent()) return { stale: 'superseded', attempts: 0 }
     try { status = await deploymentStatus(this.rcon, { requireAllowed: true }) }
     catch { return { ok: false, reason: 'actor_status_unreadable', attempts: 0 } }
-    const fence = { lineage: this.agentContext.lineageSequence, generation: this.generation, status }
+    if (!await callCurrent()) return { stale: 'superseded', attempts: 0 }
+    if (fence.status && actorChanged(fence.status, status)) return { stale: 'actor_or_epoch_changed', attempts: 0 }
+    fence.status = status
     // Not assertCurrent(): that resets the loop on a change, and this is a side call that must not touch the turn.
     // { stale } only when the loop, the actor or the epoch really changed. A status read that fails is a transient transport
     // failure, not a stale turn: it is { unreadable }, which fails the call (and pauses) instead of silently dropping it.
     const staleKind = async () => {
       if (controller.signal.aborted) return { stale: 'cancelled' }
+      if (!await callCurrent()) return { stale: 'superseded' }
       if (this.agentContext.lineageSequence !== fence.lineage || this.generation !== fence.generation) return { stale: 'superseded' }
       try {
         const current = await deploymentStatus(this.rcon, { requireAllowed: true })
+        if (!await callCurrent()) return { stale: 'superseded' }
         return actorChanged(fence.status, current) ? { stale: 'actor_or_epoch_changed' } : undefined
       }
       catch { return { unreadable: true } }
@@ -8593,10 +8603,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let attempts = 0
     while (attempts < STEP_CONTRACT_MAX_ATTEMPTS) {
       attempts++
-      if (predictionCurrent && !(await predictionCurrent())) return { stale: 'superseded', attempts }
+      if (!await callCurrent()) return { stale: 'superseded', attempts }
       try { await this.reserve({ epoch: status.epoch, actorId: status.actor_id }) }
       catch (error) { return { ok: false, reason: `provider_budget_unavailable: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}`, attempts } }
-      if (predictionCurrent && !(await predictionCurrent())) return { stale: 'superseded', attempts }
+      if (!await callCurrent()) return { stale: 'superseded', attempts }
       const startedAt = Date.now()
       let reply
       try {
@@ -8644,12 +8654,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (late?.unreadable) return { ok: false, reason: 'actor_status_unreadable', attempts }
           await this.traceEvent('plan.contract_call_attempt', { request_id: requestId, step_id: step.step_id, attempt: attempts, outcome: 'accepted',
             reason: 'checkpoint_valid', latency_ms: Date.now() - startedAt, repairs: parsed.repairs.length, usage }, { requestId })
+          if (!await callCurrent()) return { stale: 'superseded', attempts }
           return { ok: true, contract: validation.contract, attempts, repairs: parsed.repairs }
         }
         reason = `deterministic_checkpoint_rejected: ${validation.reason}${validation.requirement_id ? ` (requirement ${validation.requirement_id})` : ''}`
       }
       await this.traceEvent('plan.contract_call_attempt', { request_id: requestId, step_id: step.step_id, attempt: attempts, outcome: 'rejected',
         reason: cleanMemoryText(reason, 300), latency_ms: Date.now() - startedAt, usage }, { requestId })
+      if (!await callCurrent()) return { stale: 'superseded', attempts }
       if (attempts >= STEP_CONTRACT_MAX_ATTEMPTS) return { ok: false, reason, attempts }
       // The correction is part of this side exchange and never reaches the planner or executor conversation.
       messages = [...base, { role: 'assistant', content }, { role: 'user', content: stepContractCorrectionMessage(reason) }]
@@ -8676,30 +8688,62 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status) || !isStepContractPending(step)
       || plan.execution?.step_progress?.[step.step_id]?.status === 'completed') return { ok: true, skipped: true }
     this.stepContractsInFlight ??= new Map()
-    const flightKey = `${plan.plan_id}/${step.step_id}`
+    const flightKey = JSON.stringify([plan.goal_id, plan.plan_id, plan.plan_version, step.step_id])
+    const owner = this.captureCheckpointOwner()
     const held = this.stepContractsInFlight.get(flightKey)
-    if (held) return held
-    const flight = this.bindActiveStepContract({ key, plan, step, trigger, closedStepId, closedBy })
-    this.stepContractsInFlight.set(flightKey, flight)
-    try { return await flight }
-    finally { this.stepContractsInFlight.delete(flightKey) }
+    if (held && this.checkpointOwnerCurrent(held.owner)) return held.flight
+    const entry = { owner, flight: this.bindActiveStepContract({ key, plan, step, trigger, closedStepId, closedBy, owner }) }
+    this.stepContractsInFlight.set(flightKey, entry)
+    try { return await entry.flight }
+    finally { if (this.stepContractsInFlight.get(flightKey) === entry) this.stepContractsInFlight.delete(flightKey) }
   }
 
-  async bindActiveStepContract({ key, plan, step, trigger, closedStepId, closedBy }) {
-    const owner = this.captureCheckpointOwner()
+  async bindActiveStepContract({ key, plan, step, trigger, closedStepId, closedBy, owner = this.captureCheckpointOwner() }) {
     const requestId = this.traceRequest?.id ?? `step_contract_${Date.now().toString(36)}`
     const base = { request_id: requestId, plan_id: plan.plan_id, step_id: step.step_id }
     await this.traceEvent('plan.contract_requested', { ...base, trigger, reason: 'step_active_without_contract', closed_step_id: closedStepId, closed_by: closedBy }, { requestId })
+    await this.assertCheckpointOwnerCurrent(owner)
     const failed = async (reason, attempts) => {
+      this.assertCheckpointOwnerIdentity(owner)
       await this.traceEvent('plan.contract_call_failed', { ...base, trigger, reason: cleanMemoryText(reason, 300), attempts }, { requestId })
-      return { ok: false, failure: { reason, attempts, ...base } }
+      this.assertCheckpointOwnerIdentity(owner)
+      return { ok: false, failure: { reason, attempts, ...base, owner } }
     }
     let outcome
+    const advisory = this.contractPrediction
     try {
       outcome = await takeContractPrediction(this, { plan, step, closedStepId, closedBy })
-      outcome ??= await this.requestStepContract({ key, step, requestId, facts: await this.gatherStepContractFacts() })
+      // A prediction owns its old request; activation owns THIS callback. An old
+      // advisory result cannot cancel a fresh auto-resumed activation (Run AO).
+      await this.assertCheckpointOwnerCurrent(owner)
+      if (outcome?.stale) {
+        // A mere trace swap or in-place plan-version edit is not a new owned
+        // activation. Only an actual new request lineage can inherit this
+        // same committed intent after interruption; ordinary stale callbacks
+        // retain their existing cancellation fence.
+        if (!advisory || advisory.goalId !== owner.goalId || advisory.planId !== owner.planId
+          || advisory.planVersion !== owner.planVersion || advisory.stepId !== owner.stepId
+          || advisory.requestTrace === owner.requestTrace
+          || advisory.generation === owner.generation && advisory.lineage === owner.lineage) {
+          const error = new AgentLoopError(STALE_REPLY_MESSAGE)
+          error.code = STALE_REPLY_ERROR_CODE
+          error.staleKind = 'superseded'
+          throw error
+        }
+        await this.traceEvent('plan.contract_prediction_fallback', { ...base, trigger, reason: outcome.stale,
+          disposition: 'fresh_activation_uses_just_in_time' }, { requestId })
+        await this.assertCheckpointOwnerCurrent(owner)
+        outcome = undefined
+      }
+      if (outcome === undefined) {
+        const facts = await this.gatherStepContractFacts()
+        await this.assertCheckpointOwnerCurrent(owner)
+        outcome = await this.requestStepContract({ key, step, requestId, facts, activationCurrent: () => this.checkpointOwnerCurrent(owner) })
+      }
     }
     catch (error) {
+      if (error?.code === STALE_REPLY_ERROR_CODE) throw error
+      this.assertCheckpointOwnerIdentity(owner)
       outcome = { ok: false, reason: `step_contract_call_error: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 200)}`, attempts: 0 }
     }
     if (outcome.stale) {
@@ -8732,13 +8776,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async pauseForStepContract(failure) {
     const detail = cleanMemoryText(failure?.reason, 200)
     const chatMessage = `I paused this goal: I could not get a valid completion checkpoint for the next step (${detail}), so I stopped instead of guessing. ${RESUME_HINT}`
-    const state = await this.pausePersistentPlan('step_contract_unavailable', { pause_class: PAUSE_CLASS.GUARD })
+    const state = await this.pausePersistentPlan('step_contract_unavailable', { pause_class: PAUSE_CLASS.GUARD }, failure?.owner)
+    const pausedOwner = this.captureCheckpointOwner()
     if (this.traceRequest) {
       await this.traceEvent('request.completed', {
         chat_message: chatMessage,
         outcome: 'paused_step_contract_unavailable',
         usage: this.traceRequest?.usage,
       })
+      this.assertCheckpointOwnerIdentity(pausedOwner)
       this.traceRequest = null
     }
     return {
@@ -8771,6 +8817,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && current.goalId === owner.goalId && current.planId === owner.planId && current.planVersion === owner.planVersion
       && current.stepIndex === (advanced ? Math.min(owner.stepIndex + 1, owner.lastIndex) : owner.stepIndex)
       && plan?.steps?.[owner.stepIndex]?.step_id === owner.stepId
+  }
+
+  assertCheckpointOwnerIdentity(owner, options) {
+    if (this.checkpointOwnerCurrent(owner, options)) return
+    const error = new AgentLoopError(STALE_REPLY_MESSAGE)
+    error.code = STALE_REPLY_ERROR_CODE
+    throw error
   }
 
   async assertCheckpointOwnerCurrent(owner, options) {
@@ -10070,13 +10123,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // An idle receipt settles a batch only when its effect is proven complete or absent. Cancellation may leave a partial
   // effect, and an acknowledgement before a mod reload cannot establish what survived: both keep the duplicate guard.
-  async settleOutstandingOperation(rawStatus, operationKey, { actor: capturedActor, requestId } = {}) {
+  async settleOutstandingOperation(rawStatus, operationKey, { actor: capturedActor, requestId, receiptOwner } = {}) {
     try {
       if (typeof this.memory.pendingOperation !== 'function') return
+      if (receiptOwner) this.assertCheckpointOwnerIdentity(receiptOwner)
       const key = this.activePlanKey()
       const records = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation(key)].filter(Boolean)
       if (!operationKey && records.length > 1) {
-        for (const record of records) await this.settleOutstandingOperation(rawStatus, record.operation_key, { actor: capturedActor, requestId })
+        for (const record of records) await this.settleOutstandingOperation(rawStatus, record.operation_key, { actor: capturedActor, requestId, receiptOwner })
         return
       }
       const pending = operationKey ? records.find(record => record.operation_key === operationKey) : records.at(-1)
@@ -10089,6 +10143,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // Unlike historical full completion, partial recovery needs the live
         // actor fence even when the last basic-operation result is absent.
         const current = await super.captureEpoch()
+        if (receiptOwner) this.assertCheckpointOwnerIdentity(receiptOwner)
         actor = { actor_id: current.actor_id, epoch: current.epoch }
         result = reconcilePendingOperation(pending, { status: rawStatus, actor })
       }
@@ -10129,6 +10184,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }, { requestId: rid })
       }
       if (provable) {
+        if (receiptOwner) this.assertCheckpointOwnerIdentity(receiptOwner)
         if (!settled) {
           await this.traceEvent('operation.settlement_refused', { request_id: rid, operation_key: pending.operation_key,
             reason: 'exact_settlement_refused', verdict: result.verdict }, { requestId: rid })
@@ -10137,6 +10193,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await this.persistState()
       }
       else {
+        if (receiptOwner) this.assertCheckpointOwnerIdentity(receiptOwner)
         this.memory.updatePendingOperation?.(key, {
           state: result.verdict === RECONCILE_VERDICT.ADMITTED_CANCELLED ? PENDING_STATE.ADMITTED : PENDING_STATE.UNRECONCILED,
           effect: result.effect,
@@ -10149,6 +10206,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     catch (error) {
+      if (error?.code === STALE_REPLY_ERROR_CODE) throw error
       this.log(`[reconcile] settle failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -10653,11 +10711,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
   async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}, expectedOwner) {
     await this.loadPersistentState()
-    if (expectedOwner) await this.assertCheckpointOwnerCurrent(expectedOwner)
+    // A fail-closed pause must remain possible when native reads fail. It grants
+    // no execution authority; local request/goal/step identity fences its writes.
+    if (expectedOwner) this.assertCheckpointOwnerIdentity(expectedOwner)
     const key = expectedOwner?.key ?? this.activePlanKey()
     const state = this.memory.pausePlan?.(key, reason, pauseInfo)
     await this.persistState()
-    if (expectedOwner) await this.assertCheckpointOwnerCurrent(expectedOwner)
+    if (expectedOwner) this.assertCheckpointOwnerIdentity(expectedOwner)
     // Outside a request (the supervisor pausing a plan a failed request left
     // stranded, or a user stop) no terminal event follows, so name the pause
     // here, keyed by the request that just ended. Inside a request the
@@ -11336,11 +11396,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // The turn marks the conversation it reads (turnConversation) for as long as it runs; see restageContext.
   async runGuarded() {
+    this.controllerBusyCount = (this.controllerBusyCount ?? 0) + 1
+    const controllerOwner = decisionBudgetOwner(this)
+    const requestTrace = this.traceRequest
     try {
       return await this.runGuardedTurn()
     }
     finally {
-      this.turnConversation = null
+      if (ownsDecisionBudgets(this, controllerOwner) && this.traceRequest === requestTrace) this.turnConversation = null
+      this.controllerBusyCount--
     }
   }
 
@@ -11381,6 +11445,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       role: this.agentContext.role,
       handoffId: this.agentContext.handoffId,
       requestId: this.traceRequest?.id,
+      requestTrace: this.traceRequest,
     }
   }
 
@@ -11566,12 +11631,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async taskStatusReceipt() {
+    await this.dropIfStale(this.turnConversation)
+    const owner = this.captureCheckpointOwner()
     this.noteWorldMutation() // D2: a batch receipt is being read; whatever was observed before it is history
     this.receiptPrefixSettlement = undefined
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
+      this.assertCheckpointOwnerIdentity(owner)
       // Retain admission identity before normal settlement can clear a proved
       // refusal. This witness permits recovery classification, never replay or
       // settlement of the original batch's possibly partial effects.
@@ -11585,6 +11653,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         || (basic.code === 'nothing_moved' && basic.to_entity === true))
       const currentActor = recoveryCandidate
         ? await super.captureEpoch() : undefined
+      this.assertCheckpointOwnerIdentity(owner)
       const admitted = recoveryCandidate
         && basic.accepted === false && basic.completed === false && cancelled && outstanding.find(pending => {
         if (pending.protocol_version !== 2 || pending.actor?.actor_id !== this.epoch?.actor_id
@@ -11604,7 +11673,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           && (basic.tick === cancelled.tick || basic.tick === row.tick))) return false
         return [RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, RECONCILE_VERDICT.ADMITTED_PARTIAL].includes(result.verdict)
       })
-      await this.settleOutstandingOperation(raw, undefined, { actor: currentActor })
+      await this.settleOutstandingOperation(raw, undefined, { actor: currentActor, receiptOwner: owner })
+      this.assertCheckpointOwnerIdentity(owner)
       this.recordPlacementReceipt(raw)
       const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
       const evidence = receiptEvidence(raw, this.planUpdateReason === 'failure' ? 'failed' : 'completed', {
@@ -11625,6 +11695,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // since been superseded. Without a stamp the receipt binds as before.
       const taskBoard = this.memory.recordBoardEvidence?.(this.activePlanKey(), admission ? { ...evidence, ...admission } : evidence)
       if (taskBoard) await this.persistState()
+      this.assertCheckpointOwnerIdentity(owner)
       const view = taskStatusDecisionView(raw)
       // The diff is relative to the receipt this conversation last showed;
       // lastTaskStatusView stays the request's latest world receipt.
@@ -11639,23 +11710,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         raw_chars: raw.length,
         task_status: providerStatus,
       })
+      this.assertCheckpointOwnerIdentity(owner)
       return { raw, view, providerStatus, taskBoard: visibleTaskBoard(taskBoard) }
     }
     catch (error) {
+      if (error?.code === STALE_REPLY_ERROR_CODE) throw error
+      this.assertCheckpointOwnerIdentity(owner)
       const message = error instanceof Error ? error.message : String(error)
       const view = { status_error: message }
       const providerStatus = taskStatusDelta(this.taskStatusDiffBaseline, view)
       this.lastTaskStatusView = view
       this.taskStatusDiffBaseline = view
       await this.traceEvent('factorio.status_error', { message })
+      this.assertCheckpointOwnerIdentity(owner)
       return { raw: JSON.stringify(view), view, providerStatus }
     }
   }
 
-  async persistentRuntimeStatus() {
+  async persistentRuntimeStatus({ strict = false } = {}) {
     try {
       const raw = String(await this.rcon.command(toolCommand('getFollowStatus', {}))).slice(0, 8_000_000)
       const follow = JSON.parse(raw)
+      if (strict && (!follow || typeof follow !== 'object' || typeof follow.active !== 'boolean')) {
+        throw new AgentLoopError('Persistent controller status is unreadable')
+      }
       if (!follow || follow.active !== true) return undefined
       const status = safePersistentRuntime({ kind: 'follow', ...follow })
       await this.traceEvent('persistent_runtime.status', { runtime: status })
@@ -11663,6 +11741,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     catch (error) {
       await this.traceEvent('persistent_runtime.status_error', { message: error instanceof Error ? error.message : String(error) })
+      if (strict) throw error
       return undefined
     }
   }
@@ -12006,12 +12085,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async completed() {
+    return this.withControllerWork(() => this.completeRuntimeReceipt())
+  }
+
+  async withControllerWork(fn) {
+    this.controllerBusyCount = (this.controllerBusyCount ?? 0) + 1
+    try { return await this.turnScope.run(this.currentTurnScope(), fn) }
+    finally { this.controllerBusyCount-- }
+  }
+
+  async completeRuntimeReceipt() {
     await this.loadPersistentState()
+    await this.dropIfStale(this.turnConversation)
     if (!this.active) return null
     const pendingAmendment = this.currentPendingAmendment()
     this.planUpdateReason = pendingAmendment ? 'amend_current' : 'completion'
     if (pendingAmendment) this.requestLifecycle = 'amend_current'
     await this.traceEvent('factorio.completed_signal', pendingAmendment ? { pending_amendment: true } : {})
+    await this.dropIfStale(this.turnConversation)
     const receipt = await this.taskStatusReceipt()
     const receiptKey = runtimeReceiptKey('completion', receipt.view, '', this.epoch?.epoch)
     if (this.lastHandledRuntimeReceipt.completion === receiptKey) {
@@ -12147,10 +12238,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async failed(errorText) {
+    return this.withControllerWork(() => this.failRuntimeReceipt(errorText))
+  }
+
+  async failRuntimeReceipt(errorText) {
     await this.loadPersistentState()
+    await this.dropIfStale(this.turnConversation)
     if (!this.active) return null
     await discardContractPrediction(this, 'native_step_failed')
+    await this.dropIfStale(this.turnConversation)
     await this.jev?.noteFailureBoundary() // U11: a C4 judgment whose step now fails did not verify on its first batch (scored now, whatever the request does next)
+    await this.dropIfStale(this.turnConversation)
     this.planUpdateReason = 'failure'
     this.reasoningTriggerSource = null
     const cleanError = cleanMemoryText(errorText, 4000)

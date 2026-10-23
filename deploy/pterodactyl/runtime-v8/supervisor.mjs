@@ -1,4 +1,5 @@
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
+import { inspectControllerLiveness } from './controller-liveness.mjs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -1962,11 +1963,12 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   // Startup has no optional token. Fence the first await too; only our own
   // synchronous cancel below may intentionally advance this identity.
   let owner = decisionBudgetOwner(agent)
+  let traceOwner = agent.traceRequest
   let state
   const key = `npc:${agent.npcId ?? 'sgluna'}`
   const interrupted = () => options.isCancelled?.()
     ? { recovered: false, reason: 'cancelled_after_fire', state }
-    : !ownsDecisionBudgets(agent, owner)
+    : !ownsDecisionBudgets(agent, owner) || agent.traceRequest !== traceOwner
       ? { recovered: false, reason: 'decision_owner_superseded', state: agent.memory?.currentPlan?.(key) ?? state }
       : undefined
   const cancelled = async (stopped, stage) => {
@@ -2010,10 +2012,14 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   }
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
+  traceOwner = agent.traceRequest
   const decisionBudgetScope = captureDecisionBudgets(agent, { requestId: recoveryRequestId })
   owner = decisionBudgetScope
   try {
     const epoch = await agent.captureEpoch()
+    if (options.expectedActor && (epoch.actor_id !== options.expectedActor.actor_id || epoch.epoch !== options.expectedActor.epoch)) {
+      return cancelled({ recovered: false, reason: 'actor_or_epoch_changed', state }, 'preparation_actor')
+    }
     stopped = interrupted()
     if (stopped) return cancelled(stopped, 'preparation')
     // MW2b: before anything is issued again, reconcile any batch that was sent but never settled (a restart, an actor replacement
@@ -2105,6 +2111,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
       agent.continuations = 1
       if (typeof agent.traceEvent === 'function') {
         agent.traceRequest = { id: recoveryRequestId, seq: 0 }
+        traceOwner = agent.traceRequest
         await agent.traceEvent('runtime.recovery_started', { reason, details, boundary: 'plan_slice' })
       }
       stopped = interrupted()
@@ -2137,6 +2144,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     agent.continuations = 1
     if (typeof agent.traceEvent === 'function') {
       agent.traceRequest = { id: recoveryRequestId, seq: 0 }
+      traceOwner = agent.traceRequest
       await agent.traceEvent('runtime.recovery_started', { reason, details })
       stopped = interrupted()
       if (stopped) return cancelled(stopped, 'recovery_trace')
@@ -2289,6 +2297,9 @@ export class Session {
   }
 
   onAgentActivity(event, data) {
+    if (['operations.ack', 'step.verified', 'step.semantic_completed'].includes(event)) {
+      this.controllerProgressSequence = (this.controllerProgressSequence ?? 0) + 1
+    }
     if (event === 'goal.defined') this.announceGoalUnderstanding(data)
     if (event === 'budget.goal_warning') this.announceGoalBudgetWarning(data)
     if (event === 'amendment.dropped') this.announceAmendmentDropped(data)
@@ -3238,6 +3249,9 @@ export class Session {
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.log(`Interrupted plan recovery failed after ${reason}: ${message}`)
+      // A superseded recovery has no authority to pause or reschedule its
+      // replacement. Its own cancellation is already a terminal disposition.
+      if (options.isCancelled?.() || expectedCancellation(error) || error?.code === 'stale_handoff_reply') return null
       if (this.agent.goalAwaitingNextSlice?.() === true) {
         // Nothing is executing between slices, so there is nothing to pause.
         if (transientProviderFailure(error)) {
@@ -3429,6 +3443,16 @@ export class Session {
     return true
   }
 
+  pollControllerLiveness() {
+    if (!this.agent || !this.ready || this.stopping || this.controllerProbeQueued) return false
+    this.controllerProbeQueued = true
+    this.queueEvent(async () => {
+      try { return await inspectControllerLiveness(this) }
+      finally { this.controllerProbeQueued = false }
+    })
+    return true
+  }
+
   async applyNavigationObstaclePolicy(text) {
     if (!this.rcon) return
     const policy = navigationObstaclePolicy(text)
@@ -3541,6 +3565,7 @@ export class Session {
     this.poll = setInterval(() => {
       if (this.stopping) return
       if (this.pollRuntimeCondition()) return
+      this.pollControllerLiveness()
       this.ensureAuthorization().catch(error => this.log(`NPC authorization health check failed: ${error.message}`))
     }, 2000)
     this.queueStartupRecovery(this.currentPlanState())
@@ -3633,7 +3658,11 @@ export class Session {
         return this.queueEvent(fn, { reportError })
       })
     }
-    this.eventQueue = this.eventQueue.then(fn).catch(async error => {
+    this.controllerQueuedEvents = (this.controllerQueuedEvents ?? 0) + 1
+    this.eventQueue = this.eventQueue.then(async () => {
+      this.controllerQueuedEvents--
+      return fn()
+    }).catch(async error => {
       const message = error instanceof Error ? error.message : String(error)
       this.log(message)
       if (reportError && !expectedCancellation(error) && this.agent) {
