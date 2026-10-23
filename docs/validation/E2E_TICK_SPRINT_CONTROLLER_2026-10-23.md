@@ -69,3 +69,18 @@ on restage. Child input forwarding resumes after same-Session engine restart.
 Exact AP fixture and actual Session native scenarios cover these paths without
 providers/Jev. Final startup gates:3258 runtime/1366 mod, type/Lua/generated-Lua,
 changed lint/shell syntax pass; native12 actual-Session prevention/residual continuation/exhaustion PASS; independent reviewer found no remaining blocking source gap.
+
+AQ preflight checkpoint: no trial/goal/inference began. A fresh achievements-
+enabled world refused the first Lua command. The prior native saved-world gate
+missed this. Shared fixed read-only console confirmation now precedes all native
+startup mutations and repeats at most once for the exact empty/known confirmation
+reply. Unknown replies fail closed. Native14 creates a genuinely fresh world and
+asserts first/reloaded confirmation attempts[2,1], then passes quiet clock,
+residual correction and durable exhaustion scenarios with zero inference. Native13
+hit the existing tick-cap proof deadline while heavy static tests co-ran; its
+failure remains retained, no limit/assertion was relaxed. Native14 ran without
+concurrent heavy gates. The final log adds a reason field after native14; its
+correlated trace is asserted by the actual Session fixture. Full merged gates,
+payload pin and fresh AR freeze remain required. AQ preflight is sealed/cleaned;
+RED_AUTOMATION_PREFLIGHT_AQ_2026-10-23.md records its limits. The owner-authorized
+fresh goal trial remains unspent and will use distinct Run AR evidence.
