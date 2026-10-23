@@ -10,6 +10,7 @@ export interface OperationCorrelation {
   signature: string
   ordinal: number
   operation_count: number
+  surface_index?: number
 }
 export interface AdmissionSlot {
   index: number
@@ -219,6 +220,11 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.ok = false
     record.error = 'exact_terminal_transfer_refusal'
   }
+  else if (admission_unresolved(record) && terminal_gather_cancellation(record, status)) {
+    record.state = 'partial'
+    record.ok = false
+    record.error = 'exact_terminal_gather_cancelled'
+  }
   else if (admission_unresolved(record) && (record.generation !== status.batch_generation || refs.some(ref => {
     const receipt = receipt_for(ref)
     return receipt !== undefined && receipt.state !== 'completed'
@@ -227,6 +233,30 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.error = 'batch_reconciliation_required'
   }
   return record
+}
+
+// A cancelled gather-only batch has no hidden delivery/crafting/building tail.
+// It may have mined a partial amount. This closes its native admission only;
+// fresh inventory and the unchanged checkpoint still own demand and recovery.
+export function terminal_gather_cancellation(record: OperationAdmission, status: { receipt_journal: TaskBatchReceipt[], batch_generation: number }) {
+  if (record.generation !== status.batch_generation || record.slots.length !== record.operation_count || !record.slots.length) return false
+  const ref = record.slots[0]?.batch_refs[0]
+  if (!ref || !integer(ref.batch_id) || ref.batch_generation !== record.generation || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return false
+  const types: string[] = []
+  for (let index = 0; index < record.slots.length; index++) {
+    const slot = record.slots[index]
+    if (!slot.ok || slot.index !== index + 1 || !['gather_resource', 'mine_resource_at'].includes(slot.operation ?? '')
+      || slot.batch_refs.length !== 1 || slot.batch_refs[0].batch_id !== ref.batch_id
+      || slot.batch_refs[0].batch_generation !== ref.batch_generation || slot.batch_refs[0].batch_ref !== ref.batch_ref) return false
+    if (slot.operation === 'gather_resource') types.push('walking_to_entity')
+    types.push('mining')
+    if (slot.queued_tasks !== (slot.operation === 'gather_resource' ? 2 : 1)) return false
+  }
+  const receipt = status.receipt_journal.find(row => row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation && row.batch_ref === ref.batch_ref)
+  return receipt?.state === 'cancelled' && receipt.task_count === types.length && receipt.task_types.length === types.length
+    && receipt.task_types.every((type, index) => type === types[index]) && receipt.tick >= record.tick
+    && (receipt.reason === 'mining:mining_rejected' || receipt.reason === 'mining:no_target')
+    && receipt.outcome === undefined && !receipt.refused_count && !(receipt.refusals?.length)
 }
 function trim_history() {
   const records = journal()
@@ -262,7 +292,7 @@ export function new_operation_admission(
         log(`[AUTORIO] operation.admission.refused request_id=${record.operation_key.split('/')[0]} operation_key=${record.operation_key} reason=engine_refused_first_task`)
       }
       if (persist && derived.state === 'partial' && record.state !== 'partial') {
-        log(`[AUTORIO] operation.admission.partial request_id=${record.operation_key.split('/')[0]} operation_key=${record.operation_key} reason=exact_terminal_transfer_refusal`)
+        log(`[AUTORIO] operation.admission.partial request_id=${record.operation_key.split('/')[0]} operation_key=${record.operation_key} reason=${derived.error}`)
       }
       Object.assign(record, derived)
     }
@@ -272,6 +302,7 @@ export function new_operation_admission(
   function begin(raw: OperationCorrelation) {
     if (!correlation(raw)) return { ok: false, error: 'invalid_correlation' }
     if (!authorized(raw)) return { ok: false, error: 'stale_actor_epoch' }
+    if (raw.surface_index !== undefined && (!integer(raw.surface_index) || actor_provider()?.surface.index !== raw.surface_index)) return { ok: false, error: 'stale_actor_surface' }
     refresh()
     const previous = find(raw.operation_key)
     if (previous) {
@@ -286,6 +317,7 @@ export function new_operation_admission(
     const record: OperationAdmission = {
       operation_key: raw.operation_key, attempt_id: raw.attempt_id, actor_id: raw.actor_id, epoch: raw.epoch, signature: raw.signature,
       ordinal: raw.ordinal, operation_count: raw.operation_count,
+      ...(raw.surface_index !== undefined ? { surface_index: raw.surface_index } : {}),
       state: 'admitting', generation: task_status().batch_generation, tick: game.tick, slots: [],
       work_mark: task_status().tasks_added,
     }

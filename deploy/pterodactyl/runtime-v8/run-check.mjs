@@ -834,6 +834,19 @@ function detectSilentBlockedStalls(scopedRows) {
   }))
 }
 
+function detectUnrecoveredGather(rows) {
+      const unresolved = new Map()
+      for (const row of rows) {
+        const d = row.data ?? {}
+        if (row.event === 'operation.reconciled' && d.verdict === 'admitted_cancelled' && d.effect === 'partial_unknown'
+          && d.operations?.length && d.operations.every(name => ['gather_resource', 'mine_resource_at'].includes(name))) unresolved.set(d.operation_key, row)
+        if (row.event === 'gather.residual_detected') unresolved.set(d.operation_key, row)
+        if (row.event === 'gather.recovery_continued' || row.event === 'gather.reconciled' && d.disposition === 'ordinary_checkpoint_validation') unresolved.delete(d.operation_key)
+      }
+      const match = [...unresolved.values()][0]
+      return match ? [{ first_ts: match.ts, request_id: match.request_id, detail: match.data?.operation_key ?? 'partial_gather', count: unresolved.size }] : []
+}
+
 const SIGNATURES = [
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
@@ -1041,6 +1054,8 @@ const INFORMATIONAL_SIGNATURES = [
 
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
+  { id: 'gather_partial_unrecovered', label: 'terminal partial gathering did not reach a bounded harness continuation',
+    detect: (all, inScope) => detectUnrecoveredGather(inScope) },
   {
     id: 'unpaused_idle_controller',
     label: 'verified step transition lost its next wake while the goal remained unpaused',

@@ -446,9 +446,24 @@ function operation_preflight(name: string, args: Record<string, any>) {
     }
     if (typeof count !== 'number' || count !== math.floor(count) || count < 1 || count === math.huge) return reject('invalid_resource_count')
     const source = find_world_entities(actor.surface, { position: { x, y }, radius: 0.25, name: resource_name, type: 'resource', limit: 1 })[0]
-    if (!source || !source.valid || !(source.amount > 0)) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, position: { x, y } })
+    const nearby_correction = () => {
+      const radius = 5
+      const sources = find_world_entities(actor.surface, { position: { x, y }, radius, name: resource_name, type: 'resource', limit: 128 })
+        .filter(entity => entity.valid && entity.type === 'resource' && entity.name === resource_name
+          && entity.surface.index === actor.surface.index && entity.amount >= count
+          && (entity.position.x - x) ** 2 + (entity.position.y - y) ** 2 <= radius ** 2)
+      sources.sort((a, b) => {
+        const da = (a.position.x - x) ** 2 + (a.position.y - y) ** 2
+        const db = (b.position.x - x) ** 2 + (b.position.y - y) ** 2
+        return da - db || a.position.x - b.position.x || a.position.y - b.position.y
+      })
+      const candidate = sources[0]
+      return candidate !== undefined ? { resource_name, position: candidate.position, origin: { x, y }, radius,
+        surface_index: actor.surface.index, amount: candidate.amount } : undefined
+    }
+    if (!source || !source.valid || !(source.amount > 0)) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, position: { x, y }, resource_correction: nearby_correction() })
     const resource_target = { position: source.position, amount: source.amount, requested_count: count, infinite: prototype.infinite_resource === true }
-    if (!resource_target.infinite && count > source.amount) return reject('resource_source_insufficient', { field: 'resource_name', identity: resource_name, resource_target })
+    if (!resource_target.infinite && count > source.amount) return reject('resource_source_insufficient', { field: 'resource_name', identity: resource_name, resource_target, resource_correction: nearby_correction() })
     return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type, resource_target })
   }
 

@@ -1,4 +1,5 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
+import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
@@ -2031,11 +2032,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   /** Would these operations repeat an effect that may already have happened? Traces `operation.duplicate_suppressed` when so. */
-  checkDuplicateEffect(key, { operations } = {}, { requestId } = {}) {
+  checkDuplicateEffect(key, { operations, gatherRecoveryKey } = {}, { requestId } = {}) {
     const planning = this.planningState(key)
     const plan = getActivePlan(planning)
     const step = plan?.steps?.[plan.active_step_index]
-    const guard = conflictingOperation(planning, { operations, planId: plan?.plan_id, stepId: step?.step_id })
+    const guard = conflictingOperation(planning, { operations, gatherRecoveryKey, planId: plan?.plan_id, stepId: step?.step_id })
     if (guard.refuse) {
       const pending = this.pendingOperations(key).find(record => record.operation_key === guard.operation_key)
       this.#authTrace('operation.duplicate_suppressed', {
@@ -2865,6 +2866,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return {
       ...snapshot,
       production_tasks: [...(this.productionTasks ?? new Map()).entries()],
+      gather_recoveries: [...(this.gatherRecoveries ?? new Map()).entries()],
+      ...(this.gatherRecoveryFault ? { gather_recovery_fault: true } : {}),
       controller_recoveries: [...(this.controllerRecoveries ?? new Map()).entries()],
       ...(this.controllerRecoveryFault ? { controller_recovery_fault: true } : {}),
       ...(this.productionRestoreFault ? { production_restore_fault: true } : {}),
@@ -3014,6 +3017,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.controllerRecoveries = controller.records
     this.controllerRecoveryFault = controller.fault || snapshot?.controller_recovery_fault === true
     const production = restoreProductionRecords(snapshot?.production_tasks)
+    const gather = restoreGatherRecoveries(snapshot?.gather_recoveries)
+    this.gatherRecoveries = gather.records
+    this.gatherRecoveryFault = gather.fault || snapshot?.gather_recovery_fault === true
     this.productionTasks = production.records
     this.productionRestoreFault = production.fault || snapshot?.production_restore_fault === true
     this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)

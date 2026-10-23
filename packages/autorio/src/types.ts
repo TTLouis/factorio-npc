@@ -68,6 +68,7 @@ export interface PlayerParametersWalkingDirect {
 
 export interface PlayerParametersMineEntity {
   type: TaskStates.MINING
+  owner_surface_index?: number
   operation_id?: number
   owner_actor_id?: number
   owner_actor_kind?: string

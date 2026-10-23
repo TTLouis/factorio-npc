@@ -38,7 +38,7 @@ function notSent(error) {
 // Mod admission begin() refusals: each is returned before any journal record or operation exists.
 // The wrapper prefixes them (admission_begin_refused:) so finish() or slot() errors with the same code are never mistaken for them.
 const BEGIN_REFUSAL_PREFIX = 'admission_begin_refused:'
-const REFUSED_BEFORE_RECORD = new Set(['invalid_correlation', 'stale_actor_epoch', 'expired_operation_ordinal', 'admission_journal_full']
+const REFUSED_BEFORE_RECORD = new Set(['invalid_correlation', 'stale_actor_epoch', 'stale_actor_surface', 'expired_operation_ordinal', 'admission_journal_full']
   .map(code => `${BEGIN_REFUSAL_PREFIX}${code}`).concat('stale npc actor epoch'))
 
 function emptyPrefix(prefix) {
@@ -170,6 +170,7 @@ function prepareAuthorizedBatch(epoch, commands, marker, correlation) {
 
   if (correlation?.protocol_version === 2) {
     const identity = { operation_key: correlation.operation_key, attempt_id: correlation.attempt_id,
+      ...(correlation.surface_index !== undefined ? { surface_index: correlation.surface_index } : {}),
       signature: correlation.signature, actor_id: correlation.actor?.actor_id, epoch, ordinal: correlation.ordinal, operation_count: validated.length }
     check(typeof identity.operation_key === 'string' && identity.operation_key.length > 0 && identity.operation_key.length <= 192 && typeof identity.attempt_id === 'string'
       && typeof identity.signature === 'string' && Number.isSafeInteger(identity.actor_id) && Number.isSafeInteger(identity.ordinal) && identity.ordinal > 0, 'Invalid operation correlation')

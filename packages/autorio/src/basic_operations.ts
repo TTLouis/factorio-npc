@@ -188,6 +188,7 @@ function bind(task: BasicTask, actor: ControlledActor) {
   task.owner_actor_id = identity.actor_id
   task.owner_actor_kind = identity.kind
   task.owner_force_index = actor.force.index
+  if (task.type === TaskStates.MINING) task.owner_surface_index = actor.surface.index
   return true
 }
 
@@ -199,6 +200,7 @@ export function basic_identity_matches(actor: ControlledActor, task: BasicTask) 
   return identity.actor_id === task.owner_actor_id
     && identity.kind === task.owner_actor_kind
     && actor.force.index === task.owner_force_index
+    && (task.type !== TaskStates.MINING || task.owner_surface_index === undefined || actor.surface.index === task.owner_surface_index)
 }
 
 function result_for(actor: ControlledActor | undefined, task: BasicTask | undefined, accepted: boolean, completed: boolean, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {

@@ -506,6 +506,22 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     expect(scan).not.toHaveBeenCalled()
   })
 
+  it('offers only a bounded same-resource same-surface correction while retaining the exact-location refusal', () => {
+    ;(globalThis as any).prototypes.entity.coal = { type: 'resource' }
+    const surface = held.actor.surface
+    const sources = [
+      { valid: true, name: 'coal', type: 'resource', surface, amount: 100, position: { x: 4, y: 0 } },
+      { valid: true, name: 'coal', type: 'resource', surface, amount: 100, position: { x: 3, y: 0 } },
+      { valid: true, name: 'coal', type: 'resource', surface, amount: 100, position: { x: 6, y: 0 } },
+      { valid: true, name: 'coal', type: 'resource', surface: { index: surface.index + 1 }, amount: 100, position: { x: 1, y: 0 } },
+      { valid: true, name: 'copper-ore', type: 'resource', surface, amount: 100, position: { x: 1, y: 0 } },
+    ]
+    ;(surface as any).find_entities_filtered = vi.fn((query: any) => query.radius === 0.25 ? [] : sources)
+    expect(preflight('mine_resource_at', { resource_name: 'coal', x: 0, y: 0, count: 10 })).toMatchObject({
+      ok: false, code: 'resource_source_not_found', resource_correction: { resource_name: 'coal', position: { x: 3, y: 0 }, radius: 5, surface_index: surface.index },
+    })
+  })
+
   it('keeps the exact-target identity fields on accepted transfers and adds the counts', () => {
     current_target = exact(15)
 
