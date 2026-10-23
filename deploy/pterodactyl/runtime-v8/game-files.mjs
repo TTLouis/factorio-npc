@@ -52,7 +52,7 @@ export async function prepareMods(root, app, workspace) {
   return destination
 }
 
-export async function prepareServerSettings(root, game, factorio = { username: '', token: '', public: false }) {
+export async function prepareServerSettings(root, game, factorio = { username: '', token: '', public: false }, { pausedStartup = false } = {}) {
   const data = path.join(root, 'data')
   await directory(data)
   const filename = path.join(data, 'server-settings.json')
@@ -78,7 +78,7 @@ export async function prepareServerSettings(root, game, factorio = { username: '
     ...current,
     visibility: { ...current.visibility, public: factorio.public, lan: false },
     require_user_verification: factorio.public,
-    auto_pause: false,
+    auto_pause: pausedStartup,
     username: factorio.username,
     token: factorio.token,
   }

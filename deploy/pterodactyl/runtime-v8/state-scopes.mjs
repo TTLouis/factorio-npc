@@ -76,6 +76,7 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   restageSoftLimitOption: f('construction', false, V8, 'restage soft limit option'),
   _agentContext: f('construction', true, V8, 'lazy holder (agentContext getter) created once; its content is the conversation, tracked as messages/baseMessages and the agentContext swap calls'),
   turnScope: f('construction', false, V8, 'AsyncLocalStorage created once; its store is the running turn identity'),
+  tickSprintBoundary: f('construction', false, SUPERVISOR, 'optional E2E-only1x barrier injected by supervisor'),
 
   // --- process: stable data that outlives requests --------------------------------------------------------------
   staticPrototypeCache: f('process', true, ST, 'prototype facts LRU, kept by reset() via ??=; a hit skips the RCON read (handleToolBatch)'),

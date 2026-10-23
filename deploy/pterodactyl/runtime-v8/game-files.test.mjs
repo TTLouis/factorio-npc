@@ -60,6 +60,13 @@ test('the server never auto-pauses, so the NPC runs with zero connected humans',
   assert.equal(settings.name, 'kept')
 })
 
+test('accelerated startup stays auto-paused until replicated lease reconciliation', async t => {
+  const root = await temp(t)
+  const game = await setupGame(root)
+  await prepareServerSettings(root, game, { username: '', token: '', public: false }, { pausedStartup: true })
+  assert.equal((await readSettings(root)).auto_pause, true)
+})
+
 test('matching username/token publishes the server', async (t) => {
   const root = await temp(t)
   const game = await setupGame(root)

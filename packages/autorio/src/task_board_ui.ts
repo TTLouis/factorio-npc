@@ -1421,6 +1421,7 @@ export function create_task_board_ui_remote_interface() {
   // the player still has an immediate read on SGLuna without needing to open
   // anything - plain player-local text, no GUI or camera involved.
   script.on_event(defines.events.on_player_joined_game, (event: any) => {
+    if (remote.interfaces.sgluna_tick_sprint !== undefined) remote.call('sgluna_tick_sprint', 'safety_event', 'player_joined_game')
     const player = game.get_player(event.player_index)
     if (!player?.valid) return
     provider_ui.roll_provider_avatar(player.index, game.tick)

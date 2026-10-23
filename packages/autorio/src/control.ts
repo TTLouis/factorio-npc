@@ -55,6 +55,7 @@ import { create_tools_remote_interface } from './tools'
 import { register_area_reservations } from './area_reservation_ui'
 import { reservation_preflight, reserve_area } from './area_reservations'
 import { TaskStates } from './types'
+import { new_tick_sprint_guard } from './e2e_tick_sprint'
 import { direction_towards } from './utils/direction'
 import { get_actor_inventory_items } from './utils/inventory'
 import { find_world_entities } from './npc_vision'
@@ -71,6 +72,16 @@ let setup_complete = false
 
 export const task_manager = new_task_manager(get_controlled_actor)
 const operation_admission = new_operation_admission(get_controlled_actor, () => task_manager.get_status_snapshot())
+const tick_sprint = new_tick_sprint_guard(peek_controlled_actor, () => task_manager.get_status_snapshot(), () => operation_admission.status().records)
+remote.add_interface('sgluna_tick_sprint', {
+  configure: (binding: Parameters<typeof tick_sprint.configure>[0]) => tick_sprint.configure(binding),
+  arm: (lease: Parameters<typeof tick_sprint.arm>[0]) => tick_sprint.arm(lease),
+  finish: (reason: string, lease_id?: string) => tick_sprint.finish(reason, lease_id),
+  status: () => tick_sprint.status(),
+  seal: (reason: string) => tick_sprint.seal(reason),
+  fail: (reason: string) => tick_sprint.fail(reason),
+  safety_event: (reason: string) => tick_sprint.safety(reason),
+})
 register_area_reservations(peek_controlled_actor, () => task_manager.player_state.task_state === TaskStates.IDLE)
 type Admission = typeof operation_admission
 // remote.call passes no self: wrap the controller's methods (compiled with a
@@ -751,6 +762,10 @@ function sweep_npc_vision(reason: string) {
 }
 
 script.on_init(() => sweep_npc_vision('on_init'))
+script.on_event(defines.events.on_player_created, () => tick_sprint.safety('player_created'))
+script.on_event(defines.events.on_entity_damaged, event => {
+  if (event.entity.unit_number === peek_controlled_actor()?.character?.unit_number) tick_sprint.safety('actor_damaged')
+})
 script.on_configuration_changed(() => {
   if (task_manager.player_state.task_state === TaskStates.PREPARING_PUMP_SITE) task_manager.cancel_all_tasks('pump_site_configuration_changed')
   invalidate_pump_preparation_proposals()
@@ -768,6 +783,7 @@ let no_actor_found = false
 
 script.on_event(defines.events.on_tick, (_event) => {
   task_manager.initialize()
+  tick_sprint.tick()
   if (!setup_complete) setup()
   tick_output_delivery_proofs()
 
