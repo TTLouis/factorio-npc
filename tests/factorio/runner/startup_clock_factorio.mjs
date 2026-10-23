@@ -5,7 +5,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { configuration, Session } from '../pterodactyl/runtime-v8/supervisor.mjs'
-import { prepareServerSettings } from '../pterodactyl/runtime-v8/game-files.mjs'
+import { createSave, prepareServerSettings } from '../pterodactyl/runtime-v8/game-files.mjs'
 import { sprintCommand, STARTUP_CLOCK_COMMAND } from '../pterodactyl/runtime-v8/tick-sprint.mjs'
 
 const arg = name => process.argv[process.argv.indexOf(`--${name}`) + 1]
@@ -17,16 +17,17 @@ globalThis.fetch = async () => { external++; throw new Error('External inference
 Object.assign(process.env, { SGLUNA_E2E_PROFILE: retained.binding.profile,
   SGLUNA_E2E_RUN_ID: retained.binding.run_id, SGLUNA_E2E_SOURCE_SHA: retained.binding.source_sha })
 
-async function scenario(name, fault, { existing = false, expectedBoots, success } = {}) {
+async function scenario(name, fault, { existing = false, cold = false, expectedBoots, success } = {}) {
   const root = path.join(results, 'startup-worlds', name)
   await fs.mkdir(path.join(root, 'saves'), { recursive: true })
   await fs.mkdir(path.join(root, '.sgluna/tmp'), { recursive: true })
   await fs.mkdir(path.join(root, 'app/src'), { recursive: true })
   const save = path.join(root, 'saves/input.zip')
-  if (!existing) await fs.copyFile(input, save)
+  if (!existing && !cold) await fs.copyFile(input, save)
   await fs.writeFile(path.join(root, 'app/src/prompt.md'), 'Deterministic native startup validation. No provider may be called.')
   const ini = path.join(root, 'config.ini')
   await fs.writeFile(ini, `[path]\nread-data=/opt/factorio/data\nwrite-data=${root}\n`)
+  if (cold) await createSave(save, '/opt/factorio', arg('mods'), ini, root)
   const config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', AI_API_METHOD: 'local',
     OPENAI_API_KEY: 'fixture-only', OPENAI_API_BASEURL: 'https://fixture.example.test/v1', OPENAI_MODEL: 'fixture',
     SERVER_PORT: arg('game-port'), SHUTDOWN_TIMEOUT_MS: '10000' })
@@ -49,7 +50,7 @@ async function scenario(name, fault, { existing = false, expectedBoots, success 
     await startGame(...args)
     const state = JSON.parse(await session.rcon.command(STARTUP_CLOCK_COMMAND))
     snapshots.push({ boot: boots, state })
-    if (boots === 1 && !existing) {
+    if (boots === 1 && !existing && !cold) {
       assert.equal(state.speed, 4); assert.equal(state.paused, true)
       assert.equal(state.guard.lease.lease_id, retained.saved.lease.lease_id)
       await delay(500)
@@ -62,10 +63,16 @@ async function scenario(name, fault, { existing = false, expectedBoots, success 
     try { await session.start() } catch (error) { failure = error }
     if (success) {
       assert.equal(failure, undefined, failure?.stack)
+      if (cold) {
+        const confirmations = logs.filter(line => line.startsWith('startup.lua_console_ready '))
+          .map(line => JSON.parse(line.slice('startup.lua_console_ready '.length)))
+        assert.deepEqual(confirmations.map(value => value.attempts), [2, 1], 'Fresh console refusal and saved-world confirmation must both execute')
+      }
       assert.ok(session.startupClockProof.native_tick_delta >= 30)
       const status = JSON.parse(await session.rcon.command(sprintCommand('status')))
       assert.equal(status.speed, 1); assert.equal(status.lease, undefined)
-      assert.deepEqual(status.episodes, retained.saved.episodes)
+      if (cold) assert.equal(Object.keys(status.episodes).length, 0)
+      else assert.deepEqual(status.episodes, retained.saved.episodes)
       const sample = JSON.parse(await session.rcon.command(STARTUP_CLOCK_COMMAND))
       await delay(1000)
       const after = JSON.parse(await session.rcon.command(STARTUP_CLOCK_COMMAND))
@@ -92,6 +99,7 @@ async function scenario(name, fault, { existing = false, expectedBoots, success 
 }
 
 try {
+  await scenario('cold-console', null, { cold: true, expectedBoots: 2, success: true })
   await scenario('prevented', null, { expectedBoots: 2, success: true })
   await scenario('residual', 'once', { expectedBoots: 3, success: true })
   await scenario('exhausted', 'always', { expectedBoots: 3, success: false })

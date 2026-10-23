@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import {
   atomicWrite,
   Child,
+  confirmLuaConsoleReady,
   Rcon,
   chatAuthorized,
   check,
@@ -3506,6 +3507,8 @@ export class Session {
     check(this.rcon, 'Timed out waiting for authenticated Factorio RCON')
     const version = await this.rcon.command('/version')
     check(/2\.0\.\d+/.test(version), 'Authenticated Factorio RCON version probe failed')
+    const handshake = await confirmLuaConsoleReady(this.rcon)
+    this.log(`startup.lua_console_ready ${JSON.stringify({ request_id: 'startup', reason: handshake.attempts === 2 ? 'native_confirmation_repeated' : 'already_enabled', ...handshake })}`)
   }
 
   async restartPausedSprintGame(rconPort, gameLog) {
