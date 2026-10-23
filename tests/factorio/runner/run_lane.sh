@@ -148,7 +148,10 @@ run_py run.py
 case "$LANE" in
   tick-sprint)
     run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"
-    restart_factorio
+    stop_factorio
+    SAVE="$WRITE_DATA/saves/sprint-active-negative-control.zip"
+    [[ -s "$SAVE" ]] || { echo 'Active-lease negative-control save missing' >&2; exit 1; }
+    start_factorio
     run_node tick_sprint_factorio.mjs --phase verify --save "$SAVE"
     ;;
   production-task)

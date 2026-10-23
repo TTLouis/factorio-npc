@@ -121,20 +121,27 @@ accounting, immutable evidence and exact owned-resource cleanup still apply.
 
 ## Adoption gates before an accelerated provider trial
 
-- [ ] Implement the bounded native guard and harness boundary barrier.
-- [ ] Integrate runner, external classifier, snapshot/identity manifest,
+- [x] Implement the bounded native guard and harness boundary barrier.
+- [x] Integrate runner, external classifier, snapshot/identity manifest,
       emergency stop and save paths around the same profile/lease contract.
-- [ ] Deterministic lifecycle tests cover eligibility/refusal, concurrent reply/
+- [x] Deterministic lifecycle tests cover eligibility/refusal, concurrent reply/
       read/admission, stale owners, duplicate callbacks, durable exhaustion,
       host/native faults, pause and restart.
-- [ ] Native exact-version proof at 4× covers real craft/smelt/wait progress,
-      tick limits, completion restoration, player/threat events, host disconnect
+- [x] Native exact-version proof at 4× covers real craft/smelt/wait progress,
+      tick limits, completion restoration, threat/damage events, host disconnect
       fallback and confirmed 1× at observations and save.
-- [ ] Negative controls reject 4× normal mode, forged/expired leases, unknown
+- [x] Negative controls reject 4× normal mode, forged/expired leases, unknown
       effects, idle-with-no-work sprinting and construction leases in measurement.
 - [ ] Offline gates, independent review and a new frozen candidate/profile pass.
       Further agents and live trials require their own applicable authorization.
 
-This task prepares rules and implementation acceptance criteria. Runtime work,
-independent review, native proof and integration remain pending. No active trial,
-frozen helper, source runtime or integration checkout is changed by preparation.
+The zero-human profile additionally proves native arrival-safety-hook restoration,
+registered join-handler source wiring and the per-tick connected-human refusal.
+The arrival hook is invoked synthetically: real engine join delivery, networking
+and peer-load synchronization remain unvalidated. They are not claimed by this
+bounded adoption. Native proof loads an explicitly saved active lease while
+paused, invalidates it before unpause and preserves expenditure.
+
+Implementation evidence and remaining promotion gates are recorded in
+[the controller checkpoint](validation/E2E_TICK_SPRINT_CONTROLLER_2026-10-23.md).
+These gates do not authorize another live trial or publication.

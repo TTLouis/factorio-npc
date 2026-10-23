@@ -172,7 +172,15 @@ try {
     const saved = await arm(restartLease)
     assert.equal(saved.speed, 4)
     assert.ok(saved.lease)
-    await command(`/server-save ${arg('save')}`)
+    // SIGTERM saves the startup world again after finally restores the live
+    // process. Reload a separately named active-lease artifact, never that save.
+    await command('/server-save sprint-active-negative-control')
+    const activeSave = path.join(path.dirname(arg('save')), 'factorio-data/saves/sprint-active-negative-control.zip')
+    const saveDeadline = Date.now() + 10000
+    while (!(await fs.stat(activeSave).catch(() => null))?.size) {
+      assert.ok(Date.now() < saveDeadline, 'Active-lease negative-control save missing')
+      await delay(50)
+    }
     await fs.writeFile(path.join(results, 'tick-sprint-proof.json'), JSON.stringify({ status: 'pass', fixture, binding, before, cases, saved,
       zero_external_inference: forbidden === 0, human_event_limit: 'Native arrival-safety hook invoked directly; registered-handler source wiring tested separately; real join dispatch/networking untested' }, null, 2))
   }

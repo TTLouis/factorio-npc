@@ -18,7 +18,7 @@ response, admission, transition, stop and save boundaries restore/verify1x first
 - [x] Native guard, durable limits, safety and independent restoration
 - [x] Host barrier/watchdog and authoritative freshness/ownership integration
 - [x] Runner/classifier/snapshot/measurement/stop/save/metrics contract
-- [ ] Lifecycle/fault/negative-control tests and exact2.0.77 native proof
+- [x] Lifecycle/fault/negative-control tests and exact2.0.77 native proof
 - [ ] Independent review, offline/payload gates, local integration
 - [ ] Freeze source/profile/helpers; one cold Run AP
 - [ ] Strict paired stop/save/pristine load, full metrics/plans and owned cleanup
@@ -45,3 +45,14 @@ Native smelting/crafting, disconnect tick cap and independent real-RCON wall
 watchdog have executed in retained attempts. Earlier failed fixture attempts are
 retained, including nonexistent player API/console-handler assumptions and the
 missing isolated save-directory failure. None called an external provider.
+
+Native adoption proof: attempt10 passed the complete exact2.0.77 lane, including
+real600-tick disconnect fallback, independent RCON wall watchdog below3s, native
+craft/smelt/wait progress, threat/damage restoration, synthetic arrival hook,
+six-burst exhaustion, and paused reload of an explicitly saved active lease.
+The loaded lease remains inert until replicated startup restoration; episode
+spending survives, zero-human ticking resumes after explicit unpause, and sealed
+construction cannot reopen. Evidence: native-lanes10/tick-sprint/results in the
+evidence directory above. Attempt9 caught SIGTERM overwriting the base save; the
+negative control now loads its separate named artifact and retains the active
+lease assertion. Native compile/type/build succeeded in native-build7.log.
