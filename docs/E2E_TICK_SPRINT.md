@@ -132,7 +132,7 @@ accounting, immutable evidence and exact owned-resource cleanup still apply.
       fallback and confirmed 1× at observations and save.
 - [x] Negative controls reject 4× normal mode, forged/expired leases, unknown
       effects, idle-with-no-work sprinting and construction leases in measurement.
-- [ ] Offline gates, independent review and a new frozen candidate/profile pass.
+- [x] Offline gates, independent review and a new frozen candidate/profile pass.
       Further agents and live trials require their own applicable authorization.
 
 The zero-human profile additionally proves native arrival-safety-hook restoration,
@@ -151,3 +151,5 @@ These gates do not authorize another live trial or publication.
 Server auto-pause is a launch setting. Factorio2.0.77 rejects `/config set auto-pause false`; manual unpause and a positive tick delta after console traffic do not prove an independently running world. Accelerated startup first restores1x and replicates pause/lease invalidation, saves and cleanly reloads that same paused world under authoritative `auto_pause:false`, then reconciles the actor before any clock advance. Before constructing or waking the NPC, sample a quiet1000ms native interval with no intervening observations and require at least30ticks/s, speed1, zero humans, idle queues and no active lease. Repeat the quiet proof before opening the ready fence. This is a liveness floor, not a60UPS performance claim.
 
 A residual stalled clock permits one run/source-scoped, fsynced harness correction. Persist attempted/completed/exhausted outcomes. Interrupted or exhausted correction blocks restaging before another restart even if the clock later appears healthy. Unsafe, busy, stale, ambiguous and storage-failure cases remain paused; no provider/Jev retry owns this recovery. Prove prevention, injected native settings miss, successful automatic continuation and durable exhaustion through the actual Session with zero inference. Native10 failed this startup gate; its positive-delta assertion is superseded by the actual-Session lane and exact Run AP regression.
+
+Fresh-console native coverage must assert that the first fixed read-only Lua handshake needs two attempts on a newly created achievements-enabled world, and one after save/reload. A previously console-enabled save alone does not cover cold startup. Run AR exercises the bounded accelerator but fails its gameplay goal; see the separate Run AR validation report.

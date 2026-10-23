@@ -2,6 +2,24 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 23: accelerated Run AR
+
+The [Run AR report](validation/RED_AUTOMATION_LIVE_RUN_AR_2026-10-23.md) records
+six safely restored sprint bursts / 1,836 native ticks, then a gameplay failure
+after 4m30s: copper gathering succeeded, coal mining was rejected, and the
+partially completed batch remained uncertain. Duplicate-effect protection blocked
+continuation. No automated science or factory construction was demonstrated.
+Quantity compilation/material-ledger/production-task paths were not exercised.
+
+The accelerator's cold-start clock and first-console confirmation gaps were
+repaired and proved in actual Session/native tests before AR. Full merged gates
+passed 3261 runtime / 1366 mod tests. AP is an invalid startup trial; AQ is a
+zero-inference preflight failure; their separate sealed evidence is retained.
+AR passed strict paired stop/save, ZIP integrity, pristine exact-version load and
+owned cleanup. A post-stop closed-authority alarm remains documented separately
+from zero in-trial sprint faults. Partial-batch effect reconciliation remains a
+harness recovery gap; safe refusal is not successful self-correction.
+
 ## October 23: Run AO controller liveness repair
 
 The [Run AO repair checkpoint](validation/RUN_AO_CONTROLLER_LIVENESS_2026-10-23.md)

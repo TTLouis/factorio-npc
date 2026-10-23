@@ -19,9 +19,9 @@ response, admission, transition, stop and save boundaries restore/verify1x first
 - [x] Host barrier/watchdog and authoritative freshness/ownership integration
 - [x] Runner/classifier/snapshot/measurement/stop/save/metrics contract
 - [x] Lifecycle/fault/negative-control tests and exact2.0.77 native proof
-- [ ] Independent review, offline/payload gates, local integration
-- [ ] Freeze source/profile/helpers; one cold Run AP
-- [ ] Strict paired stop/save/pristine load, full metrics/plans and owned cleanup
+- [x] Independent review, offline/payload gates, local integration
+- [x] Freeze source/profile/helpers; AP startup failure, AQ preflight, fresh AR
+- [x] Strict paired stop/save/pristine load, full metrics/plans and owned cleanup
 
 Evidence: `test-results/e2e-tick-sprint/`; later run evidence separate and frozen.
 Checkpoint: implementation in progress. No live provider/Jev call yet.
@@ -84,3 +84,14 @@ correlated trace is asserted by the actual Session fixture. Full merged gates,
 payload pin and fresh AR freeze remain required. AQ preflight is sealed/cleaned;
 RED_AUTOMATION_PREFLIGHT_AQ_2026-10-23.md records its limits. The owner-authorized
 fresh goal trial remains unspent and will use distinct Run AR evidence.
+
+Final checkpoint: frozen AR source2f5f5282, native14/focused32/merged3261runtime /
+1366mod/type/Lua/generated-Lua/payload9/helper45 gates PASS, independent review
+approved. AR ended controller_blocked:canonical_plan in4m30.461s after native coal
+mining rejection and unresolved partial-batch effects.6sprints/6restores/1836ticks,
+8.278s native logged sprint wall;22.322s estimated1x-equivalent saving, not a measured
+end-to-end comparison. No automated science, quantities/ledger/production tasks or
+reservation construction proved. Strict stop/save/ZIP55/pristine2.0.77load/owned
+cleanup PASS; a post-stop sealed-authority alarm remains visible. Reports AP, AQ
+preflight and AR, complete actual plans and metrics, raw seals and overwatch retained.
+No further provider trial, push/deploy or background work. Evidence is retained.
