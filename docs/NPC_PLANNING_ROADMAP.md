@@ -681,7 +681,7 @@ This is authoring discipline, not a Jev rejection loop.
 
 ## 6. Step contracts are fixed before commit
 
-> Owner decision 2026-10-08 (P1–P2 built 2026-10-09, P3–P4 not built): each step's contract becomes fixed before that step activates, not at slice commit. See [One-step contract prediction](#one-step-contract-prediction-owner-decision-2026-10-08-p1p4-implemented-2026-10-23).
+> Owner decision 2026-10-08 (P1–P2 built 2026-10-09, P3–P4 built 2026-10-23): each step's contract becomes fixed before that step activates, not at slice commit. See [One-step contract prediction](#one-step-contract-prediction-owner-decision-2026-10-08-p1p4-implemented-2026-10-23).
 
 A committed semantic step should already know what successful completion means.
 

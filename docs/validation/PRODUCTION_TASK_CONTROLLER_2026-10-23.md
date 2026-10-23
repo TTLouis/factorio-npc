@@ -16,7 +16,7 @@ Acceptance criteria:
 - [x] Finite furnace output uses distinct fuel, wait and collect batches, grounded exact native identities and fresh stock.
 - [x] Busy/uncertain work cannot replay; actor/goal/plan changes cannot admit or pause another owner; restart/restage/repeated intent cannot renew durable recovery limits; exhaustion pauses explicitly.
 - [x] Prediction is a single cancellable side call after admission; fresh validation and binding occur only at the next step boundary. Material-only, stale or failed predictions fall back to JIT.
-- [ ] Docker offline gates, deterministic native proof, independent diff review, payload repin and integration verification.
+- [x] Docker offline gates, deterministic native proof, independent diff review, payload repin and integration verification.
 
 Evidence: immutable Run AN directory `test-run-an-red-automation/test-results/red-automation-live-2026-10-22an`, particularly `analysis/bootstrap-audit/`, canonical plans and retained behavior traces. This note and new tests are derived evidence; historical artifacts stay sealed.
 
@@ -100,5 +100,43 @@ Prediction covers the next step inside a slice; future slices still require
 fresh Shelf refinement. No autonomous red-science success, live model trial,
 publication or deployment is claimed.
 
-Checkpoint: reviewed source ready for commit; final native/payload/integration
-verification and exact Docker cleanup remain before closeout.
+## Final local integration
+
+Runtime source `cd757d8bf4e9fc38970ced87a51215c71268e7d7`, separate payload
+repin `117f57548e0ca73be2c7e4dfbbe460208cc1eee3`, and local integration merge
+`5af29619e67b6ce8e4a79228b77863e4c67ae648`. The merge tree equals the reviewed
+repin tree. Payload SHA-256 is
+`6a800b4a96aee9675385dc84d40c673c9fedd9a4603ada3978dcc88d29623a14`.
+The final closeout commit changes documentation only.
+
+Fresh merged checks passed: **3,166 runtime tests**, **1,346 mod tests**, TypeScript,
+Lua build/generated-Lua checks, **9 payload tests**, payload identity and ESLint.
+Commands: `bash scripts/test-local.sh all`, payload `--check` and its test file,
+and ESLint over runtime modules, changed native tools/tests and the new lane.
+Logs: `merged-all.log` and `merged-payload-lint.log`, both exit 0.
+
+The frozen rerun built an immutable Git archive of the runtime source. Factorio
+2.0.77 again passed the same eight-batch proof, including one attempted and
+completed harness correction, zero failed corrections/operator interventions,
+two poles and two newly smelted plates. Runner wall time was **19.383 seconds**;
+fixture/setup and packaging intervals overlap and are not additive. All **9/9
+runtime files** and **32/32 loaded native files** matched the preserved source
+identities. The parent also matched those nine runtime files against the merged
+checkout. The lane's common Python gate passed **92 regressions**. This rerun
+uses scripted replies; asynchronous prediction is covered by its 16 runtime
+regressions, not this single-step native fixture.
+
+Frozen evidence is in `native/frozen-cd757d8b/`: `SUMMARY.md`, `metrics.json`,
+`deployed-runtime-matches.json`, `loaded-native-matches.json` and the full native
+transcript under `lanes/production-task/results/`. Failed setup attempts remain
+preserved separately. `final-summary.json` links the merged checks, original AN
+preservation and final resource checks. These artifacts remain in the retained
+task checkout's `test-results/production-task-controller/` directory.
+
+Independent review is complete. The five protected integration reports retain
+their original hashes, and all 306 sealed AN raw files remain unchanged. Owned
+test containers and the two task-created engine image tags are absent; detailed
+native cleanup also verifies their exact IDs. No Compose project, network,
+disposable volume, tunnel or background worker remains. Shared development/base
+images and host evidence are retained. No live provider trial, push or deployment
+was performed. Bounded integration ownership is released after this closeout.
