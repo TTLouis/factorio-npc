@@ -581,6 +581,13 @@ Fixtures may contain exact test-only coordinates for A1 harness verification. Th
 
 ## 10. Evidence required for a production E2E claim
 
+The October 23 owner-approved tick-sprint direction is prepared in
+[accelerated E2E construction](E2E_TICK_SPRINT.md). Native guard, freshness
+barrier and shared stop-policy integration must pass its adoption gates before
+4× construction is used. Freeze and label normal/accelerated profiles separately;
+record actual game ticks alongside wall time and keep existing automated-output
+acceptance. An active or sealed normal-speed run retains its original contract.
+
 Every real-provider production checkpoint should record:
 
 - repository/deployed SHA;

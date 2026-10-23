@@ -76,6 +76,13 @@ working tree has unstaged changes; hooks test the working tree.
 
 ## Review and integration
 
+For future accelerated E2E construction, follow
+[tick-sprint preparation and adoption gates](E2E_TICK_SPRINT.md). The owner has
+approved the direction, not an unvalidated speed change in an existing runner.
+Freeze the profile before a new trial; preserve normal-speed baselines and never
+retrofit active or sealed runs. Native guard and boundary-barrier proof precede
+the first accelerated provider trial.
+
 Use `.github/pull_request_template.md` for a reviewable summary: trigger, result,
 acceptance evidence, limits and recovery. A separate reviewer reads the actual
 diff and verifies claims. For every actionable finding, fix the cause or record

@@ -128,6 +128,7 @@ Live runs call real providers and cost money. Do not start one (RCON rounds, the
   - The first objective must get a new `goal_id`, or the run does not count. There is no working in-game reset (`autorio_task_board.clear` is re-pushed by the supervisor).
   - `data/sgluna-config.json` persists across cold starts. Check it when a provider limit looks wrong.
 - **Drive and observe.**
+  - Future accelerated construction must satisfy `docs/E2E_TICK_SPRINT.md` before use: maximum 4×, native tick/wall bounds, confirmed 1× at observation/admission/response boundaries, fresh validation, unchanged wall guards and separately labelled metrics. Preparation does not enable the mode; frozen/active runs keep their original speed contract.
   - Send objectives as raw chat (`!luna <objective>`), not `/silent-command`.
   - Read the board through a nil-safe `remote.call("autorio_task_board","status")`.
   - Flush `storage.airi_task_board_ui_inputs` before a round.
