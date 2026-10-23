@@ -145,3 +145,9 @@ paused, invalidates it before unpause and preserves expenditure.
 Implementation evidence and remaining promotion gates are recorded in
 [the controller checkpoint](validation/E2E_TICK_SPRINT_CONTROLLER_2026-10-23.md).
 These gates do not authorize another live trial or publication.
+
+## Startup clock gate after Run AP
+
+Server auto-pause is a launch setting. Factorio2.0.77 rejects `/config set auto-pause false`; manual unpause and a positive tick delta after console traffic do not prove an independently running world. Accelerated startup first restores1x and replicates pause/lease invalidation, saves and cleanly reloads that same paused world under authoritative `auto_pause:false`, then reconciles the actor before any clock advance. Before constructing or waking the NPC, sample a quiet1000ms native interval with no intervening observations and require at least30ticks/s, speed1, zero humans, idle queues and no active lease. Repeat the quiet proof before opening the ready fence. This is a liveness floor, not a60UPS performance claim.
+
+A residual stalled clock permits one run/source-scoped, fsynced harness correction. Persist attempted/completed/exhausted outcomes. Interrupted or exhausted correction blocks restaging before another restart even if the clock later appears healthy. Unsafe, busy, stale, ambiguous and storage-failure cases remain paused; no provider/Jev retry owns this recovery. Prove prevention, injected native settings miss, successful automatic continuation and durable exhaustion through the actual Session with zero inference. Native10 failed this startup gate; its positive-delta assertion is superseded by the actual-Session lane and exact Run AP regression.

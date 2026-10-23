@@ -151,8 +151,7 @@ case "$LANE" in
     stop_factorio
     SAVE="$WRITE_DATA/saves/sprint-active-negative-control.zip"
     [[ -s "$SAVE" ]] || { echo 'Active-lease negative-control save missing' >&2; exit 1; }
-    start_factorio
-    run_node tick_sprint_factorio.mjs --phase verify --save "$SAVE"
+    run_node startup_clock_factorio.mjs --save "$SAVE" --mods "$MODS" --game-port "$SERVER_PORT"
     ;;
   production-task)
     run_node production_task_factorio.mjs

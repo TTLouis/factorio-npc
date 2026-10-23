@@ -56,3 +56,16 @@ construction cannot reopen. Evidence: native-lanes10/tick-sprint/results in the
 evidence directory above. Attempt9 caught SIGTERM overwriting the base save; the
 negative control now loads its separate named artifact and retains the active
 lease assertion. Native compile/type/build succeeded in native-build7.log.
+
+Run AP correction (current checkpoint): the startup claim above was disproved.
+AP is invalid for performance/gameplay: unsupported auto-pause config left the
+world console-driven. Full report: RED_AUTOMATION_LIVE_RUN_AP_2026-10-23.md.
+The owner authorized one fresh follow-up because this was a harness error.
+The shared startup boundary now cleanly saves/reloads the replicated paused
+world with authoritative settings before quiet-clock proof and any NPC wake.
+One fsynced, run/source-bound residual correction has durable attempted,
+completed and exhausted states; interrupted/exhausted correction cannot reopen
+on restage. Child input forwarding resumes after same-Session engine restart.
+Exact AP fixture and actual Session native scenarios cover these paths without
+providers/Jev. Final startup gates:3258 runtime/1366 mod, type/Lua/generated-Lua,
+changed lint/shell syntax pass; native12 actual-Session prevention/residual continuation/exhaustion PASS; independent reviewer found no remaining blocking source gap.

@@ -186,6 +186,7 @@ export class Child {
     }
     stream.on('data', onData)
     this.input = { stream, onData }
+    if (typeof stream.resume === 'function') stream.resume()
     return this
   }
 

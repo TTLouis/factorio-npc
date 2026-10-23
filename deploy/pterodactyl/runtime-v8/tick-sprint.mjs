@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { TICK_SPRINT } from '../staging/tick-sprint-policy.mjs'
 import { deploymentStatus } from '../staging/supervisor-adapter.mjs'
@@ -11,15 +12,85 @@ const lua = value => `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", 
 export const sprintCommand = (method, ...args) => `/silent-command rcon.print(helpers.table_to_json(remote.call("sgluna_tick_sprint",${lua(method)}${args.map(arg => `,${typeof arg === 'object' ? `helpers.json_to_table(${lua(JSON.stringify(arg))})` : lua(arg)}`).join('')})))`
 
 export async function pauseSprintStartup(rcon) {
-  const status = JSON.parse(await rcon.command(`/silent-command game.tick_paused=true;rcon.print(helpers.table_to_json(remote.call("sgluna_tick_sprint","finish","startup_reconciliation")))`))
-  if (status.speed !== 1 || status.lease || status.version !== TICK_SPRINT.version) throw new Error('Sprint startup restoration unconfirmed')
+  const status = JSON.parse(await rcon.command(`/silent-command game.tick_paused=true;local s=remote.call("sgluna_tick_sprint","finish","startup_reconciliation");s.tick_paused=game.tick_paused;rcon.print(helpers.table_to_json(s))`))
+  if (status.speed !== 1 || status.tick_paused !== true || status.lease || status.version !== TICK_SPRINT.version) throw new Error('Sprint startup restoration unconfirmed')
   return status
 }
 
+export const STARTUP_CLOCK_COMMAND = '/silent-command local w=remote.call("autorio_operations","status");rcon.print(helpers.table_to_json({tick=game.tick,paused=game.tick_paused,speed=game.speed,humans=#game.connected_players,idle=w.task_state=="idle" and w.queue_length==0,guard=remote.call("sgluna_tick_sprint","status")}))'
+
+export async function probeSprintStartupClock(rcon, { sleep = delay, monotonic = () => performance.now() } = {}) {
+  let before
+  try {
+    await rcon.command('/silent-command game.tick_paused=false')
+    before = JSON.parse(await rcon.command(STARTUP_CLOCK_COMMAND))
+    const valid = sample => sample.speed === 1 && sample.paused === false && sample.humans === 0 && sample.idle === true && Number.isSafeInteger(sample.tick)
+    if (!valid(before)) throw new Error('Sprint startup clock native state is unsafe')
+    const started = monotonic()
+    // No observations/heartbeats during this interval. Console traffic itself
+    // advances paused-server ticks, so a positive tick delta is insufficient.
+    await sleep(1000)
+    const after = JSON.parse(await rcon.command(STARTUP_CLOCK_COMMAND))
+    const elapsed = monotonic() - started
+    if (!valid(after) || elapsed < 1000 || elapsed > 5000) throw new Error('Sprint startup clock observation is unsafe or uncertain')
+    if (after.tick - before.tick < elapsed * 30 / 1000) {
+      throw Object.assign(new Error('Sprint startup clock is not independently advancing'), { code: 'sprint_startup_clock_stalled', before, after, elapsed_ms: elapsed })
+    }
+    return { before, after, elapsed_ms: elapsed, native_tick_delta: after.tick - before.tick, minimum_ticks_per_second: 30 }
+  } finally { await pauseSprintStartup(rcon) }
+}
+
+export async function initializeSprintStartupClock({ rcon, restartAtNormalSpeed, binding, load, persist, record = () => {}, probeOptions }) {
+  await pauseSprintStartup(rcon())
+  if (binding?.profile !== 'accelerated' || !/^[a-f0-9]{40}$/.test(binding.source_sha)
+    || !/^[a-zA-Z0-9_-]{1,100}$/.test(binding.run_id)) throw new Error('Invalid frozen startup binding')
+  const saved = await load()
+  if (saved && (saved.run_id !== binding.run_id || saved.source_sha !== binding.source_sha || saved.attempts !== 1
+    || !['attempted', 'completed', 'exhausted'].includes(saved.state))) throw new Error('Invalid durable startup clock recovery ledger')
+  if (saved && saved.state !== 'completed') throw new Error('Sprint startup clock recovery exhausted')
+  // auto_pause cannot be changed with /config in Factorio2.0.77. Persist the
+  // replicated paused1x world, then reload it with authoritative settingsfalse.
+  await restartAtNormalSpeed()
+  try {
+    const proof = await probeSprintStartupClock(rcon(), probeOptions)
+    await record({ reason: 'startup_clock_verified', recovery_attempts: 0, ...proof })
+    return proof
+  } catch (error) {
+    if (error.code !== 'sprint_startup_clock_stalled') throw error
+    if (saved?.attempts === 1) {
+      await persist({ ...binding, attempts: 1, state: 'exhausted', reason: error.code })
+      throw new Error('Sprint startup clock recovery exhausted')
+    }
+    await persist({ ...binding, attempts: 1, state: 'attempted', reason: error.code })
+    await record({ reason: 'startup_clock_recovery_attempted', before: error.before, after: error.after, elapsed_ms: error.elapsed_ms })
+    await restartAtNormalSpeed()
+    try {
+      const proof = await probeSprintStartupClock(rcon(), probeOptions)
+      await persist({ ...binding, attempts: 1, state: 'completed', reason: 'startup_clock_recovery_completed' })
+      await record({ reason: 'startup_clock_recovery_completed', recovery_attempts: 1, ...proof })
+      return proof
+    } catch (failure) {
+      await persist({ ...binding, attempts: 1, state: 'exhausted', reason: 'startup_clock_recovery_exhausted' })
+      await record({ reason: 'startup_clock_recovery_exhausted', recovery_attempts: 1 })
+      throw new Error('Sprint startup clock recovery exhausted', { cause: failure })
+    }
+  }
+}
+
+export async function persistSprintLedger(filename, ledger) {
+  await fs.mkdir(path.dirname(filename), { recursive: true })
+  const temporary = `${filename}.tmp`
+  const file = await fs.open(temporary, 'w', 0o600)
+  try { await file.writeFile(`${JSON.stringify(ledger)}\n`); await file.sync() }
+  finally { await file.close() }
+  await fs.rename(temporary, filename)
+}
+
 export async function resumeSprintStartup(rcon) {
-  await rcon.command('/config set auto-pause false')
+  const proof = await probeSprintStartupClock(rcon)
   const status = JSON.parse(await rcon.command('/silent-command game.tick_paused=false;rcon.print(helpers.table_to_json({speed=game.speed,paused=game.tick_paused}))'))
   if (status.speed !== 1 || status.paused !== false) throw new Error('Sprint startup resume unconfirmed')
+  return proof
 }
 
 export function sprintOwner(session) {
@@ -56,14 +127,7 @@ export class TickSprintController {
     this.episodes = {}
     this.pollingInstance = randomUUID()
     this.reads = {}
-    this.persist = persist ?? (async ledger => {
-      await fs.mkdir(path.dirname(ledgerFile), { recursive: true })
-      const temporary = `${ledgerFile}.tmp`
-      const file = await fs.open(temporary, 'w', 0o600)
-      try { await file.writeFile(`${JSON.stringify(ledger)}\n`); await file.sync() }
-      finally { await file.close() }
-      await fs.rename(temporary, ledgerFile)
-    })
+    this.persist = persist ?? (ledger => persistSprintLedger(ledgerFile, ledger))
     const write = emit ?? ((event, data) => session.agent?.traceEvent(`sprint.${event}`, data))
     this.emit = (event, data) => write(event, { ...data, polling_instance_id: this.pollingInstance, native_reads_by_lane: { ...this.reads } })
   }

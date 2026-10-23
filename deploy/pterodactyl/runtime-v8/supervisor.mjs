@@ -1,6 +1,6 @@
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import { inspectControllerLiveness } from './controller-liveness.mjs'
-import { pauseSprintStartup, resumeSprintStartup, TickSprintController } from './tick-sprint.mjs'
+import { initializeSprintStartupClock, pauseSprintStartup, persistSprintLedger, resumeSprintStartup, STARTUP_CLOCK_COMMAND, TickSprintController } from './tick-sprint.mjs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -3479,13 +3479,8 @@ export class Session {
     return reply
   }
 
-  async start() {
-    const rconPort = this.rconPort ?? await freeTcpPort([this.config.gamePort])
-    const secrets = [this.config.key, this.rconPassword, this.session, this.config.factorio.token]
-    const gameLog = line => {
-      this.log(redact(secrets, line))
-      this.onGameLine(line)
-    }
+  async startGameProcess(rconPort, gameLog) {
+    this.rcon = null
     this.gameChild = new Child(path.join(this.game, 'bin', 'x64', 'factorio'), this.gameArgs(rconPort), {
       cwd: this.root,
       env: this.cleanEnv(),
@@ -3511,8 +3506,44 @@ export class Session {
     check(this.rcon, 'Timed out waiting for authenticated Factorio RCON')
     const version = await this.rcon.command('/version')
     check(/2\.0\.\d+/.test(version), 'Authenticated Factorio RCON version probe failed')
-    if (process.env.SGLUNA_E2E_PROFILE === 'accelerated') await pauseSprintStartup(this.rcon)
+  }
+
+  async restartPausedSprintGame(rconPort, gameLog) {
+    const pausedAt = Date.now()
+    await pauseSprintStartup(this.rcon)
+    this.rcon.close()
+    const stopped = await this.gameChild.stop(Math.min(this.config.stopMs, 30000), 'SIGINT')
+    check(!stopped.forced && stopped.result?.code === 0, 'Paused sprint bootstrap did not save/exit cleanly')
+    const save = await fsp.stat(this.save)
+    check(save.size > 0 && save.mtimeMs >= pausedAt, 'Paused sprint bootstrap save is stale')
+    this.settingsFile = await prepareServerSettings(this.root, this.game, this.config.factorio)
+    await this.startGameProcess(rconPort, gameLog)
+    const loaded = JSON.parse(await this.rcon.command(STARTUP_CLOCK_COMMAND))
+    check(loaded.paused === true && loaded.speed === 1 && loaded.humans === 0 && !loaded.guard?.lease,
+      'Paused sprint bootstrap did not reload a safe world')
     await this.bindNpc()
+  }
+  async start() {
+    const rconPort = this.rconPort ?? await freeTcpPort([this.config.gamePort])
+    const secrets = [this.config.key, this.rconPassword, this.session, this.config.factorio.token]
+    const gameLog = line => {
+      this.log(redact(secrets, line))
+      this.onGameLine(line)
+    }
+    await this.startGameProcess(rconPort, gameLog)
+    if (process.env.SGLUNA_E2E_PROFILE === 'accelerated') {
+      const binding = { profile: 'accelerated', run_id: process.env.SGLUNA_E2E_RUN_ID, source_sha: process.env.SGLUNA_E2E_SOURCE_SHA }
+      const ledger = path.join(this.root, '.sgluna', 'startup-clock-recovery.json')
+      this.startupClockProof = await initializeSprintStartupClock({ rcon: () => this.rcon, binding,
+        restartAtNormalSpeed: () => this.restartPausedSprintGame(rconPort, gameLog),
+        load: () => readJson(ledger, null),
+        persist: value => persistSprintLedger(ledger, value),
+        record: async value => {
+          await atomicWrite(path.join(this.root, '.sgluna', 'startup-clock-proof.json'), `${JSON.stringify({ ...binding, ...value })}\n`)
+          this.log(`Sprint startup clock: ${JSON.stringify({ ...binding, ...value })}`)
+        } })
+    }
+    else await this.bindNpc()
 
     const prompt = await fsp.readFile(path.join(this.app, 'src', 'prompt.md'), 'utf8')
     const jevDecisionProvider = this.config.decisionProvider
@@ -3565,8 +3596,8 @@ export class Session {
     await this.agent.loadPersistentState()
     await this.syncTaskBoardUi()
 
-    this.ready = true
     if (process.env.SGLUNA_E2E_PROFILE === 'accelerated') {
+      this.agent.epoch = await this.agent.captureEpoch()
       const watchdog = new Rcon(rconPort, this.rconPassword, 700, { auxiliary: true })
       try {
         await watchdog.connect()
@@ -3578,6 +3609,7 @@ export class Session {
         await resumeSprintStartup(this.rcon)
       } catch (error) { watchdog.close(); throw error }
     }
+    this.ready = true
     this.uiInputPoll = setInterval(() => {
       if (!this.stopping) this.drainTaskBoardUiInputs()
     }, UI_INPUT_POLL_MS)

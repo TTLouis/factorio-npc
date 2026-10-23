@@ -1,0 +1,28 @@
+{
+  "source_sha": "4c11c146e11d98c5ae403193a032667682f213e0",
+  "run_id": "red-automation-live-2026-10-23ap",
+  "rejected_command": "/config set auto-pause false",
+  "native_reply": "Unknown config: auto-pause\n",
+  "samples": [
+    {
+      "speed": 1,
+      "machine_count": 0,
+      "actor_id": 5,
+      "ts": "2026-10-23T20:18:04.756Z",
+      "tick": 607,
+      "red_produced_count": 0
+    },
+    {
+      "speed": 1,
+      "machine_count": 0,
+      "actor_id": 5,
+      "ts": "2026-10-23T20:19:34.835Z",
+      "tick": 1612,
+      "red_produced_count": 0
+    }
+  ],
+  "native_old_test": "Positive tick delta after250ms while RCON traffic itself advanced auto-paused-server ticks",
+  "observed_tick_delta": 1005,
+  "observed_wall_ms": 90079,
+  "meaning": "Harness clock-startup failure, not an NPC action failure; no autonomous sprint lease or construction observed."
+}
