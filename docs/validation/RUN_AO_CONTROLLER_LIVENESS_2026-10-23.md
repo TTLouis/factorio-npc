@@ -42,7 +42,7 @@ Acceptance:
       duplicate probes and explicit guard exhaustion without renewing limits.
 - [x] Checker catches original stale-contract idle shape and recognizes a
       corrected continuation. Assert correlated diagnostics.
-- [ ] Independent review, offline gates, payload repin and merged checks pass;
+- [x] Independent review, offline gates, payload repin and merged checks pass;
       preserve original evidence and clean all owned Docker resources.
 
 ## Harness ownership and bounds
@@ -109,5 +109,36 @@ manifest SHA-256 `6927ff8a699dedb5067e084179176dd83a55ba4f62eab4c2fdc01d88f09635
 
 No Factorio mechanics changed and no new native gameplay, provider/Jev call,
 accelerated run, publication or deployment was performed. Autonomous red-science
-output remains unvalidated. Candidate review/offline gates are complete;
-payload repin and local integration closeout follow in separate commits.
+output remains unvalidated.
+
+## Local integration closeout
+
+Runtime commit `bf773cacd05a4a5a34c7285de988e34e0e138209`, separate payload pin
+`46a6a653a818f94932aeb96dfe87186519b44305`, local merge
+`e19fd0cf018f6b171e8440b955e3d4729ab550af`. Payload source SHA-256:
+`320d73da083120e163c9fa6dea3ea2de858a7799cc1558ef376e72e32c2c902a`.
+Merged source equals the reviewed/pinned candidate. Fresh merged checks passed:
+3,225 runtime / 1,346 mod tests, TypeScript, Lua/generated-Lua, payload 9/9,
+generated-artifact check, installer syntax and lint on all changed JS modules.
+
+An additional broad runtime lint sweep has **16 pre-existing no-use-before-define
+errors in unchanged tests/fixtures**. The identical sweep on frozen d33e9697
+produces the exact same diagnostics, verified in `lint-baseline-comparison.json`.
+This broader check is not green; no lint rule or assertion was weakened.
+
+The retained task checkout is
+`D:/SideProjects/airi-factorio-npc/.worktrees/fix-run-ao-controller-liveness`;
+its ignored `test-results/run-ao-controller-liveness/final-summary.json` is the
+machine-readable closeout. Residual recovery records one attempt, one completion,
+zero failures and one original transfer. The exhaustion control records two
+attempts, two failures, then one visible guard pause. Repeated trace rows are not
+counted as additional recoveries. These are scripted harness results, not a new
+live E2E result.
+
+All 23 recorded Docker IDs and eight script container names are verified absent,
+including stopped containers. No Compose project, network, disposable volume,
+test image, tunnel or temporary configuration link was created. Existing shared
+`npc-dev` is retained. Five integration historical reports and the 241-file AO
+raw seal remain unchanged. The reviewer finished; no background work remains.
+The final closeout commit changes documentation only; tested shipped bytes stay
+identical. Local integration ownership is released; nothing was pushed/deployed.
