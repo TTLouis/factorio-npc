@@ -214,12 +214,14 @@ describe('exact entity status observation', () => {
     const { find, lookup, furnace } = fixture()
     const near = furnace(41, 2, 1)
     const far = furnace(42, 80, 17)
+    Object.assign(far, { crafting_progress: 0.25, crafting_speed: 1.5 })
     find.mockReturnValue([near])
     lookup.mockImplementation(unit => unit === 42 ? far : near)
     const tools = await tools_interface()
     const result = tools.get_entity_status(undefined, undefined, 42)
     expect(result).toMatchObject({ found: true, unit_number: 42, entity: {
       unit_number: 42, position: { x: 80, y: 0 }, recipe: 'iron-plate', working: true,
+      crafting_progress: 0.25, crafting_speed: 1.5,
       inventories: [{ index: 1, items: [{ name: 'iron-plate', count: 17, quality: 'normal' }] }],
     } })
     expect(result.radius).toBeUndefined()

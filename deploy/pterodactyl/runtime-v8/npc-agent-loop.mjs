@@ -5,6 +5,9 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { setTimeout as observationDelay } from 'node:timers/promises'
 import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
+import { normalizeProductionIntent } from './production-task.mjs'
+import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
+import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
@@ -5138,7 +5141,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // The outermost turn fixes the identity every nested admission is judged
       // against (see dropIfStale); a nested turn keeps it.
       const scope = this.currentTurnScope()
-      return await this.turnScope.run(scope, () => super.runTurn())
+      return await this.turnScope.run(scope, async () => {
+        const production = await continueProductionTask(this)
+        return production === undefined ? super.runTurn() : production
+      })
     }
     finally {
       if (--this.turnDepth === 0) this.turnConversation = null
@@ -8549,7 +8555,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // makes a restage refuse). Reserve and usage are charged to the request; the generation output cap is left alone.
   async requestStepContract(args) {
     // The call has its own controller like the other side calls: cancel() and reset() abort it, and an aborted call is stale.
-    const controller = new AbortController()
+    const controller = args.controller ?? new AbortController()
     this.stepContractAborts ??= new Set()
     this.stepContractAborts.add(controller)
     try { return await this.runStepContractCall({ ...args, controller }) }
@@ -8561,7 +8567,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.stepContractAborts?.clear()
   }
 
-  async runStepContractCall({ key, step, requestId, facts, assumedOutcome, controller }) {
+  async runStepContractCall({ key, step, requestId, facts, assumedOutcome, controller, predictionCurrent }) {
+    const usageOwner = this.traceRequest?.usage
     const planning = this.memory.planningState?.(key)
     const packet = buildStepContractPacket({ planningState: planning, stepId: step.step_id, facts, assumedOutcome })
     if (!packet) return { ok: false, reason: 'packet_unavailable', attempts: 0 }
@@ -8586,8 +8593,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let attempts = 0
     while (attempts < STEP_CONTRACT_MAX_ATTEMPTS) {
       attempts++
+      if (predictionCurrent && !(await predictionCurrent())) return { stale: 'superseded', attempts }
       try { await this.reserve({ epoch: status.epoch, actorId: status.actor_id }) }
       catch (error) { return { ok: false, reason: `provider_budget_unavailable: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}`, attempts } }
+      if (predictionCurrent && !(await predictionCurrent())) return { stale: 'superseded', attempts }
       const startedAt = Date.now()
       let reply
       try {
@@ -8612,7 +8621,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return { ok: false, reason: `provider_error: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 200)}`, attempts }
       }
       const usage = estimatedOutputUsage(normalizedProviderUsage(reply?._sglunaProvider?.usage), reply?._sglunaProvider)
-      accumulateProviderUsage(this.traceRequest?.usage, usage)
+      accumulateProviderUsage(usageOwner, usage)
       // The goal usage ledger counts provider.response rows, and a call outside a turn has no traceRequest, so the call is
       // recorded the way a loop round is.
       await this.traceEvent('provider.response', {
@@ -8677,6 +8686,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async bindActiveStepContract({ key, plan, step, trigger, closedStepId, closedBy }) {
+    const owner = this.captureCheckpointOwner()
     const requestId = this.traceRequest?.id ?? `step_contract_${Date.now().toString(36)}`
     const base = { request_id: requestId, plan_id: plan.plan_id, step_id: step.step_id }
     await this.traceEvent('plan.contract_requested', { ...base, trigger, reason: 'step_active_without_contract', closed_step_id: closedStepId, closed_by: closedBy }, { requestId })
@@ -8686,7 +8696,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     let outcome
     try {
-      outcome = await this.requestStepContract({ key, step, requestId, facts: await this.gatherStepContractFacts() })
+      outcome = await takeContractPrediction(this, { plan, step, closedStepId, closedBy })
+      outcome ??= await this.requestStepContract({ key, step, requestId, facts: await this.gatherStepContractFacts() })
     }
     catch (error) {
       outcome = { ok: false, reason: `step_contract_call_error: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 200)}`, attempts: 0 }
@@ -8699,8 +8710,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     if (!outcome.ok) return failed(outcome.reason, outcome.attempts)
+    await this.assertCheckpointOwnerCurrent(owner)
     const bound = this.memory.bindStepCompletionContract?.(key, {
-      planId: plan.plan_id, stepId: step.step_id, contract: outcome.contract, binding: 'just_in_time', requestId,
+      planId: plan.plan_id, stepId: step.step_id, contract: outcome.contract, binding: outcome.prediction ? 'prediction' : 'just_in_time', requestId,
     })
     if (!bound?.ok) return failed(`bind_refused: ${bound?.reason ?? 'unsupported'}`, outcome.attempts)
     // Every close path reads the BOARD contract, so the bind is proven there before anything relies on it.
@@ -8708,8 +8720,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const persisted = persistedStepCheckpoint(state?.task_board, state?.task_board?.active_step_id)
     if (!persisted || completionContractSignature(persisted.contract) !== completionContractSignature(outcome.contract)) return failed('bound_contract_not_persisted', outcome.attempts)
     await this.persistState()
-    await this.traceEvent('plan.contract_bound_just_in_time', {
-      ...base, trigger, reason: 'step_activated_without_contract', attempts: outcome.attempts,
+    await this.traceEvent(outcome.prediction ? 'plan.contract_prediction_bound' : 'plan.contract_bound_just_in_time', {
+      ...base, trigger, reason: outcome.prediction ? 'assumed_outcome_verified_and_fresh_contract_valid' : 'step_activated_without_contract', attempts: outcome.attempts,
       requirement_kinds: outcome.contract.requirements.map(item => item.kind),
     }, { requestId })
     return { ok: true, bound: true, state }
@@ -10639,11 +10651,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // `pauseInfo.pause_class` is the pause's declared class (pause-class.mjs). Every caller declares one; a missing class is recorded as
   // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
-  async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}) {
+  async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}, expectedOwner) {
     await this.loadPersistentState()
-    const key = this.activePlanKey()
+    if (expectedOwner) await this.assertCheckpointOwnerCurrent(expectedOwner)
+    const key = expectedOwner?.key ?? this.activePlanKey()
     const state = this.memory.pausePlan?.(key, reason, pauseInfo)
     await this.persistState()
+    if (expectedOwner) await this.assertCheckpointOwnerCurrent(expectedOwner)
     // Outside a request (the supervisor pausing a plan a failed request left
     // stranded, or a user stop) no terminal event follows, so name the pause
     // here, keyed by the request that just ended. Inside a request the
@@ -10653,6 +10667,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
     }
     abortSkillChoice(this, reason) // 2.8 hook: stop, identity/actor change
+    this.abortStepContractCalls()
     super.cancel()
     return state
   }
@@ -12013,8 +12028,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const stepCompletion = pendingAmendment
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
+    if (pruneClosedProductionRecords(this.memory)) await this.persistState({ strict: true })
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
     if (stepCompletion?.contractPause) return stepCompletion.contractPause
+    if (!pendingAmendment && !stepCompletion?.verified) {
+      const production = await continueProductionTask(this)
+      if (production !== undefined) return production
+    }
 
     // The reason a step did not close used to be trace-only: the model saw a
     // finished batch and nothing about why the step stayed open.
@@ -12129,6 +12149,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async failed(errorText) {
     await this.loadPersistentState()
     if (!this.active) return null
+    await discardContractPrediction(this, 'native_step_failed')
     await this.jev?.noteFailureBoundary() // U11: a C4 judgment whose step now fails did not verify on its first batch (scored now, whatever the request does next)
     this.planUpdateReason = 'failure'
     this.reasoningTriggerSource = null
@@ -12147,6 +12168,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return null
     }
     this.lastHandledRuntimeReceipt.failure = receiptKey
+    const production = await recoverProductionFailure(this)
+    if (production !== undefined) return production
 
     const routed = await this.routePostStepDecision(receipt, {
       boundary: 'failure',
@@ -13601,6 +13624,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let stepId
     let executionGuidance
     let plannerReview
+    let productionTask
     let reviewCheckpointIgnored = false
     let baseMessage = message
     if (typeof message?.content === 'string') {
@@ -13609,6 +13633,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         this.validatePlannerRoleOutput(raw)
+        if (Object.hasOwn(raw, 'productionTask')) {
+          try { productionTask = normalizeProductionIntent(raw.productionTask) }
+          catch (cause) { throw this.roleContractError('invalid_production_task', cause.message) }
+          if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE || raw.operations?.length !== 0
+            || !raw.stepId || raw.checkpoint || raw.semanticCompletion || raw.plannerReview || raw.observationRequest) {
+            throw this.roleContractError('invalid_production_task', 'productionTask requires an executor stepId, empty operations and no completion/review/read request')
+          }
+        }
         if (Object.hasOwn(raw, 'executionGuidance')) {
           try { executionGuidance = normalizeExecutionGuidance(raw.executionGuidance, raw.plan?.length) }
           catch (cause) { throw this.roleContractError('invalid_execution_guidance', cause.message) }
@@ -13715,7 +13747,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         // 2.6: the model's answer to a time review; traced, never executed.
         if (Object.prototype.hasOwnProperty.call(raw, 'timeReview')) timeReview = parseTimeReview(raw.timeReview)
-        if (executionGuidance || plannerReview || assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition || stepId !== undefined
+        if (productionTask || executionGuidance || plannerReview || assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition || stepId !== undefined
           || Object.prototype.hasOwnProperty.call(raw, 'timeReview')
           || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
@@ -13735,6 +13767,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             stepId: _stepId,
             executionGuidance: _executionGuidance,
             plannerReview: _plannerReview,
+            productionTask: _productionTask,
             ...base
           } = raw
           // With the step id given, plan and currentStep are not needed from the executor.
@@ -13761,6 +13794,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (stepId !== undefined) plan.stepId = stepId
     if (executionGuidance) plan.executionGuidance = executionGuidance
     if (plannerReview) plan.plannerReview = plannerReview
+    if (productionTask) plan.productionTask = productionTask
     if (reviewCheckpointIgnored) plan.reviewCheckpointIgnored = true
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
@@ -15999,6 +16033,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Backstop for programmatic callers: never silently drop planner actions.
     this.validatePlannerRoleOutput(plan)
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
+    const productionStepId = plan.productionTask ? plan.stepId : undefined
     await this.validatePreflightCorrectionScope(plan)
     try {
       plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
@@ -16010,6 +16045,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
+    if (plan.productionTask) return startProductionTask(this, { ...plan, stepId: productionStepId })
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
     const supplyReview = await this.reviewExecutorSupplyDrift(plan)
     if (supplyReview !== undefined) return supplyReview
@@ -16737,6 +16773,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (caughtError) {
         let error = caughtError
         if (!error?.preflight) throw error
+        if (this.productionAdmission) {
+          await this.assertCheckpointOwnerCurrent(this.productionAdmission)
+          // Only proven pre-admission material/quantity misses earn a bounded
+          // harness recompile. Authority, transport and world changes never do.
+          if (['bootstrap_dependency_unresolved', 'batch_stock_unverified_dependency', 'insufficient_items'].includes(error.preflight.code)) {
+            error.productionNotAdmitted = true
+            throw error
+          }
+          // Avoid model-owned recovery for unsupported production failures.
+          const reason = `production_preflight_${String(error.preflight.code).slice(0, 120)}`
+          await this.pausePersistentPlan(reason, { pause_class: PAUSE_CLASS.GUARD }, this.productionAdmission)
+          return { production: 'paused', reason, operations: [] }
+        }
         if (error.preflight.code === STEP_CONTRACT_PENDING_CODE) {
           // Backstop: a restart between the step close and the bind, or a resumed task, reaches an active step with no
           // contract. Bind it now, tell the model what changed, and let it send the batch again.
@@ -17076,6 +17125,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.persistState()
         }
         await this.assertCurrent()
+        startContractPrediction(this)
       }
       catch (error) {
         // MW2b: the command was sent but no valid acknowledgement came back. Ask the game what really happened (exact batch,
@@ -17107,6 +17157,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         else if (reconciliation?.verdict === RECONCILE_VERDICT.NOT_ADMITTED && (this.lostAckRetries ?? 0) < LOST_ACK_RETRY_BUDGET) {
           this.lostAckRetries = (this.lostAckRetries ?? 0) + 1
+          if (this.productionAdmission) {
+            await this.assertCheckpointOwnerCurrent(this.productionAdmission)
+            this.batchInFlight = this.batchInFlightBeforeSend === true
+            this.batchInFlightBeforeSend = undefined
+            error.productionNotAdmitted = true
+            error.preflight = { code: 'lost_acknowledgement_not_admitted' }
+            throw error
+          }
           await this.traceEvent('operations.preflight_recoverable', {
             failure_class: 'lost_acknowledgement_not_admitted',
             tools_enabled: true,

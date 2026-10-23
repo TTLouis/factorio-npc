@@ -681,7 +681,7 @@ This is authoring discipline, not a Jev rejection loop.
 
 ## 6. Step contracts are fixed before commit
 
-> Owner decision 2026-10-08 (P1–P2 built 2026-10-09, P3–P4 not built): each step's contract becomes fixed before that step activates, not at slice commit. See [One-step contract prediction](#one-step-contract-prediction-owner-decision-2026-10-08-p1p2-built-p3p4-not-built).
+> Owner decision 2026-10-08 (P1–P2 built 2026-10-09, P3–P4 not built): each step's contract becomes fixed before that step activates, not at slice commit. See [One-step contract prediction](#one-step-contract-prediction-owner-decision-2026-10-08-p1p4-implemented-2026-10-23).
 
 A committed semantic step should already know what successful completion means.
 
@@ -1204,7 +1204,7 @@ Constraints any design has to keep:
   (no unvalidated inserter or belt figures) and fits the production-rate goals
   above.
 
-### One-step contract prediction (owner decision, 2026-10-08; P1–P2 built, P3–P4 not built)
+### One-step contract prediction (owner decision, 2026-10-08; P1–P4 implemented 2026-10-23)
 
 Trigger: [Haiku trial C](validation/LUNA_HAIKU_LIVE_2026-10-08C.md). The planner writes every step's completion contract when it commits a slice, several steps before those steps run. By then the facts can be stale (trial C committed "mine 100 iron ore" while Luna already held 130), and a contract that turns out wrong is frozen with the plan.
 
@@ -1276,7 +1276,39 @@ Order: minimal MW5 first, because recovery is needed in both designs and it is w
 - A call that fails, or whose actor status cannot be read, pauses the goal with `step_contract_unavailable`. A stale call binds nothing, after the close it followed has been credited.
 - The call's usage is charged to the request and traced as a `provider.response` row with `trigger_source: 'step_contract'`.
 
-P3 (prediction lane) and P4 (recorded-reply scenarios) are not built. The mod's task board does not yet show `pending` contracts.
+**P3/P4 update (2026-10-23).** The runtime now starts one isolated contract
+prediction after a native batch is admitted. It captures canonical and verified
+Task Board step identities, the assumed contract fingerprint, actor/epoch,
+generation, request and lineage. Local speculative facts never write shared
+observation caches. The existing side-call reserve, usage accounting, validation
+and append-only binding path remain authoritative. Fresh validation at activation
+can bind the prediction; material-only, changed-owner, failed-step and invalid
+predictions fall back to JIT. Cancellation aborts only the owned side call.
+Scripted full-loop regressions cover binding, fresh rejection, wrong close source,
+actor/goal/version/request replacement, reserve/read/validation/trace races and
+failed native callbacks. See the [Run AN repair checkpoint](validation/PRODUCTION_TASK_CONTROLLER_2026-10-23.md).
+Prediction does not author a future slice or an entire factory. The mod's task
+board still does not display pending contracts.
+
+### Finite production execution (2026-10-23)
+
+An executor may submit `productionTask` with empty operations and desired held-item
+targets exactly matching inventory requirements of its active committed step.
+The harness compiles deterministic recipe yields into recipe execution counts,
+protects other checkpoint stock, and owns separate bounded acquire/craft/fuel/wait/
+collect batches. Explicit exact producer and direct-feed bindings do not authorize
+placement, recipe configuration, new strategy, research or completion. Fresh
+native facts and existing authorization/preflight/operation ledgers govern every
+batch. A persisted material ledger separates held, reserved, forecast and pending
+stock; prospective output cannot satisfy ingredient admission.
+
+The task has durable transition, time, fuel and recovery limits. A proven
+pre-admission miss or settled native failure triggers fresh deficit compilation;
+unknown effects remain fenced. Only canonically completed steps retire records.
+This is a finite execution primitive for successive slices, not a goal-wide
+factory quantity plan. Fluid, probabilistic and multi-output allocation need
+separate policies and currently pause. Construction robots remain a later design
+discussion; this change adds no robot execution authority.
 
 ## Agent split: sequential planner and executor (design updated 2026-09-30)
 

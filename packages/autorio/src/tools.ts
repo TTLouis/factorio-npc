@@ -532,6 +532,8 @@ export function create_tools_remote_interface() {
         rotatable: entity.rotatable,
         amount: entity.type === 'resource' ? entity.amount : undefined,
         recipe: recipe_name,
+        crafting_progress: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_progress : undefined,
+        crafting_speed: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_speed : undefined,
         status: entity.status,
         status_name: status_name(entity.status),
         working: entity.status === defines.entity_status.working,
