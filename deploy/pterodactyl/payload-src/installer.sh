@@ -156,10 +156,10 @@ cp "$WORK/source/packages/autorio/info.json" "$WORK/source/packages/autorio/dist
 cp -a "$WORK/source/packages/autorio/dist/." "$APP/autorio/"
 
 log 'Copying v8 supervisor, shared policy, and prompt'
-for file in quantity-compiler.mjs material-ledger.mjs production-task.mjs production-task-runtime.mjs contract-prediction.mjs controller-liveness.mjs agent-roles.mjs role-contracts.mjs agent-context.mjs handoff-packet.mjs handoff-format.mjs decision-budgets.mjs inventory-facts.mjs topology-context.mjs observation-rate.mjs placement-candidates-render.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs completion-finalization.mjs targeted-observation.mjs luna-step-contracts.mjs planning-state.mjs authorization.mjs refusal-class.mjs pause-class.mjs batch-stock.mjs batch-footprint.mjs replacement-wake.mjs task-ledger.mjs operation-reconciliation.mjs operation-ledger.mjs reserve-command.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs goal-definition.mjs goal-reading.mjs goal-requirements.mjs skill-offers.mjs plan-time-estimate.mjs usage-ledger.mjs unchanged-fact-reads.mjs post-batch-facts.mjs production-wait.mjs prompt-prefix.mjs context-references.mjs lifecycle.mjs dsml-tool-calls.mjs control-json-repair.mjs responsiveness.mjs npc-agent-loop.mjs; do
+for file in quantity-compiler.mjs material-ledger.mjs production-task.mjs production-task-runtime.mjs contract-prediction.mjs controller-liveness.mjs tick-sprint.mjs agent-roles.mjs role-contracts.mjs agent-context.mjs handoff-packet.mjs handoff-format.mjs decision-budgets.mjs inventory-facts.mjs topology-context.mjs observation-rate.mjs placement-candidates-render.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs completion-finalization.mjs targeted-observation.mjs luna-step-contracts.mjs planning-state.mjs authorization.mjs refusal-class.mjs pause-class.mjs batch-stock.mjs batch-footprint.mjs replacement-wake.mjs task-ledger.mjs operation-reconciliation.mjs operation-ledger.mjs reserve-command.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs goal-definition.mjs goal-reading.mjs goal-requirements.mjs skill-offers.mjs plan-time-estimate.mjs usage-ledger.mjs unchanged-fact-reads.mjs post-batch-facts.mjs production-wait.mjs prompt-prefix.mjs context-references.mjs lifecycle.mjs dsml-tool-calls.mjs control-json-repair.mjs responsiveness.mjs npc-agent-loop.mjs; do
   cp "$WORK/source/deploy/pterodactyl/runtime-v8/$file" "$APP/src/runtime-v8/$file"
 done
-for file in structured-policy.mjs supervisor-adapter.mjs npc-agent-loop.mjs; do
+for file in structured-policy.mjs supervisor-adapter.mjs npc-agent-loop.mjs tick-sprint-policy.mjs; do
   cp "$WORK/source/deploy/pterodactyl/staging/$file" "$APP/src/staging/$file"
 done
 cp "$WORK/source/packages/agent/src/llm/prompt.md" "$APP/src/prompt.md"
@@ -253,6 +253,8 @@ const names = [
   'src/runtime-v8/production-task-runtime.mjs',
   'src/runtime-v8/contract-prediction.mjs',
   'src/runtime-v8/controller-liveness.mjs',
+  'src/runtime-v8/tick-sprint.mjs',
+  'src/staging/tick-sprint-policy.mjs',
   'src/runtime-v8/placement-candidates-render.mjs',
   'src/runtime-v8/completion-finalization.mjs',
   'src/runtime-v8/targeted-observation.mjs',

@@ -145,8 +145,9 @@ test('actual supervisor entry point rereads files/native state and refuses Run V
   input.canonical.run = { paused: true, pause_class: 'guard' }; await writeState()
   assert.equal((await check()).action, 'stop')
   assert.equal(calls.at(-1), '!luna stop')
+  assert.match(calls.at(-2), /sgluna_tick_sprint.*seal/)
   await assert.rejects(() => supervisorStop({ rcon, root, expectedRunId: 'wrong-run', snapshotCommand: 'native-snapshot' }), /identity mismatch/)
-  assert.equal(calls.length, 5, 'identity mismatch must not issue RCON commands')
+  assert.equal(calls.length, 6, 'identity mismatch must not issue RCON commands')
   input.canonical.run = { paused: true, pause_class: 'model_recoverable', paused_at: input.now - 600000 }
   await writeState()
   let interruptedStops = 0

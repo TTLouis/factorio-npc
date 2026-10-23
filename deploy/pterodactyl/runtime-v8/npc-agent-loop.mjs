@@ -11399,7 +11399,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.controllerBusyCount = (this.controllerBusyCount ?? 0) + 1
     const controllerOwner = decisionBudgetOwner(this)
     const requestTrace = this.traceRequest
+    const checkpointOwner = this.captureCheckpointOwner()
     try {
+      await this.tickSprintBoundary?.('guarded_turn')
+      this.assertCheckpointOwnerIdentity(checkpointOwner)
       return await this.runGuardedTurn()
     }
     finally {
@@ -12090,7 +12093,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async withControllerWork(fn) {
     this.controllerBusyCount = (this.controllerBusyCount ?? 0) + 1
-    try { return await this.turnScope.run(this.currentTurnScope(), fn) }
+    const scope = this.currentTurnScope()
+    try {
+      return await this.turnScope.run(scope, async () => {
+        await this.tickSprintBoundary?.('native_callback')
+        await this.dropIfStale(this.turnConversation)
+        return fn()
+      })
+    }
     finally { this.controllerBusyCount-- }
   }
 

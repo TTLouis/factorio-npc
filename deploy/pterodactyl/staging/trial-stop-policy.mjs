@@ -1,3 +1,4 @@
+import { sprintSpeedValid } from './tick-sprint-policy.mjs'
 // Read-only policy for the external live-trial runner and its supervisor.
 // A recoverable pause reason is diagnostic text, never terminal authority.
 export function structuralTerminal(canonical) {
@@ -15,7 +16,7 @@ export function structuralTerminal(canonical) {
 }
 
 export function trialStopDecision({ canonical, events = [], startedAt, now, pausedSince = null,
-  goalId, actorId, native, constructionLimitMs = 45 * 60000, hardFloorReached = false }) {
+  goalId, actorId, native, constructionLimitMs = 45 * 60000, hardFloorReached = false, speedPolicy = { profile: 'normal' } }) {
   if (!Number.isFinite(startedAt) || !Number.isFinite(now) || now < startedAt
     || ![45 * 60000, 60 * 60000].includes(constructionLimitMs)) throw new Error('Invalid trial clock or approved construction cap')
   const finish = (action, reason, result = null, evidence = {}, since = null) => ({
@@ -23,7 +24,7 @@ export function trialStopDecision({ canonical, events = [], startedAt, now, paus
     evidence: { event: 'trial.stop_classified', source: 'authoritative_trial_stop_policy', reason,
       goal_id: goalId, actor_id: actorId, observed_at: now, ...evidence },
   })
-  if (native && (native.actor_id !== actorId || native.speed !== 1 || native.humans !== 0)) {
+  if (native && (native.actor_id !== actorId || !sprintSpeedValid(native, { ...speedPolicy, now }) || native.humans !== 0)) {
     return finish('stop', 'native_trial_invariant_changed', 'trial_invariant_changed')
   }
   if (goalId && canonical?.goal?.goal_id && canonical.goal.goal_id !== goalId) {

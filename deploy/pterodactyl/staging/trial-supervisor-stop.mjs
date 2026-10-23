@@ -9,7 +9,7 @@ export async function supervisorStop({ rcon, root, snapshotCommand, expectedRunI
   const logs = path.join(root, 'logs')
   const identity = JSON.parse(await fs.readFile(path.join(logs, 'e2e-trial-identity.json'), 'utf8'))
   if (identity.run_id !== expectedRunId || !identity.goal_id || !identity.actor_id) throw new Error('Trial identity mismatch')
-  const decision = await stopTrialIfTerminal({ policy: {}, readCurrent: async () => {
+  const decision = await stopTrialIfTerminal({ policy: { speedPolicy: identity.speed_policy ?? { profile: 'normal' } }, readCurrent: async () => {
     const native = JSON.parse(await rcon.command(snapshotCommand))
     const names = (await fs.readdir(logs)).filter(name => /^sgluna-behavior\.jsonl(?:\.\d+)?$/.test(name))
     const events = (await Promise.all(names.map(name => fs.readFile(path.join(logs, name), 'utf8'))))
@@ -24,7 +24,10 @@ export async function supervisorStop({ rcon, root, snapshotCommand, expectedRunI
       native, events, startedAt: identity.started_at, now: now(), pausedSince: previous.pausedSince,
       goalId: identity.goal_id, actorId: identity.actor_id, constructionLimitMs: identity.construction_limit_ms,
       hardFloorReached }
-  }, stop: async () => { await rcon.command('!luna stop') } })
+  }, stop: async () => {
+    await rcon.command('/silent-command if remote.interfaces.sgluna_tick_sprint then local g=remote.call("sgluna_tick_sprint","status");if g.binding then local s=remote.call("sgluna_tick_sprint","seal","external_stop");assert(s.speed==1 and not s.lease) end end')
+    await rcon.command('!luna stop')
+  } })
   await fs.writeFile(path.join(logs, 'e2e-supervisor-stop-decision.json'), JSON.stringify(decision, null, 2))
   return decision
 }

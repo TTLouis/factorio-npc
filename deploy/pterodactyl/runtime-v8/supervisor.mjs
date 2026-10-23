@@ -1,5 +1,6 @@
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import { inspectControllerLiveness } from './controller-liveness.mjs'
+import { pauseSprintStartup, resumeSprintStartup, TickSprintController } from './tick-sprint.mjs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -2434,6 +2435,7 @@ export class Session {
   }
 
   taskBoardUiHeartbeat() {
+    if (this.tickSprint?.lease) return false // zero-human UI refresh waits for the sprint boundary
     if (!this.rcon || !this.ready || this.stopping) return false
     this.requestTaskBoardUiSync()
     return true
@@ -3351,6 +3353,7 @@ export class Session {
   }
 
   async drainTaskBoardUiInputs() {
+    if (this.tickSprint?.lease) return false
     if (!this.rcon || !this.ready || this.stopping || this.uiInputPollRunning) return false
     this.uiInputPollRunning = true
     try {
@@ -3469,9 +3472,11 @@ export class Session {
   // Role-aware provider call (delegation U1). `context.role` picks the model via
   // agent-roles.mjs (planner when absent); the request is the pre-roles shape, so
   // a single-model config is unchanged.
-  roleProvider(messages, context) {
+  async roleProvider(messages, context) {
     const { role, ...request } = resolveAgentRole(this.config, context?.role)
-    return this.provider(request, messages, context)
+    const reply = await this.provider(request, messages, context)
+    await this.tickSprint?.boundary('provider_response')
+    return reply
   }
 
   async start() {
@@ -3506,11 +3511,13 @@ export class Session {
     check(this.rcon, 'Timed out waiting for authenticated Factorio RCON')
     const version = await this.rcon.command('/version')
     check(/2\.0\.\d+/.test(version), 'Authenticated Factorio RCON version probe failed')
+    if (process.env.SGLUNA_E2E_PROFILE === 'accelerated') await pauseSprintStartup(this.rcon)
     await this.bindNpc()
 
     const prompt = await fsp.readFile(path.join(this.app, 'src', 'prompt.md'), 'utf8')
     const jevDecisionProvider = this.config.decisionProvider
-      ? (state, questions, context = {}) => decisionProviderRequest(
+      ? async (state, questions, context = {}) => {
+          const reply = await decisionProviderRequest(
           this.config.decisionProvider,
           state,
           questions,
@@ -3521,7 +3528,10 @@ export class Session {
               this.config.decisionProvider.maxRequestsPerHour,
             ),
           },
-        )
+          )
+          await this.tickSprint?.boundary('jev_response')
+          return reply
+        }
       : undefined
     this.agent = new NpcAgentLoop({
       completionProtocolVersion: 3,
@@ -3556,6 +3566,18 @@ export class Session {
     await this.syncTaskBoardUi()
 
     this.ready = true
+    if (process.env.SGLUNA_E2E_PROFILE === 'accelerated') {
+      const watchdog = new Rcon(rconPort, this.rconPassword, 700, { auxiliary: true })
+      try {
+        await watchdog.connect()
+        this.tickSprint = new TickSprintController({ session: this, watchdog,
+          ledgerFile: path.join(this.root, '.sgluna', 'tick-sprint-ledger.json'),
+          binding: { profile: 'accelerated', run_id: process.env.SGLUNA_E2E_RUN_ID, source_sha: process.env.SGLUNA_E2E_SOURCE_SHA } })
+        await this.tickSprint.start()
+        this.agent.tickSprintBoundary = reason => this.tickSprint.boundary(reason)
+        await resumeSprintStartup(this.rcon)
+      } catch (error) { watchdog.close(); throw error }
+    }
     this.uiInputPoll = setInterval(() => {
       if (!this.stopping) this.drainTaskBoardUiInputs()
     }, UI_INPUT_POLL_MS)
@@ -3644,7 +3666,7 @@ export class Session {
     await this.printChat('I restarted and this goal has no active plan to resume, so I am not waking the planner. Say continue or give me a new instruction.')
   }
 
-  queueEvent(fn, { reportError = false } = {}) {
+  queueEvent(fn, { reportError = false, safetyControl = false } = {}) {
     // Activity hooks and real timers can inherit the completed agent turn's AsyncLocalStorage scope.
     // A supervised event starts its own turn; retaining that old generation makes a valid recovery stale.
     const inherited = this.agent?.turnScope?.getStore?.()
@@ -3655,13 +3677,17 @@ export class Session {
           origin_request_id: inherited.requestId,
           reason: 'supervisor_event_starts_fresh_turn',
         })
-        return this.queueEvent(fn, { reportError })
+        return this.queueEvent(fn, { reportError, safetyControl })
       })
     }
     this.controllerQueuedEvents = (this.controllerQueuedEvents ?? 0) + 1
     this.eventQueue = this.eventQueue.then(async () => {
       this.controllerQueuedEvents--
-      return fn()
+      this.controllerEventRunning = (this.controllerEventRunning ?? 0) + 1
+      try {
+        await this.tickSprint?.boundary(safetyControl ? 'safety_control' : 'supervisor_event')
+        return await fn()
+      } finally { this.controllerEventRunning-- }
     }).catch(async error => {
       const message = error instanceof Error ? error.message : String(error)
       this.log(message)
@@ -3741,7 +3767,7 @@ export class Session {
           await this.ackTaskBoardUiLifecycle(input.player_index, input.action)
         }
       }
-    }, { reportError: true })
+    }, { reportError: true, safetyControl: ['pause', 'terminate'].includes(input.action) })
     return true
   }
 
@@ -3798,7 +3824,7 @@ export class Session {
       finally {
         if (typeof onSettled === 'function') await onSettled()
       }
-    }, { reportError: true })
+    }, { reportError: true, safetyControl: stop })
     return true
   }
 
@@ -3926,6 +3952,8 @@ export class Session {
     this.stopPromise = (async () => {
       let clean = true
       let gracefulResult
+      try { await this.tickSprint?.stop('shutdown') }
+      catch (error) { clean = false; this.log(`Sprint shutdown restoration failed: ${error.message}`) }
       if (this.agent?.active) {
         try {
           if (this.agent.goalAwaitingNextSlice?.() === true) {
@@ -4026,7 +4054,7 @@ async function main() {
 
   try {
     const modDir = await prepareMods(root, app, work)
-    const settingsFile = await prepareServerSettings(root, game, config.factorio)
+    const settingsFile = await prepareServerSettings(root, game, config.factorio, { pausedStartup: process.env.SGLUNA_E2E_PROFILE === 'accelerated' })
     const ini = await prepareGameConfig(work, game, root)
     const selected = await selectSave(root, config.save)
     if (selected.create) {

@@ -21,7 +21,7 @@ START_COUNT=0
 PRISTINE_SAVE="$LANE_ROOT/pristine-planning-live.zip"
 export PYTHONUNBUFFERED=1
 
-mkdir -p "$RESULTS" "$WRITE_DATA" "$MODS"
+mkdir -p "$RESULTS" "$WRITE_DATA/saves" "$MODS"
 if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft || "$LANE" == local-transfer-target || "$LANE" == shoreline-recovery || "$LANE" == partial-transfer ]]; then
   # Independent controllers cannot share a persisted operation-ordinal journal.
   # Capture the untouched generated world before either controller runs.
@@ -78,6 +78,10 @@ trap 'exit 143' TERM
 
 start_factorio() {
   START_COUNT=$((START_COUNT + 1))
+  if [[ "$LANE" == tick-sprint && "$START_COUNT" -gt 1 ]]; then
+    SERVER_SETTINGS="$LANE_ROOT/sprint-startup-settings.json"
+    python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p["auto_pause"]=True; json.dump(p,open(sys.argv[2],"w"))' "$TEST_ROOT/fixtures/server-settings.json" "$SERVER_SETTINGS"
+  fi
   local process_log="$RESULTS/factorio-process-$START_COUNT.log"
   local console_log="$RESULTS/factorio-console-$START_COUNT.log"
 
@@ -142,6 +146,11 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  tick-sprint)
+    run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"
+    restart_factorio
+    run_node tick_sprint_factorio.mjs --phase verify --save "$SAVE"
+    ;;
   production-task)
     run_node production_task_factorio.mjs
     ;;
