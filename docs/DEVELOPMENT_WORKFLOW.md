@@ -38,6 +38,13 @@ checkout. A plan-only task can finish without implementation; describe its scope
 
 ## Choose evidence that matches the claim
 
+For an E2E-derived fix, apply the [E2E repair requirements](E2E_REPAIR_REQUIREMENTS.md).
+Name the failure class and harness owner; supply shared prevention and bounded
+harness-owned self-correction. Reproduce the original failure, deliberately test a
+residual miss through the real lifecycle, and prove safe continuation plus honest
+exhaustion. Prompt improvements and one passing regression do not meet this gate.
+Use the guide's repair closeout fields in the task note and PR evidence.
+
 | Change | Minimum useful proof |
 | --- | --- |
 | Runtime recovery / observation / prompt flow | Recorded/scripted full-loop regression with realistic replies; assert request-correlated traces and existing budget/uncertainty fences |

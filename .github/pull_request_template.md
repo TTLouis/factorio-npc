@@ -8,6 +8,11 @@
 Unit/static gates do not prove engine behavior; placement does not prove production.
 For workflow/docs-only changes, give the relevant command/config/link checks. -->
 
+<!-- For E2E-derived fixes, follow docs/E2E_REPAIR_REQUIREMENTS.md. Name the
+failure class and harness owner, shared prevention, residual-miss detection,
+bounded harness correction/automatic continuation, safety/exhaustion controls,
+and baseline negative evidence. Prompt-only or model-managed retry is insufficient. -->
+
 | Criterion | Proof | Result |
 | --- | --- | --- |
 | | | |
@@ -22,6 +27,7 @@ dependencies, recovery/revert procedure, and any payload repin. No secret values
 - [ ] Independent review is complete and actionable feedback is addressed.
 - [ ] Affected actor/epoch, plan authority, budget, receipt and secret boundaries are preserved (or explained as unaffected).
 - [ ] Documentation matches the behavior; historical validation records are preserved.
+- [ ] For an E2E-derived fix, shared prevention and harness-owned self-correction are evidenced, including a residual miss, safe continuation and bounded exhaustion; otherwise marked not applicable with a reason.
 
 <!-- Target experiment/jev-agent-architecture for development. Live provider trials,
 deployment and promotion require their existing authorization/evidence gates. -->

@@ -35,6 +35,7 @@ The intended actor is a real standalone Factorio `character` controlled through 
 - Unit tests and typechecks are required regression gates but are not proof of real Factorio engine behavior.
 - For engine semantics, prefer deterministic real-Factorio integration coverage under `tests/factorio/`.
 - Never weaken a failing E2E assertion merely to make a scenario pass. Fix the runtime/harness assumption or make the limitation explicit.
+- E2E-derived fixes must follow [E2E repair requirements](docs/E2E_REPAIR_REQUIREMENTS.md): prevent the bounded failure class at a shared harness boundary and prove harness-owned self-correction for residual misses. A one-example patch, better prompt or model-managed retry is insufficient; preserve safety/authority/budget fences and explicit exhaustion.
 - Do not pass unvalidated throughput assumptions to the model. Inserter, belt-lane, stacking, recipe, and transport constraints should be measured or derived deterministically before becoming planning facts.
 - Keep real provider credentials out of repository tests and CI.
 - Pterodactyl package smoke/release gates are separate from ordinary CI and should be used for promotion checkpoints.
