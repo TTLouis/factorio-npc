@@ -78,6 +78,10 @@ receipt tail. The reminder survives restore/restage and grants no completion pro
 Named traces distinguish residual detection, fresh deficit, continuation, position
 correction and exhaustion. The checker recognizes both AR's original unresolved
 partial shape and corrected continuations across request restages.
+An all-met inventory read does not clear the checker finding. Only an admitted
+missing-effect continuation or the operation-correlated `gather.checkpoint_closed`
+event does so; the latter follows ordinary verified closure. A stock-change and
+interrupted-trace regression proves an unsuccessful close remains visible.
 
 ## Acceptance and evidence
 
@@ -99,18 +103,73 @@ partial shape and corrected continuations across request restages.
   coal-only continuation and physical yield. Old-epoch historical work stays held.
 - [x] Native nearby-coordinate correction, intact-tree proof and atomic surface
   refusal pass with zero external inference. The broader science goal is unproven.
-- [ ] Final immutable candidate, payload pin, full offline gates and lint recorded.
-- [ ] Independent final review, local integration and fresh merged gate recorded.
+- [x] Final immutable candidate, payload pin, full offline gates and lint recorded.
+- [x] Independent final review, local integration and fresh merged gate recorded.
 
 Full commands, actual exits, captured native transcripts, baseline controls and
 machine-readable closeout are retained under
-`test-results/run-ar-mining-reconciliation/`. Candidate and integration closeout
-fields below will be filled after their gates; static checks do not establish
+`D:/SideProjects/airi-factorio-npc/.worktrees/fix-run-ar-mining-reconciliation/test-results/run-ar-mining-reconciliation/`.
+Static checks do not establish
 autonomous science production or recovery for arbitrary mixed/uncertain mutations.
 
 ## Build checkpoint
 
-Implementation and exact/native proof complete; final candidate validation and
-independent review in progress. Code owners are the native selection/admission
-boundary, runtime reconciliation/ledger and executor lifecycle, not planner prompts
-or Jev judgments. No background provider work or live trial is authorized.
+Complete and merged locally. Reviewed source candidate:
+`d332703af7c2aca1db62b668930fa0a3e6688e94`; fresh tested integration merge:
+`60af51084303fef50ed99b96b779cd6735e3bd17`. The subsequent closeout commit changes
+this report only. Code owners are the native selection/admission boundary, runtime
+reconciliation/ledger and executor lifecycle. Planner prompts and Jev judgments
+have no correction or completion authority.
+
+| Gate | Result / evidence |
+| --- | --- |
+| Exact unchanged runtime controls | Three expected failures on `18509c77`; `baseline-runtime.log` |
+| Exact unchanged native unit control | Expected exact-coal-selection assertion failure; `baseline-mod.log` |
+| Unchanged native 2.0.77/save | `mining_rejected`, coal 0, copper 10, tree intact; `native-baseline.json` |
+| Scoped runtime matrix | 41/41 pass, including exact Session failure/callback and changed-stock checker case; `targeted-final.log` |
+| Candidate full offline gate | 3,302 runtime + 1,378 mod, typecheck, Lua build/generated-Lua pass; `all-final-candidate.log` |
+| Fresh merged offline gate | Same 3,302 + 1,378 and type/Lua pass; `all-merged.log` |
+| Final changed-code ESLint | Zero errors/warnings, including executor loop; `lint-changed-final.json`, `lint-loop-candidate.json` |
+| Installer | Nine payload tests, generator check and shell syntax pass; `payload-merged.log` |
+| Real native candidate | Four cases pass, zero external inference; `native-final-result.json` and `native-final.log` |
+| Independent review | `/root/review_ar_repair` approved immutable `d332703a`, no remaining blockers; source/log inspection, no reviewer rerun |
+| Preservation and cleanup | 216 sealed AR files and five integration reports unchanged; 12 recorded container IDs and 23 script names absent; `cleanup-final.json` |
+
+Reproducible primary gate: `bash scripts/test-local.sh all` in each frozen checkout.
+The targeted, baseline and payload scripts in the evidence directory use the same
+reviewed Docker mount/cleanup contract and cached `npc-dev`, with network disabled.
+`build-native.sh` compiles the committed native source/guard in that cached image;
+`run-native.sh` and the committed `tests/factorio/runner/run_ar_mining_factorio.mjs`
+run the isolated saved-world proof in cached `factorio-npc-test:final` at 2.0.77.
+The final acceptance commands in the table exited zero; baseline controls retain
+their intentional failures. Earlier diagnostic/fixture attempts remain in the
+evidence directory and are not counted as passing acceptance runs.
+
+The native test loads the original save into a new disposable deployment epoch;
+historical epoch work remains held. It admits a new current-epoch copy of the exact
+AR batch and uses a test-only compiled shim to inject the coal-selection miss.
+The failure physically leaves copper 10, coal 0; after disabling the shim, the real
+failure lifecycle admits only coal 10, mines it natively and advances the checkpoint.
+The separate coordinate case removes the previous case's coal as an explicit fixture
+setup, then proves physical mining and the durable executor reminder. An isolated
+surface teleport is used only for the atomic refusal negative case. None of these
+fixture actions is claimed as autonomous gameplay or production progress.
+
+The installer ships `gather-recovery.mjs`. Its immutable payload ref is
+`b982ba96559e16ddad6e0cae2708d52b5512b7bd`, SHA-256
+`31be67220bbf0a7e6f6f836780b8a9f41652c5f3f6954a50c71144c83514857f`;
+repin commit `0da1c9e7`. The channel still resolves its selected source independently.
+
+`final-summary.json` provides machine-readable counts, identities, evidence sources,
+test durations and limits. The native transcript has 664 RCON entries; its event
+counts are separate from recoveries. There is one operation-key-scoped residual
+recovery and one separate coordinate correction, both physically completed, with
+zero model repair calls. Whole-test runtime durations are measured; aggregate
+mining/host-poll subdivisions are unavailable and concurrent gates are not added.
+NPC provider/Jev requests and incremental provider charges are zero for this offline
+proof. Codex author/reviewer usage is separate and unavailable; no thinking duration
+is inferred from request latency.
+
+No new live trial, publication, push or deployment occurred. No owned containers,
+networks, named volumes or background work remain; pre-existing shared images and
+host evidence/saves are retained. Autonomous red-science production remains unproven.
