@@ -841,7 +841,7 @@ function detectUnrecoveredGather(rows) {
         if (row.event === 'operation.reconciled' && d.verdict === 'admitted_cancelled' && d.effect === 'partial_unknown'
           && d.operations?.length && d.operations.every(name => ['gather_resource', 'mine_resource_at'].includes(name))) unresolved.set(d.operation_key, row)
         if (row.event === 'gather.residual_detected') unresolved.set(d.operation_key, row)
-        if (row.event === 'gather.recovery_continued' || row.event === 'gather.reconciled' && d.disposition === 'ordinary_checkpoint_validation') unresolved.delete(d.operation_key)
+        if (row.event === 'gather.recovery_continued' || row.event === 'gather.checkpoint_closed') unresolved.delete(d.operation_key)
       }
       const match = [...unresolved.values()][0]
       return match ? [{ first_ts: match.ts, request_id: match.request_id, detail: match.data?.operation_key ?? 'partial_gather', count: unresolved.size }] : []

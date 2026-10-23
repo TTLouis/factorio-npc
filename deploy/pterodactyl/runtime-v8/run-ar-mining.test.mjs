@@ -129,6 +129,26 @@ test('a terminal failure whose fresh inventory already meets the checkpoint adva
   assert.equal(w.game.mutations.length, 0)
   assert.equal(w.providers.length, 0)
   assert.ok(w.events.some(row => row.event === 'plan.step_closed_on_fresh_read'))
+  assert.ok(w.events.some(row => row.event === 'gather.checkpoint_closed' && row.data.reason === 'verified_checkpoint_closed'
+    && row.data.operation_key === ar.native.admission_journal[0].operation_key))
+  assert.equal(analyzeBehaviorTrace([...ar.reconciliation_events, ...w.events]).findings.filter(row => row.signature === 'gather_partial_unrecovered').length, 0)
+})
+
+test('stock changing after an all-met read keeps the failed recovery visible until verified checkpoint closure', async () => {
+  const w = world({ inventory: { ...ar.inventory, coal: 10 }, traceHook: ({ row, game }) => {
+    // External stock change between deficit calculation and the ordinary fresh
+    // evaluator: the first read alone cannot grant settlement authority.
+    if (row.event === 'gather.reconciled') game.inventory.coal = 0
+  } })
+  await w.agent.failed('mining:mining_rejected')
+  assert.equal(w.held().active_step_index, 0)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.providers.length, 0)
+  assert.equal(w.memory.pauseRecord(ar.key).pause_reason, 'gather_recovery_checkpoint_changed')
+  assert.equal(w.events.filter(row => row.event === 'gather.checkpoint_closed').length, 0)
+  for (const events of [w.events, w.events.slice(0, w.events.findIndex(row => row.event === 'gather.reconciled') + 1)]) {
+    assert.ok(analyzeBehaviorTrace([...ar.reconciliation_events, ...events]).findings.some(row => row.signature === 'gather_partial_unrecovered'))
+  }
 })
 
 test('restart/restage preserves the gather recovery allowance and explicit exhaustion', async () => {

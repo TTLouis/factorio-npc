@@ -154,8 +154,20 @@ export async function recoverGatherFailure(agent, { failureBoundary = false } = 
       claim.state = 'satisfied'
       await checked(agent.persistState({ strict: true }))
       const fresh = await agent.closeActiveStepOnFreshRead({ previousState: agent.memory.currentPlan(owner.key), trigger: 'gather_reconciled' })
-      if (fresh.contractPause) return fresh.contractPause
       if (!fresh.closed) return pause('gather_recovery_checkpoint_changed')
+      // Starting a fresh read is not settlement. Publish success only after the
+      // ordinary evaluator closes this exact checkpoint, including when the
+      // unrelated next checkpoint needs a contract and pauses its continuation.
+      const completionOwner = fresh.contractPause ? fresh.terminalOwner : fresh.continuationOwner
+      const completionOptions = { advanced: !fresh.contractPause }
+      agent.assertCheckpointOwnerIdentity(completionOwner, completionOptions)
+      await agent.traceEvent('gather.checkpoint_closed', {
+        request_id: owner.requestTrace?.id, goal_id: owner.goalId, plan_id: owner.planId,
+        plan_version: owner.planVersion, step_id: owner.stepId, operation_key: held.operation_key,
+        reason: 'verified_checkpoint_closed', disposition: 'verified_checkpoint_closed',
+      }, { requestId: owner.requestTrace?.id })
+      agent.assertCheckpointOwnerIdentity(completionOwner, completionOptions)
+      if (fresh.contractPause) return fresh.contractPause
       return agent.continueAfterFreshStepClose(fresh, { chatMessage: '', stepId: owner.stepId, plan: [], currentStep: owner.stepIndex, operations: [] }, runtime)
     }
     const previousAdmission = agent.gatherAdmission
