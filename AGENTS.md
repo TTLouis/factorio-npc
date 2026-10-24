@@ -1,79 +1,70 @@
-# AGENTS.md
+# Working on Factorio NPC
 
-These repository notes are for coding agents working on this fork. They describe current project invariants and validation expectations; user instructions for a specific task remain authoritative.
+This is the older `main` snapshot. Current development and its maintained agent
+instructions are on
+[`experiment/jev-agent-architecture`](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/AGENTS.md).
+Jev is optional on that branch. Do not infer a Jev dependency from its name.
+Explicit user instructions remain authoritative.
 
-## Project direction
+## Start with the right branch
 
-AIRI is an autonomous in-world Factorio NPC. The core runtime must not depend on owning or impersonating a connected human player.
+- New implementation targets the current Jev candidate, not this older snapshot.
+  Updating `main` documentation does not authorize promoting a runtime to `main`.
+- Inspect status, branch, upstream and worktrees before editing. Preserve existing
+  changes; never reset, stash or overwrite another session's work.
+- In the owner's shared workspace, read the parent `AGENTS.md` and `WORKTREES.md`
+  before branch/worktree operations. Register one owner and bounded task first.
+  Independent clones do not require those machine-local files.
+- Use [CONTRIBUTING.md](CONTRIBUTING.md), [SPEC.md](SPEC.md) and the
+  [documentation index](docs/README.md) for this snapshot. Check out the Jev branch
+  and read its own instructions before working on current runtime behavior.
 
-The intended actor is a real standalone Factorio `character` controlled through bounded mod/runtime APIs. Human players are requesters and observers, not AIRI's body.
+## Runtime boundaries
 
-## Architecture invariants
+- Own a standalone Factorio `character`, never a connected human `LuaPlayer`.
+  Zero connected humans must remain a valid state.
+- Preserve native inventory, crafting, mining, research, combat, reach/collision,
+  death and save/restart behavior. Do not replace production mechanics with
+  teleporting, instant item insertion or fake completion.
+- Model actions must be structured and bounded. Do not introduce arbitrary
+  model-generated Lua, shell/console commands or unrestricted remote calls.
+- The harness owns authoritative state, validation, admission, receipts and
+  recovery. Verify the requested world state; admission does not prove completion.
+- Correlate asynchronous work with the exact actor, operation and epoch. Stale
+  work after replacement, death or restart must fail safely.
+- Derive recipes, topology, geometry, ratios and transport capacities
+  deterministically; do not ask models to guess unverified game facts.
+- Prefer map-first operations when the native game supports them. Keep later
+  vehicle/train/platform and swarm work separate from the single-NPC baseline.
 
-- Keep NPC ownership actor-based, not `LuaPlayer`-ownership based.
-- Zero connected humans must remain a valid operating state.
-- Preserve physical game mechanics where practical: real inventory, native hand crafting, real mining state, research, combat, reach/collision constraints, save/restart behavior, and character death/recovery.
-- Do not replace difficult Factorio mechanics with test-only teleporting, instant item insertion, fake completion, or other production shortcuts.
-- Model mutations must remain structured and bounded. Do not reintroduce arbitrary model-generated Lua, shell commands, console commands, or unrestricted `remote.call(...)` strings.
-- The harness/runtime owns authoritative state, validation, admission, receipts, and recovery. The model chooses actions from approved observations/tools.
-- Prefer deterministic game data and validated constraints over asking the LLM to guess Factorio rules.
-- Do not silently treat a successful admission/command as proof that the user's gameplay goal is complete. Verify relevant world state.
-- Preserve exact actor/operation correlation across asynchronous work. Stale work after actor replacement, death, restart, or epoch change must fail safely.
+## Validation, configuration and evidence
 
-## Validation rules
+- Follow [TESTING.md](docs/TESTING.md). Unit/type checks protect regressions;
+  engine semantics need deterministic real-Factorio coverage. Never weaken an
+  assertion to turn a failure into a pass or present placement as production.
+- Windows shared-workspace dependencies may be WSL symlinks. Never run host
+  package installation, tests or hook installation there; use a supported isolated
+  environment. This snapshot has no `scripts/test-local.sh`.
+- Deployment environment/Egg variables override non-secret `airi-config.json`.
+  Keep credentials out of Git and non-secret config. Never read, print or copy
+  `.env`, credentials or private endpoints into commands, logs, commits or reports.
+- Offline tests/CI need no real provider credentials. Live provider/Jev calls,
+  retries, autonomous trials, pushes and deployment require their existing owner
+  authorization. One E2E instruction permits one trial; do not correct gameplay
+  manually. Follow current workspace trial/stop/save/evidence rules.
+- Preserve historical reports, traces, saves and user configuration. Add a new
+  checkpoint instead of rewriting old evidence. Use package smoke/release gates
+  at promotion; a green feature SHA is not a release.
+- Own exact run-scoped Docker resources and clean up on every exit after preserving
+  evidence. Never prune globally, delete persistent data, affect other sessions
+  or restart Docker Desktop. Report cleanup that cannot be verified.
 
-- Unit tests and typechecks are required regression gates but are not proof of real Factorio engine behavior.
-- For engine semantics, prefer deterministic real-Factorio integration coverage under `tests/factorio/`.
-- Never weaken a failing E2E assertion merely to make a scenario pass. Fix the runtime/harness assumption or make the limitation explicit.
-- Do not pass unvalidated throughput assumptions to the model. Inserter, belt-lane, stacking, recipe, and transport constraints should be measured or derived deterministically before becoming planning facts.
-- Keep real provider credentials out of repository tests and CI.
-- Pterodactyl package smoke/release gates are separate from ordinary CI and should be used for promotion checkpoints.
+## Review and publication
 
-## Branch and promotion policy
-
-- `main` is the stable integration/deployment baseline.
-- `feat/npc-transition-work` is the active single-NPC integration/E2E branch and may contain capabilities newer than main.
-- A green feature HEAD is not automatically a release. Freeze a candidate SHA, run the appropriate heavyweight gates, then promote a validated checkpoint.
-- Preserve main-only deployment/documentation changes when reconciling a long-lived feature branch.
-- Do not mix swarm experiments into a single-NPC promotion unless they are explicitly in scope and independently validated.
-- Do not force-push or rewrite shared branch history unless the user explicitly requests it.
-
-## Current development priorities
-
-1. Keep the standalone-NPC baseline reliable and promotion-ready.
-2. Turn E2E failures into deterministic regression cases and useful behavior traces.
-3. Prefer map-first remote operations for interactions that Factorio can perform from map/remote-view semantics.
-4. Keep production planning deterministic where the game can supply exact recipe/topology/capacity data.
-5. Validate inserter throughput, belt lanes, stacking capacity, and similar transport constraints before relying on them in LLM planning.
-6. Build vehicle/train/space-platform interaction after the map-operation foundation is sound.
-7. Treat swarm/message-board work as a later coordination layer, not a prerequisite for the single-NPC baseline.
-
-## Pterodactyl configuration authority
-
-Deployment environment/Egg variables are the source of truth. Runtime-visible non-secret values may be mirrored into `airi-config.json`, but that file must not override environment values.
-
-Secrets such as `OPENAI_API_KEY` and Factorio credentials must not be committed or persisted into non-secret config files.
-
-## Documentation roles
-
-- `README.md`: current public/project overview and deployment entry points.
-- `docs/NPC_CHARACTER_ARCHITECTURE.md`: stable actor/body design decisions.
-- `docs/NPC_AGENT_HARNESS_PLAN.md`: current single-NPC roadmap and promotion gates.
-- `docs/NPC_AGENT_HARNESS_STATUS.md`: current verified status and known limits.
-- `docs/validation/`: historical checkpoints, transcripts, superseded staging plans, and release-candidate evidence.
-- `deploy/pterodactyl/README.md`: current Pterodactyl operational contract.
-
-Do not update a historical validation record in place to describe a newer commit. Create a new checkpoint or update the current status document instead.
-
-## Model/Hugging Face subproject notes
-
-The older Hugging Face/model guidance applies only when working specifically under the model/training subproject (for example `models/factorio-yolo-v0`) or publishing its artifacts:
-
-- publish model and dataset to separate Hub repos;
-- include a README/model card;
-- pin consumers to a tag/commit rather than a moving ref;
-- treat label-definition changes as incompatible and keep `classes.json` consistent;
-- keep one user-facing `notebook.ipynb` in a model repo and keep training/EDA/debug notebooks elsewhere;
-- clear notebook outputs before publishing.
-
-Do not apply those model-publishing notes to the core NPC runtime, deployment, or agent harness unless the task actually concerns the model subproject.
+Keep changes bounded and record acceptance evidence. A separate reviewer checks
+actual diffs and claims; resolve actionable findings. Preserve main-only
+configuration/documentation and upstream MIT attribution. Do not mix swarm work
+into single-NPC promotion without explicit scope and proof. Follow the owning
+branch's payload-repin procedure if shipped files change. Use small conventional
+commits with no tool/co-author trailers, and preserve existing newline styles.
+Never force-push or rewrite shared history without an explicit request.

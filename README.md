@@ -1,147 +1,62 @@
 # Factorio NPC
 
+An AI teammate that lives inside a Factorio world, with its own character,
+inventory and native game actions.
+
 > [!IMPORTANT]
-> **Factorio NPC** is an independent, headless-first autonomous NPC runtime for Factorio servers. This project originated as a fork of [`moeru-ai/airi-factorio`](https://github.com/moeru-ai/airi-factorio), but has substantially diverged from the original CV/YOLO-driven game-playing architecture. Upstream history and attribution are intentionally preserved.
+> **For the current project, use
+> [`experiment/jev-agent-architecture`](https://github.com/TTLouis/factorio-npc/tree/experiment/jev-agent-architecture).**
+> That branch contains the current SGLuna runtime, documentation and development.
+> **Jev is optional on that branch:** it also runs without a Jev/TypeSafe key.
+> For Docker, leave `JEV_TYPESAFE_API_KEY` blank; your main LLM provider is still
+> required. The branch name does not mean you must enable Jev.
 
-The project is designed for persistent server-side NPCs that live inside a real Factorio simulation. NPCs use structured game state, deterministic helpers, and validated operations instead of depending on screenshots or a connected human player.
+`main` retains an older AIRI-era runtime snapshot. This documentation update does
+not promote the newer runtime to `main`. Its settings, scripts and evidence differ
+from current development, so follow the documentation on the branch you run.
 
-## Project direction
+## Start with current development
 
-The target architecture is:
-
-```text
-Factorio headless server
-        ↓
-Factorio Lua runtime / remote interfaces
-        ↓
-structured observations + deterministic game logic
-        ↓
-agent runtime / planning harness
-        ↓
-LLM strategy and tool selection
-        ↓
-validated structured operations
-        ↓
-standalone Factorio NPC character(s)
+```sh
+git clone --branch experiment/jev-agent-architecture https://github.com/TTLouis/factorio-npc.git
+cd factorio-npc
 ```
 
-Computer vision is not part of the required runtime. The inherited YOLO work is considered legacy research baggage for the current headless-first architecture; vision may return later only as an optional sensor/research mode.
+| Your goal | Current guide on the Jev branch |
+| --- | --- |
+| Run a server | [Docker](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/deploy/docker/README.md) or [Pterodactyl](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/deploy/pterodactyl/README.md) |
+| Make a first contribution | [Contributing](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/CONTRIBUTING.md) |
+| Understand the design | [Project contract](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/SPEC.md) and [documentation index](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/docs/README.md) |
+| Check demonstrated behavior and limits | [Current status](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/docs/NPC_AGENT_HARNESS_STATUS.md) |
 
-## Current capabilities
+## What the project does
 
-The standalone-NPC baseline includes:
+The NPC uses structured game observations and bounded operations, rather than
+screenshots or a connected human player's body. Deterministic code owns game
+facts, admission, receipts and recovery; Factorio remains the simulation authority.
+Computer vision is not required. The runtime supports standalone actors, inventory,
+navigation, crafting, research and combat operations, with server deployment and
+saved state.
 
-- zero-player NPC ownership backed by a real Factorio `character`;
-- structured model operations instead of model-generated Lua;
-- actor-aware inventory, entity, navigation, crafting, research, and combat operations;
-- deterministic production-planning and transport-capacity helpers;
-- transactional operation-batch admission and correlated operation outcomes;
-- persistent saves plus managed release rollback;
-- loopback-only supervisor-owned RCON;
-- Pterodactyl console input forwarded to the real Factorio child process;
-- startup reconciliation of `data/server-settings.json` without overwriting unrelated Factorio settings;
-- environment-only provider secrets, with effective non-secret provider settings synchronized into `airi-config.json`;
-- provider timeout/recovery handling so one failed request does not permanently stall the NPC;
-- configurable provider request budgeting;
-- bounded behavior tracing for E2E/debugging;
-- an in-game task/plan UI used by the current NPC harness;
-- Docker and Pterodactyl deployment paths for headless servers.
+The project is experimental. Operation admission, placement and passing static
+tests do not prove reliable autonomous factory building. Check exact-commit
+native evidence before relying on a capability. Single-NPC reliability and grounded
+production remain the focus; swarm coordination and optional vision are later work.
 
-`main` is the stable integration/deployment baseline. `feat/npc-transition-work` remains the active single-NPC integration/E2E line while newer work is promoted in validated checkpoints.
+## Working with this main snapshot
 
-## Validation model
+For existing deployments pinned to `main`, the local
+[documentation index](docs/README.md) links its retained setup, architecture and
+evidence. This snapshot uses `AIRI_*`, `airi-config.json` and the older deployment
+files. Do not mix current SGLuna settings or test commands into it.
 
-For engine behavior, real Factorio integration evidence is authoritative. Unit/type tests protect contracts and regressions, but they do not by themselves prove Factorio runtime semantics.
+New development and ordinary contributions target the Jev branch.
+[CONTRIBUTING.md](CONTRIBUTING.md) explains the branch distinction, and
+[AGENTS.md](AGENTS.md) provides coding-agent rules for this snapshot.
 
-```text
-feature/integration work
-        ↓
-ordinary CI + deterministic regressions
-        ↓
-freeze a candidate SHA
-        ↓
-package smoke + real zero-player Factorio harness
-        ↓
-promote validated checkpoint to main
-```
+## Origin and license
 
-Historical validation records live under [`docs/validation/`](./docs/validation/). Current single-NPC roadmap/status live in [`docs/NPC_AGENT_HARNESS_PLAN.md`](./docs/NPC_AGENT_HARNESS_PLAN.md) and [`docs/NPC_AGENT_HARNESS_STATUS.md`](./docs/NPC_AGENT_HARNESS_STATUS.md).
-
-The repository de-fork / identity migration is tracked in [`docs/PROJECT_MIGRATION_TRACKER.md`](./docs/PROJECT_MIGRATION_TRACKER.md).
-
-## Deployment
-
-### Pterodactyl
-
-Two PTDL_v2 eggs keep stable deployments separate from active E2E work:
-
-| Egg | Default source ref | Purpose |
-| --- | --- | --- |
-| [`deploy/pterodactyl/egg-airi-factorio-server.json`](./deploy/pterodactyl/egg-airi-factorio-server.json) | `main` | Stable/main deployment |
-| [`deploy/pterodactyl/egg-airi-factorio-npc-e2e.json`](./deploy/pterodactyl/egg-airi-factorio-npc-e2e.json) | `feat/npc-transition-work` | Active NPC/E2E testing |
-
-The filenames and `AIRI_*` deployment identifiers are retained temporarily for compatibility and will be migrated deliberately rather than renamed all at once.
-
-**Restart does not update application code.** A normal server restart keeps the already installed managed release.
-
-**Reinstall resolves the egg's `AIRI_SOURCE_REF` again.** The installer resolves the configured branch/tag/ref to one exact Git commit SHA, validates and builds that exact snapshot transactionally, records the SHA in the installed manifest, and only then activates it. A failed install leaves the previous completed release active.
-
-Set `AIRI_SOURCE_REF` to a full 40-character commit SHA when reproducing a specific E2E failure. Managed installs also provide `rollback-airi.sh` to return to the previous completed release without rewriting saves, user mods, or `airi-config.json`.
-
-See [`deploy/pterodactyl/README.md`](./deploy/pterodactyl/README.md) for import, configuration, testing, runtime, and rollback details.
-
-### Docker Compose
-
-Docker Compose support is included through [`compose.yml`](./compose.yml) and [`deploy/docker/`](./deploy/docker/). It is a thin deployment wrapper around the same standalone-NPC runtime rather than a second implementation.
-
-```bash
-cp .env.example .env
-# Fill in OPENAI_API_KEY, OPENAI_API_BASEURL, and OPENAI_MODEL.
-docker compose up -d --build
-```
-
-See [`deploy/docker/README.md`](./deploy/docker/README.md) for source pinning, configuration, persistence, console attach, and shutdown details.
-
-## Development
-
-Install workspace dependencies with:
-
-```bash
-pnpm install
-```
-
-The active runtime and E2E/deployment harness live primarily under:
-
-```text
-deploy/pterodactyl/
-deploy/docker/
-packages/agent/
-packages/autorio/
-tests/factorio/
-```
-
-Useful deployment checks include:
-
-```bash
-node deploy/pterodactyl/build-payload.mjs --check
-node --test deploy/pterodactyl/build-payload.test.mjs deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
-pnpm test:npc
-```
-
-Repository CI does not use production provider credentials.
-
-## Roadmap
-
-Near-term work is deeper single-NPC E2E coverage, deterministic production/construction constraints, and progressively stronger planning/runtime contracts. Multi-agent/swarm coordination should build on the validated single-NPC runtime rather than bypass it.
-
-The guiding boundary is:
-
-- **deterministic code** computes game facts, constraints, ratios, capacities, and validated candidate actions;
-- **LLMs** choose goals, strategy, priorities, and among already-grounded alternatives;
-- **Factorio** remains the source of truth for simulation state.
-
-## Origin, license, and credits
-
-Factorio NPC was originally derived from [`moeru-ai/airi-factorio`](https://github.com/moeru-ai/airi-factorio) and the original `autorio` work. The Git history is intentionally retained so the lineage remains auditable.
-
-The repository remains MIT-licensed. The existing upstream copyright notice in [`LICENSE`](./LICENSE) is preserved. Project-specific attribution may be added without removing upstream attribution as the independent codebase evolves.
+Factorio NPC originated from [moeru-ai/airi-factorio](https://github.com/moeru-ai/airi-factorio)
+and the original `autorio` work. Git history and upstream attribution are preserved
+under the [MIT license](LICENSE). The retained
+[migration tracker](docs/PROJECT_MIGRATION_TRACKER.md) records the earlier identity work.

@@ -1,5 +1,11 @@
 # AIRI Factorio — Pterodactyl deployment
 
+> [!IMPORTANT]
+> This guide belongs to the older `main` snapshot. For current SGLuna, use
+> [`experiment/jev-agent-architecture`](https://github.com/TTLouis/factorio-npc/tree/experiment/jev-agent-architecture)
+> and its deployment guide. Jev is optional on that branch. Keep the branch's
+> scripts/settings together; this snapshot still uses AIRI-era identifiers.
+
 This directory contains the Pterodactyl deployment for this fork's standalone AIRI Factorio NPC.
 
 ## Deployment channels

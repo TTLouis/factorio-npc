@@ -1,5 +1,11 @@
 # Docker deployment
 
+> [!IMPORTANT]
+> This guide belongs to the older `main` snapshot. For current SGLuna, use
+> [`experiment/jev-agent-architecture`](https://github.com/TTLouis/factorio-npc/tree/experiment/jev-agent-architecture)
+> and its deployment guide. Jev is optional on that branch. Keep the branch's
+> scripts/settings together; this snapshot still uses AIRI-era identifiers.
+
 The Docker wrapper packages the same standalone-NPC runtime used by the Pterodactyl deployment. Local builds resolve `AIRI_SOURCE_REF` to an exact Git commit during the image build, so restarting a container never silently updates AIRI code.
 
 ## Published prerelease image
