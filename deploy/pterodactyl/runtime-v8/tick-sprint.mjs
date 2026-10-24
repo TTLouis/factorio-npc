@@ -462,8 +462,17 @@ export class TickSprintController {
         const status = JSON.parse(await this.watchdog.command(`/silent-command local s=remote.call("sgluna_tick_sprint","status");if not s.lease or s.lease.request_id==${lua(owner.requestTrace?.id ?? '')} then s=remote.call("sgluna_tick_sprint","finish","superseded_boundary") end;rcon.print(helpers.table_to_json(s))`))
         if (this.validStatus(status) && status.phase === 'construction' && !status.fault && status.speed === TICK_SPRINT.speed
           && status.lease && status.lease.request_id !== owner.requestTrace?.id && status.lease.lease_id === this.lease?.lease_id) return
-        if (!this.validStatus(status) || status.speed !== 1 || status.lease || status.fault || status.phase !== 'construction') throw new Error('Superseded boundary restoration unconfirmed')
+        // External stop seals construction before delivering cancellation. A
+        // verified closed1x guard is a successful safety boundary for retired
+        // work, not a new acceleration fault or permission to run its callback.
+        if (!this.validStatus(status) || status.speed !== 1 || status.lease || status.fault
+          || !['construction', 'closed'].includes(status.phase)) throw new Error('Superseded boundary restoration unconfirmed')
         this.lease = undefined
+        if (status.phase === 'closed') { this.closed = true; clearInterval(this.poll); clearInterval(this.watch) }
+        try {
+          await this.emit('boundary_retired', { ...this.binding, ...identity, reason: 'owner_superseded',
+            disposition: 'retire_without_callback', native_phase: status.phase, speed: status.speed })
+        } catch { this.session.log?.('Retired boundary telemetry unavailable; native1x restoration verified') }
         return
       } catch { /* An unconfirmed physical restoration remains a global fault. */ }
     }

@@ -60,8 +60,8 @@ async function steamReplayFingerprint() {
   const cleanupRows = world.trace.filter(row => row.event.startsWith('decision.budgets_'))
   assert.deepEqual(cleanupRows.map(row => ({ event: row.event, request_id: row.request_id,
     data: row.data, turn: row.turn, seq: row.seq })), [
-    { turn: 1, seq: 65 },
-    { turn: 2, seq: 124 },
+    { turn: 1, seq: 70 },
+    { turn: 2, seq: 131 },
     { turn: undefined, seq: 0 },
   ].map(boundary => ({ event: 'decision.budgets_restored', request_id: requestId,
     data: { request_id: requestId, reason: 'decision_scope_finished' }, ...boundary })))
