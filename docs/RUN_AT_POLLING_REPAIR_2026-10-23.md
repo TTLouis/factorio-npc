@@ -69,10 +69,19 @@ Build checkpoints:
 - [x] Preserve exact failure; reproduce baseline negative controls.
 - [x] Shared prevention and composed residual continuation regressions.
 - [x] First exact Factorio 2.0.77 inline-framing/UI and sprint lifecycle proof.
-- [ ] Freeze reviewed candidate, payload pin and final offline/native/lint gates.
-- [ ] Independent immutable review, merged offline gates and owned cleanup.
+- [x] Freeze runtime378f514f / reviewed9f3c71b9; payload9 and lint pass.
+- [x] Candidate3371runtime/1378mod/type/Lua and50focused cases pass.
+- [x] Independent immutable review approved9f3c71b9.
+- [ ] Fresh merged offline gates and final owned cleanup; machine closeout records final SHAs.
 
 Evidence is under `test-results/run-at-polling-recovery/`; old AT/AR/AS evidence
 remains sealed and unchanged. Native framing/lifecycle proof does not establish
 autonomous science production. No new live E2E, provider retry, publication or
 production deployment is authorized by this repair.
+
+Closeout evidence: `test-results/run-at-polling-recovery/final-summary.json`
+records final source/pin/merged identities, gate results, independently reviewed
+follow-up deltas and exact owned resource cleanup. The native proof has its own
+raw transcript, source image and zero-inference receipt. Startup configuration
+errors remain fail-closed before any goal continuation; recovery cannot make a
+missing or incompatible native guard authoritative.

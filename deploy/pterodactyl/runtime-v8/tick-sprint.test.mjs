@@ -447,7 +447,10 @@ test('registered timer rejection cannot recapture and fault the replacement owne
   t.after(() => { clearInterval(w.controller.poll); clearInterval(w.controller.watch) })
   w.controller.bucketReads = TICK_SPRINT.maxControlReadsPerMinute
   t.mock.timers.tick(TICK_SPRINT.pollMs)
-  for (let i = 0; i < 20 && !replaced; i++) await new Promise(resolve => setImmediate(resolve))
+  for (let i = 0; i < 20; i++) {
+    if (replaced) break
+    await new Promise(resolve => setImmediate(resolve))
+  }
   for (let i = 0; i < 20 && w.controller.probe; i++) await new Promise(resolve => setImmediate(resolve))
   assert.equal(replaced, true)
   assert.equal(w.controller.fault, undefined)
