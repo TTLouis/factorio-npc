@@ -17,8 +17,9 @@ bursts restored. Six of seven committed steps completed; a direct burner-drill t
 furnace iron chain produced 41 plates, but no science was produced. The next
 failure is control-poll amplification/budget exhaustion, not the repaired AS binding.
 
-The report includes complete 42 CLI / 36 Jev usage, recovery/tool/native/timing
-accounting and actual plans, with unavailable price/thinking telemetry explicit.
+The report includes complete request counts for 42 CLI / 36 Jev calls, complete
+CLI token usage and explicitly partial Jev usage, recovery/tool/native/timing
+accounting and actual plans. Unavailable price/thinking telemetry is explicit.
 Strict paired stop, save integrity, pristine 2.0.77 load and owned cleanup passed.
 No second trial, corrective gameplay prompt, manual resume, push or deployment.
 
