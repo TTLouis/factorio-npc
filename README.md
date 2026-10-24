@@ -4,6 +4,12 @@
 standalone character with real inventory, crafting and mining, and can operate
 on a headless server with nobody connected.
 
+> [!NOTE]
+> **Use this branch for current development. Jev is optional:**
+> `experiment/jev-agent-architecture` also runs without a Jev/TypeSafe key.
+> For Docker, leave `JEV_TYPESAFE_API_KEY` blank to disable Jev. Your main LLM
+> provider is still required; the runtime uses its non-Jev decision paths.
+
 The runtime gives models structured game observations and bounded actions.
 Deterministic code handles game facts, validation and recovery; Factorio remains
 the source of truth. Computer vision is not required.
@@ -52,6 +58,7 @@ startup, after configuration, is:
 ```sh
 cp .env.example .env
 # Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
+# For this branch, set SGLUNA_SOURCE_REF=experiment/jev-agent-architecture (or an exact SHA).
 docker compose up -d --build
 ```
 

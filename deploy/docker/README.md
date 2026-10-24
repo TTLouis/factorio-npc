@@ -23,6 +23,7 @@ Published release images are built from the exact GitHub release commit. The pre
 ```bash
 cp .env.example .env
 # Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
+# For current SGLuna, set SGLUNA_SOURCE_REF=experiment/jev-agent-architecture (or an exact SHA).
 docker compose up -d --build
 ```
 
@@ -89,6 +90,11 @@ To test ongoing NPC development instead, set `SGLUNA_SOURCE_REF=experiment/jev-a
 The build is layered so a source change doesn't download Factorio again. The system packages and the official Factorio archive (verified against Factorio's published checksums) are cached. Docker also caches the Node archive and package manager stores across source revisions. The source install layer reruns whenever its build arguments change. With an exact commit SHA, a rebuild installs exactly that commit, and a new SHA reinstalls only the source. A branch ref such as `main` is resolved only when that layer reruns, so to pick up a branch's newer commits, set a new `SGLUNA_SOURCE_NONCE` (for example `SGLUNA_SOURCE_NONCE=$(date +%s) docker compose up -d --build`) or use a SHA. The installer re-verifies the cached archive and downloads Factorio itself if the cached version differs from the one it resolves. Published prerelease images are already pinned and do not need this rebuild behavior.
 
 ## Configuration boundary
+
+Jev is optional on the current `experiment/jev-agent-architecture` branch. Leave
+`JEV_TYPESAFE_API_KEY` blank in your local `.env` to run without it; Compose passes
+that optional value as `TYPESAFE_API_KEY`. The main LLM provider settings are still
+required. This uses the runtime's non-Jev decision paths, not a different branch.
 
 The Compose environment mirrors the Pterodactyl egg's runtime parameters. Provider and Factorio credentials stay in `.env`/container environment; `OPENAI_API_KEY` is not persisted to `sgluna-config.json`. `FACTORIO_USERNAME` and `FACTORIO_TOKEN` are written only where Factorio requires them in `data/server-settings.json`.
 
