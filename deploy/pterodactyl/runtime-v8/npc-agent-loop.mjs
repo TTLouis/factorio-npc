@@ -14589,7 +14589,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         }
       }
-      this.recordLiveEntityToolResult(toolName, original)
+      // Model-facing full/diff/unchanged projections omit native scope or the
+      // entity itself. Only this fresh batch's validated raw answer may renew an
+      // executable binding; a cached summary cannot resurrect invalidated facts.
+      const bindingRaw = admittedCached[index] !== true && admittedStaticCached[index] !== true
+        ? this.toolCache.get(admittedPrepared[index]?.signature) : undefined
+      if (typeof bindingRaw === 'string') {
+        if (['getEntityStatus', 'getNearbyEntities', 'findLongRangeEntities'].includes(toolName)) {
+          await this.traceEvent('entity.observation_bound', { request_id: batchOwner.requestId,
+            reason: 'fresh_native_answer_before_projection', tool: toolName }, { requestId: batchOwner.requestId })
+          assertBatchCurrent()
+          if (readFence) await readFence()
+          assertBatchCurrent()
+        }
+        this.recordLiveEntityToolResult(toolName, bindingRaw)
+      }
       if (toolName === 'getRecipeDetails') {
         this.stepFactWorkingSet ??= new StepFactWorkingSet()
         this.stepFactWorkingSet.noteRecipe(this.postBatchStepKey(), admittedPrepared[index]?.args, admittedPrepared[index]?.signature)

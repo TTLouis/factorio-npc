@@ -509,3 +509,82 @@ test('durable completed recovery disables restart acceleration; interrupted reco
     } else await assert.rejects(next.start({ timers: false }), /recovery exhausted after restart/)
   }
 })
+
+const au = JSON.parse(await fs.readFile(new URL('./fixtures/run-au-recovery.json', import.meta.url), 'utf8'))
+
+test('AU exact stop: externally sealed guard and cancelled queued RCON retire without a sprint fault', async () => {
+  let inject = false; let guard
+  const w = await world({ readHook: (f, text) => {
+    if (inject && text.includes('SPRINT_BOUNDARY_')) {
+      inject = false
+      guard.phase = 'closed' // Exact external supervisor stop seals before !luna stop.
+      f.agent.cancel('user_stop_immediate')
+    }
+  } })
+  guard = w.guard
+  assert.equal(au.stop_fault.data.reason, 'Sprint boundary owner superseded')
+  inject = true
+  await assert.rejects(w.session.rcon.command('/silent-command rcon.print("old read")'), /owner superseded/)
+  assert.equal(w.controller.fault, undefined)
+  assert.equal(w.session.accelerationFault, undefined)
+  assert.equal(w.guard.speed, 1)
+  assert.ok(w.events.some(r => r.event === 'boundary_retired' && r.data.reason === 'owner_superseded'))
+  assert.equal(w.session.queuePlayerRequest('Louis', 'stop'), true)
+  await w.session.eventQueue
+  assert.equal(w.agent.memory.pauseRecord(w.agent.activePlanKey()).pause_class, 'operator')
+  assert.equal(w.controller.fault, undefined)
+})
+
+test('AU residual: failure handler reconciles exact cancellation fault and real Session completes stop', async () => {
+  const w = await world()
+  const owner = w.agent.captureCheckpointOwner()
+  await w.controller.trySprint()
+  w.guard.phase = 'closed'
+  w.guard.speed = 1
+  w.guard.lease = undefined
+  w.agent.cancel('user_stop_immediate')
+  const allowance = structuredClone(w.controller.episodes)
+  await w.controller.fail(new Error(au.stop_fault.data.reason), owner)
+  assert.equal(w.controller.fault, undefined)
+  assert.deepEqual(w.controller.episodes, allowance)
+  assert.equal(w.session.queuePlayerRequest('Louis', 'stop'), true)
+  await w.session.eventQueue
+  assert.equal(w.agent.memory.pauseRecord(w.agent.activePlanKey()).pause_class, 'operator')
+  assert.equal(w.controller.fault, undefined)
+  assert.equal(w.guard.speed, 1)
+  assert.equal(w.guard.lease, undefined)
+})
+
+for (const unsafe of ['binding', 'fault', 'speed', 'unreadable']) test(`AU stop cannot hide unconfirmed ${unsafe} restoration`, async () => {
+  const w = await world()
+  const owner = w.agent.captureCheckpointOwner()
+  w.agent.cancel('user_stop_immediate')
+  w.guard.phase = 'closed'
+  if (unsafe === 'binding') w.guard.binding = { ...binding, run_id: 'other' }
+  if (unsafe === 'fault') w.guard.fault = 'native_fault'
+  if (unsafe === 'speed') w.controller.watchdog.command = async () => JSON.stringify({ ...w.guard, speed: 4 })
+  if (unsafe === 'unreadable') w.controller.watchdog.command = async () => 'clipped'
+  await w.controller.fail(new Error(au.stop_fault.data.reason), owner)
+  assert.ok(w.controller.fault)
+})
+
+test('AU retired boundary telemetry failure does not turn verified closed1x into a fault', async () => {
+  const w = await world({ emit: (_f, event) => { if (event === 'boundary_retired') throw new Error('trace disk failed') } })
+  const owner = w.agent.captureCheckpointOwner()
+  w.agent.cancel('user_stop_immediate')
+  w.guard.phase = 'closed'
+  await w.controller.fail(new Error(au.stop_fault.data.reason), owner)
+  assert.equal(w.controller.fault, undefined)
+  assert.equal(w.guard.speed, 1)
+})
+
+test('AU checker detects original superseded-owner fault and does not count verified retirement as failure', async () => {
+  assert.ok(analyzeBehaviorTrace([au.stop_fault]).findings.some(r => r.signature === 'sprint_superseded_owner_fault'))
+  const w = await world()
+  const owner = w.agent.captureCheckpointOwner()
+  w.agent.cancel('user_stop_immediate')
+  w.guard.phase = 'closed'
+  await w.controller.fail(new Error(au.stop_fault.data.reason), owner)
+  const rows = w.events.map(r => ({ ts: new Date().toISOString(), event: `sprint.${r.event}`, data: r.data }))
+  assert.equal(analyzeBehaviorTrace(rows).findings.filter(r => r.signature === 'sprint_superseded_owner_fault').length, 0)
+})

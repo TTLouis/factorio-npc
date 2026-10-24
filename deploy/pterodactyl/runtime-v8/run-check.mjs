@@ -1075,6 +1075,14 @@ const INFORMATIONAL_SIGNATURES = [
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
   {
+    id: 'sprint_superseded_owner_fault', label: 'superseded sprint boundary became a global fault',
+    detect: (_all, _withRequest, rows) => rows.filter(row => row.event === 'sprint.fault'
+      && row.data?.reason === 'Sprint boundary owner superseded').map(row => ({
+      request_id: row.data?.request_id ?? row.request_id ?? '(controller)', count: 1, first_ts: row.ts,
+      detail: `${row.data.reason}; ${row.data.disposition ?? 'safe_stop_required'}`,
+    })),
+  },
+  {
     id: 'sprint_polling_budget_unrecovered', label: 'Sprint polling budget fault or exhausted correction',
     detect: (_all, _withRequest, rows) => rows.filter(row =>
       row.event === 'sprint.fault' && row.data?.reason === 'Sprint harness polling budget exhausted'

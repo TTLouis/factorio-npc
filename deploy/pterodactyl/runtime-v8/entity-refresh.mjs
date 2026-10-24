@@ -41,6 +41,14 @@ export function restoreEntityRefreshClaims(raw) {
 }
 function claimKey(owner) { return JSON.stringify([owner.key, owner.goalId, owner.planId, owner.planVersion, owner.stepId]) }
 function actorStamp(agent) { return JSON.stringify([agent.epoch?.session, agent.epoch?.actor_id, agent.epoch?.epoch, agent.epoch?.surface_index]) }
+// A historical locator is a hint, never scope authority. Old model-facing
+// projections omitted surface_index; only a fresh native deployment/body/entity
+// agreement can supply it. An explicit mismatching/invalid scope stays refused.
+function refreshSurface(locatorSurface, runtime) {
+  if (!Number.isSafeInteger(runtime.surface_index) || runtime.surface_index < 1
+    || locatorSurface !== undefined && locatorSurface !== runtime.surface_index) throw new Error('entity_refresh_actor_or_surface_changed')
+  return runtime.surface_index
+}
 function heldWork(agent, owner) {
   const state = agent.memory.currentPlan(owner.key)
   return state?.condition_wait?.state === 'active' || state?.persistent_runtime?.active === true
@@ -107,7 +115,8 @@ export function restoredCollectionFence(agent, task, owner) {
     const runtime = await deploymentStatus(agent.rcon, { requireAllowed: true })
     identity()
     if (runtime.actor_id !== task.actor_id || runtime.epoch !== task.epoch
-      || !Number.isSafeInteger(owner.surfaceIndex) || surfaces.some(surface => surface !== runtime.surface_index)) throw new Error('collection_actor_or_surface_changed')
+      || surfaces.some(surface => refreshSurface(surface, runtime) !== runtime.surface_index)) throw new Error('collection_actor_or_surface_changed')
+    owner.surfaceIndex = refreshSurface(owner.surfaceIndex, runtime)
     const body = JSON.parse(await agent.rcon.command(agent.observationToolCommand('getActorStatus', {})))
     identity()
     if (body.actor?.actor_id !== task.actor_id || body.surface_index !== runtime.surface_index
@@ -133,7 +142,7 @@ export async function refreshExactEntity(agent, unit, source) {
   // probe. Automatic renewal is limited to this NPC's recorded placement.
   if (!owner.requestTrace?.id || planning?.goal?.status !== 'active' || planning.run?.paused || agent.memory.currentPlan(owner.key)?.status !== 'active'
     || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
-    || !locator?.name || !Number.isSafeInteger(locator.surface_index)
+    || !locator?.name
     || !Number.isFinite(locator.position?.x) || !Number.isFinite(locator.position?.y)
     || placement?.actor_id !== agent.epoch.actor_id || placement?.actor_epoch !== agent.epoch.epoch
     || placement.entity_name !== locator.name) return undefined
@@ -157,8 +166,8 @@ export async function refreshExactEntity(agent, unit, source) {
     identity()
     const runtime = await deploymentStatus(agent.rcon, { requireAllowed: true })
     identity()
-    if (runtime.actor_id !== agent.epoch.actor_id || runtime.epoch !== agent.epoch.epoch
-      || runtime.surface_index !== owner.surfaceIndex) throw new Error('entity_refresh_actor_or_surface_changed')
+    if (runtime.actor_id !== agent.epoch.actor_id || runtime.epoch !== agent.epoch.epoch) throw new Error('entity_refresh_actor_or_surface_changed')
+    owner.surfaceIndex = refreshSurface(owner.surfaceIndex, runtime)
     if (idleRequired && runtime.idle !== true) {
       const error = new Error('entity_refresh_native_work_pending')
       error.entityRefreshBusy = true
