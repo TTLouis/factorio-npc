@@ -2,6 +2,31 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 24: reviewed Run AU identity and stop-boundary repair
+
+[Run AU repair](RUN_AU_HARNESS_REPAIR_2026-10-24.md) now records executable
+identity from fresh raw native tool answers, before model-facing full/diff/unchanged
+projections can omit scope. Cached output cannot renew invalidated bindings.
+Legacy missing-surface locators use bounded native actor/body/entity reconciliation;
+restored collection always validates exact identity and recorded placement.
+
+Cancelled sprint boundaries accept a verified sealed1x guard as retired work,
+without executing the old callback, faulting a replacement or resetting durable
+spending. Unconfirmed restoration still fails safely. The checker detects the
+original false global fault; named retirement/reconciliation traces are tested.
+
+37new regressions include both exact AU replies, injected residual admission loss,
+actual scripted output collection and subsequent native callback, restore/refusal/
+exhaustion fences, exact stop and residual Session cancellation. Original baseline
+negative controls and five reproduced review findings remain retained. Candidate
+6a7dbecd was independently approved after the consumer-validation correction;
+mergeddd3e0cac passes3408runtime/1378mod/type/Lua, payload9 and scoped lint0.
+
+Goal/plan/checkpoint semantics and budgets are unchanged. The original six plates
+remain insufficient for the ten-plate checkpoint; safe continuation is not gameplay
+success. Native files/mechanics are unchanged; no new native engine or live E2E
+was run. Historical evidence is preserved, owned resources removed, no publication.
+
 ## October 24: Run AU avoided polling exhaustion, but identity recovery missed
 
 [Run AU](validation/RED_AUTOMATION_LIVE_RUN_AU_2026-10-23.md) tested frozen reviewed

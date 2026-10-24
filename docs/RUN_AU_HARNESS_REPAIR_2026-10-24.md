@@ -101,9 +101,9 @@ the real restored controller. First review and red/green logs remain retained.
 - [x] Shared producer correction and bounded missing-scope reconciliation.
 - [x] Real Session residual/native callback and strict-stop regressions.
 - [x] Focused137 cases pass (37new); baseline and review negative controls retained.
-- [ ] Fresh full runtime/mod/type/Lua, scoped lint and payload checks.
-- [ ] Immutable independent review; integrate and rerun merged offline gates.
-- [ ] Reverify historical seals, owned Docker cleanup and evidence mirror.
+- [x] Candidate and merged3408runtime/1378mod, type/Lua/generated-Lua; scoped lint0 errors/warnings and payload9 pass.
+- [x] Independent review approved6a7dbecd after R1 correction; mergeddd3e0cac, fresh full gate and merged payload9 pass.
+- [x] Historical seals/validation files reverified; owned cleanup and new evidence mirror recorded in machine closeout.
 
 Evidence: `test-results/run-au-harness-recovery/` (ignored, retained locally).
 Initial fixture setup failures and full-gate trace-sequence failure remain in the
@@ -115,3 +115,24 @@ No Factorio mechanics or native files changed. Prior exact2.0.77 native scope,
 same-entity collection and sprint guard proof remains applicable to unchanged
 native code; this repair's new composition is offline/scripted evidence. A future
 live trial still requires a newly frozen candidate and its own authorization.
+
+Final executable candidate: `6a7dbecdfa9fa0d20c195df592469af584d8fe0d`, runtime
+correction `c04295563cbf1a524339e8912b7bbe8b2dd94b51`, payload source the same
+runtime commit; unchanged bootstrap payload SHA-256
+`6d9ff05468d450708b8ae00650f825380291c5022206f8963154512688245be4`.
+Tested local merge: `dd3e0cac4fb1d55b604d20a932f66b81a6ccfc58`; production tree
+matches the approved candidate exactly. Later closeout commits change documents
+only. The original blocked review is retained beside final approval.
+
+The original709d10eb baseline suite records131tests/25expected failures; this
+includes auxiliary new-branch diagnostics and safety cases that cannot reach their
+new seams on the old source, not25independent live failures. The original drill
+replies and false stop fault fail for their original reasons. The separateed00025b
+review control records137tests/5unsafe-admission failures; final focused137/137
+pass. Frozen provider request fingerprints remain11/11 unchanged.
+
+Machine closeout, gates, review, negative controls, cleanup and history proofs:
+[test-results/run-au-harness-recovery/final-summary.json](../test-results/run-au-harness-recovery/final-summary.json).
+All988AR/AS/AT/AU sealed files and187historical validation files remain unchanged.
+Source, ignored evidence and shared images are retained; task-only containers are
+absent, with no background review or model work. No new live trial or publication.
