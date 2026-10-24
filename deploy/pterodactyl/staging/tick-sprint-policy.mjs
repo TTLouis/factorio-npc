@@ -1,3 +1,6 @@
+// The1200/minute limit caps additional controller RPCs. Inline native guard
+// checks share an already-owned world-command RPC and are counted separately;
+// they remain subject to the caller's existing operation/observation budgets.
 export const TICK_SPRINT = Object.freeze({ version: 'tick-sprint-v1', speed: 4, burstTicks: 600,
   episodeTicks: 3600, maxEpisodes: 1024, pollMs: 500, watchdogMs: 100, restoreAfterMs: 2000, wallMs: 3000, maxControlReadsPerMinute: 1200 })
 
@@ -57,5 +60,10 @@ export function summarizeTickSprints(rows) {
     native_tick_guard_checks: checksComplete ? restored.reduce((sum, row) => sum + row.restored.native_checks, 0) : null,
     known_restored_native_tick_guard_checks: restored.reduce((sum, row) => sum + (row.restored.native_checks ?? 0), 0),
     faults: uniqueRows.filter(row => row.event === 'sprint.fault').length,
+    polling_recovery: {
+      attempted: uniqueRows.filter(row => row.event === 'sprint.polling_recovery_attempted').length,
+      completed: uniqueRows.filter(row => row.event === 'sprint.polling_recovery_completed').length,
+      exhausted: uniqueRows.filter(row => row.event === 'sprint.polling_recovery_exhausted').length,
+    },
     refusals: uniqueRows.filter(row => row.event === 'sprint.refused').length, leases: [...leases.values()] }
 }

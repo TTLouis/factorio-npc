@@ -1,0 +1,106 @@
+{
+  "baseline_sha": "9b4037679688612f75ac1c49df6b188d6cf2adbc",
+  "source": "Run AT sealed data/logs/sgluna-behavior.jsonl",
+  "trace_sha256": "91ba33263b785f3d00279760531e69a88b7d8d58a9cad731958c02a9f7ec50cd",
+  "fault": {
+    "schema": 1,
+    "ts": "2026-10-24T02:05:31.679Z",
+    "seq": 0,
+    "event": "sprint.fault",
+    "data": {
+      "profile": "accelerated",
+      "run_id": "red-automation-live-2026-10-23at",
+      "source_sha": "9b4037679688612f75ac1c49df6b188d6cf2adbc",
+      "reason": "Sprint harness polling budget exhausted",
+      "disposition": "safe_stop_required",
+      "polling_instance_id": "c7958b6c-822b-453a-aaca-ae883ceb9586",
+      "native_reads_by_lane": {
+        "configure": 1,
+        "boundary_restore": 6152,
+        "eligibility": 71,
+        "arm": 39,
+        "identity_refresh": 78,
+        "inventory_refresh": 39,
+        "emergency_control": 1
+      }
+    }
+  },
+  "preceding_polling": [
+    {
+      "schema": 1,
+      "ts": "2026-10-24T02:05:17.450Z",
+      "seq": 1373,
+      "event": "sprint.polling",
+      "request_id": "req_mvlqyngt_1",
+      "turn": 13,
+      "actor_id": 1,
+      "epoch": 1,
+      "data": {
+        "profile": "accelerated",
+        "run_id": "red-automation-live-2026-10-23at",
+        "source_sha": "9b4037679688612f75ac1c49df6b188d6cf2adbc",
+        "reason": "bounded_control_accounting",
+        "polling_instance_id": "c7958b6c-822b-453a-aaca-ae883ceb9586",
+        "native_reads_by_lane": {
+          "configure": 1,
+          "boundary_restore": 5799,
+          "eligibility": 70,
+          "arm": 38,
+          "identity_refresh": 76,
+          "inventory_refresh": 38
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-24T02:05:23.271Z",
+      "seq": 1421,
+      "event": "sprint.polling",
+      "request_id": "req_mvlqyngt_1",
+      "turn": 13,
+      "actor_id": 1,
+      "epoch": 1,
+      "data": {
+        "profile": "accelerated",
+        "run_id": "red-automation-live-2026-10-23at",
+        "source_sha": "9b4037679688612f75ac1c49df6b188d6cf2adbc",
+        "reason": "bounded_control_accounting",
+        "polling_instance_id": "c7958b6c-822b-453a-aaca-ae883ceb9586",
+        "native_reads_by_lane": {
+          "configure": 1,
+          "boundary_restore": 5928,
+          "eligibility": 71,
+          "arm": 39,
+          "identity_refresh": 78,
+          "inventory_refresh": 39
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-24T02:05:28.301Z",
+      "seq": 1467,
+      "event": "sprint.polling",
+      "request_id": "req_mvlqyngt_1",
+      "turn": 13,
+      "actor_id": 1,
+      "epoch": 1,
+      "data": {
+        "profile": "accelerated",
+        "run_id": "red-automation-live-2026-10-23at",
+        "source_sha": "9b4037679688612f75ac1c49df6b188d6cf2adbc",
+        "reason": "bounded_control_accounting",
+        "polling_instance_id": "c7958b6c-822b-453a-aaca-ae883ceb9586",
+        "native_reads_by_lane": {
+          "configure": 1,
+          "boundary_restore": 6064,
+          "eligibility": 71,
+          "arm": 39,
+          "identity_refresh": 78,
+          "inventory_refresh": 39
+        }
+      }
+    }
+  ],
+  "fixture_substitutions": "Minute-bucket saturation is injected at its causal bound (1200); real harness lifecycle uses recorded AO committed-plan fixture with scripted native replies, not a replay of AT gameplay."
+}

@@ -1074,6 +1074,15 @@ const INFORMATIONAL_SIGNATURES = [
 
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
+  {
+    id: 'sprint_polling_budget_unrecovered', label: 'Sprint polling budget fault or exhausted correction',
+    detect: (_all, _withRequest, rows) => rows.filter(row =>
+      row.event === 'sprint.fault' && row.data?.reason === 'Sprint harness polling budget exhausted'
+      || row.event === 'sprint.polling_recovery_exhausted').map(row => ({
+      request_id: row.data?.request_id ?? row.request_id ?? '(controller)', count: 1, first_ts: row.ts,
+      detail: `${row.data?.reason}; ${row.data?.disposition ?? 'safe_stop_required'}`,
+    })),
+  },
   { id: 'exact_entity_binding_unrecovered', label: 'exact entity binding failure without verified recovery',
     detect: (_all, scoped) => detectUnrecoveredEntityBinding(scoped) },
   { id: 'gather_partial_unrecovered', label: 'terminal partial gathering did not reach a bounded harness continuation',
