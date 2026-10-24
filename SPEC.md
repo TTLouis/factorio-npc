@@ -6,6 +6,11 @@ humans. This is a navigation summary; the linked design documents own the detail
 Use the [documentation index](docs/README.md) to choose a guide and
 [CONTRIBUTING.md](CONTRIBUTING.md) for a first contribution.
 
+Jev is optional on `experiment/jev-agent-architecture`. With no decision-provider
+key configured, the runtime uses non-Jev decision paths; a main LLM provider is
+still required. In Docker, leave `JEV_TYPESAFE_API_KEY` blank. These configuration
+choices do not change the runtime's authority or gameplay acceptance contracts.
+
 | Boundary | Required behavior | Authority |
 | --- | --- | --- |
 | Body | Real inventory, reach/collision, native crafting/mining, death and save/restart behavior; stale actor work fails safely | [Character architecture](docs/NPC_CHARACTER_ARCHITECTURE.md), [AGENTS.md](AGENTS.md) |

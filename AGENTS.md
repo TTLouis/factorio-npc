@@ -38,7 +38,7 @@ Explicit user instructions remain authoritative.
 - Correlate asynchronous work with the exact actor, operation and epoch. Stale,
   uncertain or native-busy work must fail safely, including after restart/death.
 - Preserve the User Goal, non-executable LOD Roadmap Shelf and immutable committed
-  Active Plan. The Main LLM drafts plans; Jev selects/ranks/routes without granting
+  Active Plan. The Main LLM drafts plans; optional Jev selects/ranks/routes without granting
   permission, approving correctness, mutating committed plans or advancing steps.
 - Structural blockers freeze the committed plan. A replacement needs verified
   standing task authority or user approval outside that grant. Preserve the
