@@ -42,7 +42,7 @@ describe('canonical Factorio provider contract parity', () => {
     expect(Object.entries(operationContract)
       .filter(([, definition]) => !definition.surfaces.includes('ordinary-agent'))
       .map(([name]) => name)
-      .sort()).toEqual(['execute_construction_plan', 'gather_resource', 'launch_rocket', 'supply_entity'])
+      .sort()).toEqual(['execute_construction_plan', 'gather_resource', 'launch_rocket', 'reserve_construction_area', 'supply_entity'])
   })
 
   it('keeps the complete ordinary-agent tool surface aligned with the manifest', () => {
@@ -63,16 +63,19 @@ describe('canonical Factorio provider contract parity', () => {
     expect(toolsWithPolicy('runtime-v8-only')).toEqual([
       'estimateProductionTime',
       'findSkills',
+      'getConstructionReservations',
       'getFluidSourceTiles',
       'getLocalSpatialObservation',
       'getMiningDetails',
-    'getPumpSitePreparation',
+      'getPumpSitePreparation',
       'getResearchPath',
       'getResearchRequest',
+      'getReservationDesignInput',
       'getSkillDetails',
       'measureTransportThroughput',
       'planPlacement',
       'validateConstructionPlan',
+      'validateConstructionReservation',
     ])
     expect(toolsWithPolicy('ordinary-agent-only')).toEqual([])
   })

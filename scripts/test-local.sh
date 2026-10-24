@@ -14,19 +14,20 @@
 # Run from Git Bash on Windows (or any POSIX shell with Docker Desktop).
 #
 # Usage:
+#   scripts/test-local.sh agent     # ordinary-agent vitest suite used by CI
 #   scripts/test-local.sh runtime   # node --test: deploy/pterodactyl staging + runtime-v8
 #   scripts/test-local.sh mod       # autorio: vitest, tsc --noEmit, Lua build, check-generated-lua
-#   scripts/test-local.sh all       # both
+#   scripts/test-local.sh all       # agent + runtime + mod
 
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 {runtime|mod|all}" >&2
+  echo "usage: $0 {agent|runtime|mod|all}" >&2
   exit 2
 }
 
 cmd="${1:-}"
-case "$cmd" in runtime|mod|all) ;; *) usage ;; esac
+case "$cmd" in agent|runtime|mod|all) ;; *) usage ;; esac
 [[ $# -eq 1 ]] || usage
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -92,6 +93,19 @@ run_container() {
     --name "$run_scope-$lane" --cidfile "$cid_host_dir/$lane.cid" "$@"
 }
 
+run_agent() {
+  echo "== agent: ordinary-agent vitest suite =="
+  # Keep installed dependencies in the image, but read current source, package
+  # scripts/configuration and the shared contract from this checkout.
+  run_container agent \
+    -v "$host_root/packages/agent/src:/src/packages/agent/src:ro" \
+    -v "$host_root/packages/agent/package.json:/src/packages/agent/package.json:ro" \
+    -v "$host_root/packages/agent/vite.config.ts:/src/packages/agent/vite.config.ts:ro" \
+    -v "$host_root/packages/agent/tsconfig.json:/src/packages/agent/tsconfig.json:ro" \
+    -v "$host_root/contracts:/src/contracts:ro" \
+    npc-dev sh -c "pnpm --filter @factorio-npc/agent run test --run"
+}
+
 run_runtime() {
   echo "== runtime: node --test deploy/pterodactyl/staging + runtime-v8 =="
   # deploy/pterodactyl: the suites under test.
@@ -133,6 +147,9 @@ run_mod() {
 }
 
 case "$cmd" in
+  agent)
+    run_agent
+    ;;
   runtime)
     run_runtime
     ;;
@@ -140,6 +157,7 @@ case "$cmd" in
     run_mod
     ;;
   all)
+    run_agent
     run_runtime
     run_mod
     ;;
