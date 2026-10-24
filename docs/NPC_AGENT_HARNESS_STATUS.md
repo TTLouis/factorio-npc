@@ -2,7 +2,32 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
-## October 23: accelerated Run AR
+## October 23: consolidated candidate after the AR repair and Run AS
+
+The current executable baseline is `cdbc95ed`, with 3,302 runtime / 1,378 mod
+tests, type/Lua/payload gates and independent review passed. The
+[consolidation record](validation/FIX_CONSOLIDATION_2026-10-23.md) groups the
+already-merged fixes by shared harness boundary and records archival/recovery of
+completed worktrees. Historical report adoption changes documentation only.
+
+[AR's mining repair](validation/RUN_AR_MINING_RECONCILIATION_FIX_2026-10-23.md)
+proves exact native resource selection and bounded acquisition-only partial-batch
+reconciliation, including injected residual failure and physical coal-only
+continuation. Those proofs are separate from live autonomous production.
+
+[Run AS](validation/RED_AUTOMATION_LIVE_RUN_AS_2026-10-23.md) mined normally and
+smelted ten copper plates, then guard-paused on an exact furnace target with no
+live observation binding. No science was produced, and the new mining correction
+paths were not triggered. Eight control retries yielded five continuations and
+three failures; there were no automatic resumes. Stop/save/exact load/cleanup
+passed, with one documented sprint alarm during stop confirmation.
+
+The [next patch plan](RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md) targets a bounded
+harness-owned identity refresh across observation and mutation boundaries, with
+partial-production reconciliation, then separate shutdown/accounting follow-ups.
+It is a proposal, not implemented behavior or permission for another trial.
+
+## October 23: accelerated Run AR (historical trial boundary)
 
 The [Run AR report](validation/RED_AUTOMATION_LIVE_RUN_AR_2026-10-23.md) records
 six safely restored sprint bursts / 1,836 native ticks, then a gameplay failure
@@ -17,8 +42,9 @@ passed 3261 runtime / 1366 mod tests. AP is an invalid startup trial; AQ is a
 zero-inference preflight failure; their separate sealed evidence is retained.
 AR passed strict paired stop/save, ZIP integrity, pristine exact-version load and
 owned cleanup. A post-stop closed-authority alarm remains documented separately
-from zero in-trial sprint faults. Partial-batch effect reconciliation remains a
-harness recovery gap; safe refusal is not successful self-correction.
+from zero in-trial sprint faults. Partial-batch effect reconciliation was a gap at
+that trial boundary; the later offline AR repair above supplies bounded correction.
+Safe refusal alone is not successful self-correction.
 
 ## October 23: Run AO controller liveness repair
 
