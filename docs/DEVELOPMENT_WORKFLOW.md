@@ -1,13 +1,16 @@
 # Development workflow for Factorio NPC
 
-This applies the useful parts of Chris Titus Tech's
-[coding workflow](https://www.youtube.com/watch?v=wcRR5P0S2Us) and
-[companion article](https://christitus.com/my-ai-workflow/) to this project.
-Existing actor, planning, secret and promotion rules remain authoritative.
+Use this workflow for a bounded change from acceptance criteria through review.
+Start with [CONTRIBUTING.md](../CONTRIBUTING.md) for first contributions,
+[the documentation index](README.md) for subsystem references and
+[TESTING.md](TESTING.md) for test commands. Actor, planning, secret and promotion
+rules in [AGENTS.md](../AGENTS.md) remain authoritative.
 
 ## Start from a bounded failure or outcome
 
-Read the parent workspace policy/ownership registry, `AGENTS.md` and `SPEC.md`.
+Read `AGENTS.md` and `SPEC.md`. In the owner's shared workspace, also read its
+parent policy and ownership registry; independent clones do not require those
+machine-local files.
 Confirm the actual checkout, branch, upstream and current Jev source SHA. Reuse
 the task branch when resuming. Preserve occupied checkouts and historical evidence.
 Open only the relevant subsystem and design references; use exact searches before
@@ -53,7 +56,8 @@ Use the guide's repair closeout fields in the task note and PR evidence.
 | Installer / shipped runtime | Payload repin as a separate commit, payload check/tests, appropriate package gates at promotion |
 | Workflow / docs | Executable command checks, config parsing and link/diff review; no gameplay capability claim |
 
-Run `git diff --check`, then the repository's offline gate:
+Run `git diff --check`. For implementation and integration, run the repository's
+offline gate; documentation-only validation also checks links, paths and commands:
 
 ```sh
 bash scripts/test-local.sh all
@@ -82,6 +86,10 @@ approved the direction, not an unvalidated speed change in an existing runner.
 Freeze the profile before a new trial; preserve normal-speed baselines and never
 retrofit active or sealed runs. Native guard and boundary-barrier proof precede
 the first accelerated provider trial.
+
+Live trials additionally follow [LIVE_E2E.md](LIVE_E2E.md). One authorized trial
+does not permit retries, deployment or another run. Historical quota thresholds
+are not a standing allowance. Keep actual trial evidence immutable.
 
 Use `.github/pull_request_template.md` for a reviewable summary: trigger, result,
 acceptance evidence, limits and recovery. A separate reviewer reads the actual

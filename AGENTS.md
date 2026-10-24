@@ -1,184 +1,127 @@
-# AGENTS.md
+# Working on Factorio NPC
 
-These repository notes are for coding agents working on this fork. They describe current project invariants and validation expectations; user instructions for a specific task remain authoritative.
+Instructions for coding agents contributing to SGLuna, the standalone Factorio
+NPC. Read this file first, then only the references relevant to the task.
+Explicit user instructions remain authoritative.
 
-## Start with the current task
+## Start here
 
-- Read the parent workspace `AGENTS.md` and `WORKTREES.md` before branch/worktree operations. Their ownership and naming policy supersedes older examples in this checkout.
-- Use [SPEC.md](SPEC.md) for a short project contract and links to the authoritative architecture/roadmaps. Read only the documents needed for the changed subsystem; search historical validation records when a concrete failure requires them.
-- Follow [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md) for task acceptance criteria, evidence and review. Keep one bounded change per task; record the source SHA, dependency, tests and unresolved limits in its work note.
+1. Identify the requested outcome, affected subsystem and acceptance evidence.
+   Use [SPEC.md](SPEC.md) for the project contract and
+   [docs/README.md](docs/README.md) to find its owning document.
+2. Inspect Git status, branch, upstream and worktrees before editing. Preserve
+   existing changes; never reset, stash or overwrite another session's work.
+3. In the owner's shared workspace, read its parent `AGENTS.md` and `WORKTREES.md`.
+   Register ownership before creating a checkout; use its naming, source and
+   integration rules. Those local files are not prerequisites for an independent
+   contributor's clone. See [CONTRIBUTING.md](CONTRIBUTING.md).
+4. Start development from the current Jev candidate. The sole development target
+   is `experiment/jev-agent-architecture`; `main` is the stable baseline.
+   `feat/npc-transition-work` is historical. Do not switch another session's branch.
+5. Keep one bounded task per branch. For substantial work, record owner, source
+   SHA, dependencies, acceptance criteria and a resumable checkpoint using the
+   [development workflow](docs/DEVELOPMENT_WORKFLOW.md).
 
-## Project direction
+## Runtime invariants
 
-SGLuna is an autonomous in-world Factorio NPC. The core runtime must not depend on owning or impersonating a connected human player.
+- SGLuna owns a standalone Factorio `character`, never a human `LuaPlayer`.
+  Zero connected humans must remain a valid operating state.
+- Preserve native inventory, crafting, mining, research, combat, reach/collision,
+  death and save/restart behavior. Do not substitute teleporting, instant items
+  or fake completion for production mechanics.
+- Models receive structured observations and choose bounded operations. Never
+  introduce model-generated Lua, shell/console commands or unrestricted remote
+  calls. Deterministic code derives game facts, constraints and valid candidates.
+- The harness owns authoritative state, admission, receipts, recovery and
+  completion. Admission, placement and a clean wrapper exit do not establish
+  gameplay success; verify the requested native world state.
+- Correlate asynchronous work with the exact actor, operation and epoch. Stale,
+  uncertain or native-busy work must fail safely, including after restart/death.
+- Preserve the User Goal, non-executable LOD Roadmap Shelf and immutable committed
+  Active Plan. The Main LLM drafts plans; Jev selects/ranks/routes without granting
+  permission, approving correctness, mutating committed plans or advancing steps.
+- Structural blockers freeze the committed plan. A replacement needs verified
+  standing task authority or user approval outside that grant. Preserve the
+  requested result and verified history. Ask before substantially redesigning
+  player structures, using reserved supplies or changing the result. Bounded
+  recovery preserving the committed semantic step does not require interruption.
+- Interrupted accepted tasks belong to a durable ledger, separate from future
+  shelf work. Questions block affected work only. Campaign allowances cannot
+  reset on restage, plan slices or restart; preserve existing guards until a new
+  accounting contract is implemented and validated.
+- Strategic `vertical | horizontal | maintain | recover` steering occurs at safe
+  planning boundaries relative to the critical path. It cannot replace a healthy
+  committed plan or impose an arbitrary alternating cadence.
 
-The intended actor is a real standalone Factorio `character` controlled through bounded mod/runtime APIs. Human players are requesters and observers, not SGLuna's body.
+The [planning roadmap](docs/NPC_PLANNING_ROADMAP.md) and
+[macro design](docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md) define these contracts;
+design requirements are not claims that every path is implemented.
+For tool/operation changes, update the owning adapter,
+[contract manifest](contracts/factorio-tool-contract.json) and parity tests
+together. Preserve intentional provider differences; see
+[architecture ownership](docs/ARCHITECTURE_OWNERSHIP.md).
 
-## Architecture invariants
+## Validation and evidence
 
-- Keep NPC ownership actor-based, not `LuaPlayer`-ownership based.
-- Zero connected humans must remain a valid operating state.
-- Preserve physical game mechanics where practical: real inventory, native hand crafting, real mining state, research, combat, reach/collision constraints, save/restart behavior, and character death/recovery.
-- Do not replace difficult Factorio mechanics with test-only teleporting, instant item insertion, fake completion, or other production shortcuts.
-- Model mutations must remain structured and bounded. Do not reintroduce arbitrary model-generated Lua, shell commands, console commands, or unrestricted `remote.call(...)` strings.
-- The harness/runtime owns authoritative state, validation, admission, receipts, and recovery. The model chooses actions from approved observations/tools.
-- Planning has explicit ownership boundaries: user goal, non-executable LOD Roadmap Shelf, and immutable committed Active Plan. The Main LLM authors drafts; Jev provides bounded selection/ranking/routing, never correctness approval, permission, committed-plan mutation or Plan Tracker advancement.
-- A structural blocker freezes the committed plan. Under the owner's 2026-09-30 design, a new version requires harness-verified standing Auto/player-task authority or explicit user approval when outside that grant. Preserve the requested result and verified history; explain meaningful changes. Ask before removing/substantially redesigning player-built structures, using reserved supplies, or changing the result. See `docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md`; these are implementation requirements, not proof that authorization/recovery is already wired. Ordinary bounded recovery preserving the committed semantic step does not require user interruption.
-- Accepted interrupted tasks belong to a durable ledger separate from the future Roadmap Shelf. Questions block only affected work; independently authorized work may continue. Planner, executor and Jev share a persisted campaign allowance that cannot reset on restage, slice changes or restart. Its numeric limit/accounting unit are not selected. Preserve existing runtime guards until the new contracts are implemented and validated.
-- Strategic steering (`vertical | horizontal | maintain | recover`) is evaluated at safe planning boundaries and is relative to the current critical path. It may guide which shelf node the Main LLM refines next, but it must not mutate or replace a healthy committed plan; vertical/horizontal cadence is evidence-driven, not a forced alternation.
-- Prefer deterministic game data and validated constraints over asking the LLM to guess Factorio rules.
-- Do not silently treat a successful admission/command as proof that the user's gameplay goal is complete. Verify relevant world state.
-- Preserve exact actor/operation correlation across asynchronous work. Stale work after actor replacement, death, restart, or epoch change must fail safely.
+- Use [docs/TESTING.md](docs/TESTING.md) for commands and environment requirements.
+  On this shared Windows workspace, dependency directories are WSL symlinks:
+  never run host `pnpm`, `vitest`, `eslint`, `tstl` or dependency/hook installation.
+  Use the existing Docker runner and its reviewed mounts.
+- Run the offline gate `bash scripts/test-local.sh all` for implementation work
+  and before integration. Documentation changes also need link, command and
+  diff review. Keep full logs and real exit codes; do not hide failures with pipes.
+- Unit/type checks protect contracts. Engine claims require deterministic real
+  Factorio coverage under `tests/factorio/`, with the exact version and layout.
+  Never weaken an assertion to obtain a pass or give models unmeasured transport,
+  recipe, stacking or throughput assumptions.
+- E2E-derived fixes must meet [E2E_REPAIR_REQUIREMENTS.md](docs/E2E_REPAIR_REQUIREMENTS.md):
+  shared harness prevention, authoritative detection and bounded harness-owned
+  correction; original failure, residual miss, safe continuation, safety fences,
+  restart limits and exhaustion evidence. Prompt promises do not own correctness.
+- Add a named, request-correlated reason trace and regression for behavior changes.
+  Check the [production validation ladder](docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md)
+  before claiming a capability; retain the burner-drill/furnace canary.
+- Read [current status](docs/NPC_AGENT_HARNESS_STATUS.md) for verified limits.
+  Preserve dated reports, traces and saves. Add a new checkpoint instead of
+  rewriting historical evidence to describe a newer commit.
 
-## Validation rules
+## Configuration, secrets and live activity
 
-- Unit tests and typechecks are required regression gates but are not proof of real Factorio engine behavior.
-- For engine semantics, prefer deterministic real-Factorio integration coverage under `tests/factorio/`.
-- Never weaken a failing E2E assertion merely to make a scenario pass. Fix the runtime/harness assumption or make the limitation explicit.
-- E2E-derived fixes must follow [E2E repair requirements](docs/E2E_REPAIR_REQUIREMENTS.md): prevent the bounded failure class at a shared harness boundary and prove harness-owned self-correction for residual misses. A one-example patch, better prompt or model-managed retry is insufficient; preserve safety/authority/budget fences and explicit exhaustion.
-- Do not pass unvalidated throughput assumptions to the model. Inserter, belt-lane, stacking, recipe, and transport constraints should be measured or derived deterministically before becoming planning facts.
-- Keep real provider credentials out of repository tests and CI.
-- Pterodactyl package smoke/release gates are separate from ordinary CI and should be used for promotion checkpoints.
-- Production gameplay capability is promoted by real Factorio evidence, not by code presence alone. Follow `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md`: exact-layout harness proof before guided/autonomous provider trials, semantic output verification instead of placement-only success, and a separate fluid validation track.
-- Preserve the historical burner-drill -> furnace path as a production canary. The current unproven frontier is powered assembler/inserter production; fluid systems remain known-red until revalidated from a minimal live network.
+- Deployment environment/Egg variables override non-secret config mirrors.
+  `sgluna-config.json` is canonical; `airi-config.json` is a compatibility input.
+- Never read, print or copy `.env`, credentials or private provider endpoints
+  into commands, logs, commits or reports. CI and offline fixtures use no real
+  provider credentials. Public `.env.example` files document setting names.
+- Live model/Jev calls, autonomous trials, provider retries, pushes and deployment
+  need the owner's authorization for that action. One E2E instruction authorizes
+  one trial. Usage thresholds and old standing allowances do not authorize runs.
+- Before any authorized trial, follow [docs/LIVE_E2E.md](docs/LIVE_E2E.md) and the
+  current workspace rules. Freeze exact source/profile/deployment identity. Use
+  configured CLI-proxy planner/executor roles and dedicated Jev settings; verify
+  effective models from non-secret evidence. Never change the owner's models.
+- Normal speed is the baseline. Acceleration requires the separately frozen,
+  validated profile in [E2E_TICK_SPRINT.md](docs/E2E_TICK_SPRINT.md); never retrofit
+  an active run. Do not manually correct gameplay or resume the NPC.
+- Own and clean up exact run-scoped Docker resources on every exit path, preserving
+  evidence first. Never prune globally, delete persistent data, affect another
+  session's resources or restart Docker Desktop. Report unverified cleanup.
 
-## Branch and promotion policy
+## Review and integration
 
-- `main` is the stable baseline. `experiment/jev-agent-architecture` is the only development/integration destination; `feat/npc-transition-work` is historical.
-- A green feature HEAD is not automatically a release. Freeze a candidate SHA, run the appropriate heavyweight gates, then promote a validated checkpoint.
-- Preserve main-only deployment/documentation changes when reconciling a long-lived feature branch.
-- Do not mix swarm experiments into a single-NPC promotion unless they are explicitly in scope and independently validated.
-- Do not force-push or rewrite shared branch history unless the user explicitly requests it.
+Use the [development workflow](docs/DEVELOPMENT_WORKFLOW.md) and PR template.
+Commit one logical change with a conventional message and no tool/co-author
+trailers. A separate reviewer checks the actual diff and acceptance evidence;
+resolve actionable findings before integration. Delegate only authorized,
+independent work with clear ownership and completion criteria.
 
-## Current development priorities
+The integrator must own the integration checkout, verify the reported tests,
+merge with `--no-ff` and run the merged offline gate. Do not push automatically:
+publication and promotion retain their explicit authorization and release gates.
+Never force-push or rewrite shared history without an explicit request.
 
-1. Keep the standalone-NPC baseline reliable and promotion-ready.
-2. Turn E2E failures into deterministic regression cases and useful behavior traces.
-3. Prefer map-first remote operations for interactions that Factorio can perform from map/remote-view semantics.
-4. Keep production planning deterministic where the game can supply exact recipe/topology/capacity data.
-5. Validate inserter throughput, belt lanes, stacking capacity, and similar transport constraints before relying on them in LLM planning.
-6. Build vehicle/train/space-platform interaction after the map-operation foundation is sound.
-7. Treat swarm/message-board work as a later coordination layer, not a prerequisite for the single-NPC baseline.
-
-## Pterodactyl configuration authority
-
-Deployment environment/Egg variables are the source of truth. Runtime-visible non-secret values may be mirrored into `sgluna-config.json` (the legacy `airi-config.json` is still read as a fallback), but that file must not override environment values.
-
-Secrets such as `OPENAI_API_KEY` and Factorio credentials must not be committed or persisted into non-secret config files.
-
-## Documentation roles
-
-- `README.md`: current public/project overview and deployment entry points.
-- `docs/NPC_CHARACTER_ARCHITECTURE.md`: stable actor/body design decisions.
-- `docs/NPC_AGENT_HARNESS_PLAN.md`: current single-NPC roadmap and promotion gates.
-- `docs/NPC_PLANNING_ROADMAP.md`: canonical planning semantics and implementation roadmap; Goal / LOD Shelf / immutable Active Plan / Jev review authority.
-- `docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md`: owner-approved Week 1 mandate, task interruption/recovery, task-local questions, shared campaign allowance and integration acceptance requirements; implementation status remains separate.
-- `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md`: canonical production-building E2E ladder, fixture/evidence requirements, powered-item frontier, fluid validation track, and later sustained-throughput maturity path.
-- `docs/NPC_AGENT_HARNESS_STATUS.md`: current verified status and known limits.
-- `docs/validation/`: historical checkpoints, transcripts, superseded staging plans, and release-candidate evidence.
-- `deploy/pterodactyl/README.md`: current Pterodactyl operational contract.
-
-Do not update a historical validation record in place to describe a newer commit. Create a new checkpoint or update the current status document instead.
-
-## Local test gates (Windows host)
-
-- Never run `pnpm`, `vitest`, `eslint`, `tstl` or `pnpm install` on the Windows host. The checkout's `node_modules` are WSL symlinks that Windows Node cannot follow, and a host install can delete links that other worktrees are using. All tests run in Docker.
-- Run `bash scripts/test-local.sh all` from Git Bash on Windows or a POSIX shell on Linux/macOS. The script starts isolated, network-disabled containers from the existing `npc-dev` image; it never installs dependencies. `runtime` runs `node --test` over `deploy/pterodactyl/staging` and `runtime-v8`, with the mounts those suites need. `mod` runs autorio vitest, `tsc --noEmit`, the Lua build and the generated-Lua check. Do not invent ad hoc mounts; missing `contracts/` or repo-root compose files cause false failures.
-- The pre-commit configuration checks staged whitespace and runs this Docker gate without rewriting staged files; existing hook installations need a refresh in a supported environment. Lint remains a required CI check. A successful hook does not replace review or real-engine evidence.
-- The full build gate is `docker build -f tests/factorio/Dockerfile --target build .`. Real-engine lanes run with `docker build -f tests/factorio/Dockerfile -t factorio-npc-test . && docker run --rm -e NPC_TEST_LANES=<lane> factorio-npc-test`, or `scripts/e2e-cloud.sh` in a cloud sandbox. Run the real-engine lanes at milestones, not before every push.
-- Redirect long test output to a log file and report the real exit code. Piping into `tail` or `head` hides failures.
-- Batch edits and verify once at the end instead of rerunning the suite after every small change.
-- Installer payload pin. Whenever `deploy/pterodactyl/installer.sh` or the files it ships change, repin the payload:
-  1. Set `PAYLOAD_REF` in `deploy/pterodactyl/build-payload.mjs` and `build-payload.test.mjs` to the new commit.
-  2. Run `node deploy/pterodactyl/build-payload.mjs`. It prints the sha256.
-  3. Set `PAYLOAD_SHA256` in the test to that sha256.
-  4. Run `node deploy/pterodactyl/build-payload.mjs --check`, then `node --test deploy/pterodactyl/build-payload.test.mjs`.
-  5. Commit the repin as its own commit.
-- Line endings: `core.autocrlf=true`. When scripting file edits, keep each file's existing newline style.
-
-## Live E2E procedure (local Docker stack)
-
-Live runs call real providers and cost money. Do not start one (RCON rounds, the e2e overlay, subagent e2e sessions, or anything that calls a real model or Jev) until the owner says so for that run, except under the standing allowance below. Before an owner-approved live run, stop after the static gates and report that the build is ready. Static scenarios with scripted or recorded model replies are the default harness gate. Turn every live finding into a design fix plus one of those fixtures, using realistic output sizes and live Jev shapes.
-
-- **Which model (owner rule, 2026-10-12; replaces the 2026-10-01 DeepSeek-only rule).**
-  - Automated e2e is any live run an agent drives. Its main method is the CLI proxy configured in the gitignored `.env`, with GPT-6 as Luna's model. The stack reads the provider settings from `.env`. Confirm the model actually used from the non-secret config mirror or the provider traces, never by reading `.env`.
-  - Keep the CLI-proxy hostname and any private endpoint out of the repository, logs committed to it, and docs.
-  - Standing allowance: at most one agent-started e2e per 5-hour usage window, only once that window is more than 60% used, and only when the run is likely to find bugs static scenarios cannot. Any other live run still needs the owner's go.
-  - Direct DeepSeek (`OPENAI_API_BASEURL=https://api.deepseek.com`, model `deepseek-flash`) is no longer the default; use it only when the owner asks.
-  - The owner's personal tests run through OpenRouter (`AI_API_METHOD=router`), and the owner alone chooses those models. Agents may recommend models but never pick or change them.
-  - Restore the CLI-proxy settings before the next automated run.
-- **Secrets.** Secrets live only in the gitignored `.env`. Agents never read, print or echo it, and never copy its values into commands, logs, commits or docs. The stack fails fast without `FACTORIO_RCON_PASSWORD`, `OPENAI_API_KEY`, `OPENAI_API_BASEURL`, `OPENAI_MODEL` and `JEV_TYPESAFE_API_KEY`.
-- **Build what you test.**
-  - Build the local server image only with `scripts/build-docker-local.ps1` (full: pins `SGLUNA_SOURCE_REF` to the committed, pushed HEAD) or `scripts/update-docker-mod-local.ps1` (mod-only changes). Both need a clean tree. Do not pass `--no-cache` or `--pull`.
-  - The e2e overlay's `SGLUNA_LOCAL_RUNTIME_OVERRIDE` copies only `supervisor.mjs`, so a container can be a mixed deploy.
-  - Verify what is deployed by diffing the container's release files against `git show HEAD:<path>`, with CR stripped from both. Do not trust the release directory name or `/opt/airi/SOURCE_SHA`.
-- **Preflight.**
-  - `docker ps` for the container name; do not assume it.
-  - Confirm the `/data` bind-mount source still exists on the host. A deleted mount leaves RCON answering while every file write fails with ENOENT.
-  - RCON is port 27015 inside the container and is published on host loopback only (127.0.0.1:27016). Never publish it on the LAN.
-  - A hang on connect usually means a wrong RCON password.
-  - Use one `Rcon` instance (from `runtime-v8/common.mjs`) per run and always `close()` it.
-  - Do not touch Docker Desktop itself. If the engine is down, report it and let the owner restart it.
-- **Cold start.** Every test starts cold:
-  1. Run `docker compose -f compose.yml -f compose.e2e.yml down`.
-  2. Remove `data/.airi/npc-state.json`.
-  3. Move every `data/saves/*.zip`, including autosaves, to a backup outside the repo. The entrypoint regenerates the world only when the save is absent.
-  4. Bring the stack back up with `up -d --force-recreate`.
-  5. Confirm: a freshly generated world, a new actor_id, an empty inventory, and `NULL_BOARD` from the task-board status call.
-  - The first objective must get a new `goal_id`, or the run does not count. There is no working in-game reset (`autorio_task_board.clear` is re-pushed by the supervisor).
-  - `data/sgluna-config.json` persists across cold starts. Check it when a provider limit looks wrong.
-- **Drive and observe.**
-  - Future accelerated construction must satisfy `docs/E2E_TICK_SPRINT.md` before use: maximum 4×, native tick/wall bounds, confirmed 1× at observation/admission/response boundaries, fresh validation, unchanged wall guards and separately labelled metrics. Preparation does not enable the mode; frozen/active runs keep their original speed contract.
-  - Send objectives as raw chat (`!luna <objective>`), not `/silent-command`.
-  - Read the board through a nil-safe `remote.call("autorio_task_board","status")`.
-  - Flush `storage.airi_task_board_ui_inputs` before a round.
-  - Use a different objective each round, and test one input channel at a time.
-  - Poll windows of at least ~90 s; shorter ones miss transitions.
-  - In Git Bash, prefix `docker exec` and node argv containing `/...` paths or `/silent-command` with `MSYS_NO_PATHCONV=1`.
-  - With zero connected players the NPC force charts nothing, so map ops return `area_uncharted`.
-- **Evidence.**
-  - The structured logs are the evidence, not the board: `<SGLUNA_DATA_DIR>/logs/sgluna-behavior.jsonl`, `sgluna-decision.jsonl` and `sgluna-prompts.jsonl`, read from the host. `docker logs --since <ISO>` is a fallback.
-  - Filter each run to its start timestamp and check it with `node deploy/pterodactyl/runtime-v8/run-check.mjs <behavior.jsonl> [since] [--json]`.
-  - Record results in `docs/NPC_AGENT_HARNESS_STATUS.md` or a new `docs/validation/` checkpoint, never by editing an old checkpoint.
-- **Never deploy.** Never deploy to the live Pterodactyl server, and never retry providers on your own. A local container being up is not permission to run against it.
-
-## Agent build workflow (worktrees and merges)
-
-- **Integration worktree.** Work lands on the active integration branch (currently `experiment/jev-agent-architecture`) from one integration worktree.
-  - Register the task in the parent `WORKTREES.md`, then use `git worktree add -b <type>/<task-slug> <workspace>/.worktrees/<type>-<task-slug> <verified-current-Jev-SHA>`. Reuse the existing task checkout on resume. Brief any authorized subagents with that absolute path and use it on every command.
-  - Reviewers read diffs with `git -C <path>` or `git diff` and never `git checkout` inside another worktree.
-  - Never use a bare `git stash` (the stack is shared across worktrees). Use a temporary WIP commit instead.
-- **Merge protocol, per unit:**
-  1. The agent commits on its unit branch and does not push.
-  2. A separate reviewer checks the diff for merge-blocking issues. Invariant-heavy diffs (planning ownership, actor/epoch correlation, admission, budget) get the strongest reviewer. Uncorroborated findings are marked as such.
-  3. The integrator confirms the tests the agent reported actually exist in the diff.
-  4. `git merge --no-ff <branch>` into the integration worktree.
-  5. Repin the installer payload if the installer or the files it ships changed.
-  6. `bash scripts/test-local.sh all` must pass.
-  7. `git push origin HEAD:<integration branch>`.
-- **Commits.** Small conventional commits per logical unit, pushed once green. No co-author or tool-attribution trailers. No force-push or history rewrite.
-- **Traceability.** Every behavior change adds a named trace event carrying `request_id` and a reason, asserted by a test, so a later live run can be diagnosed from the logs.
-- **Progress tracking.** Track long builds in a checklist (unit, commit, status), not in chat scrollback. Update the design note's build-status section and the status doc as units merge.
-- **Scope.** When a genuine product decision comes up, flag it to the owner and keep working on everything that does not depend on the answer.
-
-## Claude Opus 5.5 guidance
-
-- [Getting the most out of Opus 5.5](https://claude.dev/blog/getting-the-most-out-of-opus-5-5/): prompting and long-run guidance for Claude Opus 5.5. Key points for this repo:
-  - State explicit completion criteria (for example "the tests pass") and let the run proceed autonomously.
-  - Do not add "think carefully"-style instructions; the model already decides how much to think.
-  - Keep clear stop/go rules, and confirm before anything destructive (deleting data, force-pushing).
-  - Track long-run progress in a checklist file rather than in scrollback; split audits/migrations across subagents and verify their findings before consolidating.
-  - Have diffs reviewed for merge-blocking issues before human review, and mark uncorroborated findings as such.
-
-## Model/Hugging Face subproject notes
-
-The older Hugging Face/model guidance applies only when working specifically under the model/training subproject (for example `models/factorio-yolo-v0`) or publishing its artifacts:
-
-- publish model and dataset to separate Hub repos;
-- include a README/model card;
-- pin consumers to a tag/commit rather than a moving ref;
-- treat label-definition changes as incompatible and keep `classes.json` consistent;
-- keep one user-facing `notebook.ipynb` in a model repo and keep training/EDA/debug notebooks elsewhere;
-- clear notebook outputs before publishing.
-
-Do not apply those model-publishing notes to the core NPC runtime, deployment, or agent harness unless the task actually concerns the model subproject.
+If the installer or shipped files change, follow the payload repin procedure in
+[TESTING.md](docs/TESTING.md) and commit the repin separately. Package smoke and
+release gates are additional promotion checks. Preserve main-only deployment
+changes, user saves/configuration and upstream MIT attribution. Keep swarm or
+optional vision work separate from single-NPC promotion unless explicitly scoped.
+Preserve existing newline styles when editing files.
