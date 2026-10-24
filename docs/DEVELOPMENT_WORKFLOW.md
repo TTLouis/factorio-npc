@@ -67,7 +67,7 @@ Run it in Git Bash on Windows or a POSIX shell on Linux/macOS, with Docker and a
 existing `npc-dev` image. Missing dependencies/image are a blocker to report;
 never repair them with a Windows host install. The script never pulls an image
 or accesses the network. Keep the full log and real exit status. CI additionally
-runs lint, the ordinary agent tests, TypeScript/build, deployment/payload contracts
+runs lint, TypeScript/build, deployment/payload contracts
 and deterministic Factorio checks. Existing required-check names stay intact.
 
 The `package.json` pre-commit configuration runs staged whitespace checks and the

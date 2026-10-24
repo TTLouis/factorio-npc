@@ -16,7 +16,27 @@ printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
 case "$1" in
   run)
     lane=runtime
-    for arg in "$@"; do [[ "$arg" != *-mod ]] || lane=mod; done
+    for arg in "$@"; do
+      case "$arg" in
+        npc-static-*-agent) lane=agent ;;
+        npc-static-*-mod) lane=mod ;;
+      esac
+    done
+    if [[ "$lane" == agent ]]; then
+      for required in \
+        '/packages/agent/src:/src/packages/agent/src:ro' \
+        '/packages/agent/package.json:/src/packages/agent/package.json:ro' \
+        '/packages/agent/vite.config.ts:/src/packages/agent/vite.config.ts:ro' \
+        '/packages/agent/tsconfig.json:/src/packages/agent/tsconfig.json:ro' \
+        '/contracts:/src/contracts:ro'; do
+        found=false
+        for arg in "$@"; do
+          [[ "$arg" != *"/repo with spaces$required" ]] || found=true
+        done
+        [[ "$found" == true ]]
+      done
+      [[ "${!#}" == 'pnpm --filter @factorio-npc/agent run test --run' ]]
+    fi
     if [[ "$lane" == runtime ]]; then
       found_contracts=false
       for arg in "$@"; do
@@ -50,22 +70,44 @@ export PATH="$fixture/bin:$PATH"
 runner="$fixture/repo with spaces/scripts/test-local.sh"
 
 bash "$runner" all
-[[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == 2 ]]
+[[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == 3 ]]
+{
+  IFS= read -r agent_run
+  IFS= read -r runtime_run
+  IFS= read -r mod_run
+} < <(grep '^run ' "$DOCKER_TEST_LOG")
+[[ "$agent_run" == *'-agent '* ]]
+[[ "$runtime_run" == *'-runtime '* ]]
+[[ "$mod_run" == *'-mod '* ]]
 grep -F -- '--rm --pull never --network none' "$DOCKER_TEST_LOG" >/dev/null
 # The quoted bind must reach Docker as one argument despite the spaces.
 grep -F '/repo with spaces/contracts:/src/contracts:ro' "$DOCKER_TEST_LOG" >/dev/null
 grep -F 'npx --no-install vitest' "$DOCKER_TEST_LOG" >/dev/null
+grep -F 'pnpm --filter @factorio-npc/agent run test --run' "$DOCKER_TEST_LOG" >/dev/null
 if grep -E '/\.env:|/repo with spaces:/src' "$DOCKER_TEST_LOG"; then exit 1; fi
 
-: > "$DOCKER_TEST_LOG"
-set +e
-FAIL_LANE=runtime bash "$runner" all
-status=$?
-set -e
-[[ "$status" == 42 ]]
-[[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == 1 ]]
-grep -Fx 'rm -f owned-runtime' "$DOCKER_TEST_LOG" >/dev/null
-[[ ! -f "$DOCKER_TEST_STATE-owned-runtime" ]]
+# Each selector runs only its own lane, including the new ordinary-agent gate.
+for lane in agent runtime mod; do
+  : > "$DOCKER_TEST_LOG"
+  bash "$runner" "$lane"
+  [[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == 1 ]]
+  grep '^run ' "$DOCKER_TEST_LOG" | grep -F -- "-$lane " >/dev/null
+done
+
+# A failure in any lane stops all before subsequent work and cleans its CID.
+expected_runs=0
+for lane in agent runtime mod; do
+  expected_runs=$((expected_runs + 1))
+  : > "$DOCKER_TEST_LOG"
+  set +e
+  FAIL_LANE="$lane" bash "$runner" all
+  status=$?
+  set -e
+  [[ "$status" == 42 ]]
+  [[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == "$expected_runs" ]]
+  grep -Fx "rm -f owned-$lane" "$DOCKER_TEST_LOG" >/dev/null
+  [[ ! -f "$DOCKER_TEST_STATE-owned-$lane" ]]
+done
 
 # Daemon failure must not be reported as successful cleanup or discard the CID.
 set +e
@@ -81,4 +123,4 @@ grep -F 'Retained owned container IDs' "$fixture/unavailable.log" >/dev/null
 if bash "$runner" invalid; then exit 1; fi
 if bash "$runner" all unexpected; then exit 1; fi
 [[ ! -s "$DOCKER_TEST_LOG" ]]
-echo 'PASS: portable paths, isolated lanes, failure propagation, owned cleanup, daemon loss evidence, invalid arguments'
+echo 'PASS: three ordered lanes, current agent mounts/CI command, portable paths, isolated selectors, failure propagation, owned cleanup, daemon loss evidence, invalid arguments'

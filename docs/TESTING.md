@@ -14,8 +14,11 @@ bash scripts/test-local.sh all
 The script launches Docker containers; it does not run tests inside your host
 Node environment. It uses reviewed mounts, `--pull never` and `--network none`,
 prints run-owned container names, records IDs and cleans up on exit. It does not
-install dependencies. `runtime` selects staging/runtime-v8 tests; `mod` selects
-Autorio tests, typecheck, Lua build and generated-Lua verification.
+install dependencies. `all` runs `agent`, `runtime`, then `mod`, stopping on the
+first failure. `agent` selects the ordinary-agent Vitest suite used by CI, reading
+current source, package scripts, configuration and the shared contract through
+read-only mounts. `runtime` selects staging/runtime-v8 tests; `mod` selects Autorio
+tests, typecheck, Lua build and generated-Lua verification.
 
 Do not run host `pnpm`, `vitest`, `eslint`, `tstl`, package installation or hook
 installation in this workspace: its `node_modules` directories are WSL symlinks.
