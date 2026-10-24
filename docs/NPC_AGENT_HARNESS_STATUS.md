@@ -2,6 +2,27 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 23: Run AT verified entity recovery, then polling guard exhaustion
+
+[Run AT](validation/RED_AUTOMATION_LIVE_RUN_AT_2026-10-23.md) tested reviewed
+`9b403767` in one cold accelerated trial with Luna read-only overwatch. The harness
+renewed furnace 3's missing request binding, collected the existing ten copper
+plates and verified the original checkpoint without corrective model/operator work.
+That was one successful entity-refresh episode; the residual admission and gather
+recovery variants were not exercised in this live run.
+
+The science goal failed after 10m31.795s at the strict stop boundary: the controller
+exceeded its 1,200 control reads per minute and safely guard-paused. All 39 sprint
+bursts restored. Six of seven committed steps completed; a direct burner-drill to
+furnace iron chain produced 41 plates, but no science was produced. The next
+failure is control-poll amplification/budget exhaustion, not the repaired AS binding.
+
+The report includes complete request counts for 42 CLI / 36 Jev calls, complete
+CLI token usage and explicitly partial Jev usage, recovery/tool/native/timing
+accounting and actual plans. Unavailable price/thinking telemetry is explicit.
+Strict paired stop, save integrity, pristine 2.0.77 load and owned cleanup passed.
+No second trial, corrective gameplay prompt, manual resume, push or deployment.
+
 ## October 23: reviewed Run AS entity-refresh repair
 
 The [entity-refresh repair](validation/RUN_AS_ENTITY_REFRESH_FIX_2026-10-23.md)
