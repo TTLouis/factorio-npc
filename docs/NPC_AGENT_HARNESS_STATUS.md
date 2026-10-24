@@ -2,9 +2,32 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 23: reviewed Run AS entity-refresh repair
+
+The [entity-refresh repair](validation/RUN_AS_ENTITY_REFRESH_FIX_2026-10-23.md)
+was merged locally at `6beb6dc7` after independent approval of `9a3c9e42`.
+The harness can refresh a recorded same-epoch NPC machine's expired exact binding
+across typed observation, mutation validation and residual admission. It discards
+the old proposal, reconciles fresh stock, and collects proven existing output
+through the durable production controller. Restored tasks retain wait/crafting,
+native-work, ownership and shared recovery-budget fences; uncertain or exhausted
+correction pauses visibly. Committed steps and checkpoint authority are unchanged.
+
+41 new runtime regressions include the exact AS replies and a composed residual
+Session recovery. Both exact positive cases fail on the unchanged baseline for the
+original reasons. Candidate and merged gates:3,343runtime/1,378mod, type/Lua and
+payload9 PASS; changed-file lint clean. Factorio2.0.77 prevention and residual
+cases physically smelted/collected10plates and verified the original checkpoint
+at1x/zero humans/zero inference. Independent review approved; all owned Docker
+resources removed/verified and sealed AR/AS evidence preserved.
+
+No further live E2E, push or deployment occurred. Autonomous science production is
+still unproven. Shutdown-alarm classification and accounting helpers remain Units
+B/C in the [next-patch plan](RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md).
+
 ## October 23: consolidated candidate after the AR repair and Run AS
 
-The current executable baseline is `cdbc95ed`, with 3,302 runtime / 1,378 mod
+The consolidated executable baseline was `cdbc95ed`, with 3,302 runtime / 1,378 mod
 tests, type/Lua/payload gates and independent review passed. The
 [consolidation record](validation/FIX_CONSOLIDATION_2026-10-23.md) groups the
 already-merged fixes by shared harness boundary and records archival/recovery of

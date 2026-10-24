@@ -84,16 +84,20 @@ outside disposable containers. Offline Docker runs have no network/providers.
 Independent reviewer found and resolved: output-disappearance replay authority,
 stale request markers, native busy races, premature durable continuation, restored
 collection safety fences, incomplete checker owner correlation and stale cleanup
-overwriting a replacement marker. Regressions cover each. Draft reread reports no
-remaining blockers; immutable source/payload review and local integration remain
-pending at this source checkpoint.
+overwriting a replacement marker. Regressions cover each. Immutable review approved `9a3c9e42` after fixing the additional native-lane
+port collision (entity-refresh34, existing tick-sprint33). An actual-registry
+regression checks35distinct game/RCON mappings; its frozen negative control
+fails at the original collision. No remaining merge blockers. Local merge
+`6beb6dc72de590ff35c97d4ffc6012f9e1d6df87` passed fresh3343runtime/1378mod,
+type/Lua/generated-Lua and payload9/check gates. Details and immutable identities:
+[validation closeout](validation/RUN_AS_ENTITY_REFRESH_FIX_2026-10-23.md).
 
 - [x] Exact baseline control; shared prevention and composed residual correction.
 - [x] Partial output, stale/busy/uncertain fences, durable restart/exhaustion/checker.
 - [x] Candidate runtime/mod/type/Lua and changed-file lint gates.
 - [x] Final native proof: `native-04`, two cases,92 helper tests, zero inference.
-- [ ] Immutable payload pin and independent commit review.
-- [ ] Verified local integration and merged offline gates.
+- [x] Immutable payload pin and independent commit review.
+- [x] Verified local integration and merged offline gates.
 
 The exact regression, composed harness recovery and native mechanics are separate
 claims. Autonomous science production remains unproven. No new live E2E is started.
