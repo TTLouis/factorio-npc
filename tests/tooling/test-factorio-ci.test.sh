@@ -2,6 +2,24 @@
 # No real engine or provider: test the actual wrapper's Docker protocol.
 set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Exercise the actual registry without launching the engine or runner setup.
+registry="$(sed -n '/^lane_offset() {/,/^}/p' "$root/tests/factorio/run.sh" | tr -d '\r')"
+[[ -n "$registry" ]]
+eval "$registry"
+declare -A used_ports=()
+lane_count=0
+while read -r lane; do
+  offset="$(lane_offset "$lane")"
+  [[ "$offset" =~ ^[0-9]+$ ]]
+  for base in 34197 27015; do
+    port=$((base + offset))
+    [[ "$port" -le 65535 && -z "${used_ports[$port]:-}" ]] || { echo "Lane port collision: $lane / ${used_ports[$port]:-invalid} at $port" >&2; exit 1; }
+    used_ports[$port]="$lane"
+  done
+  lane_count=$((lane_count + 1))
+done < <(printf '%s\n' "$registry" | sed -nE 's/^[[:space:]]+([a-z-]+)\).*/\1/p')
+[[ "$lane_count" -ge 35 && "$(lane_offset tick-sprint)" == 33 && "$(lane_offset entity-refresh)" == 34 ]]
+echo "PASS: $lane_count native lanes have distinct game/RCON ports"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/bin" "$fixture/repo with spaces/scripts"
