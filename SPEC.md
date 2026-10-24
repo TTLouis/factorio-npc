@@ -3,6 +3,8 @@
 SGLuna serves Factorio server owners and players by carrying out requested work
 with a persistent, standalone in-world character, including with zero connected
 humans. This is a navigation summary; the linked design documents own the details.
+Use the [documentation index](docs/README.md) to choose a guide and
+[CONTRIBUTING.md](CONTRIBUTING.md) for a first contribution.
 
 | Boundary | Required behavior | Authority |
 | --- | --- | --- |

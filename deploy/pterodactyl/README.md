@@ -9,7 +9,7 @@ There are two PTDL_v2 eggs:
 | File | Pterodactyl name | Default `SGLUNA_SOURCE_REF` | Use |
 | --- | --- | --- | --- |
 | `egg-sgluna-factorio-server.json` | `SGLuna Factorio Server (Main)` | `main` | stable/main servers |
-| `egg-sgluna-factorio-npc-e2e.json` | `SGLuna Factorio Server (NPC E2E)` | `feat/npc-transition-work` | active NPC/E2E testing |
+| `egg-sgluna-factorio-npc-e2e.json` | `SGLuna Factorio Server (NPC E2E)` | `experiment/jev-agent-architecture` | active NPC/E2E testing |
 
 Import the desired file through **Admin → Nests → Import Egg**.
 
@@ -42,7 +42,7 @@ Main:
 main -> exact SHA -> validate/build -> activate
 
 NPC E2E:
-feat/npc-transition-work -> exact SHA -> validate/build -> activate
+experiment/jev-agent-architecture -> exact SHA -> validate/build -> activate
 ```
 
 For reproducible debugging, set `SGLUNA_SOURCE_REF` to an exact 40-character commit SHA before reinstalling.

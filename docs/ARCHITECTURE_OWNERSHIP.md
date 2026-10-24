@@ -1,6 +1,6 @@
 # NPC architecture ownership
 
-This document records the current single-NPC ownership boundaries on `feat/npc-transition-work`. It is a runtime contract, not a migration wish list: provider differences are documented as they exist today, and adapters are added only when a provider actually needs the capability.
+This document records the current single-NPC ownership boundaries on `experiment/jev-agent-architecture`. It is a runtime contract, not a migration wish list: provider differences are documented as they exist today, and adapters are added only when a provider actually needs the capability.
 
 ## Canonical Factorio contract
 

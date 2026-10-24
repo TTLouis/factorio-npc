@@ -1,167 +1,103 @@
 # Factorio NPC
 
-> [!IMPORTANT]
-> **Factorio NPC** is an independent, headless-first autonomous NPC runtime for Factorio servers. This project originated as a fork of [`moeru-ai/airi-factorio`](https://github.com/moeru-ai/airi-factorio), but has substantially diverged from the original CV/YOLO-driven game-playing architecture. Upstream history and attribution are intentionally preserved.
+**SGLuna is an AI teammate that lives inside a Factorio world.** It controls a
+standalone character with real inventory, crafting and mining, and can operate
+on a headless server with nobody connected.
 
-The project is designed for persistent server-side NPCs that live inside a real Factorio simulation. NPCs use structured game state, deterministic helpers, and validated operations instead of depending on screenshots or a connected human player.
+The runtime gives models structured game observations and bounded actions.
+Deterministic code handles game facts, validation and recovery; Factorio remains
+the source of truth. Computer vision is not required.
 
-## Project direction
+**Status: experimental and under active development.** Runtime operations and
+deterministic tests do not establish reliable autonomous factory building.
+Repeatable autonomous science production remains unproven. Read the
+[current status and exact-commit evidence](docs/NPC_AGENT_HARNESS_STATUS.md) before
+choosing a checkpoint; newer development is not automatically a stable release.
 
-The target architecture is:
+## Start here
 
-```text
-Factorio headless server
-        ↓
-Factorio Lua runtime / remote interfaces
-        ↓
-structured observations + deterministic game logic
-        ↓
-agent runtime / planning harness
-        ↓
-LLM strategy and tool selection
-        ↓
-validated structured operations
-        ↓
-standalone Factorio NPC character(s)
-```
+| Your goal | Next step |
+| --- | --- |
+| Run SGLuna on your own server | [Docker setup](deploy/docker/README.md) or [Pterodactyl setup](deploy/pterodactyl/README.md) |
+| Help with a bug, test or explanation | [Contributing](CONTRIBUTING.md) |
+| Understand the design | [Project contract](SPEC.md) and [documentation index](docs/README.md) |
+| Work with a coding agent | [AGENTS.md](AGENTS.md) |
 
-Computer vision is not part of the required runtime. The inherited YOLO work is considered legacy research baggage for the current headless-first architecture; vision may return later only as an optional sensor/research mode.
+## What is in the project?
 
-## Current capabilities
+- A standalone NPC body, independent of a connected human player.
+- Structured inventory, navigation, crafting, research, combat and construction
+  operations, with actor/operation correlation and validated admission.
+- Deterministic recipe, production-planning and transport-capacity helpers.
+- A planning harness and in-game task/plan UI, provider budgets and behavior traces.
+- Persistent saves, managed release rollback, and Docker/Pterodactyl deployment.
 
-The standalone-NPC baseline includes:
+Capability is verified in stages: contract tests, deterministic real-engine lanes,
+then an explicitly frozen provider-backed trial. Successful placement is not proof
+of production. See the [production validation ladder](docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md)
+for acceptance criteria and the status page for current limits.
 
-- zero-player NPC ownership backed by a real Factorio `character`;
-- structured model operations instead of model-generated Lua;
-- actor-aware inventory, entity, navigation, crafting, research, and combat operations;
-- deterministic production-planning and transport-capacity helpers;
-- transactional operation-batch admission and correlated operation outcomes;
-- persistent saves plus managed release rollback;
-- loopback-only supervisor-owned RCON;
-- Pterodactyl console input forwarded to the real Factorio child process;
-- startup reconciliation of `data/server-settings.json` without overwriting unrelated Factorio settings;
-- environment-only provider secrets, with effective non-secret provider settings synchronized into `sgluna-config.json`;
-- provider timeout/recovery handling so one failed request does not permanently stall the NPC;
-- configurable provider request budgeting;
-- bounded behavior tracing for E2E/debugging;
-- an in-game task/plan UI used by the current NPC harness;
-- Docker and Pterodactyl deployment paths for headless servers.
+Single-NPC reliability and grounded production are the current focus. Wider
+swarm coordination, vehicles/trains/platforms and optional vision are later work.
 
-`main` is the stable baseline. Development integrates into `experiment/jev-agent-architecture`; promotion requires a validated checkpoint.
+## Run a server
 
-For development, start with the [project contract](./SPEC.md) and [task/validation workflow](./docs/DEVELOPMENT_WORKFLOW.md). They link the existing architecture, roadmap and evidence rather than replacing them.
+You need Docker or a Pterodactyl host, a compatible Factorio setup, and credentials
+for your chosen model provider. Provider-backed operation may incur API charges.
+Offline contribution/tests do not require production credentials.
 
-## Validation model
+For Docker, follow the full [setup guide](deploy/docker/README.md). Its basic
+startup, after configuration, is:
 
-For engine behavior, real Factorio integration evidence is authoritative. Unit/type tests protect contracts and regressions, but they do not by themselves prove Factorio runtime semantics.
-
-```text
-feature/integration work
-        ↓
-ordinary CI + deterministic regressions
-        ↓
-freeze a candidate SHA
-        ↓
-package smoke + real zero-player Factorio harness
-        ↓
-promote validated checkpoint to main
-```
-
-Historical validation records live under [`docs/validation/`](./docs/validation/). Current single-NPC roadmap/status live in [`docs/NPC_AGENT_HARNESS_PLAN.md`](./docs/NPC_AGENT_HARNESS_PLAN.md) and [`docs/NPC_AGENT_HARNESS_STATUS.md`](./docs/NPC_AGENT_HARNESS_STATUS.md).
-
-The repository de-fork / identity migration is tracked in [`docs/PROJECT_MIGRATION_TRACKER.md`](./docs/PROJECT_MIGRATION_TRACKER.md).
-
-## Deployment
-
-### Pterodactyl
-
-Two PTDL_v2 eggs keep stable deployments separate from active E2E work:
-
-| Egg | Default source ref | Purpose |
-| --- | --- | --- |
-| [`deploy/pterodactyl/egg-sgluna-factorio-server.json`](./deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Stable/main deployment |
-| [`deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json`](./deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json) | `feat/npc-transition-work` | Active NPC/E2E testing |
-
-Fresh deployments use **SGLuna** end to end: `SGLUNA_*` deployment variables, `sgluna-config.json`, `start-sgluna.sh`, `rollback-sgluna.sh`, and `!luna`. Legacy `AIRI_*` variables, `airi-config.json`, `start-airi.sh`, `rollback-airi.sh`, and `!airi` remain compatibility aliases for settings and input only. The internal `.sgluna/` state directory, actor id, protocol markers, and save keys all use SGLuna naming, with no migration from the former names (worlds are disposable test worlds).
-
-**Restart does not update application code.** A normal server restart keeps the already installed managed release.
-
-**Reinstall resolves the egg's `SGLUNA_SOURCE_REF` again.** The installer resolves the configured branch/tag/ref to one exact Git commit SHA, validates and builds that exact snapshot transactionally, records the SHA in the installed manifest, and only then activates it. A failed install leaves the previous completed release active.
-
-Set `SGLUNA_SOURCE_REF` to a full 40-character commit SHA when reproducing a specific E2E failure. Managed installs also provide `rollback-sgluna.sh` to return to the previous completed release without rewriting saves, user mods, or `sgluna-config.json`.
-
-See [`deploy/pterodactyl/README.md`](./deploy/pterodactyl/README.md) for import, configuration, testing, runtime, and rollback details.
-
-### Docker Compose
-
-Docker Compose support is included through [`compose.yml`](./compose.yml) and [`deploy/docker/`](./deploy/docker/). It is a thin deployment wrapper around the same standalone-NPC runtime rather than a second implementation.
-
-```bash
+```sh
 cp .env.example .env
-# Fill in OPENAI_API_KEY, OPENAI_API_BASEURL, and OPENAI_MODEL.
+# Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
 docker compose up -d --build
 ```
 
-See [`deploy/docker/README.md`](./deploy/docker/README.md) for source pinning, configuration, persistence, console attach, and shutdown details.
+The Compose build defaults to `main`. Set `SGLUNA_SOURCE_REF` deliberately for a
+development build, or pin a full commit SHA for reproduction. Keep credentials
+outside Git, and use your own persistent data directory.
 
-### Interactive desktop operator adapter
+For Pterodactyl, choose a channel and follow its
+[configuration and update guide](deploy/pterodactyl/README.md):
 
-[`tools/desktop-rcon-operator.mjs`](./tools/desktop-rcon-operator.mjs) is an opt-in Node adapter for an interactive desktop session, including Codex. It is intentionally **not** an autonomous replacement for a configured provider: the desktop operator chooses the next action while the adapter only exposes the existing bounded observation and operation contracts over local HTTP.
+| Egg | Default source | Purpose |
+| --- | --- | --- |
+| [Main](deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Stable baseline |
+| [NPC E2E / Jev Experiment](deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json) | `experiment/jev-agent-architecture` | Experimental development |
 
-For a local E2E run, set a distinct `DESKTOP_OPERATOR_TOKEN` (at least 16 characters) and start the normal stack with the E2E and operator overlays:
+Restart keeps the installed code. Pterodactyl reinstall resolves the selected
+ref again. Docker can reuse its source layer; use an exact SHA or the Docker
+guide's `SGLUNA_SOURCE_NONCE` procedure to pick up a branch update.
+Managed Pterodactyl installs provide `rollback-sgluna.sh` and preserve saves,
+user mods and non-secret configuration across completed releases.
 
-```bash
-docker compose -f compose.yml -f compose.e2e.yml -f compose.desktop-operator.yml --profile desktop-operator up -d --build
-```
+SGLuna uses `SGLUNA_*` settings, `sgluna-config.json` and `!luna` chat input.
+Legacy AIRI settings/input aliases are documented in the deployment guide.
 
-The adapter binds to `127.0.0.1` only. Its `/observe` and `/operate` endpoints require `Authorization: Bearer <DESKTOP_OPERATOR_TOKEN>`; operations stay schema-validated and run deterministic preflight before they are admitted to Factorio. It is a test/operator surface, not a public API and does not expose raw RCON or arbitrary Lua. The Compose service reaches RCON only through the internal Docker network.
+## Contribute
 
-## Development
+Development integrates into **`experiment/jev-agent-architecture`**; `main` is the
+stable baseline. See [CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
+bug reports and pull requests, and [TESTING.md](docs/TESTING.md) for commands.
+The shared Windows checkout requires Docker tests because its dependency
+folders are WSL symlinks; do not run a Windows host package install there.
 
-Install workspace dependencies with:
+Useful starting areas are setup feedback, clearer documentation and deterministic
+regressions for reproducible failures. The [development workflow](docs/DEVELOPMENT_WORKFLOW.md)
+defines scope, evidence and review. [Authorized live trials](docs/LIVE_E2E.md)
+are separate from ordinary tests. The opt-in
+[desktop operator adapter](tools/desktop-rcon-operator.mjs) is an operator/test
+surface, not autonomous provider operation.
 
-```bash
-pnpm install
-```
+## Origin, license and credits
 
-The active runtime and E2E/deployment harness live primarily under:
+Factorio NPC originated from [moeru-ai/airi-factorio](https://github.com/moeru-ai/airi-factorio)
+and the original `autorio` work, and has since diverged into a standalone NPC
+runtime. Git history and upstream attribution are preserved under the
+[MIT license](LICENSE). The [migration tracker](docs/PROJECT_MIGRATION_TRACKER.md)
+records the identity transition.
 
-```text
-deploy/pterodactyl/
-deploy/docker/
-packages/agent/
-packages/autorio/
-tests/factorio/
-```
-
-Useful deployment checks include:
-
-```bash
-node deploy/pterodactyl/build-payload.mjs --check
-node --test deploy/pterodactyl/build-payload.test.mjs deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
-pnpm test:npc
-```
-
-`pnpm test:npc` needs a working local Docker daemon. In a sandboxed cloud container (for example Claude Code on the web), use `pnpm test:npc:cloud` instead: it starts `dockerd` if needed, pulls base images through a registry mirror to avoid Docker Hub rate limits, trusts the sandbox egress-proxy CA inside a generated copy of the test Dockerfile, and copies lane logs to `test-results/factorio/`. Select lanes with `NPC_TEST_LANES=core,production` and use `NPC_TEST_PARALLEL=0` for ordered debug output; `--no-build` reruns the last image.
-
-For provider-backed trials in the same kind of sandbox, `scripts/stack-cloud.sh` runs `compose.yml` + `compose.e2e.yml`. On first use it creates the gitignored `.env` from [`.env.cloud.example`](./.env.cloud.example) with a generated RCON password; fill in `OPENAI_API_KEY`, `OPENAI_API_BASEURL`, `OPENAI_MODEL` and `JEV_TYPESAFE_API_KEY` there or as environment variables (which override `.env`). Then use `scripts/stack-cloud.sh up`, `goal <text>`, `logs` and `down`.
-
-Repository CI does not use production provider credentials.
-
-## Roadmap
-
-Near-term work is deeper single-NPC E2E coverage, deterministic production/construction constraints, and progressively stronger planning/runtime contracts. Multi-agent/swarm coordination should build on the validated single-NPC runtime rather than bypass it.
-
-The guiding boundary is:
-
-- **deterministic code** computes game facts, constraints, ratios, capacities, and validated candidate actions;
-- **LLMs** choose goals, strategy, priorities, and among already-grounded alternatives;
-- **Factorio** remains the source of truth for simulation state.
-
-## Origin, license, and credits
-
-Factorio NPC was originally derived from [`moeru-ai/airi-factorio`](https://github.com/moeru-ai/airi-factorio) and the original `autorio` work. The Git history is intentionally retained so the lineage remains auditable.
-
-The repository remains MIT-licensed. The existing upstream copyright notice in [`LICENSE`](./LICENSE) is preserved. Project-specific attribution may be added without removing upstream attribution as the independent codebase evolves.
-
-The provider avatars in [`packages/autorio/graphics/icons/provider/`](./packages/autorio/graphics/icons/provider/) - the character art the console's top-left button shows for whichever model is answering - are AI-generated images. They are not the work of a human illustrator and are not any vendor's official artwork.
+The [provider avatars](packages/autorio/graphics/icons/provider/) are AI-generated
+character art, not human illustrations or official vendor artwork.

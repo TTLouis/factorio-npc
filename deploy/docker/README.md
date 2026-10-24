@@ -22,7 +22,7 @@ Published release images are built from the exact GitHub release commit. The pre
 
 ```bash
 cp .env.example .env
-# Edit .env and set OPENAI_API_KEY, OPENAI_API_BASEURL, and OPENAI_MODEL.
+# Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
 docker compose up -d --build
 ```
 
@@ -53,7 +53,10 @@ test image's pnpm store, and layers it onto the existing image. It refuses to
 run if files outside the mod, docs, tests or these Docker files changed; use the
 full local build then.
 
-To run the test suites locally instead of deploying, use `scripts/test-local.sh` (Git Bash on Windows). It runs `node --test` and the autorio checks inside the `npc-dev` image — the same image family as this deployment, already carrying dependencies — with only the mounts each suite needs, so it never has to reach the network or hit the false failures that come from missing `contracts/` or repo-root compose/env files: `scripts/test-local.sh runtime` (deploy/pterodactyl staging + runtime-v8), `scripts/test-local.sh mod` (autorio vitest, `tsc --noEmit`, Lua build, `check-generated-lua`), or `scripts/test-local.sh all` for both. It exits non-zero on any failure.
+For local tests, use the offline Docker runner described in
+[TESTING.md](../../docs/TESTING.md), with Git Bash on Windows and the prepared
+`npc-dev` image. It uses reviewed mounts and does not install dependencies or
+access the network. Shared Windows dependency symlinks must remain untouched.
 
 Persistent server state is stored in `${SGLUNA_DATA_DIR:-./data}`. This includes saves, `sgluna-config.json`, `data/server-settings.json`, mods, and SGLuna runtime state.
 
@@ -79,9 +82,9 @@ Stable local builds default to:
 SGLUNA_SOURCE_REF=main
 ```
 
-The Docker build resolves that ref to an exact SHA and bakes that exact SGLuna runtime into the image. Restarting the container does not update code. Rebuilding resolves the configured ref again.
+When the source install layer runs, the Docker build resolves that ref to an exact SHA and bakes that exact SGLuna runtime into the image. Restarting the container does not update code. A rebuild can reuse a cached source layer; use an exact SHA or change `SGLUNA_SOURCE_NONCE` as described below to pick up branch updates.
 
-To test ongoing NPC development instead, set `SGLUNA_SOURCE_REF=feat/npc-transition-work` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
+To test ongoing NPC development instead, set `SGLUNA_SOURCE_REF=experiment/jev-agent-architecture` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
 
 The build is layered so a source change doesn't download Factorio again. The system packages and the official Factorio archive (verified against Factorio's published checksums) are cached. Docker also caches the Node archive and package manager stores across source revisions. The source install layer reruns whenever its build arguments change. With an exact commit SHA, a rebuild installs exactly that commit, and a new SHA reinstalls only the source. A branch ref such as `main` is resolved only when that layer reruns, so to pick up a branch's newer commits, set a new `SGLUNA_SOURCE_NONCE` (for example `SGLUNA_SOURCE_NONCE=$(date +%s) docker compose up -d --build`) or use a SHA. The installer re-verifies the cached archive and downloads Factorio itself if the cached version differs from the one it resolves. Published prerelease images are already pinned and do not need this rebuild behavior.
 
