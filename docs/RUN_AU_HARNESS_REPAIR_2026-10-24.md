@@ -84,12 +84,23 @@ The no-restage golden gains diagnostic events and shifted sequence numbers; all
 11 frozen provider request fingerprints remain identical. No assertion or
 completion contract is weakened to obtain a pass.
 
+## Independent review correction
+
+The first immutable review (ed00025b) found one reachable downstream bypass:
+restored collection accepted a missing historical surface, while production facts
+skipped exact validation when that field was absent. Five negative controls
+reproduced unsafe admission for changed position, actor, surface, force or missing
+placement. Collection-only tasks now always require matching recorded placement,
+actor/epoch and full raw entity/body validation, regardless of historical surface
+presence. The positive missing-surface restore and all five refusals pass through
+the real restored controller. First review and red/green logs remain retained.
+
 ## Validation checkpoint
 
 - [x] Preserve original AU evidence and causal negative controls.
 - [x] Shared producer correction and bounded missing-scope reconciliation.
 - [x] Real Session residual/native callback and strict-stop regressions.
-- [x] Focused131 cases pass (31new); baseline final negative suite retained.
+- [x] Focused137 cases pass (37new); baseline and review negative controls retained.
 - [ ] Fresh full runtime/mod/type/Lua, scoped lint and payload checks.
 - [ ] Immutable independent review; integrate and rerun merged offline gates.
 - [ ] Reverify historical seals, owned Docker cleanup and evidence mirror.

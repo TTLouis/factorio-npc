@@ -112,7 +112,13 @@ async function factsFor(agent, s, task, status) {
     const raw = await read('getEntityStatus', { unit_number })
     const locator = agent.exactTargetLocator?.(unit_number)
     const placement = agent.memory.authorizationState?.(s.owner.key)?.world?.npc_placements?.find(row => row.unit_number === unit_number)
-    if (locator?.position && Number.isSafeInteger(locator.surface_index) && placement) {
+    if (task.collection_only || locator?.position && Number.isSafeInteger(locator.surface_index) && placement) {
+      // A restored collection successor may carry an old incomplete locator.
+      // Missing historical scope must never disable the native identity checks.
+      if (task.collection_only && (!locator?.name || !locator.position || !placement
+        || placement.actor_id !== status.actor_id || placement.actor_epoch !== status.epoch
+        || placement.entity_name !== locator.name
+        || locator.surface_index !== undefined && locator.surface_index !== status.surface_index)) throw new Error('production_collection_identity_unproven')
       const body = JSON.parse(await read('getActorStatus', {}))
       if (body.actor?.actor_id !== status.actor_id || body.surface_index !== status.surface_index) throw new Error('production_body_scope_changed')
       validateRefreshedEntity(raw, { unit: unit_number, locator, placement, actorId: status.actor_id,

@@ -402,3 +402,36 @@ test('normal-tools typed observations share the same bounded identity refresh an
   assert.equal(w.game.sent.length, 0)
   assert.equal(w.memory.controllerRecoveries.values().next().value.attempts, 1)
 })
+
+for (const changed of ['none', 'position', 'actor', 'surface', 'force', 'placement']) test(`AU restored collection missing locator surface validates ${changed} native evidence`, async () => {
+  const w = world()
+  const plan = await w.agent.parsePlanMessageChecked(message('tap_24'))
+  let snapshot
+  w.agent.persistState = async () => {
+    if (w.memory.productionTasks.size) { snapshot = structuredClone(w.memory.snapshot()); throw new Error('after successor store') }
+  }
+  await assert.rejects(w.agent.commitPlan(plan), /after successor store/)
+  const restored = world({ snapshot })
+  const locate = restored.agent.exactTargetLocator.bind(restored.agent)
+  restored.agent.exactTargetLocator = unit => ({ ...locate(unit), surface_index: undefined })
+  if (changed === 'placement') restored.memory.authorizationState(KEY).world.npc_placements.length = 0
+  if (['position', 'actor', 'surface', 'force'].includes(changed)) {
+    const detail = { ...restored.game.entityRead(), actor_id: 12, surface_index: 1, force_index: 1 }
+    detail.entity.position = { x: 55, y: 63 }
+    if (changed === 'position') detail.entity.position.x++
+    if (changed === 'actor') detail.actor_id++
+    if (changed === 'surface') detail.surface_index++
+    if (changed === 'force') detail.force_index++
+    restored.game.entityOverride = detail
+  }
+  await restored.agent.runTurn()
+  assert.equal(restored.providers.length, 0)
+  if (changed === 'none') {
+    assert.equal(restored.game.sent.length, 1)
+    assert.equal(restored.game.sent[0].operations[0].name, 'move_items_exact')
+  } else {
+    assert.equal(restored.game.sent.length, 0, 'unproven identity cannot authorize collection')
+    assert.equal(restored.memory.pauseRecord(KEY).pause_class, 'guard')
+    assert.equal(restored.agent.liveObservedExactTarget(19), undefined)
+  }
+})
