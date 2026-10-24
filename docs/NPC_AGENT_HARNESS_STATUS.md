@@ -2,6 +2,29 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 24: Run AU avoided polling exhaustion, but identity recovery missed
+
+[Run AU](validation/RED_AUTOMATION_LIVE_RUN_AU_2026-10-23.md) tested frozen reviewed
+`0776b39b` once in a cold accelerated trial with Luna read-only overwatch. The
+inline guard prevention ran thousands of times with zero polling-budget refusals;
+the1200 additional-RPC/minute cap stayed unchanged. Residual polling correction
+was not triggered, so live self-correction of that miss remains unproven.
+
+Gameplay failed after7m30.782s at the strict stop boundary (runner7m31.199s):
+burner drill15 lacked a live exact binding and repeated validation ended in a
+guard pause. No entity-refresh or gather recovery episode ran. Three of four
+committed steps completed, six copper plates remained in the furnace, and zero
+science was produced. A separate owner-superseded sprint fault occurred during
+stop confirmation; it was not the earlier pause cause.
+
+The report retains full plans,7validation retries(3continued/4failed),24observation
+results,5native batches/7tasks, timing and complete23CLI request/token accounting
+plus17Jev responses with explicitly partial usage. Prices and measured thinking
+time are unavailable. Strict paired stop, save integrity, pristine2.0.77load and
+owned cleanup passed. No manual resume, corrective prompt, retry or second trial;
+source unchanged, no push or production deployment. Remaining exact-binding and
+stop-boundary issues are preserved for a separate harness repair.
+
 ## October 23: Run AT polling prevention and bounded correction
 
 [Polling repair](RUN_AT_POLLING_REPAIR_2026-10-23.md) removes the standalone
