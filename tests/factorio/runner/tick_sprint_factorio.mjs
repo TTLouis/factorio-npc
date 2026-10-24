@@ -75,6 +75,26 @@ try {
       rcon.print(helpers.table_to_json({furnace=f.unit_number,base=script.active_mods.base,humans=#game.connected_players}))`)
     assert.equal(fixture.base, '2.0.77'); assert.equal(fixture.humans, 0)
     assert.equal((await json(sprintCommand('configure', binding))).ok, true)
+    // Real Factorio/common.Rcon proof: the inline guard envelope must preserve
+    // every payload print and the auxiliary UI lane, including an empty payload.
+    const primary = new Rcon(Number(arg('port')), arg('password'), 3000, { host: arg('host') })
+    await primary.connect()
+    try {
+      const controller = new TickSprintController({ session: { rcon: primary }, binding,
+        watchdog: {}, persist: async () => {}, emit: async () => {} })
+      await controller.start({ timers: false })
+      assert.equal((await primary.command('/silent-command rcon.print("first");rcon.print("second")')).trim(), 'first\nsecond')
+      assert.equal((await primary.command('/silent-command local x=1')).trim(), '')
+      const board = await primary.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_task_board","status")))')
+      assert.equal(JSON.parse(board).goal_id, 'sprint-goal')
+      // Exercise its recognized snapshot writer as well, then verify the
+      // primary payload still works after auxiliary-lane traffic.
+      await primary.command('/silent-command remote.call("autorio_task_board","set_snapshot",remote.call("autorio_task_board","status"))')
+      assert.ok(primary.uiRcon?.socket, 'UI auxiliary lane retained by original command routing')
+      assert.equal((await primary.command('/silent-command rcon.print("after-ui")')).trim(), 'after-ui')
+      cases.push({ name: 'inline_boundary_real_rcon_payload_and_ui', inline_checks: controller.reads.boundary_inline,
+        additional_restore_rpc: controller.reads.boundary_restore ?? 0, speed: (await guard()).speed })
+    } finally { primary.close() }
     const admit = async operation => {
       ordinal++
       const key = `native-sprint/op_${ordinal}`

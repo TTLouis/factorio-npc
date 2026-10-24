@@ -239,7 +239,7 @@ function encodePacket(id, type, text) {
   return packet
 }
 
-function taskBoardUiRconCommand(text) {
+export function taskBoardUiRconCommand(text) {
   const command = String(text)
   return command.includes('remote.call("autorio_task_board"') || command.includes("remote.call('autorio_task_board'")
 }

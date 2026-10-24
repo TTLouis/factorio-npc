@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { TICK_SPRINT } from '../staging/tick-sprint-policy.mjs'
 import { deploymentStatus } from '../staging/supervisor-adapter.mjs'
+import { taskBoardUiRconCommand } from './common.mjs'
 
 export { sprintSpeedValid, summarizeTickSprints, TICK_SPRINT } from '../staging/tick-sprint-policy.mjs'
 
@@ -120,23 +121,69 @@ export function sprintOwner(session) {
 // One public RCON barrier also covers its auxiliary UI lane. Queued supervisor
 // events and guarded callbacks exclude arming across their entire async scope.
 export class TickSprintController {
-  constructor({ session, watchdog, ledgerFile, binding, persist, emit, now = Date.now, monotonic = () => performance.now() }) {
-    Object.assign(this, { session, watchdog, ledgerFile, binding, now, monotonic })
+  constructor({ session, watchdog, ledgerFile, binding, persist, emit, now = Date.now, monotonic = () => performance.now(), sleep = delay }) {
+    Object.assign(this, { session, watchdog, ledgerFile, binding, now, monotonic, sleep })
     this.raw = session.rcon.command.bind(session.rcon)
     this.tail = Promise.resolve()
     this.episodes = {}
     this.pollingInstance = randomUUID()
     this.reads = {}
+    this.budgetRefusals = 0
+    this.recovery = undefined
     this.persist = persist ?? (ledger => persistSprintLedger(ledgerFile, ledger))
     const write = emit ?? ((event, data) => session.agent?.traceEvent(`sprint.${event}`, data))
-    this.emit = (event, data) => write(event, { ...data, polling_instance_id: this.pollingInstance, native_reads_by_lane: { ...this.reads } })
+    this.emit = (event, data) => write(event, { ...data, polling_instance_id: this.pollingInstance, native_reads_by_lane: { ...this.reads },
+      control_minute_bucket: this.readBucket, additional_control_reads_in_bucket: this.bucketReads ?? 0, control_budget_refusals: this.budgetRefusals })
   }
   control(text, lane, command = this.raw) {
     const bucket = Math.floor(this.monotonic() / 60000)
     if (this.readBucket !== bucket) { this.readBucket = bucket; this.bucketReads = 0 }
-    if (++this.bucketReads > TICK_SPRINT.maxControlReadsPerMinute) throw new Error('Sprint harness polling budget exhausted')
+    if (this.bucketReads >= TICK_SPRINT.maxControlReadsPerMinute) {
+      this.budgetRefusals++
+      throw Object.assign(new Error('Sprint harness polling budget exhausted'), { code: 'sprint_polling_budget' })
+    }
+    this.bucketReads++
     this.reads[lane] = (this.reads[lane] ?? 0) + 1
     return command(text)
+  }
+  ledger() { return { ...this.binding, episodes: this.episodes, ...(this.recovery ? { polling_recovery: this.recovery } : {}) } }
+  validStatus(status) {
+    return status?.version === TICK_SPRINT.version && status.binding?.run_id === this.binding.run_id
+      && status.binding?.source_sha === this.binding.source_sha && status.binding?.profile === this.binding.profile
+  }
+  assertOwner(owner) {
+    if (owner && !this.session.agent?.checkpointOwnerCurrent(owner)) throw new Error('Sprint boundary owner superseded')
+  }
+  // A world command already needs a round trip. Confirm the native guard in that
+  // same Lua invocation instead of adding a standalone finish RPC for every read.
+  // The payload is withheld when restoration/freshness work is still required.
+  command(text, ...args) {
+    if (!/^\/silent-command\s/.test(text)) return this.boundary('rcon', () => this.raw(text, ...args))
+    const owner = this.session.agent?.captureCheckpointOwner()
+    const send = !this.session.rcon.auxiliary && taskBoardUiRconCommand(text) && this.session.rcon.taskBoardCommand
+      ? wrapper => this.session.rcon.taskBoardCommand(wrapper) : this.raw
+    return this.serial(async () => {
+      this.assertOwner(owner)
+      if (this.lease) await this.restore('rcon')
+      for (let attempt = 0; attempt < 2; attempt++) {
+        this.assertOwner(owner)
+        const marker = `SPRINT_BOUNDARY_${randomUUID()}:`
+        const source = text.replace(/^\/silent-command\s+/, '')
+        const ready = `s.version==${lua(TICK_SPRINT.version)} and s.binding and s.binding.run_id==${lua(this.binding.run_id)} and s.binding.source_sha==${lua(this.binding.source_sha)} and s.binding.profile==${lua(this.binding.profile)} and s.speed==1 and not s.lease and (not s.last or s.last.lease_id==${lua(this.lastRestored ?? '')})`
+        this.reads.boundary_inline = (this.reads.boundary_inline ?? 0) + 1
+        const response = String(await send(`/silent-command do local s=remote.call("sgluna_tick_sprint","status");local ok=${ready};rcon.print(${lua(marker)}..helpers.table_to_json({guard=s,executed=ok}));if ok then do ${source}\n end end end`, ...args))
+        this.assertOwner(owner)
+        const lineEnd = response.indexOf('\n')
+        const first = (lineEnd < 0 ? response : response.slice(0, lineEnd)).trim()
+        if (!first.startsWith(marker)) throw new Error('Sprint inline boundary proof unreadable; command effect uncertain')
+        const proof = JSON.parse(first.slice(marker.length))
+        if (!this.validStatus(proof.guard)) throw new Error('Sprint inline boundary binding changed')
+        if (proof.executed === true && proof.guard.speed === 1 && !proof.guard.lease) return lineEnd < 0 ? '' : response.slice(lineEnd + 1)
+        if (proof.executed !== false) throw new Error('Sprint inline execution proof unreadable')
+        if (attempt === 0) { await this.restore('inline_residual'); continue }
+        throw new Error('Sprint inline boundary recovery exhausted')
+      }
+    }).catch(async error => { await this.fail(error, owner); throw error })
   }
   async start({ timers = true } = {}) {
     if (!this.binding || this.binding.profile !== 'accelerated' || !/^[a-f0-9]{40}$/.test(this.binding.source_sha)
@@ -149,6 +196,14 @@ export class TickSprintController {
           || !Object.entries(saved.episodes).every(([key, value]) => /^batch-g\d+-\d+$/.test(key)
             && Number.isSafeInteger(value) && value > 0 && value <= TICK_SPRINT.episodeTicks && value % TICK_SPRINT.burstTicks === 0)) throw new Error('Invalid durable sprint ledger')
         this.episodes = saved.episodes
+        if (saved.polling_recovery !== undefined) {
+          const recovery = saved.polling_recovery
+          if (recovery.attempts !== 1 || !Number.isSafeInteger(recovery.bucket) || recovery.bucket < 0
+            || !['attempted', 'completed', 'exhausted', 'superseded'].includes(recovery.state)
+            || recovery.reason !== 'sprint_polling_budget') throw new Error('Invalid durable sprint polling recovery')
+          this.recovery = recovery
+          if (!['completed', 'superseded'].includes(recovery.state)) throw new Error('Sprint polling recovery exhausted after restart')
+        }
       } catch (error) { if (error.code !== 'ENOENT') throw error }
     }
     const status = JSON.parse(await this.control(sprintCommand('configure', this.binding), 'configure'))
@@ -157,11 +212,13 @@ export class TickSprintController {
       if (!/^batch-g\d+-\d+$/.test(episode) || !Number.isSafeInteger(spent) || spent <= 0 || spent > TICK_SPRINT.episodeTicks || spent % TICK_SPRINT.burstTicks !== 0) throw new Error('Native sprint ledger unreadable')
       this.episodes[episode] = Math.max(spent, this.episodes[episode] ?? 0)
     }
-    await this.persist({ ...this.binding, episodes: this.episodes })
-    this.session.rcon.command = (...args) => this.boundary('rcon', () => this.raw(...args))
+    await this.persist(this.ledger())
+    this.session.rcon.command = (...args) => this.command(...args)
     if (timers) {
-      this.poll = setInterval(() => { this.trySprint().catch(error => this.fail(error)) }, TICK_SPRINT.pollMs)
-      this.watch = setInterval(() => { this.watchdogTick().catch(error => this.fail(error)) }, TICK_SPRINT.watchdogMs)
+      // Each entry point handles failure with its captured owner. Re-dispatching
+      // fail here would capture a replacement and cancel the wrong request.
+      this.poll = setInterval(() => { this.trySprint().catch(() => {}) }, TICK_SPRINT.pollMs)
+      this.watch = setInterval(() => { this.watchdogTick().catch(() => {}) }, TICK_SPRINT.watchdogMs)
       this.poll.unref?.(); this.watch.unref?.()
     }
     await this.emit('configured', { ...this.binding, reason: 'frozen_finite_batch_profile', limits: TICK_SPRINT })
@@ -173,14 +230,107 @@ export class TickSprintController {
     return work
   }
   async restore(reason) {
-    const status = JSON.parse(await this.control(sprintCommand('finish', reason), 'boundary_restore'))
+    if (this.recovery?.state === 'superseded' && ['safety_control', 'stop', 'shutdown'].includes(reason)) {
+      this.reads.retired_safety_control = (this.reads.retired_safety_control ?? 0) + 1
+      const status = JSON.parse(await this.watchdog.command(sprintCommand('finish', reason)))
+      if (!this.validStatus(status) || status.speed !== 1 || status.lease) throw new Error('Superseded safety restoration unconfirmed')
+      return status
+    }
+    if (this.recovery?.state === 'superseded' && this.readBucket === this.recovery.bucket) {
+      const owner = this.session.agent?.captureCheckpointOwner()
+      await this.waitControlWindow(this.recovery.bucket, () => !owner || this.session.agent?.checkpointOwnerCurrent(owner))
+      return this.restoreConfirmed(reason, (text, lane) => this.control(text, lane), { refresh: true })
+    }
+    try { return await this.restoreConfirmed(reason, (text, lane) => this.control(text, lane)) }
+    catch (error) {
+      if (error.code !== 'sprint_polling_budget') throw error
+      return this.recoverPollingBudget(reason)
+    }
+  }
+  async waitControlWindow(bucket, current) {
+    const waitMs = Math.max(1, (bucket + 1) * 60000 - this.monotonic())
+    if (waitMs > 60000) throw new Error('Sprint polling recovery clock invalid')
+    for (let remaining = waitMs; remaining > 0; remaining -= 100) {
+      await this.sleep(Math.min(100, remaining))
+      if (!current()) throw new Error('Sprint polling recovery wait superseded')
+    }
+    if (!current() || Math.floor(this.monotonic() / 60000) <= bucket) throw new Error('Sprint polling recovery wait exhausted or superseded')
+    return waitMs
+  }
+  async recoverPollingBudget(reason) {
+    if (this.recovery) {
+      const owner = this.session.agent?.captureCheckpointOwner()
+      await this.emit('polling_recovery_exhausted', { reason: 'durable_polling_recovery_used', disposition: 'safe_stop_required',
+        request_id: owner?.requestTrace?.id, goal_id: owner?.goalId, plan_id: owner?.planId, plan_version: owner?.planVersion, step_id: owner?.stepId })
+      throw new Error('Sprint polling recovery exhausted')
+    }
+    const agent = this.session.agent
+    const owner = agent?.captureCheckpointOwner()
+    const actor = { ...agent?.epoch }
+    const current = () => owner && agent === this.session.agent && agent.checkpointOwnerCurrent(owner)
+      && agent.epoch?.actor_id === actor.actor_id && agent.epoch?.epoch === actor.epoch
+      && !this.session.stopping && !agent.currentPendingAmendment?.()
+      && !agent.memory.pauseRecord(owner.key)?.paused
+      && agent.memory.planningState(owner.key)?.goal?.status === 'active'
+      && ['acknowledged', undefined].includes(agent.memory.pendingOperation(owner.key)?.state)
+    if (!current()) throw new Error('Sprint polling recovery owner or native effects unsafe')
+    const identity = { request_id: owner.requestTrace?.id, actor_id: actor.actor_id, epoch: actor.epoch,
+      goal_id: owner.goalId, plan_id: owner.planId, plan_version: owner.planVersion, step_id: owner.stepId }
+    this.recovery = { attempts: 1, state: 'attempted', reason: 'sprint_polling_budget', bucket: this.readBucket, ...identity }
+    clearInterval(this.poll)
+    await this.persist(this.ledger())
+    try {
+      if (!current()) throw new Error('Sprint polling recovery superseded')
+      await this.emit('polling_recovery_attempted', { ...identity, reason: 'sprint_polling_budget', disposition: 'restore_and_disable_acceleration', boundary: reason })
+      if (!current()) throw new Error('Sprint polling recovery superseded')
+      // Fixed emergency allowance, never a reset/refill of ordinary control reads.
+      // This independent lane can restore even when the normal minute is spent.
+      let reads = 0
+      let status = await this.restoreConfirmed('polling_recovery', async (text, lane) => {
+        if (!current()) throw new Error('Sprint polling recovery superseded')
+        if (++reads > 4) throw new Error('Sprint polling recovery emergency allowance exhausted')
+        this.reads[`recovery_${lane}`] = (this.reads[`recovery_${lane}`] ?? 0) + 1
+        const result = await this.watchdog.command(text)
+        if (!current()) throw new Error('Sprint polling recovery superseded')
+        return result
+      }, { refresh: true })
+      if (!current() || status.phase !== 'construction' || status.fault) throw new Error('Sprint polling recovery authority closed')
+      const bucket = this.readBucket
+      // Short wakes let a synchronous stop/request cancellation release the
+      // serialized barrier promptly; no native work or model call is replayed.
+      const waitMs = await this.waitControlWindow(bucket, current)
+      // Native production can progress during the wait. Refresh after it as well
+      // as restoring before it; pre-wait inventory is never continuation proof.
+      status = await this.restoreConfirmed('polling_recovery_refresh', async (text, lane) => {
+        if (!current()) throw new Error('Sprint polling recovery superseded')
+        const result = await this.control(text, lane)
+        if (!current()) throw new Error('Sprint polling recovery superseded')
+        return result
+      }, { refresh: true })
+      if (!current() || status.phase !== 'construction' || status.fault) throw new Error('Sprint polling recovery authority closed')
+      this.recovery = { ...this.recovery, state: 'completed' }
+      await this.persist(this.ledger())
+      if (!current()) throw new Error('Sprint polling recovery superseded')
+      await this.emit('polling_recovery_completed', { ...identity, reason: 'sprint_polling_budget', disposition: 'continue_at_1x', emergency_reads: reads, wait_ms: waitMs })
+      if (!current()) throw new Error('Sprint polling recovery superseded')
+      return status
+    } catch (error) {
+      this.recovery = { ...this.recovery, state: current() ? 'exhausted' : 'superseded' }
+      await this.persist(this.ledger())
+      try { await this.emit(`polling_recovery_${this.recovery.state}`, { ...identity, reason: String(error.message), disposition: this.recovery.state === 'superseded' ? 'retire_old_owner' : 'safe_stop_required' }) } catch {}
+      throw error
+    }
+  }
+  async restoreConfirmed(reason, read, { refresh = false } = {}) {
+    const status = JSON.parse(await read(sprintCommand('finish', reason), 'boundary_restore'))
     if (status.speed !== 1 || status.lease || status.version !== TICK_SPRINT.version) throw new Error('Sprint restoration unconfirmed')
     if (status.binding?.run_id !== this.binding.run_id || status.binding?.source_sha !== this.binding.source_sha
       || status.binding?.profile !== this.binding.profile) throw new Error('Sprint restoration binding changed')
     const lease = this.lease
     this.lease = undefined
-    if (status.last && status.last.lease_id !== this.lastRestored) {
-      this.lastRestored = status.last.lease_id
+    if (status.fault || status.phase !== 'construction') return status
+    const newlyRestored = status.last && status.last.lease_id !== this.lastRestored
+    if (newlyRestored || refresh) {
       this.session.agent?.noteWorldMutation()
       const agent = this.session.agent
       agent?.liveEntityObservations?.clear()
@@ -188,16 +338,19 @@ export class TickSprintController {
       if (agent) { agent.postBatchFacts = undefined; agent.taskStatusDiffBaseline = undefined }
       const owner = agent?.captureCheckpointOwner()
       const identity = async () => {
-        const current = await deploymentStatus({ command: text => this.control(text, 'identity_refresh') }, { requireAllowed: true })
+        const current = await deploymentStatus({ command: text => read(text, 'identity_refresh') }, { requireAllowed: true })
         if (current.actor_id !== agent?.epoch?.actor_id || current.epoch !== agent?.epoch?.epoch || current.connected_players !== 0) throw new Error('Sprint restoration actor identity changed')
       }
       await identity()
-      const inventory = await this.control('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_inventory_items")))', 'inventory_refresh')
+      const inventory = await read('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_inventory_items")))', 'inventory_refresh')
       await identity()
       if (owner && agent.checkpointOwnerCurrent(owner)) agent.recordHandoffToolFacts('getInventoryItems', inventory)
-      await this.emit('restored', { ...status.last, reason: status.last.reason, boundary: reason,
+      if (newlyRestored) {
+        this.lastRestored = status.last.lease_id
+        await this.emit('restored', { ...status.last, reason: status.last.reason, boundary: reason,
         speed: status.speed, freshness: 'dynamic_facts_invalidated_inventory_refreshed_existing_validators_required', harness_reads: 4,
-        host_observed_lease_wall_ms: lease ? this.monotonic() - lease.monotonicStart : null })
+          host_observed_lease_wall_ms: lease ? this.monotonic() - lease.monotonicStart : null })
+      }
     }
     if (this.monotonic() - (this.lastPollingAt ?? -Infinity) >= 5000) {
       this.lastPollingAt = this.monotonic()
@@ -206,25 +359,29 @@ export class TickSprintController {
     return status
   }
   boundary(reason, fn = () => undefined) {
+    const owner = this.session.agent?.captureCheckpointOwner()
     return this.serial(async () => {
       const safety = ['stop', 'shutdown', 'rcon', 'safety_control'].includes(reason)
       try {
+        if (!['stop', 'shutdown', 'safety_control'].includes(reason)) this.assertOwner(owner)
         const status = await this.restore(reason)
+        if (!['stop', 'shutdown', 'safety_control'].includes(reason)) this.assertOwner(owner)
         if (!safety && (status.phase !== 'construction' || status.fault)) throw new Error('Sprint construction authority closed')
       }
       catch (error) {
-        if (reason !== 'safety_control') { await this.fail(error); throw error }
+        if (reason !== 'safety_control') { await this.fail(error, owner); throw error }
       }
       if (this.fault && !safety) throw new Error(`Sprint controller fault: ${this.fault}`)
       return fn()
     })
   }
   trySprint() {
-    if (this.probe || this.fault || this.closed || this.lease) return Promise.resolve(false)
+    if (this.probe || this.fault || this.closed || this.lease || this.recovery) return Promise.resolve(false)
     this.probe = true
+    const checkpoint = this.session.agent?.captureCheckpointOwner()
     return this.serial(async () => {
       const owner = sprintOwner(this.session)
-      if (!owner || this.closed || this.fault || this.lease) return false
+      if (!owner || this.closed || this.fault || this.lease || this.recovery) return false
       const status = JSON.parse(await this.control('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","status")))', 'eligibility'))
       const current = sprintOwner(this.session)
       if (!current || !this.session.agent.checkpointOwnerCurrent(owner.checkpoint)
@@ -237,7 +394,7 @@ export class TickSprintController {
         return false
       }
       this.episodes[episode] = spent + TICK_SPRINT.burstTicks
-      await this.persist({ ...this.binding, episodes: this.episodes })
+      await this.persist(this.ledger())
       const fresh = sprintOwner(this.session)
       if (!fresh || !this.session.agent.checkpointOwnerCurrent(owner.checkpoint) || fresh.operation_key !== owner.operation_key) return false
       const start = this.now()
@@ -259,21 +416,57 @@ export class TickSprintController {
         return false
       }
       return true
+    }).catch(async error => {
+      try {
+        if (error.code !== 'sprint_polling_budget') throw error
+        await this.serial(() => { this.assertOwner(checkpoint); return this.recoverPollingBudget('sprint_probe') })
+        return false
+      } catch (failure) { await this.fail(failure, checkpoint); throw failure }
     }).finally(() => { this.probe = false })
   }
   async watchdogTick() {
     const lease = this.lease
     if (!lease || this.watchBusy || this.monotonic() - lease.monotonicStart < TICK_SPRINT.restoreAfterMs) return
     this.watchBusy = true
+    const checkpoint = this.session.agent?.captureCheckpointOwner()
     try {
       const status = JSON.parse(await this.control(sprintCommand('finish', 'host_wall_watchdog', lease.lease_id), 'wall_watchdog', this.watchdog.command.bind(this.watchdog)))
       if (this.lease !== lease) return
       if (status.speed !== 1 || status.lease || this.monotonic() - lease.monotonicStart >= TICK_SPRINT.wallMs) throw new Error('Wall sprint restoration failed or exceeded3000ms')
       await this.boundary('watchdog_restored')
+    } catch (error) {
+      try {
+        if (error.code !== 'sprint_polling_budget') throw error
+        // Wall restoration cannot queue behind a blocked primary lane. One
+        // lease-scoped emergency finish precedes serialized host reconciliation.
+        this.reads.wall_budget_emergency = (this.reads.wall_budget_emergency ?? 0) + 1
+        const restored = JSON.parse(await this.watchdog.command(sprintCommand('finish', 'watchdog_budget_emergency', lease.lease_id)))
+        if (this.lease !== lease) return
+        if (!this.validStatus(restored) || restored.speed !== 1 || restored.lease
+          || this.monotonic() - lease.monotonicStart >= TICK_SPRINT.wallMs) throw new Error('Emergency wall sprint restoration unconfirmed')
+        this.assertOwner(checkpoint)
+        await this.boundary('watchdog_polling_budget')
+      } catch (failure) { await this.fail(failure, checkpoint); throw failure }
     } finally { this.watchBusy = false }
   }
-  async fail(error) {
+  async fail(error, owner = this.session.agent?.captureCheckpointOwner()) {
     if (this.fault) return
+    const identity = { request_id: owner?.requestTrace?.id, goal_id: owner?.goalId, plan_id: owner?.planId,
+      plan_version: owner?.planVersion, step_id: owner?.stepId }
+    if (owner && (!this.session.agent?.checkpointOwnerCurrent(owner)
+      || this.recovery?.state === 'superseded' && this.session.stopping)) {
+      // Retire stale work without poisoning the replacement's controller. Speed
+      // restoration is global safety; cancellation/plan changes remain owned.
+      try {
+        this.reads.superseded_restore = (this.reads.superseded_restore ?? 0) + 1
+        const status = JSON.parse(await this.watchdog.command(`/silent-command local s=remote.call("sgluna_tick_sprint","status");if not s.lease or s.lease.request_id==${lua(owner.requestTrace?.id ?? '')} then s=remote.call("sgluna_tick_sprint","finish","superseded_boundary") end;rcon.print(helpers.table_to_json(s))`))
+        if (this.validStatus(status) && status.phase === 'construction' && !status.fault && status.speed === TICK_SPRINT.speed
+          && status.lease && status.lease.request_id !== owner.requestTrace?.id && status.lease.lease_id === this.lease?.lease_id) return
+        if (!this.validStatus(status) || status.speed !== 1 || status.lease || status.fault || status.phase !== 'construction') throw new Error('Superseded boundary restoration unconfirmed')
+        this.lease = undefined
+        return
+      } catch { /* An unconfirmed physical restoration remains a global fault. */ }
+    }
     this.fault = String(error.message).slice(0, 180)
     clearInterval(this.poll)
     clearInterval(this.watch)
@@ -281,14 +474,19 @@ export class TickSprintController {
     this.reads.emergency_control = (this.reads.emergency_control ?? 0) + 1
     try { await this.watchdog.command(sprintCommand('fail', this.fault)) } catch {}
     this.lease = undefined
-    this.session.cancelAutoResume?.()
-    this.session.agent?.cancel('tick_sprint_fault')
-    this.session.queueEvent?.(async () => {
-      if (!this.session.stopping && !this.session.agent?.memory.pauseRecord?.(this.session.agent.activePlanKey())?.paused) {
-        await this.session.agent?.pausePersistentPlan('tick_sprint_fault', { pause_class: 'guard' })
-      }
-    }, { safetyControl: true })
-    try { await this.emit('fault', { ...this.binding, reason: this.fault, disposition: 'safe_stop_required' }) }
+    const agent = this.session.agent
+    if (!owner || agent?.checkpointOwnerCurrent(owner)) {
+      this.session.cancelAutoResume?.()
+      agent?.cancel('tick_sprint_fault')
+      const cancelledOwner = agent?.captureCheckpointOwner()
+      this.session.queueEvent?.(async () => {
+        if (!this.session.stopping && agent === this.session.agent && (!cancelledOwner || agent.checkpointOwnerCurrent(cancelledOwner))
+          && !agent?.memory.pauseRecord?.(agent.activePlanKey())?.paused) {
+          await agent?.pausePersistentPlan('tick_sprint_fault', { pause_class: 'guard' })
+        }
+      }, { safetyControl: true })
+    }
+    try { await this.emit('fault', { ...this.binding, ...identity, reason: this.fault, disposition: 'safe_stop_required' }) }
     catch { this.session.log?.('Sprint fault telemetry unavailable; safety control queued') }
   }
   async stop(reason = 'shutdown') {

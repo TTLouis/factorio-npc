@@ -2,6 +2,27 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 23: Run AT polling prevention and bounded correction
+
+[Polling repair](RUN_AT_POLLING_REPAIR_2026-10-23.md) removes the standalone
+finish RPC before ordinary world commands by confirming native1x in the same
+Lua invocation. Unexecuted residual commands restore/refresh before one retry.
+The additional control-RPC limit stays1200/minute; inline guard checks are
+counted separately under the owning world call.
+
+One durable residual correction disables further sprints, restores1x through
+bounded independent reads, waits for natural bucket rollover with100ms stop
+wakes, refreshes facts again and returns to ordinary harness execution. Exhaustion,
+unsafe facts and interrupted attempts fail visibly; superseded work cannot cancel
+or fault its replacement. No gameplay mutation is replayed by this correction.
+
+Both exact-defect positive cases fail the old baseline. The candidate passes
+3371runtime/1378mod/type/Lua gates and50focused cases (28new); payload9 and scoped
+lint pass. Independent review approved9f3c71b9 (runtime378f514f). Exact Factorio
+2.0.77 framing/UI and sprint lifecycle proof is retained; final integration and
+resource verification are recorded in the repair's machine closeout. No new live
+trial, provider retry, publication or production deployment.
+
 ## October 23: Run AT verified entity recovery, then polling guard exhaustion
 
 [Run AT](validation/RED_AUTOMATION_LIVE_RUN_AT_2026-10-23.md) tested reviewed
