@@ -63,7 +63,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   memory.restore(structuredClone(iron ? an.iron_memory : an.memory))
   const held = () => getActivePlan(memory.planningState(an.key))
   const game = new FakeFactorio({ inventory: { wood: 1, 'copper-plate': 1, coal: 10, lab: 1, 'offshore-pump': 1, boiler: 1, 'steam-engine': 1, pipe: 10 } })
-  Object.assign(game.status, { actor_id: 18, epoch: 1, connected_players: 0 })
+  Object.assign(game.status, { actor_id: 18, epoch: 1, connected_players: 0, surface_index: 1 })
   const events = []; const providers = []; const ops = []; const recipes = structuredClone(an.recipes)
   if (iron) {
     recipes.splice(0, recipes.length, { name: 'iron-plate', enabled: true, hand_craftable_category: false, energy: 3.2,
@@ -112,6 +112,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   }
   game.command = async text => {
     await onRead?.({ agent, memory, game, text })
+    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ actor: { actor_id: 18 }, surface_index: 1, force_index: 1 })
     if (lostAck && text.includes('local ok,result=pcall') && text.includes('"authorize"')) {
       const mode = lostAck
       lostAck = undefined
@@ -130,7 +131,9 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
       return JSON.stringify(recipe ? { found: true, truncated: false, recipes: [recipe],
         ...(name === 'copper-cable' ? { harvested_from: ['fulgoran-ruin-big'] } : {}) } : { found: false, code: 'no_recipe', mined_from: [], harvested_from: [] })
     }
-    if (text.includes('"get_entity_status"')) return JSON.stringify({ found: true, entity: iron && text.includes(',43)') ? drill : machine, observation_mode: 'full' })
+    if (text.includes('"autorio_crafting","status"')) return JSON.stringify({ task_active: false, native_queue: [] })
+    if (text.includes('"get_entity_status"')) return JSON.stringify({ found: true, actor_id: 18, surface_index: 1, force_index: 1,
+      entity: iron && text.includes(',43)') ? drill : machine, observation_mode: 'full' })
     return native(text)
   }
   agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,

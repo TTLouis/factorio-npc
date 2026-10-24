@@ -7,6 +7,7 @@ import { setTimeout as observationDelay } from 'node:timers/promises'
 import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeProductionIntent } from './production-task.mjs'
 import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
+import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
@@ -3307,6 +3308,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   reset() {
     this.lifecycleEnter('reset')
+    this.pendingEntityRefresh = undefined
     this.observationRateAbort?.abort()
     this.abortStepContractCalls()
     this.turnConversation = null
@@ -5143,6 +5145,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // against (see dropIfStale); a nested turn keeps it.
       const scope = this.currentTurnScope()
       return await this.turnScope.run(scope, async () => {
+        const interruptedRefresh = await recoverInterruptedEntityRefresh(this)
+        if (interruptedRefresh !== undefined) return interruptedRefresh
         const gather = await recoverGatherFailure(this)
         if (gather !== undefined) return gather
         const production = await continueProductionTask(this)
@@ -6819,6 +6823,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return Number.isSafeInteger(unitNumber)
       ? this.liveEntityObservations?.get?.(`unit:${unitNumber}`)
       : undefined
+  }
+
+  exactTargetLocator(unitNumber) {
+    return historicalExactTargetLocator(this.memory.currentPlan?.(this.activePlanKey()), unitNumber)
+  }
+
+  refreshExactEntityBinding(unitNumber, source) {
+    return refreshExactEntity(this, unitNumber, source)
   }
 
   liveExactEntityFreshnessToken(unitNumber) {
@@ -8508,6 +8520,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       contract,
       task_board: visibleTaskBoard(state?.task_board),
     })
+    await settleEntityRefreshClaims(this)
     await this.rollProviderBudgetAtStepClose(source ?? trigger, state)
     // The close is real either way; a stale bind is propagated only now that it has been credited and traced.
     if (contracted.thrown) throw contracted.thrown
@@ -9999,7 +10012,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
       protocolVersion: 2,
-      surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.gatherAdmission?.surfaceIndex,
+      surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex,
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -12834,8 +12847,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (JSON.stringify(declared) !== JSON.stringify(held)) return reject('read_cannot_edit_or_complete_plan')
       } catch { return reject('read_cannot_edit_or_complete_plan') }
     }
-    if (request.tool === 'getEntityStatus' && request.args.unit_number !== undefined && !this.liveObservedExactTarget(request.args.unit_number)
-      && !initial.step.completion_contract?.requirements?.some(row => row.unit_number === request.args.unit_number)) return reject('entity_not_grounded')
+    if (request.tool === 'getEntityStatus' && request.args.unit_number !== undefined && !this.liveObservedExactTarget(request.args.unit_number)) {
+      const refreshed = await this.refreshExactEntityBinding(request.args.unit_number, allowTools ? 'normal_observation' : 'targeted_observation')
+      if (refreshed) {
+        this.pendingEntityRefresh = refreshed
+        if (refreshed.action !== 'bound') return providerMessageWith(message, {
+          content: JSON.stringify({ chatMessage: '', stepId: initial.data.stepId, operations: [] }), tool_calls: undefined,
+        })
+        await refreshed.fence()
+        return this.callProvider(current, generation, { round, allowTools: false, recoveryAttempt, recoveryKind })
+      }
+      if (!initial.step.completion_contract?.requirements?.some(row => row.unit_number === request.args.unit_number)) return reject('entity_not_grounded')
+    }
     if (allowTools !== true && request.tool === 'findLongRangeEntities' && !this.targetedResourceSearchNames().includes(request.args.name)) return reject('resource_source_not_grounded')
     // The typed control form names the model's requested fact, not a separate
     // admission allowance. While tools are open, return that same call to the
@@ -14028,6 +14051,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       plan = this.parsePlanMessage(message)
     }
     catch (error) {
+      if (error?.code === 'exact_entity_requires_live_observation') {
+        const candidate = JSON.parse(message.content)
+        const owner = this.captureCheckpointOwner()
+        const refreshed = candidate.stepId === owner.stepId
+          ? await this.refreshExactEntityBinding(error.details?.unit_number, 'operation_validation') : undefined
+        if (refreshed) {
+          plan = refreshed.action === 'bound' ? this.parsePlanMessage(message) : { chatMessage: '', plan: [], currentStep: 0, operations: [] }
+          plan[REFRESHED_ENTITY_PLAN] = refreshed
+        }
+      }
       if (['planner_cannot_mutate', 'invalid_execution_guidance', 'invalid_planner_review'].includes(error?.code)) await this.traceEvent('role.contract_refused', {
         request_id: this.traceRequest?.id, reason: error.code, role: this.agentContext.role,
       })
@@ -14039,8 +14072,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
       }
       if (error?.code === 'goal_reading_disagreement') await combineGroundingWithChallenge(this, error, options)
-      throw error
+      if (!plan) throw error
     }
+    if (plan[REFRESHED_ENTITY_PLAN]?.action !== undefined && plan[REFRESHED_ENTITY_PLAN].action !== 'bound') return plan
     await this.validatePreflightCorrectionScope(plan)
     await this.validateLocalFluidSearchBlocker(plan)
     const grounding = await groundFirstPlan(this, plan, options)
@@ -16145,6 +16179,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async commitPlan(plan) {
+    let refreshed = plan[REFRESHED_ENTITY_PLAN]
+    if (refreshed && !refreshed.current()) throw new AgentLoopError('Entity refresh plan was cancelled or superseded')
+    if (!refreshed && this.pendingEntityRefresh?.current()) refreshed = this.pendingEntityRefresh
+    this.pendingEntityRefresh = undefined
+    if (refreshed && refreshed.action !== 'bound') return refreshed.result
     // Backstop for programmatic callers: never silently drop planner actions.
     this.validatePlannerRoleOutput(plan)
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
@@ -16161,7 +16200,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
-    if (plan.productionTask) return startProductionTask(this, { ...plan, stepId: productionStepId })
+    if (refreshed) return continueEntityRefresh(this, refreshed)
+    const missing = plan.operations.find(operation => EXACT_ENTITY_TARGET_OPERATIONS.has(operation.name) && !this.liveObservedExactTarget(operation.args?.unit_number))
+    if (missing) {
+      const renewed = await this.refreshExactEntityBinding(missing.args.unit_number, 'admission_residual')
+      if (renewed?.action === 'bound' && this.productionAdmission) {
+        renewed.claim.state = 'continued'
+        await this.persistState({ strict: true })
+        await renewed.fence()
+        const error = new AgentLoopError('production exact binding refreshed; recompile current stock')
+        error.productionNotAdmitted = true
+        error.preflight = { code: 'entity_binding_refreshed' }
+        throw error
+      }
+      if (renewed) return continueEntityRefresh(this, renewed)
+    }
+    if (plan.productionTask) return startProductionTask(this, { ...plan, stepId: productionStepId }, { collectionOnly: Boolean(this.entityRefreshAdmission) })
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
     const supplyReview = await this.reviewExecutorSupplyDrift(plan)
     if (supplyReview !== undefined) return supplyReview
@@ -16270,6 +16324,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await retireGoalRequirements(this, plan)
 
     const before = await this.assertCurrent()
+    if (this.entityRefreshAdmission) await this.entityRefreshAdmission.fence()
     if (this.gatherAdmission) {
       await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
       if (before.surface_index !== this.gatherAdmission.surfaceIndex) throw new AgentLoopError('gather_admission_surface_changed')
@@ -17219,12 +17274,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const admitGeneration = this.generation
       const admitRequestId = this.traceRequest?.id
       const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
+      if (this.entityRefreshAdmission) {
+        this.entityRefreshAdmission.pendingKey = pendingAdmission?.operation_key
+        this.entityRefreshAdmission.pendingSignature = pendingAdmission?.signature
+      }
       const operationOwnerKey = this.activePlanKey()
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {
         await this.traceEvent('operations.admit', { operations })
         const beforeSend = await this.assertCurrent()
+        if (this.entityRefreshAdmission) await this.entityRefreshAdmission.idleFence()
         if (this.gatherAdmission) {
           await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
           if (beforeSend.surface_index !== this.gatherAdmission.surfaceIndex) throw new AgentLoopError('gather_admission_surface_changed')

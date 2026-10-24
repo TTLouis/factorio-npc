@@ -847,6 +847,26 @@ function detectUnrecoveredGather(rows) {
       return match ? [{ first_ts: match.ts, request_id: match.request_id, detail: match.data?.operation_key ?? 'partial_gather', count: unresolved.size }] : []
 }
 
+function detectUnrecoveredEntityBinding(rows) {
+  const unresolved = new Map()
+  for (const row of rows) {
+    const data = row.data ?? {}
+    const unit = data.unit_number
+    const request = data.request_id ?? row.request_id
+    const owner = [data.goal_id, data.plan_id, data.plan_version, data.step_id]
+    const key = JSON.stringify([request, unit, ...owner])
+    if ((row.event === 'recovery.classified' && data.reason_code === 'exact_entity_requires_live_observation'
+      || row.event === 'entity.refresh_detected') && Number.isSafeInteger(unit)) unresolved.set(key, row)
+    // A binding, admission or ordinary decision wake does not prove recovery.
+    // Older classified failures omit owner fields. Preserve that uncertainty;
+    // another step's settlement cannot retrospectively supply missing identity.
+    if (row.event === 'entity.refresh_settled' && data.disposition === 'verified_checkpoint_closed'
+      && owner.every(value => value !== undefined && value !== null)) unresolved.delete(key)
+  }
+  return [...unresolved.values()].map(row => ({ request_id: row.data?.request_id ?? row.request_id,
+    first_ts: row.ts, count: 1, detail: `exact entity ${row.data?.unit_number} lacks a verified checkpoint recovery` }))
+}
+
 const SIGNATURES = [
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
@@ -1054,6 +1074,8 @@ const INFORMATIONAL_SIGNATURES = [
 
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
+  { id: 'exact_entity_binding_unrecovered', label: 'exact entity binding failure without verified recovery',
+    detect: (_all, scoped) => detectUnrecoveredEntityBinding(scoped) },
   { id: 'gather_partial_unrecovered', label: 'terminal partial gathering did not reach a bounded harness continuation',
     detect: (all, inScope) => detectUnrecoveredGather(inScope) },
   {
