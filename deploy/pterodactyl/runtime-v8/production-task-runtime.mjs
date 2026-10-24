@@ -3,6 +3,7 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { parseInventoryCounts } from './handoff-packet.mjs'
 import { materialOwnerKey } from './material-ledger.mjs'
 import { normalizeCounts, recipeForItem } from './quantity-compiler.mjs'
+import { restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
 import { advanceProductionTask, createProductionTask, machineFacts, normalizeProductionIntent, productionScopeMatches, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
@@ -109,6 +110,14 @@ async function factsFor(agent, s, task, status) {
   const machines = []
   for (const unit_number of new Set([...task.intent.producers, ...task.intent.feeders].map(row => row.unit_number))) {
     const raw = await read('getEntityStatus', { unit_number })
+    const locator = agent.exactTargetLocator?.(unit_number)
+    const placement = agent.memory.authorizationState?.(s.owner.key)?.world?.npc_placements?.find(row => row.unit_number === unit_number)
+    if (locator?.position && Number.isSafeInteger(locator.surface_index) && placement) {
+      const body = JSON.parse(await read('getActorStatus', {}))
+      if (body.actor?.actor_id !== status.actor_id || body.surface_index !== status.surface_index) throw new Error('production_body_scope_changed')
+      validateRefreshedEntity(raw, { unit: unit_number, locator, placement, actorId: status.actor_id,
+        surfaceIndex: body.surface_index, forceIndex: body.force_index })
+    }
     const detail = JSON.parse(raw)
     if (detail.found !== true || detail.entity?.unit_number !== unit_number) throw new Error('production_machine_identity_missing')
     agent.recordLiveEntityToolResult('getEntityStatus', raw)
@@ -118,7 +127,7 @@ async function factsFor(agent, s, task, status) {
     fresh: true, inventory: normalizeCounts(Object.fromEntries(inventory)), recipes, machines }
 }
 
-export async function startProductionTask(agent, plan) {
+export async function startProductionTask(agent, plan, { collectionOnly = false } = {}) {
   const s = scope(agent)
   if (agent.completionProtocolVersion < 3 || agent.agentContext.role !== 'executor'
     || ![s.owner.stepId, agent.memory.currentPlan?.(s.owner.key)?.task_board?.active_step_id].includes(plan.stepId)
@@ -134,12 +143,18 @@ export async function startProductionTask(agent, plan) {
   const key = recordKey(s)
   const previous = agent.memory.productionTasks.get(key)
   if (previous && JSON.stringify(previous.intent) !== JSON.stringify(intent)) throw agent.roleContractError('production_intent_immutable', 'An admitted production intent cannot change its targets, bindings or fuel allowance')
+  if (previous && (previous.collection_only === true) !== collectionOnly) throw agent.roleContractError('production_intent_immutable', 'A harness collection continuation cannot change production authority')
   if (!previous) {
     if (agent.memory.productionTasks.size >= PRODUCTION_RECORD_LIMIT) return pause(agent, s.owner, 'production_ledger_exhausted')
     const status = await checked(agent, s.owner, deploymentStatus(agent.rcon, { requireAllowed: true }))
     const protected_stock = protectedStock(s.step, intent)
-    await store(agent, s.owner, key, createProductionTask({ intent, owner: s.materialOwner, actor_id: status.actor_id, epoch: status.epoch, protected_stock }))
+    await store(agent, s.owner, key, createProductionTask({ intent, owner: s.materialOwner, actor_id: status.actor_id, epoch: status.epoch, protected_stock, collectionOnly }))
     await checked(agent, s.owner, agent.traceEvent('production.started', { plan_id: s.owner.planId, step_id: s.owner.stepId, intent }))
+  }
+  if (agent.entityRefreshAdmission) {
+    await agent.entityRefreshAdmission.fence()
+    agent.entityRefreshAdmission.claim.state = 'continued' // The durable responsible controller now exists.
+    await checked(agent, s.owner, agent.persistState({ strict: true }))
   }
   const result = await continueProductionTask(agent)
   return result === undefined ? agent.runTurn() : result
@@ -181,6 +196,9 @@ export async function continueProductionTask(agent) {
   if (JSON.stringify(task.protected_stock) !== JSON.stringify(protectedStock(s.step, task.intent))) return pause(agent, s.owner, 'production_checkpoint_reservation_changed')
   if (task.status === 'paused') return pause(agent, s.owner, task.pause_reason)
   if (agent.productionFlight) return { production: 'deferred', reason: 'production_transition_in_flight', operations: [] }
+  const previousRefresh = agent.entityRefreshAdmission
+  if (task.collection_only && !previousRefresh) agent.entityRefreshAdmission = restoredCollectionFence(agent, task, s.owner)
+  const installedRefresh = agent.entityRefreshAdmission
   agent.productionFlight = true
   try {
     for (;;) {
@@ -188,6 +206,7 @@ export async function continueProductionTask(agent) {
       const status = await checked(agent, s.owner, deploymentStatus(agent.rcon, { requireAllowed: true }))
       if (status.actor_id !== task.actor_id || status.epoch !== task.epoch) return pause(agent, s.owner, 'production_actor_changed')
       if (!status.idle || pending(agent, s.owner.key) || agent.batchInFlight) return { production: 'deferred', reason: 'native_or_uncertain_work_pending', operations: [] }
+      if (task.collection_only) await agent.entityRefreshAdmission.idleFence()
       let result
       try { result = advanceProductionTask(task, await factsFor(agent, s, task, status)) }
       catch (error) {
@@ -221,5 +240,14 @@ export async function continueProductionTask(agent) {
       // No replay: reread authoritative inventory, recipes and exact machines,
       // then compile the remaining demand. Exhaustion survives every restage.
     }
-  } finally { agent.productionFlight = false }
+  } catch (error) {
+    await agent.assertCheckpointOwnerCurrent(s.owner)
+    if (!task.collection_only || !error.entityRefreshBusy) throw error
+    await checked(agent, s.owner, agent.traceEvent('production.collection_deferred', { request_id: s.owner.requestTrace?.id,
+      goal_id: s.owner.goalId, plan_id: s.owner.planId, step_id: s.owner.stepId, reason: error.message }))
+    return { production: 'deferred', reason: error.message, operations: [] }
+  } finally {
+    agent.productionFlight = false
+    if (task.collection_only && agent.entityRefreshAdmission === installedRefresh) agent.entityRefreshAdmission = previousRefresh
+  }
 }

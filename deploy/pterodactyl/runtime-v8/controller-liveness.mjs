@@ -82,7 +82,7 @@ async function pause(session, s, reason) {
   return { action: 'paused', reason }
 }
 
-function claim(memory, owner, now) {
+export function claimControllerRecovery(memory, owner, now = Date.now()) {
   if (memory.controllerRecoveryFault) return { reason: 'controller_recovery_ledger_unreadable' }
   memory.controllerRecoveries ??= new Map()
   const key = JSON.stringify([owner.key, owner.goalId])
@@ -134,7 +134,7 @@ export async function inspectControllerLiveness(session, { now = Date.now() } = 
     }
     await emit(session, s, 'idle_detected', 'unpaused_idle_controller', { observed_idle_ms: now - held.since })
     if (!current(session, s)) return { action: 'stale' }
-    const allowance = claim(s.agent.memory, s.owner, now)
+    const allowance = claimControllerRecovery(s.agent.memory, s.owner, now)
     if (allowance.reason) return pause(session, s, allowance.reason)
     // Expenditure precedes any restage, model call or mutation, and survives the
     // recovery's intentional new request/generation and a process restart.

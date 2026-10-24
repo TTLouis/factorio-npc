@@ -145,6 +145,7 @@ lane_offset() {
     water-reach-approach) printf '30' ;;
     area-reservations) printf '31' ;;
     production-task) printf '32' ;;
+    entity-refresh) printf '34' ;;
     tick-sprint) printf '33' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac

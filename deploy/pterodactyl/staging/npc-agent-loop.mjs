@@ -850,6 +850,9 @@ export class NpcAgentLoop {
         else {
           await this.assertCurrent()
           const raw = String(await this.rcon.command(entry.command))
+          // Internal harness probes validate full native identity before any
+          // rendering, caching or publication. Model tool arguments cannot set this hook.
+          if (typeof entry._sglunaValidateRaw === 'function') entry._sglunaValidateRaw(raw)
           output = String(this.renderToolOutput(entry.tool.function.name, raw, 12000)).slice(0, 12000)
           await this.assertCurrent()
         }

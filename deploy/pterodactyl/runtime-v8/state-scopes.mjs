@@ -187,6 +187,7 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   actionOmissionObservationUsed: f('decision', true, V8, 'the repair\'s one observation spent: same reset sites'),
   actionOmissionForceNoTools: f('decision', true, V8, 'closes tools for the repair decision: same reset sites'),
   pendingFiniteNoOperationPlan: f('decision', true, V8, 'plan held while the no-operation pressure runs: same reset sites'),
+  pendingEntityRefresh: f('turn', false, V8, 'harness-only renewed read; consumed at commit and fenced by request, conversation, actor and step'),
   freshObservationSinceContinuation: f('decision', true, V8, 'a fresh read happened since the continuation: same reset sites'),
   genericRecoveryDecisionActive: f('decision', true, V8, 'generic recovery decision flag: request, continueFromModMessage, cancel, recoverPlanRoute'),
   staleExactPreflightRetries: f('decision', true, V8, 'preflight retry budget reset per continuation (continueFromModMessage) and per request'),

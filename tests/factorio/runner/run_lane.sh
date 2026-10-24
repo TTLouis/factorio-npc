@@ -156,6 +156,9 @@ case "$LANE" in
   production-task)
     run_node production_task_factorio.mjs
     ;;
+  entity-refresh)
+    run_node run_as_entity_refresh_factorio.mjs
+    ;;
   pump-landfill-removal)
     run_py pump_landfill_removal_cell.py
     run_py pump_landfill_lifecycle.py --phase prepare --save "$SAVE"

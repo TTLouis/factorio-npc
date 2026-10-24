@@ -60,7 +60,7 @@ export function productionScopeMatches(intent, contract) {
   return contract?.mode === 'all' && intent.targets.every(target => Math.max(0, ...(contract.requirements ?? [])
     .filter(row => row.kind === 'inventory_count' && row.item_name === target.item_name).map(row => row.minimum)) === target.count)
 }
-export function createProductionTask({ intent, owner, actor_id, epoch, ledger, protected_stock = {}, now = Date.now() }) {
+export function createProductionTask({ intent, owner, actor_id, epoch, ledger, protected_stock = {}, collectionOnly = false, now = Date.now() }) {
   intent = normalizeProductionIntent(intent)
   materialOwnerKey(owner)
   protected_stock = normalizeCounts(protected_stock)
@@ -72,12 +72,14 @@ export function createProductionTask({ intent, owner, actor_id, epoch, ledger, p
     if (protection?.kind !== 'reservation' || JSON.stringify(protection.items) !== JSON.stringify(protectedItems)) throw new Error('production_checkpoint_reservation_unreadable')
   }
   return { version: 1, owner: { ...owner }, actor_id: unit(actor_id), epoch: unit(epoch), intent,
+    ...(collectionOnly ? { collection_only: true } : {}),
     status: 'active', transitions: 0, recoveries: 0, fuel_used: 0, created_at: now, deadline_at: now + PRODUCTION_LIMITS.duration_ms,
     last_progress_at: now, last_fingerprint: null, ledger: materialLedger, protected_stock }
 }
 export function restoreProductionTask(raw) {
   if (!raw || raw.version !== 1 || !['active', 'complete', 'paused'].includes(raw.status)) throw new Error('invalid_production_task')
-  const task = createProductionTask({ intent: raw.intent, owner: raw.owner, actor_id: raw.actor_id, epoch: raw.epoch, ledger: raw.ledger, protected_stock: raw.protected_stock, now: raw.created_at })
+  if (raw.collection_only !== undefined && raw.collection_only !== true) throw new Error('invalid_production_collection_mode')
+  const task = createProductionTask({ intent: raw.intent, owner: raw.owner, actor_id: raw.actor_id, epoch: raw.epoch, ledger: raw.ledger, protected_stock: raw.protected_stock, collectionOnly: raw.collection_only === true, now: raw.created_at })
   for (const key of ['created_at', 'deadline_at', 'last_progress_at']) if (!Number.isSafeInteger(raw[key]) || raw[key] < 0) throw new Error('invalid_production_clock')
   if (raw.deadline_at !== raw.created_at + PRODUCTION_LIMITS.duration_ms) throw new Error('invalid_production_deadline')
   if (raw.last_progress_at < raw.created_at || raw.last_progress_at > raw.deadline_at) throw new Error('invalid_production_progress_clock')
@@ -148,6 +150,21 @@ export function advanceProductionTask(raw, facts, now = Date.now()) {
     if (!fuel || task.fuel_used >= fuel.count) return halt(task, 'production_fuel_allowance_exhausted')
     if (spendable(fuel.item_name) < 1) return acquire(fuel.item_name, 1)
     return emit({ name: 'supply_entity', args: { unit_number: machine.unit_number, items: [{ item_name: fuel.item_name, count: 1 }] } }, 1)
+  }
+  if (task.collection_only) {
+    // Harness identity recovery may collect the committed result, but cannot
+    // widen its authority into feeding/crafting if the previously seen output
+    // disappears. Reconcile the complete target set before moving anything.
+    const remaining = task.intent.targets.map(target => {
+      const binding = task.intent.producers.find(row => row.recipe_name === target.item_name)
+      return { target, machine: machines.find(row => row.unit_number === binding?.unit_number),
+        missing: Math.max(0, target.count - (availability.available[target.item_name] ?? 0)) }
+    })
+    if (remaining.some(row => row.missing > (row.machine?.output[row.target.item_name] ?? 0))) return halt(task, 'production_collection_stock_unproven')
+    const next = remaining.find(row => row.missing > 0)
+    return next ? emit({ name: 'move_items_exact', args: { unit_number: next.machine.unit_number,
+      item_name: next.target.item_name, max_count: Math.min(next.missing, PRODUCTION_LIMITS.batch_items), to_entity: false } })
+      : halt(task, 'production_collection_checkpoint_unproven')
   }
   // Existing exact output is collected before acquiring or producing its deficit.
   for (const node of bill.nodes) {

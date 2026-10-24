@@ -6,6 +6,7 @@ import { restoreObservationLedger } from './targeted-observation.mjs'
 import { restoreObservationRates } from './observation-rate.mjs'
 import { restoreProductionRecords } from './production-task-runtime.mjs'
 import { restoreControllerRecoveries } from './controller-liveness.mjs'
+import { restoreEntityRefreshClaims } from './entity-refresh.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -2869,6 +2870,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       gather_recoveries: [...(this.gatherRecoveries ?? new Map()).entries()],
       ...(this.gatherRecoveryFault ? { gather_recovery_fault: true } : {}),
       controller_recoveries: [...(this.controllerRecoveries ?? new Map()).entries()],
+      entity_refresh_claims: [...(this.entityRefreshClaims ?? new Map()).entries()],
+      ...(this.entityRefreshFault ? { entity_refresh_fault: true } : {}),
       ...(this.controllerRecoveryFault ? { controller_recovery_fault: true } : {}),
       ...(this.productionRestoreFault ? { production_restore_fault: true } : {}),
       targeted_observation_ledger: [...(this.targetedObservationLedger ?? new Map()).entries()].slice(0, 128),
@@ -3016,6 +3019,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const controller = restoreControllerRecoveries(snapshot?.controller_recoveries)
     this.controllerRecoveries = controller.records
     this.controllerRecoveryFault = controller.fault || snapshot?.controller_recovery_fault === true
+    const entityRefresh = restoreEntityRefreshClaims(snapshot?.entity_refresh_claims)
+    this.entityRefreshClaims = entityRefresh.records
+    this.entityRefreshFault = entityRefresh.fault || snapshot?.entity_refresh_fault === true
     const production = restoreProductionRecords(snapshot?.production_tasks)
     const gather = restoreGatherRecoveries(snapshot?.gather_recoveries)
     this.gatherRecoveries = gather.records
