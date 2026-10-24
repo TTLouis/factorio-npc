@@ -72,7 +72,7 @@ Build checkpoints:
 - [x] Freeze runtime378f514f / reviewed9f3c71b9; payload9 and lint pass.
 - [x] Candidate3371runtime/1378mod/type/Lua and50focused cases pass.
 - [x] Independent immutable review approved9f3c71b9.
-- [ ] Fresh merged offline gates and final owned cleanup; machine closeout records final SHAs.
+- [x] Fresh merged3371runtime/1378mod/type/Lua/payload9 and final owned cleanup pass.
 
 Evidence is under `test-results/run-at-polling-recovery/`; old AT/AR/AS evidence
 remains sealed and unchanged. Native framing/lifecycle proof does not establish
@@ -85,3 +85,17 @@ follow-up deltas and exact owned resource cleanup. The native proof has its own
 raw transcript, source image and zero-inference receipt. Startup configuration
 errors remain fail-closed before any goal continuation; recovery cannot make a
 missing or incompatible native guard authoritative.
+
+Final validation: reviewed candidate `f379a8b4` merged locally as `0a4ebb00`.
+Fresh merged offline gates passed, and scoped lint has zero errors. Two isolated
+Factorio 2.0.77 runs passed native inline framing/UI, guard/sprint and startup
+proofs. Image-byte verification matches all 84 non-test module files (including
+fixture helpers) and the policy against the final candidate and merge. The native
+lease fixture uses a deterministic source-label placeholder; exact source identity
+comes from the independently preserved image bytes, not that label.
+
+Cleanup verified 25 exact container names and three retained container IDs absent,
+including stopped state; all six owned image/build identities are absent. Shared
+base images, source, logs and saves remain. All 676 sealed AR/AS/AT files and 32
+historical reports rehash unchanged. The task evidence mirror and machine closeout
+retain final identities and ownership retirement. No background work remains.
