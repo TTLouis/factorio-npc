@@ -1,0 +1,197 @@
+{
+  "source": "Actual Run T stop-confirmation timeout and outer preservation boundary",
+  "source_run": "red-automation-live-2026-10-15t",
+  "source_hashes": [
+    {
+      "sha256": "5cd587073c92ddff1fd74e794f0f1a0f8deab088d5aac19e837813a684d37b10",
+      "path": "data/logs/outer-stop-confirmation.json"
+    },
+    {
+      "sha256": "786e72e5a5c3674e2ab65ba7be07c15d7d619a24af61e88d836b7557e4441f3b",
+      "path": "data/logs/stop-timeout-state.json"
+    },
+    {
+      "sha256": "d6a58ea6f3a58a330c17df1857fe8b0f36d20682e2793ce9b2d4c03b82d48c3c",
+      "path": "data/logs/e2e-incomplete.json"
+    }
+  ],
+  "issuedAt": 1792103580136,
+  "goalId": "goal_0dxyjsr_1",
+  "actorId": 1,
+  "state": {
+    "planning_states": [
+      {
+        "state": {
+          "run": {
+            "paused": true,
+            "pause_class": "operator",
+            "pause_reason": "user_stop",
+            "paused_at": 1792103560172,
+            "pending_operation": null
+          },
+          "goal": {
+            "goal_id": "goal_0dxyjsr_1",
+            "owner": "<server>",
+            "objective": "Build a fully automated factory producing at least 1 automation-science-pack per game minute from natural resources. Build real steam power generation, automatic iron/copper/coal mining, automatic ore smelting, iron-gear-wheel assembly and red science assembly, with native belts/inserters feeding every required stage and fuel supply. Hand crafting and feeding are allowed during construction and bootstrap only. The finished factory must run without the NPC supplying, collecting, hand crafting or repairing it. Build sufficient fuel and material routing for an unattended five wall-minute test at game speed 2 (ten game minutes, at least ten NEW red packs). Verify actual machine production and working supply routes, not placement alone. A chest is acceptable as final science output. Green science and lab consumption are follow-up milestones, not required for this task. Finish the construction goal when the complete chain has produced at least ten red packs and all required upstream stages o",
+            "constraints": [],
+            "status": "active",
+            "created_at": 1792102409153,
+            "updated_at": 1792102497753,
+            "definition": {
+              "scope": "long_horizon",
+              "summary": "Build a steam-powered, fully automatically mined and supplied factory producing at least one automation science pack per game minute and at least ten new packs during a ten-game-minute unattended test.",
+              "done_when": [
+                {
+                  "id": "done_1",
+                  "kind": "production_rate",
+                  "item_name": "automation-science-pack",
+                  "per_minute": 1,
+                  "window_minutes": 10
+                },
+                {
+                  "id": "done_2",
+                  "kind": "items_produced",
+                  "item_name": "automation-science-pack",
+                  "minimum": 10,
+                  "count_from": "goal_start",
+                  "baseline": 0
+                },
+                {
+                  "id": "done_3",
+                  "kind": "electric_network_satisfied",
+                  "entity_name": "electric-mining-drill",
+                  "minimum": 3
+                },
+                {
+                  "id": "done_4",
+                  "kind": "entity_working",
+                  "entity_name": "assembling-machine-1",
+                  "minimum": 1
+                }
+              ],
+              "source": "main_planner",
+              "defined_at": 1792102442661
+            },
+            "fresh_context_recovery_used": true
+          }
+        }
+      }
+    ],
+    "intake_retry": null
+  },
+  "native": {
+    "operations": {
+      "task_state": "idle",
+      "queue_empty": true,
+      "queue_length": 0,
+      "follow": {
+        "active": false,
+        "state": "stopped",
+        "clear_obstacles": true,
+        "code": "stopped",
+        "updated_tick": 81315,
+        "healthy": false,
+        "controller_live": false,
+        "last_position": {
+          "x": 23.14453125,
+          "y": -94.8984375
+        },
+        "navigation": {
+          "active": false,
+          "state": "reached",
+          "persistent_follow": false
+        },
+        "actor": {
+          "kind": "standalone_character",
+          "valid": true,
+          "name": "Kite-1",
+          "npc_id": "npc-1",
+          "position": {
+            "y": -94.8984375,
+            "x": 23.14453125
+          },
+          "has_character": true,
+          "actor_id": 1,
+          "selected_entity": {
+            "name": "copper-ore",
+            "position": {
+              "y": -93.5,
+              "x": 24.5
+            }
+          },
+          "mining_state": {
+            "mining": false,
+            "position": {
+              "y": 0,
+              "x": 0
+            }
+          },
+          "mining_progress": 0
+        }
+      },
+      "actor": {
+        "kind": "standalone_character",
+        "valid": true,
+        "name": "Kite-1",
+        "npc_id": "npc-1",
+        "position": {
+          "y": -94.8984375,
+          "x": 23.14453125
+        },
+        "has_character": true,
+        "actor_id": 1,
+        "selected_entity": {
+          "name": "copper-ore",
+          "position": {
+            "y": -93.5,
+            "x": 24.5
+          }
+        },
+        "mining_state": {
+          "mining": false,
+          "position": {
+            "y": 0,
+            "x": 0
+          }
+        },
+        "mining_progress": 0
+      }
+    },
+    "crafting_queue": {},
+    "actor_id": 1
+  },
+  "receipts": [
+    {
+      "schema": 1,
+      "ts": "2026-10-15T22:33:00.139Z",
+      "seq": 0,
+      "event": "request.cancelled",
+      "data": {
+        "reason": "user_stop_immediate"
+      }
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-15T22:33:00.153Z",
+      "seq": 0,
+      "event": "goal.paused",
+      "request_id": "recovery_mva45tlq",
+      "data": {
+        "request_id": "recovery_mva45tlq",
+        "cause": "user_stop",
+        "pause_reason": "user_stop",
+        "pause_class": "operator",
+        "provider_failure": false,
+        "source": "pause_persistent_plan",
+        "goal_id": "goal_0dxyjsr_1",
+        "active_step_id": "step_1",
+        "resume": "Resume or say continue"
+      }
+    }
+  ],
+  "receiptScope": {
+    "trace_path": "/data/logs/sgluna-behavior.jsonl",
+    "run_id": "red-automation-live-2026-10-15t",
+    "trace_source": "isolated_supervisor_behavior_trace"
+  }
+}
