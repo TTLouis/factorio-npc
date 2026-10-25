@@ -766,7 +766,7 @@ test('late claimed-wake cancellation diagnostic cannot charge or sequence a newe
   } finally { stopWake(w.session) }
 })
 
-for (const journalKind of ['admitting', 'uncertain', 'malformed', 'missing', 'nested_records', 'empty_array', 'empty_lua', 'late_identity', 'first_admitting', 'first_missing', 'late_state']) {
+for (const journalKind of ['admitting', 'uncertain', 'malformed', 'missing', 'nested_records', 'empty_array', 'empty_lua', 'late_identity', 'first_admitting', 'first_missing', 'late_state', 'malformed_terminal_slots', 'nested_terminal_fingerprint', 'oversized_terminal_fingerprint']) {
   test(`real Session residual with native journal ${journalKind} and empty host ledger cannot infer idle permission`, async t => {
     const w = orphanSession()
     assert.equal(w.memory.pendingOperations(w.key).length, 0)
@@ -798,6 +798,9 @@ for (const journalKind of ['admitting', 'uncertain', 'malformed', 'missing', 'ne
       if (journalKind === 'first_admitting') value.operations.admission_journal = projections === 1 ? [{ ...record, state: 'admitting', slots: {} }] : []
       if (journalKind === 'first_missing') { if (projections === 1) delete value.operations.admission_journal; else value.operations.admission_journal = [] }
       if (journalKind === 'late_state') value.operations.admission_journal = [{ ...record, state: projections === 1 ? 'completed' : 'uncertain' }]
+      if (journalKind === 'malformed_terminal_slots') value.operations.admission_journal = [{ ...record, operation_count: 2, slots: [record.slots[0], record.slots[0]] }]
+      if (journalKind === 'nested_terminal_fingerprint') value.operations.admission_journal = [{ ...record, error: { nested: true } }]
+      if (journalKind === 'oversized_terminal_fingerprint') value.operations.admission_journal = [{ ...record, error: 'x'.repeat(513) }]
       return JSON.stringify(value)
     }
     w.session.pollControllerLiveness(); await settle(w.session); await w.session.publishNextSliceControl()

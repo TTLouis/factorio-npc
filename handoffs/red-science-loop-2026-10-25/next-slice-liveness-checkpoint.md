@@ -74,3 +74,13 @@ Journal-control01: unchanged archived9b source plus only the new tests fails all
 Only five adapted future template hashes were refreshed in av-provenance.json (run-live, snapshot, stop policy/test, external checker). All original AV hashes, manifest hash and verified historical baseline entries remain unchanged; no sealed/frozen run was edited. The new helper is new source, not mislabeled as an AV original. A newly reviewed/frozen future profile remains mandatory before a live run.
 
 Corrected F1 owner/attempt/ordinal/native binding, outer leave RPC, real preservation_binding summarization and exact2.0.77 atomic smoke remain pending parent-approved dependency composition. No final source/payload/full/native/review approval is claimed by this checkpoint.
+
+## Malformed native-proof parser follow-up
+
+Immutable0314's remaining P2 is fixed at the shared parser: native slots must be sequential by position and cannot exceed operation_count; completed count still matches exactly. Fingerprinted optional fields are checked before serialization against the native producer's primitive types and limits (operation64, refusal128, error512, key192/attempt128/signature256, native safe counters and bounded applied prefix). Objects, nested/large arrays, out-of-order/duplicate/out-of-count slots, oversized strings and invalid counters are unknown. Explicit Lua-empty tables remain supported. No allowance or producer cap is expanded.
+
+Journal-parser01: 105/105 focused tests plus scoped ESLint pass, including actual Session empty-host-ledger malformed terminal proof refusing a wake/reconciled ack and future policy refusing malformed proof despite a current acknowledgement. Parser-control01: unchanged archived0314 parser/runtime/policy plus only new tests fails six/six expected controls, zero canceled/skipped. Historical AV hashes/manifest/baselines remain unchanged; only the future policy-test fingerprint is refreshed.
+
+The earlier Git-aware kit-smoke01 passed seven/seven on immutable0314 with a read-only Git object view, including the actual candidate-agnostic freezer and native source/path/hash refusals. That was a future-helper test with fixture native inputs, never a trial or engine proof.
+
+Parent authorized private incorporation of F1 `3c9faa489fffb6463905d3c8ffa03231bd2caf9a` after this checkpoint is committed/clean. Its native compile05 passes, but a later native snapping/claim finding remains F1-owned; final combined code must incorporate that corrected follow-up before engine/final approval. Arg6/mandatory leave/real preservation_binding summary are the next F2 wiring step. No main promotion or live permission is implied.

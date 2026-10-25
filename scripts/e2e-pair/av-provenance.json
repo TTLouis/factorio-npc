@@ -144,7 +144,7 @@
     {
       "path": "trial-stop-policy.test.mjs",
       "av_sha256": "f0bfa0ed7a5a9b8cb0f076541974bd935b707cb59743869233d03cb4b16e1e02",
-      "template_sha256": "724dfbd2b01018fcb3f8999ce3a4be9382c28503bf8effdae5a206c2f57d6fb8"
+      "template_sha256": "322272071bbeeff570e9f9c37943b1606e2ee67b3d7d42e924abdd6d6ddf83b2"
     },
     {
       "path": "trial-supervisor-stop.mjs",

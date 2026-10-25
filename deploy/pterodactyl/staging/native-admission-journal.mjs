@@ -2,8 +2,13 @@
 // present empty Lua array as {}; only that exact empty-object shape is empty.
 const states = new Set(['admitting', 'admitted', 'uncertain', 'completed', 'failed', 'partial', 'not_admitted'])
 const unresolved = new Set(['admitting', 'admitted', 'uncertain'])
-const text = value => typeof value === 'string' && value.length > 0 && value.length <= 200
-const positive = value => Number.isSafeInteger(value) && value > 0
+const MAX_NATIVE_INTEGER = 9007199254740990
+const text = (value, limit) => typeof value === 'string' && value.length > 0 && value.length <= limit
+const nonnegative = value => Number.isSafeInteger(value) && value >= 0 && value <= MAX_NATIVE_INTEGER
+const positive = value => nonnegative(value) && value > 0
+const optional = (value, accepts) => value === undefined || accepts(value)
+const boolean = value => typeof value === 'boolean'
+const boundedString = limit => value => typeof value === 'string' && value.length <= limit
 const emptyObject = value => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0
 const list = (value, limit) => emptyObject(value) ? [] : Array.isArray(value) && value.length <= limit ? value : undefined
 
@@ -15,16 +20,23 @@ export function nativeAdmissionJournal(raw) {
   const records = []
   for (const row of rows) {
     const slots = list(row?.slots, 16)
-    if (!row || !states.has(row.state) || !text(row.operation_key) || !text(row.attempt_id) || !text(row.signature)
+    if (!row || !states.has(row.state) || !text(row.operation_key, 192) || !text(row.attempt_id, 128) || !text(row.signature, 256)
       || !positive(row.ordinal) || !positive(row.actor_id) || !positive(row.epoch) || !positive(row.generation)
-      || !Number.isSafeInteger(row.tick) || row.tick < 0 || !positive(row.operation_count) || row.operation_count > 16
-      || keys.has(row.operation_key) || !slots || row.state === 'completed' && slots.length !== row.operation_count) return unknown()
+      || !nonnegative(row.tick) || !positive(row.operation_count) || row.operation_count > 16
+      || keys.has(row.operation_key) || !slots || slots.length > row.operation_count
+      || row.state === 'completed' && slots.length !== row.operation_count
+      || !optional(row.work_mark, nonnegative) || !optional(row.ok, boolean) || !optional(row.error, boundedString(512))
+      || !optional(row.proven_refusal, boolean) || !optional(row.applied_slot_count, value => nonnegative(value) && value <= slots.length)) return unknown()
     keys.add(row.operation_key)
     const slotIdentity = []
-    for (const slot of slots) {
+    for (const [position, slot] of slots.entries()) {
       const refs = list(slot?.batch_refs, 16)
-      if (!positive(slot?.index) || slot.index > 16 || typeof slot.ok !== 'boolean' || !refs
-        || refs.some(ref => !positive(ref?.batch_id) || !positive(ref.batch_generation) || !text(ref.batch_ref))) return unknown()
+      if (slot?.index !== position + 1 || !boolean(slot.ok) || !refs
+        || !optional(slot.operation, boundedString(64)) || !optional(slot.queued_tasks, nonnegative)
+        || !optional(slot.mutation_unknown, boolean) || !optional(slot.refused_before_mutation, boolean)
+        || !optional(slot.refusal_code, boundedString(128))
+        || refs.some(ref => !positive(ref?.batch_id) || !positive(ref.batch_generation) || !text(ref.batch_ref, 96)
+          || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`)) return unknown()
       slotIdentity.push([slot.index, slot.ok, slot.operation, slot.queued_tasks, slot.mutation_unknown,
         slot.refused_before_mutation, slot.refusal_code, refs.map(ref => [ref.batch_id, ref.batch_generation, ref.batch_ref])])
     }

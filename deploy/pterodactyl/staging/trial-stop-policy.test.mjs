@@ -252,3 +252,17 @@ test('runner recognizes the actual native journal array and present Lua-empty ob
     assert.equal(trialStopDecision(input).action, 'request_settlement')
   }
 })
+
+test('malformed terminal journal proof remains unknown despite a current settlement acknowledgement', () => {
+  const row = { operation_key: 'native/batch_1', attempt_id: 'native_attempt_1', signature: 'a'.repeat(64), ordinal: 1,
+    actor_id: 6, epoch: 3, generation: 1, operation_count: 1, tick: 1000, state: 'completed',
+    slots: [{ index: 1, ok: true, batch_refs: [] }] }
+  for (const malformed of [{ ...row, operation_count: 2, slots: [row.slots[0], row.slots[0]] },
+    { ...row, error: { nested: true } }, { ...row, error: 'x'.repeat(513) }]) {
+    const input = orphanInput()
+    const request = trialStopDecision(input).request
+    input.controller.settlement = { ...request, settled_at: input.now, native_reconciled: true }
+    input.native.operations.admission_journal = [malformed]
+    assert.equal(trialStopDecision(input).reason, 'next_slice_native_ownership_unknown')
+  }
+})
