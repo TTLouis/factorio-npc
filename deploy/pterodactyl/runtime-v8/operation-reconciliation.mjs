@@ -251,6 +251,25 @@ function historicalCompletionProven(admission, status) {
       && receipt.outcome !== 'refused' && receipt.outcome !== 'cancelled')))
 }
 
+// Select evidence, never synthesize it from an admission verdict or a live
+// watermark. The shared semantic verifier consumes one complete native batch;
+// admissions spanning several batches cannot be represented by that contract.
+export function completedOperationReceipt(pending, { status, actor } = {}) {
+  if (typeof status === 'string') { try { status = JSON.parse(status) } catch { return undefined } }
+  if (pending?.protocol_version !== 2
+    || reconcilePendingOperation(pending, { status, actor }).verdict !== RECONCILE_VERDICT.ADMITTED_COMPLETED) return undefined
+  const records = status?.admission_journal?.records ?? status?.admission_journal
+  const admission = Array.isArray(records) ? records.find(record => record.operation_key === pending.operation_key) : undefined
+  if (!admission || !historicalCompletionProven(admission, status)
+    || !admission.slots.every(slot => slot.batch_refs.length > 0)) return undefined
+  const refs = admission.slots.flatMap(slot => slot.batch_refs)
+  const first = refs[0]
+  if (!first || !refs.every(ref => ref.batch_id === first.batch_id && ref.batch_generation === first.batch_generation
+    && ref.batch_ref === first.batch_ref)) return undefined
+  return status.receipt_journal.find(receipt => receipt.batch_id === first.batch_id
+    && receipt.batch_generation === first.batch_generation && receipt.batch_ref === first.batch_ref)
+}
+
 // A drained transfer batch can contain successful tasks and no-movement
 // refusals. Unlike cancellation, its exact receipt accounts for EVERY task.
 // This proves a partial effect, never whole-batch success or permission to replay.

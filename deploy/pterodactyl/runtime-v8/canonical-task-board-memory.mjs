@@ -3309,22 +3309,32 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }).state?.task_board ?? boardAfterReceipt
     }
 
-    if (state.status !== 'active' || boardAfterReceipt.status !== 'active') return boardAfterReceipt
+    // Recording historical proof is passive: transport-paused startup recovery
+    // may ingest it before reactivation, but only the completion gate can close.
+    if (!['active', 'paused'].includes(state.status) || !['active', 'paused'].includes(boardAfterReceipt.status)) return boardAfterReceipt
+    const activePlan = getActivePlan(this.planningByNpc.get(key))
+    if (evidence?.plan_id && (evidence.plan_id !== activePlan?.plan_id
+      || evidence.step_id !== activePlan.steps?.[activePlan.active_step_index]?.step_id)) return boardAfterReceipt
 
     const verification = verifyDeterministicReceipt(state, evidence)
     if (!verification.verified) return boardAfterReceipt
+    const receipt = parseReceiptSummary(evidence)
     const ref = `batch_${verification.batchId}`
-    if ((boardAfterReceipt.evidence ?? []).some(item => item?.kind === 'deterministic_verification' && item?.ref === ref)) {
+    if ((boardAfterReceipt.evidence ?? []).some(item => item?.kind === 'deterministic_verification' && item?.ref === ref
+      && item.step_id === boardAfterReceipt.active_step_id
+      && (!receipt?.batch_ref || (() => { try { return JSON.parse(item.summary).batch_ref === receipt.batch_ref } catch { return false } })()))) {
       return boardAfterReceipt
     }
 
     super.recordBoardEvidence(key, {
       kind: 'deterministic_verification',
       ref,
+      ...(evidence?.plan_id ? { plan_id: evidence.plan_id, step_id: evidence.step_id } : {}),
       summary: JSON.stringify({
         verdict: 'verified_complete',
         semantics: 'Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.',
         batch_id: verification.batchId,
+        ...(receipt?.batch_ref ? { batch_ref: receipt.batch_ref, batch_generation: receipt.batch_generation } : {}),
         operations: verification.operationNames,
         task_types: verification.taskTypes,
       }),

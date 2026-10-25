@@ -58,6 +58,8 @@ class FakeRcon {
           task_types: ['placing'],
           tick: 100 + this.batchId,
         },
+        receipt_journal: [{ state: 'completed', batch_id: this.batchId, batch_generation: this.batchGeneration,
+          batch_ref: completedRef, task_count: 1, task_types: ['placing'], tick: 100 + this.batchId }],
         basic_operation: { last_result: { operation_id: 9, code: 'completed', completed: true } },
       })
     }

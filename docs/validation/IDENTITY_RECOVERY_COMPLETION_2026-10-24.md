@@ -118,3 +118,69 @@ claim that entire future repair matrix is complete.
 Checkpoint: test-only implementation complete; strict restart regressions expose
 an unfixed production defect. No runtime/mod/contract/installer changes, production
 repair, native engine trial, live inference, merge, push or deployment performed.
+
+## Authorized repair checkpoint (resumed)
+
+The owner authorized fixing the restart defects after the test-only checkpoint,
+then paused and explicitly resumed that work. Reuse this branch and checkout;
+the preserved red baseline is `77765aa86d40b6d83712b5ad19e3187300c82de0`.
+Earlier results above remain baseline evidence, not repaired-candidate results.
+
+Acceptance: ingest exact completed native receipt evidence through the shared
+runtime verifier, attribute it to the original goal/plan/step/actor/epoch, persist
+before releasing the duplicate guard, and let fresh world checks close the
+unchanged contract. Cover ownership changes during awaits, insufficient or stale
+proof, native busy state, duplicate/repeated restart, and transport-paused recovery.
+No new replay permission, allowance, gameplay mechanic, live call, integration,
+push or deployment is part of this repair.
+
+Checkpoint: implementation in progress; candidate validation and independent
+review pending. No production repair is claimed by the baseline evidence.
+
+## October 25 handoff and repaired candidate
+
+The owner transferred this task to Codex chat `01a171d1` and authorized finishing,
+validating and locally merging the repair. The test-only baseline above is
+preserved unchanged at `77765aa8`; the current integration source is `0102d240`.
+
+The inherited runtime repair shares exact completed-receipt ingestion between
+ordinary callbacks and restart reconciliation. A receipt must match the durable
+admission, operation signature, original goal/plan/step and actor/epoch, then pass
+the existing semantic verifier. Evidence is persisted with the pending guard
+before that guard is released. Startup recovery checks the unchanged checkpoint
+against fresh world facts before briefing the executor on its next step.
+Paused recovery records proof passively; resuming still uses the existing pause
+classification and completion gates. This does not add replay or plan authority.
+
+Fresh Docker validation, using existing `npc-dev` image
+`sha256:5ebe30259a5ad6e935317e9ad4e831bb9135c75c653c4e743029eaf5f511602f`:
+
+- Original baseline: 18 tests, 12 pass and the same six restart-completion
+  failures. They reach exact settlement without verified semantic completion.
+- Inherited repaired candidate: all 40 focused tests pass, including the original
+  six positive restart regressions and 22 added safety/durability scenarios.
+- Required `bash scripts/test-local.sh all`: exit 0; 103 ordinary-agent,
+  3,448 runtime and 1,378 mod tests pass, plus typecheck, Lua build and generated
+  Lua verification. The two failures in older repair logs do not recur on this
+  candidate; no additional runtime correction was needed during this handoff.
+- Scoped lint: exit 0 after moving an existing restart-test declaration before
+  the scripted callback that references it. Assertions and execution order of
+  the actual recovery are unchanged.
+
+Safety coverage includes missing or mismatched receipt/admission identity,
+superseded request ownership during awaits, missing/stale/wrong transfer effect,
+native busy work, insufficient fresh inventory, changed goal/plan/step, historical
+old-actor evidence, transport pause, persistence failure and repeated reconciliation.
+The existing identity-recovery allowance remains durable across process restore;
+this repair adds no retry loop or allowance reset. Unsupported semantic proof
+leaves the unchanged completion contract unsatisfied. Exact effect settlement can
+still release its pending guard; unresolved native work retains the existing
+duplicate-effect fences. Existing recovery/exhaustion suites are included in
+the complete gate; this is not a claim of new native gameplay coverage.
+
+Full logs, inherited diff and the baseline source archive remain local under
+`D:/SideProjects/airi-factorio-npc/handoffs/restart-fixes-2026-10-25/` and must not
+be staged or published. Independent review, separate payload repin and merged
+offline validation remain required before integration closeout. No Factorio
+mechanics changed; no live provider/Jev call, autonomous trial or deployment was
+performed. A local merge does not publish the repair to the remote branch.

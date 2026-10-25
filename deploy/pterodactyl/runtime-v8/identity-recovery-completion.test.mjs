@@ -116,7 +116,7 @@ function assertNextStep(w, original, pending) {
   assert.equal(w.game.inventory['copper-plate'], 10)
   assert.equal(w.game.furnace.output['copper-plate'], 6)
   const plan = w.held()
-  assert.equal(plan.active_step_index, 1, JSON.stringify({ logs: w.logs, events: w.events.slice(-15) }))
+  assert.equal(plan.active_step_index, 1, JSON.stringify({ logs: w.logs, receipts: plan.execution.receipts, events: w.events }))
   assert.equal(plan.plan_id, original.plan_id)
   assert.equal(plan.plan_version, original.plan_version)
   assert.deepEqual(plan.steps, original.steps, 'no contract, description or step identity changed')
@@ -276,4 +276,173 @@ for (const mismatch of ['missing_receipt', 'signature', 'attempt', 'ordinal', 'o
   assert.equal(w.session.modelResume, null)
   assert.equal(w.events.some(row => row.event === 'operation.recovery_settled'), false)
   assertBoundary(w)
+})
+
+test('exact restart ingestion persists per-step verified proof before releasing the pending identity', async t => {
+  const file = await stateFile(t)
+  const w = world({ stateFile: file })
+  await startRecovery(w)
+  w.game.completeBatch()
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), ['move_items_exact'], JSON.stringify(w.held().execution.receipts))
+  const restored = world({ stateFile: file, game: w.game, memory: new CanonicalTaskBoardMemory() })
+  await restored.agent.loadPersistentState()
+  assert.deepEqual(activeStepVerifiedOperationNames(restored.memory.planningState(KEY)), ['move_items_exact'], JSON.stringify(restored.held().execution.receipts))
+  assert.equal(restored.memory.pendingOperation(KEY), null)
+})
+
+async function completedWorld(t) {
+  const w = world({ stateFile: await stateFile(t) })
+  await startRecovery(w)
+  w.game.completeBatch()
+  return w
+}
+
+for (const fault of ['missing_result', 'wrong_actor', 'wrong_tick', 'wrong_target', 'wrong_direction', 'zero_moved', 'intent']) {
+  test(`restart cannot mint transfer verification from ${fault}`, async t => {
+    const w = await completedWorld(t)
+    if (fault === 'missing_result') w.game.lastBasicResult = undefined
+    if (fault === 'wrong_actor') w.game.lastBasicResult.actor_id++
+    if (fault === 'wrong_tick') w.game.lastBasicResult.tick++
+    if (fault === 'wrong_target') w.game.lastBasicResult.target_unit_number++
+    if (fault === 'wrong_direction') w.game.lastBasicResult.to_entity = true
+    if (fault === 'zero_moved') w.game.lastBasicResult.moved_count = 0
+    if (fault === 'intent') w.memory.currentPlan(KEY).last_operations = [`move_items_exact ${JSON.stringify(collect(5).args)}`]
+    await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+    assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), [])
+    assert.equal((await w.agent.settleIdleStepCheckpoint()).closed, false)
+    assert.equal(w.held().active_step_index, 0)
+    assert.equal(w.game.sent.length, 1)
+    assert.equal(w.model.calls.length, 1, 'only the original proposal called the model')
+  })
+}
+
+for (const boundary of ['status_read', 'reconciled_trace', 'evidence_persist', 'evidence_trace']) {
+  test(`restart receipt ownership is fenced during ${boundary}`, async t => {
+    const w = await completedWorld(t)
+    const pending = structuredClone(w.memory.pendingOperation(KEY))
+    const replace = () => { w.agent.traceRequest = { id: 'replacement-request', usage: {} } }
+    if (boundary === 'status_read') {
+      const read = w.agent.readTaskStatusRaw.bind(w.agent)
+      w.agent.readTaskStatusRaw = async () => { const raw = await read(); replace(); return raw }
+    }
+    if (boundary.endsWith('trace')) {
+      const emit = w.agent.behaviorTrace.emit
+      w.agent.behaviorTrace.emit = async row => {
+        await emit(row)
+        if (row.event === (boundary === 'reconciled_trace' ? 'operation.reconciled' : 'operation.completed_receipt_ingested')) replace()
+      }
+    }
+    if (boundary === 'evidence_persist') {
+      const persist = w.agent.persistState.bind(w.agent)
+      w.agent.persistState = async options => { await persist(options); if (options?.strict) replace() }
+    }
+    await assert.rejects(w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' }), error => error.code === 'stale_handoff_reply')
+    assert.equal(w.memory.pendingOperation(KEY).operation_key, pending.operation_key)
+    assert.equal(w.agent.traceRequest.id, 'replacement-request')
+    assert.equal(w.game.sent.length, 1)
+    assert.equal(w.held().active_step_index, 0)
+    assert.equal(w.events.some(row => row.event === 'operation.recovery_settled'), false)
+    if (['status_read', 'reconciled_trace'].includes(boundary)) assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), [])
+  })
+}
+
+test('native busy work defers completed receipt ingestion and keeps its guard', async t => {
+  const w = await completedWorld(t)
+  w.game.taskState = 'placing'
+  w.game.queueLength = 1
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.ok(w.memory.pendingOperation(KEY))
+  assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), [])
+  assert.equal(w.events.some(row => row.event === 'operation.recovery_settled'), false)
+  assert.equal(w.game.sent.length, 1)
+})
+
+test('evidence persistence failure retains the exact guard and repeated recovery is idempotent', async t => {
+  const w = await completedWorld(t)
+  const persist = w.agent.persistState.bind(w.agent)
+  w.agent.persistState = async options => {
+    if (options?.strict) throw new Error('injected evidence disk failure')
+    await persist(options)
+  }
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.ok(w.memory.pendingOperation(KEY))
+  assert.equal(w.events.some(row => row.event === 'operation.recovery_settled'), false)
+  w.agent.persistState = persist
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  const receipts = structuredClone(w.held().execution.receipts)
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  await w.agent.taskStatusReceipt()
+  await w.agent.taskStatusReceipt()
+  assert.deepEqual(w.held().execution.receipts, receipts)
+  assert.equal(w.memory.pendingOperation(KEY), null)
+  assert.equal(w.game.sent.length, 1)
+})
+
+test('historical completion does not substitute for insufficient fresh inventory', async t => {
+  const w = await completedWorld(t)
+  w.game.inventory['copper-plate'] = 9
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), ['move_items_exact'])
+  assert.equal((await w.agent.settleIdleStepCheckpoint()).closed, false)
+  assert.equal(w.held().active_step_index, 0)
+  assert.equal(w.game.sent.length, 1)
+})
+
+for (const owner of ['goal', 'plan', 'step']) test(`completed historical work cannot mint proof for a superseded ${owner}`, async t => {
+  const w = await completedWorld(t)
+  if (owner === 'goal') w.memory.planningState(KEY).goal.goal_id = 'replacement-goal'
+  if (owner === 'plan') w.held().plan_id = 'replacement-plan'
+  if (owner === 'step') w.held().active_step_index = 1
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), [])
+  assert.equal(w.events.find(row => row.event === 'operation.completed_receipt_ingested')?.data.recorded, false)
+  assert.equal(w.game.sent.length, 1)
+})
+
+for (const stock of [0, 10]) test(`sealed old-actor completion is historical proof, not replacement-actor inventory (stock=${stock})`, async t => {
+  const first = await completedWorld(t)
+  first.game.status.actor_id++
+  first.game.status.epoch++
+  first.game.inventory['copper-plate'] = stock
+  const w = world({ memory: new CanonicalTaskBoardMemory(), stateFile: first.agent.stateFile, game: first.game })
+  await w.agent.loadPersistentState()
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), ['move_items_exact'])
+  const proof = w.memory.currentPlan(KEY).task_board.evidence.find(row => row.kind === 'operation_receipt')
+  const context = JSON.parse(proof.summary).correlation
+  assert.equal(context.actor_id, ACTOR_ID)
+  assert.equal(context.actor_epoch, EPOCH)
+  const fresh = await w.agent.settleIdleStepCheckpoint()
+  assert.equal(fresh.closed, stock === 10, JSON.stringify({ fresh, events: w.events.slice(-8), logs: w.agentLogs }))
+  assert.equal(w.held().active_step_index, stock === 10 ? 1 : 0)
+  assert.equal(w.game.sent.length, 1)
+})
+
+test('transport-paused recovery records proof passively and reactivation checks the same contract', async t => {
+  const first = await completedWorld(t)
+  await first.agent.pausePersistentPlan('provider_transient: fixture timeout', { pause_class: 'transport', pause_subkind: 'timeout' })
+  const w = world({ memory: new CanonicalTaskBoardMemory(), stateFile: first.agent.stateFile, game: first.game })
+  await w.agent.loadPersistentState()
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), ['move_items_exact'])
+  assert.equal(w.memory.currentPlan(KEY).status, 'paused')
+  assert.equal((await w.agent.settleIdleStepCheckpoint()).closed, false)
+  assert.equal(w.held().active_step_index, 0)
+  assert.equal(w.game.sent.length, 1)
+  assert.equal(w.memory.resumePausedPlan(KEY, { pauseClasses: ['transport'] }).resumed, true)
+  const fresh = await w.agent.settleIdleStepCheckpoint()
+  assert.equal(fresh.closed, true, JSON.stringify({ fresh, events: w.events.slice(-8), logs: w.agentLogs, state: w.memory.currentPlan(KEY) }))
+  assert.equal(w.held().active_step_index, 1)
+  assert.equal(w.game.sent.length, 1)
+})
+
+test('unreadable native status retains the exact recovery guard without proof or replay', async t => {
+  const w = await completedWorld(t)
+  w.agent.readTaskStatusRaw = async () => undefined
+  await w.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
+  assert.ok(w.memory.pendingOperation(KEY))
+  assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(KEY)), [])
+  assert.equal(w.events.some(row => row.event === 'operation.recovery_settled'), false)
+  assert.equal(w.game.sent.length, 1)
 })
