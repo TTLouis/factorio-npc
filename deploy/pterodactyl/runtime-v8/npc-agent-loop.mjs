@@ -3315,11 +3315,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  reset() {
+  reset({ preserveAdmission } = {}) {
     const admission = requestAdmissionScope.getStore()
-    if (admission?.agent === this && admission.expectedReset && this.requestAdmissionOwner === admission) {
-      admission.expectedReset = false
-    }
+    const retainedAdmission = preserveAdmission && this.requestAdmissionOwner === preserveAdmission
+      ? preserveAdmission
+      : admission?.agent === this && admission.expectedReset && this.requestAdmissionOwner === admission
+        ? admission
+        : null
+    if (retainedAdmission) retainedAdmission.expectedReset = false
     else this.requestAdmissionOwner = null
     this.lifecycleEnter('reset')
     this.pendingEntityRefresh = undefined
@@ -3339,10 +3342,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.replacementWake = null // MW5: a wake belongs to the request that raised it
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
-    if (this.requestAdmissionOwner === admission) {
-      admission.actor = null
-      admission.generation = this.generation
-      admission.lineage = this.agentContext.lineageSequence
+    if (retainedAdmission && this.requestAdmissionOwner === retainedAdmission) {
+      retainedAdmission.actor = null
+      retainedAdmission.generation = this.generation
+      retainedAdmission.lineage = this.agentContext.lineageSequence
     }
     // The base reset zeroes the request-wide continuation counter; the slice baseline and the slice's
     // deterministic-progress count start from the same point.
@@ -4456,7 +4459,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { returned: false, reason: refusal }
     }
     try {
-      await this.assertCurrent()
+      await this.waitForRequestAdmission(this.assertCurrent())
     }
     catch (error) {
       await this.traceEvent('context.planner_resume_refused', { request_id: rid, role: PLANNER_ROLE, from_role: this.agentContext.role, from_handoff_id: fromHandoffId, reason: 'turn_superseded', route, message: cleanMemoryText(error instanceof Error ? error.message : String(error), 200) }, { requestId: rid })
@@ -8853,7 +8856,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.activePlanKey()
     const planning = this.memory.planningState?.(key)
     const plan = getActivePlanningPlan(planning)
-    return { ...decisionBudgetOwner(this), admissionOwner: this.requestAdmissionOwner, key, requestTrace: this.traceRequest, goalId: planning?.goal?.goal_id,
+    return { ...decisionBudgetOwner(this), admissionOwner: requestAdmissionScope.getStore()?.agent === this && requestAdmissionScope.getStore()?.phase === 'turn' ? requestAdmissionScope.getStore() : null, key, requestTrace: this.traceRequest, goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id, planVersion: plan?.plan_version, stepIndex: plan?.active_step_index,
       stepId: plan?.steps?.[plan.active_step_index]?.step_id, lastIndex: (plan?.steps?.length ?? 0) - 1 }
   }
@@ -9940,6 +9943,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // deferred and takes the cancelling amend route instead. The flag is tied to the conversation that holds
   // the text (currentPendingAmendment) and dies with it.
   async stageCompatibleAmendment(sender, text) {
+    this.assertRequestAdmission()
     if (!this.active || !this.epoch || !Array.isArray(this.baseMessages)) return false
     if (this.agentContext.role === EXECUTOR_ROLE) {
       const requestId = this.traceRequest?.id
@@ -9950,6 +9954,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason: 'user_amendment',
         requestId,
       })
+      this.assertRequestAdmission()
       if (!returned.returned) {
         await this.traceEvent('amendment.not_deferred', { request_id: requestId, reason: `planner_not_reachable:${returned.reason ?? 'restage_failed'}`, role: EXECUTOR_ROLE }, { requestId })
         return false
@@ -10910,35 +10915,45 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // `pauseInfo.pause_class` is the pause's declared class (pause-class.mjs). Every caller declares one; a missing class is recorded as
   // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
   async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}, expectedOwner) {
-    if (expectedOwner) {
-      this.assertCheckpointOwnerIdentity(expectedOwner)
-      if (expectedOwner.admissionOwner !== this.requestAdmissionOwner) throw new AgentLoopError('Request admission cancelled or superseded before pause')
-    }
+    const guardPause = pauseInfo.pause_class === PAUSE_CLASS.GUARD
+    const checkpointOwner = expectedOwner ?? (guardPause ? this.captureCheckpointOwner() : undefined)
+    const callerAdmission = checkpointOwner?.admissionOwner
+      ?? (requestAdmissionScope.getStore()?.agent === this && requestAdmissionScope.getStore()?.phase === 'turn' ? requestAdmissionScope.getStore() : null)
     const admission = this.requestAdmissionOwner
+    // Physical callbacks own their turn/checkpoint, not a question or new intake
+    // that happened to start before the guard. Global operator stops still revoke
+    // intake immediately; guarded pauses only revoke their own intake provenance.
+    const preserveAdmission = guardPause && admission && admission !== callerAdmission
+    if (checkpointOwner) this.assertCheckpointOwnerIdentity(checkpointOwner)
+    if (expectedOwner && !guardPause && expectedOwner.admissionOwner !== admission) {
+      throw new AgentLoopError('Request admission cancelled or superseded before pause')
+    }
     await this.loadPersistentState()
     if (this.requestAdmissionOwner !== admission) {
       throw new AgentLoopError('Request admission cancelled or superseded during pause')
     }
-    // A fail-closed pause must remain possible when native reads fail. It grants
-    // no execution authority; local request/goal/step identity fences its writes.
-    if (expectedOwner) this.assertCheckpointOwnerIdentity(expectedOwner)
-    this.requestAdmissionOwner = null
-    const key = expectedOwner?.key ?? this.activePlanKey()
+    if (checkpointOwner) this.assertCheckpointOwnerIdentity(checkpointOwner)
+    if (!preserveAdmission) this.requestAdmissionOwner = null
+    const key = checkpointOwner?.key ?? this.activePlanKey()
     const state = this.memory.pausePlan?.(key, reason, pauseInfo)
+    // Pausing can reconcile a torn legacy/reducer projection. Fence the exact
+    // result of that synchronous owned mutation across the persistence await.
+    const pausedOwner = checkpointOwner ? this.captureCheckpointOwner() : undefined
     await this.persistState()
-    if (expectedOwner) this.assertCheckpointOwnerIdentity({ ...expectedOwner, admissionOwner: null })
-    if (this.requestAdmissionOwner !== null) throw new AgentLoopError('Request admission cancelled or superseded during pause')
-    // Outside a request (the supervisor pausing a plan a failed request left
-    // stranded, or a user stop) no terminal event follows, so name the pause
-    // here, keyed by the request that just ended. Inside a request the
-    // terminal event carries it.
+    if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
+    if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
+      throw new AgentLoopError('Request admission cancelled or superseded during pause')
+    }
     if (!this.traceRequest) {
       const paused = this.goalPausedTrace('pause_persistent_plan')
       if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
     }
-    abortSkillChoice(this, reason) // 2.8 hook: stop, identity/actor change
+    abortSkillChoice(this, reason)
     this.abortStepContractCalls()
-    super.cancel()
+    // Base cancel is exactly reset(). Preserve/re-anchor an unrelated intake
+    // across this physical reset, rather than lending it to the guard as owner.
+    if (preserveAdmission) this.reset({ preserveAdmission: admission })
+    else super.cancel()
     return state
   }
 
@@ -10991,6 +11006,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (typeof provider !== 'function') return null
     return async (state, questions, context = {}) => {
       const pending = takePendingDecisionRequest(this, state, context)
+      const admission = requestAdmissionScope.getStore()
+      const request = this.traceRequest
+      const actor = { actor_id: context.actorId ?? this.epoch?.actor_id ?? admission?.nativeActor?.actor_id,
+        epoch: context.epoch ?? this.epoch?.epoch ?? admission?.nativeActor?.epoch }
+      const exchangeOwned = () => !admission || admission.agent !== this
+        || (this.requestAdmissionOwner === admission || (!this.requestAdmissionOwner && admission.phase === 'turn'))
+          && this.traceRequest === request
+      const emitExchange = data => {
+        if (exchangeOwned()) return this.decisionTraceEvent('decision.exchange', data)
+        // The real API exchange remains evidence even after ownership expires.
+        // Record it under its original identity without current accounting/state.
+        return this.decisionTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+          event: 'decision.exchange', decision_id: pending?.decision_id,
+          request_id: request?.id ?? admission?.requestId ?? admission?.id,
+          actor_id: actor.actor_id, epoch: actor.epoch, data })
+      }
       // The decision trace never copies the player's message; the behavior
       // trace already holds it for the same request.
       const tracedState = state && typeof state === 'object' && typeof state.message === 'string'
@@ -11005,7 +11036,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const startedAt = Date.now()
       try {
         const response = await provider(state, questions, context)
-        await this.decisionTraceEvent('decision.exchange', {
+        await emitExchange({
           ...exchange,
           model: typeof response?.model === 'string' ? response.model : undefined,
           answers: response?.answers,
@@ -11015,7 +11046,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return response
       }
       catch (error) {
-        await this.decisionTraceEvent('decision.exchange', {
+        await emitExchange({
           ...exchange,
           error: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
           latency_ms: Date.now() - startedAt,

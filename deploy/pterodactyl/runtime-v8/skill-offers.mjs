@@ -257,7 +257,29 @@ async function runSkillChoice(loop, offer, trigger, base) {
     })
     if (!current()) return
     const startedAt = Date.now()
+    const staleFailure = async (outcome, reason, decisionWritten = false) => {
+      // Preserve the old call's diagnostic without routing it through current
+      // decision/behavior accounting or incrementing a replacement's sequence.
+      const actor = admission?.nativeActor ?? epoch
+      const failure = { decision_id: decisionId, contract: SKILL_CHOICE_CONTRACT,
+        reason, fallback: 'deterministic_skill_order', shadow }
+      if (!decisionWritten) await loop.decisionTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+        event: 'decision.fallback', decision_id: decisionId, request_id: offer.request_id,
+        actor_id: actor.actor_id, epoch: actor.epoch, data: failure })
+      const data = { ...base, ...correlation, source: 'deterministic', outcome,
+        reason: outcome === 'error' ? 'jev_error' : `jev_${outcome}`, error: reason,
+        latency_ms: Date.now() - startedAt, stale_callback: true, request_id: offer.request_id }
+      // Preserve the existing stop activity notification only when exactly that
+      // stop is still the latest lineage, with no replacement intake or trace.
+      if (admission && loop.generation === admission.generation + 1 && !loop.requestAdmissionOwner
+        && (!loop.traceRequest || loop.traceRequest.id === offer.request_id)) {
+        loop.onActivity?.('skill.ranked', data)
+      }
+      await loop.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+        event: 'skill.ranked', request_id: offer.request_id, actor_id: actor.actor_id, epoch: actor.epoch, data })
+    }
     const failed = async (outcome, reason) => {
+      if (!current()) return staleFailure(outcome, reason)
       await loop.decisionTraceEvent('decision.fallback', {
         decision_id: decisionId,
         contract: SKILL_CHOICE_CONTRACT,
@@ -265,6 +287,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
         fallback: 'deterministic_skill_order',
         shadow,
       })
+      if (!current()) return staleFailure(outcome, reason, true)
       await loop.traceEvent('skill.ranked', {
         ...base,
         ...correlation,
@@ -320,6 +343,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
     offer.advisor = applied ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
     // U11: the pick goes through the judgment ledger so it is scored against what the fresh agent then loads.
     await loop.jev?.recordSkillOrder({ offer, choice, deterministicOrder: base.deterministic_order, latencyMs: latency })
+    if (!current()) return
     await loop.traceEvent('skill.ranked', {
       ...base,
       ...correlation,
