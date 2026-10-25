@@ -73,6 +73,7 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   jev: f('construction', true, V8, 'JevCheckpoints object built once; its hints/facts reach restage packets (own state is in jev-checkpoints.mjs)'),
   executorHandoffEnabled: f('construction', true, V8, 'executorHandoff option; gates the planner/executor handoff'),
   replacementWakeEnabled: f('construction', true, V8, 'replacementWake option set by the supervisor'),
+  requireTypedObligations: f('construction', true, V8, 'production rejects new deterministic drafts without typed intent; saved legacy plans remain readable'),
   restageSoftLimitOption: f('construction', false, V8, 'restage soft limit option'),
   _agentContext: f('construction', true, V8, 'lazy holder (agentContext getter) created once; its content is the conversation, tracked as messages/baseMessages and the agentContext swap calls'),
   turnScope: f('construction', false, V8, 'AsyncLocalStorage created once; its store is the running turn identity'),

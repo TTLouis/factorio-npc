@@ -769,7 +769,8 @@
         "ordinary-agent",
         "pterodactyl-runtime-v8"
       ],
-      "surface_policy": "shared"
+      "surface_policy": "shared",
+      "native_scope_fields": ["actor_id", "actor_surface_index", "actor_force_index", "surface_index", "force_index"]
     },
     "getLogisticsTopology": {
       "remote": [

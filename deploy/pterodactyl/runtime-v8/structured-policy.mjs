@@ -1005,6 +1005,10 @@ plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions 
     { type: 'object', additionalProperties: false, required: ['kind'], properties: {
       kind: { type: 'string', enum: ['deterministic'] },
       checkpoint: plannerControlToolDefinitions[0].function.parameters.properties.checkpoint,
+      obligations: { type: 'object', additionalProperties: false, required: ['outcome', 'preserve'],
+        description: 'Typed immutable intent for a step combining new outcomes with preservation. Declare outcome predicates separately from preserve exact unit numbers; the harness reads preservation geometry and compiles the completion contract. Future global counts explicitly in outcome remain future outcomes. Supply this when preserving existing structures; never encode preservation as extra global counts.',
+        properties: { outcome: plannerControlToolDefinitions[0].function.parameters.properties.checkpoint,
+          preserve: { type: 'array', maxItems: 8, uniqueItems: true, items: { type: 'integer', minimum: 1 } } } },
     } },
     { type: 'object', additionalProperties: false, required: ['kind', 'rationale'], properties: {
       kind: { type: 'string', enum: ['semantic'] }, rationale: { type: 'string', minLength: 1, maxLength: 600 },

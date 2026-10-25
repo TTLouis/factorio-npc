@@ -468,6 +468,14 @@ function detectAutoResumeExhausted(rows) {
   }
 }
 
+function detectContractDefectExhausted(rows) {
+  const matches = rows.filter(row => row?.event === 'contract.defect_exhausted')
+  if (!matches.length) return undefined
+  const first = matches[0].data ?? {}
+  return { count: matches.length, first_ts: firstTsOf(matches),
+    detail: `contract-defect recovery exhausted (${first.reason ?? 'unknown'}; semantic_step_id=${first.semantic_step_id ?? first.step_id ?? 'n/a'}); a classified pause must remain visible` }
+}
+
 // The intake retry ran out its limit: the objective was reported to the player and dropped.
 function detectIntakeRetryExhausted(rows) {
   const matches = rows.filter(row => row?.event === 'recovery.intake_retry_exhausted')
@@ -870,6 +878,7 @@ function detectUnrecoveredEntityBinding(rows) {
 const SIGNATURES = [
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
+  { id: 'contract_defect_exhausted', label: 'bounded contract-defect successor exhausted', detect: detectContractDefectExhausted },
   { id: 'harness_state_fault', label: 'harness state invariant failed (a harness fault, not a model or guard stop)', detect: detectHarnessStateFault },
   { id: 'dangling_context_reference', label: 'diff/unchanged observation sent without its baseline', detect: detectDanglingContextReferences },
   { id: 'intake_retry_exhausted', label: 'intake retry of a goal lost to a transport failure exhausted', detect: detectIntakeRetryExhausted },

@@ -1986,6 +1986,20 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   let stopped = interrupted()
   if (stopped) return cancelled(stopped, 'load_persistent_state')
   state = agent.memory?.currentPlan?.(key)
+  const durablePlanning = agent.memory?.planningState?.(key)
+  const durablePlan = getActivePlan(durablePlanning)
+  if (durablePlan?.blocker?.kind === 'contract_defect'
+    || durablePlan?.status === PLAN_STATUS.DRAFT && durablePlanning?.goal?.contract_defect_successors?.includes(durablePlan.plan_id)) {
+    const pauseOwner = agent.captureCheckpointOwner?.()
+    await agent.traceEvent?.('contract.defect_exhausted', { request_id: recoveryRequestId,
+      goal_id: durablePlanning.goal.goal_id, plan_id: durablePlan.plan_id,
+      step_id: durablePlan.steps[durablePlan.active_step_index]?.step_id,
+      reason: 'interrupted_claim_requires_visible_pause', disposition: 'classified_guard_pause' }, { requestId: recoveryRequestId })
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'contract_defect_interrupted_trace')
+    const paused = await agent.pausePersistentPlan?.('contract_translation_defect:interrupted_claim', { pause_class: PAUSE_CLASS.GUARD }, pauseOwner)
+    return { recovered: false, reason: 'contract_defect_claim_exhausted', state: paused ?? state, paused: true }
+  }
   const awaitingNextSlice = agent.goalAwaitingNextSlice?.(key) === true
   if (!shouldRecoverInterruptedPlan(state, { awaitingNextSlice, allowModelRecoverable: options.allowModelRecoverable === true })) return { recovered: false, reason: 'plan_not_recoverable', state }
   if (options.allowModelRecoverable === true) agent.clearActionOmissionRecovery?.()
@@ -2160,8 +2174,13 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     // active step; otherwise the first next-step reply is rejected as stale.
     if (reason === 'runtime_restart' && reconciliation?.verdict === 'admitted_completed') {
       const fresh = await agent.settleIdleStepCheckpoint?.()
+      if (fresh?.contractRecovery && fresh.recoveryRequestId === recoveryRequestId) {
+        return { recovered: true, reason: 'restart_contract_defect_settled', result: fresh.contractRecovery,
+          state: agent.memory?.currentPlan?.(key) }
+      }
       stopped = interrupted()
       if (stopped) return cancelled(stopped, 'restart_checkpoint')
+      if (fresh?.completionDeferred) return { recovered: true, reason: 'restart_checkpoint_deferred', result: fresh.completionDeferred, state: agent.memory?.currentPlan?.(key) }
       if (fresh?.closed) {
         state = agent.memory?.currentPlan?.(key) ?? fresh.state
         if (fresh.contractPause || state?.status === 'paused') return { recovered: true, reason: 'restart_checkpoint_paused', state }
@@ -3590,6 +3609,7 @@ export class Session {
     this.agent = new NpcAgentLoop({
       completionProtocolVersion: 3,
       executorObservationRate: true, // harness-owned replenishing live-read rate
+      requireTypedObligations: true,
       replacementWake: true, // MW5: player-objective grant at admission and the replacement wake
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,

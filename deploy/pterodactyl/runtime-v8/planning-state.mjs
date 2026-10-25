@@ -23,12 +23,15 @@
 //     operations or into plan steps.
 
 import { authoredCompletionContractSupported, completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
+import { storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, compileObligations, contractDefectShape, preservedProofMatches, effectivePreservationProof, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   authorizationHasContent,
   authorizationOf,
   carryAuthorizationAcrossGoals,
+  checkGrant,
   checkReplacementAtCommit,
   classifyReplacement,
   consumeApproval,
@@ -425,6 +428,8 @@ export const PLANNING_EVENT = Object.freeze({
   // A replacement for a BLOCKED plan: accepted inside a current grant (creates a DRAFT successor with lineage),
   // raised as an approval question when it would leave the grant (the old plan stays frozen), or refused.
   REPLACEMENT_PLAN_REQUESTED: 'REPLACEMENT_PLAN_REQUESTED',
+  CONTRACT_DEFECT_CLAIMED: 'CONTRACT_DEFECT_CLAIMED',
+  PRESERVATION_OBSERVED: 'PRESERVATION_OBSERVED',
   AUTHORIZATION_APPROVAL_RECORDED: 'AUTHORIZATION_APPROVAL_RECORDED',
   // World facts that outlive a goal: NPC placement receipts and reserved containers.
   NPC_PLACEMENT_RECORDED: 'NPC_PLACEMENT_RECORDED',
@@ -801,6 +806,8 @@ function sanitizeGoal(raw) {
       ? { review_notes: reviewNotes(raw.review_notes, reviewContinuationSteps(raw.review_continuation_steps)) } : {}),
     // MW5: accepted replacement plans this goal has used (the durable cap counter; independent of retained plans and grants).
     ...(Number.isSafeInteger(raw.replacements_accepted) && raw.replacements_accepted > 0 ? { replacements_accepted: Math.min(raw.replacements_accepted, 1000) } : {}),
+    ...(Array.isArray(raw.contract_defect_claims) ? { contract_defect_claims: stringList(raw.contract_defect_claims, { max: 64, maxLength: 200 }) } : {}),
+    ...(Array.isArray(raw.contract_defect_successors) ? { contract_defect_successors: stringList(raw.contract_defect_successors, { max: 64, maxLength: 200 }) } : {}),
     owner: text(raw.owner, 128) || 'unknown',
     objective: text(raw.objective, 1000),
     constraints: stringList(raw.constraints, { max: 24, maxLength: 300 }),
@@ -933,7 +940,7 @@ export function sanitizeOptionalCompletionContract(raw) {
   return completionContractSupported(contract) ? contract : undefined
 }
 
-function sanitizeStep(raw, { planId, planVersion, sequence }) {
+function sanitizeStep(raw, { planId, planVersion, sequence, goalId, bindProof = false }) {
   if (raw === undefined || raw === null) return undefined
   const source = typeof raw === 'string' ? { description: raw } : raw
   if (typeof source !== 'object' || Array.isArray(source)) return undefined
@@ -947,10 +954,20 @@ function sanitizeStep(raw, { planId, planVersion, sequence }) {
   // makes a step pending: old saves, semantic steps and prose steps have none.
   const pending = !contract && source.completion_mode === 'deterministic' && source.contract_status === 'pending'
   const binding = contract ? sanitizeContractBinding(source.contract_binding) : undefined
+  const obligations = storedObligations(source.obligations)
+  const semanticStepId = text(source.semantic_step_id, 200) || stepId
+  let proof = normalizeObligationProof(source.obligation_proof, obligations)
+  if (proof && bindProof && !proof.binding) proof = { ...proof, binding: { goal_id: goalId, plan_id: planId,
+    plan_version: planVersion, step_id: stepId, semantic_step_id: semanticStepId } }
+  if (proof && !obligationProofOwned(proof, { goalId, semanticStepId })) proof = undefined
   return {
     step_id: stepId,
+    ...(source.semantic_step_id || obligations ? { semantic_step_id: semanticStepId } : {}),
     description,
     completion_contract: contract ?? null,
+    ...(Object.hasOwn(source, 'obligations') || source.obligation_protocol === 1 ? { obligation_protocol: 1 } : {}),
+    ...(obligations ? { obligations } : {}),
+    ...(proof ? { obligation_proof: proof } : {}),
     ...(storedExecutionGuidance(source.execution_guidance) ? { execution_guidance: storedExecutionGuidance(source.execution_guidance) } : {}),
     ...(source.completion_mode === 'deterministic' || source.completion_mode === 'semantic'
       ? { completion_mode: source.completion_mode, ...(source.completion_mode === 'semantic' ? { semantic_rationale: text(source.semantic_rationale, 600) } : {}) }
@@ -979,12 +996,12 @@ export function isStepContractPending(step) {
   return !!step && step.contract_status === STEP_CONTRACT_STATUS.PENDING && !step.completion_contract
 }
 
-function sanitizeSteps(rawSteps, { planId, planVersion }) {
+function sanitizeSteps(rawSteps, { planId, planVersion, goalId, bindProof = false }) {
   const list = boundedList(rawSteps, 64)
   const steps = []
   const seen = new Set()
   list.forEach((raw, index) => {
-    const step = sanitizeStep(raw, { planId, planVersion, sequence: index + 1 })
+    const step = sanitizeStep(raw, { planId, planVersion, sequence: index + 1, goalId, bindProof })
     if (!step || seen.has(step.step_id)) return
     seen.add(step.step_id)
     steps.push(step)
@@ -1496,7 +1513,7 @@ function createPlan(state, {
   carriedForwardEvidence = [],
 }) {
   const planId = `${state.goal.goal_id}_p${sequence}`
-  const sanitizedSteps = sanitizeSteps(steps, { planId, planVersion })
+  const sanitizedSteps = sanitizeSteps(steps, { planId, planVersion, goalId: state.goal.goal_id, bindProof: true })
   const nodeIds = stringList(roadmapNodeIds, { max: 16, maxLength: 120 })
   const mode = DEVELOPMENT_MODES.includes(developmentMode) ? developmentMode : 'maintain'
   // Which of the nodes this draft claims to refine had actually been unblocked
@@ -2012,9 +2029,31 @@ function freezeCommittedPlan(plan) {
   return plan
 }
 
+export function contractDefectSuccessorValid(state, successor) {
+  const predecessor = state.plans.find(row => row.plan_id === successor?.replacement?.predecessor_plan_id)
+  if (predecessor?.blocker?.kind !== 'contract_defect' || successor.replacement?.reason?.code !== CONTRACT_DEFECT_REASON) return false
+  const suffix = predecessor.steps.slice(predecessor.active_step_index)
+  if (successor.steps.length !== suffix.length || !state.goal.contract_defect_claims?.includes(suffix[0].semantic_step_id ?? suffix[0].step_id)) return false
+  const prefix = [...(predecessor.carried_forward_evidence ?? []), ...predecessor.steps
+    .filter(step => predecessor.execution.step_progress[step.step_id]?.status === 'completed').map(step => `${predecessor.plan_id}:${step.step_id}`)]
+  if (JSON.stringify(successor.carried_forward_evidence) !== JSON.stringify(prefix)) return false
+  if (JSON.stringify(successor.execution.preservation_proofs ?? {}) !== JSON.stringify(predecessor.execution.preservation_proofs ?? {})) return false
+  return successor.steps.every((row, i) => {
+    const original = suffix[i]
+    return row.description === original.description && row.semantic_step_id === (original.semantic_step_id ?? original.step_id)
+      && row.completion_mode === original.completion_mode
+      && JSON.stringify(row.obligations) === JSON.stringify(original.obligations)
+      && JSON.stringify(row.obligation_proof) === JSON.stringify(original.obligation_proof)
+      && JSON.stringify(row.execution_guidance) === JSON.stringify(original.execution_guidance)
+      && (i === 0 ? obligationContractMatches(row.completion_contract, original.obligations)
+        : JSON.stringify(row.completion_contract) === JSON.stringify(original.completion_contract) && row.contract_status === original.contract_status)
+      && (!row.obligations || obligationProofOrigin(state, row))
+  })
+}
+
 function blockPlan(state, plan, { now, blocker }) {
-  // A blocker FREEZES the plan. There is deliberately no path from here to
-  // automatic replanning: only USER_REVISION_APPROVED can produce a successor.
+  // A blocker freezes content. A successor requires user revision or a
+  // separately classified, grant-checked runtime replacement transition.
   const blocked = withStatus({ ...plan, blocker: clone(blocker) }, PLAN_STATUS.BLOCKED, {
     now,
     reason: blocker?.reason_code ?? 'blocked',
@@ -2043,6 +2082,8 @@ export function checkStepContractBind(state, event) {
   if (!STEP_CONTRACT_BINDINGS.includes(event.binding)) return refuse('binding_not_recognized')
   const contract = sanitizeOptionalCompletionContract(event.contract)
   if (!contract || !authoredCompletionContractSupported(contract)) return refuse('contract_unsupported')
+  if (step.obligation_protocol === 1 && (!step.obligations || !step.obligation_proof || !obligationProofOrigin(state, step)
+    || !obligationContractMatches(contract, step.obligations))) return refuse('contract_obligation_mismatch')
   return { ok: true, plan, index, step, contract }
 }
 
@@ -2355,6 +2396,12 @@ Object.assign(HANDLERS, {
     if (plan.steps.length === 0) return state
     // The step that runs first must carry its checkpoint. Later steps may still be pending.
     if (isStepContractPending(plan.steps[plan.active_step_index])) return state
+    if (plan.steps.some(step => step.obligation_protocol === 1 && (!step.obligations || !step.obligation_proof
+      || !obligationProofOrigin(state, step, { committingPlanId: plan.plan_id })
+      || step.completion_contract && !obligationContractMatches(step.completion_contract, step.obligations)))) return state
+    if ((state.goal.contract_defect_successors?.includes(plan.plan_id)
+      || state.plans.find(row => row.plan_id === plan.derived_from_plan_id)?.blocker?.kind === 'contract_defect')
+      && !contractDefectSuccessorValid(state, plan)) return state
     // A replacement plan commits only while its grant is still current (MW1): the revision it was authorized under,
     // the goal, the actor epoch and the steps that were classified. Refused, it stays an uncommitted DRAFT and the
     // refusal is recorded for the trace; nothing else about the state moves.
@@ -2850,6 +2897,50 @@ Object.assign(HANDLERS, {
     }
   },
 
+  [PLANNING_EVENT.PRESERVATION_OBSERVED](state, event, now) {
+    const plan = getActivePlan(state)
+    const step = plan?.steps?.[plan.active_step_index]
+    const held = step && effectivePreservationProof(plan, step)
+    const fresh = normalizeObligationProof(event.proof, step?.obligations)
+    if (!isRuntimeAuthority(event.source) || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
+      || state.goal?.status !== GOAL_STATUS.ACTIVE || plan.plan_id !== event.plan_id || step?.step_id !== event.step_id
+      || !obligationProofOrigin(state, step) || !held || !fresh
+      || JSON.stringify(fresh.binding) !== JSON.stringify(step.obligation_proof.binding)
+      || !preservedProofMatches(held, fresh) || fresh.captured_at < held.captured_at) return state
+    const semantic = step.semantic_step_id ?? step.step_id
+    const proofs = plan.execution.preservation_proofs ?? {}
+    if (Object.keys(proofs).length >= 64 && !Object.hasOwn(proofs, semantic)) return state
+    return withPlan(state, plan.plan_id, current => ({ ...current, execution: { ...current.execution,
+      preservation_proofs: { ...proofs, [semantic]: clone(fresh) } }, updated_at: now }))
+  },
+
+  [PLANNING_EVENT.CONTRACT_DEFECT_CLAIMED](state, event, now) {
+    const plan = getActivePlan(state)
+    const step = plan?.steps?.[plan.active_step_index]
+    const semantic = step?.semantic_step_id ?? step?.step_id
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE
+      || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
+      || plan.plan_id !== event.plan_id || plan.plan_version !== event.plan_version || step?.step_id !== event.step_id
+      || !contractDefectShape(step) || step.obligation_proof.captured_at > plan.committed_at
+      || !obligationProofOwned(step.obligation_proof, { goalId: plan.goal_id, semanticStepId: semantic })
+      || !obligationProofOrigin(state, step)
+      || !(plan.execution.receipts[step.step_id] ?? []).some(row => row.kind === 'operation_receipt' && row.ref === event.evidence_ref && row.source === 'runtime')
+      || !(plan.execution.receipts[step.step_id] ?? []).some(row => row.kind === 'deterministic_verification' && row.source === 'runtime'
+        && row.verified_operation_names?.some(name => ['place_entity', 'place_candidate'].includes(name)))
+      || !effectivePreservationProof(plan, step) || !preservedProofMatches(effectivePreservationProof(plan, step), event.fresh_proof)
+      || event.fresh_proof.preserved.some(row => row.item_io && (!row.item_io.drop_target || row.entity.type === 'inserter' && !row.item_io.pickup_target))
+      || step.obligation_proof.actor_id !== event.current?.actor_id || step.obligation_proof.actor_epoch !== event.current?.actor_epoch
+      || !text(event.evidence_ref, 200) || state.goal.contract_defect_claims?.includes(semantic) || (state.goal.replacements_accepted ?? 0) >= MAX_REPLACEMENTS_PER_GOAL
+      || !checkGrant(authorizationOf(state), state.goal, { grant_id: event.grant_id, grant_revision: event.grant_revision,
+        actor_id: event.current?.actor_id, actor_epoch: event.current?.actor_epoch }).ok) return state
+    const next = blockPlan(state, plan, { now, blocker: { kind: 'contract_defect', reason_code: CONTRACT_DEFECT_REASON,
+      detected_at: now, evidence_refs: [text(event.evidence_ref, 200)].filter(Boolean),
+      detail: 'Native preservation and frozen typed intent prove a checkpoint translation defect.', requires_user_decision: false,
+      semantic_step_id: semantic } })
+    return { ...next, goal: { ...next.goal, contract_defect_claims: [...(next.goal.contract_defect_claims ?? []), semantic] },
+      log: logEntry(next, { type: PLANNING_EVENT.CONTRACT_DEFECT_CLAIMED, at: now, plan_id: plan.plan_id, step_id: step.step_id }) }
+  },
+
   [PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED](state, event, now) {
     // The harness owns this request. The planner authors the steps; it cannot invoke the transition.
     if (!isRuntimeAuthority(event.source)) return state
@@ -2895,6 +2986,17 @@ Object.assign(HANDLERS, {
     }
 
     const predecessor = getPlan(state, predecessorId)
+    if (predecessor.blocker?.kind === 'contract_defect') {
+      const active = predecessor.steps[predecessor.active_step_index]
+      const suffix = predecessor.steps.slice(predecessor.active_step_index)
+      if (event.reason?.code !== CONTRACT_DEFECT_REASON || !state.goal.contract_defect_claims?.includes(active.semantic_step_id ?? active.step_id)
+        || !contractDefectShape(active) || !Array.isArray(event.steps) || event.steps.length !== suffix.length
+        || event.steps.some((row, i) => row.description !== suffix[i].description
+          || row.semantic_step_id !== (suffix[i].semantic_step_id ?? suffix[i].step_id)
+          || JSON.stringify(row.obligations) !== JSON.stringify(suffix[i].obligations)
+          || JSON.stringify(row.obligation_proof) !== JSON.stringify(suffix[i].obligation_proof))
+        || !obligationContractMatches(event.steps[0].completion_contract, active.obligations)) return state
+    }
     const sequence = nextSequence(state)
     // The verified prefix is cumulative, exactly as for a user revision: what the predecessor carried forward, then
     // what it completed. Verified history is preserved, not recomputed or discarded.
@@ -2915,6 +3017,13 @@ Object.assign(HANDLERS, {
       origin: 'authorized_replacement',
       carriedForwardEvidence: carried,
     })
+    if (predecessor.blocker?.kind === 'contract_defect') {
+      const oldStep = predecessor.steps[predecessor.active_step_index]
+      const newStep = successor.steps[0]
+      successor.execution.receipts[newStep.step_id] = clone(predecessor.execution.receipts[oldStep.step_id] ?? [])
+      successor.execution.preservation_proofs = clone(predecessor.execution.preservation_proofs ?? {})
+      successor.contract_defect_receipt_source = { plan_id: predecessor.plan_id, step_id: oldStep.step_id }
+    }
     if (successor.steps.length === 0) return state
     successor.replacement = replacementLineage(
       { ...verdict, steps_fingerprint: replacementStepsFingerprint(successor.steps) },
@@ -2931,7 +3040,8 @@ Object.assign(HANDLERS, {
       active_plan_id: successor.plan_id,
       authorization: nextAuth,
       // The accept branch is the only place a replacement is counted: a re-draft of the same successor never passes here.
-      goal: state.goal ? { ...state.goal, replacements_accepted: (state.goal.replacements_accepted ?? 0) + 1, updated_at: now } : state.goal,
+      goal: state.goal ? { ...state.goal, replacements_accepted: (state.goal.replacements_accepted ?? 0) + 1, updated_at: now,
+        ...(predecessor.blocker?.kind === 'contract_defect' ? { contract_defect_successors: [...(state.goal.contract_defect_successors ?? []), successor.plan_id] } : {}) } : state.goal,
       updated_at: now,
       log: logEntry(state, {
         type: PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED,
@@ -3972,13 +4082,24 @@ function restoreContextRestages(raw) {
   })
 }
 
+function restorePreservationProofs(raw, steps) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.invalid === true || Object.keys(raw).length > 64) return { invalid: true }
+  const restored = {}
+  for (const [semantic, proof] of Object.entries(raw)) {
+    const step = steps.find(row => (row.semantic_step_id ?? row.step_id) === semantic)
+    if (!step) continue // verified prefix evidence remains on its historical plan
+    restored[semantic] = normalizeObligationProof(proof, step.obligations) ?? { invalid: true }
+  }
+  return restored
+}
+
 function restorePlan(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const planId = text(raw.plan_id, 200)
   const planVersion = Number.isSafeInteger(raw.plan_version) && raw.plan_version > 0 ? raw.plan_version : 1
   if (!planId) return undefined
   const status = PLAN_STATUSES.includes(raw.status) ? raw.status : PLAN_STATUS.DRAFT
-  const steps = sanitizeSteps(raw.steps, { planId, planVersion })
+  const steps = sanitizeSteps(raw.steps, { planId, planVersion, goalId: raw.goal_id })
   const stepIds = new Set(steps.map(step => step.step_id))
   const storedProgress = raw.execution?.step_progress ?? {}
   const progress = {}
@@ -4035,12 +4156,14 @@ function restorePlan(raw) {
       // Absent in a snapshot that predates the ledger: the memory facade seeds
       // it once from the legacy board evidence.
       receipts_seeded: raw.execution?.receipts_seeded === true,
+      ...(raw.execution?.preservation_proofs ? { preservation_proofs: restorePreservationProofs(raw.execution.preservation_proofs, steps) } : {}),
     },
     advisory: clone(raw.advisory) ?? { planner_focus_step_id: null, planner_focus_at: null, steering_note: null },
     carried_forward_evidence: stringList(raw.carried_forward_evidence, { max: 64, maxLength: 200 }),
     lifecycle: recentList(raw.lifecycle, 64).map(item => clone(item)),
   }
   if (raw.runtime_validation) plan.runtime_validation = clone(raw.runtime_validation)
+  if (raw.contract_defect_receipt_source) plan.contract_defect_receipt_source = clone(raw.contract_defect_receipt_source)
   const replacement = restoreReplacementLineage(raw.replacement)
   if (replacement) plan.replacement = replacement
   if (stepIds.size !== steps.length) return undefined
