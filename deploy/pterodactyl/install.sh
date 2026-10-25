@@ -3,7 +3,7 @@
 # Immutable source: deploy/pterodactyl/payload-src/installer.sh
 set -Eeuo pipefail
 umask 077
-REF="40f73ccd8a1c4143d45b35b8cec6e4a0047dc3b6"
+REF="235a9b3cc5729a17f75834576c3ad6bffa69dbde"
 EXPECTED_SOURCE_SHA256="b34bbf1b4c0f751c2fbe83c13878c9009033691b5649c5a947887c122ca90a01"
 URL="https://raw.githubusercontent.com/TTLouis/factorio-npc/$REF/deploy/pterodactyl/payload-src/installer.sh"
 TMP="$(mktemp)"
