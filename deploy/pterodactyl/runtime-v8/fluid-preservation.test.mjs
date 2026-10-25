@@ -3,10 +3,9 @@ import test from 'node:test'
 import fs from 'node:fs'
 import vm from 'node:vm'
 import { createHash } from 'node:crypto'
-import { compileObligations, normalizeObligations, preservationGeometry, normalizeObligationProof,
-  obligationSignature, preservedProofMatches, normalizeFluidAdmission, fluidAdditionProof,
+import { normalizeObligations, preservationGeometry, normalizeObligationProof,
+  preservedProofMatches, normalizeFluidAdmission, fluidAdditionProof,
   normalizeFluidCertificate, effectivePreservationProof, preservationFailure, normalizeFluidReceiptBinding, isNativeEmptyPreservationSequence } from './contract-obligations.mjs'
-import { operationSignature } from './operation-reconciliation.mjs'
 
 import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
 import { fluidPreservationMutationUnsafe } from './contract-obligation-runtime.mjs'

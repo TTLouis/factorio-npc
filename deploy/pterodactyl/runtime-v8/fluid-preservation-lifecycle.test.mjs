@@ -9,7 +9,7 @@ import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
 import { answersStepContract, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:fluid-fixture'
-function world({ trace, persist, read, journal, secondOperation, doneMinimum = 99 } = {}) {
+function world({ trace, persist, read, journal, craftingQueue, secondOperation, doneMinimum = 99 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const game = new FakeFactorio({ inventory: { boiler: 1, coal: 2 } })
   game.status.actor_id = 10
@@ -39,7 +39,7 @@ function world({ trace, persist, read, journal, secondOperation, doneMinimum = 9
       candidate.protected_geometry = [fluidGeometry(1, game.connected === true)]
       return JSON.stringify({ ok: true, preservation_join: candidate })
     }
-    if (text.includes('autorio_crafting') && text.includes('status')) return JSON.stringify({ task_active: false, native_queue: [] })
+    if (text.includes('autorio_crafting') && text.includes('status')) return JSON.stringify({ task_active: false, native_queue: craftingQueue ? craftingQueue() : [] })
     if (text.includes('evaluate_condition') && text.includes('entity_count')) return JSON.stringify({ ok: true, kind: 'entity_count',
       prototype: 'boiler', current: game.connected ? 1 : 0, found: game.connected ? 1 : 0, satisfied: game.connected === true, truncated: false })
     if (text.includes('autorio_operations","status')) {
@@ -317,6 +317,37 @@ for (const [shape, journal] of [
   test(`actual helper refuses ${shape} native journal without fluid send or certificate`, async () => {
     const w = world({ journal })
     await assert.rejects(w.start(), /preservation_pre_admission_receipt_boundary_unproven/)
+    assert.equal(w.game.mutations.length, 0)
+    assert.equal(w.game.inventory.boiler, 1)
+    assert.deepEqual(w.held().execution.preservation_certificates ?? [], [])
+    assert.deepEqual(w.held().execution.preservation_admissions ?? {}, {})
+    assert.equal(w.memory.pauseRecord(KEY).pause_class, 'guard')
+  })
+}
+
+
+for (const [shape, craftingQueue] of [['empty array', () => []], ['cold Lua empty object', () => ({})]]) {
+  test(`actual fluid hook accepts crafting ${shape} before send and certificate`, async () => {
+    const w = world({ craftingQueue })
+    await w.start()
+    assert.equal(w.game.mutations.length, 1)
+    assert.equal(Object.keys(w.held().execution.preservation_admissions).length, 1)
+    await w.agent.completed()
+    assert.equal(w.held().execution.preservation_certificates.length, 1)
+    assert.equal(w.held().active_step_index, 1)
+    assert.equal(w.game.mutations.length, 2)
+    assert.ok(w.game.mutations[1].includes("'supply_entity'"))
+  })
+}
+
+for (const [shape, craftingQueue] of [
+  ['missing', () => undefined], ['null', () => null], ['numeric zero', () => 0], ['boolean false', () => false], ['empty string', () => ''],
+  ['nonempty array', () => [{ count: 1 }]], ['nonempty object', () => ({ queued: 1 })], ['nested records', () => ({ records: [] })],
+  ['malformed array', () => [null]],
+]) {
+  test(`actual fluid hook refuses crafting ${shape} without send or certificate`, async () => {
+    const w = world({ craftingQueue })
+    await assert.rejects(w.start(), /preservation_admission_native_busy/)
     assert.equal(w.game.mutations.length, 0)
     assert.equal(w.game.inventory.boiler, 1)
     assert.deepEqual(w.held().execution.preservation_certificates ?? [], [])
