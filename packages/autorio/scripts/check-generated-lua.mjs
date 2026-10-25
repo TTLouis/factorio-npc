@@ -66,6 +66,10 @@ export function check_generated_lua(lua, factorio_methods) {
     module.lines.forEach((line, offset) => {
       const at = `${module.name} (control.lua:${module.start + offset})`
       if (/^\s*--/.test(line)) return
+      // The preservation boundary must distinguish an empty registry from a
+      // lost one. TSTL emits !array.length as `not #array`; Lua's zero is true.
+      // Check the actual generated module, beyond the JavaScript unit mocks.
+      if (module.name === 'placement_candidates' && /\bnot\s+#/.test(line)) findings.push(`${at}: numeric length truthiness in preservation placement: ${line.trim()}`)
       if (/\.length\b/.test(line)) findings.push(`${at}: untyped .length field: ${line.trim()}`)
       for (const match of line.matchAll(/([A-Za-z_][\w.[\]]*):([a-z_]\w*)\(/g)) {
         const [, receiver, method] = match

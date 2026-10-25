@@ -136,3 +136,20 @@ geometry must still match. Fresh configure/startup, changed generation/owner,
 missing/uncertain facts refuse without replay or allowance renewal. No peer-local
 on_load storage mutation is introduced; actual saved-queue/load proof remains
 pending alongside final full/payload/native checks.
+
+Combined engine01 on immutable54dfa4ea runtime/e310 native failed at the FIRST
+unguarded offshore-pump, before any fluid witness or boiler placement. Core,
+item geometry and exported atomic idle DTO passed; the full fluid result is FAIL.
+The exact generated Lua used `if not #claims` for TypeScript `!claims.length`;
+Lua zero is truthy, so a virgin empty registry fell through to required proof.
+Four new preservation length checks now use explicit `=== 0`. The generated-Lua
+gate rejects this exact compiled form in placement_candidates, with a preserved
+bad-output regression and positive explicit-comparison control. Queue/create
+tests distinguish virgin empty history from initialized missing history; the
+engine fixture explicitly captures those native facts before its normal first
+pump. Historical failing output/logs and cleanup remain local and untouched.
+An audit of introduced native length/count/size conditions found no other
+implicit numeric truthiness in this repair. One inherited gather-cancellation
+truthiness pattern predates this repair and was reported separately; it is not
+silently changed by this fluid follow-up. Fresh type/TSTL and engine proof of
+this correction are pending; the old full-gate PASS does not cover it.

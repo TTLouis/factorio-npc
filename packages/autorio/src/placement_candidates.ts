@@ -1060,8 +1060,8 @@ function placement_claims(actor: ControlledActor, entity_name: string, x?: numbe
 export function placement_preservation_queue_binding(actor: ControlledActor, entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }) {
   if (!claim_registry_valid()) return { required: true }
   const claims = placement_claims(actor, entity_name, x, y, direction)
-  if (storage.sgluna_fluid_preservation_claims_initialized && !Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length) return { required: true }
-  if (!claims.length) return { required: false }
+  if (storage.sgluna_fluid_preservation_claims_initialized && Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length === 0) return { required: true }
+  if (claims.length === 0) return { required: false }
   if (claims.length !== 1 || !proof) return { required: true }
   const guard = claims[0]
   if (proof.candidate_set_id !== guard.candidate_set_id || proof.candidate_id !== guard.candidate_id
@@ -1075,8 +1075,8 @@ export function placement_preservation_execution_allowed(actor: ControlledActor,
   proof: { candidate_set_id: string, candidate_id: string } | undefined, binding: FluidQueuedBinding | undefined, status: any) {
   if (!claim_registry_valid()) return false
   const claims = placement_claims(actor, entity_name, x, y, direction)
-  if (storage.sgluna_fluid_preservation_claims_initialized && !Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length) return false
-  if (!claims.length) return binding === undefined
+  if (storage.sgluna_fluid_preservation_claims_initialized && Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length === 0) return false
+  if (claims.length === 0) return binding === undefined
   return claims.length === 1 && !!proof && !!binding && claims[0].operation_key === binding.operation_key
     && claims[0].signature === binding.signature && same_fluid_owner(claims[0].owner, binding.owner)
     && proof.candidate_set_id === claims[0].candidate_set_id && proof.candidate_id === claims[0].candidate_id

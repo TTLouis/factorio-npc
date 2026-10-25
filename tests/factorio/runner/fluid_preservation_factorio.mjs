@@ -141,7 +141,12 @@ try {
   assert.equal(evidence.setup.humans, 0); assert.equal(evidence.setup.speed, 1)
   evidence.water = await tool('getFluidSourceTiles', { fluid_name: 'water', search_radius: 16, limit: 8 })
   assert.ok(evidence.water.samples?.length)
+  evidence.virgin_claim_registry = await lua(`local count=0; for _ in pairs(storage.sgluna_fluid_preservation_claims or {}) do count=count+1 end;
+    rcon.print(helpers.table_to_json({count=count,initialized=storage.sgluna_fluid_preservation_claims_initialized==true,
+      lua_not_empty_length=not #{},explicit_empty=(#{}==0)}))`)
+  assert.deepEqual(evidence.virgin_claim_registry, { count: 0, initialized: false, lua_not_empty_length: false, explicit_empty: true })
   const pump = await place('offshore-pump', { center: evidence.setup.center, radius: 8 })
+  evidence.virgin_unguarded_pump = pump.result
   const pumpId = pump.result.placed_unit_number
   const open = preservationGeometry(await geometry(pumpId), pumpId)
   evidence.open = open
