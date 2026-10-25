@@ -13,8 +13,8 @@ import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.m
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin } from './contract-obligations.mjs'
-import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe } from './contract-obligation-runtime.mjs'
+import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure } from './contract-obligations.mjs'
+import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
@@ -10124,10 +10124,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async recordPendingOperationBeforeSend(operations, before) {
     if (!this.requestInfo || typeof this.memory.recordPendingOperation !== 'function') return undefined
     const key = this.requestInfo.memoryKey
+    const owner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
+    const intake = this.requestAdmissionOwner
+    const amendment = this.pendingInteractionAmendment
+    const current = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      if (this.requestAdmissionOwner !== intake || this.pendingInteractionAmendment !== amendment || this.currentPendingAmendment()) throw new AgentLoopError('Prepared operation cancelled or superseded')
+    }
     const planning = this.memory.planningState?.(key)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
     const step = plan?.steps?.[plan.active_step_index]
     const baseline = batchWatermark(await this.readTaskStatusRaw()) ?? null
+    current()
     const record = this.memory.recordPendingOperation(key, buildPendingOperation({
       requestId: this.traceRequest?.id,
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
@@ -10151,26 +10159,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
     }
-    await this.persistState()
+    try {
+      await this.persistState({ strict: true })
+      current()
+    } catch (error) {
+      await this.settleUnsentOperation(record, key, 'prepared_operation_cancelled_before_return', owner)
+      throw error
+    }
     return record
   }
 
   // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
   // anything): settle it as not happened so it leaves no hold.
-  async settleUnsentOperation(pending, ownerKey, reason) {
+  async settleUnsentOperation(pending, ownerKey, reason, expectedOwner) {
+    const current = () => !expectedOwner || (this.checkpointOwnerCurrent(expectedOwner)
+      && this.requestAdmissionOwner === expectedOwner.intakeToken && this.pendingInteractionAmendment === expectedOwner.amendment)
+    const emit = (event, data) => current() ? this.traceEvent(event, data, { requestId: pending.request_id })
+      : this.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0, event,
+        request_id: pending.request_id, actor_id: pending.actor_id, epoch: pending.actor_epoch, data })
     // D2: the game never saw this send, so it did not put a batch in flight: back to what was true before it.
-    if (this.batchInFlightBeforeSend !== undefined) {
+    if (current() && this.batchInFlightBeforeSend !== undefined) {
       this.batchInFlight = this.batchInFlightBeforeSend === true
       this.batchInFlightBeforeSend = undefined
     }
     this.memory.updatePendingOperation?.(ownerKey, { effect: EFFECT.NOT_HAPPENED, reason }, pending.operation_key)
     if (this.memory.clearPendingOperation?.(ownerKey, { operationKey: pending.operation_key }) !== true) {
-      await this.traceEvent('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
+      await emit('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
         reason: 'unsent_settlement_refused', attempted_reason: reason })
       throw new AgentLoopError('Prepared operation settlement refused')
     }
     await this.persistState()
-    await this.traceEvent('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
+    await emit('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
   }
 
   // A legacy (pre-journal) record that neither exact nor baseline evidence can settle must not hold silently: raise one
@@ -10730,11 +10749,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const decisionBudgetScope = captureDecisionBudgets(this)
     const setupTrace = this.traceRequest
     const setupTraceId = setupTrace?.id
+    const requestFailureAmendment = this.pendingInteractionAmendment
     let requestTrace
     // Base request starts a new generation/lineage synchronously below; its updated
     // budget scope and this exact trace object own failure unwind, across restages.
     const ownsRequestFailure = () => requestTrace && this.traceRequest === requestTrace
       && this.traceRequest.id === decisionBudgetScope.requestId && ownsDecisionBudgets(this, decisionBudgetScope)
+      && this.pendingInteractionAmendment === requestFailureAmendment
     try {
       if (plannerShape) {
         const requestedReasoningBudget = plannerShape.reasoning_budget
@@ -11787,10 +11808,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requestTrace = this.traceRequest
     const requestId = requestTrace?.id
     let failureOwner = decisionBudgetOwner(this)
+    const failureIntake = this.requestAdmissionOwner
+    const failureAmendment = this.pendingInteractionAmendment
     // Conversation/role restages keep this request. Reset/cancel or a new trace
     // object do not; an old catch must not fail or clean up their replacement.
     const ownsFailure = () => ownsDecisionBudgets(this, failureOwner)
       && this.traceRequest === requestTrace && this.traceRequest?.id === requestId
+      && this.requestAdmissionOwner === failureIntake && this.pendingInteractionAmendment === failureAmendment
     // The scope of THIS turn, fixed before it starts: the recovery that a failed turn
     // triggers (recoverPlan below) calls the provider, admits tool batches and commits a
     // plan outside any runTurn, so it needs the same identity to be judged against.
@@ -11818,6 +11842,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const planState = this.memory.currentPlan?.(this.activePlanKey())
       if (this.goalAwaitingNextSlice()) {
         await this.settleNextSliceExit({ failure: error, reason: 'guarded_authoring_failure' })
+        if (!ownsFailure()) throw error
+      }
+      const proofFailure = preservationFailure(error) ?? preservationFailure(error?.cause)
+      if (proofFailure && !this.goalAwaitingNextSlice()) {
+        const proofOwner = this.captureCheckpointOwner()
+        this.memory.dispatchPlanningEvent?.(this.activePlanKey(), { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime',
+          goal_id: proofOwner.goalId, reason: `${proofFailure.code}: ${proofFailure.stage}`, pause_class: PAUSE_CLASS.GUARD })
+        await this.persistState({ strict: true })
+        if (!ownsFailure()) throw error
+        this.assertCheckpointOwnerIdentity(proofOwner)
+        await this.traceEvent('contract.preservation_refused', { ...proofFailure, goal_id: proofOwner.goalId,
+          plan_id: proofOwner.planId, step_id: proofOwner.stepId, disposition: 'classified_guard_pause' }, { requestId })
         if (!ownsFailure()) throw error
       }
       // The request-wide output ceiling (5 per-turn caps) is final for this
@@ -17641,15 +17677,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       const admitGeneration = this.generation
       const admitRequestId = this.traceRequest?.id
-      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
-      if (this.entityRefreshAdmission) {
-        this.entityRefreshAdmission.pendingKey = pendingAdmission?.operation_key
-        this.entityRefreshAdmission.pendingSignature = pendingAdmission?.signature
-      }
+      const sendOwner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
+      const sendIntake = this.requestAdmissionOwner
+      const sendAmendment = this.pendingInteractionAmendment
       const operationOwnerKey = this.activePlanKey()
+      const assertSendOwner = pending => {
+        this.assertCheckpointOwnerIdentity(sendOwner)
+        if (this.requestAdmissionOwner !== sendIntake || this.pendingInteractionAmendment !== sendAmendment || this.currentPendingAmendment()) throw new AgentLoopError('Operation admission cancelled or superseded')
+        if (pending) {
+          const held = this.memory.pendingOperations?.(operationOwnerKey) ?? []
+          if (held.length !== 1 || held[0].operation_key !== pending.operation_key || held[0].signature !== pending.signature
+            || this.batchInFlight) throw new AgentLoopError('Operation admission unsent ownership changed')
+        }
+      }
+      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {
+        assertSendOwner(pendingAdmission)
+        if (this.entityRefreshAdmission) {
+          this.entityRefreshAdmission.pendingKey = pendingAdmission?.operation_key
+          this.entityRefreshAdmission.pendingSignature = pendingAdmission?.signature
+        }
         await this.traceEvent('operations.admit', { operations })
         const beforeSend = await this.assertCurrent()
         if (this.entityRefreshAdmission) await this.entityRefreshAdmission.idleFence()
@@ -17657,11 +17706,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
           if (beforeSend.surface_index !== this.gatherAdmission.surfaceIndex) throw new AgentLoopError('gather_admission_surface_changed')
         }
+        assertSendOwner(pendingAdmission)
+        await prepareFluidPreservationAdmission(this, { operations, pending: pendingAdmission })
+        // No await between this final caller fence and native transport. The
+        // helper's own final fence cannot cover its caller's return boundary.
+        assertSendOwner(pendingAdmission)
       }
       catch (error) {
         // Transport has not been invoked. This local boundary proves this exact
         // prepared attempt absent; a later restart without this proof stays uncertain.
-        if (pendingAdmission) await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, 'cancelled_before_transport')
+        if (pendingAdmission) await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, 'cancelled_before_transport', sendOwner)
         throw error
       }
       let reconciledAdmitted = false
@@ -18492,7 +18546,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
-        throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`)
+        throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
       finally {
         this.reasoningTriggerSource = previousTrigger

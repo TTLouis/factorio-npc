@@ -1,6 +1,7 @@
 import { classifyRequestFailure, PAUSE_CLASS } from './pause-class.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 import { deploymentStatus } from './supervisor-adapter.mjs'
+import { preservationFailure } from './contract-obligations.mjs'
 
 export function nextSliceOwner(agent) {
   return { generation: agent.generation, lineage: agent.agentContext?.lineageSequence, trace: agent.traceRequest,
@@ -114,8 +115,9 @@ export async function settleNextSliceExit(agent, { failure, reason = 'worker_ret
   catch (error) { assertOwner(agent, owner); native = { unknown: true, detail: error.message } }
   assertOwner(agent, owner)
   if (native.busy && !native.uncertain && !native.unknown) return { action: 'native_owned' }
-  const classified = failure && /preservation_/.test(String(failure.message ?? failure))
-    ? { pause_class: PAUSE_CLASS.GUARD, code: 'next_slice_preservation_unproven' }
+  const proofFailure = preservationFailure(failure) ?? preservationFailure(failure?.cause)
+  const classified = proofFailure
+    ? { pause_class: PAUSE_CLASS.GUARD, code: proofFailure.code }
     : failure ? classifyRequestFailure(failure) : { pause_class: PAUSE_CLASS.MODEL_RECOVERABLE, code: 'next_slice_transition_interrupted' }
   const episodeFault = agent.memory.planningState?.(key)?.run?.next_slice_fault === true
   const unsafe = episodeFault || native.unknown || native.uncertain || reconcile?.verdict === 'uncertain'
@@ -130,7 +132,7 @@ export async function settleNextSliceExit(agent, { failure, reason = 'worker_ret
   await agent.persistState({ strict: true })
   assertOwner(agent, owner)
   await agent.traceEvent('planning.next_slice_settled', { ...anchor, reason: code, disposition: 'durable_classified_pause',
-    pause_class: pauseClass, request_id: owner.trace?.id }, { requestId: owner.trace?.id })
+    pause_class: pauseClass, preservation_failure: proofFailure, request_id: owner.trace?.id }, { requestId: owner.trace?.id })
   assertOwner(agent, owner)
   const paused = agent.goalPausedTrace('next_slice_settlement')
   if (paused) await agent.traceEvent('goal.paused', paused, { requestId: owner.trace?.id })

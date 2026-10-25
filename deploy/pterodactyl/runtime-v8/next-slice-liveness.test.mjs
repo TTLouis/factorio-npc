@@ -78,12 +78,14 @@ for (const lane of fixture.lanes) {
     const w = awWorld(lane, () => ({ content: lane.wire.content }))
     const before = structuredClone(w.memory.planningState(w.key).plans)
     startAuthoring(w)
-    await assert.rejects(w.agent.runGuarded(), /provider_jev_recovery_route_failed: preservation_geometry_unproven/)
+    await assert.rejects(w.agent.runGuarded(), /provider_jev_recovery_route_failed: preservation_fluid_geometry_incomplete/)
     assert.ok(w.geometryReads() > 0)
     assert.equal(w.memory.pauseRecord(w.key).paused, true)
     assert.equal(w.memory.pauseRecord(w.key).pause_class, 'guard')
     assert.deepEqual(w.memory.planningState(w.key).plans, before)
-    assert.ok(w.rows.some(row => row.event === 'planning.next_slice_settled' && row.data.pause_class === 'guard'))
+    assert.ok(w.rows.some(row => row.event === 'planning.next_slice_settled' && row.data.pause_class === 'guard'
+      && row.data.preservation_failure?.code === 'preservation_fluid_geometry_incomplete'
+      && row.data.preservation_failure.category === 'unproven' && row.data.preservation_failure.stage === 'capture'))
   })
 }
 test('actual supervisor detects injected AW orphan and automatically claims/commits same-goal ordinary next slice', async () => {

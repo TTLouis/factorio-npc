@@ -53,6 +53,8 @@ test('installer-shipped runtime is transitively complete and preserves structure
   assert.ok(runtimeFiles.includes('step-completion.mjs'), 'installer must ship the runtime step completion module')
   assert.ok(runtimeFiles.includes('completion-finalization.mjs'), 'installer must ship the canonical completion finalization fence')
   assert.ok(runtimeFiles.includes('luna-step-contracts.mjs'), 'installer must ship the Luna completion-declaration validator')
+  assert.ok(runtimeFiles.includes('next-slice-state.mjs'), 'installer must ship the durable completed-slice anchor')
+  assert.ok(runtimeFiles.includes('next-slice-liveness.mjs'), 'installer must ship supervisor next-slice settlement')
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-release-copy-'))
 
   try {

@@ -3,7 +3,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
-import { prepareFluidPreservationAdmission, reconcilePreservationProof } from './contract-obligation-runtime.mjs'
+import { reconcilePreservationProof } from './contract-obligation-runtime.mjs'
 import { captureObligationProof, compileObligations, effectivePreservationProof, obligationProofOrigin,
   normalizeFluidAdmission, preservedProofMatches } from './contract-obligations.mjs'
 import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
@@ -86,16 +86,7 @@ function world({ trace, persist, read } = {}) {
   agent.behaviorTrace = { emit: async row => { rows.push(row); await trace?.({ row, agent, memory, game }) } }
   const realPersist = agent.persistState.bind(agent)
   agent.persistState = async options => { await realPersist(options); await persist?.({ options, agent, memory, game }) }
-  // F2 owns production large-loop wiring. This provisional seam calls the agreed
-  // helper on the real prepared ledger record and reproduces its unsent catch.
-  // The final combined candidate must also run this case with F2's actual hook.
-  const record = agent.recordPendingOperationBeforeSend.bind(agent)
-  agent.recordPendingOperationBeforeSend = async (operations, before) => {
-    const pending = await record(operations, before)
-    try { await prepareFluidPreservationAdmission(agent, { operations, pending }) }
-    catch (error) { await agent.settleUnsentOperation(pending, KEY, 'fixture_proof_refused_before_transport'); throw error }
-    return pending
-  }
+  // Production before-send hook is exercised directly; no provisional wrapper.
   return { agent, memory, game, rows, calls, held: () => getActivePlan(memory.planningState(KEY)),
     start: () => agent.request('Build fixture steam production without changing the goal.', { sender: 'Louis' }) }
 }
@@ -130,4 +121,19 @@ test('missed first normalization self-reconciles from durable admission plus exa
   const plan = getActivePlan(restored.planningState(KEY))
   assert.equal(effectivePreservationProof(plan, plan.steps[0]).preserved[0].fluid.storages[0].ports[0].target.entity.unit_number, 2)
   assert.equal(plan.steps[0].obligation_proof.preserved[0].fluid.storages[0].ports[0].connected, false)
+})
+
+test('typed proof admission failure durably guard-pauses without replacement authority or native send', async () => {
+  const w = world({ read: ({ text, game, memory }) => {
+    if (text.includes('autorio_operations","status') && memory.pendingOperations(KEY).length) game.queueLength = 1
+  } })
+  await assert.rejects(w.start(), /preservation_admission_native_busy/)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.memory.pauseRecord(KEY).pause_class, 'guard')
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
+  assert.equal(w.held().status, 'COMMITTED')
+  assert.equal(w.held().steps.length, 2)
+  assert.equal(w.held().execution.preservation_certificates, undefined)
+  assert.ok(w.rows.some(row => row.event === 'contract.preservation_refused' && row.data.code === 'preservation_admission_native_busy'
+    && row.data.category === 'unproven' && row.data.stage === 'admission' && row.data.retryable === false))
 })
