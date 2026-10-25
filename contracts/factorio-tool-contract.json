@@ -348,6 +348,7 @@
     },
     "place_candidate": {
       "native_preservation_preflight_fields": ["preservation_join", "preservation_nonfluid_output", "preservation_clears_count"],
+      "native_preservation_join_projection": { "version": 3, "required": ["candidate_ports", "candidate_storages", "operation_key", "protected_geometry"], "storage_constraints": ["index", "production_type", "filter", "minimum_temperature", "maximum_temperature"], "harness_only_freeze_remote": ["autorio_preflight", "fluid_preservation_candidate"], "closure_limit": 16 },
       "args": [
         "candidate_set_id",
         "candidate_id"

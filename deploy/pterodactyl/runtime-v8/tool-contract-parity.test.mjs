@@ -19,6 +19,12 @@ test('fluid preservation projection and admission metadata remain native and ver
   const placement = await readFile(new URL('packages/autorio/src/placement_candidates.ts', root), 'utf8')
   const items = await readFile(new URL('packages/autorio/src/placement_preflight.ts', root), 'utf8')
   for (const field of contract.operations.place_candidate.native_preservation_preflight_fields) assert.match(placement + items, new RegExp(`\\b${field}:`))
+  const join = contract.operations.place_candidate.native_preservation_join_projection
+  assert.equal(join.version, 3); assert.equal(join.closure_limit, 16)
+  for (const field of join.required) assert.match(placement, new RegExp(`\\b${field}[:,]`))
+  assert.deepEqual(join.harness_only_freeze_remote, ['autorio_preflight', 'fluid_preservation_candidate'])
+  assert.equal(Object.hasOwn(contract.tools, 'fluid_preservation_candidate'), false)
+  assert.equal(Object.hasOwn(contract.operations, 'fluid_preservation_candidate'), false)
 })
 test('exact geometry preserves explicit native actor/entity scope for obligation certificates', async () => {
   assert.deepEqual(contract.tools.getEntityGeometry.native_scope_fields,

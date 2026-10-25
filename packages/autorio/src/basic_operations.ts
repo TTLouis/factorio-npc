@@ -352,7 +352,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     }
     const actor = actor_for_submission()
     if (!actor) return false
-    if (prototypes.entity[entity_name]?.type === 'offshore-pump'
+    if ((prototypes.entity[entity_name]?.type === 'offshore-pump' || placement_candidate)
       && (!placement_candidate || !placement_candidate_matches(actor, placement_candidate, entity_name, x, y, direction))) {
       result_for(actor, undefined, false, false, 'placement_candidate_required')
       return false

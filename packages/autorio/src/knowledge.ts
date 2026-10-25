@@ -634,6 +634,36 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
   }
 }
 
+// Stable native facts for a queued preservation guard. Fluid contents, distance
+// and production counters may change; identity/scope/layout/roles/filters/edges
+// may not. This is a read, never a replacement or placement authorization.
+export function preservation_geometry_for_actor(actor: ControlledActor, unit_number: number): any | undefined {
+  const raw: any = entity_geometry_for_actor(actor, unit_number)
+  if (!raw.found || raw.fluid_storages_truncated !== false || raw.fluid_box_count > 16
+    || raw.surface_index !== raw.actor_surface_index || raw.force_index !== raw.actor_force_index) return undefined
+  if (raw.fluid_box_count > 0) {
+    if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe'].includes(raw.entity.name)
+      || raw.non_fluidbox_storage_count !== 0) return undefined
+    const storages: any[] = raw.fluid_storages ?? []
+    if (storages.length !== raw.fluid_box_count) return undefined
+    for (const storage of storages) {
+      if (storage.pipe_connections_truncated !== false || storage.prototypes_truncated !== false) return undefined
+      const ports: any[] = storage.pipe_connections ?? []
+      for (const port of ports) {
+        if (port.connection_type !== 'normal' || port.target_valid !== true) return undefined
+      }
+    }
+  } else if (!['furnace', 'mining-drill', 'inserter'].includes(raw.entity.type)) return undefined
+  const storages: any[] = raw.fluid_storages ?? []
+  return { found: raw.found, entity: raw.entity, surface_index: raw.surface_index, force_index: raw.force_index,
+    actor_id: raw.actor_id, actor_surface_index: raw.actor_surface_index, actor_force_index: raw.actor_force_index,
+    item_io: raw.item_io, fluid_geometry_version: raw.fluid_geometry_version, fluid_box_count: raw.fluid_box_count,
+    non_fluidbox_storage_count: raw.non_fluidbox_storage_count, fluid_storages_truncated: raw.fluid_storages_truncated,
+    fluid_storages: storages.map(storage => ({ index: storage.index, capacity: storage.capacity,
+      prototypes: storage.prototypes, prototypes_truncated: storage.prototypes_truncated,
+      pipe_connections: storage.pipe_connections, pipe_connections_truncated: storage.pipe_connections_truncated })) }
+}
+
 export function logistics_topology_for_actor(actor: ControlledActor, unit_number: number, radius: number = 8) {
   if (unit_number < 1 || math.floor(unit_number) !== unit_number) {
     return { found: false, unit_number, error: 'invalid unit_number' }

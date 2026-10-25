@@ -50,3 +50,29 @@ The V2 fixture uses sealed history line22 before stop; the superseded initial
 extraction incorrectly labelled a post-stop latest snapshot as pre-stop.
 Fluid support is bounded to vanilla offshore-pump, boiler, steam-engine and pipe;
 unknown prototypes remain unsupported even when their type matches.
+
+Review follow-up to immutable checkpoint 544850cc (still unreviewed):
+
+- Complete candidate storage role/filter/temperature constraints and native role
+  none for ordinary pipes; fresh receiver constraints must match exactly.
+- Effective old endpoint/known native closure IDs are protected before exact or
+  generic mining/rotation; opaque bulk clear/cut/composite work refuses.
+- Certificate seals exactly two owner-bound runtime receipt dependencies while
+  the original ledger is live. Rolling24/closed4 receipt retention cannot erase
+  certified authority; unsealed historical flags cannot gain it on restore.
+- Harness-only native freeze binds one candidate/operation without renewing its
+  lifetime, captures at most16 complete protected/connected identities, and
+  keeps its immutable guard in native candidate storage. The actual queued
+  placement checks it before any clearing and immediately before native create.
+  It grants no model tool, successor trigger, extra retry or destructive action.
+
+Focused checkpoint: runtime138/138 and native unit85/85 pass; genuine completed
+plan plus normal receipt churn/closed trimming/restore is positive. Saturated64
+admission claims survive restore and refuse before send. New exact engine proof,
+updated source type/Lua checks, full gates and payload repin remain pending.
+F2 separately owns outer controller amendment retention and the final actual
+production-hook composition; the local base134 seam wrapper does not claim that.
+Initial engine01 refused setup without water read. Engine02 built the normal
+pump/boiler/pipe/engine chain and produced first-fuel steam, then exposed the
+ordinary-pipe production role none validator gap. Both failures and exact
+cleanup are retained locally; neither is reported as a complete native PASS.

@@ -2945,7 +2945,7 @@ Object.assign(HANDLERS, {
     const plan = getActivePlan(state)
     const step = plan?.steps?.[plan.active_step_index]
     const held = step && effectivePreservationProof(plan, step, { plans: state.plans })
-    const certificate = step && normalizeFluidCertificate(event.certificate, plan, step)
+    const certificate = step && normalizeFluidCertificate(event.certificate, plan, step, { requireLive: true })
     const admission = certificate && plan.execution.preservation_admissions[certificate.admission_key]
     const certificates = plan?.execution?.preservation_certificates ?? []
     if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE

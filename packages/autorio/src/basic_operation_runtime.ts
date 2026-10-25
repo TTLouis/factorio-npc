@@ -516,10 +516,10 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return [false, `Unknown entity prototype ${task.entity_name}`]
     }
 
-    if (prototype.type === 'offshore-pump' && (!task.placement_candidate
+    if ((prototype.type === 'offshore-pump' || task.placement_candidate) && (!task.placement_candidate
       || !placement_candidate_matches(actor, task.placement_candidate, task.entity_name, task.position?.x, task.position?.y, task.direction))) {
       controller.fail(actor, task, 'placement_candidate_unavailable')
-      return [false, 'Offshore pumps require a current validated placement candidate']
+      return [false, 'Placement requires its current validated candidate and preservation guard']
     }
 
     if (!task.position) {
@@ -609,6 +609,10 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return [false, `Requested placement is not placeable at grid center (${position.x}, ${position.y}); footprint=${serpent.line(footprint.world_box)}; blockers=${blocker_text}`]
     }
 
+    if (task.placement_candidate && !placement_candidate_matches(actor, task.placement_candidate, task.entity_name, position.x, position.y, task.direction)) {
+      controller.fail(actor, task, 'placement_candidate_unavailable')
+      return [false, 'Queued placement preservation guard changed before native create']
+    }
     const create_entity_args: SurfaceCreateEntity = {
       name: task.entity_name,
       position,

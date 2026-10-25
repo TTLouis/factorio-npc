@@ -1,6 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fluid_source_observation } from './fluid_source_observation'
-import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor, freeze_fluid_preservation_candidate, placement_candidate_matches } from './placement_candidates'
+import { new_basic_operation_controller } from './basic_operations'
+import { new_basic_operation_runtime } from './basic_operation_runtime'
+import { new_task_manager } from './task_manager'
 
 // Geometry fixtures still establish the native water-read prerequisite.
 function observe_water(actor: any) {
@@ -160,7 +163,8 @@ describe('placement candidates that join a live fluid port', () => {
     const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
     const read = () => placement_candidate_preflight(actor, set.candidate_set_id, 'candidate-1') as any
     try {
-      expect(read()).toMatchObject({ ok: true, preservation_join: { version: 1, complete: true,
+      expect(read()).toMatchObject({ ok: true, preservation_join: { version: 2, complete: true,
+        candidate_storages: [{ index: 1, production_type: 'input-output', filter: 'water' }, { index: 2, production_type: 'output', filter: 'steam' }],
         actor_id: 18, surface_index: 1, force_index: 1, entity_name: 'boiler',
         connects_to: { unit_number: 100, target_port: { storage_index: 1, connection_index: 1 } } } })
       // The other boiler water port must not silently join an existing object.
@@ -175,6 +179,46 @@ describe('placement candidates that join a live fluid port', () => {
       const original = world[100].fluidbox.get_pipe_connections
       world[100].fluidbox.get_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
       expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_ports_incomplete' })
+    } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
+  })
+
+  it('carries a nonrenewable native guard through the real queued boiler task and refuses a late second neighbour before mutation', () => {
+    build_pump()
+    Object.assign(world[100], { type: 'offshore-pump', direction: 0, fluids_count: 1, get_fluid: () => undefined })
+    world[100].fluidbox.get_capacity = () => 100
+    ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    const actor = actor_at(10, 20)
+    actor.character = { valid: true }
+    actor.status_snapshot = () => ({ actor_id: 18, kind: 'standalone_character' })
+    const remove = vi.fn(); const create = vi.fn()
+    actor.get_main_inventory = () => ({ get_item_count: () => 1, remove })
+    actor.surface.create_entity = create
+    actor.surface.find_entities_filtered = () => Object.values(world)
+    const manager = new_task_manager(() => actor)
+    const basic = new_basic_operation_controller(() => actor, manager)
+    const runtime = new_basic_operation_runtime(manager, basic)
+    const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+    const candidate = set.candidates[0]
+    try {
+      const frozen: any = freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100])
+      expect(frozen.ok).toBe(true)
+      expect(frozen.preservation_join).toMatchObject({ version: 3, operation_key: 'req/first' })
+      const firstTick = frozen.preservation_join.tick
+      ;(globalThis as any).game.tick++
+      expect((freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100]) as any).preservation_join.tick).toBe(firstTick)
+      expect(freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/other', [100])).toMatchObject({ ok: false, code: 'preservation_guard_already_claimed' })
+      expect(execute_placement_candidate(actor, set.candidate_set_id, candidate.id, basic.submit_placement)[0]).toBe(true)
+      expect(manager.player_state.parameters_place_entity?.placement_candidate).toEqual({ candidate_set_id: set.candidate_set_id, candidate_id: candidate.id })
+      // Native persisted candidate registry can be restored without weakening its claim.
+      ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+      world[101] = live_entity(101, 'pipe', [{ filter: 'water', ports: [
+        { position: { x: 12.5, y: 20.5 }, target_position: { x: 11.5, y: 20.5 }, flow_direction: 'input-output' },
+      ] }])
+      runtime.state_placing(actor)
+      expect(basic.status().last_result).toMatchObject({ code: 'placement_candidate_unavailable', completed: false })
+      expect(create).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled()
+      expect(placement_candidate_matches(actor, { candidate_set_id: set.candidate_set_id, candidate_id: candidate.id }, 'boiler', candidate.position.x, candidate.position.y, candidate.direction)).toBe(false)
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
   })
 

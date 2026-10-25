@@ -28,6 +28,7 @@ const FLUID_TYPES = new Set(['offshore-pump', 'boiler', 'generator', 'pipe'])
 const FLUID_PROTOTYPES = Object.freeze({ 'offshore-pump': 'offshore-pump', boiler: 'boiler', 'steam-engine': 'generator', pipe: 'pipe' })
 const supportedFluid = entity => FLUID_PROTOTYPES[entity?.name] === entity?.type
 const fluidFlows = new Set(['input', 'output', 'input-output'])
+const fluidProduction = new Set([...fluidFlows, 'none'])
 const finite = value => typeof value === 'number' && Number.isFinite(value)
 const positiveIndex = value => Number.isSafeInteger(value) && value > 0 && value <= 16
 export function obligationSignature(value) {
@@ -90,7 +91,7 @@ function point(raw) {
   return { x: raw.x, y: raw.y }
 }
 function fluidPrototype(raw) {
-  if (!positiveIndex(raw?.index) || !fluidFlows.has(raw.production_type)
+  if (!positiveIndex(raw?.index) || !fluidProduction.has(raw.production_type)
     || raw.filter !== undefined && (typeof raw.filter !== 'string' || !raw.filter)
     || raw.minimum_temperature !== undefined && !finite(raw.minimum_temperature)
     || raw.maximum_temperature !== undefined && !finite(raw.maximum_temperature)) unproven('preservation_fluid_prototype_unproven')
@@ -289,18 +290,37 @@ function fluidAdmissionUnchecked(raw, plan, step) {
     || !Number.isSafeInteger(raw.native_max_batch_id) || raw.native_max_batch_id < 0
     || operation?.name !== 'place_candidate' || raw.signature !== operationSignature([operation])
     || operation.args?.candidate_set_id !== candidate.candidate_set_id || operation.args?.candidate_id !== candidate.candidate_id
-    || candidate.version !== 1 || candidate.complete !== true || candidate.actor_id !== owner.actor_id
+    || candidate.version !== 3 || candidate.operation_key !== raw.operation_key || candidate.complete !== true || candidate.actor_id !== owner.actor_id
     || !Number.isSafeInteger(candidate.tick) || !Number.isSafeInteger(candidate.generated_tick)
     || candidate.tick < candidate.generated_tick || candidate.tick - candidate.generated_tick > 3600
     || !supportedFluid({ name: candidate.entity_name, type: candidate.entity_type })
     || !Array.isArray(candidate.clears) || candidate.clears.length !== 0
-    || !Array.isArray(candidate.candidate_ports) || !candidate.candidate_ports.length || candidate.candidate_ports.length > 16) return undefined
+    || !Array.isArray(candidate.candidate_ports) || !candidate.candidate_ports.length || candidate.candidate_ports.length > 16
+    || !Array.isArray(candidate.candidate_storages) || !candidate.candidate_storages.length || candidate.candidate_storages.length > 16) return undefined
+  const proposedStorages = candidate.candidate_storages.map(fluidPrototype)
+  if (!Array.isArray(candidate.protected_geometry) || candidate.protected_geometry.length > 16
+    || candidate.protected_geometry.length < proof.preserved.length) return undefined
+  const closure = candidate.protected_geometry.map(row => preservationGeometry(row, row.entity?.unit_number))
+  if (new Set(closure.map(row => row.entity.unit_number)).size !== closure.length
+    || proof.preserved.some(row => JSON.stringify(row) !== JSON.stringify(closure.find(item => item.entity.unit_number === row.entity.unit_number)))
+    || closure.some(row => row.actor_id !== proof.actor_id || row.fluid?.storages.some(storage => storage.ports.some(port =>
+      port.connected && !closure.some(endpoint => JSON.stringify(endpoint.entity) === JSON.stringify(port.target.entity)
+        && endpoint.surface_index === port.target.surface_index && endpoint.force_index === port.target.force_index))))) return undefined
+  if (proposedStorages.some((row, i) => row.index !== i + 1)
+    || candidate.candidate_ports.some(row => !positiveIndex(row.storage_index) || !positiveIndex(row.connection_index)
+      || !proposedStorages.some(storage => storage.index === row.storage_index)
+      || proposedStorages.some(storage => storage.index === row.storage_index
+        && (storage.production_type !== row.production_type || storage.filter !== (row.filter ?? null)))
+      || row.connection_type !== 'normal' || !fluidFlows.has(row.flow_direction)
+      || !finite(row.position?.x) || !finite(row.position?.y) || ![0, 4, 8, 12].includes(row.direction))
+    || new Set(candidate.candidate_ports.map(row => `${row.storage_index}/${row.connection_index}`)).size !== candidate.candidate_ports.length) return undefined
   const join = candidate.connects_to
   const source = proof.preserved.find(row => row.entity.unit_number === join?.unit_number)
   const storage = source?.fluid?.storages.find(row => row.index === join.target_port?.storage_index)
   const port = storage?.ports.find(row => row.index === join.target_port?.connection_index)
   const own = candidate.candidate_ports.find(row => row.storage_index === join.candidate_port?.storage_index
     && row.connection_index === join.candidate_port?.connection_index)
+  const ownStorage = own && proposedStorages.find(row => row.index === own.storage_index)
   if (!source || !port || port.connected !== false || source.entity.name !== join.entity_name || !own
     || candidate.surface_index !== source.surface_index || candidate.force_index !== source.force_index
     || !positiveIndex(own.storage_index) || !positiveIndex(own.connection_index)
@@ -313,7 +333,9 @@ function fluidAdmissionUnchecked(raw, plan, step) {
     || own.position.x + ({ 0: 0, 4: 1, 8: 0, 12: -1 })[own.direction] !== port.position.x
     || own.position.y + ({ 0: -1, 4: 0, 8: 1, 12: 0 })[own.direction] !== port.position.y
     || port.flow_direction === own.flow_direction && ['input', 'output'].includes(port.flow_direction)
-    || own.filter !== undefined && storage.prototypes.some(row => row.filter !== null && row.filter !== own.filter)
+    || !ownStorage || storage.prototypes.some(row => row.filter !== null && ownStorage.filter !== null && row.filter !== ownStorage.filter
+      || row.minimum_temperature !== null && ownStorage.maximum_temperature !== null && row.minimum_temperature > ownStorage.maximum_temperature
+      || row.maximum_temperature !== null && ownStorage.minimum_temperature !== null && row.maximum_temperature < ownStorage.minimum_temperature)
     || !step.obligations.outcome.requirements.some(row => row.kind === 'entity_count' && row.prototype === candidate.entity_name
       && (!row.anchor || Math.hypot(candidate.position.x - row.anchor.x, candidate.position.y - row.anchor.y) <= row.radius))) return undefined
   return clone(raw)
@@ -362,6 +384,9 @@ export function fluidAdditionProof(envelope, receipt, built, fresh, plan, step) 
   const targets = built.fluid.storages.flatMap(row => row.ports).filter(row => row.connected)
   if (targets.length !== 1) return undefined
   const ports = built.fluid.storages.flatMap(storage => storage.ports.map(port => ({ ...port, storage_index: storage.index })))
+  const expectedStorages = candidate.candidate_storages.map(fluidPrototype)
+  if (built.fluid.storages.length !== expectedStorages.length || built.fluid.storages.some(storage =>
+    storage.prototypes.length !== 1 || JSON.stringify(storage.prototypes[0]) !== JSON.stringify(expectedStorages.find(row => row.index === storage.index)))) return undefined
   if (ports.length !== candidate.candidate_ports.length || candidate.candidate_ports.some(proposed => !ports.some(port =>
     port.storage_index === proposed.storage_index && port.index === proposed.connection_index
     && port.position.x === proposed.position.x && port.position.y === proposed.position.y
@@ -441,7 +466,7 @@ function inheritedFluidProof(plan, step, baseline, plans) {
   return current
 }
 
-export function normalizeFluidCertificate(raw, plan, step) {
+export function normalizeFluidCertificate(raw, plan, step, { seal = false, requireLive = false } = {}) {
   try {
     const admission = normalizeFluidAdmission(plan.execution?.preservation_admissions?.[raw?.admission_key], plan, step)
     const proof = normalizeObligationProof(raw?.proof, step.obligations)
@@ -452,10 +477,23 @@ export function normalizeFluidCertificate(raw, plan, step) {
       || JSON.stringify(fluidPreservationGeometry(built.fluid, built, { stored: true })) !== JSON.stringify(built.fluid)
       || !fluidAdditionProof(admission, raw.receipt, built, proof, plan, step)) return undefined
     const ledger = plan.execution.receipts?.[step.step_id] ?? []
-    if (!ledger.some(row => row.kind === 'operation_receipt' && row.source === 'runtime' && row.ref === raw.ref)
-      || !ledger.some(row => row.kind === 'deterministic_verification' && row.source === 'runtime'
-        && row.ref === `batch_${raw.receipt.batch_id}` && row.verified_operation_names?.length === 1
-        && row.verified_operation_names[0] === 'place_candidate')) return undefined
-    return clone(raw)
+    const receipt = row => row?.kind === 'operation_receipt' && row.source === 'runtime' && row.ref === raw.ref
+    const verification = row => row?.kind === 'deterministic_verification' && row.source === 'runtime'
+      && row.ref === `batch_${raw.receipt.batch_id}` && row.verified_operation_names?.length === 1
+      && row.verified_operation_names[0] === 'place_candidate'
+    const liveReceipt = ledger.find(receipt); const liveVerification = ledger.find(verification)
+    const owner = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
+      operation_key: admission.operation_key, signature: admission.signature }
+    const dependencies = seal && liveReceipt && liveVerification
+      ? { version: 1, owner, receipt: clone(liveReceipt), verification: clone(liveVerification) }
+      : raw.authority_dependencies
+    if (!dependencies || dependencies.version !== 1 || JSON.stringify(dependencies.owner) !== JSON.stringify(owner)
+      || !receipt(dependencies.receipt) || !verification(dependencies.verification)
+      || requireLive && (!liveReceipt || !liveVerification
+        || JSON.stringify(dependencies.receipt) !== JSON.stringify(liveReceipt)
+        || JSON.stringify(dependencies.verification) !== JSON.stringify(liveVerification))) return undefined
+    // These two bounded dependencies are sealed at runtime certification, before
+    // ordinary prompt/history receipt retention can trim its rolling window.
+    return { ...clone(raw), authority_dependencies: clone(dependencies) }
   } catch { return undefined }
 }

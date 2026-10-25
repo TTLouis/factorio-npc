@@ -30,12 +30,13 @@ export function fluidFixture() {
   const step = { step_id: 'fluid_step', semantic_step_id: 'fluid_step', obligations, obligation_proof: proof,
     completion_contract: compileObligations(obligations) }
   const operation = { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }
-  const candidate = { version: 1, complete: true, tick: 100, generated_tick: 90,
+  const candidate = { version: 3, operation_key: 'req/batch_5', protected_geometry: [fluidGeometry()], complete: true, tick: 100, generated_tick: 90,
     actor_id: 10, surface_index: 1, force_index: 1, candidate_set_id: 'placement-1', candidate_id: 'candidate-1',
     entity_name: 'boiler', entity_type: 'boiler', position: { x: 0, y: 3 }, direction: 0, clears: [],
     connects_to: { unit_number: 1, entity_name: 'offshore-pump', target_port: { storage_index: 1, connection_index: 1 },
       candidate_port: { storage_index: 1, connection_index: 1 }, tile: { x: 0, y: 2 } },
-    candidate_ports: [{ storage_index: 1, connection_index: 1, direction: 0, filter: 'water',
+    candidate_storages: [{ index: 1, production_type: 'input', filter: 'water' }],
+    candidate_ports: [{ storage_index: 1, connection_index: 1, direction: 0, filter: 'water', production_type: 'input',
       connection_type: 'normal', flow_direction: 'input', position: { x: 0, y: 2 } }] }
   const plan = { goal_id: 'goal_fluid', plan_id: 'goal_fluid_p1', plan_version: 1, steps: [step], active_step_index: 0,
     execution: { receipts: { fluid_step: [{ source: 'runtime', kind: 'operation_receipt', ref: 'batch-g1-5' },

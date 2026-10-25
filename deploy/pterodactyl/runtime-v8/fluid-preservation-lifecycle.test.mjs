@@ -10,25 +10,14 @@ import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
 import { answersStepContract, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:fluid-fixture'
-function world({ trace, persist, read } = {}) {
+function world({ trace, persist, read, secondOperation, doneMinimum = 99 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const game = new FakeFactorio({ inventory: { boiler: 1, coal: 2 } })
   game.status.actor_id = 10
   game.status.connected_players = 0
   game.nearby = [fluidGeometry().entity]
   const native = game.command.bind(game)
-  const recordAdmission = memory.recordPreservationAdmission.bind(memory)
-  memory.recordPreservationAdmission = (key, envelope) => {
-    const state = memory.planningState(key); const plan = getActivePlan(state); const step = plan.steps[plan.active_step_index]
-    const held = effectivePreservationProof(plan, step)
-    const result = recordAdmission(key, envelope)
-    if (!result) throw new Error(JSON.stringify({ fixture_admission_diagnostic: true, goal: state.goal.status, plan: plan.status,
-      origin: obligationProofOrigin(state, step), normalized: !!normalizeFluidAdmission(envelope, plan, step), held: !!held,
-      matches: !!held && preservedProofMatches(held, envelope.baseline), timestamps: [held?.captured_at, envelope.baseline.captured_at, envelope.created_at, Date.now()],
-      pending: state.operation_ledger.records, envelope_owner: envelope.owner, generation: envelope.native_generation, max_batch: envelope.native_max_batch_id }))
-    return result
-  }
-  const rows = []; const calls = []
+  const rows = []; const calls = []; const prepared = []; const refusals = []
   let agent
   game.command = async text => {
     await read?.({ text, game, memory, agent })
@@ -38,6 +27,12 @@ function world({ trace, persist, read } = {}) {
     }
     if (text.includes('autorio_preflight') && text.includes('place_candidate')) {
       return JSON.stringify({ ok: true, operation: 'place_candidate', preservation_join: fluidFixture().admission.candidate })
+    }
+    if (text.includes('fluid_preservation_candidate')) {
+      const candidate = fluidFixture().admission.candidate
+      candidate.operation_key = memory.pendingOperations(KEY)[0]?.operation_key
+      candidate.protected_geometry = [fluidGeometry(1, game.connected === true)]
+      return JSON.stringify({ ok: true, preservation_join: candidate })
     }
     if (text.includes('autorio_crafting') && text.includes('status')) return JSON.stringify({ task_active: false, native_queue: [] })
     if (text.includes('evaluate_condition') && text.includes('entity_count')) return JSON.stringify({ ok: true, kind: 'entity_count',
@@ -74,14 +69,14 @@ function world({ trace, persist, read } = {}) {
       calls.push(context.role)
       if (context.role === 'planner') return planReply({ plan: ['Install one boiler connected to the existing pump.', 'Fuel the installed boiler with one coal.'],
         currentStep: 0, operations: [], goal: { scope: 'long_horizon', summary: 'Build fixture steam production without changing the goal.',
-          doneWhen: [{ kind: 'inventory_count', item_name: 'coal', minimum: 99 }] }, roadmap: [{ id: 'steam', intent: 'Run native steam production.' }],
+          doneWhen: [{ kind: 'inventory_count', item_name: 'coal', minimum: doneMinimum }] }, roadmap: [{ id: 'steam', intent: 'Run native steam production.' }],
         stepCompletions: [{ kind: 'deterministic', checkpoint: compileObligations(first), obligations: first }, { kind: 'deterministic', obligations: second }],
         executionGuidance: ['Join the existing pump with one boiler.', 'Supply one coal to the installed boiler.'].map(approach =>
           ({ approach, rationale: 'Preserve pump identity and all prior edges.', constraints: [], skillIds: [], materialSupply: null })) })
       const held = getActivePlan(memory.planningState(KEY)); const step = held.steps[held.active_step_index]
       if (held.active_step_index === 0) return planReply({ stepId: step.step_id,
         operations: [{ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }] })
-      return planReply({ stepId: step.step_id, operations: [{ name: 'supply_entity', args: { unit_number: 2, items: [{ item_name: 'coal', count: 1 }] } }] })
+      return planReply({ stepId: step.step_id, operations: [secondOperation ?? { name: 'supply_entity', args: { unit_number: 2, items: [{ item_name: 'coal', count: 1 }] } }] })
     }) })
   agent.behaviorTrace = { emit: async row => { rows.push(row); await trace?.({ row, agent, memory, game }) } }
   const realPersist = agent.persistState.bind(agent)
@@ -92,11 +87,15 @@ function world({ trace, persist, read } = {}) {
   const record = agent.recordPendingOperationBeforeSend.bind(agent)
   agent.recordPendingOperationBeforeSend = async (operations, before) => {
     const pending = await record(operations, before)
+    prepared.push(operations)
     try { await prepareFluidPreservationAdmission(agent, { operations, pending }) }
-    catch (error) { await agent.settleUnsentOperation(pending, KEY, 'fixture_proof_refused_before_transport'); throw error }
+    catch (error) {
+      refusals.push({ error, amendment: agent.currentPendingAmendment() })
+      await agent.settleUnsentOperation(pending, KEY, 'fixture_proof_refused_before_transport'); throw error
+    }
     return pending
   }
-  return { agent, memory, game, rows, calls, held: () => getActivePlan(memory.planningState(KEY)),
+  return { agent, memory, game, rows, calls, prepared, refusals, held: () => getActivePlan(memory.planningState(KEY)),
     start: () => agent.request('Build fixture steam production without changing the goal.', { sender: 'Louis' }) }
 }
 
@@ -117,6 +116,55 @@ test('real prepared ledger -> exact single boiler receipt -> certified addition 
   assert.equal(w.memory.planningState(KEY).goal.replacements_accepted ?? 0, 0)
 })
 
+for (const name of ['rotate_entity', 'mine_entity_exact']) test(`actual prepared next-step ${name} of certified neighbour is refused before native transport`, async () => {
+  const w = world({ secondOperation: { name, args: { unit_number: 2 } } })
+  await w.start(); await assert.rejects(w.agent.completed(), /preservation_protected_mutation_refused/)
+  assert.equal(w.game.mutations.length, 1)
+  assert.equal(w.prepared.length, 2, 'the destructive operation reached the real prepared admission seam')
+  assert.equal(w.prepared[1][0].name, name)
+  assert.equal(w.held().active_step_index, 1)
+  assert.equal(w.held().execution.preservation_certificates.length, 1)
+})
+
+for (const seam of ['admission_persist', 'admission_trace']) for (const fault of ['amendment', 'native_busy']) {
+  test(`helper fences ${fault} during ${seam} before the unsent catch, with zero native sends`, async () => {
+    let injected = false
+    const inject = ({ agent, game, memory }) => {
+      if (injected || !Object.keys(getActivePlan(memory.planningState(KEY))?.execution.preservation_admissions ?? {}).length) return
+      injected = true
+      if (fault === 'amendment') agent.pendingInteractionAmendment = { sender: 'Louis', text: 'Hold for new direction.' }
+      else { game.taskState = 'working'; game.queueLength = 1 }
+    }
+    const w = world(seam === 'admission_persist' ? { persist: inject } : { trace: data => {
+      if (data.row.event === 'contract.fluid_admission_prepared') inject(data)
+    } })
+    await assert.rejects(w.start(), /preservation_admission_not_safe|preservation_admission_native_busy|preservation_pre_admission_boundary_changed/)
+    assert.equal(injected, true); assert.equal(w.game.mutations.length, 0)
+    assert.equal(w.held().active_step_index, 0)
+    assert.equal(w.memory.pendingOperations(KEY).length, 0, 'unsent pending settles without an uncertain gameplay effect')
+    // This provisional wrapper throws before base134's real unsent try. It can
+    // prove helper fencing/preservation at that boundary only. F2's actual hook
+    // separately proves retained amendment through the outer controller unwind.
+    if (fault === 'amendment') assert.equal(w.refusals.at(-1).amendment.text, 'Hold for new direction.')
+  })
+}
+
+for (const seam of ['certificate_persist', 'certificate_trace']) test(`receipt close defers late same-owner amendment during ${seam} without next mutation`, async () => {
+  let injected = false
+  const inject = ({ agent, memory }) => {
+    if (injected || !getActivePlan(memory.planningState(KEY))?.execution.preservation_certificates?.length) return
+    injected = true; agent.pendingInteractionAmendment = { sender: 'Louis', text: 'Hold after exact boiler receipt.' }
+  }
+  const w = world(seam === 'certificate_persist' ? { persist: inject } : { trace: data => {
+    if (data.row.event === 'contract.fluid_addition_certified') inject(data)
+  } })
+  await w.start(); const providers = w.calls.length; const result = await w.agent.completed()
+  assert.equal(injected, true); assert.equal(w.game.mutations.length, 1); assert.equal(w.calls.length, providers)
+  assert.equal(w.held().active_step_index, 0)
+  assert.equal(w.agent.currentPendingAmendment()?.text, 'Hold after exact boiler receipt.')
+  assert.ok(result.deferred || result.goalStatus === 'paused', JSON.stringify(result))
+})
+
 test('missed first normalization self-reconciles from durable admission plus exact receipt without replay', async () => {
   const w = world(); await w.start()
   await w.agent.taskStatusReceipt() // Simulate lost completion normalization/callback.
@@ -130,4 +178,68 @@ test('missed first normalization self-reconciles from durable admission plus exa
   const plan = getActivePlan(restored.planningState(KEY))
   assert.equal(effectivePreservationProof(plan, plan.steps[0]).preserved[0].fluid.storages[0].ports[0].target.entity.unit_number, 2)
   assert.equal(plan.steps[0].obligation_proof.preserved[0].fluid.storages[0].ports[0].connected, false)
+})
+
+test('normal runtime receipt churn, genuine plan completion, closed4 trimming and snapshot restore retain sealed additive authority', async () => {
+  const w = world({ doneMinimum: 1 })
+  await w.start(); await w.agent.completed()
+  const id = w.held().plan_id; const first = w.held().steps[0].step_id
+  for (let i = 0; i < 32; i++) w.memory.dispatchPlanningEvent(KEY, { type: 'OPERATION_RECEIPT_RECORDED', source: 'runtime',
+    plan_id: id, step_id: first, kind: 'observation', ref: `normal_churn_${i}`, summary: 'fresh unrelated observation', now: Date.now() })
+  assert.equal(w.held().execution.receipts[first].length, 24)
+  assert.equal(w.held().execution.receipts[first].some(row => row.ref === 'batch-g1-1'), false)
+  assert.ok(effectivePreservationProof(w.held(), w.held().steps[0]))
+  await w.agent.completed()
+  const snapshot = w.memory.snapshot()
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(snapshot)
+  const plan = restored.planningState(KEY).plans.find(row => row.plan_id === id)
+  assert.equal(plan.status, 'COMPLETED')
+  assert.equal(plan.execution.receipts[first].length, 4)
+  assert.ok(effectivePreservationProof(plan, plan.steps[0]))
+  assert.equal(effectivePreservationProof(plan, plan.steps[1], { plans: restored.planningState(KEY).plans }).preserved[0].fluid.storages[0].ports[0].target.entity.unit_number, 2)
+  assert.equal(w.game.mutations.length, 2)
+})
+
+test('durable admission capacity refuses before send and survives restart without minting a fresh allowance', async () => {
+  const w = world()
+  const record = w.memory.recordPreservationAdmission.bind(w.memory)
+  let seeded = false
+  w.memory.recordPreservationAdmission = (key, envelope) => {
+    if (!seeded) {
+      seeded = true
+      // Explicit saturation precondition: 64 previously valid durable native
+      // claims for this exact typed step, none relabelled as a completed effect.
+      const admissions = {}
+      for (let i = 0; i < 64; i++) {
+        const prior = structuredClone(envelope)
+        prior.operation_key = `prior/${i}`; prior.candidate.operation_key = prior.operation_key
+        admissions[prior.operation_key] = prior
+      }
+      w.held().execution.preservation_admissions = admissions
+    }
+    return record(key, envelope)
+  }
+  await assert.rejects(w.start(), error => error.code === 'preservation_admission_limit_exhausted')
+  assert.equal(w.game.mutations.length, 0); assert.equal(w.prepared.length, 1)
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(w.memory.snapshot())
+  const plan = getActivePlan(restored.planningState(KEY))
+  assert.equal(Object.keys(plan.execution.preservation_admissions).length, 64)
+  assert.equal(plan.execution.preservation_certificates, undefined)
+  assert.equal(restored.planningState(KEY).goal.replacements_accepted ?? 0, 0)
+})
+
+for (const seam of ['certificate_persist', 'certificate_trace']) test(`fresh native busy during ${seam} prevents ordinary close and next mutation`, async () => {
+  let fired = false
+  const inject = ({ memory, game }) => {
+    if (!fired && getActivePlan(memory.planningState(KEY))?.execution.preservation_certificates?.length) {
+      fired = true; game.taskState = 'working'; game.queueLength = 1
+    }
+  }
+  const w = world(seam === 'certificate_persist' ? { persist: inject } : { trace: data => {
+    if (data.row.event === 'contract.fluid_addition_certified') inject(data)
+  } })
+  await w.start(); const providers = w.calls.length; const result = await w.agent.completed()
+  assert.equal(fired, true); assert.equal(w.game.mutations.length, 1); assert.equal(w.calls.length, providers)
+  assert.equal(w.held().active_step_index, 0)
+  assert.ok(result.goalStatus === 'paused' || result.deferred, JSON.stringify(result))
 })
