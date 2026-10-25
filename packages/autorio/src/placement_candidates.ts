@@ -903,7 +903,7 @@ function native_fact_equal(left: any, right: any): boolean {
   if (left === right) return true
   if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
   const keys = Object.keys(left)
-  return keys.length === Object.keys(right).length && keys.every(key => native_fact_equal(left[key], right[key]))
+  return keys.length === Object.keys(right).length && keys.every(key => native_fact_equal(left[key as string], right[key as string]))
 }
 
 function protected_geometry(actor: ControlledActor, ids: number[]) {

@@ -39,14 +39,26 @@ async function place(name, request, before) {
   const candidate = set.candidates[0]
   const args = { candidate_set_id: set.candidate_set_id, candidate_id: candidate.id }
   const preflight = JSON.parse(await rcon.command(renderOperationPreflight({ name: 'place_candidate', args })))
+  let preservedBefore
   if (request.connects_to) assert.equal(preflight.preservation_join?.complete, true, JSON.stringify(preflight))
   if (request.connects_to) {
     const guard = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(args.candidate_set_id)},${luaString(args.candidate_id)},${luaString(`native-fixture/${evidence.operations.length}`)},{${request.connects_to.unit_number}})))`)
     assert.equal(guard.ok, true, JSON.stringify(guard)); preflight.preservation_join = guard.preservation_join
+    preservedBefore = preservationGeometry(guard.preservation_join.protected_geometry.find(row => row.entity.unit_number === request.connects_to.unit_number), request.connects_to.unit_number)
   }
   if (before) await before(preflight.preservation_join)
   const result = await operation('place_candidate', args)
-  assert.ok(result.placed_unit_number); return { result, candidate, preflight }
+  assert.ok(result.placed_unit_number)
+  if (preservedBefore) {
+    const fresh = preservationGeometry(await geometry(request.connects_to.unit_number), request.connects_to.unit_number)
+    const join = preflight.preservation_join.connects_to
+    const port = fresh.fluid.storages.find(row => row.index === join.target_port.storage_index).ports.find(row => row.index === join.target_port.connection_index)
+    const pair = row => ({ actor_id: row.actor_id, actor_epoch: 1, intent_signature: 'native-addition', preserved: [row] })
+    assert.equal(preservedProofMatches(pair(preservedBefore), pair(fresh), { addition: { source_unit_number: join.unit_number,
+      source_storage_index: join.target_port.storage_index, source_connection_index: join.target_port.connection_index, endpoint: port.target } }), true,
+    JSON.stringify({ message: 'every allowed native additive output must preserve old layout/edges/constraints', preservedBefore, fresh }))
+  }
+  return { result, candidate, preflight }
 }
 try {
   connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') }); await connection.connect()
