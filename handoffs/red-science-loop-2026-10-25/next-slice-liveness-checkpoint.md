@@ -107,3 +107,47 @@ Parent authorized private incorporation of F1 `3c9faa489fffb6463905d3c8ffa03231b
 - Source-hook proximity assertion now anchors the actual emitted `planner.wake` event, retaining the400-character bound; the first route literal now belongs to earlier wake classification.
 - `golden01` replays archived134 and current source without changing the original golden/evidence. All11 provider body/context fingerprints and165 event order match. Exactly two status hashes differ: index71 raw_chars1259→1271, index1322424→2448, from the native journal fixture's required producer tick field (+12chars/record). Parent independently verified and approved ONLY those two expected trace hash updates. Raw normalized rows/fingerprints are retained locally.
 - Focused failures `compat01`–`compat06` remain local. `compat07` passes181/181 including all startup/observation checks, unknown guard, exact golden and skill-hook checks. `compat08` passes684/684 across23 affected/safety suites; its scoped lint found only a test prefer-const declaration, fixed without behavioral change and rechecked in compat09. No native/proof source was changed in this follow-up. Heavy full02 follows only after this checkpoint is frozen; engine still belongs to F1 on the corrected combined source.
+
+
+## Validation addendum — 2026-10-25, immutable runtime `152ac475`
+
+Later receipts supersede only earlier pending status, not historical failures:
+[AW harness repair validation](../../docs/validation/AW_HARNESS_REPAIR_2026-10-25.md)
+consolidates exact commits, original AW/control proofs, actual Session bounded
+continuation, safety/restart/exhaustion, native and cleanup evidence.
+
+Native07's explicit zero-claim correction was privately merged at `e8b5d6dc` after
+primary engine01 failed before the first unguarded pump; all03 passed. Actual
+loop02 then exposed a real cold native journal `{}`. Narrow host fix `b286d885` reuses
+the canonical journal reader (known/resolved/no exact pending identity), retaining
+all stronger ownership/idle checks; unchanged old helper cold control fails,
+13 actual-helper controls and focused 168 pass; all04 passes. F1 host fix `7789045f`
+handles proved empty clears/crafting sequences; exact private merge `22df1481` keeps
+`b286d885`'s journal logic. Final test-only `152ac475` adds 11 actual-hook crafting-shape
+controls; composed 205 pass, scoped lint passes after unused-test-import cleanup.
+Native inputs remain identical to native-07; no mechanics/authority changes.
+
+Required all05 on `152ac475d418ac0198344bb33eecd79488bde674` passes 103 agent,
+3782 runtime and 1382 native tests plus type/TSTL/generated Lua; source remained
+fixed and every exact gate CID is absent. Native primary02/actual-loop04/saved-
+queue03 now pass: real native binding survives the shared result summary/disk
+restore, missed certificate is automatically reconciled, unchanged fuel executes
+once, and10 finite native reload/fault phases preserve exact prior admission or
+refuse stale/unknown/new-owner effects. This is scripted deterministic engine
+proof, not autonomous gameplay or red-science success. All 32 loaded file hashes,
+ZIP checks and explicit resource cleanup are retained locally. Parent's final
+inventory finds 134 unique recorded owned CIDs absent including stopped.
+
+Fresh Git-aware future-kit smoke02 on `b286d885` passes 8/8 fixture-input checks with
+read-only Git objects, including current template provenance and parser parity;
+later host-only fixes do not modify those templates. No actual trial was frozen.
+Original all01's 44 failures/7 cancelled and later native/host shape failures stay
+retained. No timeouts/assertions were weakened; source/native review now accepts exact `152ac475`; documentation/package review, separate
+exact-source payload repin and integration gates remain pending.
+
+Evidence limits: disposable per-phase pre-load ZIP-copy hashes are unmeasured;
+original ZIP hashes/integrity and the frozen copy/load sequence are retained.
+Native loaded-file hashes are checked every phase. Zero-effect claims cover the
+fixture area/inventory/protected geometry, excluding dynamic fluid amounts and
+network capacity. The validation report links the final native index (SHA256
+`ae642de19ab2a5bf4edbc82c152f3236ff5c27d47de8713beebc2470c49ca390`).

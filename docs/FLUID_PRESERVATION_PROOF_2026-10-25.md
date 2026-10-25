@@ -188,3 +188,39 @@ Focused shared161/161 and old-module causal replay pass. Production-hook craftin
 shape controls, full combined gates and actual real-loop certificate/fuel plus
 saved-queue/load evidence remain pending at this source checkpoint. Native files
 are unchanged, so no repeated compile or primary engine is claimed or needed.
+
+
+## Validation addendum — 2026-10-25, runtime `152ac475` / native-07
+
+The historical pending/failure paragraphs above are preserved. Current bounded
+validation is recorded in [AW harness repair validation](validation/AW_HARNESS_REPAIR_2026-10-25.md).
+Runtime `152ac475d418ac0198344bb33eecd79488bde674` contains corrected F1/F2
+composition; native-07 is compiled from `f2d1cb7608dfa98ab33822107b1ab87dce380e9e`
+with exact compiler/native-file equivalence verified against that runtime.
+
+Primary combined-engine02 passes actual Factorio 2.0.77 pump→boiler→pipe→engine,
+first-fuel steam, native guard faults and the actual exported atomic ownership
+reader/DTO. Actual-loop04 on `152ac475` passes the same external script after the earlier
+journal/clears shape failures: real helper/native binding/shared summary, disk
+restore after an injected missing certificate, automatic certification and exact
+unchanged fuel step; one boiler, one fuel transfer, replacements 0. Saved-queue03
+passes all 10 finite phases: exact existing admitted owner continues once, while
+new configure/actual Session startup and identity/missing-proof/claim-history/
+outer-leave faults refuse without world effects or replay. All 32 loaded files
+and ZIP integrity are checked; exact owned containers are absent. Local absolute
+links and practical limits are in the validation report. Scenario counters are
+unavailable; actual mod-context count 5→5 is specific to the saved-queue03 phases.
+
+The full offline all05 passes 103 agent / 3782 runtime / 1382 native tests plus
+type/TSTL/generated guard. Original failed primary/loop/full gates remain retained.
+No autonomous red-science or live-provider result follows from these scripted
+native proofs. Final source/native review accepts exact runtime `152ac475`. Documentation/package
+review, separate payload repin and parent-controlled integration/merged validation
+remain pending; no source authority or limits changed.
+
+Evidence limits: disposable per-phase pre-load ZIP-copy hashes are unmeasured;
+original ZIP hashes/integrity and the frozen copy/load sequence are retained.
+Native loaded-file hashes are checked every phase. Zero-effect claims cover the
+fixture area/inventory/protected geometry, excluding dynamic fluid amounts and
+network capacity. The validation report links the final native index (SHA256
+`ae642de19ab2a5bf4edbc82c152f3236ff5c27d47de8713beebc2470c49ca390`).
