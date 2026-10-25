@@ -5,6 +5,7 @@ import { candidateWorld, KEY } from './fluid-candidate-recovery-fixtures.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { argumentCorrectionAvailable, restorePlanningState, serializePlanningState, applyPlanningEvent } from './planning-state.mjs'
 import { checkFluidPreservationEligibility } from './contract-obligation-runtime.mjs'
+import { buildPendingOperation, sanitizePendingOperation } from './operation-reconciliation.mjs'
 
 test('early native known-argument eligibility -> durable existing allowance -> fresh certified proposal -> one placement -> unchanged fuel', async () => {
   const w = await candidateWorld()
@@ -249,10 +250,146 @@ test('duplicate GOAL_ACCEPTED for the same immutable goal cannot reinitialize it
   const state = w.memory.planningState(KEY)
   const duplicate = applyPlanningEvent(state, { type: 'GOAL_ACCEPTED', source: 'runtime', goal_id: state.goal.goal_id,
     objective: 'A duplicate event must not erase the old objective or claims.', now: Date.now() })
-  assert.equal(duplicate, state); assert.equal(duplicate.goal.argument_corrections.claims.length, 1)
+  assert.equal(duplicate, state); assert.deepEqual(duplicate.goal.argument_corrections, state.goal.argument_corrections)
   const newGoal = applyPlanningEvent(state, { type: 'GOAL_ACCEPTED', source: 'runtime', objective: 'A genuinely new owner goal.', now: Date.now() })
   assert.notEqual(newGoal.goal.goal_id, state.goal.goal_id)
   assert.equal(newGoal.goal.argument_corrections.goal_id, newGoal.goal.goal_id)
   assert.equal(newGoal.goal.argument_corrections.initialized_at, newGoal.goal.created_at)
   assert.deepEqual(newGoal.goal.argument_corrections.claims, [])
+})
+
+test('argument allowance remains durable execution state and never leaks through model planning context', async () => {
+  const w = await candidateWorld({ repeated: true }); await assert.rejects(w.start())
+  assert.equal(w.memory.planningState(KEY).goal.argument_corrections.claims.length, 1)
+  const context = w.memory.planningContext(KEY)
+  assert.equal(context.includes('argument_corrections'), false)
+  assert.equal(context.includes('operation_signature'), false)
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(w.memory.snapshot())
+  assert.deepEqual(restored.planningState(KEY).goal.argument_corrections, w.memory.planningState(KEY).goal.argument_corrections)
+  assert.equal(restored.planningContext(KEY).includes('argument_corrections'), false)
+})
+
+test('inactive model recovery stop is scope-bound and preserves every native and authority owner', async () => {
+  const w = await candidateWorld({ repeated: true }); await assert.rejects(w.start())
+  const state = structuredClone(w.memory.planningState(KEY)); state.goal.status = 'completed'; state.run.paused = false
+  const plan = state.plans.find(row => row.plan_id === state.active_plan_id); const step = plan.steps[plan.active_step_index]
+  const event = { type: 'RUN_MODEL_RECOVERY_STOPPED', source: 'runtime', goal_id: state.goal.goal_id,
+    now: Date.now(), goal_status: 'completed', plan_id: plan.plan_id, plan_version: plan.plan_version,
+    step_id: step.step_id, request_id: 'offline-inactive-goal', native_idle: false }
+  const guarded = applyPlanningEvent(state, event)
+  assert.equal(guarded.run.paused, false); assert.equal(guarded.run.model_recovery_stop.native_idle, false)
+  assert.deepEqual(guarded.goal, state.goal); assert.deepEqual(guarded.plans, state.plans)
+  assert.equal(applyPlanningEvent(guarded, { type: 'GOAL_ACCEPTED', source: 'runtime', goal_id: state.goal.goal_id,
+    objective: state.goal.objective, now: Date.now() }), guarded)
+  for (const change of [row => { row.source = 'planner' }, row => { row.goal_id = 'other' },
+    row => { row.plan_id = 'other' }, row => { row.plan_version++ }, row => { row.step_id = 'other' },
+    row => { row.goal_status = 'cancelled' }, row => { delete row.request_id }]) {
+    const invalid = structuredClone(event); change(invalid)
+    assert.equal(applyPlanningEvent(state, invalid).run.model_recovery_stop, undefined)
+  }
+  const record = sanitizePendingOperation(buildPendingOperation({ operationKey: 'unresolved-effect', requestId: 'owned-request',
+    protocolVersion: 2, goalId: state.goal.goal_id, planId: plan.plan_id, stepId: step.step_id,
+    actor: { actor_id: 10, epoch: 3, session: 'fixture' }, operations: [{ name: 'wait', args: { ticks: 60 } }], now: 1 }))
+  assert.ok(record)
+  for (const shape of ['ledger', 'legacy']) for (const pause of ['operator', 'authority']) {
+    const pending = structuredClone(state)
+    pending.run = { ...pending.run, paused: true, pause_class: pause, pause_reason: 'owned stop',
+      condition_wait: { id: 'owned-wait' }, persistent_runtime: { id: 'owned-controller' } }
+    pending.run.pending_operation = record
+    if (shape === 'ledger') pending.operation_ledger = { version: 1, sequence: 1, records: [record], closed: [] }
+    const stopped = applyPlanningEvent(pending, event)
+    const { model_recovery_stop, ...run } = stopped.run
+    assert.ok(model_recovery_stop); assert.deepEqual(run, pending.run)
+    const restored = restorePlanningState(serializePlanningState(stopped))
+    assert.deepEqual(restored.run.condition_wait, pending.run.condition_wait)
+    assert.deepEqual(restored.run.persistent_runtime, pending.run.persistent_runtime)
+    assert.equal(restored.operation_ledger.records.length, 1)
+    assert.deepEqual(restored.goal, pending.goal)
+  }
+})
+
+test('current-schema malformed or missing goal status fails closed on restore with exact consumed ledger and both pending shapes', async () => {
+  const w = await candidateWorld({ repeated: true }); await assert.rejects(w.start())
+  const original = w.memory.snapshot()
+  for (const status of ['active', 'completed', 'cancelled', 'paused', ' active ', 'active\n', ['active'], undefined, null, '']) for (const shape of ['ledger', 'legacy']) {
+    const snapshot = structuredClone(original)
+    const state = snapshot.planning_states.find(row => row.key === KEY).state
+    const plan = state.plans.find(row => row.plan_id === state.active_plan_id)
+    const pending = sanitizePendingOperation(buildPendingOperation({ operationKey: 'restore-owned-effect', requestId: 'restore-request',
+      protocolVersion: 2, goalId: state.goal.goal_id, planId: plan.plan_id, stepId: plan.steps[plan.active_step_index].step_id,
+      actor: { actor_id: 10, epoch: 3 }, operations: [{ name: 'wait', args: { ticks: 1 } }], now: 1 }))
+    if (status === undefined) delete state.goal.status
+    else state.goal.status = status
+    if (shape === 'ledger') state.operation_ledger = { version: 1, sequence: 1, records: [pending], closed: [] }
+    else { delete state.operation_ledger; state.run.pending_operation = pending }
+    const restored = new CanonicalTaskBoardMemory(); restored.restore(snapshot)
+    const after = restored.planningState(KEY)
+    assert.equal(after.goal.status, typeof status === 'string' && status ? status : 'invalid')
+    assert.equal(after.goal.goal_id, state.goal.goal_id)
+    assert.equal(after.goal.objective, state.goal.objective)
+    assert.deepEqual(after.goal.argument_corrections, state.goal.argument_corrections)
+    assert.deepEqual(restored.pendingOperations(KEY), [pending])
+    if (status !== 'active') {
+      w.agent.memory = restored
+      const calls = w.calls.length; const mutations = w.game.mutations.length
+      await assert.rejects(w.agent.callProviderRound(w.agent.epoch, w.agent.generation, { round: 1 }), /inactive_goal_recovery_refused/)
+      await assert.rejects(w.agent.recordPendingOperationBeforeSend([{ name: 'wait', args: { ticks: 1 } }], w.agent.epoch), /inactive_goal_recovery_refused/)
+      assert.equal(w.calls.length, calls); assert.equal(w.game.mutations.length, mutations)
+      assert.deepEqual(restored.pendingOperations(KEY), [pending])
+    }
+  }
+  // Pre-canonical Task Board Lite migration has explicit admitted-work
+  // provenance and still mints its ACTIVE goal through GOAL_ACCEPTED.
+  const legacy = structuredClone(original); delete legacy.planning_states
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(legacy)
+  assert.equal(restored.planningState(KEY).goal.status, 'active')
+  assert.equal(restored.planningState(KEY).goal.objective, w.memory.planningState(KEY).goal.objective)
+})
+
+for (const seam of ['prepared_persist', 'operations_admit', 'late_preflight']) test(`goal terminal at ${seam} refuses native transport and settles only its exact unsent record`, async () => {
+  let injected = false; let prepared; let unrelated
+  const terminate = ({ memory }) => {
+    if (injected) return
+    const records = memory.pendingOperations(KEY)
+    if (!records.length) return
+    injected = true; prepared = structuredClone(records.at(-1))
+    const state = memory.planningState(KEY)
+    unrelated = { ...structuredClone(prepared), operation_key: `${prepared.operation_key}-unrelated`, attempt_id: 'unrelated-native-owner' }
+    state.operation_ledger = { ...state.operation_ledger, records: [...state.operation_ledger.records, unrelated] }
+    state.run = { ...state.run, pending_operation: unrelated }
+    memory.planningByNpc.set(KEY, { ...state, goal: { ...state.goal, status: 'cancelled' } })
+  }
+  const w = await candidateWorld({
+    persist: seam === 'prepared_persist' ? terminate : undefined,
+    trace: seam === 'operations_admit' ? context => { if (context.row.event === 'operations.admit') terminate(context) } : undefined,
+    response: seam === 'late_preflight' ? context => { if (context.text.includes('fluid_preservation_candidate') && context.text.includes('placement-2')) terminate(context) } : undefined,
+  })
+  await w.start()
+  assert.equal(injected, true)
+  assert.equal(w.game.mutations.length, 0)
+  assert.deepEqual(w.memory.pendingOperations(KEY), [unrelated])
+  const closed = w.memory.planningState(KEY).operation_ledger.closed.find(row => row.operation_key === prepared.operation_key)
+  assert.equal(closed.effect, 'not_happened')
+  assert.equal(w.memory.planningState(KEY).goal.status, 'cancelled')
+  assert.equal(w.rows.filter(row => row.event === 'request.completed' && row.data.outcome === 'inactive_goal_recovery_stopped').length, 1)
+})
+
+test('malformed and other-goal stop markers fail closed without bypassing paused restore invariants', async () => {
+  const w = await candidateWorld({ repeated: true }); await assert.rejects(w.start())
+  const raw = serializePlanningState(w.memory.planningState(KEY))
+  for (const marker of [true, 'invalid', {}, { goal_id: 'other' }, { version: 1, source: 'planner', goal_id: raw.goal.goal_id }, { value: 'x'.repeat(9000) }]) {
+    const invalid = structuredClone(raw)
+    invalid.run.model_recovery_stop = marker
+    invalid.run.condition_wait = { id: 'invalid-owner' }; invalid.run.persistent_runtime = { id: 'invalid-controller' }
+    const restored = restorePlanningState(invalid)
+    assert.equal(restored.run.model_recovery_stop_fault, true)
+    assert.equal(restored.run.model_recovery_stop, undefined)
+    assert.equal(restored.run.condition_wait, null); assert.equal(restored.run.persistent_runtime, null)
+    assert.deepEqual(restored.goal.argument_corrections, raw.goal.argument_corrections)
+    assert.equal(applyPlanningEvent(restored, { type: 'RUN_RESUMED', source: 'runtime', goal_id: restored.goal.goal_id,
+      reason: 'must remain fenced', now: Date.now() }), restored)
+    w.memory.planningByNpc.set(KEY, restored)
+    assert.throws(() => w.agent.assertModelRecoveryAllowed(), /model_recovery_stop_invalid/)
+    assert.equal(restorePlanningState(serializePlanningState(restored)).run.model_recovery_stop_fault, true)
+  }
 })

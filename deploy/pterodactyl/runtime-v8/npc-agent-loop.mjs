@@ -10124,6 +10124,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // Written BEFORE the batch is sent: what is about to be sent, for which plan step, by which actor and epoch, and where the
   // mod's batch counter stood. A lost acknowledgement or a restart then has something exact to reconcile against.
   async recordPendingOperationBeforeSend(operations, before) {
+    this.assertModelRecoveryAllowed()
     if (!this.requestInfo || typeof this.memory.recordPendingOperation !== 'function') return undefined
     const key = this.requestInfo.memoryKey
     const owner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
@@ -10131,6 +10132,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const amendment = this.pendingInteractionAmendment
     const current = () => {
       this.assertCheckpointOwnerIdentity(owner)
+      this.assertModelRecoveryAllowed()
       if (this.requestAdmissionOwner !== intake || this.pendingInteractionAmendment !== amendment) throw new AgentLoopError('Prepared operation cancelled or superseded')
     }
     const planning = this.memory.planningState?.(key)
@@ -11845,6 +11847,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     catch (error) {
       if (!ownsFailure()) throw error
+      const failedGoal = this.memory.planningState?.(this.activePlanKey())?.goal
+      if (this.traceRequest && failedGoal && failedGoal.status !== GOAL_STATUS.ACTIVE) return this.withPauseNotice(await this.stopInactiveGoalRecovery())
       const message = error instanceof Error ? error.message : String(error)
       const planState = this.memory.currentPlan?.(this.activePlanKey())
       if (this.goalAwaitingNextSlice()) {
@@ -13502,6 +13506,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     recoveryKind,
     providerMessagesOverride,
   }) {
+    this.assertModelRecoveryAllowed()
+    const recoveryOwner = this.captureModelRecoveryOwner()
     const omissionRepair = this.actionOmissionRepairActive && recoveryKind !== 'output_budget_exhaustion'
     const effectiveAllowTools = omissionRepair && this.actionOmissionForceNoTools ? false : allowTools
     const effectiveRecoveryAttempt = omissionRepair ? Math.max(1, recoveryAttempt) : recoveryAttempt
@@ -13510,9 +13516,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let budget
     try {
       budget = await this.reserve({ epoch: current.epoch, actorId: current.actor_id, recoveryKind, recoveryAttempt: effectiveRecoveryAttempt })
+      this.assertModelRecoveryAllowed(recoveryOwner)
       await this.traceEvent('budget.reserved', { latency_ms: Date.now() - budgetStartedAt, usage: budget, recovery_attempt: effectiveRecoveryAttempt, recovery_kind: traceRecoveryKind })
     }
     catch (error) {
+      if (error?.code === 'inactive_goal_recovery_refused' || error?.code === STALE_REPLY_ERROR_CODE) throw error
       const message = error instanceof Error ? error.message : String(error)
       await this.traceEvent('budget.rejected', { latency_ms: Date.now() - budgetStartedAt, message, recovery_attempt: effectiveRecoveryAttempt, recovery_kind: traceRecoveryKind })
       if (recoveryKind === 'output_budget_exhaustion') {
@@ -13681,6 +13689,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     let message
     try {
+      this.assertModelRecoveryAllowed(recoveryOwner)
       message = await this.provider(providerMessages, {
         ...this.providerRoleFields(attribution),
         ...(this.completionProtocolVersion >= 3 ? { completionProtocolVersion: this.completionProtocolVersion } : {}),
@@ -13956,6 +13965,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // its own single bounded recovery.
     if (effectiveAllowTools && !omissionRepair && effectiveRecoveryAttempt === 0 && providerOutputBudgetExhausted(message)) {
       await this.dropIfStale(attribution)
+      this.assertModelRecoveryAllowed(recoveryOwner)
       this.outputBudgetRecoveryUsed = true
       const state = this.memory.currentPlan?.(this.activePlanKey())
       this.outputBudgetRecoveryGuard = {
@@ -13983,6 +13993,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         world_evidence_observed: this.outputBudgetRecoveryGuard.world_evidence_observed,
         completed_operation_count: this.outputBudgetRecoveryGuard.completed_operations.length,
       })
+      this.assertModelRecoveryAllowed(recoveryOwner)
       this.memory.setProviderRecovery?.(this.activePlanKey(), {
         kind: 'output_budget_exhaustion',
         phase: 'in_flight',
@@ -13991,6 +14002,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         started_at: Date.now(),
       })
       await this.persistState()
+      this.assertModelRecoveryAllowed(recoveryOwner)
       try {
         // The retry rebuilds the request from this round's messages: never under another conversation's attribution.
         await this.dropIfStale(attribution)
@@ -17731,6 +17743,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const operationOwnerKey = this.activePlanKey()
       const assertSendOwner = pending => {
         this.assertCheckpointOwnerIdentity(sendOwner)
+        this.assertModelRecoveryAllowed()
         if (this.requestAdmissionOwner !== sendIntake || this.pendingInteractionAmendment !== sendAmendment) throw new AgentLoopError('Operation admission cancelled or superseded')
         if (pending) {
           const records = this.memory.pendingOperations?.(operationOwnerKey) ?? []
@@ -18233,13 +18246,103 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     try {
       return await this.recoverPlanRoute(generation, reason, roundBase)
     }
+    catch (error) {
+      if (error?.code === 'inactive_goal_recovery_refused') return await this.stopInactiveGoalRecovery()
+      throw error
+    }
     finally {
       this.recoveryCommitDepth--
     }
   }
 
+  captureModelRecoveryOwner() {
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const run = planning?.run
+    return { checkpoint: this.captureCheckpointOwner(), intake: this.requestAdmissionOwner, actor: JSON.stringify(this.epoch),
+      amendment: this.currentPendingAmendment(), ownership: JSON.stringify([run?.paused, run?.pause_reason,
+        run?.pause_class, run?.condition_wait, run?.persistent_runtime]) }
+  }
+
+  assertModelRecoveryAllowed(owner) {
+    if (owner) {
+      this.assertCheckpointOwnerIdentity(owner.checkpoint)
+      const current = this.captureModelRecoveryOwner()
+      if (current.intake !== owner.intake || current.amendment !== owner.amendment || current.actor !== owner.actor
+        || current.ownership !== owner.ownership) {
+        const error = new AgentLoopError('Model recovery cancelled or superseded by an authority owner')
+        error.code = STALE_REPLY_ERROR_CODE
+        throw error
+      }
+    }
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    if (planning?.run?.model_recovery_stop_fault) {
+      const error = new AgentLoopError('model_recovery_stop_invalid: persisted recovery ownership is unproven')
+      error.code = 'model_recovery_stop_invalid'
+      declarePauseClass(error, PAUSE_CLASS.GUARD)
+      throw error
+    }
+    if (planning?.goal && (planning.goal.status !== GOAL_STATUS.ACTIVE
+      || planning.run?.model_recovery_stop?.goal_id === planning.goal.goal_id)) {
+      const error = new AgentLoopError('inactive_goal_recovery_refused: no new recovery or provider call is permitted')
+      error.code = 'inactive_goal_recovery_refused'
+      throw error
+    }
+  }
+
+  async stopInactiveGoalRecovery() {
+    const key = this.activePlanKey(); const owner = this.captureModelRecoveryOwner()
+    const goal = this.memory.planningState?.(key)?.goal
+    const goalId = goal?.goal_id; const goalStatus = goal?.status
+    const trace = this.traceRequest
+    const sync = () => {
+      this.assertCheckpointOwnerIdentity(owner.checkpoint)
+      const current = this.captureModelRecoveryOwner()
+      const currentGoal = this.memory.planningState?.(key)?.goal
+      if (!goal || currentGoal?.goal_id !== goalId || currentGoal.status !== goalStatus
+        || current.intake !== owner.intake || current.amendment !== owner.amendment || current.actor !== owner.actor
+        || current.ownership !== owner.ownership || this.traceRequest !== trace) {
+        const error = new AgentLoopError('Inactive-goal stop cancelled or superseded')
+        error.code = STALE_REPLY_ERROR_CODE
+        throw error
+      }
+    }
+    await this.assertCheckpointOwnerCurrent(owner.checkpoint); sync()
+    let runtime
+    try { runtime = await this.readInteractionTaskStatus() }
+    catch { runtime = undefined }
+    sync()
+    const run = this.memory.planningState?.(key)?.run
+    const nativeIdle = idleRuntimeStatus(runtime) && (this.memory.pendingOperations?.(key) ?? []).length === 0
+      && !run?.condition_wait && !run?.persistent_runtime && !this.batchInFlight
+    const code = 'inactive_goal_recovery_refused'
+    const checkpoint = owner.checkpoint
+    const stopped = this.memory.dispatchPlanningEvent(key, { type: PLANNING_EVENT.RUN_MODEL_RECOVERY_STOPPED,
+      source: 'runtime', now: Date.now(), goal_id: goalId, goal_status: goalStatus,
+      plan_id: checkpoint.planId ?? null, plan_version: checkpoint.planVersion ?? null,
+      step_id: checkpoint.stepId ?? null, request_id: trace?.id, native_idle: nativeIdle })
+    if (stopped?.run?.model_recovery_stop?.request_id !== trace?.id) throw new AgentLoopError('Inactive-goal recovery stop failed to persist')
+    await this.persistState({ strict: true }); sync()
+    await this.traceEvent('recovery.inactive_goal_stopped', { request_id: trace?.id, goal_id: goalId,
+      plan_id: checkpoint.planId, step_id: checkpoint.stepId, goal_status: goalStatus, reason: code,
+      disposition: nativeIdle ? 'model_recovery_stopped_native_idle' : 'model_recovery_stopped_native_ownership_retained', native_idle: nativeIdle })
+    sync()
+    await this.traceEvent('request.completed', { outcome: 'inactive_goal_recovery_stopped', reason: code,
+      goal_id: goalId, goal_status: goalStatus, native_idle: nativeIdle, usage: trace?.usage })
+    sync()
+    const state = this.peekPlanState(key)
+    this.active = false
+    this.traceRequest = null
+    return { chatMessage: 'I stopped model recovery because the admitted goal is no longer active.',
+      plan: state?.plan ?? [], currentStep: state?.current_step ?? 0, operations: [], epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id, goalId,
+      goalStatus: [GOAL_STATUS.COMPLETED, GOAL_STATUS.CANCELLED].includes(goalStatus) ? goalStatus : 'inactive',
+      taskBoard: visibleTaskBoard(state?.task_board) }
+  }
   async recoverPlanRoute(generation, reason, roundBase) {
     if (this.freshContextRecoveryInProgress) throw new AgentLoopError(`provider_action_omission_repair_failed: fresh_context_recovery_exhausted: ${reason instanceof Error ? reason.message : String(reason)}`)
+    const admittedGoal = this.memory.planningState?.(this.activePlanKey())?.goal
+    if (admittedGoal && admittedGoal.status !== GOAL_STATUS.ACTIVE) return this.stopInactiveGoalRecovery()
+    const recoveryOwner = this.captureModelRecoveryOwner()
     const reasonText = reason instanceof Error ? reason.message : String(reason)
     const recovery = {
       reason: reasonText,
@@ -18249,6 +18352,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.traceRequest) this.traceRequest.recovery = recovery
     this.lifecycleEnter('plan.recover')
     await this.traceEvent('replan.started', recovery)
+    this.assertModelRecoveryAllowed(recoveryOwner)
 
     const providerBudgetFailure = recoveryFailureClassHint(reasonText) === 'provider_budget'
 
@@ -18305,9 +18409,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let routed
     try {
       routed = await this.routeRecoveryDecision(reason, roundBase)
+      this.assertModelRecoveryAllowed(recoveryOwner)
     }
     catch (error) {
-      if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
+      if (error?.code === 'inactive_goal_recovery_refused' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
       routed = { route: 'fallback_runtime', error: cleanMemoryText(error instanceof Error ? error.message : String(error), 300) }
     }
 
@@ -18437,6 +18542,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (providerBudgetFailure && plannerRecoveryRoutes.includes(routed.route)) {
       const semanticScope = 'keep_target'
       const key = this.activePlanKey()
+      const goal = this.memory.planningState?.(key)?.goal
+      if (goal && goal.status !== GOAL_STATUS.ACTIVE) return this.stopInactiveGoalRecovery()
+      this.assertModelRecoveryAllowed(recoveryOwner)
       this.providerBudgetHandoffCount++
       this.providerBudgetGeneration = Math.max(1, this.providerBudgetGeneration) + 1
       this.providerBudgetGenerationOutputUnits = 0
@@ -18455,12 +18563,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         started_at: Date.now(),
       })
       await this.persistState()
+      this.assertModelRecoveryAllowed(recoveryOwner)
       await this.traceEvent('budget.generation_started', {
         generation: this.providerBudgetGeneration,
         handoff_count: this.providerBudgetHandoffCount,
         semantic_scope: semanticScope,
         route: routed.route,
       })
+      this.assertModelRecoveryAllowed(recoveryOwner)
 
       const previousTrigger = this.reasoningTriggerSource
       const previousReasoningBudget = this.reasoningBudgetOverride
@@ -18473,10 +18583,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         semanticScope,
         runtime: routed.runtime,
       }))
+      if (!ownsDecisionBudgets(this, recoveryOwner.checkpoint)) await this.dropIfStale(this.turnConversation)
+      this.assertModelRecoveryAllowed(recoveryOwner)
       if (!restaged.restaged) {
         // Refused (no admitted reducer goal, the reducer rejected the event): the
         // fresh generation must still not run on the exhausted thread.
         await this.traceEvent('budget.handoff_restage_fallback', { reason: restaged.reason, budget_generation: this.providerBudgetGeneration })
+        this.assertModelRecoveryAllowed(recoveryOwner)
         const admittedGoal = this.memory.planningState?.(key)?.goal
         const capsule = providerBudgetHandoffCapsule(
           this.memory.currentPlan?.(key),

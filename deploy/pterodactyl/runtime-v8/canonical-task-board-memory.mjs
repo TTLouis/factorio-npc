@@ -2413,8 +2413,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           nodes: (planning.roadmap.nodes ?? []).map(node => ({ ...node })),
         }
       : null
+    const goal = { ...planning.goal }
+    delete goal.argument_corrections // harness execution accounting is not model-authored goal context
     const visible = {
-      goal: { ...planning.goal },
+      goal,
       roadmap,
       steering: steeringContextForDraft(planning),
       plan_tracker: planTrackerView(planning),

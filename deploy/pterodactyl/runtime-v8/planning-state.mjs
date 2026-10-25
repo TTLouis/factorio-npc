@@ -401,6 +401,7 @@ export const PLANNING_EVENT = Object.freeze({
   // Run state (3.3 move 3). The goal's run is paused or running; a pause never
   // touches plan semantics, the active step or approval state.
   RUN_PAUSED: 'RUN_PAUSED',
+  RUN_MODEL_RECOVERY_STOPPED: 'RUN_MODEL_RECOVERY_STOPPED',
   RUN_RESUMED: 'RUN_RESUMED',
   // A model_recoverable pause is being resumed automatically (pause-class.mjs). The reducer counts the attempt per step identity
   // and per goal, durably, and refuses an attempt whose goal, plan, plan version or step is no longer the live one.
@@ -868,7 +869,9 @@ function sanitizeGoal(raw) {
     owner: text(raw.owner, 128) || 'unknown',
     objective: text(raw.objective, 1000),
     constraints: stringList(raw.constraints, { max: 24, maxLength: 300 }),
-    status: Object.values(GOAL_STATUS).includes(raw.status) ? raw.status : GOAL_STATUS.ACTIVE,
+    // Never trim/coerce malformed input into ACTIVE. Keep bounded diagnostic
+    // strings exactly; all execution authorities require the exact enum.
+    status: typeof raw.status === 'string' && raw.status.length > 0 && raw.status.length <= 60 ? raw.status : 'invalid',
     created_at: finiteNumber(raw.created_at) ?? 0,
     updated_at: finiteNumber(raw.updated_at) ?? finiteNumber(raw.created_at) ?? 0,
   }
@@ -3440,6 +3443,21 @@ Object.assign(HANDLERS, {
     }
   },
 
+  // This closes model recovery only. Native effects, controllers and existing
+  // pause authority retain their owners even when their settlement is unknown.
+  [PLANNING_EVENT.RUN_MODEL_RECOVERY_STOPPED](state, event, now) {
+    const plan = getActivePlan(state)
+    if (!state.goal || state.goal.status === GOAL_STATUS.ACTIVE || event.source !== 'runtime'
+      || event.goal_id !== state.goal.goal_id || event.goal_status !== state.goal.status
+      || event.plan_id !== (plan?.plan_id ?? null) || event.plan_version !== (plan?.plan_version ?? null)
+      || event.step_id !== (plan?.steps?.[plan.active_step_index]?.step_id ?? null)
+      || !text(event.request_id, 240)) return state
+    const stop = { version: 1, source: 'runtime', goal_id: event.goal_id, goal_status: event.goal_status, plan_id: event.plan_id,
+      plan_version: event.plan_version, step_id: event.step_id, request_id: text(event.request_id, 240),
+      reason: 'inactive_goal_recovery_refused', native_idle: event.native_idle === true, at: now }
+    return { ...state, run: { ...(state.run ?? createEmptyRunState()), model_recovery_stop: stop }, updated_at: now }
+  },
+
   [PLANNING_EVENT.NEXT_SLICE_TRANSITION](state, event, now) {
     return nextSliceTransition(state, event, now)
   },
@@ -3487,6 +3505,7 @@ Object.assign(HANDLERS, {
   },
 
   [PLANNING_EVENT.RUN_RESUMED](state, event, now) {
+    if (state.run?.model_recovery_stop_fault || state.run?.model_recovery_stop?.goal_id === state.goal?.goal_id) return state
     if (!runEventAllowed(state, event)) return state
     const run = state.run
     if (!run?.paused) return state
@@ -4445,6 +4464,16 @@ function restoreReplacementLineage(raw) {
 
 function restoreRun(raw, state) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const candidateStop = boundedRecord(raw.model_recovery_stop)
+  const stopPlan = getActivePlan(state)
+  const validStop = candidateStop?.version === 1 && candidateStop.source === 'runtime'
+    && candidateStop.goal_id === state.goal?.goal_id && state.goal?.status !== GOAL_STATUS.ACTIVE
+    && candidateStop.goal_status === state.goal?.status && candidateStop.reason === 'inactive_goal_recovery_refused'
+    && typeof candidateStop.request_id === 'string' && candidateStop.request_id.length > 0 && candidateStop.request_id.length <= 240
+    && Number.isFinite(candidateStop.at) && typeof candidateStop.native_idle === 'boolean'
+    && candidateStop.plan_id === (stopPlan?.plan_id ?? null) && candidateStop.plan_version === (stopPlan?.plan_version ?? null)
+    && candidateStop.step_id === (stopPlan?.steps?.[stopPlan.active_step_index]?.step_id ?? null)
+  const recoveryStopFault = raw.model_recovery_stop_fault === true || (raw.model_recovery_stop != null && !validStop)
   const paused = raw.paused === true
   const reason = paused ? text(raw.pause_reason, RUN_STATE_LIMITS.pauseReason) : ''
   const locators = raw.locators && typeof raw.locators === 'object' && !Array.isArray(raw.locators) ? raw.locators : {}
@@ -4459,9 +4488,11 @@ function restoreRun(raw, state) {
     paused_at: finiteNumber(raw.paused_at) ?? null,
     resumed_at: finiteNumber(raw.resumed_at) ?? null,
     pause_count: Number.isSafeInteger(raw.pause_count) && raw.pause_count >= 0 ? raw.pause_count : 0,
-    condition_wait: paused ? null : boundedRecord(raw.condition_wait),
+    condition_wait: paused && !validStop ? null : boundedRecord(raw.condition_wait),
     provider_recovery: boundedRecord(raw.provider_recovery),
-    persistent_runtime: paused ? null : boundedRecord(raw.persistent_runtime),
+    ...(validStop ? { model_recovery_stop: clone(candidateStop) } : {}),
+    ...(recoveryStopFault ? { model_recovery_stop_fault: true } : {}),
+    persistent_runtime: paused && !validStop ? null : boundedRecord(raw.persistent_runtime),
     pending_operation: sanitizePendingOperation(raw.pending_operation),
     locators: {
       durable_last_operations: sanitizeDurableOperations(locators.durable_last_operations),
@@ -4542,7 +4573,7 @@ export function restorePlanningState(raw) {
           reason: text(raw.last_reasoning_reset.reason, 200) || null,
         }
       : null,
-    run: restoreRun(raw.run, { goal, plans }),
+    run: restoreRun(raw.run, { goal, plans, active_plan_id: plans.some(plan => plan.plan_id === activePlanId) ? activePlanId : null }),
     ...((raw.operation_ledger || raw.run?.pending_operation) ? { operation_ledger: operationLedger(raw.operation_ledger, raw.run?.pending_operation) } : {}),
     context_restages: restoreContextRestages(raw.context_restages),
     ...(() => {

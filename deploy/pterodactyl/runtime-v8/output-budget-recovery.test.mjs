@@ -36,6 +36,7 @@ class FakeRcon {
     this.status = deployment()
     this.mutations = []
     this.batchId = 0
+    this.admissions = []
   }
 
   async command(text) {
@@ -44,6 +45,8 @@ class FakeRcon {
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
         task_state: 'idle',
+        batch_generation: 1,
+        admission_journal: this.admissions,
         queue_empty: true,
         queue_length: 0,
         last_completed_batch: {
@@ -60,6 +63,13 @@ class FakeRcon {
       assert.ok(marker)
       this.mutations.push(text)
       this.batchId++
+      const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
+      if (encoded) {
+        const identity = JSON.parse(JSON.parse(encoded))
+        this.admissions.push({ ...identity, generation: 1, tick: 500 + this.batchId, batch_id: this.batchId, state: 'completed',
+          slots: Array.from({ length: identity.operation_count }, (_, index) => ({ index: index + 1, ok: true, queued_tasks: 1,
+            batch_refs: [{ batch_id: this.batchId, batch_generation: 1, batch_ref: `batch-g1-${this.batchId}` }] })) })
+      }
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
     }
@@ -2036,21 +2046,27 @@ test('C5: the request output ceiling still pauses visibly, and Resume after it r
   assert.equal(world.memory.planningState('npc:sgluna').context_restages.at(-1).handoff_id, row.data.handoff_id)
 })
 
-test('C5: the capsule fallback runs through a REAL refusal (the reducer goal is no longer active), traced with the request id and the reason', async () => {
+for (const status of ['paused', 'completed', 'cancelled']) for (const response of ['context_error', 'exhausted_response']) test(`C5: inactive ${status} ${response} stops model recovery without a fresh provider, budget or same-goal acceptance`, async () => {
   const canonical = ['Inspect machine state', 'Continue the build']
   const calls = []
   const trace = []
+  let before
   const agent = makeAgent({
     interactionDecisionProvider: rolloverDecisionProvider({ count: 0 }),
     provider: async (messages) => {
       calls.push(messages)
       if (calls.length === 1) return planMessage({ chatMessage: 'One action.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
       if (calls.length === 2) {
-        // The reducer goal stops being active while the legacy plan still is: the
-        // seam refuses (goal_not_active) exactly as it would in production.
+        assert.deepEqual(agent.memory.pendingOperations('npc:sgluna'), [], 'the first wait was exactly settled before changing goal status')
+        assert.equal(agent.memory.planningState('npc:sgluna').operation_ledger.closed.length, 1)
+        // 'paused' is the original malformed fixture status (not a GOAL_STATUS).
+        // The valid terminal statuses must also never revive through legacy
+        // same-ID GOAL_ACCEPTED or obtain a new budget/provider call.
         const state = agent.memory.planningState('npc:sgluna')
-        agent.memory.planningByNpc.set('npc:sgluna', { ...state, goal: { ...state.goal, status: 'paused' } })
-        throw contextWindowError()
+        before = { goal: structuredClone(state.goal), budget: agent.providerBudgetGeneration, handoffs: agent.providerBudgetHandoffCount }
+        agent.memory.planningByNpc.set('npc:sgluna', { ...state, goal: { ...state.goal, status } })
+        if (response === 'context_error') throw contextWindowError()
+        return exhaustedMessage()
       }
       return planMessage({ chatMessage: 'Continued.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
     },
@@ -2060,19 +2076,38 @@ test('C5: the capsule fallback runs through a REAL refusal (the reducer goal is 
   await agent.request('exercise a real refusal', { sender: 'TTLouis' })
   await agent.completed()
 
-  assert.equal(calls.length, 3)
-  const refused = trace.filter(record => record.event === 'context.restage_refused')
+  assert.equal(calls.length, 2)
+  assert.equal(agent.rcon.mutations.length, 1, 'only the initially admitted wait; no continuation after inactive goal')
+  assert.equal(agent.providerBudgetGeneration, before.budget)
+  assert.equal(agent.providerBudgetHandoffCount, before.handoffs)
+  const refused = trace.filter(record => record.event === 'recovery.inactive_goal_stopped')
   assert.equal(refused.length, 1)
-  assert.equal(refused[0].data.reason, 'goal_not_active')
-  assert.equal(refused[0].data.checkpoint, 'C5')
+  assert.equal(refused[0].data.reason, 'inactive_goal_recovery_refused')
+  assert.equal(refused[0].data.goal_status, status)
+  assert.equal(refused[0].data.disposition, 'model_recovery_stopped_native_idle')
   assert.ok(refused[0].request_id)
-  const fallback = trace.filter(record => record.event === 'budget.handoff_restage_fallback')
-  assert.equal(fallback.length, 1)
-  assert.equal(fallback[0].data.reason, 'goal_not_active')
-  assert.equal(fallback[0].request_id, refused[0].request_id)
+  assert.equal(trace.filter(record => record.event === 'budget.handoff_restage_fallback').length, 0)
+  assert.equal(trace.filter(record => record.event === 'budget.generation_started').length, 0)
   assert.equal(trace.filter(record => record.event === 'context.restaged' && record.data.checkpoint === 'C5').length, 0)
-  assert.ok(calls[2].some(message => String(message.content ?? '').startsWith('[PROVIDER_BUDGET_HANDOFF]')), 'the capsule carried the fresh generation')
-  assert.ok(!calls[2].some(message => message.role === 'assistant' || message.role === 'tool'), 'still none of the exhausted thread')
+  const planning = agent.memory.planningState('npc:sgluna')
+  assert.equal(planning.goal.goal_id, before.goal.goal_id); assert.equal(planning.goal.status, status)
+  assert.deepEqual(planning.goal.argument_corrections, before.goal.argument_corrections)
+  assert.equal(planning.run.paused, false)
+  assert.equal(planning.run.model_recovery_stop.goal_id, before.goal.goal_id)
+  const terminals = trace.filter(record => ['request.completed', 'request.failed'].includes(record.event))
+  assert.equal(terminals.length, 1)
+  assert.equal(terminals[0].data.outcome, 'inactive_goal_recovery_stopped')
+  assert.equal(agent.lastTerminalRequestId, terminals[0].request_id)
+  assert.ok(terminals[0].data.usage)
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(agent.memory.snapshot())
+  assert.equal(restored.planningState('npc:sgluna').run.paused, false)
+  assert.equal(restored.planningState('npc:sgluna').goal.status, status)
+  assert.deepEqual(restored.planningState('npc:sgluna').run.model_recovery_stop, planning.run.model_recovery_stop)
+  assert.deepEqual(restored.planningState('npc:sgluna').goal.argument_corrections, before.goal.argument_corrections)
+  assert.throws(() => { agent.memory = restored; agent.assertModelRecoveryAllowed() }, /inactive_goal_recovery_refused/)
+  restored.dispatchPlanningEvent('npc:sgluna', { type: 'GOAL_ACCEPTED', source: 'runtime', objective: 'New authorized goal', now: Date.now() })
+  assert.equal(restored.planningState('npc:sgluna').run?.model_recovery_stop, undefined)
+  assert.doesNotThrow(() => agent.assertModelRecoveryAllowed())
 })
 
 test('a Resume request that fails before its turn leaves no pending start restage behind for the next flow', async () => {
@@ -2111,4 +2146,167 @@ test('a Resume request that fails before its turn leaves no pending start restag
   const rows = trace.filter(record => record.event === 'context.restaged').slice(restagedBefore)
   assert.ok(rows.every(row => row.data.checkpoint === 'C7'), JSON.stringify(rows.map(row => row.data.checkpoint)))
   assert.equal(recovery.recovered === true || recovery.reason === 'plan_not_recoverable', true)
+})
+
+// Each case drives the actual request -> receipt -> provider -> recovery chain.
+async function inactiveRecoveryWorld({ at = 'response', response = 'exhausted', native = 'idle', ownerChange, retainedOwner } = {}) {
+  const rows = []; const calls = []; let transitioned = false; let captured
+  const rcon = new FakeRcon()
+  const originalCommand = rcon.command.bind(rcon)
+  rcon.command = async text => {
+    const result = await originalCommand(text)
+    if (!text.includes('remote.call("autorio_operations","status")')) return result
+    const status = JSON.parse(result)
+    if (native === 'missing_journal') delete status.admission_journal
+    if (native === 'wrong_journal') status.admission_journal = status.admission_journal.map(row => ({ ...row, attempt_id: 'other-attempt' }))
+    if (transitioned && native === 'busy') Object.assign(status, { task_state: 'working', queue_empty: false, queue_length: 1 })
+    if (transitioned && native === 'unreadable') throw new Error('native status unavailable')
+    return JSON.stringify(status)
+  }
+  const agent = makeAgent({ rcon, interactionDecisionProvider: rolloverDecisionProvider({ count: 0 }),
+    reserve: async () => { if (at === 'compact_reserve' && calls.length === 2) transition(); return {} },
+    provider: async () => {
+      calls.push(calls.length + 1)
+      if (calls.length === 1) return planMessage({ plan: ['Wait once', 'Inspect result'], operations: [{ name: 'wait', args: { ticks: 1 } }] })
+      if (calls.length === 2) {
+        if (at === 'response') transition()
+        if (response === 'context') throw contextWindowError()
+        return exhaustedMessage()
+      }
+      throw new Error('Unexpected extra provider call')
+    } })
+  function transition() {
+    if (transitioned) return
+    transitioned = true
+    const state = agent.memory.planningState('npc:sgluna')
+    if (retainedOwner === 'operator' || retainedOwner === 'authority') state.run = { ...state.run, paused: true,
+      pause_class: retainedOwner, pause_reason: 'existing authority stop', pause_code: 'existing_stop' }
+    else if (retainedOwner === 'condition_wait' || retainedOwner === 'persistent_runtime') state.run = { ...state.run,
+      [retainedOwner]: { id: 'existing-native-owner' } }
+    else if (retainedOwner === 'partial_effect') {
+      const record = { ...structuredClone(state.operation_ledger.closed.at(-1)), effect: 'partial_unknown', state: 'unreconciled' }
+      state.operation_ledger = { ...state.operation_ledger, records: [record] }
+      state.run = { ...state.run, pending_operation: record }
+    }
+    captured = { goal: structuredClone(state.goal), run: structuredClone(state.run), pending: agent.memory.pendingOperations('npc:sgluna'),
+      generation: agent.providerBudgetGeneration, handoffs: agent.providerBudgetHandoffCount }
+    agent.memory.planningByNpc.set('npc:sgluna', { ...state, goal: { ...state.goal, status: 'cancelled' } })
+  }
+  const persist = agent.persistState.bind(agent)
+  if (at === 'provider_boundary') {
+    const topology = agent.gatherTopologyContext.bind(agent)
+    agent.gatherTopologyContext = async () => {
+      const value = await topology()
+      if (calls.length === 2) transition()
+      return value
+    }
+  }
+  agent.persistState = async options => {
+    await persist(options)
+    const run = agent.memory.planningState('npc:sgluna')?.run
+    if ((at === 'compact_persist' && run?.provider_recovery?.kind === 'output_budget_exhaustion')
+      || (at === 'handoff_persist' && run?.provider_recovery?.kind === 'budget_handoff')) transition()
+    if (run?.model_recovery_stop && ownerChange?.at === 'persist') ownerChange.change(agent)
+  }
+  if (at === 'restage_refusal') {
+    const restage = agent.restageInTurn.bind(agent)
+    agent.restageInTurn = async args => {
+      if (args.checkpoint !== 'C5') return restage(args)
+      await Promise.resolve(); transition(); return { restaged: false, reason: 'fixture-refusal' }
+    }
+  }
+  agent.behaviorTrace = { emit: async row => {
+    rows.push(row)
+    if ((at === 'compact_trace' && row.event === 'provider.output_budget_recovery_started')
+      || (at === 'handoff_trace' && row.event === 'budget.generation_started')
+      || (at === 'restage_trace' && row.event === 'context.restaged' && row.data.checkpoint === 'C5')) transition()
+    if (row.event === 'recovery.inactive_goal_stopped' && ownerChange?.at === 'trace') ownerChange.change(agent)
+    if (row.event === 'request.completed' && ownerChange?.at === 'terminal') ownerChange.change(agent)
+  } }
+  await agent.request('exercise recovery ownership', { sender: 'TTLouis' })
+  let error
+  try { await agent.completed() } catch (caught) { error = caught }
+  return { agent, rows, calls, captured, error, transitioned }
+}
+
+for (const at of ['compact_trace', 'compact_persist', 'compact_reserve', 'provider_boundary', 'handoff_persist', 'handoff_trace', 'restage_refusal', 'restage_trace']) {
+  test(`inactive transition at ${at} ends the request before a recovery provider send`, async () => {
+    const w = await inactiveRecoveryWorld({ at, response: at.startsWith('compact') || at === 'provider_boundary' ? 'exhausted' : 'context' })
+    assert.equal(w.transitioned, true)
+    assert.equal(w.calls.length, 2)
+    assert.equal(w.error, undefined)
+    assert.equal(w.agent.providerBudgetGeneration, w.captured.generation)
+    assert.equal(w.agent.providerBudgetHandoffCount, w.captured.handoffs)
+    const state = w.agent.memory.planningState('npc:sgluna')
+    assert.deepEqual(state.goal.argument_corrections, w.captured.goal.argument_corrections)
+    assert.equal(state.goal.status, 'cancelled')
+    assert.equal(w.rows.filter(row => ['request.completed', 'request.failed'].includes(row.event)).length, 1)
+    assert.equal(w.rows.filter(row => row.event === 'budget.handoff_restage_fallback').length, 0)
+    assert.equal(state.run.model_recovery_stop.goal_status, 'cancelled')
+  })
+}
+
+for (const native of ['busy', 'unreadable', 'missing_journal', 'wrong_journal']) test(`inactive model stop retains ${native} native ownership without fabricating a successful pause`, async () => {
+  const w = await inactiveRecoveryWorld({ native, response: 'context' })
+  assert.equal(w.calls.length, 2); assert.equal(w.error, undefined)
+  const state = w.agent.memory.planningState('npc:sgluna')
+  assert.equal(state.run.model_recovery_stop.native_idle, false)
+  assert.equal(state.run.paused, false)
+  assert.equal(w.rows.filter(row => row.event === 'request.completed').length, 1)
+  assert.equal(w.rows.filter(row => row.event === 'goal.paused').length, 0)
+  if (native.endsWith('journal')) {
+    assert.equal(w.captured.pending.length, 1)
+    assert.deepEqual(w.agent.memory.pendingOperations('npc:sgluna'), w.captured.pending)
+    const restored = new CanonicalTaskBoardMemory(); restored.restore(w.agent.memory.snapshot())
+    assert.deepEqual(restored.pendingOperations('npc:sgluna'), w.captured.pending)
+  }
+})
+
+for (const at of ['persist', 'trace', 'terminal']) for (const field of ['operator', 'authority', 'condition_wait', 'persistent_runtime', 'request', 'plan', 'actor', 'amendment']) {
+  test(`inactive stop preserves newer ${field} owner during ${at}`, async () => {
+    let changed = false; let expected
+    const w = await inactiveRecoveryWorld({ response: 'context', ownerChange: { at, change: agent => {
+      if (changed) return
+      changed = true
+      const state = agent.memory.planningState('npc:sgluna')
+      if (field === 'operator' || field === 'authority') {
+        state.run = { ...state.run, paused: true, pause_class: field, pause_reason: 'new authoritative stop', pause_code: 'new_stop' }
+        expected = structuredClone(state.run)
+      }
+      else if (field === 'condition_wait' || field === 'persistent_runtime') {
+        state.run = { ...state.run, [field]: { id: 'new-native-owner', token: 'retained' } }
+        expected = structuredClone(state.run[field])
+      }
+      else if (field === 'request') { agent.traceRequest = { id: 'new-request', seq: 0 }; expected = agent.traceRequest }
+      else if (field === 'plan') { state.active_plan_id = 'new-plan'; expected = state.active_plan_id }
+      else if (field === 'actor') { agent.epoch = { ...agent.epoch, actor_id: 999 }; expected = 999 }
+      else { agent.pendingInteractionAmendment = { text: 'new amendment', sender: 'TTLouis', conversation: agent.agentContext.conversationSeq }; expected = agent.pendingInteractionAmendment }
+    } } })
+    assert.equal(changed, true); assert.equal(w.calls.length, 2)
+    const state = w.agent.memory.planningState('npc:sgluna')
+    if (field === 'operator' || field === 'authority') assert.deepEqual(state.run, expected)
+    else if (field === 'condition_wait' || field === 'persistent_runtime') assert.deepEqual(state.run[field], expected)
+    else if (field === 'request') assert.equal(w.agent.traceRequest, expected)
+    else if (field === 'plan') assert.equal(state.active_plan_id, expected)
+    else if (field === 'actor') assert.equal(w.agent.epoch.actor_id, expected)
+    else assert.equal(w.agent.pendingInteractionAmendment, expected)
+    assert.equal(w.rows.filter(row => row.event === 'request.completed' && row.data.outcome === 'inactive_goal_recovery_stopped').length, at === 'terminal' ? 1 : 0)
+  })
+}
+
+for (const retainedOwner of ['operator', 'authority', 'condition_wait', 'persistent_runtime', 'partial_effect']) test(`inactive stop retains existing ${retainedOwner} through the complete request lifecycle and restart`, async () => {
+  const w = await inactiveRecoveryWorld({ retainedOwner, response: 'context' })
+  assert.equal(w.calls.length, 2); assert.equal(w.error, undefined)
+  const state = w.agent.memory.planningState('npc:sgluna')
+  const { model_recovery_stop, ...run } = state.run
+  assert.ok(model_recovery_stop); assert.deepEqual(run, w.captured.run)
+  assert.deepEqual(w.agent.memory.pendingOperations('npc:sgluna'), w.captured.pending)
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(w.agent.memory.snapshot())
+  const after = restored.planningState('npc:sgluna')
+  assert.deepEqual(after.run.condition_wait, state.run.condition_wait)
+  assert.deepEqual(after.run.persistent_runtime, state.run.persistent_runtime)
+  assert.deepEqual(after.run.model_recovery_stop, model_recovery_stop)
+  assert.deepEqual(restored.pendingOperations('npc:sgluna'), w.captured.pending)
+  assert.equal(after.run.pause_class, state.run.pause_class)
+  assert.equal(after.run.pause_reason, state.run.pause_reason)
 })
