@@ -1,8 +1,9 @@
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
+
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as observationDelay } from 'node:timers/promises'
 import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeProductionIntent } from './production-task.mjs'
@@ -221,6 +222,10 @@ import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MAR
 import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
+
+// Intake exists before the base loop has an active turn, epoch or request id.
+// Its async scope also fences nested advisory/read helpers and queued writes.
+const requestAdmissionScope = new AsyncLocalStorage()
 
 const TRACE_MAX_BYTES = 5 * 1024 * 1024
 const TRACE_FILES = 5
@@ -3119,6 +3124,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationRateClock = options.observationRateClock ?? { now: Date.now, sleep: (ms, signal) => observationDelay(ms, undefined, { signal }) }
     this.observationRateAbort = null
     this.stateLoaded = false
+    this.stateLoadPromise = null
     this.maxProviderOutputUnits = Number.isSafeInteger(options.maxProviderOutputUnits) ? options.maxProviderOutputUnits : 100000
     if (this.maxProviderOutputUnits < 1000 || this.maxProviderOutputUnits > 200000) {
       throw new AgentLoopError('maxProviderOutputUnits must be an integer from 1000 to 200000')
@@ -3263,6 +3269,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default is prefix-aware (restageSoftLimitTokens)
     this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
     this.providerCallsByGeneration = new Map() // the same count per loop generation: restageContext refuses only while a round of the CURRENT generation is in flight
+    this.requestAdmissionOwner = null
     this.turnScope = new AsyncLocalStorage() // the running turn identity (lineage, generation, request id): every admission point of that turn judges staleness against it
     this.turnConversation = null // attribution of the conversation the running turn last read; null between turns
     // MW1: authorization events raised inside the memory facade (grant checks, replacement decisions, protected and
@@ -3309,6 +3316,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   reset() {
+    const admission = requestAdmissionScope.getStore()
+    if (admission?.agent === this && admission.expectedReset && this.requestAdmissionOwner === admission) {
+      admission.expectedReset = false
+    }
+    else this.requestAdmissionOwner = null
     this.lifecycleEnter('reset')
     this.pendingEntityRefresh = undefined
     this.observationRateAbort?.abort()
@@ -3327,6 +3339,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.replacementWake = null // MW5: a wake belongs to the request that raised it
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
+    if (this.requestAdmissionOwner === admission) {
+      admission.actor = null
+      admission.generation = this.generation
+      admission.lineage = this.agentContext.lineageSequence
+    }
     // The base reset zeroes the request-wide continuation counter; the slice baseline and the slice's
     // deterministic-progress count start from the same point.
     this.sliceContinuationBaseline = 0
@@ -5209,6 +5226,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async loadPersistentState() {
+    if (this.stateLoadPromise) return this.stateLoadPromise
+    if (this.stateLoaded) return
+    // Restore belongs to the process, not to the first chat that waited for it.
+    // A replacement must share this barrier before reading or mutating memory.
+    this.stateLoadPromise = requestAdmissionScope.exit(() => this.loadPersistentStateOnce())
+    return this.stateLoadPromise
+  }
+
+  async loadPersistentStateOnce() {
     if (this.stateLoaded) return
     this.stateLoaded = true
     if (!this.stateFile || typeof this.memory.restore !== 'function') return
@@ -5232,13 +5258,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async persistState({ strict = false } = {}) {
+    this.assertRequestAdmission()
     if (!this.stateFile || typeof this.memory.snapshot !== 'function') return
     const filename = this.stateFile
     const snapshot = this.memory.snapshot()
     const write = this.persistQueue.then(async () => {
+      this.assertRequestAdmission()
       await fsp.mkdir(path.dirname(filename), { recursive: true })
+      this.assertRequestAdmission()
       const temp = `${filename}.${process.pid}.tmp`
       await fsp.writeFile(temp, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+      this.assertRequestAdmission()
       await fsp.rename(temp, filename)
     })
     this.persistQueue = write.catch(error => this.log(`[memory] durable NPC state write failed: ${error instanceof Error ? error.message : String(error)}`))
@@ -7805,7 +7835,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async classifyInteraction(text, sender, taskStatus, planState) {
-    const current = await super.captureEpoch()
+    const current = await this.waitForRequestAdmission(super.captureEpoch())
     const currentGoal = planState
       ? {
           goal_id: sanitizeDurableModelText(planState.goal_id, 100),
@@ -7838,7 +7868,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     try {
       if (decisionId) {
-        await this.decisionTraceEvent('decision.request', {
+        await this.waitForRequestAdmission(this.decisionTraceEvent('decision.request', {
           decision_id: decisionId,
           contract: 'interaction_route',
           mode: 'hybrid_signal',
@@ -7847,18 +7877,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           has_current_goal: currentGoal !== null,
           runtime_task_state: cleanMemoryText(taskStatus?.task_state, 64),
           runtime_queue_length: Number.isSafeInteger(taskStatus?.queue_length) ? taskStatus.queue_length : 0,
-        })
+        }))
 
         const decisionStartedAt = Date.now()
         try {
-          const response = await this.interactionDecisionProvider(state, decisionQuestions, {
+          const response = await this.waitForRequestAdmission(this.interactionDecisionProvider(state, decisionQuestions, {
             epoch: current.epoch,
             actorId: current.actor_id,
             signal: controller.signal,
-          })
+          }))
           typedDecision = parseInteractionDecisionShadow(response)
           decisionLatencyMs = Date.now() - decisionStartedAt
-          await this.decisionTraceEvent('decision.response', {
+          await this.waitForRequestAdmission(this.decisionTraceEvent('decision.response', {
             decision_id: decisionId,
             contract: 'interaction_route',
             mode: 'hybrid_signal',
@@ -7871,19 +7901,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             input_units: Number.isFinite(typedDecision.usage?.input_tokens) ? Math.max(0, Math.trunc(typedDecision.usage.input_tokens)) : 0,
             output_units: Number.isFinite(typedDecision.usage?.output_tokens) ? Math.max(0, Math.trunc(typedDecision.usage.output_tokens)) : 0,
             cost_usd: Number.isFinite(typedDecision.usage?.cost) && typedDecision.usage.cost >= 0 ? typedDecision.usage.cost : 0,
-          })
+          }))
         }
         catch (error) {
           decisionLatencyMs = Date.now() - decisionStartedAt
           decisionError = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
-          await this.decisionTraceEvent('decision.fallback', {
+          await this.waitForRequestAdmission(this.decisionTraceEvent('decision.fallback', {
             decision_id: decisionId,
             contract: 'interaction_route',
             mode: 'hybrid_signal',
             fallback_target: 'interaction_router',
             reason: decisionError,
             latency_ms: decisionLatencyMs,
-          })
+          }))
         }
       }
 
@@ -7893,7 +7923,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       if (typedDecision && !interactionDecisionNeedsLanguageRouter(typedDecision)) {
         const route = interactionRouteFromTypedDecision(typedDecision)
-        await this.decisionTraceEvent('decision.route_applied', {
+        await this.waitForRequestAdmission(this.decisionTraceEvent('decision.route_applied', {
           decision_id: decisionId,
           contract: 'interaction_route',
           mode: 'active_typed',
@@ -7904,7 +7934,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           language_router_called: false,
           request_id: this.traceRequest?.id ?? decisionId,
           reason: 'typed_route_without_main_provider',
-        })
+        }))
         return {
           route,
           epoch: current,
@@ -7923,13 +7953,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       // Jev has its own allowance; reserve main quota only for a language call.
-      await this.reserve({ epoch: current.epoch, actorId: current.actor_id })
-      await this.traceEvent('interaction.main_provider_reserved', {
+      await this.waitForRequestAdmission(this.reserve({ epoch: current.epoch, actorId: current.actor_id }))
+      await this.waitForRequestAdmission(this.traceEvent('interaction.main_provider_reserved', {
         request_id: this.traceRequest?.id ?? decisionId ?? 'interaction',
         reason: 'language_router_fallback',
-      })
+      }))
       if (controller.signal.aborted) throw new AgentLoopError('Interaction routing cancelled or superseded')
-      const message = await this.interactionProvider([
+      const message = await this.waitForRequestAdmission(this.interactionProvider([
         { role: 'system', content: INTERACTION_ROUTER_PROMPT },
         { role: 'user', content: JSON.stringify(state) },
       ], {
@@ -7945,10 +7975,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           max_tokens: 180,
           response_format: { type: 'json_object' },
         },
-      })
+      }))
       const route = parseInteractionRoute(message)
       if (decisionId) {
-        await this.decisionTraceEvent('decision.route_applied', {
+        await this.waitForRequestAdmission(this.decisionTraceEvent('decision.route_applied', {
           decision_id: decisionId,
           contract: 'interaction_route',
           mode: typedDecision ? 'hybrid_double_evaluation' : 'language_router_fallback',
@@ -7958,7 +7988,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           agreement: typedDecision ? typedDecision.intent === route.intent : undefined,
           typed_available: Boolean(typedDecision),
           language_router_called: true,
-        })
+        }))
       }
       return {
         route,
@@ -7992,7 +8022,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // A new goal also gets Jev's blind goal reading in the same request: the
     // player's words plus save-progress facts, never the planner's answer.
     const readGoal = intent === 'new_goal' && this.goalDefinitionPolicy === 'required'
-    const saveProgress = readGoal ? await this.readGoalProgressFacts() : undefined
+    const saveProgress = readGoal ? await this.waitForRequestAdmission(this.readGoalProgressFacts()) : undefined
     const questions = readGoal
       ? { ...interactionPlannerShapeQuestions(), ...goalReadingQuestions() }
       : interactionPlannerShapeQuestions()
@@ -8022,20 +8052,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     const startedAt = Date.now()
 
-    await this.decisionTraceEvent('decision.request', {
+    await this.waitForRequestAdmission(this.decisionTraceEvent('decision.request', {
       decision_id: decisionId,
       contract: 'interaction_planner_shape',
       mode: 'active_advisory',
       active_intent: state.active_intent,
       question_ids: Object.keys(questions),
-    })
+    }))
 
     try {
-      const response = await this.interactionDecisionProvider(state, questions, {
+      const response = await this.waitForRequestAdmission(this.interactionDecisionProvider(state, questions, {
         epoch: epoch?.epoch ?? this.epoch?.epoch,
         actorId: epoch?.actor_id ?? this.epoch?.actor_id,
         signal: controller.signal,
-      })
+      }))
       const steering = parseBoundarySteeringTelemetry(response)
       const observationRelevance = parseObservationRelevance(response)
       if (readGoal) {
@@ -8054,7 +8084,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         provider: typeof response?.provider === 'string' ? response.provider : undefined,
         usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
       }
-      await this.decisionTraceEvent('decision.response', {
+      await this.waitForRequestAdmission(this.decisionTraceEvent('decision.response', {
         decision_id: decisionId,
         contract: 'interaction_planner_shape',
         mode: 'active_advisory',
@@ -8084,11 +8114,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         input_units: Number.isFinite(shape.usage?.input_tokens) ? Math.max(0, Math.trunc(shape.usage.input_tokens)) : 0,
         output_units: Number.isFinite(shape.usage?.output_tokens) ? Math.max(0, Math.trunc(shape.usage.output_tokens)) : 0,
         cost_usd: Number.isFinite(shape.usage?.cost) && shape.usage.cost >= 0 ? shape.usage.cost : 0,
-      })
+      }))
       return shape
     }
     catch (error) {
-      await this.decisionTraceEvent('decision.fallback', {
+      await this.waitForRequestAdmission(this.decisionTraceEvent('decision.fallback', {
         decision_id: decisionId,
         contract: 'interaction_planner_shape',
         mode: 'active_advisory',
@@ -8096,7 +8126,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         fallback_target: 'main_planner_defaults',
         reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
         latency_ms: Date.now() - startedAt,
-      })
+      }))
       return undefined
     }
     finally {
@@ -8823,7 +8853,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.activePlanKey()
     const planning = this.memory.planningState?.(key)
     const plan = getActivePlanningPlan(planning)
-    return { ...decisionBudgetOwner(this), key, requestTrace: this.traceRequest, goalId: planning?.goal?.goal_id,
+    return { ...decisionBudgetOwner(this), admissionOwner: this.requestAdmissionOwner, key, requestTrace: this.traceRequest, goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id, planVersion: plan?.plan_version, stepIndex: plan?.active_step_index,
       stepId: plan?.steps?.[plan.active_step_index]?.step_id, lastIndex: (plan?.steps?.length ?? 0) - 1 }
   }
@@ -9264,7 +9294,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : null,
       // A packet starts a new conversation, so its receipt is full, never a diff.
       verified_world: sanitizeDurableModelValue(receipt?.view ? taskStatusDelta(null, receipt.view) : (receipt?.providerStatus ?? world)),
-      save_progress: (await this.readGoalProgressFacts()) ?? null,
+      save_progress: (await this.waitForRequestAdmission(this.readGoalProgressFacts())) ?? null,
     }
 
     const steeringQuestionOptions = {
@@ -9275,25 +9305,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const questions = steeringRecommendationQuestions(steeringQuestionOptions)
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     const startedAt = Date.now()
-    await this.decisionTraceEvent('decision.request', {
+    await this.waitForRequestAdmission(this.decisionTraceEvent('decision.request', {
       decision_id: decisionId,
       contract: 'planning_boundary_steering',
       boundary,
       question_ids: Object.keys(questions),
-    })
+    }))
 
     try {
-      const response = await this.steeringDecisionProvider(state, questions, {
+      const response = await this.waitForRequestAdmission(this.steeringDecisionProvider(state, questions, {
         epoch: this.epoch?.epoch,
         actorId: this.epoch?.actor_id,
-      })
+      }))
       const parsed = parseSteeringRecommendation(response, steeringQuestionOptions)
       const recommendation = {
         ...parsed,
         pressure: steeringPressureFromReasonCodes(parsed.reason_codes),
         recommended_by: 'jev',
       }
-      await this.decisionTraceEvent('decision.response', {
+      await this.waitForRequestAdmission(this.decisionTraceEvent('decision.response', {
         decision_id: decisionId,
         contract: 'planning_boundary_steering',
         boundary,
@@ -9307,28 +9337,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         provider: recommendation.provider,
         model: recommendation.model,
         latency_ms: Date.now() - startedAt,
-      })
-      await this.traceEvent('planning.steering_recommendation', {
+      }))
+      await this.waitForRequestAdmission(this.traceEvent('planning.steering_recommendation', {
         boundary,
         recommended_mode: recommendation.recommended_mode,
         confidence: recommendation.confidence,
         reason_codes: recommendation.reason_codes,
         candidate_shelf_nodes: recommendation.candidate_shelf_nodes,
         pressure: recommendation.pressure,
-      })
+      }))
       return recommendation
     }
     catch (error) {
       const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
-      await this.decisionTraceEvent('decision.fallback', {
+      await this.waitForRequestAdmission(this.decisionTraceEvent('decision.fallback', {
         decision_id: decisionId,
         contract: 'planning_boundary_steering',
         boundary,
         fallback_target: 'runtime_boundary_default',
         reason: message,
         latency_ms: Date.now() - startedAt,
-      })
-      await this.traceEvent('planning.steering_recommendation_failed', { boundary, reason: message })
+      }))
+      await this.waitForRequestAdmission(this.traceEvent('planning.steering_recommendation_failed', { boundary, reason: message }))
       return undefined
     }
   }
@@ -9985,7 +10015,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       gameTick: this.latestGameTick,
       requestId: this.preMintedRequestId,
     })
-    if (result?.ok) await this.persistState()
+    if (result?.ok) await this.waitForRequestAdmission(this.persistState())
     return result
   }
 
@@ -10328,15 +10358,67 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return result
   }
 
+  assertRequestAdmission() {
+    const owner = requestAdmissionScope.getStore()
+    if (!owner || owner.agent !== this || owner.phase === 'turn') return
+    const actor = this.epoch
+    if (this.requestAdmissionOwner !== owner || owner.npcId !== this.npcId
+      || owner.generation !== this.generation || owner.lineage !== this.agentContext.lineageSequence
+      || (owner.requestId && !owner.traceCleared && (this.traceRequest !== owner.trace || this.traceRequest?.id !== owner.requestId))
+      || actor?.actor_id !== owner.actor?.actor_id || actor?.epoch !== owner.actor?.epoch || actor?.session !== owner.actor?.session) {
+      throw new AgentLoopError('Request admission cancelled or superseded')
+    }
+  }
+
+  async assertRequestAdmissionActor() {
+    const owner = requestAdmissionScope.getStore()
+    if (!owner || owner.agent !== this || owner.phase === 'turn') return
+    const current = await this.waitForRequestAdmission(super.captureEpoch())
+    const before = owner.nativeActor
+    if (before && (before.actor_id !== current.actor_id || before.epoch !== current.epoch || before.session !== current.session)) {
+      throw new AgentLoopError('Request admission cancelled or superseded by actor change')
+    }
+  }
+
+  async waitForRequestAdmission(pending) {
+    // Rejections preserve their original error; only a successful continuation
+    // needs a fence before it can perform another effect.
+    const result = await pending
+    this.assertRequestAdmission()
+    return result
+  }
+
   async request(text, options = {}) {
+    const owner = { id: `intake_${randomUUID()}`, agent: this, npcId: this.npcId, actor: this.epoch ? { ...this.epoch } : null, generation: this.generation, lineage: this.agentContext.lineageSequence, phase: 'intake', expectedReset: false }
+    this.requestAdmissionOwner = owner
+    return requestAdmissionScope.run(owner, async () => {
+      try { return await this.requestAdmitted(text, options) }
+      catch (error) {
+        if (this.requestAdmissionOwner !== owner || /admission cancelled or superseded/.test(error?.message ?? '')) {
+          // Emit directly: a stale refusal must not score judgments, accrue timing,
+          // increment the replacement trace, or inherit its request/actor identity.
+          await this.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+            event: 'request.admission_refused', request_id: owner.requestId ?? owner.id,
+            actor_id: owner.nativeActor?.actor_id ?? owner.actor?.actor_id, epoch: owner.nativeActor?.epoch ?? owner.actor?.epoch,
+            data: { reason: 'cancelled_or_superseded', disposition: 'no_further_admission' } })
+        }
+        throw error
+      }
+      finally {
+        if (this.requestAdmissionOwner === owner) this.requestAdmissionOwner = null
+      }
+    })
+  }
+
+  async requestAdmitted(text, options = {}) {
     const requestStartedAt = Date.now() // 2.10: time zero for reply-latency metrics
     this.preMintedRequestId = undefined
-    await this.loadPersistentState()
+    await this.waitForRequestAdmission(this.loadPersistentState())
     const sender = options.sender ?? 'unknown'
     this.lastMemoryKey = `npc:${this.npcId}`
     const memoryKey = this.activePlanKey()
     let planBefore = this.memory.currentPlan?.(memoryKey)
-    const taskStatus = await this.readInteractionTaskStatus()
+    const taskStatus = await this.waitForRequestAdmission(this.readInteractionTaskStatus())
     const healthyRuntime = interactionRuntimeHealthy(taskStatus)
 
     // Upgrade safety: older builds could persist a provider/control-plane
@@ -10352,7 +10434,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       if (recovered?.decision?.accepted) {
         planBefore = recovered.state
-        await this.persistState()
+        await this.waitForRequestAdmission(this.persistState())
       }
     }
     let routed
@@ -10366,16 +10448,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     else {
       try {
-        routed = await this.classifyInteraction(text, sender, taskStatus, planBefore)
+        routed = await this.waitForRequestAdmission(this.classifyInteraction(text, sender, taskStatus, planBefore))
       }
       catch (error) {
         const fallbackIntent = healthyRuntime ? 'continue_current' : (planBefore ? 'amend_current' : 'new_goal')
         routed = {
           route: { intent: fallbackIntent, queue_conflict: false, reply: '' },
-          epoch: healthyRuntime ? await super.captureEpoch() : undefined,
+          epoch: healthyRuntime ? await this.waitForRequestAdmission(super.captureEpoch()) : undefined,
           router_error: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
         }
       }
+    }
+
+    try { requestAdmissionScope.getStore().nativeActor = routed.epoch ?? await this.waitForRequestAdmission(super.captureEpoch()) }
+    catch {
+      this.assertRequestAdmission()
+      // Preserve the ordinary traced bind failure for an unavailable/denied actor.
+      requestAdmissionScope.getStore().nativeActor = undefined
     }
 
     // A bare Resume/continue on the goal a restart paused before its first plan re-drives that goal.
@@ -10386,7 +10475,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (options.intakeRetryIntent === 'new_goal' && !redriveGoal) routed.route = { ...routed.route, intent: 'new_goal', queue_conflict: false, reply: '' }
     const intent = routed.route.intent
     const jevNewGoalAligned = intent === 'new_goal' && routed.decision_shadow?.intent === 'new_goal'
-    await this.traceEvent('interaction.routed', {
+    await this.waitForRequestAdmission(this.traceEvent('interaction.routed', {
       sender,
       text,
       intent,
@@ -10413,38 +10502,39 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             : this.interactionDecisionProvider
               ? 'configured_not_called'
               : 'not_configured',
-    })
+    }))
 
     if (!routed.router_bypassed && intent === 'continue_current' && healthyRuntime && !redriveGoal) {
       const reply = `Current Autorio work is still running (${taskStatus.task_state ?? 'active'}, queue ${taskStatus.queue_length ?? 0}); I will let it continue without restarting the planner.`
-      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      await this.waitForRequestAdmission(this.rememberRoutedInteraction(memoryKey, sender, text, reply))
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
     }
 
     if (!routed.router_bypassed && intent === 'status_query') {
       const reply = interactionStatusReply(taskStatus, planBefore)
-      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      await this.waitForRequestAdmission(this.rememberRoutedInteraction(memoryKey, sender, text, reply))
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
     }
 
     if (!routed.router_bypassed && intent === 'chat_only') {
       const reply = routed.route.reply || 'I am here.'
-      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      await this.waitForRequestAdmission(this.rememberRoutedInteraction(memoryKey, sender, text, reply))
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
     }
 
     if (!routed.router_bypassed && intent === 'cancel_current') {
-      if (healthyRuntime) await this.cancelInteractionWorldWork(routed.epoch)
+      if (healthyRuntime) await this.waitForRequestAdmission(this.cancelInteractionWorldWork(routed.epoch))
       const state = this.memory.pausePlan?.(memoryKey, 'user_cancel', { pause_class: PAUSE_CLASS.OPERATOR })
-      await this.persistState()
+      await this.waitForRequestAdmission(this.persistState())
       this.clearLoadedSkillContext()
+      requestAdmissionScope.getStore().expectedReset = true
       super.cancel()
       const reply = !state
         ? 'There is no active goal to cancel.'
         : state.status === 'blocked'
           ? 'Cancelled the remaining Autorio work. The plan is still blocked and waiting for your Revise or Cancel choice.'
           : 'Cancelled the remaining Autorio work and paused the current goal.'
-      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      await this.waitForRequestAdmission(this.rememberRoutedInteraction(memoryKey, sender, text, reply))
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
     }
 
@@ -10463,46 +10553,48 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // literally "continue" -- as a brand-new goal objective.
     if (!routed.router_bypassed && intent === 'continue_current' && !planBefore && !healthyRuntime && !redriveGoal) {
       const reply = 'There is no current goal to continue; the last one is finished. Tell me what you want me to do next.'
-      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      await this.waitForRequestAdmission(this.rememberRoutedInteraction(memoryKey, sender, text, reply))
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
     }
     if (!routed.router_bypassed && blockedAwaitingUser && intent === 'continue_current') {
       const reply = blockedPlanReply(reducerPlanBeforeRequest)
-      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      await this.waitForRequestAdmission(this.rememberRoutedInteraction(memoryKey, sender, text, reply))
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true, goalStatus: 'blocked' }
     }
     if (!routed.router_bypassed && blockedAwaitingUser && intent === 'amend_current'
       && typeof this.memory.recordBlockedChoice === 'function') {
       this.memory.recordBlockedChoice(memoryKey, 'revise', sender, { now: Date.now() })
-      await this.persistState()
-      await this.traceEvent('planning.blocked_revision_from_chat', {
+      await this.waitForRequestAdmission(this.persistState())
+      await this.waitForRequestAdmission(this.traceEvent('planning.blocked_revision_from_chat', {
         plan_id: reducerPlanBeforeRequest.plan_id,
         blocker: reducerPlanBeforeRequest.blocker?.reason_code,
         approved_by: sender,
-      })
+      }))
     }
 
     if (!routed.router_bypassed && intent === 'amend_current' && healthyRuntime && routed.route.queue_conflict !== true) {
-      if (await this.stageCompatibleAmendment(sender, text)) {
+      if (await this.waitForRequestAdmission(this.stageCompatibleAmendment(sender, text))) {
         const reply = `The amendment is compatible with the Autorio work already running (queue ${taskStatus.queue_length ?? 0}), so I will not cancel that batch. I will apply the amendment at the next main-planner boundary.`
-        await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+        await this.waitForRequestAdmission(this.rememberRoutedInteraction(memoryKey, sender, text, reply))
         return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true, amendmentDeferred: true }
       }
     }
 
     if (!routed.router_bypassed && intent === 'amend_current' && healthyRuntime) {
-      await this.cancelInteractionWorldWork(routed.epoch)
+      await this.waitForRequestAdmission(this.cancelInteractionWorldWork(routed.epoch))
+      requestAdmissionScope.getStore().expectedReset = true
       super.cancel()
     }
     else if (!routed.router_bypassed && intent === 'new_goal') {
-      if (healthyRuntime) await this.cancelInteractionWorldWork(routed.epoch)
+      if (healthyRuntime) await this.waitForRequestAdmission(this.cancelInteractionWorldWork(routed.epoch))
       this.clearLoadedSkillContext()
+      requestAdmissionScope.getStore().expectedReset = true
       super.cancel()
       // An intake retry replaces the plan-less goal its own failed first attempt admitted: that goal never ran, so it is not an
       // interrupted task to keep (the supervisor fenced out any other goal before re-sending).
-      if (!options.intakeRetryIntent) await this.recordInterruptedTask(memoryKey, { sender, text, epoch: routed.epoch })
+      if (!options.intakeRetryIntent) await this.waitForRequestAdmission(this.recordInterruptedTask(memoryKey, { sender, text, epoch: routed.epoch }))
       this.memory.clearTaskContext?.(memoryKey)
-      await this.persistState()
+      await this.waitForRequestAdmission(this.persistState())
     }
 
     if (redriveGoal) {
@@ -10510,8 +10602,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // of the goal still carries the goal definition); the run is no longer paused.
       text = redriveGoal.objective
       this.memory.dispatchPlanningEvent?.(memoryKey, { type: PLANNING_EVENT.RUN_RESUMED, source: 'runtime', goal_id: redriveGoal.goal_id, reason: 'resume_before_first_plan', now: Date.now() })
-      await this.persistState()
-      await this.traceEvent('goal.redriven_after_restart', { goal_id: redriveGoal.goal_id, reason: RESTART_BEFORE_FIRST_PLAN_PAUSE, model_woken: true }, { requestId: this.traceRequest?.id ?? `redrive_${Date.now().toString(36)}` })
+      await this.waitForRequestAdmission(this.persistState())
+      await this.waitForRequestAdmission(this.traceEvent('goal.redriven_after_restart', { goal_id: redriveGoal.goal_id, reason: RESTART_BEFORE_FIRST_PLAN_PAUSE, model_woken: true }, { requestId: this.traceRequest?.id ?? `redrive_${Date.now().toString(36)}` }))
     }
     const resumeProviderBudgetHandoff = intent === 'continue_current'
       && planBefore?.status === 'active'
@@ -10520,7 +10612,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && !healthyRuntime
     const plannerShape = !resumeProviderBudgetHandoff
       && ['new_goal', 'amend_current', 'continue_current'].includes(intent)
-      ? await this.requestInteractionPlannerShape(text, sender, taskStatus, planBefore, intent, routed.epoch)
+      ? await this.waitForRequestAdmission(this.requestInteractionPlannerShape(text, sender, taskStatus, planBefore, intent, routed.epoch))
       : undefined
 
     this.liveEntityObservations = new Map()
@@ -10644,7 +10736,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       else if (resumeActionOmission) {
         this.memory.setNextContextOverride?.(memoryKey, this.executorControlGuidance(actionOmissionRecoveryCapsule(planBefore, taskStatus)))
       }
-      if (this.traceRequest) await this.traceEvent('request.superseded', { usage: this.traceRequest.usage })
+      if (this.traceRequest) await this.waitForRequestAdmission(this.traceEvent('request.superseded', { usage: this.traceRequest.usage }))
       requestTrace = this.traceRequest = {
         id: this.preMintedRequestId ?? `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`,
         seq: 0,
@@ -10655,18 +10747,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         start_pause_reason: planBefore?.pause_reason,
       }
       decisionBudgetScope.requestId = this.traceRequest.id
-      await this.traceEvent('request.received', {
+      requestAdmissionScope.getStore().requestId = this.traceRequest.id
+      requestAdmissionScope.getStore().trace = this.traceRequest
+      await this.waitForRequestAdmission(this.traceEvent('request.received', {
         sender,
         text,
         interaction_intent: intent,
         action_omission_recovery: resumeActionOmission,
         provider_budget_handoff_resume: resumeProviderBudgetHandoff,
         intake_ms: Date.now() - requestStartedAt,
-      })
+      }))
       // 2.10: one acknowledgement, from the goal text and route, before any
       // planner round. A player request only: recovery runs never enter here.
       const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
-      if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
+      if (acknowledgement) await this.waitForRequestAdmission(this.traceEvent('chat.acknowledged', acknowledgement))
       this.lifecycleEnter('request.start', { interaction_intent: intent })
 
       // Goal admission is the reducer's (GOAL_ACCEPTED), and it happens at
@@ -10680,13 +10774,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
         // MW5: the player's own objective carries a grant so a replacement can be authorized later. Only a chat-origin
         // new_goal reaches this point; recovery runs, amendments and chat-only intents never mint one.
-        if (admitted?.goal) await this.grantPlayerObjective(memoryKey, admitted.goal, text)
+        if (admitted?.goal) await this.waitForRequestAdmission(this.grantPlayerObjective(memoryKey, admitted.goal, text))
         if (admitted?.goal && this.steeringDecisionProvider
           && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
-          const recommendation = await this.requestBoundarySteeringRecommendation(memoryKey, {
+          const recommendation = await this.waitForRequestAdmission(this.requestBoundarySteeringRecommendation(memoryKey, {
             boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
             world: taskStatus,
-          })
+          }))
+          await this.assertRequestAdmissionActor()
           if (recommendation && typeof this.memory.recordSteeringAdvice === 'function') {
             this.memory.recordSteeringAdvice(memoryKey, recommendation)
           }
@@ -10699,43 +10794,49 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             && typeof this.memory.recordSteeringAdvice === 'function') {
             this.memory.recordSteeringAdvice(memoryKey, null)
           }
-          await this.persistState()
-          await this.traceEvent('planning.goal_admission_steered', {
+          await this.waitForRequestAdmission(this.persistState())
+          await this.waitForRequestAdmission(this.traceEvent('planning.goal_admission_steered', {
             goal_id: steered.goal?.goal_id,
             steering_mode: steered.steering?.current_mode,
             recommended_mode: steered.steering?.recommendation?.recommended_mode,
-          })
+          }))
         }
         else if (admitted?.goal) {
           // No steering provider: the reducer's default (maintain) steering is
           // recorded by ensurePlanningDraft at the first draft, as before.
-          await this.persistState()
-          await this.traceEvent('planning.goal_admitted', { goal_id: admitted.goal.goal_id })
+          await this.waitForRequestAdmission(this.persistState())
+          await this.waitForRequestAdmission(this.traceEvent('planning.goal_admitted', { goal_id: admitted.goal.goal_id }))
         }
       }
 
-      await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
-      await ensureGoalRequirements(this, { memoryKey, intent }) // goal-requirements.mjs: reset on a new goal, re-read on a revision
+      await this.assertRequestAdmissionActor()
+      await this.waitForRequestAdmission(ensureSkillOffers(this, { memoryKey, intent, text })) // 2.8 hook: skill-offers.mjs
+      await ensureGoalRequirements(this, { memoryKey, intent })
+      this.assertRequestAdmission() // goal-requirements.mjs: reset on a new goal, re-read on a revision
       this.chatRequestPending = true
       this.startRestage = pendingStartRestage // consumed by the first turn (applyStartRestage); cleared in the finally below whatever happens
-      const pendingRequest = super.request(text, options)
+      requestAdmissionScope.getStore().expectedReset = true
+      const pendingRequest = super.request(text, { ...options, assertOwner: () => {
+        this.assertRequestAdmission()
+        requestAdmissionScope.getStore().phase = 'turn'
+      } })
       // Base request synchronously starts its lineage before its first await.
       Object.assign(decisionBudgetScope, decisionBudgetOwner(this), { requestId: this.traceRequest?.id ?? decisionBudgetScope.requestId })
       const result = await pendingRequest
       if (this.requestInfo?.memoryKey) this.lastMemoryKey = this.requestInfo.memoryKey
       if (resumeProviderBudgetHandoff) {
         this.memory.setProviderRecovery?.(memoryKey, undefined)
-        await this.persistState()
-        await this.traceEvent('budget.handoff_resumed', {
+        await this.waitForRequestAdmission(this.persistState())
+        await this.waitForRequestAdmission(this.traceEvent('budget.handoff_resumed', {
           generation: this.providerBudgetGeneration,
           handoff_count: this.providerBudgetHandoffCount,
           semantic_scope: planBefore.provider_recovery.semantic_scope,
-        })
+        }))
       }
       return { ...result, interactionIntent: intent, routedOnly: false }
     }
     catch (error) {
-      if (ownsRequestFailure()) {
+      if (this.requestAdmissionOwner === requestAdmissionScope.getStore() && ownsRequestFailure()) {
         this.chatRequestPending = false
         const message = error instanceof Error ? error.message : String(error)
         await this.traceEvent('request.failed', {
@@ -10746,20 +10847,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           failure_snapshot: this.failureSnapshot('bind', message),
         }, { requestId: decisionBudgetScope.requestId })
         // Cancellation/replacement can land while the failure trace is queued.
-        if (ownsRequestFailure()) this.traceRequest = null
+        if (this.requestAdmissionOwner === requestAdmissionScope.getStore() && ownsRequestFailure()) {
+          this.traceRequest = null
+          requestAdmissionScope.getStore().traceCleared = true
+        }
       }
       throw error
     }
     finally {
       // A replacement can already own setup before Base request advances generation.
       // In that window even the old decision's finally must leave its overrides alone.
-      const sameDecision = ownsDecisionBudgets(this, decisionBudgetScope)
+      const ownsAdmission = this.requestAdmissionOwner === requestAdmissionScope.getStore()
+      const sameDecision = ownsAdmission && ownsDecisionBudgets(this, decisionBudgetScope)
       const expectedTrace = requestTrace ?? setupTrace
       const expectedId = requestTrace ? decisionBudgetScope.requestId : setupTraceId
       const replacedTrace = this.traceRequest
         && (this.traceRequest !== expectedTrace || this.traceRequest.id !== expectedId)
       if (sameDecision && !replacedTrace) this.startRestage = undefined
-      if (!sameDecision || !replacedTrace) await restoreDecisionBudgets(this, decisionBudgetScope)
+      if (ownsAdmission && (!sameDecision || !replacedTrace)) await restoreDecisionBudgets(this, decisionBudgetScope)
     }
   }
 
@@ -10805,14 +10910,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // `pauseInfo.pause_class` is the pause's declared class (pause-class.mjs). Every caller declares one; a missing class is recorded as
   // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
   async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}, expectedOwner) {
+    if (expectedOwner) {
+      this.assertCheckpointOwnerIdentity(expectedOwner)
+      if (expectedOwner.admissionOwner !== this.requestAdmissionOwner) throw new AgentLoopError('Request admission cancelled or superseded before pause')
+    }
+    const admission = this.requestAdmissionOwner
     await this.loadPersistentState()
+    if (this.requestAdmissionOwner !== admission) {
+      throw new AgentLoopError('Request admission cancelled or superseded during pause')
+    }
     // A fail-closed pause must remain possible when native reads fail. It grants
     // no execution authority; local request/goal/step identity fences its writes.
     if (expectedOwner) this.assertCheckpointOwnerIdentity(expectedOwner)
+    this.requestAdmissionOwner = null
     const key = expectedOwner?.key ?? this.activePlanKey()
     const state = this.memory.pausePlan?.(key, reason, pauseInfo)
     await this.persistState()
-    if (expectedOwner) this.assertCheckpointOwnerIdentity(expectedOwner)
+    if (expectedOwner) this.assertCheckpointOwnerIdentity({ ...expectedOwner, admissionOwner: null })
+    if (this.requestAdmissionOwner !== null) throw new AgentLoopError('Request admission cancelled or superseded during pause')
     // Outside a request (the supervisor pausing a plan a failed request left
     // stranded, or a user stop) no terminal event follows, so name the pause
     // here, keyed by the request that just ended. Inside a request the
@@ -10911,6 +11026,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   decisionTraceEvent(event, data = {}) {
+    this.assertRequestAdmission()
     if (event === 'decision.request') recordPendingDecisionRequest(this, data)
     else if (event === 'decision.response' || event === 'decision.fallback') settlePendingDecisionRequest(this, data)
     this.recordJevHealthEvent(event, data)
@@ -11389,6 +11505,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   traceEvent(event, data = {}, { requestId } = {}) {
+    if (event !== 'request.cancelled' && event !== 'lifecycle.entered') this.assertRequestAdmission()
     if (event === 'request.completed' || event === 'request.failed') {
       data = { ...(data ?? {}), jev_health: this.takeJevHealthSummary() }
       if (this.traceRequest?.id) this.lastTerminalRequestId = this.traceRequest.id
@@ -11723,8 +11840,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async captureEpoch() {
-    const status = await super.captureEpoch()
-    await this.traceEvent('actor.bound', actorFields(status))
+    const status = await this.waitForRequestAdmission(super.captureEpoch())
+    const before = requestAdmissionScope.getStore()?.nativeActor
+    if (requestAdmissionScope.getStore()?.phase === 'intake' && before
+      && (before.actor_id !== status.actor_id || before.epoch !== status.epoch || before.session !== status.session)) {
+      throw new AgentLoopError('Request admission cancelled or superseded by actor change')
+    }
+    await this.waitForRequestAdmission(this.traceEvent('actor.bound', actorFields(status)))
     return status
   }
 
@@ -12493,6 +12615,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   cancel(reason = 'cancelled') {
+    this.requestAdmissionOwner = null
     this.observationRateAbort?.abort()
     this.abortStepContractCalls()
     this.jev?.abortAll(reason)
@@ -12507,7 +12630,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     abortSkillChoice(this, reason) // 2.8 hook
     if (/terminate|new_task|cancel_current|user_cancel/i.test(String(reason))) this.clearLoadedSkillContext()
     this.reasoningTriggerSource = null
-    void this.traceEvent('request.cancelled', { reason, usage: this.traceRequest?.usage })
+    void requestAdmissionScope.exit(() => this.traceEvent('request.cancelled', { reason, usage: this.traceRequest?.usage }))
     this.traceRequest = null
     this.outputBudgetRecoveryUsed = false
     this.outputBudgetRecoveryGuard = null

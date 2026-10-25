@@ -231,6 +231,11 @@ export function abortSkillChoice(loop, reason = 'cancelled') {
 // only when the offer is still the current one for the same actor epoch; a
 // late answer for a replaced offer or a replaced actor is traced and dropped.
 async function runSkillChoice(loop, offer, trigger, base) {
+  const admission = loop.requestAdmissionOwner
+  // A shadow answer may arrive after the same intake legitimately entered its
+  // base turn. A new intake or trace still fences it before any ledger write.
+  const current = () => !admission || (loop.requestAdmissionOwner === admission
+    || (!loop.requestAdmissionOwner && admission.phase === 'turn')) && loop.traceRequest?.id === offer.request_id
   let controller
   try {
     const questions = skillChoiceQuestions(offer.cards)
@@ -250,6 +255,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
       shadow,
       question_ids: Object.keys(questions),
     })
+    if (!current()) return
     const startedAt = Date.now()
     const failed = async (outcome, reason) => {
       await loop.decisionTraceEvent('decision.fallback', {
@@ -291,6 +297,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
       await failed('aborted', stale)
       return
     }
+    if (!current()) return
     const choice = parseSkillChoice(response, offer.cards)
     if (!choice) {
       await failed('error', 'skill_choice answer missing or not one of the offered ids')
@@ -306,6 +313,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
       latency_ms: latency,
       shadow,
     })
+    if (!current()) return
     const confident = choice.pick !== 'none' && choice.confidence >= SKILL_CHOICE_MIN_CONFIDENCE
     const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
     offer.jev = { pick: choice.pick, confidence: choice.confidence, order: choice.order }
@@ -349,11 +357,12 @@ async function rankWithJev(loop, offer, trigger) {
 }
 
 function skillReadFence(loop) {
+  const admission = loop.requestAdmissionOwner
   const generation = loop.generation
   const lineage = loop.agentContext?.lineageSequence
   const request = loop.traceRequest
   const { actor_id, epoch, session } = loop.epoch ?? {}
-  return () => loop.generation === generation && loop.agentContext?.lineageSequence === lineage
+  return () => (!admission || loop.requestAdmissionOwner === admission) && loop.generation === generation && loop.agentContext?.lineageSequence === lineage
     && loop.traceRequest === request && loop.epoch?.actor_id === actor_id
     && loop.epoch?.epoch === epoch && loop.epoch?.session === session
 }
@@ -456,7 +465,9 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
       locked: card.needs.filter(need => need.state === 'locked').map(need => ({ subject: need.subject, technology: need.technology })),
     })),
   })
+  if (!current()) return null
   await rankWithJev(loop, offer, trigger)
+  if (!current()) return null
   await loadOfferedSkillDetails(loop, offer, current)
   return offer
 }

@@ -15,7 +15,7 @@ import { getActivePlan } from './planning-state.mjs'
 // Every entry point, where it lives and what it does. lifecycle.test.mjs proves each site calls
 // lifecycleEnter with its event, so a new entry point must be added here to be seen.
 export const LIFECYCLE_SITES = Object.freeze([
-  { event: 'request.start', owner: 'runtime-v8/npc-agent-loop', site: 'request', note: 'a player chat request starts' },
+  { event: 'request.start', owner: 'runtime-v8/npc-agent-loop', site: 'requestAdmitted', note: 'a player chat request starts' },
   { event: 'reset', owner: 'runtime-v8/npc-agent-loop', site: 'reset', note: 'the request lineage is discarded (new request, actor replaced, death, recovery prepare)' },
   { event: 'restage', owner: 'runtime-v8/npc-agent-loop', site: 'restageContext', note: 'a role conversation is restaged from a handoff packet (details.role), or the executor kept through a review round is resumed (details.folded_from)' },
   { event: 'planner.return', owner: 'runtime-v8/npc-agent-loop', site: 'returnControlToPlanner', note: 'the executor hands control back to the planner' },
