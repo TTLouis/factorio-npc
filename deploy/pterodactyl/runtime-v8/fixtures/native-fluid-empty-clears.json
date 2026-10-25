@@ -1,0 +1,406 @@
+{
+  "envelope": {
+    "created_at": 1792934395082,
+    "native_generation": 1,
+    "operation": {
+      "name": "place_candidate",
+      "args": {
+        "candidate_set_id": "placement-2",
+        "candidate_id": "candidate-1"
+      }
+    },
+    "candidate": {
+      "version": 4,
+      "complete": true,
+      "tick": 856,
+      "generated_tick": 714,
+      "actor_id": 1,
+      "surface_index": 1,
+      "force_index": 1,
+      "candidate_set_id": "placement-2",
+      "candidate_id": "candidate-1",
+      "entity_name": "boiler",
+      "entity_type": "boiler",
+      "position": {
+        "x": 80.5,
+        "y": -1
+      },
+      "direction": 0,
+      "connects_to": {
+        "unit_number": 5,
+        "entity_name": "offshore-pump",
+        "target_port": {
+          "storage_index": 1,
+          "connection_index": 1
+        },
+        "candidate_port": {
+          "storage_index": 1,
+          "connection_index": 1,
+          "direction": 12,
+          "filter": "water",
+          "flow_direction": "input-output"
+        },
+        "tile": {
+          "x": 79.5,
+          "y": -0.5
+        }
+      },
+      "candidate_ports": [
+        {
+          "storage_index": 1,
+          "connection_index": 1,
+          "production_type": "input",
+          "filter": "water",
+          "flow_direction": "input-output",
+          "connection_type": "normal",
+          "position": {
+            "x": 79.5,
+            "y": -0.5
+          },
+          "direction": 12
+        },
+        {
+          "storage_index": 1,
+          "connection_index": 2,
+          "production_type": "input",
+          "filter": "water",
+          "flow_direction": "input-output",
+          "connection_type": "normal",
+          "position": {
+            "x": 81.5,
+            "y": -0.5
+          },
+          "direction": 4
+        },
+        {
+          "storage_index": 2,
+          "connection_index": 1,
+          "production_type": "output",
+          "filter": "steam",
+          "flow_direction": "output",
+          "connection_type": "normal",
+          "position": {
+            "x": 80.5,
+            "y": -1.5
+          },
+          "direction": 0
+        }
+      ],
+      "candidate_storages": [
+        {
+          "index": 1,
+          "production_type": "input",
+          "volume": 200,
+          "filter": "water"
+        },
+        {
+          "index": 2,
+          "production_type": "output",
+          "volume": 200,
+          "filter": "steam"
+        }
+      ],
+      "clears": {},
+      "operation_key": "req_mvnuufbt_1/batch_1",
+      "signature": "3cf6e0131c0c91920a6b843d9ae3f8c9f32b2d097456ba7f3c8725d9766225ae",
+      "owner": {
+        "goal_id": "goal_1nrgb3a_1",
+        "plan_id": "goal_1nrgb3a_1_p3",
+        "plan_version": 1,
+        "step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+        "semantic_step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+        "actor_id": 1,
+        "actor_epoch": 1,
+        "session": "fluid-real-loop-fixture"
+      },
+      "native_baseline": {
+        "generation": 1,
+        "max_batch_id": 5
+      },
+      "protected_geometry": [
+        {
+          "found": true,
+          "entity": {
+            "name": "offshore-pump",
+            "type": "offshore-pump",
+            "unit_number": 5,
+            "position": {
+              "y": -0.5,
+              "x": 78.5
+            },
+            "direction": 12,
+            "force": "player"
+          },
+          "surface_index": 1,
+          "force_index": 1,
+          "actor_id": 1,
+          "actor_surface_index": 1,
+          "actor_force_index": 1,
+          "fluid_geometry_version": 3,
+          "fluid_box_count": 1,
+          "non_fluidbox_storage_count": 0,
+          "fluid_storages_truncated": false,
+          "fluid_storages": [
+            {
+              "index": 1,
+              "local_volume": 100,
+              "prototypes": [
+                {
+                  "index": 1,
+                  "production_type": "output",
+                  "volume": 100
+                }
+              ],
+              "prototypes_truncated": false,
+              "pipe_connections": [
+                {
+                  "connection_index": 1,
+                  "connected": false,
+                  "target_valid": true,
+                  "flow_direction": "output",
+                  "connection_type": "normal",
+                  "position": {
+                    "y": -0.5,
+                    "x": 78.5
+                  },
+                  "target_position": {
+                    "y": -0.5,
+                    "x": 79.5
+                  }
+                }
+              ],
+              "pipe_connections_truncated": false
+            }
+          ]
+        }
+      ]
+    },
+    "board_step_id": "step_1",
+    "native_idle": true,
+    "operation_key": "req_mvnuufbt_1/batch_1",
+    "native_max_batch_id": 5,
+    "request_id": "req_mvnuufbt_1",
+    "version": 2,
+    "ordinal": 1,
+    "baseline": {
+      "version": 2,
+      "intent_signature": "b7e686b7374685a7e9f7b09c501f8d8947389181b17f77c2d84ca1a7c6b07cb4",
+      "actor_id": 1,
+      "actor_epoch": 1,
+      "request_id": "req_mvnuufbt_1",
+      "captured_at": 1792934393362,
+      "preserved": [
+        {
+          "entity": {
+            "unit_number": 5,
+            "name": "offshore-pump",
+            "type": "offshore-pump",
+            "position": {
+              "x": 78.5,
+              "y": -0.5
+            },
+            "direction": 12
+          },
+          "actor_id": 1,
+          "surface_index": 1,
+          "force_index": 1,
+          "fluid": {
+            "version": 3,
+            "storages": [
+              {
+                "index": 1,
+                "local_volume": 100,
+                "prototypes": [
+                  {
+                    "index": 1,
+                    "production_type": "output",
+                    "volume": 100,
+                    "filter": null,
+                    "minimum_temperature": null,
+                    "maximum_temperature": null
+                  }
+                ],
+                "ports": [
+                  {
+                    "index": 1,
+                    "position": {
+                      "x": 78.5,
+                      "y": -0.5
+                    },
+                    "target_position": {
+                      "x": 79.5,
+                      "y": -0.5
+                    },
+                    "connection_type": "normal",
+                    "flow_direction": "output",
+                    "connected": false,
+                    "target": null
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "binding": {
+        "goal_id": "goal_1nrgb3a_1",
+        "plan_id": "goal_1nrgb3a_1_p3",
+        "plan_version": 1,
+        "step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+        "semantic_step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt"
+      }
+    },
+    "owner": {
+      "goal_id": "goal_1nrgb3a_1",
+      "plan_id": "goal_1nrgb3a_1_p3",
+      "plan_version": 1,
+      "step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+      "semantic_step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+      "actor_id": 1,
+      "actor_epoch": 1
+    },
+    "attempt_id": "req_mvnuufbt_1/batch_1",
+    "signature": "3cf6e0131c0c91920a6b843d9ae3f8c9f32b2d097456ba7f3c8725d9766225ae"
+  },
+  "native_source": "f2d1cb7608dfa98ab33822107b1ab87dce380e9e",
+  "factorio": "2.0.77",
+  "original_reply": "{\"ok\":true,\"preservation_join\":{\"version\":4,\"complete\":true,\"tick\":856,\"generated_tick\":714,\"actor_id\":1,\"surface_index\":1,\"force_index\":1,\"candidate_set_id\":\"placement-2\",\"candidate_id\":\"candidate-1\",\"entity_name\":\"boiler\",\"entity_type\":\"boiler\",\"position\":{\"x\":80.5,\"y\":-1},\"direction\":0,\"connects_to\":{\"unit_number\":5,\"entity_name\":\"offshore-pump\",\"target_port\":{\"storage_index\":1,\"connection_index\":1},\"candidate_port\":{\"storage_index\":1,\"connection_index\":1,\"direction\":12,\"filter\":\"water\",\"flow_direction\":\"input-output\"},\"tile\":{\"x\":79.5,\"y\":-0.5}},\"candidate_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":79.5,\"y\":-0.5},\"direction\":12},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":81.5,\"y\":-0.5},\"direction\":4},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":80.5,\"y\":-1.5},\"direction\":0}],\"candidate_storages\":[{\"index\":1,\"production_type\":\"input\",\"volume\":200,\"filter\":\"water\"},{\"index\":2,\"production_type\":\"output\",\"volume\":200,\"filter\":\"steam\"}],\"clears\":{},\"operation_key\":\"req_mvnuufbt_1/batch_1\",\"signature\":\"3cf6e0131c0c91920a6b843d9ae3f8c9f32b2d097456ba7f3c8725d9766225ae\",\"owner\":{\"goal_id\":\"goal_1nrgb3a_1\",\"plan_id\":\"goal_1nrgb3a_1_p3\",\"plan_version\":1,\"step_id\":\"goal_1nrgb3a_1_p3_v1_s1_0q45flt\",\"semantic_step_id\":\"goal_1nrgb3a_1_p3_v1_s1_0q45flt\",\"actor_id\":1,\"actor_epoch\":1,\"session\":\"fluid-real-loop-fixture\"},\"native_baseline\":{\"generation\":1,\"max_batch_id\":5},\"protected_geometry\":[{\"found\":true,\"entity\":{\"name\":\"offshore-pump\",\"type\":\"offshore-pump\",\"unit_number\":5,\"position\":{\"y\":-0.5,\"x\":78.5},\"direction\":12,\"force\":\"player\"},\"surface_index\":1,\"force_index\":1,\"actor_id\":1,\"actor_surface_index\":1,\"actor_force_index\":1,\"fluid_geometry_version\":3,\"fluid_box_count\":1,\"non_fluidbox_storage_count\":0,\"fluid_storages_truncated\":false,\"fluid_storages\":[{\"index\":1,\"local_volume\":100,\"prototypes\":[{\"index\":1,\"production_type\":\"output\",\"volume\":100}],\"prototypes_truncated\":false,\"pipe_connections\":[{\"connection_index\":1,\"connected\":false,\"target_valid\":true,\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"y\":-0.5,\"x\":78.5},\"target_position\":{\"y\":-0.5,\"x\":79.5}}],\"pipe_connections_truncated\":false}]}]}}\n",
+  "label": "Exact finite offline real-loop03 native DTO; not historical AW evidence and not a completion certificate",
+  "step": {
+    "step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+    "semantic_step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+    "description": "Install one boiler connected to the preserved pump.",
+    "completion_contract": {
+      "mode": "all",
+      "requirements": [
+        {
+          "id": "obligation_1",
+          "kind": "entity_count",
+          "prototype": "boiler",
+          "minimum": 1,
+          "radius": 4,
+          "anchor": {
+            "x": 80.5,
+            "y": -1
+          }
+        },
+        {
+          "id": "obligation_2",
+          "kind": "entity_exists",
+          "unit_number": 5
+        }
+      ],
+      "confidence": 0
+    },
+    "obligation_protocol": 1,
+    "obligations": {
+      "outcome": {
+        "mode": "all",
+        "requirements": [
+          {
+            "id": "requirement_1",
+            "kind": "entity_count",
+            "prototype": "boiler",
+            "minimum": 1,
+            "radius": 4,
+            "anchor": {
+              "x": 80.5,
+              "y": -1
+            }
+          }
+        ],
+        "confidence": 0
+      },
+      "preserve": [
+        5
+      ]
+    },
+    "obligation_proof": {
+      "version": 2,
+      "intent_signature": "b7e686b7374685a7e9f7b09c501f8d8947389181b17f77c2d84ca1a7c6b07cb4",
+      "actor_id": 1,
+      "actor_epoch": 1,
+      "request_id": "req_mvnuufbt_1",
+      "captured_at": 1792934393362,
+      "preserved": [
+        {
+          "entity": {
+            "unit_number": 5,
+            "name": "offshore-pump",
+            "type": "offshore-pump",
+            "position": {
+              "x": 78.5,
+              "y": -0.5
+            },
+            "direction": 12
+          },
+          "actor_id": 1,
+          "surface_index": 1,
+          "force_index": 1,
+          "fluid": {
+            "version": 3,
+            "storages": [
+              {
+                "index": 1,
+                "local_volume": 100,
+                "prototypes": [
+                  {
+                    "index": 1,
+                    "production_type": "output",
+                    "volume": 100,
+                    "filter": null,
+                    "minimum_temperature": null,
+                    "maximum_temperature": null
+                  }
+                ],
+                "ports": [
+                  {
+                    "index": 1,
+                    "position": {
+                      "x": 78.5,
+                      "y": -0.5
+                    },
+                    "target_position": {
+                      "x": 79.5,
+                      "y": -0.5
+                    },
+                    "connection_type": "normal",
+                    "flow_direction": "output",
+                    "connected": false,
+                    "target": null
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "binding": {
+        "goal_id": "goal_1nrgb3a_1",
+        "plan_id": "goal_1nrgb3a_1_p3",
+        "plan_version": 1,
+        "step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt",
+        "semantic_step_id": "goal_1nrgb3a_1_p3_v1_s1_0q45flt"
+      }
+    },
+    "execution_guidance": {
+      "approach": "Join the preserved pump with one boiler.",
+      "rationale": "Retain all old topology.",
+      "constraints": [],
+      "skillIds": [],
+      "materialSupply": null
+    },
+    "completion_mode": "deterministic",
+    "contract_status": "bound",
+    "completion_confidence": "grounded",
+    "reduced_confidence": false
+  },
+  "plan": {
+    "goal_id": "goal_1nrgb3a_1",
+    "plan_version": 1,
+    "active_step_index": 0,
+    "plan_id": "goal_1nrgb3a_1_p3"
+  },
+  "runtime_source": "b286d88570320529ffa0636669e4fe13436995bb",
+  "original_reply_sha256": "b5bd1012f52f5e3c4a250028b8d421fee7403bd8932e7c4d2942a2c61c95e1bf"
+}

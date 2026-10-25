@@ -5,13 +5,45 @@ import vm from 'node:vm'
 import { createHash } from 'node:crypto'
 import { compileObligations, normalizeObligations, preservationGeometry, normalizeObligationProof,
   obligationSignature, preservedProofMatches, normalizeFluidAdmission, fluidAdditionProof,
-  normalizeFluidCertificate, effectivePreservationProof, preservationFailure, normalizeFluidReceiptBinding } from './contract-obligations.mjs'
+  normalizeFluidCertificate, effectivePreservationProof, preservationFailure, normalizeFluidReceiptBinding, isNativeEmptyPreservationSequence } from './contract-obligations.mjs'
 import { operationSignature } from './operation-reconciliation.mjs'
 
 import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
 import { fluidPreservationMutationUnsafe } from './contract-obligation-runtime.mjs'
 
 const aw = JSON.parse(fs.readFileSync(new URL('./fixtures/aw-fluid-preservation-baseline.json', import.meta.url)))
+const nativeEmpty = JSON.parse(fs.readFileSync(new URL('./fixtures/native-fluid-empty-clears.json', import.meta.url)))
+test('exact real2.0.77 freeze reply canonicalizes empty clears without changing original native evidence', () => {
+  assert.equal(createHash('sha256').update(nativeEmpty.original_reply).digest('hex'), nativeEmpty.original_reply_sha256)
+  assert.deepEqual(JSON.parse(nativeEmpty.original_reply).preservation_join, nativeEmpty.envelope.candidate)
+  assert.deepEqual(nativeEmpty.envelope.candidate.clears, {})
+  const before = JSON.stringify(nativeEmpty)
+  const normalized = normalizeFluidAdmission(nativeEmpty.envelope, nativeEmpty.plan, nativeEmpty.step)
+  assert.ok(normalized)
+  assert.deepEqual(normalized.candidate.clears, [])
+  assert.deepEqual(normalizeFluidAdmission(normalized, nativeEmpty.plan, nativeEmpty.step), normalized, 'canonical add/restore/cert input is stable')
+  assert.equal(JSON.stringify(nativeEmpty), before, 'the original native reply and old committed proof stay immutable')
+})
+for (const [label, value] of [['missing', undefined], ['null', null], ['number', 0], ['boolean', false], ['string', ''],
+  ['nonempty-object', { unit_number: 5 }], ['fake-length', { length: 0 }], ['nonempty-array', [5]],
+  ['null-prototype', Object.create(null)], ['inherited', Object.create({ clear: 5 })], ['date', new Date(0)],
+  ['symbol-field', { [Symbol('unknown')]: true }], ['array-extra-field', Object.assign([], { unknown: true })],
+  ['array-prototype', Object.setPrototypeOf([], null)]]) {
+  test(`allowed-empty native preservation sequences refuse ${label} rather than grant no-clearing/idle authority`, () => {
+    assert.equal(isNativeEmptyPreservationSequence(value), false)
+    const raw = structuredClone(nativeEmpty.envelope); raw.candidate.clears = value
+    assert.equal(normalizeFluidAdmission(raw, nativeEmpty.plan, nativeEmpty.step), undefined)
+  })
+}
+for (const value of [[], {}]) test(`allowed-empty native preservation shape ${JSON.stringify(value)} is known empty`, () => {
+  assert.equal(isNativeEmptyPreservationSequence(value), true)
+})
+for (const field of ['candidate_ports', 'candidate_storages', 'protected_geometry']) for (const value of [[], {}, undefined]) {
+  test(`required nonempty native ${field} refuses ${JSON.stringify(value)}`, () => {
+    const raw = structuredClone(nativeEmpty.envelope); raw.candidate[field] = value
+    assert.equal(normalizeFluidAdmission(raw, nativeEmpty.plan, nativeEmpty.step), undefined)
+  })
+}
 for (const lane of aw.lanes) test(`AW ${lane.tap}: exact old nonfluid guard reproduces original refusal, future v2 captures pump without waiving it`, async () => {
   assert.equal(createHash('sha256').update(aw.baseline_functions).digest('hex'), aw.baseline_function_sha256)
   assert.equal(lane.pre_stop.plan_status, 'COMPLETED'); assert.match(lane.pre_stop.active_plan_id, /_p7$/)
