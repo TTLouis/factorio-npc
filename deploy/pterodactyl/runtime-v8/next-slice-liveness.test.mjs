@@ -765,3 +765,52 @@ test('late claimed-wake cancellation diagnostic cannot charge or sequence a newe
     assert.equal(w.calls(), 0)
   } finally { stopWake(w.session) }
 })
+
+for (const journalKind of ['admitting', 'uncertain', 'malformed', 'missing', 'nested_records', 'empty_array', 'empty_lua', 'late_identity', 'first_admitting', 'first_missing', 'late_state']) {
+  test(`real Session residual with native journal ${journalKind} and empty host ledger cannot infer idle permission`, async t => {
+    const w = orphanSession()
+    assert.equal(w.memory.pendingOperations(w.key).length, 0)
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'next-slice-native-journal-'))
+    w.session.root = root
+    t.after(async () => { stopWake(w.session); await w.session.publishNextSliceControl(); await fsp.rm(root, { recursive: true, force: true }) })
+    await w.session.publishNextSliceControl()
+    const view = w.session.nextSliceControlView()
+    await fsp.writeFile(path.join(root, '.sgluna/next-slice-settle-request.json'), JSON.stringify({ schema: 1,
+      request_id: 'native_journal_request', instance_id: view.instance_id, goal_id: view.goal_id,
+      actor_id: view.actor_id, epoch: view.epoch, boundary_key: view.boundary_key, requested_at: Date.now() }))
+    const command = w.game.command.bind(w.game)
+    let projections = 0
+    const record = { operation_key: 'native/batch_1', attempt_id: 'native_attempt_1', signature: 'a'.repeat(64), ordinal: 1,
+      actor_id: w.game.status.actor_id, epoch: w.game.status.epoch, generation: 1, operation_count: 1, tick: 1000,
+      state: 'completed', slots: [{ index: 1, ok: true, batch_refs: [] }] }
+    w.game.command = async text => {
+      const raw = await command(text)
+      if (!text.includes('projection="next_slice_ownership_v1"')) return raw
+      projections++
+      const value = JSON.parse(raw)
+      if (['admitting', 'uncertain'].includes(journalKind)) value.operations.admission_journal = [{ ...record, state: journalKind, slots: {} }]
+      if (journalKind === 'malformed') value.operations.admission_journal = [{ state: 'uncertain' }]
+      if (journalKind === 'missing') delete value.operations.admission_journal
+      if (journalKind === 'nested_records') value.operations.admission_journal = { records: [] }
+      if (journalKind === 'empty_array') value.operations.admission_journal = []
+      if (journalKind === 'empty_lua') value.operations.admission_journal = {}
+      if (journalKind === 'late_identity') value.operations.admission_journal = [{ ...record, attempt_id: projections === 1 ? 'native_attempt_1' : 'native_attempt_2' }]
+      if (journalKind === 'first_admitting') value.operations.admission_journal = projections === 1 ? [{ ...record, state: 'admitting', slots: {} }] : []
+      if (journalKind === 'first_missing') { if (projections === 1) delete value.operations.admission_journal; else value.operations.admission_journal = [] }
+      if (journalKind === 'late_state') value.operations.admission_journal = [{ ...record, state: projections === 1 ? 'completed' : 'uncertain' }]
+      return JSON.stringify(value)
+    }
+    w.session.pollControllerLiveness(); await settle(w.session); await w.session.publishNextSliceControl()
+    const published = JSON.parse(await fsp.readFile(path.join(root, '.sgluna/controller-state.json')))
+    if (['empty_array', 'empty_lua'].includes(journalKind)) {
+      assert.ok(w.session.modelResume)
+      assert.equal(published.settlement.native_reconciled, true)
+    } else {
+      assert.equal(w.session.modelResume, null)
+      assert.equal(published.settlement, null)
+      assert.equal(w.memory.pauseRecord(w.key).pause_class, 'guard')
+    }
+    assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 0)
+    assert.equal(w.calls(), 0)
+  })
+}

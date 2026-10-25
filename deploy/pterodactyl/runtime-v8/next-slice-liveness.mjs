@@ -3,6 +3,7 @@ import { completedSliceAnchor } from './next-slice-state.mjs'
 import { readNextSliceOwnership } from './supervisor-adapter.mjs'
 import { preservationFailure } from './contract-obligations.mjs'
 import { batchWatermark } from './operation-reconciliation.mjs'
+import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 
 export function nextSliceOwner(agent) {
   return { agent, generation: agent.generation, lineage: agent.agentContext?.lineageSequence, trace: agent.traceRequest,
@@ -81,16 +82,15 @@ export async function nextSliceNativeState(agent, owner, expectedActor = owner.e
   const finalMark = batchWatermark(status)
   const craftOwner = value => JSON.stringify([value?.task_active, value?.native_queue, value?.persisted_owner, value?.last_result])
   const followOwner = value => JSON.stringify([value?.active, value?.state, value?.player_name, value?.target_player, value?.desired_distance, value?.updated_tick, value?.code, value?.controller_live, value?.healthy])
-  const changed = !firstMark || !finalMark || JSON.stringify(firstMark) !== JSON.stringify(finalMark)
+  const journals = [first, final].map(value => nativeAdmissionJournal(value.operations?.admission_journal))
+  const changed = journals[0].identity !== journals[1].identity || !firstMark || !finalMark || JSON.stringify(firstMark) !== JSON.stringify(finalMark)
     || craftOwner(first.crafting) !== craftOwner(crafting) || followOwner(first.follow) !== followOwner(follow)
-  const journal = status?.admission_journal?.records
-  const unknown = !Number.isSafeInteger(firstMark?.generation) || !Number.isSafeInteger(finalMark?.generation)
+  const unknown = journals.some(journal => !journal.known) || !Number.isSafeInteger(firstMark?.generation) || !Number.isSafeInteger(finalMark?.generation)
     || [first, final].some(value => typeof value.operations?.task_state !== 'string' || !Number.isSafeInteger(value.operations.queue_length)
       || typeof value.operations.queue_empty !== 'boolean' || typeof value.crafting?.task_active !== 'boolean'
-      || !value.crafting.native_queue || typeof value.follow?.active !== 'boolean'
-      || value.operations.admission_journal?.records !== undefined && !Array.isArray(value.operations.admission_journal.records))
+      || !value.crafting.native_queue || typeof value.follow?.active !== 'boolean')
   const pending = agent.memory.pendingOperations?.(agent.activePlanKey()) ?? (agent.memory.pendingOperation?.(agent.activePlanKey()) ? [agent.memory.pendingOperation(agent.activePlanKey())] : [])
-  const uncertain = changed || pending.length > 0 || agent.batchInFlight || (Array.isArray(journal) && journal.some(row => ['admitting', 'uncertain'].includes(row.state)))
+  const uncertain = changed || journals.some(journal => journal.unresolved) || pending.length > 0 || agent.batchInFlight
   const busy = native.idle !== true || status?.task_state !== 'idle' || status?.queue_empty !== true || status?.queue_length !== 0
     || Boolean(status?.active_batch) || crafting?.task_active || Object.keys(crafting?.native_queue ?? {}).length > 0
     || Boolean(crafting?.persisted_owner) || follow?.active || status?.actor?.mining_state?.mining

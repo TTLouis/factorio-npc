@@ -1,4 +1,5 @@
 import { sprintSpeedValid } from './tick-sprint-policy.mjs'
+import { nativeAdmissionJournal } from './native-admission-journal.mjs'
 // Read-only policy for the external live-trial runner and its supervisor.
 // A recoverable pause reason is diagnostic text, never terminal authority.
 export function structuralTerminal(canonical) {
@@ -63,12 +64,14 @@ export function trialStopDecision({ canonical, events = [], startedAt, now, paus
     const known = typeof operations?.task_state === 'string' && Number.isSafeInteger(operations.queue_length)
       && typeof operations.queue_empty === 'boolean' && typeof craft?.task_active === 'boolean'
       && craft.native_queue && typeof follow?.active === 'boolean'
-    if (operations?.admission_journal?.records !== undefined && !Array.isArray(operations.admission_journal.records)) return finish('wait', 'next_slice_native_ownership_unknown')
+    const journal = nativeAdmissionJournal(operations?.admission_journal)
+    if (!journal.known) return finish('wait', 'next_slice_native_ownership_unknown')
+    if (journal.unresolved) return finish('wait', 'next_slice_native_admission_unsettled')
     if (!known) return finish('wait', 'next_slice_native_ownership_unknown')
     const busy = operations.task_state !== 'idle' || operations.queue_length !== 0 || operations.queue_empty !== true
       || Boolean(operations.active_batch) || craft.task_active || Object.keys(craft.native_queue).length > 0
       || Boolean(craft.persisted_owner) || follow.active || operations.actor?.mining_state?.mining
-      || operations.admission_journal?.records?.some(row => ['admitting', 'uncertain'].includes(row.state))
+
     if (busy) return finish('continue', 'next_slice_native_work_owned')
     const ack = controller.settlement
     const settled = ack?.schema === 1 && ack.native_reconciled === true && ack.instance_id === controller.instance_id && ack.boundary_key === boundary

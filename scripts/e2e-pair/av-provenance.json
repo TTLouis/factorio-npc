@@ -99,7 +99,7 @@
     {
       "path": "run-live.mjs",
       "av_sha256": "4fc26c82751c83db6de9542c68e76e33129951a60222c8d88b906e829913ed19",
-      "template_sha256": "6ecbdc9365630036cb7d24374d31fe9a0f91b5d817fa09cb29aa63530ac5ee73"
+      "template_sha256": "7a846a160c9cd035e2cbe42e083a08b3d41ccfe06c2563e28fe13a33ab19d768"
     },
     {
       "path": "runner-terminal.mjs",
@@ -124,7 +124,7 @@
     {
       "path": "snapshot.lua",
       "av_sha256": "dbd1a34daa5a19514846604351e1f03e29601da5fd92e398eed881889d7bb029",
-      "template_sha256": "dbd1a34daa5a19514846604351e1f03e29601da5fd92e398eed881889d7bb029"
+      "template_sha256": "1b2862b10ad67a2a973e058e3a2e0037be1a7195f8c161df61dd6d6a4dc36cfa"
     },
     {
       "path": "supervisor-preflight.mjs",
@@ -139,17 +139,17 @@
     {
       "path": "trial-stop-policy.mjs",
       "av_sha256": "9155dc28f5658c026251f04a29c728db2de4f101630966cf6a7b01676e60484f",
-      "template_sha256": "9155dc28f5658c026251f04a29c728db2de4f101630966cf6a7b01676e60484f"
+      "template_sha256": "3628908627e0a72b2ba53277e81fae06b1748c20bb4e391f8f43e582ce9f7f22"
     },
     {
       "path": "trial-stop-policy.test.mjs",
       "av_sha256": "f0bfa0ed7a5a9b8cb0f076541974bd935b707cb59743869233d03cb4b16e1e02",
-      "template_sha256": "f0bfa0ed7a5a9b8cb0f076541974bd935b707cb59743869233d03cb4b16e1e02"
+      "template_sha256": "724dfbd2b01018fcb3f8999ce3a4be9382c28503bf8effdae5a206c2f57d6fb8"
     },
     {
       "path": "trial-supervisor-stop.mjs",
       "av_sha256": "edad9de455685f7ebc3b179d7fe0efe60c16dcb005d5e84310309efbd73a7943",
-      "template_sha256": "8f51b8b86a49d7295f51423c7f5658bfcadd0ca2d1dc1705a53a40d478d0000e"
+      "template_sha256": "464d9053bab101639da0f880c69e8698d33525dec63b1cb73ee6547b008cc616"
     },
     {
       "path": "verify-deployment.mjs",

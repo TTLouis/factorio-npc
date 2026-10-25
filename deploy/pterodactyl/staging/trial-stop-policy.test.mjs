@@ -165,7 +165,7 @@ function orphanInput() {
   input.canonical.goal.status = 'active'
   input.canonical.run = { paused: false }
   Object.assign(input.canonical.plans[0], { status: 'COMPLETED', execution: { step_progress: { s: { status: 'completed' } } } })
-  Object.assign(input.native, { epoch: 3, operations: { task_state: 'idle', queue_empty: true, queue_length: 0 },
+  Object.assign(input.native, { epoch: 3, operations: { task_state: 'idle', queue_empty: true, queue_length: 0, admission_journal: {} },
     crafting_status: { task_active: false, native_queue: {} }, follow: { active: false } })
   input.controller = { schema: 1, ready: true, stopping: false, instance_id: 'runtime-instance', observed_at: input.now,
     applicable: true, boundary_key: `next_slice|${goalId}|p|1|s`, goal_id: goalId, actor_id: 6, epoch: 3,
@@ -230,4 +230,25 @@ test('actual future checker requests runtime settlement without submitting a gam
   const request = JSON.parse(await fsp.readFile(path.join(root, '.sgluna/next-slice-settle-request.json')))
   assert.equal(request.instance_id, input.controller.instance_id)
   assert.equal(request.goal_id, goalId)
+})
+
+test('runner recognizes the actual native journal array and present Lua-empty object; missing proof stays unknown', () => {
+  const record = { operation_key: 'native/batch_1', attempt_id: 'native_attempt_1', signature: 'a'.repeat(64), ordinal: 1,
+    actor_id: 6, epoch: 3, generation: 1, operation_count: 1, tick: 1000, state: 'admitting', slots: {} }
+  for (const state of ['admitting', 'uncertain']) {
+    const input = orphanInput()
+    input.native.operations.admission_journal = [{ ...record, state }]
+    input.controller.settlement = { ...trialStopDecision(orphanInput()).request, settled_at: input.now, native_reconciled: true }
+    assert.equal(trialStopDecision(input).reason, 'next_slice_native_admission_unsettled')
+  }
+  for (const raw of [null, { records: [] }, [{ state: 'uncertain' }]]) {
+    const input = orphanInput(); input.native.operations.admission_journal = raw
+    assert.equal(trialStopDecision(input).reason, 'next_slice_native_ownership_unknown')
+  }
+  const missing = orphanInput(); delete missing.native.operations.admission_journal
+  assert.equal(trialStopDecision(missing).reason, 'next_slice_native_ownership_unknown')
+  for (const raw of [[], {}]) {
+    const input = orphanInput(); input.native.operations.admission_journal = raw
+    assert.equal(trialStopDecision(input).action, 'request_settlement')
+  }
 })
