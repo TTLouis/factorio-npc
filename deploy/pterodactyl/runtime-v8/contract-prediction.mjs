@@ -1,3 +1,4 @@
+import { obligationContractContext } from './contract-obligations.mjs'
 import { getActivePlan, isStepContractPending, PLAN_STATUS } from './planning-state.mjs'
 import { completionContractSignature } from './luna-step-contracts.mjs'
 import { deploymentStatus } from './supervisor-adapter.mjs'
@@ -8,8 +9,8 @@ function identity(agent) {
   const key = agent.activePlanKey(); const planning = agent.memory.planningState?.(key); const plan = getActivePlan(planning)
   return { key, planning, plan, generation: agent.generation, actor: agent.epoch?.actor_id, epoch: agent.epoch?.epoch }
 }
-function signature(contract) {
-  try { return completionContractSignature(contract) }
+function signature(contract, step) {
+  try { return completionContractSignature(contract, obligationContractContext(step?.obligations)) }
   catch { return undefined }
 }
 function same(agent, prediction, { next = false } = {}) {
@@ -22,7 +23,7 @@ function same(agent, prediction, { next = false } = {}) {
     && now.generation === prediction.generation && now.actor === prediction.actor && now.epoch === prediction.epoch
     && now.plan?.active_step_index === prediction.index + (next ? 1 : 0)
     && previous?.step_id === prediction.previousId && previous.completion_contract
-    && signature(previous.completion_contract) === prediction.signature
+    && signature(previous.completion_contract, previous) === prediction.signature
     && now.plan?.steps?.[prediction.index + 1]?.step_id === prediction.stepId
     && now.plan?.steps?.[prediction.index + 1]?.description === prediction.targetDescription
 }
@@ -77,7 +78,7 @@ function beginContractPrediction(agent) {
   const board = agent.memory.currentPlan?.(current.key)?.task_board
   const boardStep = board?.steps?.find(step => step.id === board.active_step_id)
   if (!boardStep || boardStep.description !== previous.description || !boardStep.completion_contract
-    || !signature(previous.completion_contract) || signature(boardStep.completion_contract) !== signature(previous.completion_contract)) return
+    || !signature(previous.completion_contract, previous) || signature(boardStep.completion_contract, previous) !== signature(previous.completion_contract, previous)) return
   const held = agent.contractPrediction
   if (held && held.planId === plan.plan_id && held.planVersion === plan.plan_version && held.previousId === previous.step_id) return
   // Never allow a second in-flight prediction, including a superseded one.
@@ -85,7 +86,7 @@ function beginContractPrediction(agent) {
   const record = { key: current.key, generation: current.generation, actor: current.actor, epoch: current.epoch,
     lineage: agent.agentContext.lineageSequence, requestTrace: agent.traceRequest,
     goalId: current.planning.goal.goal_id, planId: plan.plan_id, planVersion: plan.plan_version, index,
-    previousId: previous.step_id, previousBoardId: boardStep.id, stepId: next.step_id, signature: signature(previous.completion_contract),
+    previousId: previous.step_id, previousBoardId: boardStep.id, stepId: next.step_id, signature: signature(previous.completion_contract, previous),
     targetDescription: next.description,
     requestId: agent.traceRequest?.id, controller: new AbortController(), settled: false }
   agent.contractPrediction = record

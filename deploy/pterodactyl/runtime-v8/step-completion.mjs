@@ -242,7 +242,7 @@ function boundedRequirement(raw, index) {
   return { id, kind, controller, expected }
 }
 
-export function sanitizeStepCompletionContract(raw) {
+export function sanitizeStepCompletionContract(raw, context) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { mode: 'semantic_unknown', requirements: [], confidence: 0 }
   }
@@ -252,7 +252,9 @@ export function sanitizeStepCompletionContract(raw) {
   if (raw.mode === 'semantic_unknown') return { mode: 'semantic_unknown', requirements: [], confidence }
   if (!['all', 'any'].includes(raw.mode)) return { mode: 'semantic_unknown', requirements: [], confidence }
   const rawRequirements = Array.isArray(raw.requirements) ? raw.requirements : []
-  if (rawRequirements.length === 0 || rawRequirements.length > COMPLETION_REQUIREMENT_LIMIT) {
+  const expected = context?.expectedRequirements
+  const derived = Array.isArray(expected) && expected.length > 0 && expected.length <= 16
+  if (rawRequirements.length === 0 || rawRequirements.length > (derived ? 16 : COMPLETION_REQUIREMENT_LIMIT)) {
     return { mode: 'semantic_unknown', requirements: [], confidence }
   }
   const requirements = rawRequirements.map(boundedRequirement)
@@ -264,12 +266,19 @@ export function sanitizeStepCompletionContract(raw) {
     if (ids.has(requirement.id)) return { mode: 'semantic_unknown', requirements: [], confidence }
     ids.add(requirement.id)
   }
+  if (derived) {
+    const expectedRows = expected.map(boundedRequirement)
+    const predicates = rows => JSON.stringify(rows.map(({ id: _id, ...row }) => JSON.stringify(row)).sort())
+    if (raw.mode !== 'all' || expectedRows.some(row => !row) || predicates(expectedRows) !== predicates(requirements)) {
+      return { mode: 'semantic_unknown', requirements: [], confidence }
+    }
+  }
   return { mode: raw.mode, requirements, confidence, source: clean(raw.source, 80) || undefined }
 
 }
 
-export function completionContractSupported(contract) {
-  const normalized = sanitizeStepCompletionContract(contract)
+export function completionContractSupported(contract, context) {
+  const normalized = sanitizeStepCompletionContract(contract, context)
   return normalized.mode !== 'semantic_unknown' && normalized.requirements.length > 0
 }
 
@@ -325,8 +334,8 @@ export function operationReceiptMatchesRequirement(actual, required) {
   return actual === required || (actual === 'place_candidate' && required === 'place_entity')
 }
 
-export function evaluateCompletionContract(contract, facts = {}) {
-  const normalized = sanitizeStepCompletionContract(contract)
+export function evaluateCompletionContract(contract, facts = {}, context) {
+  const normalized = sanitizeStepCompletionContract(contract, context)
   if (normalized.mode === 'semantic_unknown') return { status: 'unknown', satisfied: false, contract: normalized, results: [] }
   const results = normalized.requirements.map(requirement => {
     const fact = facts[requirement.id]
@@ -369,8 +378,8 @@ const IDENTITY_PINNED_REQUIREMENT_KINDS = new Set([
  * Returns undefined when nothing is proven -- the honest answer for "not yet
  * known to be impossible", which is not the same as "possible".
  */
-export function provePermanentlyUnsatisfiable(contract, { staleUnitNumbers = [] } = {}) {
-  const normalized = sanitizeStepCompletionContract(contract)
+export function provePermanentlyUnsatisfiable(contract, { staleUnitNumbers = [], contractContext } = {}) {
+  const normalized = sanitizeStepCompletionContract(contract, contractContext)
   if (normalized.mode === 'semantic_unknown' || normalized.requirements.length === 0) return undefined
   const stale = new Set(
     (Array.isArray(staleUnitNumbers) ? staleUnitNumbers : [staleUnitNumbers])
@@ -423,8 +432,8 @@ function operationRemovesRequirementStock(operation, requirement) {
  * Mode matters: an `all` contract is unsatisfiable as soon as one requirement is undone; an `any` contract is
  * only unsatisfiable when every requirement is undone. Nothing here reads prose or rewrites the contract.
  */
-export function checkpointBatchContradiction(contract, operations) {
-  const normalized = sanitizeStepCompletionContract(contract)
+export function checkpointBatchContradiction(contract, operations, context) {
+  const normalized = sanitizeStepCompletionContract(contract, context)
   if (normalized.mode === 'semantic_unknown' || !Array.isArray(operations) || operations.length === 0) return undefined
   const conflicts = []
   const conflicted = new Set()

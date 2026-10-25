@@ -3,7 +3,7 @@ import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_
 import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
-import { compileObligations, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+import { obligationContractContext, obligationProofOrigin, compileObligations, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { restoreObservationRates } from './observation-rate.mjs'
 import { restoreProductionRecords } from './production-task-runtime.mjs'
@@ -165,7 +165,7 @@ function completionPolicyFields(entry) {
     if (entry.checkpoint === undefined || entry.checkpoint === null) {
       return { ...intent, completion_mode: 'deterministic', completion_contract: null, contract_status: STEP_CONTRACT_STATUS.PENDING }
     }
-    const contract = safeDurableStepCompletionContract(entry.checkpoint)
+    const contract = safeDurableStepCompletionContract(entry.checkpoint, entry)
     return contract ? { ...intent, completion_mode: 'deterministic', completion_contract: contract } : undefined
   }
   if (entry?.kind === 'semantic' && typeof entry.rationale === 'string' && entry.rationale.trim()) {
@@ -209,9 +209,10 @@ function sameSemanticSteps(planSteps, incomingSteps) {
   return current.length === incoming.length && current.every((description, index) => description === incoming[index])
 }
 
-function safeDurableStepCompletionContract(value) {
-  const contract = sanitizeStepCompletionContract(value)
-  return completionContractSupported(contract) ? contract : undefined
+function safeDurableStepCompletionContract(value, step) {
+  const context = obligationContractContext(step?.obligations)
+  const contract = sanitizeStepCompletionContract(value, context)
+  return completionContractSupported(contract, context) ? contract : undefined
 }
 
 function parseStoredOperation(value) {
@@ -2162,7 +2163,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const event = { type: PLANNING_EVENT.STEP_CONTRACT_BOUND, now, source: 'runtime', plan_id: planId, step_id: stepId, contract, binding, request_id: requestId }
     const check = checkStepContractBind(planning, event)
     if (!check.ok) return refuse(check.reason)
-    const durable = safeDurableStepCompletionContract(check.contract)
+    const durable = safeDurableStepCompletionContract(check.contract, check.step)
     const alignment = boardPlanAlignment(legacy.task_board, check.plan)
     const boardIndex = alignment === undefined ? -1 : alignment + check.index
     if (!durable || boardIndex < 0 || legacy.task_board.steps[boardIndex] === undefined) return refuse('board_step_not_found')
@@ -2282,7 +2283,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return planning
     const step = plan.steps?.[plan.active_step_index]
     if (!step?.completion_contract) return planning
-    const proof = provePermanentlyUnsatisfiable(step.completion_contract, { staleUnitNumbers: [...stale] })
+    const proof = provePermanentlyUnsatisfiable(step.completion_contract, { staleUnitNumbers: [...stale], contractContext: obligationContractContext(step.obligations) })
     if (!proof) return planning
 
     planning = applyPlanningEvent(planning, {
@@ -3145,12 +3146,18 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       this.jevLedger = restoredLedger.ledger
       this.jevLedgerClamped = restoredLedger.clamped
     }
+    const storedPlanning = new Map((Array.isArray(snapshot?.planning_states) ? snapshot.planning_states.slice(0, 128) : []).filter(item => item && typeof item.key === 'string' && item.key.length > 0 && item.key.length <= 200).map(item => [item.key, restorePlanningState(item.state)]))
     for (const [key, state] of this.planByNpc.entries()) {
       const stepContracts = persistedStepContracts.get(key)
       if (state.task_board && Array.isArray(state.task_board.steps) && stepContracts) {
-        state.task_board.steps = state.task_board.steps.map(step => {
+        const planning = storedPlanning.get(key)
+        const plan = getActivePlan(planning)
+        const offset = plan ? boardPlanAlignment(state.task_board, plan) : undefined
+        state.task_board.steps = state.task_board.steps.map((step, index) => {
           const persisted = stepContracts.get(step.id)
-          const contract = safeDurableStepCompletionContract(persisted?.contract)
+          const canonical = offset === undefined ? undefined : plan.steps[index - offset]
+          const typed = canonical && obligationProofOrigin(planning, canonical) ? canonical : undefined
+          const contract = safeDurableStepCompletionContract(persisted?.contract, typed)
           return contract
             ? {
                 ...step,
@@ -3265,10 +3272,15 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       this.planByNpc.set(key, state)
       return { ...stateResult, state, blockedByHarness: true }
     }
+    const contractPlanning = this.planningState(key)
+    const contractPlan = getActivePlan(contractPlanning)
+    const contractOffset = contractPlan ? boardPlanAlignment(previousBoard, contractPlan) : undefined
     const durableContracts = new Map(
       (Array.isArray(previousBoard?.steps) ? previousBoard.steps : [])
-        .flatMap(step => {
-          const contract = safeDurableStepCompletionContract(step?.completion_contract)
+        .flatMap((step, index) => {
+          const canonical = contractOffset === undefined ? undefined : contractPlan.steps[index - contractOffset]
+          const typed = canonical && obligationProofOrigin(contractPlanning, canonical) ? canonical : undefined
+          const contract = safeDurableStepCompletionContract(step?.completion_contract, typed)
           return typeof step?.id === 'string' && contract
             ? [[step.id, { contract, at: step.completion_contract_at }]]
             : []
