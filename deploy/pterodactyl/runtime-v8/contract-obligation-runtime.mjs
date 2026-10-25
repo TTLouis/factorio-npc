@@ -1,7 +1,7 @@
+import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { evaluateCompletionContract } from './step-completion.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
-import { PAUSE_CLASS } from './pause-class.mjs'
 import { renderOperationPreflight, luaString } from './structured-policy.mjs'
 import { batchWatermark, operationSignature } from './operation-reconciliation.mjs'
 import { captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
@@ -131,10 +131,10 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   await fence()
   const status = typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus
   const baseline = batchWatermark(status)
-  const journal = status.admission_journal?.records ?? status.admission_journal ?? []
+  const journal = nativeAdmissionJournal(status?.admission_journal)
   if (!await nativeIdle(agent, fence) || !baseline || !baseline.idle || baseline.queue_length !== 0
     || baseline.generation !== pending.baseline?.generation || baseline.max_batch_id !== pending.baseline?.max_batch_id
-    || !Array.isArray(journal) || journal.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')
+    || !journal.known || journal.unresolved || journal.records.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')
   const envelope = normalizeFluidAdmission({ version: 2, operation_key: pending.operation_key, attempt_id: pending.attempt_id,
     ordinal: pending.ordinal, signature: pending.signature,
     request_id: pending.request_id, board_step_id: agent.memory.currentPlan(key)?.task_board?.active_step_id,

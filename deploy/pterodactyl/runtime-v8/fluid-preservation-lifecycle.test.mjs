@@ -4,13 +4,12 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { reconcilePreservationProof } from './contract-obligation-runtime.mjs'
-import { captureObligationProof, compileObligations, effectivePreservationProof, obligationProofOrigin,
-  normalizeFluidAdmission, preservedProofMatches } from './contract-obligations.mjs'
+import { captureObligationProof, compileObligations, effectivePreservationProof } from './contract-obligations.mjs'
 import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
 import { answersStepContract, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:fluid-fixture'
-function world({ trace, persist, read, secondOperation, doneMinimum = 99 } = {}) {
+function world({ trace, persist, read, journal, secondOperation, doneMinimum = 99 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const game = new FakeFactorio({ inventory: { boiler: 1, coal: 2 } })
   game.status.actor_id = 10
@@ -45,6 +44,7 @@ function world({ trace, persist, read, secondOperation, doneMinimum = 99 } = {})
       prototype: 'boiler', current: game.connected ? 1 : 0, found: game.connected ? 1 : 0, satisfied: game.connected === true, truncated: false })
     if (text.includes('autorio_operations","status')) {
       const status = JSON.parse(await native(text))
+      if (journal && game.batchId === 0) status.admission_journal = journal({ status, game, memory, agent })
       if (status.last_completed_batch) {
         Object.assign(status.last_completed_batch, { batch_generation: 1, batch_ref: `batch-g1-${game.batchId}` })
         status.receipt_journal = [{ ...status.last_completed_batch, state: 'completed' }]
@@ -287,3 +287,40 @@ for (const seam of ['certificate_persist', 'certificate_trace']) test(`fresh nat
   assert.ok(result.goalStatus === 'paused' || result.deferred, JSON.stringify(result))
 })
 
+
+
+const nativeJournalRecord = state => ({ operation_key: 'historical/operation', attempt_id: 'historical/attempt', signature: 'a'.repeat(64),
+  ordinal: 1, actor_id: 10, epoch: 3, generation: 1, tick: 600, operation_count: 1, state,
+  slots: state === 'completed' ? [{ index: 1, ok: true, operation: 'wait', queued_tasks: 0, batch_refs: {} }] : {} })
+
+for (const [shape, journal] of [['cold Lua empty object', () => ({})], ['empty array', () => []], ['resolved historical array', () => [nativeJournalRecord('completed')]]]) {
+  test(`actual helper accepts native ${shape} before exact fluid send and certificate`, async () => {
+    const w = world({ journal })
+    await w.start()
+    assert.equal(w.game.mutations.length, 1)
+    assert.equal(Object.keys(w.held().execution.preservation_admissions).length, 1)
+    await w.agent.completed()
+    assert.equal(w.held().execution.preservation_certificates.length, 1)
+    assert.equal(w.held().active_step_index, 1)
+    assert.equal(w.game.mutations.length, 2)
+    assert.ok(w.game.mutations[1].includes("'supply_entity'"))
+  })
+}
+
+for (const [shape, journal] of [
+  ['missing', () => undefined], ['null', () => null], ['nested records', () => ({ records: [] })],
+  ['malformed nonempty object', () => ({ unexpected: 1 })], ['malformed terminal', () => [{ ...nativeJournalRecord('completed'), slots: [{ index: 2, ok: true, batch_refs: [] }] }]],
+  ['truncated array', () => Array.from({ length: 129 }, (_, index) => ({ ...nativeJournalRecord('completed'), operation_key: `historical/${index}` }))],
+  ...['admitting', 'admitted', 'uncertain'].map(state => [state, () => [nativeJournalRecord(state)]]),
+  ['exact pending already recorded', ({ memory }) => [{ ...nativeJournalRecord('completed'), operation_key: memory.pendingOperations(KEY)[0]?.operation_key ?? 'historical/operation' }]],
+]) {
+  test(`actual helper refuses ${shape} native journal without fluid send or certificate`, async () => {
+    const w = world({ journal })
+    await assert.rejects(w.start(), /preservation_pre_admission_receipt_boundary_unproven/)
+    assert.equal(w.game.mutations.length, 0)
+    assert.equal(w.game.inventory.boiler, 1)
+    assert.deepEqual(w.held().execution.preservation_certificates ?? [], [])
+    assert.deepEqual(w.held().execution.preservation_admissions ?? {}, {})
+    assert.equal(w.memory.pauseRecord(KEY).pause_class, 'guard')
+  })
+}
