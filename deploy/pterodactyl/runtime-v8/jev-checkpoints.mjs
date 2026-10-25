@@ -334,8 +334,9 @@ export class JevCheckpoints {
     await this.flushPersist()
   }
 
-  async emit(rows) {
+  async emit(rows, { current = () => true } = {}) {
     for (const [event, data, requestId] of rows) {
+      if (!current()) return
       try {
         await this.loop.traceEvent(event, data, { requestId })
       }
@@ -476,7 +477,8 @@ export class JevCheckpoints {
     return true
   }
 
-  async record(input) {
+  async record(input, { current = () => true } = {}) {
+    if (!current()) return undefined
     const result = recordJudgment(this.ledger, input, { salt: this.salt })
     if (!result) return undefined
     this.ledger = result.ledger
@@ -500,6 +502,7 @@ export class JevCheckpoints {
       detail: judgment.detail,
       saving_estimate: judgment.saving_estimate,
     }, { requestId: judgment.request_id })
+    if (!current()) return undefined
     return judgment
   }
 
@@ -1258,11 +1261,15 @@ export class JevCheckpoints {
 
   // --- skill card order (shadow) -----------------------------------------------------------------------
 
-  async recordSkillOrder({ offer, choice, deterministicOrder, latencyMs }) {
+  async recordSkillOrder({ offer, choice, deterministicOrder, latencyMs, current = () => true }) {
     try {
-      if (!this.enabled) return
+      if (!this.enabled || !current()) return
       for (const tracker of [...this.trackers.values()]) {
-        if (tracker.kind === 'skill' && tracker.offer_seq !== offer.seq) await this.emit(this.abandonNow(tracker.judgment_id, 'superseded_by_a_newer_offer'))
+        if (!current()) return
+        if (tracker.kind === 'skill' && tracker.offer_seq !== offer.seq) {
+          await this.emit(this.abandonNow(tracker.judgment_id, 'superseded_by_a_newer_offer'), { current })
+          if (!current()) return
+        }
       }
       const judgment = await this.record({
         family: 'skill_order',
@@ -1274,26 +1281,27 @@ export class JevCheckpoints {
         acted: false,
         reason: 'shadow_skill_order_never_reaches_the_prompt',
         detail: { jev_order: choice.order.slice(0, 5), offer_seq: offer.seq, trigger: offer.trigger, latency_ms: latencyMs },
-      })
-      if (!judgment) return
+      }, { current })
+      if (!judgment || !current()) return
       this.track({ kind: 'skill', judgment_id: judgment.judgment_id, request_id: judgment.request_id, offer_seq: offer.seq, pick: choice.pick })
       // Jev answers in the background: when the plan was committed before its answer came, it is scored now
       // against what the agent had loaded at the commit.
-      if (Array.isArray(offer.retired_loaded)) await this.scoreSkillOrderAtCommit({ offer, loaded: offer.retired_loaded })
+      if (Array.isArray(offer.retired_loaded)) await this.scoreSkillOrderAtCommit({ offer, loaded: offer.retired_loaded, current })
     }
     catch {}
   }
 
-  async scoreSkillOrderAtCommit({ offer, loaded }) {
+  async scoreSkillOrderAtCommit({ offer, loaded, current = () => true }) {
     try {
-      if (!this.enabled || !offer) return
+      if (!this.enabled || !offer || !current()) return
       const rows = []
       for (const tracker of [...this.trackers.values()]) {
+        if (!current()) return
         if (tracker.kind !== 'skill' || tracker.offer_seq !== offer.seq) continue
         const result = scoreSkillOrder({ pick: tracker.pick, loaded })
         rows.push(...this.scoreNow(tracker.judgment_id, { ...result, outcome: { jev_pick: tracker.pick, loaded_skills: loaded.slice(0, 5), deterministic_top: offer.cards?.[0]?.id } }))
       }
-      await this.emit(rows)
+      await this.emit(rows, { current })
     }
     catch {}
   }

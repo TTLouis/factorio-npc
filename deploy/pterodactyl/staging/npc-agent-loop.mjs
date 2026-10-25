@@ -424,11 +424,13 @@ export class NpcAgentLoop {
     }
   }
 
-  async request(text, { sender = 'unknown' } = {}) {
+  async request(text, { sender = 'unknown', assertOwner } = {}) {
     check(typeof text === 'string' && text.trim().length > 0 && text.length <= 4000, 'Invalid chat request')
     check(typeof sender === 'string' && sender.trim().length > 0 && sender.length <= 128 && !/[\x00-\x1f\x7f]/.test(sender), 'Invalid chat sender')
     this.reset()
-    this.epoch = await this.captureEpoch()
+    const requestEpoch = await this.captureEpoch()
+    assertOwner?.() // intake may be cancelled/replaced while actor binding is pending
+    this.epoch = requestEpoch
     const memoryKey = this.memoryKeyForStatus(this.epoch)
     check(typeof memoryKey === 'string' && memoryKey.length > 0 && memoryKey.length <= 200, 'Invalid NPC memory key')
     const memoryContext = this.memory.context(memoryKey)

@@ -535,6 +535,7 @@ async function queryRequirements(loop, definition, { trigger }) {
     await loop.traceEvent('planning.requirements_unavailable', { trigger, reason: 'lookup_failed', error: errorText(error) })
     return { ok: false, reason: 'lookup_failed' }
   }
+  loop.assertRequestAdmission?.()
   const parsed = parseGoalRequirements(raw)
   if (!parsed.ok) {
     await loop.traceEvent('planning.requirements_unavailable', { trigger, reason: parsed.reason, ...(parsed.error ? { error: parsed.error } : {}) })
@@ -576,11 +577,14 @@ async function loadRequirements(loop, { memoryKey, trigger, definition }) {
     await loop.traceEvent('planning.requirements_unavailable', { trigger, reason: 'no_goal_definition' })
     return null
   }
+  const admission = loop.requestAdmissionOwner
   const generation = loop.generation
   const result = await queryRequirements(loop, definition, { trigger })
+  loop.assertRequestAdmission?.()
   if (!result.ok) return null
   // A newer request (a new goal, a cancel) started while the game was read: this
   // answer belongs to the old one and must not reach its planning rounds.
+  if (admission && loop.requestAdmissionOwner !== admission) return null
   if (loop.generation !== generation || memoryKey !== loop.activePlanKey?.()) {
     await loop.traceEvent('planning.requirements_unavailable', { trigger, reason: 'superseded' })
     return null

@@ -231,6 +231,11 @@ export function abortSkillChoice(loop, reason = 'cancelled') {
 // only when the offer is still the current one for the same actor epoch; a
 // late answer for a replaced offer or a replaced actor is traced and dropped.
 async function runSkillChoice(loop, offer, trigger, base) {
+  const admission = loop.requestAdmissionOwner
+  // A shadow answer may arrive after the same intake legitimately entered its
+  // base turn. A new intake or trace still fences it before any ledger write.
+  const current = () => !admission || (loop.requestAdmissionOwner === admission
+    || (!loop.requestAdmissionOwner && admission.phase === 'turn')) && loop.traceRequest?.id === offer.request_id
   let controller
   try {
     const questions = skillChoiceQuestions(offer.cards)
@@ -250,8 +255,31 @@ async function runSkillChoice(loop, offer, trigger, base) {
       shadow,
       question_ids: Object.keys(questions),
     })
+    if (!current()) return
     const startedAt = Date.now()
+    const staleFailure = async (outcome, reason, decisionWritten = false) => {
+      // Preserve the old call's diagnostic without routing it through current
+      // decision/behavior accounting or incrementing a replacement's sequence.
+      const actor = admission?.nativeActor ?? epoch
+      const failure = { decision_id: decisionId, contract: SKILL_CHOICE_CONTRACT,
+        reason, fallback: 'deterministic_skill_order', shadow }
+      if (!decisionWritten) await loop.decisionTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+        event: 'decision.fallback', decision_id: decisionId, request_id: offer.request_id,
+        actor_id: actor.actor_id, epoch: actor.epoch, data: failure })
+      const data = { ...base, ...correlation, source: 'deterministic', outcome,
+        reason: outcome === 'error' ? 'jev_error' : `jev_${outcome}`, error: reason,
+        latency_ms: Date.now() - startedAt, stale_callback: true, request_id: offer.request_id }
+      // Preserve the existing stop activity notification only when exactly that
+      // stop is still the latest lineage, with no replacement intake or trace.
+      if (admission && loop.generation === admission.generation + 1 && !loop.requestAdmissionOwner
+        && (!loop.traceRequest || loop.traceRequest.id === offer.request_id)) {
+        loop.onActivity?.('skill.ranked', data)
+      }
+      await loop.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+        event: 'skill.ranked', request_id: offer.request_id, actor_id: actor.actor_id, epoch: actor.epoch, data })
+    }
     const failed = async (outcome, reason) => {
+      if (!current()) return staleFailure(outcome, reason)
       await loop.decisionTraceEvent('decision.fallback', {
         decision_id: decisionId,
         contract: SKILL_CHOICE_CONTRACT,
@@ -259,6 +287,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
         fallback: 'deterministic_skill_order',
         shadow,
       })
+      if (!current()) return staleFailure(outcome, reason, true)
       await loop.traceEvent('skill.ranked', {
         ...base,
         ...correlation,
@@ -291,6 +320,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
       await failed('aborted', stale)
       return
     }
+    if (!current()) return
     const choice = parseSkillChoice(response, offer.cards)
     if (!choice) {
       await failed('error', 'skill_choice answer missing or not one of the offered ids')
@@ -306,12 +336,14 @@ async function runSkillChoice(loop, offer, trigger, base) {
       latency_ms: latency,
       shadow,
     })
+    if (!current()) return
     const confident = choice.pick !== 'none' && choice.confidence >= SKILL_CHOICE_MIN_CONFIDENCE
     const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
     offer.jev = { pick: choice.pick, confidence: choice.confidence, order: choice.order }
     offer.advisor = applied ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
     // U11: the pick goes through the judgment ledger so it is scored against what the fresh agent then loads.
-    await loop.jev?.recordSkillOrder({ offer, choice, deterministicOrder: base.deterministic_order, latencyMs: latency })
+    await loop.jev?.recordSkillOrder({ offer, choice, deterministicOrder: base.deterministic_order, latencyMs: latency, current })
+    if (!current()) return
     await loop.traceEvent('skill.ranked', {
       ...base,
       ...correlation,
@@ -349,11 +381,12 @@ async function rankWithJev(loop, offer, trigger) {
 }
 
 function skillReadFence(loop) {
+  const admission = loop.requestAdmissionOwner
   const generation = loop.generation
   const lineage = loop.agentContext?.lineageSequence
   const request = loop.traceRequest
   const { actor_id, epoch, session } = loop.epoch ?? {}
-  return () => loop.generation === generation && loop.agentContext?.lineageSequence === lineage
+  return () => (!admission || loop.requestAdmissionOwner === admission) && loop.generation === generation && loop.agentContext?.lineageSequence === lineage
     && loop.traceRequest === request && loop.epoch?.actor_id === actor_id
     && loop.epoch?.epoch === epoch && loop.epoch?.session === session
 }
@@ -456,7 +489,9 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
       locked: card.needs.filter(need => need.state === 'locked').map(need => ({ subject: need.subject, technology: need.technology })),
     })),
   })
+  if (!current()) return null
   await rankWithJev(loop, offer, trigger)
+  if (!current()) return null
   await loadOfferedSkillDetails(loop, offer, current)
   return offer
 }
@@ -546,13 +581,18 @@ export async function traceSkillLoaded(loop, skill, source = 'model_tool') {
 // skills were loaded into [SKILL_CONTEXT]. Emitted once per distinct loaded set
 // per offer.
 export async function traceSkillsFollowed(loop, plan) {
+  const offer = loop.skillOffers
+  const fence = skillReadFence(loop)
+  const current = () => fence() && loop.skillOffers === offer
   const loaded = loop.loadedSkillContext instanceof Map ? [...loop.loadedSkillContext.keys()] : []
   if (loop.skillOffers?.authoring && Array.isArray(plan?.plan) && plan.plan.length > 0) {
     loop.skillOffers.authoring = false
     // What the fresh agent had loaded when it committed: a late Jev answer is still scored against it (U11).
     loop.skillOffers.retired_loaded = loaded
     await loop.traceEvent('skill.offer_retired', { reason: 'plan_committed', trigger: loop.skillOffers.trigger })
-    await loop.jev?.scoreSkillOrderAtCommit({ offer: loop.skillOffers, loaded })
+    if (!current()) return
+    await loop.jev?.scoreSkillOrderAtCommit({ offer, loaded, current })
+    if (!current()) return
   }
   if (loaded.length === 0) return
   const key = loaded.slice().sort().join(',')
