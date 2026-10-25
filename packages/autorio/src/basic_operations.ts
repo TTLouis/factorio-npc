@@ -12,7 +12,7 @@ import type {
   PlayerParametersWaiting,
 } from './types'
 import { TaskStates } from './types'
-import { placement_candidate_matches } from './placement_candidates'
+import { placement_candidate_matches, placement_preservation_queue_binding } from './placement_candidates'
 import type { ClearableEntity, ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
@@ -60,6 +60,7 @@ export interface BasicOperationResult {
   placed_surface_index?: number
   placed_direction?: number
   placed_last_user?: string
+  preservation_binding?: PlayerParametersPlaceEntity['preservation_binding']
   placement_footprint?: {
     tile_width: number
     tile_height: number
@@ -352,8 +353,13 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     }
     const actor = actor_for_submission()
     if (!actor) return false
-    if (prototypes.entity[entity_name]?.type === 'offshore-pump'
+    if ((prototypes.entity[entity_name]?.type === 'offshore-pump' || placement_candidate)
       && (!placement_candidate || !placement_candidate_matches(actor, placement_candidate, entity_name, x, y, direction))) {
+      result_for(actor, undefined, false, false, 'placement_candidate_required')
+      return false
+    }
+    const preservation = placement_preservation_queue_binding(actor, entity_name, x, y, direction, placement_candidate)
+    if (preservation.required && !preservation.binding) {
       result_for(actor, undefined, false, false, 'placement_candidate_required')
       return false
     }
@@ -366,7 +372,18 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,
     }
-    return queue(task, actor)
+    const accepted = queue(task, actor)
+    if (accepted && preservation.binding) {
+      const batch = manager.get_status_snapshot().active_batch
+      if (!batch || typeof batch.batch_generation !== 'number' || typeof batch.batch_id !== 'number' || typeof batch.batch_ref !== 'string') {
+        manager.cancel_all_tasks('preservation_batch_binding_missing')
+        result_for(actor, task, false, false, 'placement_candidate_unavailable')
+        return false
+      }
+      task.preservation_binding = { ...preservation.binding, batch_id: batch.batch_id,
+        batch_generation: batch.batch_generation, batch_ref: batch.batch_ref }
+    }
+    return accepted
   }
 
   function submit_rotate_exact(target_unit_number: number, reverse: boolean = false): [boolean, string] {

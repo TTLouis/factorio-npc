@@ -348,6 +348,7 @@
     },
     "place_candidate": {
       "native_preservation_preflight_fields": ["preservation_join", "preservation_nonfluid_output", "preservation_clears_count"],
+      "native_preservation_join_projection": { "version": 4, "required": ["candidate_ports", "candidate_storages", "operation_key", "signature", "owner", "native_baseline", "protected_geometry"], "storage_constraints": ["index", "production_type", "volume", "filter", "minimum_temperature", "maximum_temperature"], "harness_only_freeze_remote": ["autorio_preflight", "fluid_preservation_candidate"], "closure_limit": 16, "claim_limit": 64 },
       "args": [
         "candidate_set_id",
         "candidate_id"
@@ -773,10 +774,13 @@
       "surface_policy": "shared",
       "native_scope_fields": ["actor_id", "actor_surface_index", "actor_force_index", "surface_index", "force_index"],
       "fluid_preservation_projection": {
-        "version": 2,
+        "version": 3,
         "storage_limit": 16,
         "connection_limit": 16,
-        "storage_fields": ["index", "capacity", "prototypes", "prototypes_truncated", "pipe_connections_truncated"],
+        "storage_fields": ["index", "capacity", "local_volume", "prototypes", "prototypes_truncated", "pipe_connections_truncated"],
+        "dynamic_storage_fields": ["capacity", "current_fluid"],
+        "immutable_storage_fields": ["index", "local_volume", "prototypes", "pipe_connections"],
+        "intrinsic_volume_source": "LuaFluidBoxPrototype.volume; local_volume is its complete per-storage sum; unknown refuses",
         "connection_fields": ["connection_index", "connected", "target_valid", "flow_direction", "connection_type", "position", "target_position", "target", "target_surface_index", "target_force_index", "target_fluidbox_index", "target_pipe_connection_index"]
       }
     },

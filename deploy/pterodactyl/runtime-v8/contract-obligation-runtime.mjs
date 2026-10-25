@@ -2,7 +2,7 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { evaluateCompletionContract } from './step-completion.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { PAUSE_CLASS } from './pause-class.mjs'
-import { renderOperationPreflight } from './structured-policy.mjs'
+import { renderOperationPreflight, luaString } from './structured-policy.mjs'
 import { batchWatermark, operationSignature } from './operation-reconciliation.mjs'
 import { captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
   obligationProofOrigin, preservedProofMatches, effectivePreservationProof, preservationGeometry, normalizeFluidAdmission,
@@ -78,7 +78,7 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   const plan = getActivePlan(planning)
   const step = plan?.steps?.[plan.active_step_index]
   if (step?.obligation_proof?.version !== 2) return undefined
-  const fail = code => { throw new PreservationProofError(code, { stage: 'admission' }) }
+  const fail = code => { throw new PreservationProofError(code, { stage: 'admission', category: code.endsWith('_limit_exhausted') ? 'exhausted' : 'unproven' }) }
   const owner = agent.captureCheckpointOwner()
   const fence = async () => {
     await agent.assertCheckpointOwnerCurrent(owner)
@@ -92,10 +92,8 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   const fresh = { ...await captureObligationProof(agent, step.obligations, fence), binding: step.obligation_proof.binding }
   const effective = effectivePreservationProof(plan, step, { plans: agent.memory.planningState(agent.activePlanKey()).plans })
   if (!effective || !preservedProofMatches(effective, fresh)) fail('preservation_baseline_changed')
-  for (const operation of operations ?? []) {
-    if (['rotate_entity', 'mine_entity', 'mine_entity_exact'].includes(operation.name)
-      && step.obligations.preserve.includes(operation.args?.unit_number)) fail('preservation_protected_mutation_refused')
-  }
+  const protectedEntities = fluidPreservationEntities(planning, plan, step, effective)
+  if (fluidPreservationMutationUnsafe(effective, operations, protectedEntities)) fail('preservation_protected_mutation_refused')
   const placements = operations?.filter(row => ['place_candidate', 'place_entity', 'execute_construction_plan'].includes(row.name)) ?? []
   if (!placements.length) return undefined
   // Nonfluid placement cannot add a fluid edge. This is fresh native prototype
@@ -118,9 +116,17 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   }
   if (operations?.length !== 1 || operations[0].name !== 'place_candidate') fail('preservation_exact_single_candidate_required')
   let preflight
-  try { preflight = JSON.parse(String(await agent.rcon.command(renderOperationPreflight({ name: operations[0].name, args: operations[0].args })))) }
+  const args = operations[0].args
+  const current = await agent.assertCurrent(); await fence()
+  if (typeof current.session !== 'string' || !current.session) fail('preservation_native_session_unproven')
+  const nativeOwner = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
+    semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch, session: current.session }
+  const context = { signature: pending.signature, owner: nativeOwner }
+  const freeze = `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(args.candidate_set_id)},${luaString(args.candidate_id)},${luaString(pending.operation_key)},{${step.obligations.preserve.join(',')}},helpers.json_to_table(${luaString(JSON.stringify(context))}))))`
+  try { preflight = JSON.parse(String(await agent.rcon.command(freeze))) }
   catch { await fence(); fail('preservation_candidate_read_unavailable') }
   await fence()
+  if (preflight?.ok !== true && ['preservation_native_claim_limit_exhausted', 'preservation_claim_history_missing', 'preservation_guard_already_claimed'].includes(preflight?.code)) fail(preflight.code)
   const rawStatus = await agent.readTaskStatusRaw()
   await fence()
   const status = typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus
@@ -129,7 +135,8 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   if (!await nativeIdle(agent, fence) || !baseline || !baseline.idle || baseline.queue_length !== 0
     || baseline.generation !== pending.baseline?.generation || baseline.max_batch_id !== pending.baseline?.max_batch_id
     || !Array.isArray(journal) || journal.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')
-  const envelope = normalizeFluidAdmission({ version: 1, operation_key: pending.operation_key, signature: pending.signature,
+  const envelope = normalizeFluidAdmission({ version: 2, operation_key: pending.operation_key, attempt_id: pending.attempt_id,
+    ordinal: pending.ordinal, signature: pending.signature,
     request_id: pending.request_id, board_step_id: agent.memory.currentPlan(key)?.task_board?.active_step_id,
     owner: { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
       semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch },
@@ -152,6 +159,45 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
     || final.max_batch_id !== baseline.max_batch_id || !await nativeIdle(agent, fence)) fail('preservation_pre_admission_boundary_changed')
   await fence()
   return envelope
+}
+
+// The frozen edge endpoint is protected even when it is not separately named
+// in preserve. Bulk cut/clear/opaque composites carry no complete affected-ID
+// witness in this protocol, so they cannot prove preservation before transport.
+export function fluidPreservationMutationUnsafe(proof, operations, extraEntities = []) {
+  const entities = (proof?.preserved ?? []).flatMap(row => [row.entity,
+    ...(row.fluid?.storages ?? []).flatMap(storage => storage.ports.flatMap(port => port.target ? [port.target.entity] : []))])
+  entities.push(...extraEntities)
+  return (operations ?? []).some(operation =>
+    ['clear_construction_area', 'reserve_construction_area', 'prepare_pump_site', 'execute_construction_plan'].includes(operation.name)
+    || ['rotate_entity', 'mine_entity_exact'].includes(operation.name) && entities.some(entity => entity.unit_number === operation.args?.unit_number)
+    || operation.name === 'mine_entity' && entities.some(entity => entity.name === operation.args?.entity_name))
+}
+
+function fluidPreservationEntities(planning, plan, step, effective) {
+  const entities = []
+  const prefix = new Set(plan.carried_forward_evidence ?? [])
+  for (const origin of planning.plans ?? []) {
+    if (origin.goal_id !== plan.goal_id) continue
+    for (const prior of origin.steps ?? []) {
+      const same = origin.plan_id === plan.plan_id && prior.step_id === step.step_id
+      const preceding = origin.plan_id === plan.plan_id && origin.steps.indexOf(prior) < plan.active_step_index
+        || prefix.has(`${origin.plan_id}:${prior.step_id}`)
+      if (!same && !(preceding && origin.execution.step_progress?.[prior.step_id]?.status === 'completed'
+        && origin.execution.step_progress[prior.step_id].contract_satisfied === true)) continue
+      if (!obligationProofOrigin(planning, prior)) continue
+      for (const raw of Object.values(origin.execution.preservation_admissions ?? {})) {
+        const admission = normalizeFluidAdmission(raw, origin, prior)
+        if (!admission || admission.owner.actor_id !== effective.actor_id || admission.owner.actor_epoch !== effective.actor_epoch) continue
+        entities.push(...admission.candidate.protected_geometry.map(row => row.entity))
+      }
+      for (const raw of origin.execution.preservation_certificates ?? []) {
+        const certificate = normalizeFluidCertificate(raw, origin, prior)
+        if (certificate && certificate.proof.actor_id === effective.actor_id && certificate.proof.actor_epoch === effective.actor_epoch) entities.push(certificate.built.entity)
+      }
+    }
+  }
+  return entities
 }
 
 async function reconcileFluidAddition(agent, plan, step, fresh, fence) {
@@ -178,7 +224,7 @@ async function reconcileFluidAddition(agent, plan, step, fresh, fence) {
     if (!fluidAdditionProof(envelope, receipt, built, fresh, plan, step)) return false
     const proof = { ...fresh, binding: step.obligation_proof.binding }
     const certificate = normalizeFluidCertificate({ admission_key: envelope.operation_key, step_id: step.step_id,
-      ref: row.ref, receipt, built, proof, certified_at: Date.now() }, plan, step)
+      ref: row.ref, receipt, built, proof, certified_at: Date.now() }, plan, step, { seal: true })
     if (!certificate || !agent.memory.certifyPreservationAddition?.(agent.activePlanKey(), certificate)) return false
     await agent.persistState({ strict: true })
     await fence()

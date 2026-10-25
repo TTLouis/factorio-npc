@@ -28,6 +28,7 @@ const FLUID_TYPES = new Set(['offshore-pump', 'boiler', 'generator', 'pipe'])
 const FLUID_PROTOTYPES = Object.freeze({ 'offshore-pump': 'offshore-pump', boiler: 'boiler', 'steam-engine': 'generator', pipe: 'pipe' })
 const supportedFluid = entity => FLUID_PROTOTYPES[entity?.name] === entity?.type
 const fluidFlows = new Set(['input', 'output', 'input-output'])
+const fluidProduction = new Set([...fluidFlows, 'none'])
 const finite = value => typeof value === 'number' && Number.isFinite(value)
 const positiveIndex = value => Number.isSafeInteger(value) && value > 0 && value <= 16
 export function obligationSignature(value) {
@@ -90,11 +91,11 @@ function point(raw) {
   return { x: raw.x, y: raw.y }
 }
 function fluidPrototype(raw) {
-  if (!positiveIndex(raw?.index) || !fluidFlows.has(raw.production_type)
+  if (!positiveIndex(raw?.index) || !fluidProduction.has(raw.production_type) || !finite(raw.volume) || raw.volume <= 0
     || raw.filter !== undefined && (typeof raw.filter !== 'string' || !raw.filter)
     || raw.minimum_temperature !== undefined && !finite(raw.minimum_temperature)
     || raw.maximum_temperature !== undefined && !finite(raw.maximum_temperature)) unproven('preservation_fluid_prototype_unproven')
-  return { index: raw.index, production_type: raw.production_type, filter: raw.filter ?? null,
+  return { index: raw.index, production_type: raw.production_type, volume: raw.volume, filter: raw.filter ?? null,
     minimum_temperature: raw.minimum_temperature ?? null, maximum_temperature: raw.maximum_temperature ?? null }
 }
 function fluidPort(raw, scope, { stored = false } = {}) {
@@ -117,27 +118,29 @@ function fluidPort(raw, scope, { stored = false } = {}) {
 export function fluidPreservationGeometry(raw, scope, { stored = false } = {}) {
   const storages = stored ? raw?.storages : raw?.fluid_storages
   const count = stored ? storages?.length : raw?.fluid_box_count
-  if ((stored ? raw?.version : raw?.fluid_geometry_version) !== 2 || !positiveIndex(count)
+  if ((stored ? raw?.version : raw?.fluid_geometry_version) !== 3 || !positiveIndex(count)
     || !Array.isArray(storages) || storages.length !== count
     || !stored && (raw.fluid_storages_truncated !== false || raw.non_fluidbox_storage_count !== 0)) unproven('preservation_fluid_geometry_incomplete')
   const projected = storages.map((storage, index) => {
     const prototypes = storage.prototypes
     const ports = stored ? storage.ports : storage.pipe_connections
-    if (storage.index !== index + 1 || !finite(storage.capacity) || storage.capacity <= 0
+    if (storage.index !== index + 1 || !finite(storage.local_volume) || storage.local_volume <= 0
       || !Array.isArray(prototypes) || !prototypes.length || prototypes.length > 16
       || !Array.isArray(ports) || !ports.length || ports.length > 16
       || !stored && (storage.pipe_connections_truncated !== false || storage.prototypes_truncated !== false)) unproven('preservation_fluid_storage_incomplete')
-    return { index: storage.index, capacity: storage.capacity,
+    const projected = { index: storage.index, local_volume: storage.local_volume,
       prototypes: prototypes.map(row => fluidPrototype(stored ? { ...row,
         filter: row.filter ?? undefined, minimum_temperature: row.minimum_temperature ?? undefined,
         maximum_temperature: row.maximum_temperature ?? undefined } : row)).sort((a, b) => a.index - b.index),
       ports: ports.map(row => fluidPort(row, scope, { stored })).sort((a, b) => a.index - b.index) }
+    if (projected.local_volume !== projected.prototypes.reduce((total, row) => total + row.volume, 0)) unproven('preservation_local_volume_unproven')
+    return projected
   })
   for (const storage of projected) {
     if (new Set(storage.prototypes.map(row => row.index)).size !== storage.prototypes.length
       || storage.ports.some((port, index) => port.index !== index + 1)) unproven('preservation_fluid_indices_incomplete')
   }
-  return { version: 2, storages: projected }
+  return { version: 3, storages: projected }
 }
 // Geometry contains no changing fuel/output counters. Preserve engine-known
 // item routes and reject unsupported fluid topology instead of guessing it.
@@ -273,34 +276,81 @@ export function preservedProofMatches(before, after, { addition } = {}) {
   })
 }
 
+const nativeOwnerFields = ['goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'actor_id', 'actor_epoch', 'session']
+function normalizeNativeOwner(raw) {
+  if (!raw || Object.keys(raw).length !== 8 || nativeOwnerFields.some(key => !Object.hasOwn(raw, key))
+    || ['goal_id', 'plan_id', 'step_id', 'semantic_step_id', 'session'].some(key => typeof raw[key] !== 'string' || !raw[key] || raw[key].length > 240)
+    || ['plan_version', 'actor_id', 'actor_epoch'].some(key => !Number.isSafeInteger(raw[key]) || raw[key] < 1)) return undefined
+  return Object.fromEntries(nativeOwnerFields.map(key => [key, raw[key]]))
+}
+function nativeOwnerMatches(left, right) {
+  return normalizeNativeOwner(left) && normalizeNativeOwner(right)
+    && nativeOwnerFields.every(key => Object.hasOwn(left, key) && Object.hasOwn(right, key) && left[key] === right[key])
+}
+export function normalizeFluidReceiptBinding(raw) {
+  const keys = ['operation_key', 'attempt_id', 'signature', 'ordinal', 'owner', 'batch_id', 'batch_generation', 'batch_ref']
+  const owner = normalizeNativeOwner(raw?.owner)
+  if (!raw || !owner || Object.keys(raw).length !== keys.length || keys.some(key => !Object.hasOwn(raw, key))
+    || typeof raw.operation_key !== 'string' || !raw.operation_key || raw.operation_key.length > 192
+    || typeof raw.attempt_id !== 'string' || !raw.attempt_id || raw.attempt_id.length > 128
+    || typeof raw.signature !== 'string' || !/^[a-f0-9]{64}$/.test(raw.signature)
+    || ['ordinal', 'batch_id', 'batch_generation'].some(key => !Number.isSafeInteger(raw[key]) || raw[key] < 1)
+    || raw.batch_ref !== `batch-g${raw.batch_generation}-${raw.batch_id}`) return undefined
+  return { operation_key: raw.operation_key, attempt_id: raw.attempt_id, signature: raw.signature, ordinal: raw.ordinal,
+    owner, batch_id: raw.batch_id, batch_generation: raw.batch_generation, batch_ref: raw.batch_ref }
+}
 function fluidAdmissionUnchecked(raw, plan, step) {
   const proof = normalizeObligationProof(raw?.baseline, step?.obligations)
   const owner = raw?.owner
   const candidate = raw?.candidate
   const operation = raw?.operation
-  if (raw?.version !== 1 || !proof || proof.version !== 2 || !owner || !candidate
+  if (raw?.version !== 2 || !proof || proof.version !== 2 || !owner || !candidate
     || JSON.stringify(proof.binding) !== JSON.stringify(step.obligation_proof.binding)
     || owner.goal_id !== plan.goal_id || owner.plan_id !== plan.plan_id || owner.plan_version !== plan.plan_version
     || owner.step_id !== step.step_id || owner.semantic_step_id !== (step.semantic_step_id ?? step.step_id)
     || owner.actor_id !== proof.actor_id || owner.actor_epoch !== proof.actor_epoch
     || typeof raw.operation_key !== 'string' || !raw.operation_key || typeof raw.request_id !== 'string' || !raw.request_id
+    || typeof raw.attempt_id !== 'string' || !raw.attempt_id || !Number.isSafeInteger(raw.ordinal) || raw.ordinal < 1
     || typeof raw.board_step_id !== 'string' || !raw.board_step_id
     || !finite(raw.created_at) || raw.native_idle !== true || !Number.isSafeInteger(raw.native_generation) || raw.native_generation < 1
     || !Number.isSafeInteger(raw.native_max_batch_id) || raw.native_max_batch_id < 0
     || operation?.name !== 'place_candidate' || raw.signature !== operationSignature([operation])
     || operation.args?.candidate_set_id !== candidate.candidate_set_id || operation.args?.candidate_id !== candidate.candidate_id
-    || candidate.version !== 1 || candidate.complete !== true || candidate.actor_id !== owner.actor_id
+    || candidate.version !== 4 || candidate.operation_key !== raw.operation_key || candidate.signature !== raw.signature
+    || candidate.native_baseline?.generation !== raw.native_generation || candidate.native_baseline.max_batch_id !== raw.native_max_batch_id
+    || typeof candidate.owner?.session !== 'string' || !candidate.owner.session || candidate.owner.session.length > 240
+    || !nativeOwnerMatches(candidate.owner, { ...owner, session: candidate.owner.session })
+    || candidate.complete !== true || candidate.actor_id !== owner.actor_id
     || !Number.isSafeInteger(candidate.tick) || !Number.isSafeInteger(candidate.generated_tick)
     || candidate.tick < candidate.generated_tick || candidate.tick - candidate.generated_tick > 3600
     || !supportedFluid({ name: candidate.entity_name, type: candidate.entity_type })
     || !Array.isArray(candidate.clears) || candidate.clears.length !== 0
-    || !Array.isArray(candidate.candidate_ports) || !candidate.candidate_ports.length || candidate.candidate_ports.length > 16) return undefined
+    || !Array.isArray(candidate.candidate_ports) || !candidate.candidate_ports.length || candidate.candidate_ports.length > 16
+    || !Array.isArray(candidate.candidate_storages) || !candidate.candidate_storages.length || candidate.candidate_storages.length > 16) return undefined
+  const proposedStorages = candidate.candidate_storages.map(fluidPrototype)
+  if (!Array.isArray(candidate.protected_geometry) || candidate.protected_geometry.length > 16
+    || candidate.protected_geometry.length < proof.preserved.length) return undefined
+  const closure = candidate.protected_geometry.map(row => preservationGeometry(row, row.entity?.unit_number))
+  if (new Set(closure.map(row => row.entity.unit_number)).size !== closure.length
+    || proof.preserved.some(row => JSON.stringify(row) !== JSON.stringify(closure.find(item => item.entity.unit_number === row.entity.unit_number)))
+    || closure.some(row => row.actor_id !== proof.actor_id || row.fluid?.storages.some(storage => storage.ports.some(port =>
+      port.connected && !closure.some(endpoint => JSON.stringify(endpoint.entity) === JSON.stringify(port.target.entity)
+        && endpoint.surface_index === port.target.surface_index && endpoint.force_index === port.target.force_index))))) return undefined
+  if (proposedStorages.some((row, i) => row.index !== i + 1)
+    || candidate.candidate_ports.some(row => !positiveIndex(row.storage_index) || !positiveIndex(row.connection_index)
+      || !proposedStorages.some(storage => storage.index === row.storage_index)
+      || proposedStorages.some(storage => storage.index === row.storage_index
+        && (storage.production_type !== row.production_type || storage.filter !== (row.filter ?? null)))
+      || row.connection_type !== 'normal' || !fluidFlows.has(row.flow_direction)
+      || !finite(row.position?.x) || !finite(row.position?.y) || ![0, 4, 8, 12].includes(row.direction))
+    || new Set(candidate.candidate_ports.map(row => `${row.storage_index}/${row.connection_index}`)).size !== candidate.candidate_ports.length) return undefined
   const join = candidate.connects_to
   const source = proof.preserved.find(row => row.entity.unit_number === join?.unit_number)
   const storage = source?.fluid?.storages.find(row => row.index === join.target_port?.storage_index)
   const port = storage?.ports.find(row => row.index === join.target_port?.connection_index)
   const own = candidate.candidate_ports.find(row => row.storage_index === join.candidate_port?.storage_index
     && row.connection_index === join.candidate_port?.connection_index)
+  const ownStorage = own && proposedStorages.find(row => row.index === own.storage_index)
   if (!source || !port || port.connected !== false || source.entity.name !== join.entity_name || !own
     || candidate.surface_index !== source.surface_index || candidate.force_index !== source.force_index
     || !positiveIndex(own.storage_index) || !positiveIndex(own.connection_index)
@@ -313,7 +363,9 @@ function fluidAdmissionUnchecked(raw, plan, step) {
     || own.position.x + ({ 0: 0, 4: 1, 8: 0, 12: -1 })[own.direction] !== port.position.x
     || own.position.y + ({ 0: -1, 4: 0, 8: 1, 12: 0 })[own.direction] !== port.position.y
     || port.flow_direction === own.flow_direction && ['input', 'output'].includes(port.flow_direction)
-    || own.filter !== undefined && storage.prototypes.some(row => row.filter !== null && row.filter !== own.filter)
+    || !ownStorage || storage.prototypes.some(row => row.filter !== null && ownStorage.filter !== null && row.filter !== ownStorage.filter
+      || row.minimum_temperature !== null && ownStorage.maximum_temperature !== null && row.minimum_temperature > ownStorage.maximum_temperature
+      || row.maximum_temperature !== null && ownStorage.minimum_temperature !== null && row.maximum_temperature < ownStorage.minimum_temperature)
     || !step.obligations.outcome.requirements.some(row => row.kind === 'entity_count' && row.prototype === candidate.entity_name
       && (!row.anchor || Math.hypot(candidate.position.x - row.anchor.x, candidate.position.y - row.anchor.y) <= row.radius))) return undefined
   return clone(raw)
@@ -327,9 +379,14 @@ export function fluidAdditionProof(envelope, receipt, built, fresh, plan, step) 
   const basic = receipt?.basic_operation
   const admitted = receipt?.admitted_batch
   const candidate = witness.candidate
+  const binding = normalizeFluidReceiptBinding(basic?.preservation_binding)
   if (receipt.outcome !== 'completed' || receipt.task_state !== 'idle' || receipt.queue_length !== 0
     || basic?.type !== 'placing' || basic.accepted !== true || basic.completed !== true || basic.code !== 'completed'
     || basic.actor_id !== witness.owner.actor_id || basic.entity_name !== candidate.entity_name
+    || binding?.operation_key !== witness.operation_key || binding.signature !== witness.signature || binding.attempt_id !== witness.attempt_id
+    || binding.ordinal !== witness.ordinal || !nativeOwnerMatches(binding.owner, candidate.owner)
+    || binding.batch_id !== receipt.batch_id || binding.batch_generation !== receipt.batch_generation
+    || binding.batch_ref !== `batch-g${receipt.batch_generation}-${receipt.batch_id}`
     || basic.placed_surface_index !== candidate.surface_index || basic.placed_direction !== candidate.direction
     || basic.placed_position?.x !== candidate.position.x || basic.placed_position?.y !== candidate.position.y
     || !Number.isSafeInteger(basic.placed_unit_number) || step.obligations.preserve.includes(basic.placed_unit_number)
@@ -362,6 +419,9 @@ export function fluidAdditionProof(envelope, receipt, built, fresh, plan, step) 
   const targets = built.fluid.storages.flatMap(row => row.ports).filter(row => row.connected)
   if (targets.length !== 1) return undefined
   const ports = built.fluid.storages.flatMap(storage => storage.ports.map(port => ({ ...port, storage_index: storage.index })))
+  const expectedStorages = candidate.candidate_storages.map(fluidPrototype)
+  if (built.fluid.storages.length !== expectedStorages.length || built.fluid.storages.some(storage =>
+    storage.prototypes.length !== 1 || JSON.stringify(storage.prototypes[0]) !== JSON.stringify(expectedStorages.find(row => row.index === storage.index)))) return undefined
   if (ports.length !== candidate.candidate_ports.length || candidate.candidate_ports.some(proposed => !ports.some(port =>
     port.storage_index === proposed.storage_index && port.index === proposed.connection_index
     && port.position.x === proposed.position.x && port.position.y === proposed.position.y
@@ -441,7 +501,7 @@ function inheritedFluidProof(plan, step, baseline, plans) {
   return current
 }
 
-export function normalizeFluidCertificate(raw, plan, step) {
+export function normalizeFluidCertificate(raw, plan, step, { seal = false, requireLive = false } = {}) {
   try {
     const admission = normalizeFluidAdmission(plan.execution?.preservation_admissions?.[raw?.admission_key], plan, step)
     const proof = normalizeObligationProof(raw?.proof, step.obligations)
@@ -452,10 +512,23 @@ export function normalizeFluidCertificate(raw, plan, step) {
       || JSON.stringify(fluidPreservationGeometry(built.fluid, built, { stored: true })) !== JSON.stringify(built.fluid)
       || !fluidAdditionProof(admission, raw.receipt, built, proof, plan, step)) return undefined
     const ledger = plan.execution.receipts?.[step.step_id] ?? []
-    if (!ledger.some(row => row.kind === 'operation_receipt' && row.source === 'runtime' && row.ref === raw.ref)
-      || !ledger.some(row => row.kind === 'deterministic_verification' && row.source === 'runtime'
-        && row.ref === `batch_${raw.receipt.batch_id}` && row.verified_operation_names?.length === 1
-        && row.verified_operation_names[0] === 'place_candidate')) return undefined
-    return clone(raw)
+    const receipt = row => row?.kind === 'operation_receipt' && row.source === 'runtime' && row.ref === raw.ref
+    const verification = row => row?.kind === 'deterministic_verification' && row.source === 'runtime'
+      && row.ref === `batch_${raw.receipt.batch_id}` && row.verified_operation_names?.length === 1
+      && row.verified_operation_names[0] === 'place_candidate'
+    const liveReceipt = ledger.find(receipt); const liveVerification = ledger.find(verification)
+    const owner = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
+      operation_key: admission.operation_key, signature: admission.signature }
+    const dependencies = seal && liveReceipt && liveVerification
+      ? { version: 1, owner, receipt: clone(liveReceipt), verification: clone(liveVerification) }
+      : raw.authority_dependencies
+    if (!dependencies || dependencies.version !== 1 || JSON.stringify(dependencies.owner) !== JSON.stringify(owner)
+      || !receipt(dependencies.receipt) || !verification(dependencies.verification)
+      || requireLive && (!liveReceipt || !liveVerification
+        || JSON.stringify(dependencies.receipt) !== JSON.stringify(liveReceipt)
+        || JSON.stringify(dependencies.verification) !== JSON.stringify(liveVerification))) return undefined
+    // These two bounded dependencies are sealed at runtime certification, before
+    // ordinary prompt/history receipt retention can trim its rolling window.
+    return { ...clone(raw), authority_dependencies: clone(dependencies) }
   } catch { return undefined }
 }

@@ -1,6 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fluid_source_observation } from './fluid_source_observation'
-import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor, freeze_fluid_preservation_candidate, placement_candidate_matches, placement_preservation_execution_allowed } from './placement_candidates'
+import { new_basic_operation_controller } from './basic_operations'
+import { new_basic_operation_runtime } from './basic_operation_runtime'
+import { new_task_manager } from './task_manager'
+import { new_operation_admission } from './operation_admission'
 
 // Geometry fixtures still establish the native water-read prerequisite.
 function observe_water(actor: any) {
@@ -44,11 +48,11 @@ const boiler = {
   tile_width: 3,
   tile_height: 2,
   fluidbox_prototypes: [
-    { index: 1, production_type: 'input-output', filter: { name: 'water' }, pipe_connections: [
+    { index: 1, volume: 200, production_type: 'input-output', filter: { name: 'water' }, pipe_connections: [
       connection(12, { x: -1, y: 0.5 }, 'input-output'),
       connection(4, { x: 1, y: 0.5 }, 'input-output'),
     ] },
-    { index: 2, production_type: 'output', filter: { name: 'steam' }, pipe_connections: [
+    { index: 2, volume: 200, production_type: 'output', filter: { name: 'steam' }, pipe_connections: [
       connection(0, { x: 0, y: -0.5 }, 'output'),
     ] },
   ],
@@ -61,7 +65,7 @@ const steam_engine = {
   tile_width: 3,
   tile_height: 5,
   fluidbox_prototypes: [
-    { index: 1, production_type: 'input-output', filter: { name: 'steam' }, pipe_connections: [
+    { index: 1, volume: 200, production_type: 'input-output', filter: { name: 'steam' }, pipe_connections: [
       connection(0, { x: 0, y: -2 }, 'input-output'),
       connection(8, { x: 0, y: 2 }, 'input-output'),
     ] },
@@ -75,7 +79,7 @@ const offshore_pump = {
   tile_width: 1,
   tile_height: 1,
   fluidbox_prototypes: [
-    { index: 1, production_type: 'output', filter: { name: 'water' }, pipe_connections: [
+    { index: 1, volume: 100, production_type: 'output', filter: { name: 'water' }, pipe_connections: [
       connection(8, { x: 0, y: 0 }, 'output'),
     ] },
   ],
@@ -160,7 +164,8 @@ describe('placement candidates that join a live fluid port', () => {
     const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
     const read = () => placement_candidate_preflight(actor, set.candidate_set_id, 'candidate-1') as any
     try {
-      expect(read()).toMatchObject({ ok: true, preservation_join: { version: 1, complete: true,
+      expect(read()).toMatchObject({ ok: true, preservation_join: { version: 2, complete: true,
+        candidate_storages: [{ index: 1, production_type: 'input-output', filter: 'water' }, { index: 2, production_type: 'output', filter: 'steam' }],
         actor_id: 18, surface_index: 1, force_index: 1, entity_name: 'boiler',
         connects_to: { unit_number: 100, target_port: { storage_index: 1, connection_index: 1 } } } })
       // The other boiler water port must not silently join an existing object.
@@ -176,6 +181,89 @@ describe('placement candidates that join a live fluid port', () => {
       world[100].fluidbox.get_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
       expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_ports_incomplete' })
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
+  })
+
+  it('carries a nonrenewable native guard through the real queued boiler task and refuses a late second neighbour before mutation', () => {
+    build_pump()
+    Object.assign(world[100], { type: 'offshore-pump', direction: 0, fluids_count: 1, get_fluid: () => undefined })
+    world[100].fluidbox.get_capacity = () => 100
+    const heldPrototype = world[100].fluidbox.get_prototype
+    world[100].fluidbox.get_prototype = (index: number) => ({ ...heldPrototype(index), volume: 100 })
+    ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    const actor = actor_at(10, 20)
+    actor.character = { valid: true }
+    actor.status_snapshot = () => ({ actor_id: 18, kind: 'standalone_character' })
+    const remove = vi.fn(); const create = vi.fn()
+    actor.get_main_inventory = () => ({ get_item_count: () => 1, remove })
+    actor.surface.create_entity = create
+    actor.surface.find_entities_filtered = () => Object.values(world)
+    const manager = new_task_manager(() => actor)
+    const basic = new_basic_operation_controller(() => actor, manager)
+    const runtime = new_basic_operation_runtime(manager, basic)
+    const journal = new_operation_admission(() => actor, () => manager.get_status_snapshot())
+    const owner = { goal_id: 'goal_native', plan_id: 'goal_native_p1', plan_version: 1, step_id: 'native_step',
+      semantic_step_id: 'native_step', actor_id: 18, actor_epoch: 3, session: 'native-session' }
+    const context = { signature: 'native-exact-signature', owner }
+    const originalRemote = (globalThis as any).remote
+    let nativeEpoch = 3; let nativeSession = 'native-session'
+    ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { status: true, authorize: true }, autorio_operations: { status: true }, autorio_crafting: { status: true } },
+      call: (scope: string, method: string, epoch: number) => scope === 'autorio_operations'
+        ? { ...manager.get_status_snapshot(), actor: {}, follow: { active: false } }
+        : scope === 'autorio_crafting' ? { task_active: false, native_queue: [] }
+          : method === 'authorize' ? epoch === nativeEpoch : ({ allowed: true, actor_id: 18, epoch: nativeEpoch, session: nativeSession }) }
+    const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+    const candidate = set.candidates[0]
+    try {
+      const frozen: any = freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100], context)
+      expect(frozen.ok).toBe(true)
+      expect(frozen.preservation_join).toMatchObject({ version: 4, operation_key: 'req/first', owner })
+      const firstTick = frozen.preservation_join.tick
+      ;(globalThis as any).game.tick++
+      expect((freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100], context) as any).preservation_join.tick).toBe(firstTick)
+      expect(freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/other', [100], context)).toMatchObject({ ok: false, code: 'preservation_guard_already_claimed' })
+      expect(basic.submit_placement('boiler', candidate.position.x, candidate.position.y, candidate.direction)).toBe(false)
+      expect(execute_placement_candidate(actor, set.candidate_set_id, candidate.id, basic.submit_placement)[0]).toBe(false, 'a frozen witness is not an active admission caller')
+      expect(journal.begin({ operation_key: 'req/first', attempt_id: 'attempt', signature: context.signature, actor_id: 18, epoch: 3,
+        ordinal: 1, operation_count: 1, fluid_preservation: owner }).ok).toBe(true)
+      expect(execute_placement_candidate(actor, set.candidate_set_id, candidate.id, basic.submit_placement)[0]).toBe(true)
+      expect(manager.player_state.parameters_place_entity?.placement_candidate).toEqual({ candidate_set_id: set.candidate_set_id, candidate_id: candidate.id })
+      const batch = manager.get_status_snapshot().active_batch!
+      expect(journal.slot('req/first', 1, { ok: true, operation: 'place_candidate', batch_refs: [batch] }).ok).toBe(true)
+      expect(journal.finish('req/first', { ok: true }).ok).toBe(true)
+      const queued = JSON.stringify((globalThis as any).storage)
+      const task = manager.player_state.parameters_place_entity!
+      expect(placement_preservation_execution_allowed(actor, task.entity_name, task.position?.x, task.position?.y, task.direction,
+        task.placement_candidate, task.preservation_binding, manager.get_status_snapshot())).toBe(true)
+      for (const fault of ['epoch', 'session', 'goal', 'semantic_step', 'signature', 'operation', 'generation', 'proof_omission', 'binding_omission', 'missing_journal']) {
+        ;(globalThis as any).storage = JSON.parse(queued)
+        nativeEpoch = 3; nativeSession = 'native-session'
+        const held = manager.player_state.parameters_place_entity!
+        if (fault === 'epoch') nativeEpoch++
+        if (fault === 'session') nativeSession = 'new-session'
+        if (fault === 'goal') held.preservation_binding!.owner.goal_id = 'copied-goal'
+        if (fault === 'semantic_step') held.preservation_binding!.owner.semantic_step_id = 'copied-step'
+        if (fault === 'signature') held.preservation_binding!.signature = 'wrong'
+        if (fault === 'operation') held.preservation_binding!.operation_key = 'wrong'
+        if (fault === 'generation') held.preservation_binding!.batch_generation++
+        if (fault === 'proof_omission') held.placement_candidate = undefined
+        if (fault === 'binding_omission') held.preservation_binding = undefined
+        if (fault === 'missing_journal') (globalThis as any).storage.sgluna_operation_admissions = []
+        runtime.state_placing(actor)
+        expect(basic.status().last_result, fault).toMatchObject({ code: 'placement_candidate_unavailable', completed: false })
+        expect(create, fault).not.toHaveBeenCalled(); expect(remove, fault).not.toHaveBeenCalled()
+      }
+      nativeEpoch = 3; nativeSession = 'native-session'
+      // Native persisted candidate registry can be restored without weakening its claim.
+      ;(globalThis as any).storage = JSON.parse(queued)
+      world[101] = live_entity(101, 'pipe', [{ filter: 'water', ports: [
+        { position: { x: 12.5, y: 20.5 }, target_position: { x: 11.5, y: 20.5 }, flow_direction: 'input-output' },
+      ] }])
+      runtime.state_placing(actor)
+      expect(basic.status().last_result).toMatchObject({ code: 'placement_candidate_unavailable', completed: false })
+      expect(create).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled()
+      expect(placement_candidate_matches(actor, { candidate_set_id: set.candidate_set_id, candidate_id: candidate.id }, 'boiler', candidate.position.x, candidate.position.y, candidate.direction)).toBe(false)
+    } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit']; (globalThis as any).remote = originalRemote }
   })
 
   it('reports fresh bounded rejected-join witnesses then admits a newly cleared layout using native checks', () => {
