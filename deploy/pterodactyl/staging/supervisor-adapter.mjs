@@ -151,10 +151,10 @@ export async function executeAuthorizedOperation(rcon, epoch, command, marker = 
   }
 }
 
-export async function executeAuthorizedBatch(rcon, epoch, commands, marker = `SGLUNA_RESULT_${crypto.randomBytes(12).toString('hex')}:`, correlation) {
+export async function executeAuthorizedBatch(rcon, epoch, commands, marker = `SGLUNA_RESULT_${crypto.randomBytes(12).toString('hex')}:`, correlation, preservationAdmission) {
   let prepared
   try {
-    prepared = prepareAuthorizedBatch(epoch, commands, marker, correlation)
+    prepared = prepareAuthorizedBatch(epoch, commands, marker, correlation, preservationAdmission)
   }
   catch (error) {
     throw notSent(error)
@@ -162,16 +162,43 @@ export async function executeAuthorizedBatch(rcon, epoch, commands, marker = `SG
   return sendAuthorizedBatch(rcon, epoch, prepared, marker, correlation)
 }
 
-function prepareAuthorizedBatch(epoch, commands, marker, correlation) {
+function prepareAuthorizedBatch(epoch, commands, marker, correlation, preservationAdmission) {
   check(Number.isSafeInteger(epoch) && epoch > 0, 'Invalid deployment epoch')
   check(Array.isArray(commands) && commands.length >= 1 && commands.length <= 16, 'Invalid operation batch')
   const validated = commands.map(validatedOperationCall)
   check(/^SGLUNA_RESULT_[a-f0-9]{24}:$/.test(marker), 'Invalid operation acknowledgement marker')
 
+  let fluidOwner
+  if (preservationAdmission !== undefined) {
+    const envelope = preservationAdmission
+    const owner = envelope?.candidate?.owner
+    const fields = ['goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'actor_id', 'actor_epoch', 'session']
+    check(envelope?.version === 2 && envelope.candidate?.version === 4 && correlation?.protocol_version === 2
+      && ['operation_key', 'attempt_id', 'signature', 'ordinal'].every(key => envelope[key] === correlation[key])
+      && envelope.candidate.operation_key === correlation.operation_key && envelope.candidate.signature === correlation.signature,
+    'Invalid fluid preservation operation correlation')
+    check(owner && Object.keys(owner).length === fields.length && fields.every(key => Object.hasOwn(owner, key))
+      && ['goal_id', 'plan_id', 'step_id', 'semantic_step_id', 'session'].every(key => typeof owner[key] === 'string' && owner[key].length > 0 && owner[key].length <= 240)
+      && ['plan_version', 'actor_id', 'actor_epoch'].every(key => Number.isSafeInteger(owner[key]) && owner[key] > 0)
+      && fields.filter(key => key !== 'session').every(key => owner[key] === envelope.owner?.[key])
+      && owner.actor_id === correlation.actor?.actor_id && owner.actor_epoch === epoch && correlation.actor?.epoch === epoch
+      && owner.goal_id === correlation.goal_id && owner.plan_id === correlation.plan_id && owner.step_id === correlation.step_id,
+    'Invalid fluid preservation native owner')
+    const candidate = envelope.candidate
+    const singleQuoted = value => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'").replaceAll('\n', '\\n').replaceAll('\r', '\\r')}'`
+    check(typeof candidate.candidate_set_id === 'string' && candidate.candidate_set_id.length > 0 && candidate.candidate_set_id.length <= 240
+      && typeof candidate.candidate_id === 'string' && candidate.candidate_id.length > 0 && candidate.candidate_id.length <= 240,
+    'Invalid fluid preservation candidate identity')
+    const expected = `remote.call('autorio_operations','place_candidate',${singleQuoted(candidate.candidate_set_id)},${singleQuoted(candidate.candidate_id)})`
+    check(validated.length === 1 && validated[0] === expected, 'Fluid preservation requires the exact single candidate operation')
+    fluidOwner = Object.fromEntries(fields.map(key => [key, owner[key]]))
+  }
+
   if (correlation?.protocol_version === 2) {
     const identity = { operation_key: correlation.operation_key, attempt_id: correlation.attempt_id,
       ...(correlation.surface_index !== undefined ? { surface_index: correlation.surface_index } : {}),
-      signature: correlation.signature, actor_id: correlation.actor?.actor_id, epoch, ordinal: correlation.ordinal, operation_count: validated.length }
+      signature: correlation.signature, actor_id: correlation.actor?.actor_id, epoch, ordinal: correlation.ordinal, operation_count: validated.length,
+      ...(fluidOwner ? { fluid_preservation: fluidOwner } : {}) }
     check(typeof identity.operation_key === 'string' && identity.operation_key.length > 0 && identity.operation_key.length <= 192 && typeof identity.attempt_id === 'string'
       && typeof identity.signature === 'string' && Number.isSafeInteger(identity.actor_id) && Number.isSafeInteger(identity.ordinal) && identity.ordinal > 0, 'Invalid operation correlation')
     const key = luaString(identity.operation_key)
@@ -180,7 +207,10 @@ function prepareAuthorizedBatch(epoch, commands, marker, correlation) {
       // A refusal is a returned false / false-first tuple; a thrown error is not. Only the mod decides what a refusal proves.
       return `local ok${slot},r${slot}=pcall(function() return ${command} end); local accepted=ok${slot} and r${slot}~=false and not(type(r${slot})=="table" and (r${slot}[1]==false or r${slot}.accepted==false or r${slot}.ok==false)); local refused=ok${slot} and not accepted; local detail=nil; if not ok${slot} then detail=tostring(r${slot}) elseif refused then detail=(type(r${slot})=="table" and r${slot}[2]~=nil) and tostring(r${slot}[2]) or "rejected" end; local snap=remote.call("autorio_".."operations","status"); local refs={}; if snap.active_batch then refs[1]={batch_id=snap.active_batch.batch_id,batch_generation=snap.active_batch.batch_generation,batch_ref=snap.active_batch.batch_ref} end; local stored=remote.call("autorio_operation_admission","slot",${key},${slot},{ok=accepted,result=ok${slot} and r${slot} or nil,error=detail,operation=${luaString(operationName(command))},refused=refused,batch_refs=refs}); if not stored.ok then error("admission slot recording failed: "..tostring(stored.error),0) end; if not accepted then local message="autorio rejected operation ${slot}: "..tostring(detail); local final=remote.call("autorio_operation_admission","finish",${key},{ok=false,error=message}); receipt=final.record; error(message,0) end; results[${slot}]=r${slot}`
     }).join('; ')
-    const wrapped = `/silent-command local prefix={}; local receipt=nil; local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local b=remote.call("autorio_operation_admission","begin",helpers.json_to_table(${luaString(JSON.stringify(identity))})); if not b.ok then error("admission_begin_refused:"..tostring(b.error),0) end; if b.duplicate then receipt=b.record; error("duplicate operation admission; reconcile exact record",0) end; local results={}; prefix=results; ${admissions}; local final=remote.call("autorio_operation_admission","finish",${key},{ok=true}); receipt=final.record; if not final.ok then error(tostring(final.error),0) end; return results end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result,prefix=prefix,admission=receipt}))`
+    // Always revoke the transient native capability outside the entire admission
+    // pcall, including failures before slot/finish. Cleanup uncertainty is never success.
+    const leave = fluidOwner ? `local leaveOk,left=pcall(function() return remote.call("autorio_operation_admission","leave",${key}) end); if not leaveOk or left~=true then result=ok and "fluid preservation admission leave unproven" or tostring(result).."; fluid preservation admission leave unproven"; ok=false end; ` : ''
+    const wrapped = `/silent-command local prefix={}; local receipt=nil; local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local b=remote.call("autorio_operation_admission","begin",helpers.json_to_table(${luaString(JSON.stringify(identity))})); if not b.ok then error("admission_begin_refused:"..tostring(b.error),0) end; if b.duplicate then receipt=b.record; error("duplicate operation admission; reconcile exact record",0) end; local results={}; prefix=results; ${admissions}; local final=remote.call("autorio_operation_admission","finish",${key},{ok=true}); receipt=final.record; if not final.ok then error(tostring(final.error),0) end; return results end); ${leave}rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result,prefix=prefix,admission=receipt}))`
     return { wrapped, validated, v2: true }
   }
   const admissions = validated.map((command, index) => {

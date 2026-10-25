@@ -13,7 +13,7 @@ import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.m
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure } from './contract-obligations.mjs'
+import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding } from './contract-obligations.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
@@ -1078,6 +1078,7 @@ function compactBasicOperationResult(result) {
     source_removed_count: Number.isSafeInteger(result.source_removed_count) && result.source_removed_count >= 0 ? result.source_removed_count : undefined,
     held_count: Number.isSafeInteger(result.held_count) ? result.held_count : undefined,
     placed_unit_number: Number.isSafeInteger(result.placed_unit_number) ? result.placed_unit_number : undefined,
+    preservation_binding: normalizeFluidReceiptBinding(result.preservation_binding),
     placed_entity_type: typeof result.placed_entity_type === 'string' ? cleanMemoryText(result.placed_entity_type, 100) : undefined,
     placed_position: result.placed_position && Number.isFinite(result.placed_position.x) && Number.isFinite(result.placed_position.y)
       ? { x: result.placed_position.x, y: result.placed_position.y }
@@ -17692,9 +17693,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (pending) {
           const held = this.memory.pendingOperations?.(operationOwnerKey) ?? []
           if (held.length !== 1 || held[0].operation_key !== pending.operation_key || held[0].signature !== pending.signature
+            || held[0].attempt_id !== pending.attempt_id || held[0].ordinal !== pending.ordinal
+            || held[0].goal_id !== pending.goal_id || held[0].plan_id !== pending.plan_id || held[0].step_id !== pending.step_id
+            || held[0].actor?.actor_id !== pending.actor?.actor_id || held[0].actor?.epoch !== pending.actor?.epoch
             || this.batchInFlight) throw new AgentLoopError('Operation admission unsent ownership changed')
         }
       }
+      let fluidAdmission
       const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
@@ -17712,7 +17717,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (beforeSend.surface_index !== this.gatherAdmission.surfaceIndex) throw new AgentLoopError('gather_admission_surface_changed')
         }
         assertSendOwner(pendingAdmission)
-        await prepareFluidPreservationAdmission(this, { operations, pending: pendingAdmission })
+        fluidAdmission = await prepareFluidPreservationAdmission(this, { operations, pending: pendingAdmission })
         // No await between this final caller fence and native transport. The
         // helper's own final fence cannot cover its caller's return boundary.
         assertSendOwner(pendingAdmission)
@@ -17728,7 +17733,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.lifecycleEnter('batch.send', { operations: operations.length })
         this.batchInFlightBeforeSend = this.batchInFlight // restored if the game provably never saw this send
         this.noteWorldMutation({ sent: true }) // D2: observations taken before this send date from before the batch; the batch is in flight until its receipt is read
-        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
+        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission, fluidAdmission)
         this.batchInFlightBeforeSend = undefined // the game took it: it stays in flight until its receipt
         // A batch actually reached the game: only now does the world-correction budget start over. Resetting it any earlier (after the
         // preflight, or after the loop-raised guards) would let a guard refuse the same batch for ever.
