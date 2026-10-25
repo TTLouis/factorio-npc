@@ -237,3 +237,150 @@ test('R2 a physical guard entered from the intake async scope cannot borrow that
   assert.equal(result.routedOnly, true)
   assert.equal(w.calls(), 1)
 })
+for (const boundary of ['pretrace-status', 'pretrace-new-goal', 'minted-trace']) {
+  test(`R4 final goal.paused trace cannot reset B at ${boundary}`, async () => {
+    const w = await physicalWorld()
+    w.agent.lastTerminalRequestId = w.agent.traceRequest.id
+    w.agent.traceRequest = null
+    const pauseEntered = deferred(); const pauseHeld = deferred(); const replacementEntered = deferred(); const replacementHeld = deferred()
+    const emit = w.agent.behaviorTrace.emit
+    w.agent.behaviorTrace.emit = async row => {
+      await emit(row)
+      if (row.event === 'goal.paused') { pauseEntered.resolve(); await pauseHeld.promise }
+      if (boundary === 'minted-trace' && row.event === 'request.received') { replacementEntered.resolve(); await replacementHeld.promise }
+    }
+    const pause = w.agent.pausePersistentPlan('stranded_physical_guard', { pause_class: PAUSE_CLASS.GUARD }).then(result => ({ result }), error => ({ error }))
+    await pauseEntered.promise
+    const route = boundary === 'pretrace-status' ? 'status_query' : 'new_goal'
+    w.agent.interactionProvider = async () => ({ content: JSON.stringify({ intent: route, queue_conflict: false, reply: '' }) })
+    if (boundary !== 'minted-trace') {
+      const read = w.agent.readInteractionTaskStatus.bind(w.agent)
+      let first = true
+      w.agent.readInteractionTaskStatus = async () => {
+        if (first) { first = false; replacementEntered.resolve(); await replacementHeld.promise }
+        return read()
+      }
+    }
+    const replacement = w.agent.request('B continues under its own intake', { sender: 'Louis' })
+    await replacementEntered.promise
+    const intake = w.agent.requestAdmissionOwner
+    const trace = w.agent.traceRequest
+    const generation = w.agent.generation
+    const snapshot = w.memory.snapshot()
+    const skill = w.agent.skillChoiceAbort = new AbortController()
+    const contract = new AbortController()
+    w.agent.stepContractAborts ??= new Set()
+    w.agent.stepContractAborts.add(contract)
+    try {
+      pauseHeld.resolve()
+      const stopped = await pause
+      assert.equal(w.agent.requestAdmissionOwner, intake)
+      assert.equal(w.agent.traceRequest, trace)
+      assert.equal(w.agent.generation, generation)
+      assert.equal(skill.signal.aborted, false)
+      assert.equal(contract.signal.aborted, false)
+      assert.deepEqual(w.memory.snapshot(), snapshot)
+      assert.match(stopped.error?.message ?? '', /cancelled|superseded/)
+    }
+    finally {
+      pauseHeld.resolve()
+      replacementHeld.resolve()
+      await replacement.catch(() => {})
+      w.agent.skillChoiceAbort = null
+      w.agent.stepContractAborts.delete(contract)
+    }
+  })
+}
+const successfulSkill = { answers: { skill_choice: { choice: 'iron-starter', confidence: 0.9, probabilities: { 'iron-starter': 0.9, none: 0.1 } } } }
+for (const boundary of ['abandon', 'judgment']) {
+  for (const disposition of ['cancel', 'replacement']) {
+    for (const retired of [false, true]) {
+      test(`R3-success ${boundary} ${disposition} retired=${retired} cannot mutate the later ledger/trackers`, async () => {
+        const response = deferred(); const entered = deferred(); const held = deferred()
+        let first = true
+        const w = await physicalWorld({ game: new ReviewSkillFactorio(), skillDecisionProvider: async () => {
+          if (first) { first = false; return response.promise }
+          return undefined
+        } })
+        const shadow = w.agent.skillChoicePending
+        const offer = w.agent.skillOffers
+        assert.ok(Array.isArray(offer.retired_loaded), 'actual committed plan retired its loaded skill offer')
+        if (!retired) delete offer.retired_loaded
+        if (boundary === 'abandon') {
+          const seed = await w.agent.jev.record({ family: 'skill_order', request_id: offer.request_id,
+            jev_choice: 'none', jev_confidence: 0.8, acted: false, reason: 'prior owned offer fixture' })
+          w.agent.jev.track({ kind: 'skill', judgment_id: seed.judgment_id, request_id: offer.request_id, offer_seq: offer.seq - 1, pick: 'none' })
+        }
+        const emit = w.agent.behaviorTrace.emit
+        w.agent.behaviorTrace.emit = async row => {
+          await emit(row)
+          const target = boundary === 'abandon'
+            ? row.event === 'jev.judgment_unscored' && row.data.reason === 'superseded_by_a_newer_offer'
+            : row.event === 'jev.judgment_recorded' && row.data.detail?.offer_seq === offer.seq
+          if (target) { entered.resolve(); await held.promise }
+        }
+        response.resolve(successfulSkill)
+        await entered.promise
+        w.agent.cancel('user_stop_immediate')
+        let replacement
+        const replacementHeld = deferred()
+        if (disposition === 'replacement') {
+          const replacementEntered = deferred()
+          w.agent.interactionProvider = async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) })
+          const prior = w.agent.behaviorTrace.emit
+          w.agent.behaviorTrace.emit = async row => {
+            await prior(row)
+            if (row.event === 'request.received') { replacementEntered.resolve(); await replacementHeld.promise }
+          }
+          replacement = w.agent.request('B owns the current request', { sender: 'Louis' })
+          await replacementEntered.promise
+        }
+        await w.agent.jev.flushPersist()
+        const snapshot = w.memory.snapshot()
+        const trackers = structuredClone([...w.agent.jev.trackers])
+        const trace = w.agent.traceRequest
+        const traceSeq = trace?.seq
+        const decisionSeq = w.agent.decisionTraceSequence
+        const rows = w.rows.length
+        let persists = 0
+        const persist = w.agent.persistState.bind(w.agent)
+        w.agent.persistState = async (...args) => { persists++; return persist(...args) }
+        try {
+          held.resolve()
+          await shadow
+          await w.agent.jev.flushPersist()
+          assert.deepEqual([...w.agent.jev.trackers], trackers)
+          assert.deepEqual(w.memory.snapshot(), snapshot)
+          assert.equal(w.agent.traceRequest, trace)
+          assert.equal(trace?.seq, traceSeq)
+          assert.equal(w.agent.decisionTraceSequence, decisionSeq)
+          assert.equal(w.rows.length, rows)
+          assert.equal(persists, 0)
+        }
+        finally {
+          held.resolve()
+          replacementHeld.resolve()
+          if (replacement) await replacement.catch(() => {})
+          await w.agent.skillChoicePending
+          await w.agent.jev.idle()
+        }
+      })
+    }
+  }
+}
+for (const retired of [false, true]) {
+  test(`R3-success unchanged owner slow shadow still records ${retired ? 'and scores' : 'its tracker'}`, async () => {
+    const response = deferred()
+    const w = await physicalWorld({ game: new ReviewSkillFactorio(), skillDecisionProvider: async () => response.promise })
+    const offer = w.agent.skillOffers
+    if (!retired) delete offer.retired_loaded
+    response.resolve(successfulSkill)
+    await w.agent.skillChoicePending
+    await w.agent.jev.idle()
+    const recorded = w.rows.filter(row => row.event === 'jev.judgment_recorded' && row.data.detail?.offer_seq === offer.seq)
+    assert.equal(recorded.length, 1)
+    const scored = w.rows.filter(row => row.event === 'jev.judgment_scored' && row.data.judgment_id === recorded[0].data.judgment_id)
+    assert.equal(scored.length, retired ? 1 : 0)
+    assert.equal([...w.agent.jev.trackers.values()].some(tracker => tracker.judgment_id === recorded[0].data.judgment_id), !retired)
+  })
+}

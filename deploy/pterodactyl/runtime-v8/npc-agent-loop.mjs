@@ -10948,6 +10948,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const paused = this.goalPausedTrace('pause_persistent_plan')
       if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
     }
+    // The diagnostic is an awaited writer too: no late pause may abort/reset a
+    // request or checkpoint that arrived while its final row was queued.
+    if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
+    if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
+      throw new AgentLoopError('Request admission cancelled or superseded during pause diagnostic')
+    }
     abortSkillChoice(this, reason)
     this.abortStepContractCalls()
     // Base cancel is exactly reset(). Preserve/re-anchor an unrelated intake
