@@ -1637,6 +1637,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return after !== before
   }
 
+  claimArgumentCorrection(key, args) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { ...args, type: PLANNING_EVENT.ARGUMENT_CORRECTION_CLAIMED,
+      source: 'runtime', now: Date.now() })
+    return after !== before
+  }
+
   certifyPreservationAddition(key, certificate) {
     const before = this.planningState(key)
     const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_ADDITION_CERTIFIED,

@@ -13,8 +13,8 @@ import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.m
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding } from './contract-obligations.mjs'
-import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission } from './contract-obligation-runtime.mjs'
+import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
+import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
@@ -80,7 +80,7 @@ import {
   buildFluidsFromBill,
   buildFluidsTruncated,
 } from './handoff-packet.mjs'
-import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
+import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION, authorizationOf, checkGrant } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchFootprintOverlap } from './batch-footprint.mjs'
@@ -134,6 +134,7 @@ import {
 import { authoritativeRuntimeState, isLifecycleMetaStep, MODEL_RECOVERABLE_OUTCOME_REASONS, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
   activeStepVerifiedOperationNames,
+  argumentCorrectionAvailable,
   getActivePlan as getActivePlanningPlan,
   GOAL_STATUS,
   isStepContractPending,
@@ -15353,6 +15354,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw failure
     }
     await this.settleBatchStock(operations, results, held, assertPreflightCurrent)
+    await checkFluidPreservationEligibility(this, { operations, preflight: results })
     return results
   }
 
@@ -15501,6 +15503,76 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       guidance = 'Preserve the existing force research/queue. Use the exact current/queue identities to wait, observe, or do other work that remains part of this semantic step; do not clear or replace the force queue just to admit this request.'
     }
     return `[HARNESS] Deterministic research preflight rejected the requested operation before any Autorio batch admission, so no operation from that batch ran. This is a recoverable dependency/control-state result, not WORLD_BLOCKED. Preserve the same user goal and active canonical semantic step. Tools remain enabled. ${guidance} Deterministic facts: ${JSON.stringify(facts)}`
+  }
+
+  async recoverArgumentPreflight(error, plan, stateResult) {
+    const owner = this.captureCheckpointOwner()
+    const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment(); const trace = this.traceRequest
+    let grant
+    const grantFence = () => {
+      if (grant && !checkGrant(authorizationOf(this.memory.planningState(owner.key)), this.memory.planningState(owner.key)?.goal,
+        { grant_id: grant.grant_id, grant_revision: grant.revision, actor_id: this.epoch?.actor_id, actor_epoch: this.epoch?.epoch }).ok) throw new PreservationProofError('argument_correction_authority_changed', { stage: 'correction' })
+    }
+    const fence = async () => {
+      await this.assertCheckpointOwnerCurrent(owner)
+      grantFence()
+      if (amendment || this.currentPendingAmendment() !== amendment || this.requestAdmissionOwner !== intake
+        || this.traceRequest !== trace || this.batchInFlight || (this.memory.pendingOperations?.(this.activePlanKey()) ?? []).length) throw new AgentLoopError('Argument correction cancelled or superseded')
+    }
+    await fence()
+    const zeroSend = error.fluidCandidateArgument ? await confirmFluidCandidateArgumentUnsent(this, error) : undefined
+    await fence()
+    const key = this.activePlanKey(); const planning = this.memory.planningState?.(key)
+    const active = getActivePlanningPlan(planning); const step = active?.steps?.[active.active_step_index]
+    const typed = step?.obligations !== undefined || step?.obligation_protocol !== undefined || step?.obligation_proof !== undefined
+    const durable = typed || FROZEN_PLAN_STATUSES.has(active?.status) && typeof step?.semantic_step_id === 'string'
+      && Object.hasOwn(planning.goal ?? {}, 'argument_corrections')
+    if (durable) {
+      grant = this.memory.currentGoalGrant?.(key)
+      if (!grant) throw new PreservationProofError('argument_correction_authority_unproven', { stage: 'correction' })
+      grantFence()
+    }
+    if (error.fluidCandidateArgument && batchOperationSignature(plan.operations) !== batchOperationSignature(error.fluidCandidateArgument.operations)) throw new PreservationProofError('preservation_argument_operation_changed', { stage: 'correction' })
+    const claims = planning?.goal?.argument_corrections?.claims
+    if ((this.modelCorrectablePreflightRetries ?? 0) >= MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET
+      || durable && Array.isArray(claims) && (claims.length >= 64 || claims.some(row => row.semantic_step_id === step?.semantic_step_id))) throw new PreservationProofError('argument_correction_limit_exhausted', { category: 'exhausted', stage: 'correction' })
+    if (durable && !argumentCorrectionAvailable(planning)) throw new PreservationProofError('argument_correction_lineage_unproven', { stage: 'correction' })
+    if (durable && !this.memory.claimArgumentCorrection?.(key, { goal_id: active.goal_id, plan_id: active.plan_id,
+      plan_version: active.plan_version, step_id: step.step_id, semantic_step_id: step.semantic_step_id,
+      request_id: trace?.id, reason: error.preflight.code, operation_signature: batchOperationSignature(plan.operations),
+      grant_id: grant?.grant_id, grant_revision: grant?.revision, actor_id: this.epoch?.actor_id, actor_epoch: this.epoch?.epoch,
+      request_consumed: this.modelCorrectablePreflightRetries ?? 0 })) throw new PreservationProofError('argument_correction_claim_refused', { stage: 'correction' })
+    this.modelCorrectablePreflightRetries = (this.modelCorrectablePreflightRetries ?? 0) + 1
+    if (this.requestInfo) {
+      const state = this.memory.setAdmissionState?.(key, 'preflight_rejected')
+      if (state) stateResult = { ...(stateResult ?? {}), state }
+      this.memory.recordBoardEvidence?.(key, { kind: 'operation_preflight_recoverable', ref: `${trace?.id ?? 'request'}/${error.preflight.code}`,
+        summary: JSON.stringify({ code: error.preflight.code, operation_index: error.preflight.operation_index,
+          operation: error.preflight.operation, detail: cleanMemoryText(error.preflight.detail ?? error.preflight.identity ?? '', 300) }) })
+    }
+    await this.persistState({ strict: true }); await fence()
+    if (error.fluidCandidateArgument) await confirmFluidCandidateArgumentUnsent(this, error)
+    await fence()
+    await this.traceEvent('operations.preflight_recoverable', { failure_class: `model_correctable_${error.preflight.code}`,
+      preflight: error.preflight, refusal_class: refusalClassLabel(error.preflight), tools_enabled: true,
+      retry: this.modelCorrectablePreflightRetries, retry_budget: MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET,
+      goal_id: active?.goal_id, plan_id: active?.plan_id, step_id: step?.step_id, semantic_step_id: step?.semantic_step_id,
+      durable_claim: durable, zero_send: zeroSend })
+    await fence()
+    if (error.fluidCandidateArgument) await confirmFluidCandidateArgumentUnsent(this, error)
+    const index = Number.isSafeInteger(error.preflight.operation_index) ? error.preflight.operation_index : 0
+    if (error.preflight.code === 'placement_candidate_required') {
+      await this.traceEvent('operations.pump_candidate_required', { request_id: trace?.id, reason: 'generic_offshore_pump_placement_refused', operation_index: index })
+      await fence()
+    }
+    this.messages.push({ role: 'user', content: typeof error.preflight.correction_message === 'string' ? error.preflight.correction_message
+      : `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${cleanMemoryText(plan.operations[index]?.name, 80)}) before Autorio admission with code ${error.preflight.code}; no mutation from this batch ran. This is a naming/argument error in the proposed operation, not a world blocker. Correct the prototype, recipe, identity or argument using exact Factorio names already confirmed by observation (observe once if the exact name is unknown), then resubmit the same step. Do not change the plan's steps to avoid the error. Preflight: ${JSON.stringify(error.preflight).slice(0, 600)}` })
+    // No await between this synchronous owner/amendment fence and the wake.
+    this.assertCheckpointOwnerIdentity(owner)
+    grantFence()
+    if (this.currentPendingAmendment() !== amendment || this.requestAdmissionOwner !== intake || this.traceRequest !== trace) throw new AgentLoopError('Argument correction cancelled or superseded')
+    if (error.fluidCandidateArgument && batchOperationSignature(plan.operations) !== batchOperationSignature(error.fluidCandidateArgument.operations)) throw new PreservationProofError('preservation_argument_operation_changed', { stage: 'correction' })
+    return this.runTurn()
   }
 
   async recordRecoverableResearchPreflight(stateResult, preflight) {
@@ -17563,42 +17635,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           })
           return this.runTurn()
         }
+        if (error.fluidCandidateArgument) return this.recoverArgumentPreflight(error, plan, stateResult)
         if (refusal.refusal_class === REFUSAL_CLASS.ARGUMENT
           && (this.modelCorrectablePreflightRetries ?? 0) < MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET) {
-          this.modelCorrectablePreflightRetries = (this.modelCorrectablePreflightRetries ?? 0) + 1
-          if (this.requestInfo) {
-            const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'preflight_rejected')
-            if (state) stateResult = { ...(stateResult ?? {}), state }
-            this.memory.recordBoardEvidence?.(this.requestInfo.memoryKey, {
-              kind: 'operation_preflight_recoverable',
-              ref: `${this.traceRequest?.id ?? 'request'}/${error.preflight.code}`,
-              summary: JSON.stringify({
-                code: error.preflight.code,
-                operation_index: error.preflight.operation_index,
-                operation: error.preflight.operation,
-                detail: cleanMemoryText(error.preflight.detail ?? error.preflight.identity ?? '', 300),
-              }),
-            })
-            await this.persistState()
-          }
-          await this.traceEvent('operations.preflight_recoverable', {
-            failure_class: `model_correctable_${error.preflight.code}`,
-            preflight: error.preflight,
-            refusal_class: refusalClassLabel(error.preflight),
-            tools_enabled: true,
-            retry: this.modelCorrectablePreflightRetries,
-            retry_budget: MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET,
-          })
-          const index = Number.isSafeInteger(error.preflight.operation_index) ? error.preflight.operation_index : 0
-          if (error.preflight.code === 'placement_candidate_required') await this.traceEvent('operations.pump_candidate_required', {
-            request_id: this.traceRequest?.id, reason: 'generic_offshore_pump_placement_refused', operation_index: index,
-          })
-          this.messages.push({
-            role: 'user',
-            // A producer may carry its own correction text (the batch stock refusal names the shortage per item).
-            content: typeof error.preflight.correction_message === 'string' ? error.preflight.correction_message : `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${cleanMemoryText(plan.operations[index]?.name, 80)}) before Autorio admission with code ${error.preflight.code}; no mutation from this batch ran. This is a naming/argument error in the proposed operation, not a world blocker. Correct the prototype, recipe, identity or argument using exact Factorio names already confirmed by observation (observe once if the exact name is unknown), then resubmit the same step. Do not change the plan's steps to avoid the error. Preflight: ${JSON.stringify(error.preflight).slice(0, 600)}`,
-          })
-          return this.runTurn()
+          return this.recoverArgumentPreflight(error, plan, stateResult)
         }
         if (error?.preflight?.code === 'stale_exact_target' && this.staleExactPreflightRetries < 1) {
           this.staleExactPreflightRetries++
@@ -17730,6 +17770,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // Transport has not been invoked. This local boundary proves this exact
         // prepared attempt absent; a later restart without this proof stays uncertain.
         if (pendingAdmission) await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, 'cancelled_before_transport', sendOwner)
+        if (error.fluidCandidateArgument) {
+          assertSendOwner()
+          return this.recoverArgumentPreflight(error, plan, stateResult)
+        }
         throw error
       }
       let reconciledAdmitted = false
