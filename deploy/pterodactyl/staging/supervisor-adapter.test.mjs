@@ -299,3 +299,63 @@ test('correlated slots tell the mod the operation name and whether it was refuse
   assert.doesNotMatch(command, /refused_before_mutation/)
   assert.match(command, /"autorio rejected operation 1: "\.\.tostring\(detail\)/)
 })
+
+
+function fluidTransportFixture() {
+  const owner = { goal_id: 'goal', plan_id: 'plan', plan_version: 1, step_id: 'step', semantic_step_id: 'semantic', actor_id: 18, actor_epoch: 3, session: SESSION }
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/attempt_1', signature: 'a'.repeat(64), ordinal: 1,
+    actor: { actor_id: 18, epoch: 3 }, goal_id: 'goal', plan_id: 'plan', step_id: 'step' }
+  const envelope = { version: 2, operation_key: correlation.operation_key, attempt_id: correlation.attempt_id, signature: correlation.signature, ordinal: 1,
+    board_step_id: 'board_step', owner: Object.fromEntries(Object.entries(owner).filter(([key]) => key !== 'session')),
+    candidate: { version: 4, operation_key: correlation.operation_key, signature: correlation.signature, owner, candidate_set_id: 'set1', candidate_id: 'candidate1' } }
+  return { correlation, envelope, commands: ["remote.call('autorio_operations','place_candidate','set1','candidate1')"] }
+}
+
+test('fluid transport binds actual admission and always leaves outside admission pcall', async () => {
+  const { correlation, envelope, commands } = fluidTransportFixture()
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true] })}`])
+  await executeAuthorizedBatch(rcon, 3, commands, marker, correlation, envelope)
+  const wrapped = rcon.commands[0]
+  assert.match(wrapped, /fluid_preservation/)
+  assert.match(wrapped, /semantic_step_id/)
+  assert.match(wrapped, /session/)
+  assert.match(wrapped, /return results end\); local leaveOk,left=pcall/)
+  assert.match(wrapped, /left~=true/)
+  assert.ok(wrapped.indexOf('"leave"') < wrapped.indexOf('rcon.print'))
+})
+
+test('provided fluid envelope rejects mismatched operation, pending identity, owner, or composite before send', async () => {
+  const edits = [
+    f => { f.envelope.operation_key = 'other' }, f => { f.envelope.attempt_id = 'other' },
+    f => { f.envelope.signature = 'b'.repeat(64) }, f => { f.envelope.ordinal = 2 },
+    f => { f.envelope.candidate.operation_key = 'other' }, f => { f.envelope.candidate.signature = 'b'.repeat(64) },
+    f => { f.envelope.candidate.owner.actor_epoch = 4 }, f => { f.envelope.candidate.owner.actor_id = 19 },
+    f => { f.envelope.candidate.owner.session = '' }, f => { f.envelope.candidate.owner.extra = true },
+    f => { f.envelope.candidate.owner.goal_id = 'other' }, f => { f.envelope.owner.plan_id = 'other' },
+    f => { f.correlation.goal_id = 'other' }, f => { f.correlation.plan_id = 'other' },
+    f => { f.correlation.step_id = 'other' }, f => { f.correlation = undefined },
+    f => { f.commands.unshift('remote.call("autorio_operations","wait",60)') },
+    f => { f.commands = ["remote.call('autorio_operations','place_candidate','set1','candidate2')"] },
+    f => { f.envelope = null },
+  ]
+  for (const edit of edits) {
+    const fixture = fluidTransportFixture(); edit(fixture)
+    const rcon = new FakeRcon([])
+    await assert.rejects(executeAuthorizedBatch(rcon, 3, fixture.commands, undefined, fixture.correlation, fixture.envelope), error => error.notSent === true)
+    assert.equal(rcon.commands.length, 0)
+  }
+})
+
+test('fluid leave uncertainty preserves authoritative prefix and admission without replay', async () => {
+  const { correlation, envelope, commands } = fluidTransportFixture()
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const admission = { operation_key: correlation.operation_key, state: 'completed' }
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'fluid preservation admission leave unproven', prefix: [true], admission })}`])
+  await assert.rejects(executeAuthorizedBatch(rcon, 3, commands, marker, correlation, envelope), error => {
+    assert.equal(error.noReplay, true); assert.equal(error.notAdmitted, false)
+    assert.deepEqual(error.results, [true]); assert.deepEqual(error.admission, admission)
+    return true
+  })
+  assert.equal(rcon.commands.length, 1)
+})

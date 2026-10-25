@@ -1,3 +1,4 @@
+import { completedSliceAnchor } from './next-slice-state.mjs'
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
@@ -755,6 +756,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return { paused: legacy?.status === 'paused', pause_reason: legacy?.pause_reason ?? '', pause_class: legacy?.pause_class ?? '', pause_subkind: legacy?.pause_subkind ?? '' }
   }
 
+  nextSliceAnchor(key) {
+    return completedSliceAnchor(key ? this.planningByNpc.get(key) : undefined)
+  }
+
+  nextSliceEpisode(key) {
+    return key ? this.planningByNpc.get(key)?.run?.next_slice : undefined
+  }
+
+  recordNextSliceTransition(key, { phase, boundary_key, reason, failure_class, owner } = {}) {
+    const before = key ? this.planningByNpc.get(key) : undefined
+    if (!before?.goal) return undefined
+    const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.NEXT_SLICE_TRANSITION, goal_id: before.goal.goal_id,
+      phase, boundary_key, reason, failure_class, owner })
+    return after?.run?.next_slice
+  }
+
   // The durable, bounded automatic-resume allowance for the live goal / plan / plan version / step (planning-state.mjs).
   autoResumeAllowance(key) {
     return autoResumeAllowance(key ? this.planningByNpc.get(key) : undefined)
@@ -762,12 +779,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   // Count one automatic model_recoverable resume attempt against the step identity and the goal. The reducer refuses an attempt whose
   // goal, plan, plan version or step is no longer the live one; the result says whether it was recorded.
-  recordAutoResumeStarted(key, { plan_id: planId, plan_version: planVersion, step_id: stepId } = {}) {
+  recordAutoResumeStarted(key, { plan_id: planId, plan_version: planVersion, step_id: stepId, boundary_key, request_id } = {}) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!key || !this.#reducerHoldsGoal(key, state)) return { recorded: false, allowance: this.autoResumeAllowance(key) }
     const before = this.planningByNpc.get(key)
     const after = this.#applyRunEvent(key, {
       type: PLANNING_EVENT.RUN_AUTO_RESUME_STARTED,
+      boundary_key, request_id,
       goal_id: state.goal_id,
       plan_id: planId,
       plan_version: planVersion,
@@ -1609,6 +1627,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const before = this.planningState(key)
     const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_OBSERVED, source: 'runtime',
       plan_id: planId, step_id: stepId, proof, now: Date.now() })
+    return after !== before
+  }
+
+  recordPreservationAdmission(key, envelope) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_ADMISSION_RECORDED,
+      source: 'runtime', envelope, now: Date.now() })
+    return after !== before
+  }
+
+  certifyPreservationAddition(key, certificate) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_ADDITION_CERTIFIED,
+      source: 'runtime', certificate, now: Date.now() })
     return after !== before
   }
 
@@ -2476,6 +2508,23 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       result.state.objective = priorPlanning.goal.objective
       this.planByNpc.set(key, result.state)
     }
+    // A counted ordinary next-slice authoring request may replace an abandoned
+    // PRE-COMMIT proposal. Projecting that old draft first would silently carry
+    // its description into the new response and bind a fresh contract to it.
+    // This never changes a committed plan or drops replacement lineage.
+    const reauthorBoundaryDraft = this.nextSliceEpisode(key)?.phase === 'request_owned'
+      && Boolean(completedSliceAnchor(priorPlanning))
+      && PRE_COMMIT_REPLACEABLE_STATUSES.includes(priorReducerPlan?.status)
+      && !priorReducerPlan?.replacement && !priorReducerPlan?.derived_from_plan_id
+      && !priorPlanning.goal.contract_defect_successors?.includes(priorReducerPlan.plan_id)
+      && !replacementAccepted && !userRevisionApproved
+      && Array.isArray(plan?.plan) && plan.plan.length > 0
+    if (result?.state && reauthorBoundaryDraft) {
+      result.state.task_board = createTaskBoard(plan.plan, 0, { goalId: priorPlanning.goal.goal_id, now: result.state.updated_at })
+      this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at, replacePrecommit: true,
+        stepCompletions: plan.stepCompletions, executionGuidance: plan.executionGuidance,
+        roadmap: plan.roadmap, roadmapNodeIds: plan.roadmapNodeIds, developmentMode: plan.developmentMode })
+    }
     if (result?.state) {
       this.ensureTaskBoard(result.state)
       this.ensurePlanningDraft(key, result.state, {
@@ -2495,7 +2544,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // Once an immutable bounded slice is COMPLETED, the reducer is allowed to
     // mint the next shelf-linked DRAFT. The legacy Task Board mirrors that new
     // semantic slice instead of preserving the completed board.
-    const completedSliceDraftApproved = priorReducerPlan?.status === PLAN_STATUS.COMPLETED
+    const completedSliceDraftApproved = (priorReducerPlan?.status === PLAN_STATUS.COMPLETED || reauthorBoundaryDraft)
       && activeAfterDraft?.status === PLAN_STATUS.DRAFT
       && activeAfterDraft.plan_id !== priorReducerPlan.plan_id
     if (!userRevisionApproved && !supersededPlanId && !completedSliceDraftApproved && !replacementAccepted) return result

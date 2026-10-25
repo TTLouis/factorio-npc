@@ -1,3 +1,4 @@
+import { normalizeFluidReceiptBinding } from './contract-obligations.mjs'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import net from 'node:net'
@@ -844,12 +845,57 @@ export function serializeAdmissionBlockerEvidence(value) {
   return { summary: JSON.stringify(record), compacted: true, omitted_fields: record.omitted_fields, truncated_fields: record.truncated_fields ?? [] }
 }
 
+// Native preservation receipts contain an exact authority witness, not prose.
+// Keep only validated receipt/correlation fields as whole JSON on both add and
+// restore. Old receipts without a binding retain the original display behavior.
+function taskBoardEvidenceSummary(kind, summary) {
+  const original = typeof summary === 'string' ? summary : String(summary ?? '')
+  if (kind !== 'operation_receipt') return taskBoardText(original, 1200)
+  if (original.length > 8000) return original.includes('preservation_binding') ? '' : taskBoardText(original, 1200)
+  let raw
+  try { raw = JSON.parse(original) } catch { return original.includes('preservation_binding') ? '' : taskBoardText(original, 1200) }
+  const basic = raw?.basic_operation
+  if (!basic || !Object.hasOwn(basic, 'preservation_binding')) return taskBoardText(original, 1200)
+  const binding = normalizeFluidReceiptBinding(basic.preservation_binding)
+  const admitted = raw.admitted_batch
+  const correlation = raw.correlation
+  const positive = value => Number.isSafeInteger(value) && value > 0
+  const text = (value, max = 240) => typeof value === 'string' && value.length > 0 && value.length <= max
+  if (!binding || raw.outcome !== 'completed' || raw.task_state !== 'idle' || raw.queue_length !== 0
+    || raw.batch_id !== binding.batch_id || raw.batch_generation !== binding.batch_generation || raw.batch_ref !== binding.batch_ref
+    || basic.type !== 'placing' || basic.accepted !== true || basic.completed !== true || basic.code !== 'completed'
+    || basic.actor_id !== binding.owner.actor_id || !positive(basic.operation_id) || !positive(basic.placed_unit_number)
+    || !Number.isSafeInteger(basic.tick) || basic.tick < 0 || !positive(basic.placed_surface_index)
+    || !Number.isSafeInteger(basic.placed_direction) || basic.placed_direction < 0 || basic.placed_direction > 15
+    || !Number.isFinite(basic.placed_position?.x) || !Number.isFinite(basic.placed_position?.y)
+    || !text(basic.entity_name, 100) || !text(basic.placed_entity_type, 100)
+    || admitted?.operation_key !== binding.operation_key || admitted.signature !== binding.signature
+    || admitted.goal_id !== binding.owner.goal_id || admitted.plan_id !== binding.owner.plan_id || admitted.step_id !== binding.owner.step_id
+    || admitted.actor_id !== binding.owner.actor_id || admitted.actor_epoch !== binding.owner.actor_epoch
+    || admitted.batch_id !== binding.batch_id || admitted.batch_generation !== binding.batch_generation
+    || correlation?.goal_id !== binding.owner.goal_id || correlation.actor_id !== binding.owner.actor_id
+    || correlation.actor_epoch !== binding.owner.actor_epoch || !text(correlation.step_id, 80)) return ''
+  const record = {
+    outcome: 'completed', task_state: 'idle', queue_length: 0, batch_id: binding.batch_id, batch_generation: binding.batch_generation, batch_ref: binding.batch_ref,
+    task_count: raw.task_count, task_types: ['placing'], tick: basic.tick,
+    basic_operation: { operation_id: basic.operation_id, tick: basic.tick, actor_id: basic.actor_id, type: 'placing', accepted: true, completed: true,
+      code: 'completed', entity_name: basic.entity_name, placed_unit_number: basic.placed_unit_number, placed_entity_type: basic.placed_entity_type,
+      placed_position: { x: basic.placed_position.x, y: basic.placed_position.y }, placed_surface_index: basic.placed_surface_index,
+      placed_direction: basic.placed_direction, preservation_binding: binding },
+    correlation: { goal_id: correlation.goal_id, step_id: correlation.step_id, actor_id: correlation.actor_id, actor_epoch: correlation.actor_epoch },
+    admitted_batch: Object.fromEntries(['operation_key', 'signature', 'goal_id', 'plan_id', 'step_id', 'actor_id', 'actor_epoch', 'batch_id', 'batch_generation'].map(key => [key, admitted[key]])),
+  }
+  if (!positive(record.task_count) || record.task_count > 16 || !Array.isArray(raw.task_types) || raw.task_types.length !== 1 || raw.task_types[0] !== 'placing') return ''
+  const serialized = JSON.stringify(record)
+  return serialized.length <= 8000 ? serialized : ''
+}
+
 export function addTaskBoardEvidence(board, { kind = 'operation_receipt', summary = '', ref = '', now = Date.now() } = {}) {
   if (!board || board.kind !== 'task_board_lite') return board
   const record = {
     id: `evidence_${(board.evidence_sequence ?? 0) + 1}`,
     kind: taskBoardText(kind, 64),
-    summary: taskBoardText(summary, 1200),
+    summary: taskBoardEvidenceSummary(kind, summary),
     ref: taskBoardText(ref, 160),
     at: now,
     step_id: board.active_step_id,
@@ -918,7 +964,7 @@ export function sanitizeTaskBoard(value, { fallbackPlan = [], fallbackCurrentSte
     evidence: (Array.isArray(value.evidence) ? value.evidence : []).slice(-TASK_BOARD_MAX_EVIDENCE).map(item => ({
       id: taskBoardText(item?.id, 80),
       kind: taskBoardText(item?.kind, 64),
-      summary: taskBoardText(item?.summary, 1200),
+      summary: taskBoardEvidenceSummary(item?.kind, item?.summary),
       ref: taskBoardText(item?.ref, 160),
       at: Number.isFinite(item?.at) ? item.at : now,
       step_id: taskBoardText(item?.step_id, 80) || undefined,

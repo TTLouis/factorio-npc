@@ -1,3 +1,4 @@
+import { inspectNextSliceLiveness, nextSliceControlView, nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice } from './next-slice-liveness.mjs'
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import { inspectControllerLiveness } from './controller-liveness.mjs'
 import { initializeSprintStartupClock, pauseSprintStartup, persistSprintLedger, resumeSprintStartup, STARTUP_CLOCK_COMMAND, TickSprintController } from './tick-sprint.mjs'
@@ -1966,11 +1967,15 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   // synchronous cancel below may intentionally advance this identity.
   let owner = decisionBudgetOwner(agent)
   let traceOwner = agent.traceRequest
+  const authoringBoundary = agent.goalAwaitingNextSlice?.() === true
+  let admissionOwner = agent.requestAdmissionOwner
+  const amendmentOwner = agent.pendingInteractionAmendment
   let state
   const key = `npc:${agent.npcId ?? 'sgluna'}`
   const interrupted = () => options.isCancelled?.()
     ? { recovered: false, reason: 'cancelled_after_fire', state }
     : !ownsDecisionBudgets(agent, owner) || agent.traceRequest !== traceOwner
+      || agent.requestAdmissionOwner !== admissionOwner || agent.pendingInteractionAmendment !== amendmentOwner
       ? { recovered: false, reason: 'decision_owner_superseded', state: agent.memory?.currentPlan?.(key) ?? state }
       : undefined
   const cancelled = async (stopped, stage) => {
@@ -1982,6 +1987,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     catch {}
     return stopped
   }
+  if (admissionOwner && (authoringBoundary || admissionOwner.phase === 'intake')) return { recovered: false, reason: 'next_slice_intake_owned' }
   await agent.loadPersistentState?.()
   let stopped = interrupted()
   if (stopped) return cancelled(stopped, 'load_persistent_state')
@@ -2028,6 +2034,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   }
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
+  admissionOwner = agent.requestAdmissionOwner
   traceOwner = agent.traceRequest
   const decisionBudgetScope = captureDecisionBudgets(agent, { requestId: recoveryRequestId })
   owner = decisionBudgetScope
@@ -2103,6 +2110,46 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     stopped = interrupted()
     if (stopped) return cancelled(stopped, 'conversation_setup')
     if (awaitingNextSlice) {
+      const pause = agent.memory.pauseRecord?.(key)
+      if (pause?.paused && pause.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE && pause.pause_class !== PAUSE_CLASS.TRANSPORT) {
+        return { recovered: false, reason: 'next_slice_pause_not_resumable', state }
+      }
+      agent.epoch = epoch
+      const boundaryOwner = nextSliceOwner(agent)
+      const native = await nextSliceNativeState(agent, boundaryOwner, epoch)
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'next_slice_native_reconcile')
+      if (native.busy || native.unknown || native.uncertain) return { recovered: false, reason: 'next_slice_native_not_idle', state }
+      await registerNextSlice(agent, { owner: boundaryOwner, reason: 'interrupted_authoring_boundary' })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'next_slice_episode_persist')
+      if (!options.allowModelRecoverable) {
+        agent.memory.dispatchPlanningEvent(key, { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime', goal_id: agent.memory.nextSliceAnchor(key).goal_id,
+          reason: 'next_slice_transition_interrupted: startup authoring boundary', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+        const allowance = agent.memory.autoResumeAllowance(key)
+        if (allowance.limit_kind) {
+          agent.memory.dispatchPlanningEvent(key, { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime', goal_id: allowance.goal_id, reason: 'next_slice_recovery_exhausted', pause_class: PAUSE_CLASS.GUARD })
+          agent.memory.recordNextSliceTransition(key, { phase: 'paused', boundary_key: allowance.boundary_key, reason: 'next_slice_recovery_exhausted', failure_class: PAUSE_CLASS.GUARD })
+          await agent.persistState({ strict: true })
+          stopped = interrupted()
+          if (stopped) return cancelled(stopped, 'next_slice_exhaustion_persist')
+          return { recovered: false, reason: 'next_slice_recovery_exhausted', state: agent.memory.currentPlan(key), paused: true }
+        }
+        const claim = agent.memory.recordAutoResumeStarted(key, { ...allowance, request_id: recoveryRequestId })
+        if (!claim.recorded) return { recovered: false, reason: 'next_slice_claim_refused', state }
+        await agent.persistState({ strict: true })
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'next_slice_claim_persist')
+      }
+      const episode = agent.memory.nextSliceEpisode?.(key)
+      if (episode?.phase !== 'claimed' || episode.owner?.request_id !== recoveryRequestId) return { recovered: false, reason: 'next_slice_unclaimed_request', state }
+      agent.memory.dispatchPlanningEvent(key, { type: 'RUN_RESUMED', now: Date.now(), source: 'runtime', goal_id: episode.goal_id, reason: 'counted_next_slice_authoring' })
+      agent.memory.recordNextSliceTransition(key, { phase: 'request_owned', boundary_key: episode.boundary_key, reason: 'counted_authoring_request',
+        owner: { request_id: recoveryRequestId, actor_id: epoch.actor_id, epoch: epoch.epoch } })
+      await agent.persistState({ strict: true })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'next_slice_request_persist')
+      state = agent.memory.currentPlan(key)
       // Between slices there is no current step to re-observe: re-check the goal
       // in game and plan the next slice, exactly as the completed slice would
       // have done had nothing interrupted it.
@@ -2132,7 +2179,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
       }
       stopped = interrupted()
       if (stopped) return cancelled(stopped, 'recovery_trace')
-      const result = await agent.settleCompletedStepState(state)
+      const result = await agent.settleCompletedStepState(state, { nextSliceBoundary: episode.boundary_key })
       return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
     }
     const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations.${reconciliationLine} Recovery details: ${recoveryDetails}`
@@ -2338,6 +2385,7 @@ export class Session {
   }
 
   onAgentActivity(event, data) {
+    void this.publishNextSliceControl()
     if (['operations.ack', 'step.verified', 'step.semantic_completed'].includes(event)) {
       this.controllerProgressSequence = (this.controllerProgressSequence ?? 0) + 1
     }
@@ -3095,6 +3143,7 @@ export class Session {
     const delayMs = MODEL_RECOVERABLE_RESUME_DELAY_MS
     const correlation = {
       ...actor,
+      ...(allowance.boundary_key ? { boundary_key: allowance.boundary_key, native_session: this.lastStatus?.session } : {}),
       goal_id: allowance.goal_id,
       plan_id: allowance.plan_id,
       plan_version: allowance.plan_version,
@@ -3137,6 +3186,18 @@ export class Session {
   }
 
   async reportModelResumeExhausted(allowance) {
+    const owner = nextSliceOwner(this.agent)
+    const cancel = this.cancelGeneration
+    const current = () => this.cancelGeneration === cancel && ownsNextSlice(this.agent, owner)
+    if (allowance.boundary_key && !this.agent.requestAdmissionOwner
+      && this.agent.memory.nextSliceAnchor?.(this.planKey())?.boundary_key === allowance.boundary_key) {
+      this.agent.memory.dispatchPlanningEvent(this.planKey(), { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime', goal_id: allowance.goal_id,
+        reason: 'next_slice_recovery_exhausted', pause_class: PAUSE_CLASS.GUARD })
+      this.agent.memory.recordNextSliceTransition(this.planKey(), { phase: 'paused', boundary_key: allowance.boundary_key,
+        reason: 'next_slice_recovery_exhausted', failure_class: PAUSE_CLASS.GUARD })
+      await this.agent.persistState({ strict: true })
+      if (!current()) return
+    }
     const goalLimit = allowance.limit_kind === 'goal'
     this.log(`Auto-resume gave up (${allowance.limit_kind} limit); waiting for an explicit continue`)
     await this.traceRecovery('recovery.auto_resume_exhausted', {
@@ -3152,6 +3213,7 @@ export class Session {
       plan_version: allowance.plan_version,
       step_id: allowance.step_id,
     })
+    if (!current()) return
     await this.printChat(goalLimit
       ? `I paused after ${allowance.goal_attempts} automatic restarts for this goal and will not retry on my own again. The plan stays paused; say continue to retry.`
       : `I paused after ${allowance.step_attempts} automatic restarts on this step without verified progress. The plan stays paused; say continue to retry.`)
@@ -3171,6 +3233,7 @@ export class Session {
     }
     if (current?.actor_id !== correlation.actor_id) return 'actor_changed'
     if (current?.epoch !== correlation.epoch) return 'epoch_changed'
+    if (correlation.boundary_key && (!correlation.native_session || current.session !== correlation.native_session)) return 'session_changed'
     const key = this.planKey()
     const record = this.agent.memory.pauseRecord(key)
     if (!record?.paused) return 'no_longer_paused'
@@ -3187,6 +3250,13 @@ export class Session {
   // its own. The token is checked after every await and immediately before the attempt is counted and before recovery starts.
   async runModelRecoverableResume(correlation, attempt, token = undefined) {
     const key = this.planKey()
+    const diagnosticAgent = this.agent
+    const diagnosticRequestId = this.agent.traceRequest?.id
+    let recoveryRequestId
+    const traceCancelled = data => correlation.boundary_key
+      ? diagnosticAgent.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0, event: 'recovery.auto_resume_cancelled',
+        request_id: recoveryRequestId ?? diagnosticRequestId, actor_id: correlation.actor_id, epoch: correlation.epoch, data })
+      : this.traceRecovery('recovery.auto_resume_cancelled', data)
     if (!token) {
       token = { cancelled: false, reason: undefined }
       this.modelResume = { token, timer: null, correlation, attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }
@@ -3202,10 +3272,15 @@ export class Session {
       actor_epoch: correlation.epoch,
     }
     const finish = () => { if (this.modelResume?.token === token) this.modelResume = null }
+    const boundaryAgent = this.agent
+    const boundaryAdmission = this.agent.requestAdmissionOwner
+    const boundaryAmendment = this.agent.pendingInteractionAmendment
     const cancelled = () => token.cancelled === true || this.stopping === true
+      || correlation.boundary_key && (this.agent !== boundaryAgent || this.modelResume?.token !== token || Boolean(boundaryAdmission)
+        || this.agent.requestAdmissionOwner !== boundaryAdmission || this.agent.pendingInteractionAmendment !== boundaryAmendment)
     const abortCancelled = async () => {
       finish()
-      await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
+      await traceCancelled({ ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
       return null
     }
     if (cancelled()) return abortCancelled()
@@ -3213,38 +3288,39 @@ export class Session {
     if (cancelled()) return abortCancelled()
     if (stale) {
       finish()
-      await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: stale })
+      await traceCancelled({ ...traceBase, reason: stale })
       return null
     }
     // Count the attempt BEFORE it runs, in durable plan state: a crash mid-attempt still spent it. No await between the last
     // cancel check and the (synchronous) count.
-    const counted = this.agent.memory.recordAutoResumeStarted?.(key, correlation)
+    const requestId = `recovery_${Date.now().toString(36)}`
+    recoveryRequestId = requestId
+    const counted = this.agent.memory.recordAutoResumeStarted?.(key, { ...correlation, request_id: requestId })
     if (!counted?.recorded) {
       finish()
-      await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'plan_identity_changed' })
+      await traceCancelled({ ...traceBase, reason: 'plan_identity_changed' })
       return null
     }
-    await this.agent.persistState?.()
-    if (cancelled()) return abortCancelled()
-    const requestId = `recovery_${Date.now().toString(36)}`
-    await this.traceRecovery('recovery.auto_resume_started', {
-      ...traceBase,
-      request_id: requestId,
-      step_attempt: counted.allowance.step_attempts,
-      step_limit: counted.allowance.per_step,
-      goal_attempt: counted.allowance.goal_attempts,
-      goal_limit: counted.allowance.per_goal,
-    })
-    if (cancelled()) return abortCancelled()
     let result = null
     try {
+      await this.agent.persistState?.(correlation.boundary_key ? { strict: true } : undefined)
+      if (cancelled()) return abortCancelled()
+      await this.traceRecovery('recovery.auto_resume_started', {
+        ...traceBase,
+        request_id: requestId,
+        step_attempt: counted.allowance.step_attempts,
+        step_limit: counted.allowance.per_step,
+        goal_attempt: counted.allowance.goal_attempts,
+        goal_limit: counted.allowance.per_goal,
+      })
+      if (cancelled()) return abortCancelled()
       result = await this.recoverInterruptedPlan('auto_resume_after_model_recoverable_pause', { attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }, {
         allowModelRecoverable: true,
         requestId,
         isCancelled: cancelled,
         reactivate: { pause_classes: [PAUSE_CLASS.MODEL_RECOVERABLE], identity: correlation, actor: { actor_id: correlation.actor_id, epoch: correlation.epoch }, onResumed: state => this.syncTaskBoardUi(state) },
       })
-      if (cancelled()) await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
+      if (cancelled()) await traceCancelled({ ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
     }
     finally {
       finish()
@@ -3295,7 +3371,7 @@ export class Session {
       // replacement. Its own cancellation is already a terminal disposition.
       if (options.isCancelled?.() || expectedCancellation(error) || error?.code === 'stale_handoff_reply') return null
       if (this.agent.goalAwaitingNextSlice?.() === true) {
-        // Nothing is executing between slices, so there is nothing to pause.
+        await this.agent.settleNextSliceExit?.({ failure: error, reason: 'supervisor_authoring_error' })
         if (transientProviderFailure(error)) {
           await this.scheduleAutoResume(error)
           return null
@@ -3486,12 +3562,69 @@ export class Session {
     return true
   }
 
+  nextSliceControlView() {
+    if (this.nextSliceControlAgent !== this.agent) {
+      this.nextSliceControlAgent = this.agent
+      this.nextSliceControlInstance = nonce()
+      this.nextSliceSettlement = null
+    }
+    this.nextSliceControlInstance ??= nonce()
+    return { ...nextSliceControlView(this), instance_id: this.nextSliceControlInstance,
+      settlement: this.nextSliceSettlement ?? null }
+  }
+
+  // Coalesced local observation only. A stored active flag is never work ownership.
+  publishNextSliceControl() {
+    if (!this.root || !this.agent) return Promise.resolve()
+    this.nextSliceControlDirty = true
+    if (this.nextSliceControlWriting) return this.nextSliceControlWriting
+    this.nextSliceControlWriting = (async () => {
+      try {
+        while (this.nextSliceControlDirty) {
+          this.nextSliceControlDirty = false
+          await atomicWrite(path.join(this.root, '.sgluna', 'controller-state.json'), `${JSON.stringify(this.nextSliceControlView())}\n`)
+        }
+      } finally { this.nextSliceControlWriting = null }
+    })().catch(error => this.log(`Controller ownership observation unavailable: ${error.message}`))
+    return this.nextSliceControlWriting
+  }
+
+  async readNextSliceSettlementRequest() {
+    if (!this.root) return undefined
+    const raw = await fsp.readFile(path.join(this.root, '.sgluna', 'next-slice-settle-request.json'), 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return ''
+      throw error
+    })
+    if (!raw || raw.length > 4096) return undefined
+    let request
+    try { request = JSON.parse(raw) } catch { return undefined }
+    const view = this.nextSliceControlView()
+    if (request.schema !== 1 || typeof request.request_id !== 'string' || request.request_id.length > 240
+      || request.request_id === this.nextSliceSettlement?.request_id || request.instance_id !== view.instance_id
+      || request.goal_id !== view.goal_id || request.boundary_key !== view.boundary_key
+      || request.actor_id !== view.actor_id || request.epoch !== view.epoch
+      || !Number.isFinite(request.requested_at) || request.requested_at > Date.now() || Date.now() - request.requested_at > 30000) return undefined
+    return request
+  }
+
   pollControllerLiveness() {
     if (!this.agent || !this.ready || this.stopping || this.controllerProbeQueued) return false
     this.controllerProbeQueued = true
     this.queueEvent(async () => {
-      try { return await inspectControllerLiveness(this) }
-      finally { this.controllerProbeQueued = false }
+      try {
+        const request = await this.readNextSliceSettlementRequest()
+        const owner = this.agent && nextSliceOwner(this.agent)
+        const cancel = this.cancelGeneration
+        const boundary = await inspectNextSliceLiveness(this, { withinEvent: true })
+        const view = this.nextSliceControlView()
+        if (request && boundary.native_reconciled === true && this.cancelGeneration === cancel
+          && ownsNextSlice(this.agent, owner) && request.instance_id === view.instance_id
+          && request.goal_id === view.goal_id && request.boundary_key === view.boundary_key) {
+          this.nextSliceSettlement = { ...request, settled_at: Date.now(), disposition: boundary.action, native_reconciled: true }
+        }
+        return boundary.action === 'not_applicable' ? await inspectControllerLiveness(this) : boundary
+      }
+      finally { this.controllerProbeQueued = false; void this.publishNextSliceControl() }
     })
     return true
   }
@@ -3652,7 +3785,10 @@ export class Session {
         await resumeSprintStartup(this.rcon)
       } catch (error) { watchdog.close(); throw error }
     }
+    this.nextSliceControlInstance = nonce()
+    this.nextSliceSettlement = null
     this.ready = true
+    await this.publishNextSliceControl()
     this.uiInputPoll = setInterval(() => {
       if (!this.stopping) this.drainTaskBoardUiInputs()
     }, UI_INPUT_POLL_MS)
@@ -3661,6 +3797,7 @@ export class Session {
     this.drainTaskBoardUiInputs()
     this.poll = setInterval(() => {
       if (this.stopping) return
+      void this.publishNextSliceControl()
       if (this.pollRuntimeCondition()) return
       this.pollControllerLiveness()
       this.ensureAuthorization().catch(error => this.log(`NPC authorization health check failed: ${error.message}`))
@@ -3756,13 +3893,21 @@ export class Session {
       })
     }
     this.controllerQueuedEvents = (this.controllerQueuedEvents ?? 0) + 1
+    void this.publishNextSliceControl()
     this.eventQueue = this.eventQueue.then(async () => {
       this.controllerQueuedEvents--
       this.controllerEventRunning = (this.controllerEventRunning ?? 0) + 1
+      let eventFailure
       try {
         await this.tickSprint?.boundary(safetyControl ? 'safety_control' : 'supervisor_event')
         return await fn()
-      } finally { this.controllerEventRunning-- }
+      } catch (error) { eventFailure = error; throw error }
+      finally {
+        this.controllerEventRunning--
+        try { await inspectNextSliceLiveness(this, { failure: eventFailure }) }
+        catch (error) { this.log(`Next-slice event settlement deferred: ${error.message}`) }
+        void this.publishNextSliceControl()
+      }
     }).catch(async error => {
       const message = error instanceof Error ? error.message : String(error)
       this.log(message)

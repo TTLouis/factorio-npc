@@ -29,6 +29,22 @@ function bundle(module: string) {
 }
 
 describe('generated Lua guard', () => {
+  it('rejects the exact emitted empty-claim bug and accepts explicit numeric comparisons', () => {
+    const compiled = (body: string) => `["placement_candidates"] = function(...)\n${body}\nend,`
+    const broken = compiled([
+      'if storage.sgluna_fluid_preservation_claims_initialized and not #__TS__ObjectKeys(storage.sgluna_fluid_preservation_claims or ({})) then return {required = true} end',
+      'if not #claims then return {required = false} end',
+      'if not #claims then return binding == nil end',
+    ].join('\n'))
+    const findings = check_generated_lua(broken, factorio_methods)
+    expect(findings).toHaveLength(3)
+    expect(findings.every((line: string) => line.includes('numeric length truthiness in preservation placement'))).toBe(true)
+    expect(check_generated_lua(compiled([
+      'if storage.sgluna_fluid_preservation_claims_initialized and #__TS__ObjectKeys(storage.sgluna_fluid_preservation_claims or ({})) == 0 then return {required = true} end',
+      'if #claims == 0 then return {required = false} end',
+      'if #claims == 0 then return binding == nil end',
+    ].join('\n')), factorio_methods)).toEqual([])
+  })
   it('reads Factorio method names from typed-factorio declarations', () => {
     expect([...factorio_methods].sort()).toEqual(['get_inserter_rotation_speed', 'get_inventory', 'get_main_inventory', 'get_pipe_connections', 'get_recipe'])
   })

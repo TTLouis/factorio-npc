@@ -184,6 +184,15 @@ export class FakeFactorio {
   }
 
   async command(text) {
+    if (text.includes('projection="next_slice_ownership_v1"')) {
+      // All four existing status getters are sampled synchronously before any
+      // promise resumes, mirroring one native read-only event.
+      const commands = ['sgluna_deployment', 'autorio_operations', 'autorio_crafting', 'autorio_follow']
+      const reads = commands.map(name => FakeFactorio.prototype.command.call(this, `/silent-command rcon.print(helpers.table_to_json(remote.call("${name}","status")))`))
+      const [deployment, operations, crafting, follow] = await Promise.all(reads.map(async read => JSON.parse(await read)))
+      return JSON.stringify({ projection: 'next_slice_ownership_v1', tick: this.gameTick, deployment, operations, crafting, follow })
+    }
+
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
@@ -206,8 +215,11 @@ export class FakeFactorio {
       const id = /remote\.call\("autorio_skills","get",'([^']+)'\)/.exec(text)?.[1]
       return JSON.stringify(this.skills[id] ?? { ok: false, error: 'unknown_skill' })
     }
+    if (text.includes('remote.call("autorio_crafting","status")')) {
+      return JSON.stringify(this.craftingStatus ?? { task_active: false, native_queue: {}, persisted_owner: null })
+    }
     if (text.includes('remote.call("autorio_follow","status")')) {
-      return JSON.stringify({ active: false, healthy: false, controller_live: false, state: 'idle' })
+      return JSON.stringify(this.followStatus ?? { active: false, healthy: false, controller_live: false, state: 'idle' })
     }
     if (text.includes('remote.call("autorio_preflight","operation"')) {
       return JSON.stringify(this.preflight(text))
@@ -264,12 +276,12 @@ export class FakeFactorio {
                 ? { index: refusal.slot, ok: false, error: refusal.error, operation: refusal.operation, mutation_unknown: false, refused_before_mutation: true, refusal_code: refusal.error, batch_refs: [] }
                 : { index: refusal.slot, ok: false, error: refusal.error, operation: refusal.operation, mutation_unknown: true, batch_refs: [] })
             : { index: index + 1, ok: true, batch_refs: [] })
-          const record = { ...identity, generation: this.generation ?? 1, state: proven ? 'failed' : 'uncertain', ...(proven ? { proven_refusal: true } : {}), ok: false, error: `autorio rejected operation ${refusal.slot}`, slots }
+          const record = { ...identity, tick: this.gameTick, generation: this.generation ?? 1, state: proven ? 'failed' : 'uncertain', ...(proven ? { proven_refusal: true } : {}), ok: false, error: `autorio rejected operation ${refusal.slot}`, slots }
           this.admissions.push(record)
           return `${marker}${JSON.stringify({ ok: false, result: `autorio rejected operation ${refusal.slot}: ${refusal.error}`, prefix: [], admission: record })}`
         }
         const names = [...text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'/g)].map(([, name]) => name)
-        this.admissions.push({ ...identity, generation: this.generation ?? 1, batch_id: this.batchId, state: 'admitted',
+        this.admissions.push({ ...identity, tick: this.gameTick, generation: this.generation ?? 1, batch_id: this.batchId, state: 'admitted',
           slots: Array.from({ length: identity.operation_count }, (_, index) => ({ index: index + 1, ok: true, operation: names[index],
             queued_tasks: (TASK_TYPES_BY_OPERATION[names[index]] ?? ['waiting']).length,
             batch_refs: [{ batch_id: this.batchId, batch_generation: this.generation ?? 1, batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}` }] })) })

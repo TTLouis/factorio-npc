@@ -269,6 +269,7 @@ case "$LANE" in
   entity-observation)
     run_py exact_entity_status_cell.py
     run_node contract_obligation_geometry_factorio.mjs
+    run_node fluid_preservation_factorio.mjs
     ;;
   craft-trigger)
     run_py craft_trigger_cell.py

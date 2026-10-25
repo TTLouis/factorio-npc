@@ -1,3 +1,5 @@
+import { completedSliceAnchor } from './next-slice-state.mjs'
+import { nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice, settleNextSliceExit } from './next-slice-liveness.mjs'
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -11,8 +13,8 @@ import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.m
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin } from './contract-obligations.mjs'
-import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe } from './contract-obligation-runtime.mjs'
+import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding } from './contract-obligations.mjs'
+import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
@@ -1076,6 +1078,7 @@ function compactBasicOperationResult(result) {
     source_removed_count: Number.isSafeInteger(result.source_removed_count) && result.source_removed_count >= 0 ? result.source_removed_count : undefined,
     held_count: Number.isSafeInteger(result.held_count) ? result.held_count : undefined,
     placed_unit_number: Number.isSafeInteger(result.placed_unit_number) ? result.placed_unit_number : undefined,
+    preservation_binding: normalizeFluidReceiptBinding(result.preservation_binding),
     placed_entity_type: typeof result.placed_entity_type === 'string' ? cleanMemoryText(result.placed_entity_type, 100) : undefined,
     placed_position: result.placed_position && Number.isFinite(result.placed_position.x) && Number.isFinite(result.placed_position.y)
       ? { x: result.placed_position.x, y: result.placed_position.y }
@@ -3993,6 +3996,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // happen now (a round or turn is open) or fails is never an error: the wake
   // proceeds on the existing conversation and the next slice close retries.
   async planSliceCloseWake({ route, planningState, goalEvaluation, withinTurn = false }) {
+    const boundaryOwner = nextSliceOwner(this)
+    const current = () => { if (!ownsNextSlice(this, boundaryOwner)) throw new AgentLoopError('Slice planner wake cancelled or superseded') }
     const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId // captured before any await: a superseding reset can clear the request
     const plan = planningState ? getActivePlanningPlan(planningState) : undefined
     // The NPC time split of the slice just closed: the mark advances here, once per slice close.
@@ -4018,6 +4023,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason: 'slice_close',
       }, { requestId })
     }
+    current()
     const wake = { verifiedResults: verified.text, restaged: false }
     if (!planningState?.goal) return wake
     // Never restage a planner that has nothing healthy to be re-briefed on: a
@@ -4027,7 +4033,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // U11: a verified slice scores the shelf ranking whose picked node it refined; then Jev ranks the complete
     // candidate set for this pickup (shadow: recorded and scored; advisory: orders the packet's candidates only).
     await this.jev.onSliceClosed()
+    current()
     const { candidates: shelfCandidates, ranking } = await this.shelfCandidatesForPickup({ route, planningState, withinTurn })
+    current()
     // U6: the slice is closed, so the executor's work is done. Control returns to the
     // planner conversation (parked at the plan commit, untouched by executor traffic),
     // which the wake below then briefs with the verified results.
@@ -4035,6 +4043,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // request visibly (endSliceWithoutPlanner) and no model runs.
     if (this.agentContext.role === EXECUTOR_ROLE) {
       const returned = await this.returnControlToPlannerWithRetry({ route, planningState, withinTurn, reason: 'slice_close', requestId, shelfCandidates })
+      current()
       if (!returned.returned) return { ...wake, unavailable: { route, reason: returned.reason ?? 'planner_unavailable' } }
       if (!returned.resumed) {
         await this.jev.markShelfApplied(ranking) // the ordered candidates reached the fresh planner's packet
@@ -4061,6 +4070,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('context.restage_refused', { role: PLANNER_ROLE, checkpoint, reason: 'turn_superseded', message: cleanMemoryText(error instanceof Error ? error.message : String(error), 200) }, { requestId })
       throw error
     }
+    current()
     const restage = withinTurn ? this.restageInTurn : this.restageBetweenTurns
     const result = await restage.call(this, {
       checkpoint,
@@ -4071,6 +4081,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       softLimitTokens,
       requestId,
     })
+    current()
     if (result.restaged === true) await this.jev.markShelfApplied(ranking) // the ordered candidates reached the packet
     return { ...wake, restaged: result.restaged === true, checkpoint, result }
   }
@@ -4775,8 +4786,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // visibly with the goal still active between slices (Resume re-drives it from the verified state);
   // no model is woken, and in particular the executor does not author the next slice.
   async endSliceWithoutPlanner({ route, reason }) {
+    const owner = nextSliceOwner(this)
+    const current = () => { if (!ownsNextSlice(this, owner)) throw new AgentLoopError('Planner handoff settlement cancelled or superseded') }
     const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
+    await settleNextSliceExit(this, { owner, reason: 'planner_handoff_unavailable', failure: new Error(`next_slice_planner_unavailable: ${reason}`) })
+    current()
     await this.persistState()
+    current()
     const state = this.peekPlanState(this.activePlanKey())
     this.active = false
     const chatMessage = `The plan slice is verified complete, but I could not hand the goal back to the planner (${reason}), so I stopped without waking a model. The goal stays active between slices. ${RESUME_HINT}`
@@ -4787,6 +4803,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       task_board: visibleTaskBoard(state?.task_board),
       usage: this.traceRequest?.usage,
     })
+    current()
     this.traceRequest = null
     // After request.completed (which reads as idle), so the UI shows a waiting marker for the goal and
     // the supervisor's activity hook syncs the task board; the row also carries the request id.
@@ -10108,10 +10125,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async recordPendingOperationBeforeSend(operations, before) {
     if (!this.requestInfo || typeof this.memory.recordPendingOperation !== 'function') return undefined
     const key = this.requestInfo.memoryKey
+    const owner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
+    const intake = this.requestAdmissionOwner
+    const amendment = this.pendingInteractionAmendment
+    const current = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      if (this.requestAdmissionOwner !== intake || this.pendingInteractionAmendment !== amendment) throw new AgentLoopError('Prepared operation cancelled or superseded')
+    }
     const planning = this.memory.planningState?.(key)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
     const step = plan?.steps?.[plan.active_step_index]
     const baseline = batchWatermark(await this.readTaskStatusRaw()) ?? null
+    current()
     const record = this.memory.recordPendingOperation(key, buildPendingOperation({
       requestId: this.traceRequest?.id,
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
@@ -10135,26 +10160,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
     }
-    await this.persistState()
+    try {
+      await this.persistState({ strict: true })
+      current()
+    } catch (error) {
+      await this.settleUnsentOperation(record, key, 'prepared_operation_cancelled_before_return', owner)
+      throw error
+    }
     return record
   }
 
   // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
   // anything): settle it as not happened so it leaves no hold.
-  async settleUnsentOperation(pending, ownerKey, reason) {
+  async settleUnsentOperation(pending, ownerKey, reason, expectedOwner) {
+    const current = () => !expectedOwner || (this.checkpointOwnerCurrent(expectedOwner)
+      && this.requestAdmissionOwner === expectedOwner.intakeToken && this.pendingInteractionAmendment === expectedOwner.amendment)
+    const emit = (event, data) => current() ? this.traceEvent(event, data, { requestId: pending.request_id })
+      : this.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0, event,
+        request_id: pending.request_id, actor_id: pending.actor?.actor_id, epoch: pending.actor?.epoch, data })
     // D2: the game never saw this send, so it did not put a batch in flight: back to what was true before it.
-    if (this.batchInFlightBeforeSend !== undefined) {
+    if (current() && this.batchInFlightBeforeSend !== undefined) {
       this.batchInFlight = this.batchInFlightBeforeSend === true
       this.batchInFlightBeforeSend = undefined
     }
     this.memory.updatePendingOperation?.(ownerKey, { effect: EFFECT.NOT_HAPPENED, reason }, pending.operation_key)
     if (this.memory.clearPendingOperation?.(ownerKey, { operationKey: pending.operation_key }) !== true) {
-      await this.traceEvent('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
+      await emit('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
         reason: 'unsent_settlement_refused', attempted_reason: reason })
       throw new AgentLoopError('Prepared operation settlement refused')
     }
     await this.persistState()
-    await this.traceEvent('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
+    await emit('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
   }
 
   // A legacy (pre-journal) record that neither exact nor baseline evidence can settle must not hold silently: raise one
@@ -10714,11 +10750,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const decisionBudgetScope = captureDecisionBudgets(this)
     const setupTrace = this.traceRequest
     const setupTraceId = setupTrace?.id
+    const requestFailureAmendment = this.pendingInteractionAmendment
     let requestTrace
     // Base request starts a new generation/lineage synchronously below; its updated
     // budget scope and this exact trace object own failure unwind, across restages.
     const ownsRequestFailure = () => requestTrace && this.traceRequest === requestTrace
       && this.traceRequest.id === decisionBudgetScope.requestId && ownsDecisionBudgets(this, decisionBudgetScope)
+      && this.pendingInteractionAmendment === requestFailureAmendment
     try {
       if (plannerShape) {
         const requestedReasoningBudget = plannerShape.reasoning_budget
@@ -11319,16 +11357,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // reads "completed" here, so without this check a restart or a provider
   // failure at the slice boundary stranded the goal silently.
   goalAwaitingNextSlice(key = this.activePlanKey()) {
-    const legacy = this.memory.currentPlan?.(key)
-    if (legacy?.status !== 'completed') return false
-    const planning = this.memory.planningState?.(key)
-    if (planning?.goal?.status !== GOAL_STATUS.ACTIVE) return false
-    if (legacy.goal_id && planning.goal.goal_id && legacy.goal_id !== planning.goal.goal_id) return false
-    const hasShelf = (planning.roadmap?.nodes?.length ?? 0) > 0
-    if (!planning.goal.definition && !hasShelf) return false
-    const plan = getActivePlanningPlan(planning)
-    return !plan || plan.status === PLAN_STATUS.COMPLETED
+    return Boolean(completedSliceAnchor(this.memory.planningState?.(key)))
   }
+
+  async settleNextSliceExit(options) {
+    return settleNextSliceExit(this, options)
+  }
+
 
   // Reads the goal's conditions from the game and records any baseline a
   // goal_start counter still lacks. Called when the goal is defined, so the
@@ -11717,13 +11752,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const controllerOwner = decisionBudgetOwner(this)
     const requestTrace = this.traceRequest
     const checkpointOwner = this.captureCheckpointOwner()
+    const intakeOwner = this.requestAdmissionOwner
+    const amendmentOwner = this.pendingInteractionAmendment
     try {
       await this.tickSprintBoundary?.('guarded_turn')
       this.assertCheckpointOwnerIdentity(checkpointOwner)
       return await this.runGuardedTurn()
     }
     finally {
-      if (ownsDecisionBudgets(this, controllerOwner) && this.traceRequest === requestTrace) this.turnConversation = null
+      if (ownsDecisionBudgets(this, controllerOwner) && this.traceRequest === requestTrace
+        && this.requestAdmissionOwner === intakeOwner && this.pendingInteractionAmendment === amendmentOwner) this.turnConversation = null
       this.controllerBusyCount--
     }
   }
@@ -11774,10 +11812,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requestTrace = this.traceRequest
     const requestId = requestTrace?.id
     let failureOwner = decisionBudgetOwner(this)
+    let failureIntake = this.requestAdmissionOwner
+    let failureAmendment = this.pendingInteractionAmendment
+    const settlementOrigin = nextSliceOwner(this)
+    const settlementOwner = () => ({ ...settlementOrigin, boundary: completedSliceAnchor(this.memory.planningState?.(this.activePlanKey()))?.boundary_key })
     // Conversation/role restages keep this request. Reset/cancel or a new trace
     // object do not; an old catch must not fail or clean up their replacement.
     const ownsFailure = () => ownsDecisionBudgets(this, failureOwner)
       && this.traceRequest === requestTrace && this.traceRequest?.id === requestId
+      && this.requestAdmissionOwner === failureIntake && this.pendingInteractionAmendment === failureAmendment
     // The scope of THIS turn, fixed before it starts: the recovery that a failed turn
     // triggers (recoverPlan below) calls the provider, admits tool batches and commits a
     // plan outside any runTurn, so it needs the same identity to be judged against.
@@ -11795,12 +11838,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.chatRequestPending = false
     try {
       await this.applyStartRestage()
-      return this.withPauseNotice(await this.runTurnRedriving(generation))
+      const result = await this.runTurnRedriving(generation)
+      if (ownsFailure()) await this.settleNextSliceExit({ owner: settlementOwner(), reason: 'guarded_turn_returned' })
+      return this.withPauseNotice(result)
     }
     catch (error) {
       if (!ownsFailure()) throw error
       const message = error instanceof Error ? error.message : String(error)
       const planState = this.memory.currentPlan?.(this.activePlanKey())
+      if (this.goalAwaitingNextSlice()) {
+        await this.settleNextSliceExit({ owner: settlementOwner(), failure: error, reason: 'guarded_authoring_failure' })
+        if (!ownsFailure()) throw error
+      }
+      const proofFailure = preservationFailure(error) ?? preservationFailure(error?.cause)
+      if (proofFailure && !this.goalAwaitingNextSlice()) {
+        const proofOwner = this.captureCheckpointOwner()
+        this.memory.dispatchPlanningEvent?.(this.activePlanKey(), { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime',
+          goal_id: proofOwner.goalId, reason: `${proofFailure.code}: ${proofFailure.stage}`, pause_class: PAUSE_CLASS.GUARD })
+        await this.persistState({ strict: true })
+        if (!ownsFailure()) throw error
+        this.assertCheckpointOwnerIdentity(proofOwner)
+        await this.traceEvent('contract.preservation_refused', { ...proofFailure, goal_id: proofOwner.goalId,
+          plan_id: proofOwner.planId, step_id: proofOwner.stepId, disposition: 'classified_guard_pause' }, { requestId })
+        if (!ownsFailure()) throw error
+      }
       // The request-wide output ceiling (5 per-turn caps) is final for this
       // request: no fresh generation, no recovery call. The goal ends
       // visibly and Resume starts a new request with a new allowance.
@@ -11875,6 +11936,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // Our own synchronous reset intentionally advances generation and lineage.
         // Keep ownership of this failure, then fence the awaited trace below again.
         failureOwner = decisionBudgetOwner(this)
+        failureIntake = this.requestAdmissionOwner
+        failureAmendment = this.pendingInteractionAmendment
       }
       if (requestTrace) {
         await this.traceEvent('request.failed', {
@@ -12149,18 +12212,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // started as a separate guarded run; allowContinuation: false suppresses the
   // continuation altogether. `droppedOperationsNote` tells the planner why the
   // operations in the reply that closed the slice were not run.
-  async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true, withinTurn = false, droppedOperationsNote = '' } = {}) {
+  async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true, withinTurn = false, droppedOperationsNote = '', nextSliceBoundary } = {}) {
+    const boundaryOwner = nextSliceOwner(this)
+    const assertBoundary = () => { if (!ownsNextSlice(this, boundaryOwner)) throw new Error('Next-slice continuation cancelled or superseded') }
     let planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
-    const reducerPlanAfterCompletion = planningAfterCompletion
-      ? getActivePlanningPlan(planningAfterCompletion)
-      : undefined
+    const recoveredAnchor = nextSliceBoundary && completedSliceAnchor(planningAfterCompletion)
+    const recoveredBoundary = Boolean(nextSliceBoundary && recoveredAnchor?.boundary_key === nextSliceBoundary)
+    const reducerPlanAfterCompletion = recoveredBoundary
+      ? planningAfterCompletion.plans.find(plan => plan.plan_id === recoveredAnchor.plan_id)
+      : planningAfterCompletion ? getActivePlanningPlan(planningAfterCompletion) : undefined
     // A defined goal is complete only when the game says so. Check it at every
     // finished plan slice; a finished slice is never proof on its own.
     const goalDefinition = planningAfterCompletion?.goal?.definition
     let goalEvaluation
     if (goalDefinition
       && !pendingAmendment
-      && completionState?.status === 'completed'
+      && (completionState?.status === 'completed' || recoveredBoundary)
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED) {
       goalEvaluation = await this.evaluateGoalCompletion()
@@ -12171,13 +12238,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const goalUnmet = goalEvaluation !== undefined && !goalEvaluation.satisfied
     const boundedSliceCompleted = !pendingAmendment
-      && completionState?.status === 'completed'
+      && (completionState?.status === 'completed' || recoveredBoundary)
       && planningAfterCompletion?.goal?.status === 'active'
       && ((Array.isArray(planningAfterCompletion?.roadmap?.nodes) && planningAfterCompletion.roadmap.nodes.length > 0) || goalUnmet)
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED
 
     if (boundedSliceCompleted && allowContinuation) {
-      const completedBoard = visibleTaskBoard(completionState.task_board)
+      const completedBoard = recoveredBoundary ? undefined : visibleTaskBoard(completionState.task_board)
+      await registerNextSlice(this, { reason: 'verified_final_step_of_bounded_slice' })
+      assertBoundary()
       await this.traceEvent('outcome.validated', {
         kind: 'plan_slice_completed',
         source: 'step_completion_gate',
@@ -12185,16 +12254,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_id: reducerPlanAfterCompletion.plan_id,
         task_board: completedBoard,
       })
+      assertBoundary()
       await this.closeOutputSlice('next_shelf_slice')
+      assertBoundary()
       const sliceClose = await this.planSliceCloseWake({ route: 'next_shelf_slice', planningState: planningAfterCompletion, goalEvaluation, withinTurn })
+      assertBoundary()
       if (sliceClose.unavailable) return this.endSliceWithoutPlanner(sliceClose.unavailable)
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'next_shelf_slice',
         steering_mode: planningAfterCompletion.steering?.current_mode,
       })
+      assertBoundary()
       await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion) // 2.8 hook: shelf -> active plan skill search
+      assertBoundary()
       await refreshGoalRequirementsAtShelfPickup(this, planningAfterCompletion) // live requirements for the next slice
+      assertBoundary()
+      const native = await nextSliceNativeState(this, boundaryOwner)
+      assertBoundary()
+      if (native.busy || native.unknown || native.uncertain) throw new AgentLoopError('next_slice_native_unproven: native ownership changed before authoring')
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         const unmet = goalEvaluation
@@ -12210,7 +12288,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         )
       }
       finally {
-        this.reasoningTriggerSource = null
+        if (ownsNextSlice(this, boundaryOwner)) this.reasoningTriggerSource = null
       }
     }
 
@@ -12887,8 +12965,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return false
   }
   async closeOutputSlice(route) {
+    const owner = decisionBudgetOwner(this)
     this.lifecycleEnter('slice.close', { route })
     await this.closeContinuationSlice(route)
+    if (!ownsDecisionBudgets(this, owner)) throw new AgentLoopError('Slice close cancelled or superseded')
     const before = this.sliceOutputCeiling()
     const baseline = markRequestSliceClosed(this.traceRequest)
     if (baseline === undefined) return
@@ -17605,15 +17685,34 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       const admitGeneration = this.generation
       const admitRequestId = this.traceRequest?.id
-      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
-      if (this.entityRefreshAdmission) {
-        this.entityRefreshAdmission.pendingKey = pendingAdmission?.operation_key
-        this.entityRefreshAdmission.pendingSignature = pendingAdmission?.signature
-      }
+      const sendOwner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
+      const sendIntake = this.requestAdmissionOwner
+      const sendAmendment = this.pendingInteractionAmendment
+      const sendBatchInFlight = this.batchInFlight
       const operationOwnerKey = this.activePlanKey()
+      const assertSendOwner = pending => {
+        this.assertCheckpointOwnerIdentity(sendOwner)
+        if (this.requestAdmissionOwner !== sendIntake || this.pendingInteractionAmendment !== sendAmendment) throw new AgentLoopError('Operation admission cancelled or superseded')
+        if (pending) {
+          const records = this.memory.pendingOperations?.(operationOwnerKey) ?? []
+          const held = records.filter(record => record.operation_key === pending.operation_key)
+          if (held.length !== 1 || held[0].signature !== pending.signature
+            || held[0].attempt_id !== pending.attempt_id || held[0].ordinal !== pending.ordinal
+            || held[0].goal_id !== pending.goal_id || held[0].plan_id !== pending.plan_id || held[0].step_id !== pending.step_id
+            || held[0].actor?.actor_id !== pending.actor?.actor_id || held[0].actor?.epoch !== pending.actor?.epoch
+            || this.batchInFlight !== sendBatchInFlight) throw new AgentLoopError('Operation admission unsent ownership changed')
+        }
+      }
+      let fluidAdmission
+      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {
+        assertSendOwner(pendingAdmission)
+        if (this.entityRefreshAdmission) {
+          this.entityRefreshAdmission.pendingKey = pendingAdmission?.operation_key
+          this.entityRefreshAdmission.pendingSignature = pendingAdmission?.signature
+        }
         await this.traceEvent('operations.admit', { operations })
         const beforeSend = await this.assertCurrent()
         if (this.entityRefreshAdmission) await this.entityRefreshAdmission.idleFence()
@@ -17621,11 +17720,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
           if (beforeSend.surface_index !== this.gatherAdmission.surfaceIndex) throw new AgentLoopError('gather_admission_surface_changed')
         }
+        assertSendOwner(pendingAdmission)
+        fluidAdmission = await prepareFluidPreservationAdmission(this, { operations, pending: pendingAdmission })
+        // No await between this final caller fence and native transport. The
+        // helper's own final fence cannot cover its caller's return boundary.
+        assertSendOwner(pendingAdmission)
       }
       catch (error) {
         // Transport has not been invoked. This local boundary proves this exact
         // prepared attempt absent; a later restart without this proof stays uncertain.
-        if (pendingAdmission) await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, 'cancelled_before_transport')
+        if (pendingAdmission) await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, 'cancelled_before_transport', sendOwner)
         throw error
       }
       let reconciledAdmitted = false
@@ -17633,7 +17737,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.lifecycleEnter('batch.send', { operations: operations.length })
         this.batchInFlightBeforeSend = this.batchInFlight // restored if the game provably never saw this send
         this.noteWorldMutation({ sent: true }) // D2: observations taken before this send date from before the batch; the batch is in flight until its receipt is read
-        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
+        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission, fluidAdmission)
         this.batchInFlightBeforeSend = undefined // the game took it: it stays in flight until its receipt
         // A batch actually reached the game: only now does the world-correction budget start over. Resetting it any earlier (after the
         // preflight, or after the loop-raised guards) would let a guard refuse the same batch for ever.
@@ -18456,7 +18560,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
-        throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`)
+        throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
       finally {
         this.reasoningTriggerSource = previousTrigger

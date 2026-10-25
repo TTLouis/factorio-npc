@@ -1,4 +1,5 @@
 import { sprintSpeedValid } from './tick-sprint-policy.mjs'
+import { nativeAdmissionJournal } from './native-admission-journal.mjs'
 // Read-only policy for the external live-trial runner and its supervisor.
 // A recoverable pause reason is diagnostic text, never terminal authority.
 export function structuralTerminal(canonical) {
@@ -16,7 +17,7 @@ export function structuralTerminal(canonical) {
 }
 
 export function trialStopDecision({ canonical, events = [], startedAt, now, pausedSince = null,
-  goalId, actorId, native, constructionLimitMs = 45 * 60000, hardFloorReached = false, speedPolicy = { profile: 'normal' } }) {
+  goalId, actorId, native, controller, constructionLimitMs = 45 * 60000, hardFloorReached = false, speedPolicy = { profile: 'normal' } }) {
   if (!Number.isFinite(startedAt) || !Number.isFinite(now) || now < startedAt
     || ![45 * 60000, 60 * 60000].includes(constructionLimitMs)) throw new Error('Invalid trial clock or approved construction cap')
   const finish = (action, reason, result = null, evidence = {}, since = null) => ({
@@ -37,7 +38,51 @@ export function trialStopDecision({ canonical, events = [], startedAt, now, paus
     `construction_wall_limit_${constructionLimitMs / 60000}_minutes`)
 
   const run = canonical?.run
-  if (run?.paused !== true) return finish('continue', 'controller_running')
+  if (run?.paused !== true) {
+    const predecessor = canonical?.plans?.findLast(plan => plan.status === 'COMPLETED')
+    const later = canonical?.plans?.slice((canonical?.plans?.indexOf(predecessor) ?? -1) + 1) ?? []
+    const step = predecessor?.steps?.at(-1)
+    const boundary = canonical?.goal?.status === 'active' && step
+      && !later.some(plan => ['COMMITTED', 'EXECUTING', 'BLOCKED'].includes(plan.status))
+      && predecessor.steps.every(item => predecessor.execution?.step_progress?.[item.step_id]?.status === 'completed')
+      ? `next_slice|${goalId}|${predecessor.plan_id}|${predecessor.plan_version}|${step.step_id}` : undefined
+    if (!boundary) return finish('continue', 'controller_running')
+    const fresh = controller?.schema === 1 && controller.ready === true && controller.stopping === false && typeof controller.instance_id === 'string'
+      && controller.goal_id === goalId && controller.actor_id === actorId && controller.epoch === native?.epoch
+      && controller.boundary_key === boundary && controller.applicable === true
+      && controller.run_paused === false && Number.isFinite(controller.observed_at)
+      && controller.observed_at <= now && now - controller.observed_at <= 10000
+    if (!fresh) return finish('wait', 'next_slice_controller_ownership_unknown')
+    const counts = controller.ownership
+    const validCounts = counts && ['worker', 'provider', 'queued', 'event', 'condition', 'intake', 'wake', 'contract'].every(key => Number.isSafeInteger(counts[key]) && counts[key] >= 0)
+    if (!validCounts) return finish('wait', 'next_slice_controller_ownership_unknown')
+    if (controller.unsettled === true) return finish('wait', 'next_slice_pending_native_reconciliation')
+    if (Object.values(counts).some(value => value > 0)) return finish('continue', 'next_slice_work_owned', null, { ownership: counts })
+    const operations = native?.operations
+    const craft = native?.crafting_status
+    const follow = native?.follow
+    const known = typeof operations?.task_state === 'string' && Number.isSafeInteger(operations.queue_length)
+      && typeof operations.queue_empty === 'boolean' && typeof craft?.task_active === 'boolean'
+      && craft.native_queue && typeof follow?.active === 'boolean'
+    const journal = nativeAdmissionJournal(operations?.admission_journal)
+    if (!journal.known) return finish('wait', 'next_slice_native_ownership_unknown')
+    if (journal.unresolved) return finish('wait', 'next_slice_native_admission_unsettled')
+    if (!known) return finish('wait', 'next_slice_native_ownership_unknown')
+    const busy = operations.task_state !== 'idle' || operations.queue_length !== 0 || operations.queue_empty !== true
+      || Boolean(operations.active_batch) || craft.task_active || Object.keys(craft.native_queue).length > 0
+      || Boolean(craft.persisted_owner) || follow.active || operations.actor?.mining_state?.mining
+
+    if (busy) return finish('continue', 'next_slice_native_work_owned')
+    const ack = controller.settlement
+    const settled = ack?.schema === 1 && ack.native_reconciled === true && ack.instance_id === controller.instance_id && ack.boundary_key === boundary
+      && ack.goal_id === goalId && ack.actor_id === actorId && ack.epoch === native.epoch
+      && Number.isFinite(ack.settled_at) && ack.settled_at >= ack.requested_at && ack.settled_at <= controller.observed_at
+      && now - ack.settled_at <= 30000
+    if (settled) return finish('stop', 'confirmed_next_slice_owner_missing_after_settlement', 'controller_orphaned_after_runtime_settlement', { settlement: ack, ownership: counts })
+    return { ...finish('request_settlement', 'next_slice_runtime_settlement_required'),
+      request: { schema: 1, request_id: `${controller.instance_id}:${now}`, instance_id: controller.instance_id,
+        goal_id: goalId, actor_id: actorId, epoch: native.epoch, boundary_key: boundary, requested_at: now } }
+  }
   if (!['model_recoverable', 'transport'].includes(run.pause_class)) {
     return finish('stop', 'nonresumable_controller_pause', `controller_paused:${run.pause_class || 'unclassified'}`)
   }

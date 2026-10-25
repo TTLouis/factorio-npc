@@ -1,3 +1,4 @@
+import { fluidFixture } from './fluid-preservation-fixtures.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -120,4 +121,44 @@ test('replanning never rebinds old evidence to a changed semantic step id', () =
   assert.equal(restored.active_step_id, replanned.active_step_id)
   assert.equal(restored.steps[2].id, unchangedVerifyId)
   assert.equal(restored.evidence.at(-1).step_id, replacedStepId)
+})
+
+
+test('native preservation receipt stays whole across board add/restore while prose remains bounded', () => {
+  const { receipt } = fluidFixture()
+  Object.assign(receipt, { batch_ref: 'batch-g1-5', task_count: 1, task_types: ['placing'] })
+  receipt.basic_operation.operation_id = 9
+  const original = JSON.stringify(receipt)
+  assert.ok(original.length > 1200)
+  let board = createTaskBoard(['place boiler'], 0, { goalId: 'goal_1', now: 100 })
+  board = addTaskBoardEvidence(board, { kind: 'operation_receipt', ref: 'batch-g1-5', summary: original })
+  const retained = JSON.parse(board.evidence.at(-1).summary)
+  assert.deepEqual(retained.basic_operation.preservation_binding, receipt.basic_operation.preservation_binding)
+  assert.deepEqual(retained.admitted_batch, receipt.admitted_batch)
+  assert.deepEqual(retained.correlation, receipt.correlation)
+  assert.equal(sanitizeTaskBoard(board).evidence.at(-1).summary, board.evidence.at(-1).summary)
+  assert.equal(addTaskBoardEvidence(board, { kind: 'note', summary: 'x'.repeat(3000) }).evidence.at(-1).summary.length, 1200)
+})
+
+test('malformed and oversized native binding receipts cannot acquire proof on add or restore', () => {
+  const { receipt } = fluidFixture()
+  Object.assign(receipt, { batch_ref: 'batch-g1-5', task_count: 1, task_types: ['placing'] })
+  receipt.basic_operation.operation_id = 9
+  const edits = [
+    row => { row.basic_operation.preservation_binding.owner.session = '' },
+    row => { row.basic_operation.preservation_binding.ordinal = 0 },
+    row => { row.admitted_batch.operation_key = 'other' },
+    row => { row.correlation.actor_epoch++ },
+    row => { row.basic_operation.placed_position.x = null },
+    row => { row.task_count = {} },
+    row => { row.extra = 'x'.repeat(8000) },
+  ]
+  const board = createTaskBoard(['place boiler'], 0, { goalId: 'goal_1', now: 100 })
+  for (const edit of edits) {
+    const changed = structuredClone(receipt); edit(changed)
+    const summary = JSON.stringify(changed)
+    assert.equal(addTaskBoardEvidence(board, { kind: 'operation_receipt', summary }).evidence.at(-1).summary, '')
+    const restored = sanitizeTaskBoard({ ...board, evidence: [{ kind: 'operation_receipt', summary }] })
+    assert.equal(restored.evidence.at(-1).summary, '')
+  }
 })

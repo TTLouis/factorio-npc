@@ -44,6 +44,7 @@ export async function supervisorStop({ rcon, root, snapshotCommand, expectedRunI
     // observation before issuing any automatic stop.
     const state = JSON.parse(await fs.readFile(path.join(root, '.sgluna/npc-state.json'), 'utf8'))
     return { canonical: state.planning_states?.find(row => row.state?.goal)?.state,
+      controller: JSON.parse(await fs.readFile(path.join(root, '.sgluna/controller-state.json'), 'utf8').catch(() => 'null')),
       native, events, startedAt: identity.started_at, now: now(), pausedSince: previous.pausedSince,
       goalId: identity.goal_id, actorId: identity.actor_id, constructionLimitMs: identity.construction_limit_ms,
       hardFloorReached }
@@ -51,6 +52,7 @@ export async function supervisorStop({ rcon, root, snapshotCommand, expectedRunI
     await rcon.command('/silent-command if remote.interfaces.sgluna_tick_sprint then local g=remote.call("sgluna_tick_sprint","status");if g.binding then local s=remote.call("sgluna_tick_sprint","seal","external_stop");assert(s.speed==1 and not s.lease) end end')
     await rcon.command('!luna stop')
   } })
+  if (decision.action === 'request_settlement') await fs.writeFile(path.join(root, '.sgluna/next-slice-settle-request.json'), JSON.stringify(decision.request))
   await fs.writeFile(path.join(logs, 'e2e-supervisor-stop-decision.json'), JSON.stringify(decision, null, 2))
   return decision
 }
