@@ -3,6 +3,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { defaultModels, validateFrozenModels } from './templates/model-profile.mjs'
 
 export const kitRoot = path.dirname(fileURLToPath(import.meta.url))
 const sha = value => crypto.createHash('sha256').update(value).digest('hex')
@@ -20,7 +21,7 @@ export function files(root, prefix = '') {
   }).sort()
 }
 
-export function definePair({ version = 'aw', date = '2026-10-25', candidate, published, imageId, seeds = [2026102501, 2026102502] }) {
+export function definePair({ version = 'aw', date = '2026-10-25', candidate, published, imageId, seeds = [2026102501, 2026102502], models = defaultModels }) {
   check(/^[a-z]{2,8}$/.test(version) && /^\d{4}-\d{2}-\d{2}$/.test(date), 'Invalid version/date')
   check(/^[a-f0-9]{40}$/.test(candidate) && /^[a-f0-9]{40}$/.test(published), 'Exact candidate and published SHA required')
   check(/^sha256:[a-f0-9]{64}$/.test(imageId), 'Immutable image ID required')
@@ -30,7 +31,7 @@ export function definePair({ version = 'aw', date = '2026-10-25', candidate, pub
   return { schema: 1, pairId, candidate, published, imageId, imageTag: `factorio-npc:run-${version}-${day}`,
     profile: 'normal', factorioVersion: '2.0.77', constructionLimitMs: 3600000,
     measurement: { wallMinutes: 5, gameSpeed: 2, minimumGameMinutes: 10, minimumRedPerGameMinute: 1, nativeUpstream: true },
-    models: { planner: 'gpt-6.1-sol', executor: 'gpt-6-luna', overwatch: 'gpt-6-luna' },
+    models: validateFrozenModels(models), overwatchReasoning: 'low',
     sharedQuota: { reserveRemainingPercent: 5, stopRemainingPercent: 7, owner: 'parent', scope: 'shared account across both lanes', staleAfterMs: 180000 },
     lanes: ['a', 'b'].map((id, i) => ({ id, seed: seeds[i], runId: `red-automation-live-${date}${version}-${id}`,
       project: `${pairId}-${id}`, resourcePrefix: `run-${version}-${id}`, saveName: `red-automation-${version}-${id}-checkpoint`,
@@ -87,7 +88,8 @@ export function freezePair({ repo, output, nativeDir, nativeManifest, nativeBuil
   writeJson(path.join(output, 'pair.json'), pair)
   for (const lane of pair.lanes) {
     const root = path.join(output, lane.id)
-    const bindings = { RUN_ID: lane.runId, PROJECT: lane.project, RESOURCE_PREFIX: lane.resourcePrefix,
+    const bindings = { PLANNER_MODEL: pair.models.planner, EXECUTOR_MODEL: pair.models.executor, OVERWATCH_MODEL: pair.models.overwatch,
+      ROLE_MODEL_LIST: `${pair.models.planner},${pair.models.executor}`, RUN_ID: lane.runId, PROJECT: lane.project, RESOURCE_PREFIX: lane.resourcePrefix,
       SAVE_NAME: lane.saveName, CANDIDATE: pair.candidate, RECORDER_PORT: lane.recorderPort, TUNNEL_PORT: lane.tunnelPort,
       SEED: lane.seed, IMAGE_ID: pair.imageId, GAME_PORT: lane.gamePort, RCON_HOST_PORT: lane.rconHostPort,
       COMPOSE_BASE_SHA: sha(composeBase), COMPOSE_E2E_SHA: sha(composeE2e),
@@ -101,7 +103,7 @@ export function freezePair({ repo, output, nativeDir, nativeManifest, nativeBuil
     writeJson(path.join(root, 'expected-runtime.json'), expectedRuntime)
     write(path.join(root, 'expected-prompt-sha256.txt'), promptHash + '\n')
     writeJson(path.join(root, 'expected-native-mod.json'), expectedNative)
-    writeJson(path.join(root, 'lane.json'), { ...lane, pairId: pair.pairId, candidate: pair.candidate, imageId: pair.imageId })
+    writeJson(path.join(root, 'lane.json'), { ...lane, pairId: pair.pairId, candidate: pair.candidate, imageId: pair.imageId, models: pair.models, overwatchReasoning: pair.overwatchReasoning })
     writeJson(path.join(root, 'map-gen-settings.json'), { seed: lane.seed })
     write(path.join(root, 'frozen-compose/compose.yml'), composeBase)
     write(path.join(root, 'frozen-compose/compose.e2e.yml'), composeE2e)

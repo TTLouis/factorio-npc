@@ -69,7 +69,7 @@
     {
       "path": "provider-contract-preflight.mjs",
       "av_sha256": "91f6aa61d51b6672fa5995f6e513cc45e02ed4169d9161534463a0612a93b25b",
-      "template_sha256": "06dde201ca47c7d7f58ff491481c8243fffcc31eefe2c566ef2483e6844cb3ba"
+      "template_sha256": "752215399107ee6bc3b97be2193a9721cc2c88b4ea6554ee53e3580524e380db"
     },
     {
       "path": "provider-contract-preflight.test.mjs",
@@ -99,7 +99,7 @@
     {
       "path": "run-live.mjs",
       "av_sha256": "4fc26c82751c83db6de9542c68e76e33129951a60222c8d88b906e829913ed19",
-      "template_sha256": "7a846a160c9cd035e2cbe42e083a08b3d41ccfe06c2563e28fe13a33ab19d768"
+      "template_sha256": "0b012b82b025e54c98bb6a780abcaf0981dc62101130cda00e79cf9712ca2d67"
     },
     {
       "path": "runner-terminal.mjs",
@@ -129,7 +129,7 @@
     {
       "path": "supervisor-preflight.mjs",
       "av_sha256": "9bb8c231c0d690630a1923a79d5808916180ecc28988536f93f1a56f0a1336fc",
-      "template_sha256": "56c604f5b846ee0dfebf9edddcce4f0e9e942977697e47b3a613d7c4d2a457cf"
+      "template_sha256": "d59364863e48ea28533d200bbbb20424dfd01466cca242301bb4f02e7410cd7c"
     },
     {
       "path": "tick-sprint-policy.mjs",
@@ -154,7 +154,7 @@
     {
       "path": "verify-deployment.mjs",
       "av_sha256": "6734be56a047ca773cbceb6be37e2765cfd903109072cec4ef5c156ac1017e63",
-      "template_sha256": "fef9cb27cb63a677da98385ed719215687b06a0e583332cafd8411a461ec17ea"
+      "template_sha256": "262e08510a61505013d590956cab94a99b01df7c86114b45370e37645d23868b"
     },
     {
       "path": "verify-final-save.ps1",

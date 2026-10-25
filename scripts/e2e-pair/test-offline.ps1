@@ -1,4 +1,4 @@
-param([string]$EvidenceDirectory='')
+param([string]$EvidenceDirectory='',[string]$HelperImage='npc-dev')
 $ErrorActionPreference='Stop'
 $repo=Split-Path (Split-Path $PSScriptRoot)
 if(-not $EvidenceDirectory){$EvidenceDirectory=Join-Path $repo ('test-results/paired-kit/attempt-'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,6))}
@@ -7,7 +7,7 @@ if(Test-Path $evidence){throw 'Evidence directory already exists; keep prior att
 New-Item -ItemType Directory $evidence -Force|Out-Null
 Write-Output ('Local evidence: '+$evidence)
 # Built-in Node only: deterministic freezer/schema and file tests; no host package tools.
-& node --experimental-vm-modules --test (Join-Path $PSScriptRoot 'pair.test.mjs') (Join-Path $PSScriptRoot 'launch-control.test.mjs') (Join-Path $PSScriptRoot 'runner-entry.test.mjs') *> (Join-Path $evidence 'pair-tests.log')
+& node --experimental-vm-modules --test (Join-Path $PSScriptRoot 'pair.test.mjs') (Join-Path $PSScriptRoot 'model-profile.test.mjs') (Join-Path $PSScriptRoot 'launch-control.test.mjs') (Join-Path $PSScriptRoot 'runner-entry.test.mjs') *> (Join-Path $evidence 'pair-tests.log')
 $code=$LASTEXITCODE;Set-Content (Join-Path $evidence 'pair-tests.exit') $code
 if($code -ne 0){throw 'Pair deterministic tests failed; see local log'}
 Write-Output 'Pair freezer/schema tests passed.'
@@ -24,7 +24,7 @@ if($LASTEXITCODE -ne 0){throw 'Actual top-level coordinator ownership/refusal te
 Set-Content (Join-Path $evidence 'lifecycle-tests.exit') $LASTEXITCODE
 if($LASTEXITCODE -ne 0){throw 'Deterministic lifecycle mocks/PowerShell syntax failed'}
 $testLanes=@(
-  @{name='helpers';image='npc-dev';entry='sh';arguments=@('-c','node --test /proof/a/runner-terminal.test.mjs /proof/a/automation-proof.test.mjs /proof/a/provider-contract-preflight.test.mjs /proof/a/protocol3-provider-preflight.test.mjs /proof/a/trial-stop-policy.test.mjs /proof/a/analysis/response-recorder.test.mjs /proof/a/pair-stop.test.mjs /proof/b/automation-proof.test.mjs /proof/b/provider-contract-preflight.test.mjs && for f in /proof/*.mjs /proof/a/*.mjs /proof/b/*.mjs; do node --check "$f" || exit; done')},
+  @{name='helpers';image=$HelperImage;entry='sh';arguments=@('-c','node --experimental-vm-modules --test /proof/a/model-profile.test.mjs /proof/a/runner-terminal.test.mjs /proof/a/automation-proof.test.mjs /proof/a/provider-contract-preflight.test.mjs /proof/a/protocol3-provider-preflight.test.mjs /proof/a/trial-stop-policy.test.mjs /proof/a/analysis/response-recorder.test.mjs /proof/a/pair-stop.test.mjs /proof/b/automation-proof.test.mjs /proof/b/provider-contract-preflight.test.mjs && for f in /proof/*.mjs /proof/a/*.mjs /proof/b/*.mjs; do node --check "$f" || exit; done')},
   @{name='archive';image='sha256:c23de29f686824ca7598116b07ed0b80697af354edef26c0e0eea20287fb3697';entry='python3';arguments=@('/proof/a/save-archive-check.test.py')}
 )
 foreach($lane in $testLanes) {

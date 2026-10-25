@@ -1,5 +1,12 @@
+import {validateFrozenModels} from './model-profile.mjs';
 // Gate only this explicit CLI-proxy trial. No provider auto-detection.
-export async function verifyConfiguredCliProxyProviderContract(config, { verifyCliProxyProviderContracts, requestId }) {
+export async function verifyConfiguredCliProxyProviderContract(config, { verifyCliProxyProviderContracts, requestId, frozenModels }) {
+  if (frozenModels) {
+    validateFrozenModels(frozenModels);
+    for (const [index,role] of ['planner','executor'].entries()) {
+      if ((config.models?.[index] ?? config.models?.[0] ?? config.model) !== frozenModels[role]) throw Error(`Frozen ${role} model mismatch`);
+    }
+  }
   if (typeof verifyCliProxyProviderContracts !== 'function') throw Error('Deployed CLI-proxy contract probe export is missing');
   const proof = await verifyCliProxyProviderContracts(config, { requestId });
   if (config?.aiApiMethod !== 'cli-proxy' || config?.profile !== 'cli-proxy'

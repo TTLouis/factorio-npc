@@ -109,6 +109,25 @@ changes to the source checkout's Compose files cannot redirect setup or cleanup.
 node scripts/e2e-pair/pair.mjs freeze test-results/freeze-input.json
 ```
 
+The legacy default remains planner `gpt-6.1-sol`, executor `gpt-6-luna`, and
+low-reasoning `gpt-6-luna` overwatch. For an explicitly authorized Luna/Luna
+trial add this field to the freeze input before freezing:
+
+```json
+"models": { "planner": "gpt-6-luna", "executor": "gpt-6-luna", "overwatch": "gpt-6-luna" }
+```
+
+Only those two role profiles are approved. Unknown models, extra/missing roles
+and expensive overwatch are rejected. `pair.json`, lane/run intent and the
+manifest-covered `frozen-models.mjs` retain each role. Compose receives the ordered
+planner/executor `OPENAI_MODEL` list, including duplicate Luna IDs. Deployment
+and cold preflight resolve the actual runtime configuration and compare both
+roles; the catalog needs only the selected model IDs. Real CLI-proxy serializers
+must prove both closed-tool role contracts, and observed provider responses must
+match the selected role. Same-model roles never lose their identity. The parent
+must select the declared Luna low-reasoning observer; no silent upgrade is allowed.
+A new profile requires a new frozen output; never edit AW/AX or an existing freeze.
+
 No default candidate/image is chosen. Existing output is never replaced. The
 result contains `a/`, `b/`, `pair.json`, coordinator scripts and a pair manifest.
 The parent must review that exact kit and manifests before launch. Source/image,
