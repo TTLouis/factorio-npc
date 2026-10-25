@@ -2155,6 +2155,22 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     }
     stopped = interrupted()
     if (stopped) return cancelled(stopped, 'recovery_trace')
+    // A lost completion callback may now have durable verified receipt proof.
+    // Reconcile its unchanged checkpoint BEFORE the executor handoff names the
+    // active step; otherwise the first next-step reply is rejected as stale.
+    if (reason === 'runtime_restart' && reconciliation?.verdict === 'admitted_completed') {
+      const fresh = await agent.settleIdleStepCheckpoint?.()
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'restart_checkpoint')
+      if (fresh?.closed) {
+        state = agent.memory?.currentPlan?.(key) ?? fresh.state
+        if (fresh.contractPause || state?.status === 'paused') return { recovered: true, reason: 'restart_checkpoint_paused', state }
+        if (state?.status === 'completed') {
+          const result = await agent.settleCompletedStepState(state)
+          return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
+        }
+      }
+    }
     const restage = await restageRecoveryConversation(agent, { reason, recoveryMessage, owner, requestId: recoveryRequestId, isCancelled: options.isCancelled })
     if (restage?.decision_started === false) return cancelled({
       recovered: false, reason: 'executor_decision_superseded_after_handoff', state: agent.memory?.currentPlan?.(key) ?? state,
@@ -2163,6 +2179,10 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     if (stopped) return cancelled(stopped, 'before_run_guarded')
     const result = await agent.runGuarded()
     return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
+  }
+  catch (error) {
+    if (error?.code !== 'stale_handoff_reply') throw error
+    return cancelled(interrupted() ?? { recovered: false, reason: 'checkpoint_owner_superseded', state: agent.memory?.currentPlan?.(key) ?? state }, 'reconciliation_owner')
   }
   finally {
     await restoreDecisionBudgets(agent, decisionBudgetScope)

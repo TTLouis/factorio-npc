@@ -100,8 +100,10 @@ import { OPERATION_LEDGER_LIMIT } from './operation-ledger.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
+  completedOperationReceipt,
   EFFECT,
   isLostAcknowledgement,
+  operationSignature as batchOperationSignature,
   PENDING_STATE,
   reconcilePendingOperation,
   reconciliationFacts,
@@ -10070,6 +10072,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // proven or possibly admitted stays as the duplicate guard until its receipt settles it or its step is left.
   async reconcileOutstandingOperation({ trigger, requestId, operationKey } = {}) {
     if (typeof this.memory.pendingOperation !== 'function') return undefined
+    const owner = this.captureCheckpointOwner()
     const key = this.activePlanKey()
     const records = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation(key)].filter(Boolean)
     if (!operationKey && records.length > 1) {
@@ -10086,7 +10089,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       actor = { actor_id: current.actor_id, epoch: current.epoch }
     }
     catch {}
+    this.assertCheckpointOwnerIdentity(owner)
     const rawStatus = await this.readTaskStatusRaw()
+    this.assertCheckpointOwnerIdentity(owner)
     const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
     const admitted = [RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.ADMITTED_PARTIAL].includes(result.verdict)
     let held = pending
@@ -10104,6 +10109,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }, pending.operation_key) ?? pending
     }
     await this.persistState()
+    this.assertCheckpointOwnerIdentity(owner)
     await this.traceEvent('operation.reconciled', {
       request_id: rid,
       trigger,
@@ -10113,6 +10119,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       plan_id: pending.plan_id,
       step_id: pending.step_id,
     }, { requestId: rid })
+    this.assertCheckpointOwnerIdentity(owner)
     if (result.verdict === RECONCILE_VERDICT.STALE_ACTOR) {
       await this.traceEvent('operation.stale_refused', {
         request_id: rid,
@@ -10122,25 +10129,82 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         pending_actor: pending.actor,
         current_actor: actor ?? null,
       }, { requestId: rid })
+      this.assertCheckpointOwnerIdentity(owner)
     }
     // A restart can find the exact completed receipt after losing both acknowledgement and completion notification.
     // Settle through the ordinary idle-receipt gate before a fresh checkpoint is checked; retaining this completed
     // operation as pending would suppress checkpoint settlement and provoke an unnecessary replay/empty transfer.
     if (trigger === 'runtime_restart' && result.verdict === RECONCILE_VERDICT.ADMITTED_COMPLETED) {
-      await this.settleOutstandingOperation(rawStatus, pending.operation_key, { actor, requestId: rid })
+      await this.settleOutstandingOperation(rawStatus, pending.operation_key, { actor, requestId: rid, receiptOwner: owner })
+      this.assertCheckpointOwnerIdentity(owner)
       if (!(this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation?.(key)].filter(Boolean)).some(record => record.operation_key === pending.operation_key)) {
         await this.traceEvent('operation.recovery_settled', {
           request_id: rid, operation_key: pending.operation_key, reason: 'restart_exact_completed_receipt',
         }, { requestId: rid })
+        this.assertCheckpointOwnerIdentity(owner)
       }
     }
     await this.surfaceLegacyOperation(key, pending, result, rid)
     return { ...result, admitted, pending: held ?? pending, request_id: rid }
   }
 
+  // Both the ordinary completion callback and restart settlement enter here.
+  // Bind sealed historical work to its admission owner, not the current actor or
+  // whichever plan happens to be visible when a delayed callback arrives.
+  ingestCompletedOperationReceipt(rawStatus, pending, { actor, owner }) {
+    this.assertCheckpointOwnerIdentity(owner)
+    const receipt = completedOperationReceipt(pending, { status: rawStatus, actor })
+    if (!receipt || owner.goalId !== pending.goal_id || owner.planId !== pending.plan_id
+      || owner.stepId !== pending.step_id) return { recorded: false, reason: 'completed_receipt_owner_or_proof_missing' }
+    const state = this.memory.currentPlan?.(owner.key)
+    let operations
+    try {
+      operations = (state?.last_operations ?? []).map(operation => {
+        const separator = typeof operation === 'string' ? operation.indexOf(' ') : -1
+        if (separator < 1) throw new Error('Missing stored operation')
+        return { name: operation.slice(0, separator), args: JSON.parse(operation.slice(separator + 1)) }
+      })
+    }
+    catch { return { recorded: false, reason: 'completed_receipt_intent_unreadable' } }
+    if (!operations.length || batchOperationSignature(operations) !== pending.signature) {
+      return { recorded: false, reason: 'completed_receipt_intent_changed' }
+    }
+    const status = typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus
+    const context = {
+      goal_id: pending.goal_id, step_id: state.task_board?.active_step_id,
+      actor_id: pending.actor.actor_id, actor_epoch: pending.actor.epoch,
+      admitted_batch: { operation_key: pending.operation_key, signature: pending.signature,
+        goal_id: pending.goal_id, plan_id: pending.plan_id, step_id: pending.step_id,
+        actor_id: pending.actor.actor_id, actor_epoch: pending.actor.epoch,
+        batch_id: receipt.batch_id, batch_generation: receipt.batch_generation },
+    }
+    this.recordOperationReceiptEvidence(owner.key, JSON.stringify({ ...status, last_completed_batch: receipt }), 'completed', context,
+      { plan_id: pending.plan_id, step_id: pending.step_id })
+    return { recorded: true, reason: 'exact_completed_receipt_ingested', batch_ref: receipt.batch_ref }
+  }
+
+  recordOperationReceiptEvidence(key, raw, outcome, context, stamp) {
+    const evidence = receiptEvidence(raw, outcome, context)
+    const board = this.memory.currentPlan?.(key)?.task_board
+    const previous = (board?.evidence ?? []).find(item => item.kind === evidence.kind && item.ref === evidence.ref
+      && item.step_id === board.active_step_id)
+    // One sealed receipt per step; allow a newly available transfer result to
+    // enrich previously incomplete proof, but not duplicate callback appends.
+    if (previous && evidence.ref) {
+      try {
+        const before = JSON.parse(previous.summary)
+        const after = JSON.parse(evidence.summary)
+        if (JSON.stringify(before.basic_operation) === JSON.stringify(after.basic_operation)
+          && JSON.stringify(before.stale_operation_result) === JSON.stringify(after.stale_operation_result)) return board
+      }
+      catch {}
+    }
+    return this.memory.recordBoardEvidence?.(key, { ...evidence, ...stamp })
+  }
+
   // An idle receipt settles a batch only when its effect is proven complete or absent. Cancellation may leave a partial
   // effect, and an acknowledgement before a mod reload cannot establish what survived: both keep the duplicate guard.
-  async settleOutstandingOperation(rawStatus, operationKey, { actor: capturedActor, requestId, receiptOwner } = {}) {
+  async settleOutstandingOperation(rawStatus, operationKey, { actor: capturedActor, requestId, receiptOwner = this.captureCheckpointOwner() } = {}) {
     try {
       if (typeof this.memory.pendingOperation !== 'function') return
       if (receiptOwner) this.assertCheckpointOwnerIdentity(receiptOwner)
@@ -10171,6 +10235,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           state: PENDING_STATE.ADMITTED, effect: result.effect, verdict: result.verdict,
           reason: result.reason, batch_id: result.batch_id, reconciled_at: Date.now(),
         }, pending.operation_key)
+      }
+      if (provable && result.verdict === RECONCILE_VERDICT.ADMITTED_COMPLETED && pending.protocol_version === 2) {
+        const ingestion = this.ingestCompletedOperationReceipt(rawStatus, pending, { actor, owner: receiptOwner })
+        // Evidence and the pending guard must survive together before clearing
+        // that guard. A failed write leaves the operation held for reconciliation.
+        await this.persistState({ strict: true })
+        this.assertCheckpointOwnerIdentity(receiptOwner)
+        if (ingestion.recorded || requestId) await this.traceEvent('operation.completed_receipt_ingested', {
+            request_id: requestId ?? this.traceRequest?.id, operation_key: pending.operation_key,
+            goal_id: pending.goal_id, plan_id: pending.plan_id, step_id: pending.step_id,
+            actor_id: pending.actor.actor_id, actor_epoch: pending.actor.epoch, ...ingestion,
+          }, { requestId: requestId ?? this.traceRequest?.id })
+        this.assertCheckpointOwnerIdentity(receiptOwner)
       }
       const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
       // A cancellation the game proved happened after a completed prefix: the failure turn states which operations ran.
@@ -11698,7 +11775,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.assertCheckpointOwnerIdentity(owner)
       this.recordPlacementReceipt(raw)
       const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
-      const evidence = receiptEvidence(raw, this.planUpdateReason === 'failure' ? 'failed' : 'completed', {
+      const receiptContext = {
         goal_id: currentPlan?.goal_id,
         step_id: currentPlan?.task_board?.active_step_id,
         actor_id: this.epoch?.actor_id,
@@ -11710,11 +11787,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           batch_id: cancelled.batch_id, batch_generation: cancelled.batch_generation,
           terminal_partial: reconcilePendingOperation(admitted, { status, actor: currentActor }).verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL,
         } : undefined,
-      })
+      }
       // The plan and step this batch was admitted under, when the memory
       // recorded one: lets the receipt ledger refuse a receipt whose plan has
       // since been superseded. Without a stamp the receipt binds as before.
-      const taskBoard = this.memory.recordBoardEvidence?.(this.activePlanKey(), admission ? { ...evidence, ...admission } : evidence)
+      // Exact protocol-2 completions are ingested inside settlement, while the
+      // original admission witness is still held. Do not subsequently mint a
+      // second (or unrelated watermark-only) proof using the current defaults.
+      const exactCompletion = this.planUpdateReason !== 'failure' && outstanding.some(pending => pending.protocol_version === 2)
+        && status.last_completed_batch?.batch_generation !== undefined
+      const taskBoard = exactCompletion ? this.memory.currentPlan?.(key)?.task_board
+        : this.recordOperationReceiptEvidence(key, raw, this.planUpdateReason === 'failure' ? 'failed' : 'completed', receiptContext, admission)
       if (taskBoard) await this.persistState()
       this.assertCheckpointOwnerIdentity(owner)
       const view = taskStatusDecisionView(raw)

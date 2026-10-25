@@ -260,12 +260,12 @@ test('R-restart: a restart after the second pause keeps the attempt count and th
   assert.ok(ctx.session.modelResume.timer, 'attempt 2 was waiting on its timer when the process died')
 
   const model = new ScriptedModel()
-    .push('executor', 'i:observe', (messages) => {
+  const restarted = restartProcess(ctx, model)
+  model.push('executor', 'i:observe', (messages) => {
       ctx.atI = { packet: stepBlockLines(messages), allowance: restarted.world.memory.autoResumeAllowance(KEY) }
       return observation()
     })
     .push('executor', 'i:collect-machine-output', () => executorPlan([collect(3)]))
-  const restarted = restartProcess(ctx, model)
   // The first process wrote nothing more after it died: the second reads the file the first left.
   await restarted.world.agent.loadPersistentState()
   assert.deepEqual(durableFacts(restarted), before, 'the allowance, the pause, the plan identity and the verified prefix came back from disk')
@@ -575,9 +575,7 @@ test('R-noreplay: a completed collection with a lost acknowledgement is settled 
   await runIWithLostAcknowledgement(ctx)
   ctx.game.completeBatch() // effect happened, but no completion line reached the first process
   ctx.game.reloadMod()
-  const model = new ScriptedModel()
-    .push('executor', 'restart:observe', observation())
-    .push('executor', 'restart:attempt-replay', executorPlan([collect(3)]))
+  const model = new ScriptedModel() // Exact receipts plus a fresh checkpoint need no model replay proposal.
   const restarted = restartProcess(ctx, model)
   await restarted.world.agent.loadPersistentState()
   assert.equal(restarted.session.queueStartupRecovery(restarted.session.currentPlanState()), 'recover')
@@ -590,6 +588,7 @@ test('R-noreplay: a completed collection with a lost acknowledgement is settled 
   assert.equal(ctx.game.inventory['copper-plate'], 12)
   assert.equal(restarted.world.named('goal.evaluated').at(-1)?.satisfied, true)
   assert.equal(restarted.world.memory.currentPlan(KEY), undefined)
+  assert.equal(model.calls.length, 0)
   assertStrictBoundary(restarted)
 })
 
