@@ -375,7 +375,12 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     const accepted = queue(task, actor)
     if (accepted && preservation.binding) {
       const batch = manager.get_status_snapshot().active_batch
-      if (batch) task.preservation_binding = { ...preservation.binding, batch_id: batch.batch_id,
+      if (!batch || typeof batch.batch_generation !== 'number' || typeof batch.batch_id !== 'number' || typeof batch.batch_ref !== 'string') {
+        manager.cancel_all_tasks('preservation_batch_binding_missing')
+        result_for(actor, task, false, false, 'placement_candidate_unavailable')
+        return false
+      }
+      task.preservation_binding = { ...preservation.binding, batch_id: batch.batch_id,
         batch_generation: batch.batch_generation, batch_ref: batch.batch_ref }
     }
     return accepted
