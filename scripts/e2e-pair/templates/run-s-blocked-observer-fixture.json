@@ -1,0 +1,67 @@
+{
+  "canonical": {
+    "goal": {
+      "status": "active",
+      "goal_id": "goal_046rvj5_1"
+    },
+    "active_plan_id": "goal_046rvj5_1_p3",
+    "run": {
+      "paused": false,
+      "pause_class": "",
+      "pause_reason": ""
+    },
+    "plans": [
+      {
+        "status": "BLOCKED",
+        "active_step_index": 0,
+        "plan_id": "goal_046rvj5_1_p3",
+        "plan_version": 1,
+        "blocker": {
+          "kind": "structural",
+          "reason_code": "transfer_failed:no_target",
+          "detected_at": 1792099489858,
+          "evidence_refs": [
+            "batch-g1-4"
+          ],
+          "detail": "transfer_failed:no_target",
+          "requires_user_decision": true
+        },
+        "steps": [
+          {
+            "step_id": "goal_046rvj5_1_p3_v1_s1_0uo98cl",
+            "description": "Smelt ten copper plates and verify electronics is unlocked.",
+            "completion_contract": {
+              "mode": "all",
+              "requirements": [
+                {
+                  "id": "requirement_1",
+                  "kind": "research_completed",
+                  "technology": "electronics"
+                }
+              ],
+              "confidence": 0
+            },
+            "completion_mode": "deterministic",
+            "contract_status": "bound",
+            "completion_confidence": "grounded",
+            "reduced_confidence": false
+          },
+          {
+            "step_id": "goal_046rvj5_1_p3_v1_s2_0t29kgy",
+            "description": "Smelt fifty iron plates and verify steam power is unlocked.",
+            "completion_contract": null,
+            "completion_mode": "deterministic",
+            "contract_status": "pending",
+            "completion_confidence": "pending",
+            "reduced_confidence": false
+          }
+        ],
+        "goal_id": "goal_046rvj5_1"
+      }
+    ]
+  },
+  "source_case": "Run S run-s-target-reacquisition-case.json",
+  "source_candidate": "7ca69aed3b8d8d3e4409c35e1fe916ca5ee64e7b",
+  "source_case_sha256": "df0062a1e6516e7f75b64afd212cc1b8c3c46de2985855c74af47f893ffe98cb",
+  "request_id": "recovery_mva1r99c"
+}

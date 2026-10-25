@@ -8,6 +8,9 @@
 # rejects the `#!...\r` line, so a test importing one fails to load on Windows.
 *.mjs text eol=lf
 
+# Reviewed E2E template/baseline byte hashes must survive Windows/Linux checkout.
+scripts/e2e-pair/templates/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
 # Installer source is hashed byte-for-byte by the generated immutable loader,
 # so normalize it consistently across Windows and Linux checkouts.
 deploy/pterodactyl/payload-src/installer.sh text eol=lf

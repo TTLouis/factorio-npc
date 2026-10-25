@@ -1,0 +1,24 @@
+services:
+  sgluna-factorio:
+    # Runtime images are built once by the parent. Relocated source build
+    # contexts must never be consumed by either lane's up/down command.
+    build: !reset null
+    image: "@@IMAGE_ID@@"
+    restart: "no"
+    labels:
+      owner.pair: "@@PROJECT@@"
+      owner.run: "@@RUN_ID@@"
+    ports: !override
+      - "127.0.0.1:@@RCON_HOST_PORT@@:27015/tcp"
+      - "127.0.0.1:@@GAME_PORT@@:@@GAME_PORT@@/udp"
+    volumes:
+      - "@@EVIDENCE@@:/e2e"
+    environment:
+      AI_API_METHOD: "cli-proxy"
+      OPENAI_MODEL: "gpt-6.1-sol,gpt-6-luna"
+      OPENAI_API_BASEURL: "http://host.docker.internal:@@RECORDER_PORT@@/v1"
+      SERVER_PORT: "@@GAME_PORT@@"
+      SAVE_NAME: "@@RUN_ID@@-fresh.zip"
+      SGLUNA_E2E_PROFILE: "normal"
+      SGLUNA_E2E_RUN_ID: "@@RUN_ID@@"
+      SGLUNA_E2E_SOURCE_SHA: "@@CANDIDATE@@"
