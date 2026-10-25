@@ -15505,7 +15505,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return `[HARNESS] Deterministic research preflight rejected the requested operation before any Autorio batch admission, so no operation from that batch ran. This is a recoverable dependency/control-state result, not WORLD_BLOCKED. Preserve the same user goal and active canonical semantic step. Tools remain enabled. ${guidance} Deterministic facts: ${JSON.stringify(facts)}`
   }
 
-  async recoverArgumentPreflight(error, plan, stateResult) {
+  async recoverArgumentPreflight(error, plan, _stateResult) {
     const owner = this.captureCheckpointOwner()
     const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment(); const trace = this.traceRequest
     let grant
@@ -15544,8 +15544,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       request_consumed: this.modelCorrectablePreflightRetries ?? 0 })) throw new PreservationProofError('argument_correction_claim_refused', { stage: 'correction' })
     this.modelCorrectablePreflightRetries = (this.modelCorrectablePreflightRetries ?? 0) + 1
     if (this.requestInfo) {
-      const state = this.memory.setAdmissionState?.(key, 'preflight_rejected')
-      if (state) stateResult = { ...(stateResult ?? {}), state }
+      this.memory.setAdmissionState?.(key, 'preflight_rejected')
       this.memory.recordBoardEvidence?.(key, { kind: 'operation_preflight_recoverable', ref: `${trace?.id ?? 'request'}/${error.preflight.code}`,
         summary: JSON.stringify({ code: error.preflight.code, operation_index: error.preflight.operation_index,
           operation: error.preflight.operation, detail: cleanMemoryText(error.preflight.detail ?? error.preflight.identity ?? '', 300) }) })

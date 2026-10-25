@@ -6,10 +6,12 @@ import { fluidFixture } from './fluid-preservation-fixtures.mjs'
 const directory = new URL('./', import.meta.url)
 const source = fs.readFileSync(new URL('./fluid-preservation-lifecycle.test.mjs', import.meta.url), 'utf8')
 const prefix = source.slice(0, source.indexOf("test('real prepared ledger")).replaceAll("from './", `from '${directory.href}`)
-const { world, KEY } = await import(`data:text/javascript;base64,${Buffer.from(`${prefix}\nexport { world, KEY }`).toString('base64')}`)
-export { KEY }
+const fixture = import(`data:text/javascript;base64,${Buffer.from(`${prefix}\nexport { world, KEY }`).toString('base64')}`)
+export const KEY = 'npc:fluid-fixture'
 
-export function candidateWorld({ response, executor, repeated = false, ...options } = {}) {
+export async function candidateWorld({ response, executor, repeated = false, ...options } = {}) {
+  const { world, KEY: actualKey } = await fixture
+  if (actualKey !== KEY) throw new Error('Shared fluid fixture identity changed')
   let round = 0; let originalSteps
   const nativeReads = []
   const w = world({ ...options,

@@ -10,7 +10,7 @@ import {NpcAgentLoop} from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
 import {getActivePlan} from '../pterodactyl/runtime-v8/planning-state.mjs'
 import {compileObligations,effectivePreservationProof,preservationGeometry} from '../pterodactyl/runtime-v8/contract-obligations.mjs'
 import {planReply,answersStepContract} from '../pterodactyl/runtime-v8/task-loop-fixtures.mjs'
-import {toolCommand,parseOperation,renderOperation,renderOperationPreflight,luaString} from '../pterodactyl/runtime-v8/structured-policy.mjs'
+import {toolCommand,parseOperation,renderOperation,renderOperationPreflight} from '../pterodactyl/runtime-v8/structured-policy.mjs'
 import {configureNpcSession,deploymentStatus,executeAuthorizedBatch} from '../pterodactyl/staging/supervisor-adapter.mjs'
 
 globalThis.fetch=async()=>{throw new Error('inference/network forbidden in native loop proof')}
@@ -67,7 +67,9 @@ try{
     {kind:'inventory_count',item_name:'steam-engine',minimum:1},{kind:'inventory_count',item_name:'lab',minimum:1}]},preserve:[pump]}
   const second={outcome:{mode:'all',requirements:[{kind:'authoritative_operation_receipt',operation_name:'supply_entity'}]},preserve:[pump]}
   const memory=new CanonicalTaskBoardMemory();const key='npc:fluid-real-loop'
-  let placed,round=0,immutable
+  let placed
+  let round=0
+  let immutable
   const beforeCorrection=await lua('rcon.print(helpers.table_to_json({inventory=a.get_main_inventory().get_contents(),boilers=a.surface.count_entities_filtered{name="boiler"}}))')
   const provider=answersStepContract(async(_messages,context)=>{
     evidence.scripted_calls.push({role:context.role,trigger:context.triggerSource})
@@ -149,4 +151,4 @@ try{
   assert.equal(evidence.claims_after_fuel.count,claimsBefore.count)
   evidence.status='pass'
 }catch(error){evidence.error=String(error);throw error}
-finally{if(agent){await agent.persistQueue;await fs.writeFile(path.join(results,'fluid-real-loop-memory.json'),JSON.stringify(agent.memory.snapshot(),null,2)+'\n')}connection?.close();await fs.writeFile(path.join(results,'fluid-real-loop-native.json'),JSON.stringify(evidence,null,2)+'\n')}
+finally{if(agent){await agent.persistQueue;await fs.writeFile(path.join(results,'fluid-real-loop-memory.json'),`${JSON.stringify(agent.memory.snapshot(),null,2)}\n`)}connection?.close();await fs.writeFile(path.join(results,'fluid-real-loop-native.json'),`${JSON.stringify(evidence,null,2)}\n`)}

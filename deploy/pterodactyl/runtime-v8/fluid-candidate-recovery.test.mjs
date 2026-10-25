@@ -7,7 +7,7 @@ import { argumentCorrectionAvailable, restorePlanningState, serializePlanningSta
 import { checkFluidPreservationEligibility } from './contract-obligation-runtime.mjs'
 
 test('early native known-argument eligibility -> durable existing allowance -> fresh certified proposal -> one placement -> unchanged fuel', async () => {
-  const w = candidateWorld()
+  const w = await candidateWorld()
   await w.start()
   assert.equal(w.game.mutations.length, 1, JSON.stringify(w.rows.filter(row => /failed|paused|refused/.test(row.event)).slice(-4)))
   assert.equal(w.prepared.length, 1, 'bad candidate was rejected before a pending admission')
@@ -30,14 +30,14 @@ test('injected early miss reaches actual late helper catch, exact unsent settlem
   const directory = new URL('./', import.meta.url)
   const hook = `import { registerHooks } from 'node:module'; registerHooks({load(url,context,next){ const result=next(url,context); if(!url.endsWith('/runtime-v8/npc-agent-loop.mjs'))return result; const needle='    await checkFluidPreservationEligibility(this, { operations, preflight: results })'; const source=String(result.source); if(!source.includes(needle))throw Error('missing exact prevention seam');return {...result,source:source.replace(needle,'    // injected prevention miss')};}})`
   const driver = `import assert from 'node:assert/strict'; import {candidateWorld,KEY} from ${JSON.stringify(new URL('./fluid-candidate-recovery-fixtures.mjs', directory).href)};
-const w=candidateWorld();await w.start();assert.equal(w.game.mutations.length,1,JSON.stringify(w.rows.filter(row=>/failed|refused|paused/.test(row.event)).slice(-4)));assert.equal(w.prepared.length,2);
+const w=await candidateWorld();await w.start();assert.equal(w.game.mutations.length,1,JSON.stringify(w.rows.filter(row=>/failed|refused|paused/.test(row.event)).slice(-4)));assert.equal(w.prepared.length,2);
 const notSent=w.rows.find(row=>row.event==='operation.not_sent');assert.ok(notSent);const retry=w.rows.find(row=>row.event==='operations.preflight_recoverable');assert.equal(retry.data.zero_send.operation_key,notSent.data.operation_key);assert.equal(w.memory.planningState(KEY).goal.argument_corrections.claims.length,1);assert.deepEqual(w.held().steps,w.originalSteps());await w.agent.completed();assert.equal(w.held().active_step_index,1);assert.equal(w.game.mutations.length,2);assert.equal(w.held().execution.preservation_certificates.length,1);console.log(JSON.stringify({actual_late_catch:true,old_key:notSent.data.operation_key,placements:1,certificates:1,unchanged_next_step:true}));`
   const result = spawnSync(process.execPath, ['--import', `data:text/javascript;base64,${Buffer.from(hook).toString('base64')}`, '--input-type=module', '-e', driver], { encoding: 'utf8', timeout: 30000 })
   assert.equal(result.status, 0, result.stdout + result.stderr)
 })
 
 test('second known argument mistake exhausts ONE credit; restore/restage/new request cannot renew it', async () => {
-  const w = candidateWorld({ repeated: true })
+  const w = await candidateWorld({ repeated: true })
   await assert.rejects(w.start(), /argument_correction_limit_exhausted/)
   assert.equal(w.game.mutations.length, 0)
   assert.equal(w.memory.planningState(KEY).goal.argument_corrections.claims.length, 1)
@@ -59,7 +59,7 @@ for (const [label, change] of [
   ['clearing', result => { result.preservation_clears_count = 1 }],
   ['unknown-version', result => { result.preservation_eligibility.version = 2 }],
 ]) test(`unknown/unsafe ${label} cannot become known argument credit`, async () => {
-  const w = candidateWorld({ response: ({ text }) => {
+  const w = await candidateWorld({ response: ({ text }) => {
     if (text.includes('autorio_preflight') && text.includes('place_candidate')) {
       const result = { ok: true, preservation_clears_count: 0, preservation_eligibility: { version: 1, kind: 'relation_required',
         actor_id: 10, surface_index: 1, force_index: 1, candidate_set_id: 'placement-1', candidate_id: 'candidate-1',
@@ -88,7 +88,7 @@ for (const seam of ['persist', 'trace']) for (const action of ['amendment', 'can
       if (action === 'native_queue') { game.taskState = 'working'; game.queueLength = 1 }
       if (action === 'revoke') memory.revokeAuthorization(KEY, memory.currentGoalGrant(KEY).grant_id, { reason: 'owner revoked during correction' })
     }
-    const w = candidateWorld(seam === 'persist' ? { persist: inject } : { trace: context => { if (context.row.event === 'operations.preflight_recoverable') inject(context) } })
+    const w = await candidateWorld(seam === 'persist' ? { persist: inject } : { trace: context => { if (context.row.event === 'operations.preflight_recoverable') inject(context) } })
     await assert.rejects(w.start(), /cancelled|superseded|preservation_|epoch changed|argument_correction_authority_changed/i)
     assert.equal(injected, true); assert.equal(w.game.mutations.length, 0)
     assert.equal(w.calls.length, callsAtInjection, 'no subsequent model request after the owner/safety change')
@@ -98,7 +98,7 @@ for (const seam of ['persist', 'trace']) for (const action of ['amendment', 'can
 }
 
 test('missing or malformed legacy ledger/lineage cannot restore as a fresh allowance', async () => {
-  const w = candidateWorld({ repeated: true })
+  const w = await candidateWorld({ repeated: true })
   await assert.rejects(w.start())
   const original = serializePlanningState(w.memory.planningState(KEY))
   for (const change of [state => { delete state.goal.argument_corrections }, state => { state.goal.argument_corrections = null },
@@ -114,7 +114,7 @@ test('missing or malformed legacy ledger/lineage cannot restore as a fresh allow
 
 test('generic argument correction and fluid candidate correction share the SAME request and semantic allowance', async () => {
   let first = true
-  const w = candidateWorld({ repeated: true, response: ({ text }) => {
+  const w = await candidateWorld({ repeated: true, response: ({ text }) => {
     if (first && text.includes('autorio_preflight') && text.includes('place_candidate')) {
       first = false
       return { ok: false, code: 'invalid_fixture_argument', refusal_class: 'argument' }
@@ -128,7 +128,7 @@ test('generic argument correction and fluid candidate correction share the SAME 
 })
 
 test('a consumed old in-memory request allowance cannot be bypassed by an empty durable ledger', async () => {
-  const w = candidateWorld({ response: ({ text, agent }) => {
+  const w = await candidateWorld({ response: ({ text, agent }) => {
     if (text.includes('autorio_preflight') && text.includes('place_candidate')) agent.modelCorrectablePreflightRetries = 1
   } })
   await assert.rejects(w.start(), /argument_correction_limit_exhausted/)
@@ -137,7 +137,7 @@ test('a consumed old in-memory request allowance cannot be bypassed by an empty 
 })
 
 test('legacy absence at the actual correction boundary is unproven, not lazily initialized', async () => {
-  const w = candidateWorld({ response: ({ text, memory }) => {
+  const w = await candidateWorld({ response: ({ text, memory }) => {
     if (text.includes('autorio_preflight') && text.includes('place_candidate')) delete memory.planningState(KEY).goal.argument_corrections
   } })
   await assert.rejects(w.start(), /argument_correction_lineage_unproven/)
@@ -147,7 +147,7 @@ test('legacy absence at the actual correction boundary is unproven, not lazily i
 
 for (const [label, journal] of [['unreadable', () => null], ['unresolved', () => [{ operation_key: 'another', state: 'admitting' }]]]) {
   test(`actual ${label} native journal cannot certify zero-send argument correction`, async () => {
-    const w = candidateWorld({ journal })
+    const w = await candidateWorld({ journal })
     await assert.rejects(w.start(), /preservation_pre_admission_receipt_boundary_unproven/)
     assert.equal(w.game.mutations.length, 0)
     assert.equal(w.memory.planningState(KEY).goal.argument_corrections.claims.length, 0)
@@ -155,7 +155,7 @@ for (const [label, journal] of [['unreadable', () => null], ['unresolved', () =>
 }
 
 test('normal >64-plan churn pins consumed claim origin, active plan and active native-proof dependency without renewing credit', async () => {
-  const w = candidateWorld(); await w.start()
+  const w = await candidateWorld(); await w.start()
   const raw = serializePlanningState(w.memory.planningState(KEY)); raw.run.paused = false
   const origin = raw.plans[0]
   const future = index => {
@@ -202,7 +202,7 @@ for (const seam of ['persist', 'trace']) for (const generic of [false, true]) te
     assert.equal(agent.pendingAmendmentConversationSeq, agent.agentContext.conversationSeq)
   }
   let first = true
-  const w = candidateWorld({
+  const w = await candidateWorld({
     ...(seam === 'persist' ? { persist: inject } : { trace: context => context.row.event === 'operations.preflight_recoverable' ? inject(context) : undefined }),
     response: generic ? ({ text }) => {
       if (first && text.includes('autorio_preflight') && text.includes('place_candidate')) {
@@ -222,7 +222,7 @@ for (const seam of ['persist', 'trace']) for (const generic of [false, true]) te
 })
 
 test('actual Memory restore plus request-counter reset and new request identity cannot spend the semantic credit again', async () => {
-  const w = candidateWorld({ repeated: true }); await assert.rejects(w.start(), /argument_correction_limit_exhausted/)
+  const w = await candidateWorld({ repeated: true }); await assert.rejects(w.start(), /argument_correction_limit_exhausted/)
   const restored = new CanonicalTaskBoardMemory(); restored.restore(w.memory.snapshot()); w.agent.memory = restored
   const state = restored.planningState(KEY)
   restored.dispatchPlanningEvent(KEY, { type: 'RUN_RESUMED', source: 'runtime', goal_id: state.goal.goal_id, now: Date.now(), reason: 'offline restore-boundary substitution' })
@@ -245,7 +245,7 @@ test('actual Memory restore plus request-counter reset and new request identity 
 })
 
 test('duplicate GOAL_ACCEPTED for the same immutable goal cannot reinitialize its consumed allowance', async () => {
-  const w = candidateWorld({ repeated: true }); await assert.rejects(w.start())
+  const w = await candidateWorld({ repeated: true }); await assert.rejects(w.start())
   const state = w.memory.planningState(KEY)
   const duplicate = applyPlanningEvent(state, { type: 'GOAL_ACCEPTED', source: 'runtime', goal_id: state.goal.goal_id,
     objective: 'A duplicate event must not erase the old objective or claims.', now: Date.now() })
