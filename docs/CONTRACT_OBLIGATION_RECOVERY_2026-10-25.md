@@ -146,3 +146,31 @@ independently built control.lua SHA256
 Historical failed attempts remain in ignored local evidence. No sealed AV data
 was modified or resumed. Final independent review, payload repin and parent
 integration are separate remaining gates.
+
+## Final review follow-up: late same-owner amendment
+
+The independent review of source `40f73ccd` / repin `dd186b6b` requested
+changes for one remaining normal-close race. A same-owner amendment could arrive
+while native target refinement awaited strict persistence/tracing, or during the
+last ownership await immediately before synchronous completion authority.
+The original commits remain immutable.
+
+The follow-up makes the preservation verifier fence amendment/pending/batch
+safety after awaits and refresh native idle after reconciliation. The actual
+`applyStepClose` also checks amendment/pending/batch safety synchronously after
+its final ownership await; no await separates that check from completion
+authority. Unsafe completion returns a named `step.close_deferred` disposition
+through all normal/fresh/recovery consumers. It does not advance, cancel, pause
+or consume the held amendment. Native busy without a held amendment remains a
+visible guard pause.
+
+New real ordinary completed-receipt regressions use the unfueled bootstrap
+fixture, refine the native target to the already-preserved furnace, and stage
+production amendment fields at the strict persist, trace and final owner-await
+seams. They assert same owner, retained amendment, no semantic progress, no
+`step.verified`, no next mutation and no provider request. Additional negatives
+cover late native busy and pending/batch guards after refinement and at the final
+authority boundary. Focus16 passed 62/62, including the two extra final-boundary pending/batch
+cases; renewed full gate and separate repin are pending.
+Native knowledge/projection and engine mechanics are unchanged by this follow-up;
+the existing exact-version native proof remains applicable.

@@ -2180,6 +2180,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
       }
       stopped = interrupted()
       if (stopped) return cancelled(stopped, 'restart_checkpoint')
+      if (fresh?.completionDeferred) return { recovered: true, reason: 'restart_checkpoint_deferred', result: fresh.completionDeferred, state: agent.memory?.currentPlan?.(key) }
       if (fresh?.closed) {
         state = agent.memory?.currentPlan?.(key) ?? fresh.state
         if (fresh.contractPause || state?.status === 'paused') return { recovered: true, reason: 'restart_checkpoint_paused', state }

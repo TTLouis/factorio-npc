@@ -63,23 +63,39 @@ export async function reconcilePreservationProof(agent, step, fresh, fence) {
   return true
 }
 
+export function stepCloseSettlementUnsafe(agent) {
+  return agent.currentPendingAmendment() ? 'pending_amendment'
+    : agent.batchInFlight ? 'batch_in_flight'
+      : agent.memory.pendingOperation?.(agent.activePlanKey()) ? 'pending_operation' : undefined
+}
+
 export async function verifyPreservationBeforeClose(agent) {
   const plan = getActivePlan(agent.memory.planningState?.(agent.activePlanKey()))
   const step = plan?.steps?.[plan.active_step_index]
   if (!step?.obligations && step?.obligation_protocol !== 1) return { ok: true }
   const owner = agent.captureCheckpointOwner()
-  const fence = () => agent.assertCheckpointOwnerCurrent(owner)
+  const fence = async () => {
+    await agent.assertCheckpointOwnerCurrent(owner)
+    if (stepCloseSettlementUnsafe(agent)) throw new Error('preservation_settlement_not_safe')
+  }
   if (!obligationProofOrigin(agent.memory.planningState(agent.activePlanKey()), step)) return { ok: false, reason: 'preservation_provenance_unproven' }
-  if (agent.currentPendingAmendment() || agent.batchInFlight || agent.memory.pendingOperation?.(agent.activePlanKey())) return { ok: false, reason: 'preservation_settlement_not_safe' }
+  if (stepCloseSettlementUnsafe(agent)) return { ok: false, reason: 'preservation_settlement_not_safe' }
   try {
     if (!await nativeIdle(agent, fence)) return { ok: false, reason: 'preservation_native_not_idle' }
     const fresh = await captureObligationProof(agent, step.obligations, fence)
     await fence()
     if (!await nativeIdle(agent, fence)) return { ok: false, reason: 'preservation_native_not_idle' }
-    if (agent.currentPendingAmendment() || agent.batchInFlight || agent.memory.pendingOperation?.(agent.activePlanKey())) return { ok: false, reason: 'preservation_settlement_not_safe' }
-    return await reconcilePreservationProof(agent, step, fresh, fence) ? { ok: true } : { ok: false, reason: 'preservation_baseline_changed' }
-  } catch (error) {
+    if (stepCloseSettlementUnsafe(agent)) return { ok: false, reason: 'preservation_settlement_not_safe' }
+    if (!await reconcilePreservationProof(agent, step, fresh, fence)) return { ok: false, reason: 'preservation_baseline_changed' }
+    // Reconciliation may persist/trace newly resolved native knowledge. Neither
+    // ownership nor an earlier idle sample fences a same-owner amendment or
+    // newly outstanding work arriving during those awaits.
+    if (!await nativeIdle(agent, fence)) return { ok: false, reason: 'preservation_native_not_idle' }
     await fence()
+    return { ok: true }
+  } catch (error) {
+    await agent.assertCheckpointOwnerCurrent(owner)
+    if (stepCloseSettlementUnsafe(agent)) return { ok: false, reason: 'preservation_settlement_not_safe' }
     return { ok: false, reason: `preservation_unreadable:${error.message}` }
   }
 }
@@ -189,6 +205,7 @@ export async function recoverContractObligations(agent, { trigger = 'settlement'
   // Existing fresh settlement closes exactly once using the copied verified
   // ledger and current native facts, then supplies the unchanged next step.
   const settled = await agent.closeActiveStepOnFreshRead({ previousState: agent.memory.currentPlan(key), trigger: 'contract_defect_successor' })
+  if (settled.completionDeferred) return settled.completionDeferred
   if (settled.contractPause) return settled.contractPause
   if (!settled.closed) return pause('successor_fresh_settlement_refused')
   owner = agent.captureCheckpointOwner()

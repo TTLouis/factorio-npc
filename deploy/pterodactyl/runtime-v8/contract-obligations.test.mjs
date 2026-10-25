@@ -534,3 +534,104 @@ test('unknown target cannot resolve to an identity outside frozen preservation m
   after.preserved[1].surface_index = 2
   assert.equal(preservedProofMatches(before, after), false)
 })
+
+for (const seam of ['persist', 'trace', 'final_owner']) {
+  test(`ordinary receipt close defers a same-owner amendment during ${seam} without consuming it`, async () => {
+    let armed = false
+    let fired = false
+    const amendment = { sender: 'Louis', text: 'Hold the copper step for new owner direction.' }
+    const stage = agent => {
+      fired = true
+      agent.pendingInteractionAmendment = amendment
+      agent.pendingAmendmentConversationSeq = agent.agentContext.conversationSeq
+    }
+    const w = world({ bootstrapFuel: true, onTrace: async ({ row, agent }) => {
+      if (armed && seam === 'trace' && row.event === 'contract.preservation_resolved') { stage(agent); await Promise.resolve() }
+    } })
+    await w.start()
+    const owner = w.agent.captureCheckpointOwner()
+    const calls = w.calls.length
+    const receipt = await w.agent.taskStatusReceipt()
+    w.game.routeReady = true
+    const persist = w.agent.persistState.bind(w.agent)
+    w.agent.persistState = async options => {
+      await persist(options)
+      if (armed && !fired && seam === 'persist' && options?.strict && w.held().execution.preservation_proofs) stage(w.agent)
+    }
+    const assertOwner = w.agent.assertCheckpointOwnerCurrent.bind(w.agent)
+    w.agent.assertCheckpointOwnerCurrent = async (...args) => {
+      const caller = new Error().stack.split('\n')[2]
+      await assertOwner(...args)
+      if (armed && !fired && seam === 'final_owner' && caller.includes('NpcAgentLoop.applyStepClose')) stage(w.agent)
+    }
+    armed = true
+    // The ordinary real completion path owns this receipt; no residual defect is injected.
+    const result = await w.agent.completed()
+    assert.equal(fired, true, 'the intended late-await seam was exercised')
+    assert.equal(w.agent.checkpointOwnerCurrent(owner), true, 'amendment alone does not change checkpoint owner')
+    assert.equal(result.deferred, 'pending_amendment')
+    assert.equal(result.goalStatus, 'active', 'deferral does not cancel or pause the held amendment request')
+    assert.strictEqual(w.agent.currentPendingAmendment(), amendment)
+    assert.equal(w.held().active_step_index, 0)
+    assert.equal(w.game.mutations.length, 1)
+    assert.equal(w.calls.length, calls)
+    assert.equal(w.rows.some(row => row.event === 'step.verified'), false)
+    assert.ok(w.rows.some(row => row.event === 'step.close_deferred' && row.data.reason === 'pending_amendment'))
+    assert.ok(receipt.taskBoard.evidence.some(row => row.kind === 'deterministic_verification'))
+  })
+}
+
+for (const change of ['native_busy', 'pending', 'batch']) {
+  test(`ordinary receipt close refreshes ${change} safety after durable native refinement`, async () => {
+    let armed = false
+    let fired = false
+    const w = world({ bootstrapFuel: true, onTrace: ({ row, agent, game, memory }) => {
+      if (!armed || row.event !== 'contract.preservation_resolved') return
+      fired = true
+      if (change === 'native_busy') game.queueLength = 1
+      if (change === 'batch') agent.batchInFlight = true
+      if (change === 'pending') memory.pendingOperation = () => ({ operation_key: 'new-outstanding-operation' })
+    } })
+    await w.start()
+    const calls = w.calls.length
+    await w.agent.taskStatusReceipt()
+    w.game.routeReady = true
+    armed = true
+    const result = await w.agent.completed()
+    assert.equal(fired, true)
+    assert.equal(w.held().active_step_index, 0)
+    assert.equal(w.game.mutations.length, 1)
+    assert.equal(w.calls.length, calls)
+    assert.equal(w.rows.some(row => row.event === 'step.verified'), false)
+    if (change === 'native_busy') {
+      assert.equal(result.goalStatus, 'paused')
+      assert.ok(w.rows.some(row => row.event === 'contract.preservation_close_refused' && row.data.reason === 'preservation_native_not_idle'))
+    } else assert.equal(result.deferred, change === 'pending' ? 'pending_operation' : 'batch_in_flight')
+  })
+}
+
+for (const change of ['pending', 'batch']) {
+  test(`ordinary close fences late ${change} immediately after its final owner await`, async () => {
+    const w = world({ bootstrapFuel: true })
+    await w.start()
+    const calls = w.calls.length
+    const assertOwner = w.agent.assertCheckpointOwnerCurrent.bind(w.agent)
+    let fired = false
+    w.agent.assertCheckpointOwnerCurrent = async (...args) => {
+      const caller = new Error().stack.split('\n')[2]
+      await assertOwner(...args)
+      if (!fired && caller.includes('NpcAgentLoop.applyStepClose')) {
+        fired = true
+        if (change === 'batch') w.agent.batchInFlight = true
+        else w.memory.pendingOperation = () => ({ operation_key: 'late-pending' })
+      }
+    }
+    const result = await w.agent.completed()
+    assert.equal(fired, true)
+    assert.equal(result.deferred, change === 'pending' ? 'pending_operation' : 'batch_in_flight')
+    assert.equal(w.held().active_step_index, 0)
+    assert.equal(w.game.mutations.length, 1)
+    assert.equal(w.calls.length, calls)
+    assert.equal(w.rows.some(row => row.event === 'step.verified'), false)
+  })
+}

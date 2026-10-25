@@ -11,7 +11,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin } from './contract-obligations.mjs'
-import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof } from './contract-obligation-runtime.mjs'
+import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
@@ -3581,6 +3581,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requestId = this.traceRequest?.id
     const reviewOwner = this.captureCheckpointOwner()
     const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan?.(key), trigger: 'before_planner_review' })
+    if (fresh.completionDeferred) return fresh.completionDeferred
     if (fresh.contractRecovery) return fresh.contractRecovery
     // Contract binding may intentionally cancel this turn after durably pausing
     // the newly active step. Preserve that terminal receipt, but never a result
@@ -8512,17 +8513,34 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { closed: false, reason }
   }
 
+  async deferStepClose(trigger, reason, owner) {
+    await this.traceEvent('step.close_deferred', { request_id: owner.requestTrace?.id, trigger, reason,
+      goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId,
+      disposition: 'settlement_deferred_without_progress_or_request_cancellation' })
+    await this.assertCheckpointOwnerCurrent(owner)
+    const state = this.memory.currentPlan?.(owner.key)
+    return { closed: false, reason, completionDeferred: { deferred: reason, operations: [],
+      plan: state?.plan ?? [], currentStep: state?.current_step ?? 0,
+      goalId: state?.goal_id, goalStatus: state?.status, actorId: this.epoch?.actor_id, epoch: this.epoch?.epoch } }
+  }
+
   async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
     const generation = this.generation // the slice-progress credit below belongs to this lineage only
     const requestId = this.traceRequest?.id
     const closeOwner = this.captureCheckpointOwner()
     const preservation = await verifyPreservationBeforeClose(this)
     await this.assertCheckpointOwnerCurrent(closeOwner)
+    // No await between this last same-owner safety check and synchronous
+    // completion authority. A staged amendment need not change owner identity.
+    const unsafe = stepCloseSettlementUnsafe(this)
+    if (unsafe) return this.deferStepClose(trigger, unsafe, closeOwner)
     if (!preservation.ok) {
       const owner = this.captureCheckpointOwner()
       await this.traceEvent('contract.preservation_close_refused', { request_id: requestId, trigger, reason: preservation.reason,
         goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId })
       await this.assertCheckpointOwnerCurrent(owner)
+      const lateUnsafe = stepCloseSettlementUnsafe(this)
+      if (lateUnsafe) return this.deferStepClose(trigger, lateUnsafe, owner)
       return { closed: false, reason: preservation.reason,
         contractPause: await this.pauseForStepContract({ reason: preservation.reason, owner }) }
     }
@@ -9008,7 +9026,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       source: 'deterministic_completion_contract',
       steeringRecommendation,
     })
-    if (!closed.closed) return { closed: false, reason: closed.reason, state: closed.state, ...(closed.contractPause ? { contractPause: closed.contractPause } : {}), ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}) }
+    if (!closed.closed) return { closed: false, reason: closed.reason, state: closed.state, ...(closed.completionDeferred ? { completionDeferred: closed.completionDeferred } : {}), ...(closed.contractPause ? { contractPause: closed.contractPause } : {}), ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}) }
     const terminalOwner = closed.contractPause ? this.captureCheckpointOwner() : undefined
     await this.traceEvent('plan.step_closed_on_fresh_read', {
       ...base,
@@ -9513,6 +9531,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         state: closed.state ?? planState,
         contract: checkpoint.contract,
         ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}),
+        ...(closed.completionDeferred ? { completionDeferred: closed.completionDeferred } : {}),
         ...(closed.contractPause ? { contractPause: closed.contractPause } : {}),
       }
     }
@@ -12281,6 +12300,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : await this.routeStepCompletionDecision(receipt)
     if (pruneClosedProductionRecords(this.memory)) await this.persistState({ strict: true })
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
+    if (stepCompletion?.completionDeferred) return stepCompletion.completionDeferred
     if (stepCompletion?.contractPause) return stepCompletion.contractPause
     if (!pendingAmendment && !stepCompletion?.verified) {
       const corrected = await recoverContractObligations(this, { trigger: 'native_completion' })
@@ -16604,6 +16624,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw error
       }
       if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+      if (fresh.completionDeferred) return fresh.completionDeferred
       if (fresh.contractRecovery) return fresh.contractRecovery
       if (fresh.contractPause) return fresh.contractPause
       if (fresh.closed) return this.continueAfterFreshStepClose(fresh, plan, before)
