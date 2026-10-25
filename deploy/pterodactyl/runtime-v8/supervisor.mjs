@@ -3250,6 +3250,13 @@ export class Session {
   // its own. The token is checked after every await and immediately before the attempt is counted and before recovery starts.
   async runModelRecoverableResume(correlation, attempt, token = undefined) {
     const key = this.planKey()
+    const diagnosticAgent = this.agent
+    const diagnosticRequestId = this.agent.traceRequest?.id
+    let recoveryRequestId
+    const traceCancelled = data => correlation.boundary_key
+      ? diagnosticAgent.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0, event: 'recovery.auto_resume_cancelled',
+        request_id: recoveryRequestId ?? diagnosticRequestId, actor_id: correlation.actor_id, epoch: correlation.epoch, data })
+      : this.traceRecovery('recovery.auto_resume_cancelled', data)
     if (!token) {
       token = { cancelled: false, reason: undefined }
       this.modelResume = { token, timer: null, correlation, attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }
@@ -3273,7 +3280,7 @@ export class Session {
         || this.agent.requestAdmissionOwner !== boundaryAdmission || this.agent.pendingInteractionAmendment !== boundaryAmendment)
     const abortCancelled = async () => {
       finish()
-      await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
+      await traceCancelled({ ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
       return null
     }
     if (cancelled()) return abortCancelled()
@@ -3281,16 +3288,17 @@ export class Session {
     if (cancelled()) return abortCancelled()
     if (stale) {
       finish()
-      await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: stale })
+      await traceCancelled({ ...traceBase, reason: stale })
       return null
     }
     // Count the attempt BEFORE it runs, in durable plan state: a crash mid-attempt still spent it. No await between the last
     // cancel check and the (synchronous) count.
     const requestId = `recovery_${Date.now().toString(36)}`
+    recoveryRequestId = requestId
     const counted = this.agent.memory.recordAutoResumeStarted?.(key, { ...correlation, request_id: requestId })
     if (!counted?.recorded) {
       finish()
-      await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'plan_identity_changed' })
+      await traceCancelled({ ...traceBase, reason: 'plan_identity_changed' })
       return null
     }
     let result = null
@@ -3312,7 +3320,7 @@ export class Session {
         isCancelled: cancelled,
         reactivate: { pause_classes: [PAUSE_CLASS.MODEL_RECOVERABLE], identity: correlation, actor: { actor_id: correlation.actor_id, epoch: correlation.epoch }, onResumed: state => this.syncTaskBoardUi(state) },
       })
-      if (cancelled()) await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
+      if (cancelled()) await traceCancelled({ ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
     }
     finally {
       finish()

@@ -732,3 +732,36 @@ for (const cut of ['before_claim', 'after_claim', 'request_owned']) {
     } finally { stopWake(session) }
   })
 }
+
+test('late claimed-wake cancellation diagnostic cannot charge or sequence a newer pretrace intake', async () => {
+  const w = orphanSession()
+  await w.session.queueEvent(async () => null); await settle(w.session)
+  const pending = w.session.modelResume
+  assert.ok(pending)
+  clearTimeout(pending.timer); pending.timer = null
+  let release, enter
+  const held = new Promise(resolve => { release = resolve })
+  const entered = new Promise(resolve => { enter = resolve })
+  const persist = w.agent.persistState.bind(w.agent)
+  let first = true
+  w.agent.persistState = async options => { if (options?.strict && first) { first = false; enter(); await held }; return persist(options) }
+  const fired = w.session.fireModelResume(pending.token)
+  await entered
+  const token = { phase: 'intake', held: true }
+  w.agent.requestAdmissionOwner = token
+  w.agent.traceRequest = { id: 'new_question_before_base', seq: 0 }
+  w.agent.baseMessages = [{ role: 'user', content: 'newer request prefix' }]
+  const trace = structuredClone(w.agent.traceRequest)
+  const state = w.memory.snapshot()
+  const base = structuredClone(w.agent.baseMessages)
+  const budgets = [w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining]
+  try {
+    release(); await fired; await settle(w.session)
+    assert.deepEqual(w.agent.traceRequest, trace)
+    assert.equal(w.agent.requestAdmissionOwner, token)
+    assert.deepEqual(w.agent.baseMessages, base)
+    assert.deepEqual(w.memory.snapshot(), state)
+    assert.deepEqual([w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining], budgets)
+    assert.equal(w.calls(), 0)
+  } finally { stopWake(w.session) }
+})
