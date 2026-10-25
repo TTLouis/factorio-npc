@@ -54,7 +54,7 @@
     {
       "path": "prelaunch-cold-check.mjs",
       "av_sha256": "c6f4556fab7f66e96b7f5025dfcfa58c4af55a49296bf49af562a6faecca32c1",
-      "template_sha256": "f71431869d8e1975eda1373d0f4e7f7ba324617955e6342e53eb021056a9c6d2"
+      "template_sha256": "d3db3dc905f6a8419e8c5d874951c2a5a5f8dfc3eef0aeffec60f93d5e8d8d7f"
     },
     {
       "path": "protocol3-provider-preflight.mjs",
@@ -99,7 +99,7 @@
     {
       "path": "run-live.mjs",
       "av_sha256": "4fc26c82751c83db6de9542c68e76e33129951a60222c8d88b906e829913ed19",
-      "template_sha256": "4fe3fa343575b2295046c12fc56499b5066ff6241dc73c3e184b8011c3d526b1"
+      "template_sha256": "6ecbdc9365630036cb7d24374d31fe9a0f91b5d817fa09cb29aa63530ac5ee73"
     },
     {
       "path": "runner-terminal.mjs",
@@ -149,7 +149,7 @@
     {
       "path": "trial-supervisor-stop.mjs",
       "av_sha256": "edad9de455685f7ebc3b179d7fe0efe60c16dcb005d5e84310309efbd73a7943",
-      "template_sha256": "6830846cae1d48f1c71e9002ba6d6884d3b137033a92a6000f5692c18fa6ec2e"
+      "template_sha256": "8f51b8b86a49d7295f51423c7f5658bfcadd0ca2d1dc1705a53a40d478d0000e"
     },
     {
       "path": "verify-deployment.mjs",

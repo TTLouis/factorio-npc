@@ -3,22 +3,35 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { stopTrialIfTerminal } from './trial-stop-policy.mjs'
 import { operatorStopReason } from './pair-stop-policy.mjs'
+import {withLaunchGate} from './launch-control.mjs'
 
 // External E2E supervisor entry point. The identity is written once by the
 // runner, not inferred from an old pause message or selected by the model.
 export async function supervisorStop({ rcon, root, snapshotCommand, expectedRunId, now = Date.now }) {
   const logs = path.join(root, 'logs')
-  const identity = JSON.parse(await fs.readFile(path.join(logs, 'e2e-trial-identity.json'), 'utf8'))
-  if (identity.run_id !== expectedRunId || !identity.goal_id || !identity.actor_id) throw new Error('Trial identity mismatch')
+  const identity = JSON.parse(await fs.readFile(path.join(logs, 'e2e-trial-identity.json'), 'utf8').catch(async error=>{
+    if(error.code!=='ENOENT')throw error
+    return fs.readFile(path.join(logs,'e2e-launch-control.json'),'utf8').catch(error=>{
+      if(error.code!=='ENOENT')throw error
+      return fs.readFile(path.join(logs,'prelaunch-cold-proof.json'),'utf8')
+    })
+  }))
+  if (identity.run_id !== expectedRunId || !identity.actor_id) throw new Error('Trial/launch identity mismatch')
   const requested=JSON.parse(await fs.readFile(path.join(identity.helper_root,'operator-stop-request.json'),'utf8').catch(()=>'null'))
-  const operatorReason=operatorStopReason(requested,{runId:expectedRunId,goalId:identity.goal_id,actorId:identity.actor_id})
+  const operatorReason=operatorStopReason(requested,{runId:expectedRunId,goalId:identity.goal_id,actorId:identity.actor_id,source:identity.source,epoch:identity.epoch,launchControlId:identity.control_id})
   if(operatorReason) {
+    return withLaunchGate(identity.helper_root,async()=>{
+    const state=JSON.parse(await fs.readFile(path.join(root,'.sgluna/npc-state.json'),'utf8').catch(error=>{if(error.code==='ENOENT')return '{}';throw error}))
+    const currentGoal=state.planning_states?.find(row=>row.state?.goal)?.state.goal.goal_id
+    if(identity.goal_id&&currentGoal&&identity.goal_id!==currentGoal)throw Error('Stop goal identity changed')
     await rcon.command('/silent-command if remote.interfaces.sgluna_tick_sprint then local g=remote.call("sgluna_tick_sprint","status");if g.binding then local s=remote.call("sgluna_tick_sprint","seal","external_operator_stop");assert(s.speed==1 and not s.lease) end end')
     await rcon.command('!luna stop')
-    const decision={action:'stop',result:operatorReason,run_id:expectedRunId,goal_id:identity.goal_id,actor_id:identity.actor_id,strict_save_confirmation:'runner must independently obtain fresh paired receipts and save'}
+    const decision={action:'stop',result:operatorReason,run_id:expectedRunId,goal_id:identity.goal_id??currentGoal??null,actor_id:identity.actor_id,launch_phase:identity.phase??'goal',strict_same_goal_confirmation:false,strict_save_confirmation:'unconfirmed: runner must independently obtain fresh same-goal paired receipts and save; absent goal stays incomplete'}
     await fs.writeFile(path.join(logs,'e2e-supervisor-stop-decision.json'),JSON.stringify(decision,null,2))
     return decision
+    })
   }
+  if(!identity.goal_id)return {action:'continue',run_id:expectedRunId,phase:'intake_pending',goal_id:null}
   const decision = await stopTrialIfTerminal({ policy: { speedPolicy: identity.speed_policy ?? { profile: 'normal' } }, readCurrent: async () => {
     const native = JSON.parse(await rcon.command(snapshotCommand))
     const names = (await fs.readdir(logs)).filter(name => /^sgluna-behavior\.jsonl(?:\.\d+)?$/.test(name))

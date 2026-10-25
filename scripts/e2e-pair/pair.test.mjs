@@ -27,7 +27,7 @@ test('two frozen worlds differ in seed and all host resources, share exactly one
 test('frozen map seed cannot drift to default, peer or string value',()=>{
   assert.doesNotThrow(()=>assertNativeSeed({seed:2026102501},2026102501))
   for(const seed of [undefined,0,2026102502,'2026102501'])assert.throws(()=>assertNativeSeed({seed},2026102501))
-  assert.throws(()=>render('@@MISSING@@',{}));assert.equal(render('@@A@@ @@A@@',{A:42}),'42 42')
+  assert.throws(()=>render('@@MISSING@@',{}));assert.throws(()=>render('@@MISSING2@@',{}));assert.equal(render('@@A@@ @@A2@@',{A:42,A2:43}),'42 43')
 })
 test('lane A ending never permits tag teardown while B remains; wrong capability/tag/resources retain it',()=>{
   const input={pair,ledger:cap,lanes,containers:[],networks:[],volumes:[],tagId:pair.imageId}
@@ -78,7 +78,7 @@ test('real freezer is candidate agnostic, input-only and immutable; generated la
       assert.equal(JSON.parse(read(lane.id,'map-gen-settings.json')).seed,lane.seed)
       const runner=read(lane.id,'run-live.mjs')
       assert.ok(runner.includes(`s.seed!==${lane.seed}`))
-      assert.ok(runner.indexOf('before = assertSeed')<runner.indexOf('const starter ='))
+      assert.ok(runner.indexOf('before = assertSeed')<runner.indexOf('giveStarter:'))
       for(const name of ['preflight.mjs','supervisor-preflight.mjs','prelaunch-cold-check.mjs'])assert.ok(read(lane.id,name).includes(String(lane.seed)),name)
       assert.ok(runner.includes("const constructionLimitMs = 60 * 60000"))
       const cleanup=read(lane.id,'finish-cleanup.ps1')
@@ -86,7 +86,7 @@ test('real freezer is candidate agnostic, input-only and immutable; generated la
       assert.ok(cleanup.includes(`label=owner.run=${lane.runId}`))
       for(const name of files(path.join(input.output,lane.id))) {
         if(name.startsWith('independent-native/'))continue
-        assert.doesNotMatch(read(lane.id,name),/@@[A-Z_]+@@|red-automation-live-2026-10-25av|red-automation-20261025av|run-av-/)
+        assert.doesNotMatch(read(lane.id,name),/@@[A-Z][A-Z0-9_]*@@|red-automation-live-2026-10-25av|red-automation-20261025av|run-av-/)
       }
       assert.deepEqual(fs.readdirSync(path.join(input.output,lane.id,'data')),['logs','saves'])
       const manifest=JSON.parse(read(lane.id,'helper-manifest.json'))
@@ -94,6 +94,25 @@ test('real freezer is candidate agnostic, input-only and immutable; generated la
     }
     const manifest=JSON.parse(fs.readFileSync(path.join(input.output,'pair-manifest.json')))
     for(const e of manifest)assert.equal(sha(fs.readFileSync(path.join(input.output,e.path))),e.sha256)
+  } finally {fs.rmSync(input.temp,{recursive:true,force:true})}
+})
+
+test('candidate Compose copies survive mutable working files and actual stack wrapper resolves only frozen paths',()=>{
+  const input=fixture()
+  try {
+    const older=execFileSync('git',['-C',repo,'rev-parse','HEAD^'],{encoding:'utf8'}).trim()
+    assert.notEqual(older,candidate)
+    const working=path.join(input.temp,'working');fs.mkdirSync(working)
+    const gitdir=execFileSync('git',['-C',repo,'rev-parse','--absolute-git-dir'],{encoding:'utf8'}).trim().replaceAll('\\','/')
+    fs.writeFileSync(path.join(working,'.git'),`gitdir: ${gitdir}\n`)
+    fs.writeFileSync(path.join(working,'compose.yml'),'WORKING_TREE_DRIFT_BEFORE_FREEZE')
+    fs.writeFileSync(path.join(working,'compose.e2e.yml'),'WORKING_TREE_DRIFT_BEFORE_FREEZE')
+    freezePair({...input,repo:working,candidate:older,nativeBuildSource:older})
+    for(const lane of ['a','b'])for(const name of ['compose.yml','compose.e2e.yml'])assert.equal(
+      fs.readFileSync(path.join(input.output,lane,'frozen-compose',name),'utf8'),
+      execFileSync('git',['-C',repo,'show',`${older}:${name}`],{encoding:'utf8'}))
+    const out=execFileSync('pwsh',['-NoProfile','-File',path.join(kitRoot,'stack-freeze.test.ps1'),'-Fixture',input.output,'-ExternalRepo',working],{encoding:'utf8'})
+    assert.match(out,/PASS actual frozen stack/)
   } finally {fs.rmSync(input.temp,{recursive:true,force:true})}
 })
 test('wrong native compile source, path set or digest is rejected before writing a pair',()=>{

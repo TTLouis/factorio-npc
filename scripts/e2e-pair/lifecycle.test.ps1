@@ -66,7 +66,7 @@ function global:docker {
 Check ($LASTEXITCODE -eq 1) 'Injected runner/emergency failure lost failure status'
 $finished=Get-Content (Join-Path $Fixture 'a/wrapper-finished.json') -Raw|ConvertFrom-Json
 Check ($finished.failed -eq $true -and $finished.runId -eq $pair.lanes[0].runId) 'Failed wrapper claimed a pass or mixed lane identity'
-Check (@($global:pairedKitDockerCalls|Where-Object {$_ -like '*compose -p red-automation-20261025aw-a*down --volumes'}).Count -eq 1) 'Runner exception did not execute exact lane compose cleanup'
+Check (@($global:pairedKitDockerCalls|Where-Object {$_ -like '*compose *-p red-automation-20261025aw-a*down --volumes'}).Count -eq 1) 'Runner exception did not execute exact lane compose cleanup'
 Check (Test-Path (Join-Path $Fixture 'a/emergency-failure.txt')) 'Missing stop/save failure evidence'
 Check (-not(Test-Path (Join-Path $Fixture 'b/wrapper-finished.json'))) 'A failure advanced B lifecycle'
 

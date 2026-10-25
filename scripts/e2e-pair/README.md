@@ -9,6 +9,10 @@ This kit does not authorize a trial, provider retry, publication or deployment.
 Preparation is candidate agnostic. The contract-obligation repair must be
 reviewed and integrated before the parent selects the next runtime candidate.
 Do not freeze the old AV runtime merely because this kit was developed from it.
+The separately reproduced goal-admission cancellation fence must also be fixed
+and checked on the combined candidate: the old runtime can start a provider
+request after an aborted steering call. Kit tests prove control dispatch and
+intake ordering; they do not prove that old runtime safe to launch.
 
 ## Provenance and contracts
 
@@ -51,6 +55,14 @@ before use and verifies absence in `finally`. It creates no live world, model
 request, tunnel, recorder or image. Never use its fake native tree for a run.
 The second command is the repository's unchanged required offline gate.
 
+The R1-R3 follow-up also executes the complete runner entry point under explicit
+filesystem/RCON substitutes, and the actual top-level prepare/launch scripts with
+resource-boundary substitutes. It injects owner/stale/floor stops before intake
+and while LLM/Jev work is pending without a persisted goal; no-goal confirmations
+remain incomplete. Immutable `ff98d3e5` negative controls reproduce all three
+review findings. The original runtime cancellation defect has its own real-agent
+offline reproduction and remains a separate combined-candidate launch gate.
+
 Coverage includes resource/port isolation, map seed drift/refusal, source/native
 manifest mismatch, immutable output, each lane's fresh stop/save sequence,
 stale/floor/ambiguous quota evidence, runner/emergency exceptions, failed Docker
@@ -86,6 +98,12 @@ contents before supplying these inputs. Record online published verification and
 all gate/build/payload identities in the parent's source-freeze evidence. The
 freezer derives installer-enumerated runtime hashes and prompt hash directly with
 `git show` from `candidate`; it checks the complete native compile file set/hash.
+It also copies the candidate's exact `compose.yml` and `compose.e2e.yml` into each
+lane's `frozen-compose/`. Stack up/down use only these manifest-listed copies and
+the lane overlay, with immediate embedded hash checks. `--project-directory` is
+the lane directory, `/data` and `/e2e` mounts are absolute, and the overlay resets
+the build section because only the immutable prebuilt image may be used. Later
+changes to the source checkout's Compose files cannot redirect setup or cleanup.
 
 ```powershell
 node scripts/e2e-pair/pair.mjs freeze test-results/freeze-input.json
@@ -134,6 +152,13 @@ or supply absolute paths. They are operating instructions, not preparation tests
    preparation. Evidence expires after 180 seconds. Exactly one weekly window,
    `get_usage_limits`, parent ownership and pair identity are mandatory. Reserve
    remains 5%; live stop is 7% across the shared account, not 7% per lane.
+   Preparation holds an exclusively created `controller.lock` and records the
+   exact `pair-prepared.json` ownership capability on success. A later launch
+   atomically acquires that controller capability and records a single launch
+   attempt before checking quota/preflight. Refusal cleans both owned prepared
+   lanes, even if the first cleanup fails. An existing controller or lifecycle
+   attempt makes a duplicate invocation refuse without touching its resources.
+   A stale lock is evidence requiring owner inspection; the kit never steals it.
 
 2. Preparation runs native offline `--create --map-gen-settings` separately for
    the explicit seeds, with the independently compiled candidate mod. It then
@@ -158,6 +183,14 @@ or supply absolute paths. They are operating instructions, not preparation tests
    A successful wrapper exit is not gameplay success. Optional peer cancellation
    requires the other lane's native success result, measurement proof and fresh
    sample reevaluation; mere placement or claimed completion cannot trigger it.
+   Before the starter, the runner writes `e2e-launch-control.json` with immutable
+   run/source/actor/epoch/control identity. Host stop writers and the actual intake
+   boundary share an exclusive launch gate. Stop requests can therefore cancel
+   owned pending intake immediately without waiting for goal persistence. The
+   control path reads durable identity/state and issues stop commands; it adds no
+   native world observer. Once a goal is present, the original strict same-goal
+   receipt/save contract applies. No-goal stop evidence stays explicitly
+   incomplete and cannot become a fake strict confirmation or gameplay pass.
 
 4. Parent stop commands preserve distinct results:
 

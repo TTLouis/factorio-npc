@@ -43,7 +43,7 @@ export function assertNativeSeed(native, expected) {
 }
 
 export function render(text, bindings) {
-  return text.replace(/@@([A-Z_]+)@@/g, (_all, key) => {
+  return text.replace(/@@([A-Z][A-Z0-9_]*)@@/g, (_all, key) => {
     check(Object.hasOwn(bindings, key), `Unknown template binding ${key}`)
     return String(bindings[key])
   })
@@ -81,6 +81,8 @@ export function freezePair({ repo, output, nativeDir, nativeManifest, nativeBuil
   for (const e of provenance.verified_baseline_inputs) check(sha(fs.readFileSync(path.join(kitRoot, 'templates', e.path))) === e.sha256, `Historical baseline fixture changed: ${e.path}`)
   const expectedRuntime = runtimeManifest(repo, pair.candidate)
   const promptHash = hashText(git(repo, 'show', `${pair.candidate}:packages/agent/src/llm/prompt.md`))
+  const composeBase = git(repo, 'show', `${pair.candidate}:compose.yml`)
+  const composeE2e = git(repo, 'show', `${pair.candidate}:compose.e2e.yml`)
   fs.mkdirSync(output, { recursive: true })
   writeJson(path.join(output, 'pair.json'), pair)
   for (const lane of pair.lanes) {
@@ -88,7 +90,9 @@ export function freezePair({ repo, output, nativeDir, nativeManifest, nativeBuil
     const bindings = { RUN_ID: lane.runId, PROJECT: lane.project, RESOURCE_PREFIX: lane.resourcePrefix,
       SAVE_NAME: lane.saveName, CANDIDATE: pair.candidate, RECORDER_PORT: lane.recorderPort, TUNNEL_PORT: lane.tunnelPort,
       SEED: lane.seed, IMAGE_ID: pair.imageId, GAME_PORT: lane.gamePort, RCON_HOST_PORT: lane.rconHostPort,
+      COMPOSE_BASE_SHA: sha(composeBase), COMPOSE_E2E_SHA: sha(composeE2e),
       LANE: lane.id, REPO: path.resolve(repo).replaceAll('\\', '/'), EVIDENCE: path.resolve(root).replaceAll('\\', '/') }
+    bindings.LIVE_COMPOSE_SHA = sha(render(fs.readFileSync(path.join(kitRoot, 'templates/live.compose.yml'), 'utf8'), bindings))
     for (const file of files(path.join(kitRoot, 'templates'))) {
       write(path.join(root, file), render(fs.readFileSync(path.join(kitRoot, 'templates', file), 'utf8'), bindings))
     }
@@ -99,6 +103,8 @@ export function freezePair({ repo, output, nativeDir, nativeManifest, nativeBuil
     writeJson(path.join(root, 'expected-native-mod.json'), expectedNative)
     writeJson(path.join(root, 'lane.json'), { ...lane, pairId: pair.pairId, candidate: pair.candidate, imageId: pair.imageId })
     writeJson(path.join(root, 'map-gen-settings.json'), { seed: lane.seed })
+    write(path.join(root, 'frozen-compose/compose.yml'), composeBase)
+    write(path.join(root, 'frozen-compose/compose.e2e.yml'), composeE2e)
     write(path.join(root, 'proxy-tunnel/target-port.txt'), lane.tunnelPort + '\n')
     fs.mkdirSync(path.join(root, 'data/logs'), { recursive: true })
     fs.mkdirSync(path.join(root, 'data/saves'), { recursive: true })

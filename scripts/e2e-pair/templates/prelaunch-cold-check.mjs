@@ -32,7 +32,7 @@ try {
   const jev=await count('sgluna-decision.jsonl','decision.request');
   assert.equal(provider,0);assert.equal(jev,0);
   const prior=JSON.parse(await fs.readFile('/data/logs/supervisor-preflight-proof.json','utf8'));assert.equal(native.actor_id,prior.actor_id);assert.equal(native.seed,prior.seed);
-  const proof={at:new Date().toISOString(),actor_id:native.actor_id,seed:native.seed,provider_requests:provider,jev_requests:jev,starter_given:extra.starter_given,native_full_idle:true,goal:null,board:null,humans:0,speed:1,inventory_empty:true};
+  const proof={at:new Date().toISOString(),run_id:'@@RUN_ID@@',source:'@@CANDIDATE@@',epoch:native.epoch,actor_id:native.actor_id,helper_root:'/e2e',phase:'prelaunch',seed:native.seed,provider_requests:provider,jev_requests:jev,starter_given:extra.starter_given,native_full_idle:true,goal:null,board:null,humans:0,speed:1,inventory_empty:true};
   await fs.writeFile('/data/logs/prelaunch-cold-proof.json',JSON.stringify(proof,null,2));
   console.log(JSON.stringify(proof));
 }finally{rcon.close();}

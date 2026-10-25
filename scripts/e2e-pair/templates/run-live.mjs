@@ -3,6 +3,7 @@ import { measurementReady, measureFactory, topologyReviewApproved } from './auto
 import { issueAndConfirmStrictStop, quiesceAndSave, stopStateConfirmed, waitForStop } from './runner-terminal.mjs';
 import { trialStopDecision } from './trial-stop-policy.mjs';
 import { operatorStopReason } from './pair-stop-policy.mjs';
+import {beginColdIntake,readLaunchStop} from './launch-control.mjs';
 import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -49,7 +50,9 @@ let before;
 let last;
 let goalId;
 let pausedSince = null;
+let launchControl;
 const requestedStop=async()=>{
+  if(launchControl)return readLaunchStop('/e2e',launchControl,goalId);
   const request=JSON.parse(await fsp.readFile('/e2e/operator-stop-request.json','utf8').catch(()=>'null'));
   if(request)return operatorStopReason(request,{runId,goalId,actorId:before?.actor_id});
   const early=(await fsp.readFile('/e2e/stop-before-admission','utf8').catch(()=>'')).trim();
@@ -67,11 +70,13 @@ try {
   if (before.humans!==0 || before.speed!==1 || !empty || before.red_unlocked || before.green_researched || before.board || machineCount>0) throw Error('Fresh-world precondition failed');
   if (await fsp.stat('/data/saves/@@SAVE_NAME@@.zip').catch(()=>null)) throw Error('paired lane checkpoint already exists before objective submission');
   if(await fsp.stat('/e2e/stop-before-admission').catch(()=>null))throw Error('Owner stopped lane before starter/objective admission');
-  const starter = await json('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(not storage.luna_autonomy_starter_given,"Starter already given"); assert(#a.get_main_inventory().get_contents()==0,"Initial inventory nonempty"); local given={}; for n,c in pairs({["iron-plate"]=8,["burner-mining-drill"]=1,["stone-furnace"]=1,["pistol"]=1,["firearm-magazine"]=10}) do given[n]=a.insert{name=n,count=c}; assert(given[n]==c,"Incomplete starter") end; storage.luna_autonomy_starter_given=true; storage.airi_task_board_ui_inputs={}; rcon.print(helpers.table_to_json({starter=given}))');
+  const intake=await beginColdIntake({root:'/e2e',logs:root,identity:{run_id:runId,source,actor_id:before.actor_id,epoch:before.epoch,started_at:started,speed_policy:speedPolicy,construction_limit_ms:constructionLimitMs},giveStarter:()=>json('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(not storage.luna_autonomy_starter_given,"Starter already given"); assert(#a.get_main_inventory().get_contents()==0,"Initial inventory nonempty"); local given={}; for n,c in pairs({["iron-plate"]=8,["burner-mining-drill"]=1,["stone-furnace"]=1,["pistol"]=1,["firearm-magazine"]=10}) do given[n]=a.insert{name=n,count=c}; assert(given[n]==c,"Incomplete starter") end; storage.luna_autonomy_starter_given=true; storage.airi_task_board_ui_inputs={}; rcon.print(helpers.table_to_json({starter=given}))'),prepareIntake:async starter=>{
   await fsp.writeFile(path.join(root,'e2e-contract.json'),JSON.stringify({started:new Date(started).toISOString(),model:process.env.OPENAI_MODEL,planner_model: 'gpt-6.1-sol',executor_model: 'gpt-6-luna',jev_enabled:true,construction_profile:speedPolicy,sprint_limits:TICK_SPRINT,objective,starter:starter.starter,stop_conditions:["native_automated_1_red_per_game_minute","authoritative_terminal_stop_policy","weekly_remaining_7_percent"],policy_reserve_remaining_percent:5,live_stop_remaining_percent:7,usage_window_duration_minutes:10080,max_provider_calls:null,max_decision_calls:null,operator_gameplay_actions_after_starter:0,corrective_prompts:0,observer_connections_allowed:false,measurement:{wall_minutes:5,game_speed:2,minimum_game_minutes:10,minimum_new_red_packs:10,red_per_game_minute:1,ai_mutations:false,enemy_removal:true,enemy_expansion:false,require_upstream_native_production:true,topology_review_required:true}},null,2));
   console.log(JSON.stringify({event:'trial.started',actor:before.actor_id,seed:before.seed,starter:starter.starter,objective}));
   await fsp.writeFile(path.join(root,'e2e-started.txt'),new Date().toISOString());
-  console.log(await rcon.command(objective));
+  },submitObjective:()=>rcon.command(objective)});
+  launchControl=intake.control;
+  console.log(intake.response);
   for (let n=0; ; n++) {
     last = assertSeed(await json(snapshot));
     const events = await behavior();
@@ -111,7 +116,7 @@ try {
       if (canonical.goal.goal_id !== goalId) { result='goal_identity_changed';break; }
     }
     if (goalId && !await fsp.stat(path.join(root,'e2e-trial-identity.json')).catch(()=>null)) {
-      await fsp.writeFile(path.join(root,'e2e-trial-identity.json'),JSON.stringify({run_id:runId,goal_id:goalId,actor_id:before.actor_id,started_at:started,speed_policy:speedPolicy,construction_limit_ms:constructionLimitMs,helper_root:'/e2e'},null,2),{flag:'wx'});
+      await fsp.writeFile(path.join(root,'e2e-trial-identity.json'),JSON.stringify({...launchControl,run_id:runId,goal_id:goalId,actor_id:before.actor_id,started_at:started,speed_policy:speedPolicy,construction_limit_ms:constructionLimitMs,helper_root:'/e2e'},null,2),{flag:'wx'});
     }
     const operatorReason=await requestedStop();
     if(operatorReason){result=operatorReason;break;}
@@ -197,6 +202,9 @@ try {
       throw Error('Fresh stable paired lane checkpoint was not confirmed');
     },
   });
+} catch(error) {
+  if(error.code==='launch_canceled')await fsp.writeFile(path.join(root,'e2e-launch-canceled.json'),JSON.stringify({run_id:runId,result:error.reason,no_goal:true,strict_same_goal_confirmation:false,intake_submitted:false},null,2));
+  throw error;
 } finally {
   rcon.close();
 }

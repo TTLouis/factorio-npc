@@ -1,5 +1,8 @@
 services:
   sgluna-factorio:
+    # Runtime images are built once by the parent. Relocated source build
+    # contexts must never be consumed by either lane's up/down command.
+    build: !reset null
     image: "@@IMAGE_ID@@"
     restart: "no"
     labels:

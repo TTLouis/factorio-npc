@@ -5,6 +5,31 @@ function Assert-PairFrozen {
     if((Get-FileHash (Join-Path $PSScriptRoot $e.path) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $e.sha256){throw "Frozen pair input changed: $($e.path)"}
   }
 }
+function Enter-PairController($Pair,[string]$Purpose) {
+  $file=Join-Path $PSScriptRoot 'controller.lock'
+  $token=[guid]::NewGuid().ToString('N')
+  # Exclusive create is the ownership transition. A duplicate, stale or active
+  # lock grants no cleanup authority; the owner must inspect it explicitly.
+  $stream=[IO.File]::Open($file,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)
+  try {
+    $record=@{pairId=$Pair.pairId;candidate=$Pair.candidate;token=$token;purpose=$Purpose;pid=$PID;startedTicks=(Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks}
+    $bytes=[Text.Encoding]::UTF8.GetBytes(($record|ConvertTo-Json -Compress))
+    $stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)
+    return @{stream=$stream;file=$file;token=$token}
+  } catch {$stream.Dispose();throw}
+}
+function Exit-PairController($Controller) {
+  if(-not $Controller){return}
+  $Controller.stream.Dispose()
+  $record=Get-Content $Controller.file -Raw|ConvertFrom-Json
+  if($record.token -ne $Controller.token){throw 'Controller capability changed; refusing lock removal'}
+  Remove-Item -LiteralPath $Controller.file
+}
+function Assert-PreparedOwnership($Pair) {
+  $prepared=Get-Content (Join-Path $PSScriptRoot 'pair-prepared.json') -Raw|ConvertFrom-Json
+  if($prepared.pairId -ne $Pair.pairId -or $prepared.candidate -ne $Pair.candidate -or $prepared.imageId -ne $Pair.imageId){throw 'Prepared pair capability mismatch'}
+  foreach($lane in $Pair.lanes){if(@($prepared.lanes|Where-Object {$_.id -eq $lane.id -and $_.runId -eq $lane.runId}).Count -ne 1){throw 'Prepared lane capability mismatch'}}
+}
 function Pair-DockerInventory([string[]]$Arguments) {
   $rows=@(& docker @Arguments)
   if($LASTEXITCODE -ne 0){throw 'Docker inventory failed; cleanup unverified'}
@@ -20,22 +45,31 @@ function Read-QuotaDecision($Pair) {
   if($q.remainingPercent -le $Pair.sharedQuota.stopRemainingPercent){return 'stop_both_shared_quota_floor'}
   return 'continue'
 }
+function Invoke-LaunchControlGate([string]$Root,[scriptblock]$Action) {
+  $file=Join-Path $Root 'launch-control.lock';$token=[guid]::NewGuid().ToString('N');$deadline=[DateTime]::UtcNow.AddSeconds(20);$stream=$null
+  while(-not $stream){try{$stream=[IO.File]::Open($file,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)}catch [IO.IOException]{if([DateTime]::UtcNow -ge $deadline){throw 'Launch control gate unavailable; refusing stale takeover'};Start-Sleep -Milliseconds 10}}
+  $bytes=[Text.Encoding]::UTF8.GetBytes($token);$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)
+  try {& $Action} finally {$stream.Dispose();if((Get-Content $file -Raw) -ne $token){throw 'Launch control gate ownership changed'};Remove-Item -LiteralPath $file}
+}
 function Write-LaneStop($Lane,[string]$Reason,[string]$PeerRunId='',[string]$PeerAcceptanceSha256='') {
   $root=Join-Path $PSScriptRoot $Lane.id
+  Invoke-LaunchControlGate $root {
   $identityFile=Join-Path $root 'data/logs/e2e-trial-identity.json'
+  $scope='goal'
   if(-not(Test-Path $identityFile)) {
-    # Pre-admission stops use a distinct marker read before the first starter/goal.
-    [IO.File]::WriteAllText((Join-Path $root 'stop-before-admission'),$Reason)
-    return
+    $identityFile=Join-Path $root 'data/logs/e2e-launch-control.json';$scope='launch'
+    if(-not(Test-Path $identityFile)){$identityFile=Join-Path $root 'data/logs/prelaunch-cold-proof.json';$scope='prelaunch'}
+    if(-not(Test-Path $identityFile)){[IO.File]::WriteAllText((Join-Path $root 'stop-before-admission'),$Reason);return}
   }
   $identity=Get-Content $identityFile -Raw|ConvertFrom-Json
-  if($identity.run_id -ne $Lane.runId -or -not $identity.goal_id -or -not $identity.actor_id){throw 'Lane stop identity mismatch'}
-  $request=@{runId=$Lane.runId;goalId=$identity.goal_id;actorId=$identity.actor_id;reason=$Reason;peerRunId=$PeerRunId;peerAcceptanceSha256=$PeerAcceptanceSha256;at=[DateTime]::UtcNow.ToString('o')}
+  if($identity.run_id -ne $Lane.runId -or -not $identity.actor_id -or ($scope -eq 'goal' -and -not $identity.goal_id)){throw 'Lane stop identity mismatch'}
+  $request=@{scope=$scope;runId=$Lane.runId;goalId=$identity.goal_id;actorId=$identity.actor_id;source=$identity.source;epoch=$identity.epoch;launchControlId=$identity.control_id;reason=$Reason;peerRunId=$PeerRunId;peerAcceptanceSha256=$PeerAcceptanceSha256;at=[DateTime]::UtcNow.ToString('o')}
   $file=Join-Path $root 'operator-stop-request.json'
   if(Test-Path $file){$prior=Get-Content $file -Raw|ConvertFrom-Json;if($prior.reason -ne $Reason){return}}
   $temp=$file+'.new'
   [IO.File]::WriteAllText($temp,($request|ConvertTo-Json))
   Move-Item -LiteralPath $temp -Destination $file -Force
+  }
 }
 function Emergency-LaneStop($Lane) {
   $root=Join-Path $PSScriptRoot $Lane.id

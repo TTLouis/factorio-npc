@@ -7,14 +7,21 @@ if(Test-Path $evidence){throw 'Evidence directory already exists; keep prior att
 New-Item -ItemType Directory $evidence -Force|Out-Null
 Write-Output ('Local evidence: '+$evidence)
 # Built-in Node only: deterministic freezer/schema and file tests; no host package tools.
-& node --test (Join-Path $PSScriptRoot 'pair.test.mjs') *> (Join-Path $evidence 'pair-tests.log')
+& node --experimental-vm-modules --test (Join-Path $PSScriptRoot 'pair.test.mjs') (Join-Path $PSScriptRoot 'launch-control.test.mjs') (Join-Path $PSScriptRoot 'runner-entry.test.mjs') *> (Join-Path $evidence 'pair-tests.log')
 $code=$LASTEXITCODE;Set-Content (Join-Path $evidence 'pair-tests.exit') $code
 if($code -ne 0){throw 'Pair deterministic tests failed; see local log'}
 Write-Output 'Pair freezer/schema tests passed.'
 & node (Join-Path $PSScriptRoot 'render-fixture.mjs') $repo $evidence *> (Join-Path $evidence 'render-fixture.log')
 if($LASTEXITCODE -ne 0){throw 'Offline fixture render failed; existing fixtures are never overwritten'}
 $fixture=Join-Path $evidence 'rendered-pair'
+& node --experimental-vm-modules (Join-Path $PSScriptRoot 'baseline-controls.mjs') $repo $evidence $fixture *> (Join-Path $evidence 'baseline-controls.log')
+Set-Content (Join-Path $evidence 'baseline-controls.exit') $LASTEXITCODE
+if($LASTEXITCODE -ne 0){throw 'Immutable R1-R3 negative controls did not reproduce the reviewed defects'}
+& (Get-Command pwsh).Source -NoProfile -File (Join-Path $PSScriptRoot 'coordinator-top.test.ps1') -Fixture $fixture *> (Join-Path $evidence 'coordinator-top-tests.log')
+Set-Content (Join-Path $evidence 'coordinator-top-tests.exit') $LASTEXITCODE
+if($LASTEXITCODE -ne 0){throw 'Actual top-level coordinator ownership/refusal tests failed'}
 & (Get-Command pwsh).Source -NoProfile -File (Join-Path $PSScriptRoot 'lifecycle.test.ps1') -Fixture $fixture *> (Join-Path $evidence 'lifecycle-tests.log')
+Set-Content (Join-Path $evidence 'lifecycle-tests.exit') $LASTEXITCODE
 if($LASTEXITCODE -ne 0){throw 'Deterministic lifecycle mocks/PowerShell syntax failed'}
 $testLanes=@(
   @{name='helpers';image='npc-dev';entry='sh';arguments=@('-c','node --test /proof/a/runner-terminal.test.mjs /proof/a/automation-proof.test.mjs /proof/a/provider-contract-preflight.test.mjs /proof/a/protocol3-provider-preflight.test.mjs /proof/a/trial-stop-policy.test.mjs /proof/a/analysis/response-recorder.test.mjs /proof/a/pair-stop.test.mjs /proof/b/automation-proof.test.mjs /proof/b/provider-contract-preflight.test.mjs && for f in /proof/*.mjs /proof/a/*.mjs /proof/b/*.mjs; do node --check "$f" || exit; done')},

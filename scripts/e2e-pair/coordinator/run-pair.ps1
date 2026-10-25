@@ -1,14 +1,21 @@
 param([switch]$StopPeerAfterVerifiedSuccess)
 . (Join-Path $PSScriptRoot 'pair-common.ps1')
-Assert-PairFrozen
 $pair=Read-Pair
 $workers=@{}
 $completed=$false
 $failed=$false
-if(Test-Path (Join-Path $PSScriptRoot 'pair-launch-once.json')){throw 'Pair already launched; no automatic trial retry'}
-if((Read-QuotaDecision $pair) -ne 'continue'){throw 'Fresh shared-account quota above the stop floor required'}
-foreach($lane in $pair.lanes){if(-not(Test-Path (Join-Path $PSScriptRoot ($lane.id+'/preflight-ready.json')))){throw 'Both independent preflights must pass before paired launch'}}
+if((Test-Path (Join-Path $PSScriptRoot 'pair-launch-once.json')) -or (Test-Path (Join-Path $PSScriptRoot 'pair-launch-attempt.json'))){throw 'Pair lifecycle already claimed; duplicate has no cleanup authority'}
+$controller=Enter-PairController $pair 'launch'
+$ownsPrepared=$false
 try {
+  Assert-PreparedOwnership $pair
+  $ownsPrepared=$true
+  $attempt=Join-Path $PSScriptRoot 'pair-launch-attempt.json'
+  $handle=[IO.File]::Open($attempt,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+  try{$bytes=[Text.Encoding]::UTF8.GetBytes((@{pairId=$pair.pairId;controllerToken=$controller.token;at=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json));$handle.Write($bytes,0,$bytes.Length);$handle.Flush($true)}finally{$handle.Dispose()}
+  Assert-PairFrozen
+  if((Read-QuotaDecision $pair) -ne 'continue'){throw 'Fresh shared-account quota above the stop floor required'}
+  foreach($lane in $pair.lanes){if(-not(Test-Path (Join-Path $PSScriptRoot ($lane.id+'/preflight-ready.json')))){throw 'Both independent preflights must pass before paired launch'}}
   [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'pair-launch-once.json'),(@{pairId=$pair.pairId;candidate=$pair.candidate;startedAt=[DateTime]::UtcNow.ToString('o');stopPeerAfterVerifiedSuccess=[bool]$StopPeerAfterVerifiedSuccess}|ConvertTo-Json))
   foreach($lane in $pair.lanes) {
     $root=Join-Path $PSScriptRoot $lane.id
@@ -47,7 +54,8 @@ try {
   foreach($w in $workers.Values){$w.process.WaitForExit();if($w.process.ExitCode -ne 0){$failed=$true}}
   $completed=$true
 } finally {
-  if(-not $completed) {
+  try {
+  if($ownsPrepared -and -not $completed) {
     $failed=$true
     foreach($lane in $pair.lanes){try{Write-LaneStop $lane 'pair_supervisor_failure';$null=Invoke-LaneSupervisorStop $lane}catch{[IO.File]::WriteAllText((Join-Path $PSScriptRoot ($lane.id+'/external-cancel-failure.txt')),[string]$_)}}
     $deadline=[DateTime]::UtcNow.AddSeconds(240)
@@ -83,10 +91,13 @@ try {
       } catch { [IO.File]::WriteAllText((Join-Path $PSScriptRoot ($lane.id+'/wrapper-cleanup-failure.txt')),[string]$_) }
     }
   }
+  if($ownsPrepared) {
   try { & (Join-Path $PSScriptRoot 'finish-pair.ps1') *> (Join-Path $PSScriptRoot 'pair-cleanup.log') }
   catch { $failed=$true;[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'pair-cleanup-failure.txt'),[string]$_) }
   & node (Join-Path $PSScriptRoot 'summarize-pair.mjs') *> (Join-Path $PSScriptRoot 'combined-call-index.log')
   if($LASTEXITCODE -ne 0){$failed=$true}
   [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'pair-finished.json'),(@{pairId=$pair.pairId;at=[DateTime]::UtcNow.ToString('o');wrapperFailure=$failed;gameplayResults='Read each lane result independently; wrapper status is not gameplay acceptance'}|ConvertTo-Json))
+  }
+  } finally {Exit-PairController $controller}
 }
 if($failed){exit 1}
