@@ -347,6 +347,7 @@
       "pterodactyl_layer": "staging-base"
     },
     "place_candidate": {
+      "native_preservation_preflight_fields": ["preservation_join", "preservation_nonfluid_output", "preservation_clears_count"],
       "args": [
         "candidate_set_id",
         "candidate_id"
@@ -770,7 +771,14 @@
         "pterodactyl-runtime-v8"
       ],
       "surface_policy": "shared",
-      "native_scope_fields": ["actor_id", "actor_surface_index", "actor_force_index", "surface_index", "force_index"]
+      "native_scope_fields": ["actor_id", "actor_surface_index", "actor_force_index", "surface_index", "force_index"],
+      "fluid_preservation_projection": {
+        "version": 2,
+        "storage_limit": 16,
+        "connection_limit": 16,
+        "storage_fields": ["index", "capacity", "prototypes", "prototypes_truncated", "pipe_connections_truncated"],
+        "connection_fields": ["connection_index", "connected", "target_valid", "flow_direction", "connection_type", "position", "target_position", "target", "target_surface_index", "target_force_index", "target_fluidbox_index", "target_pipe_connection_index"]
+      }
     },
     "getLogisticsTopology": {
       "remote": [

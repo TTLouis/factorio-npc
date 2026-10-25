@@ -621,6 +621,7 @@ describe('entity geometry knowledge', () => {
       position: { x: 21, y: 20 },
       direction: 0,
       force: { name: 'player', index: 1 },
+      surface: { index: 1 },
     }
     const fluidbox = {
       length: 2,
@@ -662,6 +663,7 @@ describe('entity geometry knowledge', () => {
 
     const result = entity_geometry_for_actor(actor, 77) as any
     expect(result).toMatchObject({
+      fluid_geometry_version: 2,
       fluid_storage_count: 2,
       fluid_box_count: 2,
       non_fluidbox_storage_count: 0,
@@ -673,6 +675,9 @@ describe('entity geometry knowledge', () => {
       current_fluid: { name: 'water', amount: 40, temperature: 15 },
       prototypes: [{ index: 1, production_type: 'input' }],
       pipe_connections: [{
+        connection_index: 1,
+        connected: false,
+        target_valid: true,
         flow_direction: 'input',
         position: { x: 19, y: 20 },
         target_position: { x: 18, y: 20 },
@@ -681,6 +686,11 @@ describe('entity geometry knowledge', () => {
     expect(result.fluid_storages[1]).toMatchObject({
       prototypes: [{ index: 2, production_type: 'output', filter: 'sulfuric-acid' }],
       pipe_connections: [{
+        connection_index: 1,
+        connected: true,
+        target_valid: true,
+        target_surface_index: 1,
+        target_force_index: 1,
         flow_direction: 'output',
         position: { x: 21, y: 20 },
         target: { name: 'pipe', unit_number: 90 },

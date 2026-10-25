@@ -7,6 +7,19 @@ import * as staging from '../staging/structured-policy.mjs'
 
 const root = new URL('../../../', import.meta.url)
 const contract = JSON.parse(await readFile(new URL('contracts/factorio-tool-contract.json', root), 'utf8'))
+
+test('fluid preservation projection and admission metadata remain native and versioned', async () => {
+  const projection = contract.tools.getEntityGeometry.fluid_preservation_projection
+  assert.equal(projection.version, 2)
+  assert.equal(projection.storage_limit, 16)
+  assert.equal(projection.connection_limit, 16)
+  const knowledge = await readFile(new URL('packages/autorio/src/knowledge.ts', root), 'utf8')
+  assert.match(knowledge, /fluid_geometry_version: 2/)
+  for (const field of projection.storage_fields.concat(projection.connection_fields)) assert.match(knowledge, new RegExp(`\\b${field}:`))
+  const placement = await readFile(new URL('packages/autorio/src/placement_candidates.ts', root), 'utf8')
+  const items = await readFile(new URL('packages/autorio/src/placement_preflight.ts', root), 'utf8')
+  for (const field of contract.operations.place_candidate.native_preservation_preflight_fields) assert.match(placement + items, new RegExp(`\\b${field}:`))
+})
 test('exact geometry preserves explicit native actor/entity scope for obligation certificates', async () => {
   assert.deepEqual(contract.tools.getEntityGeometry.native_scope_fields,
     ['actor_id', 'actor_surface_index', 'actor_force_index', 'surface_index', 'force_index'])

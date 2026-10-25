@@ -2,7 +2,7 @@ import { reservation_intersection } from './area_reservations'
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_features'
-import { candidate_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
+import { candidate_fluid_ports, complete_live_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
 import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, snap_placement_center, type PlacementFootprint } from './placement_geometry'
 import { resolve_exact_entity } from './entity_reference'
 import { pole_candidate_facts, pole_reach, protected_read } from './electric_facts'
@@ -903,7 +903,54 @@ export function placement_candidate_preflight(actor: ControlledActor, candidate_
   // Only the native registry supplies entity identity and geometry.
   const { set, candidate } = resolved
   const planned_footprint = planned_placement_footprint(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
-  return { ...placement_item_preflight(actor, set.entity_name), ...(planned_footprint ? { planned_footprint } : {}) }
+  return { ...placement_item_preflight(actor, set.entity_name), ...(planned_footprint ? { planned_footprint } : {}),
+    preservation_clears_count: candidate.clears?.length ?? 0,
+    ...(candidate.connects_to ? { preservation_join: preservation_candidate_join(actor, set, candidate) } : {}) }
+}
+
+function preservation_candidate_join(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate) {
+  const unavailable = (reason: string) => ({ version: 1, complete: false, reason })
+  const prototype = prototypes.entity[set.entity_name]
+  const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
+  let expected = 0
+  for (const storage of fluidboxes) {
+    const connections: any[] = storage.pipe_connections ?? []
+    expected += connections.length
+  }
+  const ports = candidate_fluid_ports(prototype, candidate.position, candidate.direction)
+  if (!ports || expected !== ports.length || expected > 16 || expected < 1
+    || ports.some(port => port.connection_type !== 'normal') || (candidate.clears?.length ?? 0) > 0) return unavailable('candidate_ports_incomplete_or_clearing')
+  let left = candidate.position.x
+  let right = left
+  let top = candidate.position.y
+  let bottom = top
+  for (const port of ports) {
+    left = math.min(left, port.position.x); right = math.max(right, port.position.x)
+    top = math.min(top, port.position.y); bottom = math.max(bottom, port.position.y)
+  }
+  const neighbours = find_world_entities(actor.surface, { area: [{ x: left - 2, y: top - 2 }, { x: right + 2, y: bottom + 2 }], limit: 65 })
+  if (neighbours.length > 64) return unavailable('neighbour_scan_truncated')
+  let matches = 0
+  for (const entity of neighbours) {
+    if (!entity.fluidbox || entity.fluidbox.length === 0) continue
+    const live = complete_live_fluid_ports(entity)
+    if (!live.complete) return unavailable('neighbour_ports_incomplete')
+    for (const from of live.ports) for (const to of ports) {
+      if (!fluid_ports_join(from, to)) continue
+      const join = candidate.connects_to!
+      if (entity.unit_number !== join.unit_number || entity.force.index !== actor.force.index
+        || entity.surface.index !== actor.surface.index || from.connected
+        || from.storage_index !== join.target_port.storage_index || from.connection_index !== join.target_port.connection_index
+        || to.storage_index !== join.candidate_port.storage_index || to.connection_index !== join.candidate_port.connection_index) return unavailable('additional_or_changed_connection')
+      matches += 1
+    }
+  }
+  if (matches !== 1) return unavailable('exact_single_join_unproven')
+  return { version: 1, complete: true, tick: game.tick, generated_tick: set.generated_tick,
+    actor_id: set.actor_id, surface_index: set.surface_index, force_index: set.force_index,
+    candidate_set_id: set.id, candidate_id: candidate.id, entity_name: set.entity_name,
+    entity_type: prototype.type, position: candidate.position, direction: candidate.direction,
+    connects_to: candidate.connects_to, candidate_ports: ports, clears: [] }
 }
 
 export function execute_placement_candidate(

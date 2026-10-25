@@ -24,7 +24,7 @@ import { completedSliceAnchor, nextSliceTransition, restoreNextSlice, stepProgre
 //     operations or into plan steps.
 
 import { authoredCompletionContractSupported, completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
-import { storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, contractDefectShape, preservedProofMatches, effectivePreservationProof, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+import { storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, contractDefectShape, preservedProofMatches, effectivePreservationProof, normalizeFluidAdmission, normalizeFluidCertificate, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
@@ -432,6 +432,8 @@ export const PLANNING_EVENT = Object.freeze({
   REPLACEMENT_PLAN_REQUESTED: 'REPLACEMENT_PLAN_REQUESTED',
   CONTRACT_DEFECT_CLAIMED: 'CONTRACT_DEFECT_CLAIMED',
   PRESERVATION_OBSERVED: 'PRESERVATION_OBSERVED',
+  PRESERVATION_ADMISSION_RECORDED: 'PRESERVATION_ADMISSION_RECORDED',
+  PRESERVATION_ADDITION_CERTIFIED: 'PRESERVATION_ADDITION_CERTIFIED',
   AUTHORIZATION_APPROVAL_RECORDED: 'AUTHORIZATION_APPROVAL_RECORDED',
   // World facts that outlive a goal: NPC placement receipts and reserved containers.
   NPC_PLACEMENT_RECORDED: 'NPC_PLACEMENT_RECORDED',
@@ -2040,6 +2042,8 @@ export function contractDefectSuccessorValid(state, successor) {
     .filter(step => predecessor.execution.step_progress[step.step_id]?.status === 'completed').map(step => `${predecessor.plan_id}:${step.step_id}`)]
   if (JSON.stringify(successor.carried_forward_evidence) !== JSON.stringify(prefix)) return false
   if (JSON.stringify(successor.execution.preservation_proofs ?? {}) !== JSON.stringify(predecessor.execution.preservation_proofs ?? {})) return false
+  if (JSON.stringify(successor.execution.preservation_admissions ?? {}) !== JSON.stringify(predecessor.execution.preservation_admissions ?? {})
+    || JSON.stringify(successor.execution.preservation_certificates ?? []) !== JSON.stringify(predecessor.execution.preservation_certificates ?? [])) return false
   return successor.steps.every((row, i) => {
     const original = suffix[i]
     return row.description === original.description && row.semantic_step_id === (original.semantic_step_id ?? original.step_id)
@@ -2902,7 +2906,7 @@ Object.assign(HANDLERS, {
   [PLANNING_EVENT.PRESERVATION_OBSERVED](state, event, now) {
     const plan = getActivePlan(state)
     const step = plan?.steps?.[plan.active_step_index]
-    const held = step && effectivePreservationProof(plan, step)
+    const held = step && effectivePreservationProof(plan, step, { plans: state.plans })
     const fresh = normalizeObligationProof(event.proof, step?.obligations)
     if (!isRuntimeAuthority(event.source) || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
       || state.goal?.status !== GOAL_STATUS.ACTIVE || plan.plan_id !== event.plan_id || step?.step_id !== event.step_id
@@ -2914,6 +2918,49 @@ Object.assign(HANDLERS, {
     if (Object.keys(proofs).length >= 64 && !Object.hasOwn(proofs, semantic)) return state
     return withPlan(state, plan.plan_id, current => ({ ...current, execution: { ...current.execution,
       preservation_proofs: { ...proofs, [semantic]: clone(fresh) } }, updated_at: now }))
+  },
+
+  [PLANNING_EVENT.PRESERVATION_ADMISSION_RECORDED](state, event, now) {
+    const plan = getActivePlan(state)
+    const step = plan?.steps?.[plan.active_step_index]
+    const held = step && effectivePreservationProof(plan, step, { plans: state.plans })
+    const envelope = step && normalizeFluidAdmission(event.envelope, plan, step)
+    const pending = state.operation_ledger?.records?.find(row => row.operation_key === envelope?.operation_key)
+    const admissions = plan?.execution?.preservation_admissions ?? {}
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE
+      || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
+      || !step || !held || !envelope || !obligationProofOrigin(state, step)
+      || !pending || pending.protocol_version !== 2 || pending.signature !== envelope.signature
+      || pending.goal_id !== plan.goal_id || pending.plan_id !== plan.plan_id || pending.step_id !== step.step_id
+      || pending.actor?.actor_id !== envelope.owner.actor_id || pending.actor.epoch !== envelope.owner.actor_epoch
+      || pending.operations?.length !== 1 || pending.operations[0].name !== 'place_candidate'
+      || pending.baseline?.active !== null || envelope.native_idle !== true
+      || pending.baseline.generation !== envelope.native_generation || pending.baseline.max_batch_id !== envelope.native_max_batch_id
+      || envelope.created_at > now || envelope.baseline.captured_at < held.captured_at
+      || !preservedProofMatches(held, envelope.baseline) || admissions.invalid === true
+      || Object.hasOwn(admissions, envelope.operation_key) || Object.keys(admissions).length >= 64) return state
+    return withPlan(state, plan.plan_id, current => ({ ...current, execution: { ...current.execution,
+      preservation_admissions: { ...admissions, [envelope.operation_key]: clone(envelope) } }, updated_at: now }))
+  },
+
+  [PLANNING_EVENT.PRESERVATION_ADDITION_CERTIFIED](state, event, now) {
+    const plan = getActivePlan(state)
+    const step = plan?.steps?.[plan.active_step_index]
+    const held = step && effectivePreservationProof(plan, step, { plans: state.plans })
+    const certificate = step && normalizeFluidCertificate(event.certificate, plan, step)
+    const admission = certificate && plan.execution.preservation_admissions[certificate.admission_key]
+    const certificates = plan?.execution?.preservation_certificates ?? []
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE
+      || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
+      || !held || !certificate || !obligationProofOrigin(state, step)
+      || !Array.isArray(certificates) || certificates.length >= 64
+      || certificates.some(row => row.admission_key === certificate.admission_key)
+      || (state.operation_ledger?.records?.length ?? 0) !== 0
+      || certificate.certified_at > now || !preservedProofMatches(held, admission.baseline)) return state
+    const semantic = step.semantic_step_id ?? step.step_id
+    return withPlan(state, plan.plan_id, current => ({ ...current, execution: { ...current.execution,
+      preservation_certificates: [...certificates, clone(certificate)],
+      preservation_proofs: { ...(current.execution.preservation_proofs ?? {}), [semantic]: clone(certificate.proof) } }, updated_at: now }))
   },
 
   [PLANNING_EVENT.CONTRACT_DEFECT_CLAIMED](state, event, now) {
@@ -2929,7 +2976,7 @@ Object.assign(HANDLERS, {
       || !(plan.execution.receipts[step.step_id] ?? []).some(row => row.kind === 'operation_receipt' && row.ref === event.evidence_ref && row.source === 'runtime')
       || !(plan.execution.receipts[step.step_id] ?? []).some(row => row.kind === 'deterministic_verification' && row.source === 'runtime'
         && row.verified_operation_names?.some(name => ['place_entity', 'place_candidate'].includes(name)))
-      || !effectivePreservationProof(plan, step) || !preservedProofMatches(effectivePreservationProof(plan, step), event.fresh_proof)
+      || !effectivePreservationProof(plan, step, { plans: state.plans }) || !preservedProofMatches(effectivePreservationProof(plan, step, { plans: state.plans }), event.fresh_proof)
       || event.fresh_proof.preserved.some(row => row.item_io && (!row.item_io.drop_target || row.entity.type === 'inserter' && !row.item_io.pickup_target))
       || step.obligation_proof.actor_id !== event.current?.actor_id || step.obligation_proof.actor_epoch !== event.current?.actor_epoch
       || !text(event.evidence_ref, 200) || state.goal.contract_defect_claims?.includes(semantic) || (state.goal.replacements_accepted ?? 0) >= MAX_REPLACEMENTS_PER_GOAL
@@ -3024,6 +3071,8 @@ Object.assign(HANDLERS, {
       const newStep = successor.steps[0]
       successor.execution.receipts[newStep.step_id] = clone(predecessor.execution.receipts[oldStep.step_id] ?? [])
       successor.execution.preservation_proofs = clone(predecessor.execution.preservation_proofs ?? {})
+      if (predecessor.execution.preservation_admissions) successor.execution.preservation_admissions = clone(predecessor.execution.preservation_admissions)
+      if (predecessor.execution.preservation_certificates) successor.execution.preservation_certificates = clone(predecessor.execution.preservation_certificates)
       successor.contract_defect_receipt_source = { plan_id: predecessor.plan_id, step_id: oldStep.step_id }
     }
     if (successor.steps.length === 0) return state
@@ -4172,6 +4221,29 @@ function restorePlan(raw) {
     lifecycle: recentList(raw.lifecycle, 64).map(item => clone(item)),
   }
   if (raw.runtime_validation) plan.runtime_validation = clone(raw.runtime_validation)
+  if (raw.execution?.preservation_admissions) {
+    const entries = raw.execution.preservation_admissions
+    if (typeof entries !== 'object' || Array.isArray(entries) || Object.keys(entries).length > 64 || entries.invalid) {
+      plan.execution.preservation_admissions = { invalid: true }
+    } else {
+      plan.execution.preservation_admissions = Object.fromEntries(Object.entries(entries).map(([key, value]) => {
+        const step = steps.find(row => row.step_id === value?.owner?.step_id)
+        const normalized = step ? normalizeFluidAdmission(value, plan, step)
+          : value?.owner?.plan_id !== plan.plan_id ? clone(value) : undefined
+        return [key, normalized && key === normalized.operation_key ? normalized : { invalid: true }]
+      }))
+      if (Object.values(plan.execution.preservation_admissions).some(row => row?.invalid)) plan.execution.preservation_admissions = { invalid: true }
+    }
+  }
+  if (raw.execution?.preservation_certificates) {
+    const certificates = raw.execution.preservation_certificates
+    plan.execution.preservation_certificates = !Array.isArray(certificates) || certificates.length > 64 ? [{ invalid: true }]
+      : certificates.map(value => {
+          const step = steps.find(row => row.step_id === value?.step_id)
+          return step ? normalizeFluidCertificate(value, plan, step) ?? { invalid: true }
+            : plan.execution.preservation_admissions?.[value?.admission_key]?.owner?.plan_id !== plan.plan_id ? clone(value) : { invalid: true }
+        })
+  }
   if (raw.contract_defect_receipt_source) plan.contract_defect_receipt_source = clone(raw.contract_defect_receipt_source)
   const replacement = restoreReplacementLineage(raw.replacement)
   if (replacement) plan.replacement = replacement

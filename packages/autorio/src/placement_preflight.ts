@@ -18,7 +18,12 @@ export function placement_item_preflight(actor: ControlledActor | undefined, ent
     return { ok: false, code: 'placement_item_unreadable', entity_name }
   }
   if (held_count < resolved.requirement.count) return { ok: false, code: 'placement_item_missing', placement_item }
-  return { ok: true, placement_item }
+  const prototype = prototypes.entity[entity_name]
+  const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
+  const scope = typeof actor.status_snapshot === 'function' && actor.surface?.index !== undefined && actor.force?.index !== undefined
+    ? { actor_id: actor.status_snapshot().actor_id, surface_index: actor.surface.index, force_index: actor.force.index } : undefined
+  return { ok: true, placement_item, ...(scope && fluidboxes.length === 0
+    ? { preservation_nonfluid_output: { version: 1, ...scope, entity_name, fluid_port_count: 0 } } : {}) }
 }
 
 // The tiles a coordinate placement will occupy, from the same grid snap and footprint execution uses, and the

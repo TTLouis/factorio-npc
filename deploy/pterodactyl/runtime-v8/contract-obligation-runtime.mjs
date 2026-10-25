@@ -2,8 +2,11 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { evaluateCompletionContract } from './step-completion.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { PAUSE_CLASS } from './pause-class.mjs'
+import { renderOperationPreflight } from './structured-policy.mjs'
+import { batchWatermark, operationSignature } from './operation-reconciliation.mjs'
 import { captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
-  obligationProofOrigin, preservedProofMatches, effectivePreservationProof, preservationGeometry, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+  obligationProofOrigin, preservedProofMatches, effectivePreservationProof, preservationGeometry, normalizeFluidAdmission,
+  normalizeFluidCertificate, fluidAdditionProof, PreservationProofError, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 
 function placementReceipt(agent, plan, step) {
   const board = agent.memory.currentPlan(agent.activePlanKey())?.task_board
@@ -46,8 +49,14 @@ async function nativeIdle(agent, fence) {
 export async function reconcilePreservationProof(agent, step, fresh, fence) {
   const key = agent.activePlanKey()
   const plan = getActivePlan(agent.memory.planningState(key))
-  const effective = effectivePreservationProof(plan, step)
-  if (!effective || !preservedProofMatches(effective, fresh)) return false
+  const effective = effectivePreservationProof(plan, step, { plans: agent.memory.planningState(agent.activePlanKey()).plans })
+  if (!effective) return false
+  // A completed witnessed placement must be reconciled even if someone later
+  // made its old open port look unchanged. Omitted/corrupt execution facts may
+  // not forget an already-created protected connection after restore.
+  const fluid = await reconcileFluidAddition(agent, plan, step, fresh, fence)
+  if (fluid !== undefined) return fluid
+  if (!preservedProofMatches(effective, fresh)) return false
   if (JSON.stringify(effective.preserved) === JSON.stringify(fresh.preserved)) return true
   // Predictions may check facts for a future step but cannot append execution
   // facts for it. Activation repeats this read and persists before binding.
@@ -61,6 +70,125 @@ export async function reconcilePreservationProof(agent, step, fresh, fence) {
     disposition: 'durable_advisory_fact_not_connection_completion' })
   await fence()
   return true
+}
+
+export async function prepareFluidPreservationAdmission(agent, { operations, pending } = {}) {
+  const key = agent.activePlanKey()
+  const planning = agent.memory.planningState?.(key)
+  const plan = getActivePlan(planning)
+  const step = plan?.steps?.[plan.active_step_index]
+  if (step?.obligation_proof?.version !== 2) return undefined
+  const fail = code => { throw new PreservationProofError(code, { stage: 'admission' }) }
+  const owner = agent.captureCheckpointOwner()
+  const fence = async () => {
+    await agent.assertCheckpointOwnerCurrent(owner)
+    const records = agent.memory.pendingOperations?.(key) ?? []
+    if (agent.currentPendingAmendment() || agent.batchInFlight || records.length !== 1
+      || records[0].operation_key !== pending?.operation_key || records[0].signature !== pending?.signature) fail('preservation_admission_not_safe')
+  }
+  await fence()
+  if (!obligationProofOrigin(planning, step) || !pending || pending.signature !== operationSignature(operations)) fail('preservation_admission_owner_unproven')
+  if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')
+  const fresh = { ...await captureObligationProof(agent, step.obligations, fence), binding: step.obligation_proof.binding }
+  const effective = effectivePreservationProof(plan, step, { plans: agent.memory.planningState(agent.activePlanKey()).plans })
+  if (!effective || !preservedProofMatches(effective, fresh)) fail('preservation_baseline_changed')
+  for (const operation of operations ?? []) {
+    if (['rotate_entity', 'mine_entity', 'mine_entity_exact'].includes(operation.name)
+      && step.obligations.preserve.includes(operation.args?.unit_number)) fail('preservation_protected_mutation_refused')
+  }
+  const placements = operations?.filter(row => ['place_candidate', 'place_entity', 'execute_construction_plan'].includes(row.name)) ?? []
+  if (!placements.length) return undefined
+  // Nonfluid placement cannot add a fluid edge. This is fresh native prototype
+  // evidence, never a name/prose assumption; candidates may not clear assets.
+  let allNonfluid = true
+  for (const operation of placements) {
+    let checked
+    try { checked = JSON.parse(String(await agent.rcon.command(renderOperationPreflight({ name: operation.name, args: operation.args })))) }
+    catch { await fence(); fail('preservation_candidate_read_unavailable') }
+    await fence()
+    const output = checked?.preservation_nonfluid_output
+    if (checked.ok !== true || output?.version !== 1 || output.fluid_port_count !== 0
+      || output.actor_id !== fresh.actor_id || fresh.preserved.some(row => row.surface_index !== output.surface_index || row.force_index !== output.force_index)
+      || operation.name === 'place_candidate' && checked.preservation_clears_count !== 0) allNonfluid = false
+  }
+  if (allNonfluid) {
+    if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')
+    await fence()
+    return undefined
+  }
+  if (operations?.length !== 1 || operations[0].name !== 'place_candidate') fail('preservation_exact_single_candidate_required')
+  let preflight
+  try { preflight = JSON.parse(String(await agent.rcon.command(renderOperationPreflight({ name: operations[0].name, args: operations[0].args })))) }
+  catch { await fence(); fail('preservation_candidate_read_unavailable') }
+  await fence()
+  const rawStatus = await agent.readTaskStatusRaw()
+  await fence()
+  const status = typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus
+  const baseline = batchWatermark(status)
+  const journal = status.admission_journal?.records ?? status.admission_journal ?? []
+  if (!await nativeIdle(agent, fence) || !baseline || !baseline.idle || baseline.queue_length !== 0
+    || baseline.generation !== pending.baseline?.generation || baseline.max_batch_id !== pending.baseline?.max_batch_id
+    || !Array.isArray(journal) || journal.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')
+  const envelope = normalizeFluidAdmission({ version: 1, operation_key: pending.operation_key, signature: pending.signature,
+    request_id: pending.request_id, board_step_id: agent.memory.currentPlan(key)?.task_board?.active_step_id,
+    owner: { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
+      semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch },
+    baseline: fresh, operation: operations[0], candidate: preflight?.ok === true ? preflight.preservation_join : undefined,
+    native_idle: true, native_generation: baseline.generation, native_max_batch_id: baseline.max_batch_id, created_at: Date.now() }, plan, step)
+  if (!envelope) fail('preservation_candidate_join_unproven')
+  await fence()
+  if (!agent.memory.recordPreservationAdmission?.(key, envelope)) fail(Object.keys(plan.execution.preservation_admissions ?? {}).length >= 64
+    ? 'preservation_admission_limit_exhausted' : 'preservation_admission_record_refused')
+  await agent.persistState({ strict: true })
+  await fence()
+  if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')
+  await agent.traceEvent('contract.fluid_admission_prepared', { request_id: envelope.request_id, goal_id: plan.goal_id,
+    plan_id: plan.plan_id, step_id: step.step_id, operation_key: envelope.operation_key,
+    reason: 'native_candidate_single_additive_join_before_transport' })
+  await fence()
+  const final = batchWatermark(await agent.readTaskStatusRaw())
+  await fence()
+  if (!final?.idle || final.queue_length !== 0 || final.generation !== baseline.generation
+    || final.max_batch_id !== baseline.max_batch_id || !await nativeIdle(agent, fence)) fail('preservation_pre_admission_boundary_changed')
+  await fence()
+  return envelope
+}
+
+async function reconcileFluidAddition(agent, plan, step, fresh, fence) {
+  if (step.obligation_proof?.version !== 2) return undefined
+  const admissions = plan.execution.preservation_admissions ?? {}
+  const certificates = plan.execution.preservation_certificates ?? []
+  const board = agent.memory.currentPlan(agent.activePlanKey())?.task_board
+  for (const raw of Object.values(admissions)) {
+    if (raw?.owner?.step_id !== step.step_id || certificates.some(row => row.admission_key === raw.operation_key)) continue
+    const envelope = normalizeFluidAdmission(raw, plan, step)
+    if (!envelope) return false
+    const row = [...(board?.evidence ?? [])].reverse().find(row => {
+      if (row.kind !== 'operation_receipt' || row.step_id !== board.active_step_id) return false
+      try { return JSON.parse(row.summary).admitted_batch?.operation_key === envelope.operation_key } catch { return false }
+    })
+    if (!row) continue
+    const receipt = JSON.parse(row.summary)
+    const id = receipt.basic_operation?.placed_unit_number
+    if (!Number.isSafeInteger(id)) return false
+    let built
+    try { built = preservationGeometry(JSON.parse(String(await agent.rcon.command(agent.observationToolCommand('getEntityGeometry', { unit_number: id })))), id) }
+    catch { await fence(); return false }
+    await fence()
+    if (!fluidAdditionProof(envelope, receipt, built, fresh, plan, step)) return false
+    const proof = { ...fresh, binding: step.obligation_proof.binding }
+    const certificate = normalizeFluidCertificate({ admission_key: envelope.operation_key, step_id: step.step_id,
+      ref: row.ref, receipt, built, proof, certified_at: Date.now() }, plan, step)
+    if (!certificate || !agent.memory.certifyPreservationAddition?.(agent.activePlanKey(), certificate)) return false
+    await agent.persistState({ strict: true })
+    await fence()
+    await agent.traceEvent('contract.fluid_addition_certified', { request_id: agent.traceRequest?.id, goal_id: plan.goal_id,
+      plan_id: plan.plan_id, step_id: step.step_id, operation_key: envelope.operation_key, placed_unit_number: id,
+      reason: 'pre_admission_witness_exact_receipt_reciprocal_native_join', replayed: false })
+    await fence()
+    return true
+  }
+  return undefined
 }
 
 export function stepCloseSettlementUnsafe(agent) {
