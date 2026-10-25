@@ -5,7 +5,7 @@ import vm from 'node:vm'
 import { createHash } from 'node:crypto'
 import { compileObligations, normalizeObligations, preservationGeometry, normalizeObligationProof,
   obligationSignature, preservedProofMatches, normalizeFluidAdmission, fluidAdditionProof,
-  normalizeFluidCertificate, effectivePreservationProof, preservationFailure } from './contract-obligations.mjs'
+  normalizeFluidCertificate, effectivePreservationProof, preservationFailure, normalizeFluidReceiptBinding } from './contract-obligations.mjs'
 import { operationSignature } from './operation-reconciliation.mjs'
 
 import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
@@ -37,12 +37,41 @@ test('complete empty/open native fluid facts produce an explicit v2 proof; produ
   assert.deepEqual(normalizeObligationProof(f.proof, f.step.obligations), f.proof)
   const changed = fluidGeometry()
   changed.fluid_storages[0].current_fluid = { name: 'water', amount: 87, temperature: 20 }
+  changed.fluid_storages[0].capacity = 300 // independently retained dynamic network capacity
   assert.deepEqual(preservationGeometry(changed, 1), f.proof.preserved[0])
   assert.equal(f.proof.preserved[0].fluid.storages[0].ports[0].connected, false)
 })
+test('missing or changed intrinsic native volume cannot borrow a dynamic network-capacity value', () => {
+  const raw = fluidGeometry(); delete raw.fluid_storages[0].local_volume
+  assert.throws(() => preservationGeometry(raw, 1), /preservation_fluid_storage_incomplete/)
+  const changed = fluidGeometry(); changed.fluid_storages[0].local_volume = 101; changed.fluid_storages[0].prototypes[0].volume = 101
+  const f = fluidFixture(); const altered = { ...f.proof, preserved: [preservationGeometry(changed, 1)] }
+  assert.equal(preservedProofMatches(f.proof, altered), false)
+})
+test('native receipt binding normalizes exact ownership independent of JSON key order', () => {
+  const f = fluidFixture(); const binding = f.receipt.basic_operation.preservation_binding
+  binding.owner = Object.fromEntries(Object.entries(binding.owner).reverse())
+  assert.ok(normalizeFluidReceiptBinding(binding))
+  assert.ok(fluidAdditionProof(f.admission, f.receipt, f.built, f.fresh, f.plan, f.step))
+})
+for (const fault of ['missing', 'session', 'goal', 'semantic_step', 'operation', 'attempt', 'ordinal', 'batch', 'legacy_flag']) {
+  test(`legacy/mismatched native receipt binding refuses ${fault}`, () => {
+    const f = fluidFixture(); const binding = f.receipt.basic_operation.preservation_binding
+    if (fault === 'missing') delete f.receipt.basic_operation.preservation_binding
+    if (fault === 'session') binding.owner = { ...binding.owner, session: 'new-session' }
+    if (fault === 'goal') binding.owner = { ...binding.owner, goal_id: 'other-goal' }
+    if (fault === 'semantic_step') binding.owner = { ...binding.owner, semantic_step_id: 'other-step' }
+    if (fault === 'operation') binding.operation_key = 'other-operation'
+    if (fault === 'attempt') binding.attempt_id = 'other-attempt'
+    if (fault === 'ordinal') binding.ordinal++
+    if (fault === 'batch') binding.batch_generation++
+    if (fault === 'legacy_flag') f.receipt.basic_operation.preservation_binding = { verified: true }
+    assert.equal(fluidAdditionProof(f.admission, f.receipt, f.built, f.fresh, f.plan, f.step), undefined)
+  })
+}
 test('native ordinary pipe production role none is distinct from its normal input-output port flow', () => {
   const raw = fluidGeometry(); raw.entity.name = 'pipe'; raw.entity.type = 'pipe'
-  raw.fluid_storages[0].prototypes = [{ index: 1, production_type: 'none' }]
+  raw.fluid_storages[0].prototypes = [{ index: 1, production_type: 'none', volume: 100 }]
   raw.fluid_storages[0].pipe_connections[0].flow_direction = 'input-output'
   assert.equal(preservationGeometry(raw, 1).fluid.storages[0].prototypes[0].production_type, 'none')
   raw.entity.name = 'unknown-modded-pipe'
@@ -58,7 +87,7 @@ for (const fault of ['actor', 'epoch', 'goal', 'plan_version', 'request_signatur
     if (fault === 'request_signature') f.admission.signature = 'not_exact'
     if (fault === 'stale_candidate') f.admission.candidate.tick += 3601
     if (fault === 'missing_native_guard') f.admission.candidate.version = 2
-    if (fault === 'closure_geometry_changed') f.admission.candidate.protected_geometry[0].fluid_storages[0].capacity++
+    if (fault === 'closure_geometry_changed') f.admission.candidate.protected_geometry[0].fluid_storages[0].local_volume++
     if (fault === 'partial_receipt') f.receipt.basic_operation.completed = false
     assert.equal(fluidAdditionProof(f.admission, f.receipt, f.built, f.fresh, f.plan, f.step), undefined)
   })
@@ -124,7 +153,7 @@ for (const bad of ['no_envelope', 'wrong_signature', 'wrong_step', 'wrong_candid
     if (bad === 'unrelated_receipt') f.receipt.admitted_batch.operation_key = 'other'
     if (bad === 'rotated') f.built.entity.direction = 4
     if (bad === 'no_reciprocal') f.built.fluid.storages[0].ports[0].target.connection_index = 2
-    if (bad === 'old_edge_changed') f.fresh.preserved[0].fluid.storages[0].capacity++
+    if (bad === 'old_edge_changed') f.fresh.preserved[0].fluid.storages[0].local_volume++
     if (bad === 'wrong_filter') f.built.fluid.storages[0].prototypes[0].filter = 'steam'
     if (bad === 'wrong_production') f.built.fluid.storages[0].prototypes[0].production_type = 'output'
     if (bad === 'wrong_minimum_temperature') f.built.fluid.storages[0].prototypes[0].minimum_temperature = 100

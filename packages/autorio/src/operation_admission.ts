@@ -2,6 +2,23 @@ import type { ControlledActor } from './actors/types'
 import type { TaskBatchIdentity, TaskBatchReceipt } from './task_manager'
 
 export const ADMISSION_LIMITS = { unresolved: 64, history: 64, slots: 16, refs: 16 }
+export interface FluidPreservationOwner {
+  goal_id: string
+  plan_id: string
+  plan_version: number
+  step_id: string
+  semantic_step_id: string
+  actor_id: number
+  actor_epoch: number
+  session: string
+}
+export interface FluidQueuedBinding extends TaskBatchIdentity {
+  operation_key: string
+  attempt_id: string
+  signature: string
+  ordinal: number
+  owner: FluidPreservationOwner
+}
 export interface OperationCorrelation {
   operation_key: string
   attempt_id: string
@@ -11,6 +28,7 @@ export interface OperationCorrelation {
   ordinal: number
   operation_count: number
   surface_index?: number
+  fluid_preservation?: FluidPreservationOwner
 }
 export interface AdmissionSlot {
   index: number
@@ -78,10 +96,52 @@ function integer(value: unknown): value is number {
 function text(value: unknown, limit: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= limit
 }
+const fluid_owner_fields: (keyof FluidPreservationOwner)[] = ['goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'actor_id', 'actor_epoch', 'session']
+export function valid_fluid_owner(raw: any): raw is FluidPreservationOwner {
+  return !!raw && typeof raw === 'object' && Object.keys(raw).length === fluid_owner_fields.length
+    && Object.keys(raw).every(key => fluid_owner_fields.includes(key as keyof FluidPreservationOwner))
+    && ['goal_id', 'plan_id', 'step_id', 'semantic_step_id', 'session'].every(key => text(raw[key], 240))
+    && integer(raw.plan_version) && integer(raw.actor_id) && integer(raw.actor_epoch)
+}
+export function same_fluid_owner(left: any, right: any) {
+  return valid_fluid_owner(left) && valid_fluid_owner(right) && fluid_owner_fields.every(key => left[key] === right[key])
+}
+export function current_fluid_owner(actor: ControlledActor, owner: FluidPreservationOwner) {
+  if (!valid_fluid_owner(owner) || !actor.is_valid || actor.status_snapshot().actor_id !== owner.actor_id
+    || !remote.interfaces.sgluna_deployment?.status || !remote.interfaces.sgluna_deployment?.authorize) return false
+  const current: any = remote.call('sgluna_deployment', 'status')
+  return current.allowed === true && current.actor_id === owner.actor_id && current.epoch === owner.actor_epoch
+    && current.session === owner.session && remote.call('sgluna_deployment', 'authorize', owner.actor_epoch) === true
+}
+// This capability exists only during begin→slot→finish in one native callback.
+// Module state deliberately disappears on load; journal history alone cannot
+// resurrect a previously admitting operation as a current caller.
+let current_admitting_key: string | undefined
+export function current_fluid_admission(actor: ControlledActor, key: string, signature: string, owner: FluidPreservationOwner) {
+  const record = journal().find(row => row.operation_key === key)
+  return current_admitting_key === key && record?.state === 'admitting' && record.operation_count === 1
+    && record.signature === signature && record.actor_id === owner.actor_id && record.epoch === owner.actor_epoch
+    && same_fluid_owner(record.fluid_preservation, owner) && current_fluid_owner(actor, owner) ? record : undefined
+}
+export function queued_fluid_admission(actor: ControlledActor, binding: FluidQueuedBinding, status: any) {
+  const record = journal().find(row => row.operation_key === binding?.operation_key)
+  return !!record && record.state === 'admitted' && record.operation_count === 1 && record.attempt_id === binding.attempt_id
+    && record.signature === binding.signature && same_fluid_owner(record.fluid_preservation, binding.owner)
+    && record.ordinal === binding.ordinal
+    && current_fluid_owner(actor, binding.owner) && record.generation === binding.batch_generation
+    && status.active_batch?.batch_id === binding.batch_id && status.active_batch.batch_generation === binding.batch_generation
+    && status.active_batch.batch_ref === binding.batch_ref && record.slots.length === 1
+    && record.slots[0].operation === 'place_candidate' && record.slots[0].ok === true
+    && record.slots[0].batch_refs.length === 1 && record.slots[0].batch_refs[0].batch_id === binding.batch_id
+    && record.slots[0].batch_refs[0].batch_generation === binding.batch_generation
+    && record.slots[0].batch_refs[0].batch_ref === binding.batch_ref
+}
 function correlation(raw: OperationCorrelation) {
   return raw && text(raw.operation_key, 192) && text(raw.attempt_id, 128) && text(raw.signature, 256)
     && integer(raw.actor_id) && integer(raw.epoch)
     && integer(raw.ordinal) && integer(raw.operation_count) && raw.operation_count <= ADMISSION_LIMITS.slots
+    && (raw.fluid_preservation === undefined || valid_fluid_owner(raw.fluid_preservation)
+      && raw.fluid_preservation.actor_id === raw.actor_id && raw.fluid_preservation.actor_epoch === raw.epoch)
 }
 function journal() {
   if (!storage.sgluna_operation_admissions) storage.sgluna_operation_admissions = []
@@ -300,14 +360,17 @@ export function new_operation_admission(
     return records
   }
   function begin(raw: OperationCorrelation) {
+    current_admitting_key = undefined
     if (!correlation(raw)) return { ok: false, error: 'invalid_correlation' }
     if (!authorized(raw)) return { ok: false, error: 'stale_actor_epoch' }
+    if (raw.fluid_preservation && !current_fluid_owner(actor_provider()!, raw.fluid_preservation)) return { ok: false, error: 'stale_fluid_owner' }
     if (raw.surface_index !== undefined && (!integer(raw.surface_index) || actor_provider()?.surface.index !== raw.surface_index)) return { ok: false, error: 'stale_actor_surface' }
     refresh()
     const previous = find(raw.operation_key)
     if (previous) {
       if (previous.attempt_id !== raw.attempt_id || previous.signature !== raw.signature || previous.actor_id !== raw.actor_id || previous.epoch !== raw.epoch
-        || previous.ordinal !== raw.ordinal || previous.operation_count !== raw.operation_count) {
+        || previous.ordinal !== raw.ordinal || previous.operation_count !== raw.operation_count
+        || (previous.fluid_preservation !== undefined || raw.fluid_preservation !== undefined) && !same_fluid_owner(previous.fluid_preservation, raw.fluid_preservation)) {
         return { ok: false, error: 'operation_key_conflict' }
       }
       return { ok: true, duplicate: true, record: previous }
@@ -318,10 +381,12 @@ export function new_operation_admission(
       operation_key: raw.operation_key, attempt_id: raw.attempt_id, actor_id: raw.actor_id, epoch: raw.epoch, signature: raw.signature,
       ordinal: raw.ordinal, operation_count: raw.operation_count,
       ...(raw.surface_index !== undefined ? { surface_index: raw.surface_index } : {}),
+      ...(raw.fluid_preservation !== undefined ? { fluid_preservation: { ...raw.fluid_preservation } } : {}),
       state: 'admitting', generation: task_status().batch_generation, tick: game.tick, slots: [],
       work_mark: task_status().tasks_added,
     }
     journal().push(record)
+    current_admitting_key = raw.operation_key
     storage.sgluna_operation_admission_high_water = raw.ordinal
     log(`[AUTORIO] operation.admission.recorded request_id=${raw.operation_key.split('/')[0]} operation_key=${raw.operation_key} reason=admitting`)
     return { ok: true, record }
@@ -366,6 +431,7 @@ export function new_operation_admission(
     return { ok: true, record }
   }
   function finish(key: string, raw: { ok: boolean, error?: string }) {
+    if (current_admitting_key === key) current_admitting_key = undefined
     refresh()
     const record = find(key)
     if (!record || !authorized(record)) return { ok: false, error: 'stale_actor_epoch' }
@@ -398,7 +464,10 @@ export function new_operation_admission(
     trim_history()
     return { ok: true, record }
   }
-  return { begin, slot, finish, resolve, status: (key?: string) => {
+  return { begin, slot, finish, resolve, leave: (key: string) => {
+    if (current_admitting_key === key) current_admitting_key = undefined
+    return true
+  }, status: (key?: string) => {
     const records = refresh(false)
     return { records: key ? records.filter(record => record.operation_key === key) : records,
       limits: ADMISSION_LIMITS, high_water: storage.sgluna_operation_admission_high_water ?? 0 }

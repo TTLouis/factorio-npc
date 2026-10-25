@@ -627,8 +627,8 @@ describe('entity geometry knowledge', () => {
       length: 2,
       get_capacity: (index: number) => index === 1 ? 100 : 200,
       get_prototype: (index: number) => index === 1
-        ? { index: 1, production_type: 'input', filter: undefined }
-        : { index: 2, production_type: 'output', filter: { name: 'sulfuric-acid' } },
+        ? { index: 1, volume: 100, production_type: 'input', filter: undefined }
+        : { index: 2, volume: 200, production_type: 'output', filter: { name: 'sulfuric-acid' } },
       get_pipe_connections: (index: number) => index === 1
         ? [{
             flow_direction: 'input',
@@ -663,7 +663,7 @@ describe('entity geometry knowledge', () => {
 
     const result = entity_geometry_for_actor(actor, 77) as any
     expect(result).toMatchObject({
-      fluid_geometry_version: 2,
+      fluid_geometry_version: 3,
       fluid_storage_count: 2,
       fluid_box_count: 2,
       non_fluidbox_storage_count: 0,
@@ -672,6 +672,7 @@ describe('entity geometry knowledge', () => {
     expect(result.fluid_storages[0]).toMatchObject({
       index: 1,
       capacity: 100,
+      local_volume: 100,
       current_fluid: { name: 'water', amount: 40, temperature: 15 },
       prototypes: [{ index: 1, production_type: 'input' }],
       pipe_connections: [{

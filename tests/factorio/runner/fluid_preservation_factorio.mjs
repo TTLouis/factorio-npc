@@ -8,19 +8,27 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
 import { toolCommand, parseOperation, renderOperation, renderOperationPreflight, luaString } from '../pterodactyl/runtime-v8/structured-policy.mjs'
 import { preservationGeometry, preservedProofMatches } from '../pterodactyl/runtime-v8/contract-obligations.mjs'
+import { buildPendingOperation, batchWatermark } from '../pterodactyl/runtime-v8/operation-reconciliation.mjs'
 import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
 
 globalThis.fetch = async () => { throw new Error('inference forbidden in fluid preservation fixture') }
 const arg = name => process.argv[process.argv.indexOf(`--${name}`) + 1]
 const evidence = { status: 'fail', factorio: '2.0.77', transcript: [], operations: [] }
 let connection
-const rcon = { command: async command => { const response = await connection.command(command); evidence.transcript.push({ command, response }); return response } }
+const rcon = { command: async command => {
+  if (rcon.queueFault && command.includes('autorio_operation_admission') && command.includes('SGLUNA_RESULT_')) {
+    const at = command.lastIndexOf('; rcon.print('); assert.ok(at > 0)
+    command = `${command.slice(0, at)}; ${rcon.queueFault}${command.slice(at)}`
+    rcon.queueFault = undefined
+  }
+  const response = await connection.command(command); evidence.transcript.push({ command, response }); return response
+} }
 const lua = async body => JSON.parse(await rcon.command(`/silent-command local a; for _,s in pairs(game.surfaces) do local c=s.find_entities_filtered{name="character"}; if #c>0 then a=c[1]; break end end; assert(a); ${body}`))
 const tool = async (name, args) => JSON.parse(await rcon.command(toolCommand(name, args)))
 const geometry = id => tool('getEntityGeometry', { unit_number: id })
-async function operation(name, args) {
+async function operation(name, args, prepared) {
   const actor = await deploymentStatus(rcon, { requireAllowed: true })
-  const admission = await executeAuthorizedBatch(rcon, actor.epoch, [renderOperation(parseOperation({ name, args }))])
+  const admission = await executeAuthorizedBatch(rcon, actor.epoch, [renderOperation(parseOperation({ name, args }))], undefined, prepared?.pending, prepared?.envelope)
   evidence.operations.push({ name, args, admission })
   const deadline = Date.now() + 60000
   for (;;) {
@@ -32,6 +40,21 @@ async function operation(name, args) {
     assert.ok(Date.now() < deadline, `native ${name} timeout`); await delay(100)
   }
 }
+async function freeze(set, candidate, target) {
+  const actor = await deploymentStatus(rcon, { requireAllowed: true })
+  const journal = await lua('rcon.print(helpers.table_to_json(remote.call("autorio_operation_admission","status")))')
+  const ordinal = journal.high_water + 1
+  const owner = { goal_id: 'goal_fluid_native', plan_id: 'goal_fluid_native_p1', plan_version: 1, step_id: `native_step_${ordinal}`,
+    semantic_step_id: `native_step_${ordinal}`, actor_id: actor.actor_id, actor_epoch: actor.epoch, session: actor.session }
+  const pending = buildPendingOperation({ requestId: 'native-fixture', operationKey: `native-fixture/${ordinal}`, attemptId: `native-fixture/${ordinal}`,
+    ordinal, protocolVersion: 2, operations: [{ name: 'place_candidate', args: { candidate_set_id: set.candidate_set_id, candidate_id: candidate.id } }],
+    goalId: owner.goal_id, planId: owner.plan_id, stepId: owner.step_id, actor, baseline: batchWatermark(await tool('getTaskStatus', {})), now: Date.now() })
+  const context = { signature: pending.signature, owner }
+  const guard = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(set.candidate_set_id)},${luaString(candidate.id)},${luaString(pending.operation_key)},{${target}},helpers.json_to_table(${luaString(JSON.stringify(context))}))))`)
+  assert.equal(guard.ok, true, JSON.stringify(guard))
+  return { pending, envelope: { version: 2, operation_key: pending.operation_key, attempt_id: pending.attempt_id,
+    ordinal, signature: pending.signature, owner: Object.fromEntries(Object.entries(owner).filter(([key]) => key !== 'session')), candidate: guard.preservation_join } }
+}
 async function place(name, request, before) {
   const set = await tool('getPlacementCandidates', { entity_name: name, limit: 8, ...request })
   evidence.candidates ??= []; evidence.candidates.push(set)
@@ -40,14 +63,15 @@ async function place(name, request, before) {
   const args = { candidate_set_id: set.candidate_set_id, candidate_id: candidate.id }
   const preflight = JSON.parse(await rcon.command(renderOperationPreflight({ name: 'place_candidate', args })))
   let preservedBefore
+  let prepared
   if (request.connects_to) assert.equal(preflight.preservation_join?.complete, true, JSON.stringify(preflight))
   if (request.connects_to) {
-    const guard = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(args.candidate_set_id)},${luaString(args.candidate_id)},${luaString(`native-fixture/${evidence.operations.length}`)},{${request.connects_to.unit_number}})))`)
-    assert.equal(guard.ok, true, JSON.stringify(guard)); preflight.preservation_join = guard.preservation_join
-    preservedBefore = preservationGeometry(guard.preservation_join.protected_geometry.find(row => row.entity.unit_number === request.connects_to.unit_number), request.connects_to.unit_number)
+    prepared = await freeze(set, candidate, request.connects_to.unit_number)
+    preflight.preservation_join = prepared.envelope.candidate
+    preservedBefore = preservationGeometry(prepared.envelope.candidate.protected_geometry.find(row => row.entity.unit_number === request.connects_to.unit_number), request.connects_to.unit_number)
   }
   if (before) await before(preflight.preservation_join)
-  const result = await operation('place_candidate', args)
+  const result = await operation('place_candidate', args, prepared)
   assert.ok(result.placed_unit_number)
   if (preservedBefore) {
     const fresh = preservationGeometry(await geometry(request.connects_to.unit_number), request.connects_to.unit_number)
@@ -68,7 +92,7 @@ try {
     for _,e in pairs(s.find_entities_filtered{area={{ox-14,oy-16},{ox+26,oy+20}}}) do if e.type~="character" then e.destroy() end end;
     local tiles={}; for x=ox-14,ox+26 do for y=oy-16,oy+20 do tiles[#tiles+1]={name=x<ox and "water" or "landfill",position={x,y}} end end; s.set_tiles(tiles,true,false,true);
     storage.fluid_preservation_fixture={x=a.position.x,y=a.position.y,ox=ox,oy=oy,s=s}; assert(a.teleport({ox+5,oy},s)); a.get_main_inventory().clear();
-    for _,item in pairs({{"offshore-pump",1},{"boiler",1},{"steam-engine",1},{"pipe",2},{"coal",5}}) do assert(a.insert{name=item[1],count=item[2]}==item[2]) end;
+    for _,item in pairs({{"offshore-pump",2},{"boiler",2},{"steam-engine",1},{"pipe",2},{"coal",5}}) do assert(a.insert{name=item[1],count=item[2]}==item[2]) end;
     rcon.print(helpers.table_to_json({center={x=ox,y=oy},actor=a.unit_number,humans=#game.connected_players,speed=game.speed}))`)
   assert.equal(evidence.setup.humans, 0); assert.equal(evidence.setup.speed, 1)
   evidence.water = await tool('getFluidSourceTiles', { fluid_name: 'water', search_radius: 16, limit: 8 })
@@ -78,35 +102,6 @@ try {
   const open = preservationGeometry(await geometry(pumpId), pumpId)
   evidence.open = open
   assert.equal(open.fluid.storages[0].ports.some(port => port.connected), false)
-  // A delayed, already-queued placement must revalidate at native mutation,
-  // after host admission/freeze. The wait is fixture fault scheduling only;
-  // production typed-fluid admission still allows exactly one placement/batch.
-  const delayedSet = await tool('getPlacementCandidates', { entity_name: 'boiler', connects_to: { unit_number: pumpId }, limit: 8 })
-  assert.ok(delayedSet.candidates?.length)
-  const delayedCandidate = delayedSet.candidates[0]
-  const delayedArgs = { candidate_set_id: delayedSet.candidate_set_id, candidate_id: delayedCandidate.id }
-  const delayedGuard = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(delayedArgs.candidate_set_id)},${luaString(delayedArgs.candidate_id)},"native-fixture/delayed",{${pumpId}})))`)
-  assert.equal(delayedGuard.ok, true, JSON.stringify(delayedGuard))
-  const otherPort = delayedGuard.preservation_join.candidate_ports.find(port => port.storage_index === 1
-    && port.connection_index !== delayedCandidate.connects_to.candidate_port.connection_index)
-  assert.ok(otherPort)
-  const offset = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] }[otherPort.direction]
-  const delayedOwner = await deploymentStatus(rcon, { requireAllowed: true })
-  await executeAuthorizedBatch(rcon, delayedOwner.epoch, [renderOperation(parseOperation({ name: 'wait', args: { ticks: 120 } })),
-    renderOperation(parseOperation({ name: 'place_candidate', args: delayedArgs }))])
-  evidence.late_neighbour = await lua(`local e=a.surface.create_entity{name="pipe",position={${otherPort.position.x + offset[0]},${otherPort.position.y + offset[1]}},force=a.force}; assert(e); storage.fluid_preservation_late=e; rcon.print(helpers.table_to_json({unit_number=e.unit_number,created_at_tick=game.tick}))`)
-  const guardDeadline = Date.now() + 30000
-  for (;;) {
-    const status = await tool('getTaskStatus', {})
-    if (status.task_state === 'idle' && status.queue_length === 0) { evidence.delayed_refusal = status; break }
-    assert.ok(Date.now() < guardDeadline); await delay(100)
-  }
-  assert.equal(evidence.delayed_refusal.basic_operation?.last_result?.code, 'placement_candidate_unavailable')
-  assert.equal(evidence.delayed_refusal.basic_operation.last_result.completed, false)
-  evidence.delayed_world = await lua('rcon.print(helpers.table_to_json({boilers=a.surface.count_entities_filtered{name="boiler"},held=a.get_main_inventory().get_item_count("boiler")}))')
-  assert.equal(evidence.delayed_world.boilers, 0); assert.equal(evidence.delayed_world.held, 1)
-  assert.deepEqual(preservationGeometry(await geometry(pumpId), pumpId), open)
-  await lua('assert(storage.fluid_preservation_late.valid); storage.fluid_preservation_late.destroy(); rcon.print("{}")')
   const boiler = await place('boiler', { connects_to: { unit_number: pumpId } })
   assert.equal(boiler.preflight.preservation_join?.complete, true, JSON.stringify(boiler.preflight))
   const boilerId = boiler.result.placed_unit_number
@@ -114,7 +109,7 @@ try {
   const boilerRaw = await geometry(boilerId)
   const boilerProof = preservationGeometry(boilerRaw, boilerId)
   assert.deepEqual(boilerProof.fluid.storages.flatMap(row => row.prototypes), boiler.preflight.preservation_join.candidate_storages.map(row => ({
-    index: row.index, production_type: row.production_type, filter: row.filter ?? null,
+    index: row.index, production_type: row.production_type, volume: row.volume, filter: row.filter ?? null,
     minimum_temperature: row.minimum_temperature ?? null, maximum_temperature: row.maximum_temperature ?? null })))
   const witness = boiler.preflight.preservation_join.connects_to
   const port = joined.fluid.storages.find(row => row.index === witness.target_port.storage_index).ports.find(row => row.index === witness.target_port.connection_index)
@@ -145,6 +140,33 @@ try {
   assert.deepEqual(preservationGeometry(await geometry(pumpId), pumpId), joined, 'production counters do not change protected pump topology')
   evidence.pipe = preservationGeometry(await geometry(pipeId), pipeId)
   evidence.engine = preservationGeometry(await geometry(engineId), engineId)
+  // Fault scheduling occurs after the actual correlated candidate was queued,
+  // inside the same native callback, before its first execution tick. No wait
+  // or second production operation is smuggled into the single-slot batch.
+  await operation('walk_to_position', { x: evidence.setup.center.x + 5, y: evidence.setup.center.y + 9 })
+  const secondPump = await place('offshore-pump', { center: { x: evidence.setup.center.x, y: evidence.setup.center.y + 9 }, radius: 2 })
+  const secondPumpId = secondPump.result.placed_unit_number
+  const secondOpen = preservationGeometry(await geometry(secondPumpId), secondPumpId)
+  const delayedSet = await tool('getPlacementCandidates', { entity_name: 'boiler', connects_to: { unit_number: secondPumpId }, limit: 8 })
+  assert.ok(delayedSet.candidates?.length)
+  const delayedCandidate = delayedSet.candidates[0]
+  const delayedArgs = { candidate_set_id: delayedSet.candidate_set_id, candidate_id: delayedCandidate.id }
+  const prepared = await freeze(delayedSet, delayedCandidate, secondPumpId)
+  // Native claimed-footprint enforcement is independent of the host helper.
+  await assert.rejects(operation('place_entity', { entity_name: 'boiler', x: delayedCandidate.position.x,
+    y: delayedCandidate.position.y, direction: delayedCandidate.direction }), /rejected|refused|Autorio/i)
+  const otherPort = prepared.envelope.candidate.candidate_ports.find(port => port.storage_index === 1
+    && port.connection_index !== delayedCandidate.connects_to.candidate_port.connection_index)
+  assert.ok(otherPort)
+  const offset = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] }[otherPort.direction]
+  rcon.queueFault = `local e=game.surfaces[${prepared.envelope.candidate.surface_index}].create_entity{name="pipe",position={${otherPort.position.x + offset[0]},${otherPort.position.y + offset[1]}},force="player"}; assert(e); storage.fluid_preservation_late=e; storage.fluid_preservation_late_tick=game.tick;`
+  await assert.rejects(operation('place_candidate', delayedArgs, prepared), /completed|false|true|ASSERTION/)
+  evidence.delayed_refusal = await tool('getTaskStatus', {})
+  assert.equal(evidence.delayed_refusal.basic_operation?.last_result?.code, 'placement_candidate_unavailable')
+  assert.equal(evidence.delayed_refusal.basic_operation.last_result.completed, false)
+  evidence.delayed_world = await lua('rcon.print(helpers.table_to_json({boilers=a.surface.count_entities_filtered{name="boiler"},held=a.get_main_inventory().get_item_count("boiler"),fault_tick=storage.fluid_preservation_late_tick}))')
+  assert.equal(evidence.delayed_world.boilers, 1); assert.equal(evidence.delayed_world.held, 1)
+  assert.deepEqual(preservationGeometry(await geometry(secondPumpId), secondPumpId), secondOpen)
   await lua(`local s=a.surface; local e; for _,v in pairs(s.find_entities_filtered{name="boiler"}) do if v.unit_number==${boilerId} then e=v end end; assert(e); e.destroy(); rcon.print("{}")`)
   assert.equal(preservedProofMatches(pair(joined), pair(preservationGeometry(await geometry(pumpId), pumpId))), false, 'removing the receiver cannot erase an established edge')
   await lua(`for _,v in pairs(a.surface.find_entities_filtered{name="offshore-pump"}) do if v.unit_number==${pumpId} then v.force=game.forces.enemy end end; rcon.print("{}")`)

@@ -14,6 +14,7 @@ import { fluid_io_names } from './prototype_knowledge'
 import { type ClearableEntity, type ClearanceMemo, placeable_or_clearable, placement_clearance } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { preservation_geometry_for_actor } from './knowledge'
+import { current_fluid_owner, current_fluid_admission, queued_fluid_admission, same_fluid_owner, valid_fluid_owner, type FluidPreservationOwner, type FluidQueuedBinding } from './operation_admission'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -92,7 +93,18 @@ export interface PlacementCandidate {
   // Entities in the footprint (natural obstructions, the NPC's own idle entities)
   // that placing this candidate mines into the actor inventory first.
   clears?: ClearableEntity[]
-  preservation_guard?: { operation_key: string, protected_ids: number[], geometry: any[], join: any }
+  preservation_guard?: NativeFluidGuard
+}
+interface NativeFluidGuard {
+  operation_key: string
+  signature: string
+  owner: FluidPreservationOwner
+  candidate_set_id: string
+  candidate_id: string
+  protected_ids: number[]
+  geometry: any[]
+  join: any
+  native_baseline: { generation: number, max_batch_id: number }
 }
 
 interface PlacementCandidateSet {
@@ -112,6 +124,8 @@ declare const storage: {
   sgluna_placement_candidate_sets?: Record<string, PlacementCandidateSet>
   sgluna_placement_candidate_set_order?: string[]
   sgluna_placement_candidate_next_id?: number
+  sgluna_fluid_preservation_claims?: Record<string, NativeFluidGuard>
+  sgluna_fluid_preservation_claims_initialized?: boolean
 }
 
 function candidate_sets() {
@@ -926,6 +940,7 @@ function protected_geometry(actor: ControlledActor, ids: number[]) {
 function preservation_guard_matches(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate) {
   const guard = candidate.preservation_guard
   if (!guard) return true
+  if (!native_fact_equal(guard, storage.sgluna_fluid_preservation_claims?.[guard.operation_key]) || !current_fluid_owner(actor, guard.owner)) return false
   if (!actor.surface.can_place_entity({ name: set.entity_name, position: candidate.position, direction: candidate.direction,
     force: actor.force, ...placement_check_args(set.entity_name) })) return false
   const geometry = protected_geometry(actor, guard.protected_ids)
@@ -933,29 +948,94 @@ function preservation_guard_matches(actor: ControlledActor, set: PlacementCandid
   return !!geometry && join.complete === true && native_fact_equal(geometry, guard.geometry)
     && native_fact_equal({ ...join, tick: 0 }, { ...guard.join, tick: 0 })
 }
+function native_admission_baseline() {
+  if (!remote.interfaces.autorio_operations?.status || !remote.interfaces.autorio_crafting?.status) return undefined
+  const status: any = remote.call('autorio_operations', 'status')
+  const crafting: any = remote.call('autorio_crafting', 'status')
+  if (status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch
+    || status.actor?.mining_state?.mining === true || status.follow?.active !== false
+    || crafting.task_active !== false || !crafting.native_queue || Object.keys(crafting.native_queue).length !== 0
+    || crafting.persisted_owner || typeof status.batch_generation !== 'number' || status.batch_generation < 1) return undefined
+  return { generation: status.batch_generation,
+    max_batch_id: math.max(status.last_completed_batch?.batch_id ?? 0, status.last_cancelled_batch?.batch_id ?? 0) }
+}
 
 // Harness-only native claim. Unknown/bulk geometry cannot be frozen. A claim
 // cannot be rebound to another operation or renewed with a changed baseline.
-export function freeze_fluid_preservation_candidate(actor: ControlledActor | undefined, candidate_set_id: string, candidate_id: string, operation_key: string, protected_ids: number[]) {
+export function freeze_fluid_preservation_candidate(actor: ControlledActor | undefined, candidate_set_id: string, candidate_id: string, operation_key: string, protected_ids: number[], context: { signature: string, owner: FluidPreservationOwner }) {
   if (!actor?.is_valid || typeof operation_key !== 'string' || operation_key.length < 1 || operation_key.length > 240
     || !Array.isArray(protected_ids) || protected_ids.length < 1 || protected_ids.length > 8
     || protected_ids.some(id => typeof id !== 'number' || id < 1 || math.floor(id) !== id)
-    || new Set(protected_ids).size !== protected_ids.length) return { ok: false, code: 'preservation_guard_invalid' }
+    || new Set(protected_ids).size !== protected_ids.length || !context || typeof context.signature !== 'string'
+    || context.signature.length < 1 || context.signature.length > 256 || !valid_fluid_owner(context.owner)
+    || !current_fluid_owner(actor, context.owner)) return { ok: false, code: 'preservation_guard_invalid' }
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
   if (!resolved.ok || !resolved.candidate.connects_to || !protected_ids.includes(resolved.candidate.connects_to.unit_number)) return { ok: false, code: 'preservation_guard_candidate_unavailable' }
   const { set, candidate } = resolved
   if (actor.status_snapshot().actor_id !== set.actor_id) return { ok: false, code: 'preservation_guard_actor_changed' }
   const join: any = preservation_candidate_join(actor, set, candidate)
   const geometry = protected_geometry(actor, protected_ids)
-  if (!geometry || join.complete !== true) return { ok: false, code: 'preservation_guard_geometry_unproven' }
-  const guard = { operation_key, protected_ids: [...protected_ids], geometry, join }
+  const native_baseline = native_admission_baseline()
+  if (!geometry || join.complete !== true || !native_baseline) return { ok: false, code: 'preservation_guard_geometry_unproven' }
+  const guard = { operation_key, signature: context.signature, owner: { ...context.owner }, candidate_set_id, candidate_id,
+    protected_ids: [...protected_ids], geometry, join, native_baseline }
   if (candidate.preservation_guard && (!native_fact_equal({ ...guard.join, tick: 0 }, { ...candidate.preservation_guard.join, tick: 0 })
     || !native_fact_equal(guard.geometry, candidate.preservation_guard.geometry)
     || !native_fact_equal(guard.protected_ids, candidate.preservation_guard.protected_ids)
-    || guard.operation_key !== candidate.preservation_guard.operation_key)) return { ok: false, code: 'preservation_guard_already_claimed' }
+    || guard.operation_key !== candidate.preservation_guard.operation_key || guard.signature !== candidate.preservation_guard.signature
+    || !same_fluid_owner(guard.owner, candidate.preservation_guard.owner))) return { ok: false, code: 'preservation_guard_already_claimed' }
+  const claims = storage.sgluna_fluid_preservation_claims ?? {}
+  if (storage.sgluna_fluid_preservation_claims_initialized && Object.keys(claims).length === 0) return { ok: false, code: 'preservation_claim_history_missing' }
+  if (!claims[operation_key] && Object.keys(claims).length >= 64) return { ok: false, code: 'preservation_native_claim_limit_exhausted' }
+  if (claims[operation_key] && !native_fact_equal({ ...guard.join, tick: 0 }, { ...claims[operation_key].join, tick: 0 })) return { ok: false, code: 'preservation_guard_already_claimed' }
   candidate.preservation_guard ??= guard
-  return { ok: true, preservation_join: { ...candidate.preservation_guard.join, version: 3,
-    operation_key, protected_geometry: candidate.preservation_guard.geometry } }
+  claims[operation_key] ??= candidate.preservation_guard
+  if (!native_fact_equal(claims[operation_key], candidate.preservation_guard)) return { ok: false, code: 'preservation_guard_already_claimed' }
+  storage.sgluna_fluid_preservation_claims = claims
+  storage.sgluna_fluid_preservation_claims_initialized = true
+  return { ok: true, preservation_join: { ...candidate.preservation_guard.join, version: 4,
+    operation_key, signature: context.signature, owner: candidate.preservation_guard.owner,
+    native_baseline: candidate.preservation_guard.native_baseline, protected_geometry: candidate.preservation_guard.geometry } }
+}
+
+function placement_claims(actor: ControlledActor, entity_name: string, x?: number, y?: number, direction?: number) {
+  const result: NativeFluidGuard[] = []
+  if (!prototypes.entity[entity_name]) return result
+  const fluidboxes: any[] = prototypes.entity[entity_name]?.fluidbox_prototypes ?? []
+  const claims = Object.values(storage.sgluna_fluid_preservation_claims ?? {}) as NativeFluidGuard[]
+  for (const guard of claims) {
+    if (guard.join.surface_index !== actor.surface.index) continue
+    if (x === undefined || y === undefined) { if (fluidboxes.length > 0) result.push(guard); continue }
+    const own = placement_footprint(prototypes.entity[entity_name], { x, y }, direction).world_box
+    const held = placement_footprint(prototypes.entity[guard.join.entity_name], guard.join.position, guard.join.direction).world_box
+    if (own.left_top.x < held.right_bottom.x && own.right_bottom.x > held.left_top.x
+      && own.left_top.y < held.right_bottom.y && own.right_bottom.y > held.left_top.y) result.push(guard)
+  }
+  return result
+}
+export function placement_preservation_queue_binding(actor: ControlledActor, entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }) {
+  const claims = placement_claims(actor, entity_name, x, y, direction)
+  if (storage.sgluna_fluid_preservation_claims_initialized && !Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length) return { required: true }
+  if (!claims.length) return { required: false }
+  if (claims.length !== 1 || !proof) return { required: true }
+  const guard = claims[0]
+  if (proof.candidate_set_id !== guard.candidate_set_id || proof.candidate_id !== guard.candidate_id
+    || !placement_candidate_matches(actor, proof, entity_name, x, y, direction)) return { required: true }
+  if (!native_fact_equal(native_admission_baseline(), guard.native_baseline)) return { required: true }
+  const admission = current_fluid_admission(actor, guard.operation_key, guard.signature, guard.owner)
+  return admission ? { required: true, binding: { operation_key: admission.operation_key, signature: admission.signature,
+    attempt_id: admission.attempt_id, ordinal: admission.ordinal, owner: { ...guard.owner } } } : { required: true }
+}
+export function placement_preservation_execution_allowed(actor: ControlledActor, entity_name: string, x: number | undefined, y: number | undefined, direction: number | undefined,
+  proof: { candidate_set_id: string, candidate_id: string } | undefined, binding: FluidQueuedBinding | undefined, status: any) {
+  const claims = placement_claims(actor, entity_name, x, y, direction)
+  if (storage.sgluna_fluid_preservation_claims_initialized && !Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length) return false
+  if (!claims.length) return binding === undefined
+  return claims.length === 1 && !!proof && !!binding && claims[0].operation_key === binding.operation_key
+    && claims[0].signature === binding.signature && same_fluid_owner(claims[0].owner, binding.owner)
+    && proof.candidate_set_id === claims[0].candidate_set_id && proof.candidate_id === claims[0].candidate_id
+    && binding.batch_generation === claims[0].native_baseline.generation && binding.batch_id > claims[0].native_baseline.max_batch_id
+    && placement_candidate_matches(actor, proof, entity_name, x, y, direction) && queued_fluid_admission(actor, binding, status)
 }
 
 export function placement_candidate_preflight(actor: ControlledActor, candidate_set_id: string, candidate_id: string) {
@@ -974,6 +1054,10 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   const unavailable = (reason: string) => ({ version: 1, complete: false, reason })
   const prototype = prototypes.entity[set.entity_name]
   const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
+  if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe'].includes(set.entity_name)
+    || fluidboxes.length < 1 || fluidboxes.length > 16 || fluidboxes.some((storage, index) => storage.index !== index + 1
+      || !(storage.volume > 0 && storage.volume < math.huge)
+      || !['input', 'output', 'input-output', 'none'].includes(storage.production_type))) return unavailable('candidate_storage_constraints_unproven')
   let expected = 0
   for (const storage of fluidboxes) {
     const connections: any[] = storage.pipe_connections ?? []
@@ -983,7 +1067,7 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   if (!ports || expected !== ports.length || expected > 16 || expected < 1
     || ports.some(port => port.connection_type !== 'normal') || (candidate.clears?.length ?? 0) > 0) return unavailable('candidate_ports_incomplete_or_clearing')
   const storages = fluidboxes.map((storage, index) => ({ index: storage.index ?? index + 1,
-    production_type: storage.production_type, filter: storage.filter?.name,
+    production_type: storage.production_type, volume: storage.volume, filter: storage.filter?.name,
     minimum_temperature: storage.minimum_temperature, maximum_temperature: storage.maximum_temperature }))
   let left = candidate.position.x
   let right = left

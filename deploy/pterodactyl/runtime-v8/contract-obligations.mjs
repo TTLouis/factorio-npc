@@ -91,11 +91,11 @@ function point(raw) {
   return { x: raw.x, y: raw.y }
 }
 function fluidPrototype(raw) {
-  if (!positiveIndex(raw?.index) || !fluidProduction.has(raw.production_type)
+  if (!positiveIndex(raw?.index) || !fluidProduction.has(raw.production_type) || !finite(raw.volume) || raw.volume <= 0
     || raw.filter !== undefined && (typeof raw.filter !== 'string' || !raw.filter)
     || raw.minimum_temperature !== undefined && !finite(raw.minimum_temperature)
     || raw.maximum_temperature !== undefined && !finite(raw.maximum_temperature)) unproven('preservation_fluid_prototype_unproven')
-  return { index: raw.index, production_type: raw.production_type, filter: raw.filter ?? null,
+  return { index: raw.index, production_type: raw.production_type, volume: raw.volume, filter: raw.filter ?? null,
     minimum_temperature: raw.minimum_temperature ?? null, maximum_temperature: raw.maximum_temperature ?? null }
 }
 function fluidPort(raw, scope, { stored = false } = {}) {
@@ -118,27 +118,29 @@ function fluidPort(raw, scope, { stored = false } = {}) {
 export function fluidPreservationGeometry(raw, scope, { stored = false } = {}) {
   const storages = stored ? raw?.storages : raw?.fluid_storages
   const count = stored ? storages?.length : raw?.fluid_box_count
-  if ((stored ? raw?.version : raw?.fluid_geometry_version) !== 2 || !positiveIndex(count)
+  if ((stored ? raw?.version : raw?.fluid_geometry_version) !== 3 || !positiveIndex(count)
     || !Array.isArray(storages) || storages.length !== count
     || !stored && (raw.fluid_storages_truncated !== false || raw.non_fluidbox_storage_count !== 0)) unproven('preservation_fluid_geometry_incomplete')
   const projected = storages.map((storage, index) => {
     const prototypes = storage.prototypes
     const ports = stored ? storage.ports : storage.pipe_connections
-    if (storage.index !== index + 1 || !finite(storage.capacity) || storage.capacity <= 0
+    if (storage.index !== index + 1 || !finite(storage.local_volume) || storage.local_volume <= 0
       || !Array.isArray(prototypes) || !prototypes.length || prototypes.length > 16
       || !Array.isArray(ports) || !ports.length || ports.length > 16
       || !stored && (storage.pipe_connections_truncated !== false || storage.prototypes_truncated !== false)) unproven('preservation_fluid_storage_incomplete')
-    return { index: storage.index, capacity: storage.capacity,
+    const projected = { index: storage.index, local_volume: storage.local_volume,
       prototypes: prototypes.map(row => fluidPrototype(stored ? { ...row,
         filter: row.filter ?? undefined, minimum_temperature: row.minimum_temperature ?? undefined,
         maximum_temperature: row.maximum_temperature ?? undefined } : row)).sort((a, b) => a.index - b.index),
       ports: ports.map(row => fluidPort(row, scope, { stored })).sort((a, b) => a.index - b.index) }
+    if (projected.local_volume !== projected.prototypes.reduce((total, row) => total + row.volume, 0)) unproven('preservation_local_volume_unproven')
+    return projected
   })
   for (const storage of projected) {
     if (new Set(storage.prototypes.map(row => row.index)).size !== storage.prototypes.length
       || storage.ports.some((port, index) => port.index !== index + 1)) unproven('preservation_fluid_indices_incomplete')
   }
-  return { version: 2, storages: projected }
+  return { version: 3, storages: projected }
 }
 // Geometry contains no changing fuel/output counters. Preserve engine-known
 // item routes and reject unsupported fluid topology instead of guessing it.
@@ -274,23 +276,51 @@ export function preservedProofMatches(before, after, { addition } = {}) {
   })
 }
 
+const nativeOwnerFields = ['goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'actor_id', 'actor_epoch', 'session']
+function normalizeNativeOwner(raw) {
+  if (!raw || Object.keys(raw).length !== 8 || nativeOwnerFields.some(key => !Object.hasOwn(raw, key))
+    || ['goal_id', 'plan_id', 'step_id', 'semantic_step_id', 'session'].some(key => typeof raw[key] !== 'string' || !raw[key] || raw[key].length > 240)
+    || ['plan_version', 'actor_id', 'actor_epoch'].some(key => !Number.isSafeInteger(raw[key]) || raw[key] < 1)) return undefined
+  return Object.fromEntries(nativeOwnerFields.map(key => [key, raw[key]]))
+}
+function nativeOwnerMatches(left, right) {
+  return normalizeNativeOwner(left) && normalizeNativeOwner(right)
+    && nativeOwnerFields.every(key => Object.hasOwn(left, key) && Object.hasOwn(right, key) && left[key] === right[key])
+}
+export function normalizeFluidReceiptBinding(raw) {
+  const keys = ['operation_key', 'attempt_id', 'signature', 'ordinal', 'owner', 'batch_id', 'batch_generation', 'batch_ref']
+  const owner = normalizeNativeOwner(raw?.owner)
+  if (!raw || !owner || Object.keys(raw).length !== keys.length || keys.some(key => !Object.hasOwn(raw, key))
+    || typeof raw.operation_key !== 'string' || !raw.operation_key || raw.operation_key.length > 192
+    || typeof raw.attempt_id !== 'string' || !raw.attempt_id || raw.attempt_id.length > 128
+    || typeof raw.signature !== 'string' || !/^[a-f0-9]{64}$/.test(raw.signature)
+    || ['ordinal', 'batch_id', 'batch_generation'].some(key => !Number.isSafeInteger(raw[key]) || raw[key] < 1)
+    || raw.batch_ref !== `batch-g${raw.batch_generation}-${raw.batch_id}`) return undefined
+  return { operation_key: raw.operation_key, attempt_id: raw.attempt_id, signature: raw.signature, ordinal: raw.ordinal,
+    owner, batch_id: raw.batch_id, batch_generation: raw.batch_generation, batch_ref: raw.batch_ref }
+}
 function fluidAdmissionUnchecked(raw, plan, step) {
   const proof = normalizeObligationProof(raw?.baseline, step?.obligations)
   const owner = raw?.owner
   const candidate = raw?.candidate
   const operation = raw?.operation
-  if (raw?.version !== 1 || !proof || proof.version !== 2 || !owner || !candidate
+  if (raw?.version !== 2 || !proof || proof.version !== 2 || !owner || !candidate
     || JSON.stringify(proof.binding) !== JSON.stringify(step.obligation_proof.binding)
     || owner.goal_id !== plan.goal_id || owner.plan_id !== plan.plan_id || owner.plan_version !== plan.plan_version
     || owner.step_id !== step.step_id || owner.semantic_step_id !== (step.semantic_step_id ?? step.step_id)
     || owner.actor_id !== proof.actor_id || owner.actor_epoch !== proof.actor_epoch
     || typeof raw.operation_key !== 'string' || !raw.operation_key || typeof raw.request_id !== 'string' || !raw.request_id
+    || typeof raw.attempt_id !== 'string' || !raw.attempt_id || !Number.isSafeInteger(raw.ordinal) || raw.ordinal < 1
     || typeof raw.board_step_id !== 'string' || !raw.board_step_id
     || !finite(raw.created_at) || raw.native_idle !== true || !Number.isSafeInteger(raw.native_generation) || raw.native_generation < 1
     || !Number.isSafeInteger(raw.native_max_batch_id) || raw.native_max_batch_id < 0
     || operation?.name !== 'place_candidate' || raw.signature !== operationSignature([operation])
     || operation.args?.candidate_set_id !== candidate.candidate_set_id || operation.args?.candidate_id !== candidate.candidate_id
-    || candidate.version !== 3 || candidate.operation_key !== raw.operation_key || candidate.complete !== true || candidate.actor_id !== owner.actor_id
+    || candidate.version !== 4 || candidate.operation_key !== raw.operation_key || candidate.signature !== raw.signature
+    || candidate.native_baseline?.generation !== raw.native_generation || candidate.native_baseline.max_batch_id !== raw.native_max_batch_id
+    || typeof candidate.owner?.session !== 'string' || !candidate.owner.session || candidate.owner.session.length > 240
+    || !nativeOwnerMatches(candidate.owner, { ...owner, session: candidate.owner.session })
+    || candidate.complete !== true || candidate.actor_id !== owner.actor_id
     || !Number.isSafeInteger(candidate.tick) || !Number.isSafeInteger(candidate.generated_tick)
     || candidate.tick < candidate.generated_tick || candidate.tick - candidate.generated_tick > 3600
     || !supportedFluid({ name: candidate.entity_name, type: candidate.entity_type })
@@ -349,9 +379,14 @@ export function fluidAdditionProof(envelope, receipt, built, fresh, plan, step) 
   const basic = receipt?.basic_operation
   const admitted = receipt?.admitted_batch
   const candidate = witness.candidate
+  const binding = normalizeFluidReceiptBinding(basic?.preservation_binding)
   if (receipt.outcome !== 'completed' || receipt.task_state !== 'idle' || receipt.queue_length !== 0
     || basic?.type !== 'placing' || basic.accepted !== true || basic.completed !== true || basic.code !== 'completed'
     || basic.actor_id !== witness.owner.actor_id || basic.entity_name !== candidate.entity_name
+    || binding?.operation_key !== witness.operation_key || binding.signature !== witness.signature || binding.attempt_id !== witness.attempt_id
+    || binding.ordinal !== witness.ordinal || !nativeOwnerMatches(binding.owner, candidate.owner)
+    || binding.batch_id !== receipt.batch_id || binding.batch_generation !== receipt.batch_generation
+    || binding.batch_ref !== `batch-g${receipt.batch_generation}-${receipt.batch_id}`
     || basic.placed_surface_index !== candidate.surface_index || basic.placed_direction !== candidate.direction
     || basic.placed_position?.x !== candidate.position.x || basic.placed_position?.y !== candidate.position.y
     || !Number.isSafeInteger(basic.placed_unit_number) || step.obligations.preserve.includes(basic.placed_unit_number)

@@ -78,7 +78,7 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   const plan = getActivePlan(planning)
   const step = plan?.steps?.[plan.active_step_index]
   if (step?.obligation_proof?.version !== 2) return undefined
-  const fail = code => { throw new PreservationProofError(code, { stage: 'admission' }) }
+  const fail = code => { throw new PreservationProofError(code, { stage: 'admission', category: code.endsWith('_limit_exhausted') ? 'exhausted' : 'unproven' }) }
   const owner = agent.captureCheckpointOwner()
   const fence = async () => {
     await agent.assertCheckpointOwnerCurrent(owner)
@@ -117,10 +117,16 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   if (operations?.length !== 1 || operations[0].name !== 'place_candidate') fail('preservation_exact_single_candidate_required')
   let preflight
   const args = operations[0].args
-  const freeze = `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(args.candidate_set_id)},${luaString(args.candidate_id)},${luaString(pending.operation_key)},{${step.obligations.preserve.join(',')}})))`
+  const current = await agent.assertCurrent(); await fence()
+  if (typeof current.session !== 'string' || !current.session) fail('preservation_native_session_unproven')
+  const nativeOwner = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
+    semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch, session: current.session }
+  const context = { signature: pending.signature, owner: nativeOwner }
+  const freeze = `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(args.candidate_set_id)},${luaString(args.candidate_id)},${luaString(pending.operation_key)},{${step.obligations.preserve.join(',')}},helpers.json_to_table(${luaString(JSON.stringify(context))}))))`
   try { preflight = JSON.parse(String(await agent.rcon.command(freeze))) }
   catch { await fence(); fail('preservation_candidate_read_unavailable') }
   await fence()
+  if (preflight?.ok !== true && ['preservation_native_claim_limit_exhausted', 'preservation_claim_history_missing', 'preservation_guard_already_claimed'].includes(preflight?.code)) fail(preflight.code)
   const rawStatus = await agent.readTaskStatusRaw()
   await fence()
   const status = typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus
@@ -129,7 +135,8 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   if (!await nativeIdle(agent, fence) || !baseline || !baseline.idle || baseline.queue_length !== 0
     || baseline.generation !== pending.baseline?.generation || baseline.max_batch_id !== pending.baseline?.max_batch_id
     || !Array.isArray(journal) || journal.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')
-  const envelope = normalizeFluidAdmission({ version: 1, operation_key: pending.operation_key, signature: pending.signature,
+  const envelope = normalizeFluidAdmission({ version: 2, operation_key: pending.operation_key, attempt_id: pending.attempt_id,
+    ordinal: pending.ordinal, signature: pending.signature,
     request_id: pending.request_id, board_step_id: agent.memory.currentPlan(key)?.task_board?.active_step_id,
     owner: { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
       semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch },

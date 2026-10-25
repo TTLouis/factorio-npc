@@ -30,7 +30,12 @@ function world({ trace, persist, read, secondOperation, doneMinimum = 99 } = {})
     }
     if (text.includes('fluid_preservation_candidate')) {
       const candidate = fluidFixture().admission.candidate
-      candidate.operation_key = memory.pendingOperations(KEY)[0]?.operation_key
+      const pending = memory.pendingOperations(KEY)[0]
+      const held = getActivePlan(memory.planningState(KEY)); const step = held.steps[held.active_step_index]
+      candidate.operation_key = pending?.operation_key; candidate.signature = pending?.signature
+      candidate.native_baseline = { generation: pending.baseline.generation, max_batch_id: pending.baseline.max_batch_id }
+      candidate.owner = { goal_id: held.goal_id, plan_id: held.plan_id, plan_version: held.plan_version, step_id: step.step_id,
+        semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: 10, actor_epoch: 3, session: game.status.session }
       candidate.protected_geometry = [fluidGeometry(1, game.connected === true)]
       return JSON.stringify({ ok: true, preservation_join: candidate })
     }
@@ -53,6 +58,10 @@ function world({ trace, persist, read, secondOperation, doneMinimum = 99 } = {})
       game.lastBasicResult = { operation_id: game.batchId, tick: 600 + game.batchId, actor_id: 10,
         type: 'placing', accepted: true, completed: true, code: 'completed', entity_name: 'boiler',
         placed_unit_number: 2, placed_entity_type: 'boiler', placed_position: { x: 0, y: 3 }, placed_surface_index: 1, placed_direction: 0 }
+      const envelope = Object.values(getActivePlan(memory.planningState(KEY)).execution.preservation_admissions).at(-1)
+      game.lastBasicResult.preservation_binding = { operation_key: envelope.operation_key, attempt_id: envelope.attempt_id,
+        ordinal: envelope.ordinal, signature: envelope.signature, owner: envelope.candidate.owner,
+        batch_id: game.batchId, batch_generation: 1, batch_ref: `batch-g1-${game.batchId}` }
     } else if (text.includes("'supply_entity'")) {
       game.lastTaskTypes = ['moving_items']; game.inventory.coal--
       game.lastBasicResult = { operation_id: game.batchId, tick: 600 + game.batchId, actor_id: 10,

@@ -248,6 +248,7 @@ function fluidbox_prototype_summary(value: any) {
     result.push({
       index: prototype.index,
       production_type: prototype.production_type,
+      volume: prototype.volume,
       filter: prototype.filter?.name,
       minimum_temperature: prototype.minimum_temperature,
       maximum_temperature: prototype.maximum_temperature,
@@ -265,6 +266,7 @@ function fluid_storage_summary(entity: LuaEntity, index: number) {
   return {
     index,
     capacity: fluidbox.get_capacity(index),
+    local_volume: prototypes_for_storage.reduce((total, prototype) => total + (prototype.volume as number), 0),
     current_fluid: current_fluid
       ? {
           name: current_fluid.name,
@@ -626,7 +628,7 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
           }
         : undefined,
     fluid_storage_count: entity.fluids_count,
-    fluid_geometry_version: 2,
+    fluid_geometry_version: 3,
     fluid_box_count,
     non_fluidbox_storage_count: math.max(0, entity.fluids_count - fluid_box_count),
     fluid_storages_truncated: fluid_box_count > MAX_FLUID_STORAGES,
@@ -648,6 +650,7 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
     if (storages.length !== raw.fluid_box_count) return undefined
     for (const storage of storages) {
       if (storage.pipe_connections_truncated !== false || storage.prototypes_truncated !== false) return undefined
+      if (!(storage.local_volume > 0 && storage.local_volume < math.huge)) return undefined
       const ports: any[] = storage.pipe_connections ?? []
       for (const port of ports) {
         if (port.connection_type !== 'normal' || port.target_valid !== true) return undefined
@@ -659,7 +662,7 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
     actor_id: raw.actor_id, actor_surface_index: raw.actor_surface_index, actor_force_index: raw.actor_force_index,
     item_io: raw.item_io, fluid_geometry_version: raw.fluid_geometry_version, fluid_box_count: raw.fluid_box_count,
     non_fluidbox_storage_count: raw.non_fluidbox_storage_count, fluid_storages_truncated: raw.fluid_storages_truncated,
-    fluid_storages: storages.map(storage => ({ index: storage.index, capacity: storage.capacity,
+    fluid_storages: storages.map(storage => ({ index: storage.index, local_volume: storage.local_volume,
       prototypes: storage.prototypes, prototypes_truncated: storage.prototypes_truncated,
       pipe_connections: storage.pipe_connections, pipe_connections_truncated: storage.pipe_connections_truncated })) }
 }

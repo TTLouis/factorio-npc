@@ -90,6 +90,7 @@ remote.add_interface('autorio_operation_admission', {
   begin: (raw: Parameters<Admission['begin']>[0]) => operation_admission.begin(raw),
   slot: (key: string, index: number, raw: Parameters<Admission['slot']>[2]) => operation_admission.slot(key, index, raw),
   finish: (key: string, raw: Parameters<Admission['finish']>[1]) => operation_admission.finish(key, raw),
+  leave: (key: string) => operation_admission.leave(key),
   resolve: (key: string, raw: Parameters<Admission['resolve']>[1]) => operation_admission.resolve(key, raw),
   status: (key?: string) => operation_admission.status(key),
 })
@@ -525,8 +526,8 @@ function operation_preflight(name: string, args: Record<string, any>) {
 remote.add_interface('autorio_preflight', {
   // The single place a preflight refusal gets its class (see refusal_classes.ts); every ok:false result passes through here.
   operation: (name: string, args: Record<string, any>) => with_refusal_class(operation_preflight(name, args)),
-  fluid_preservation_candidate: (set: string, candidate: string, operation_key: string, protected_ids: number[]) =>
-    freeze_fluid_preservation_candidate(get_controlled_actor(), set, candidate, operation_key, protected_ids),
+  fluid_preservation_candidate: (set: string, candidate: string, operation_key: string, protected_ids: number[], context: Parameters<typeof freeze_fluid_preservation_candidate>[5]) =>
+    freeze_fluid_preservation_candidate(get_controlled_actor(), set, candidate, operation_key, protected_ids, context),
 })
 
 remote.add_interface('autorio_operations', {

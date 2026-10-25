@@ -2929,6 +2929,7 @@ Object.assign(HANDLERS, {
       || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
       || !step || !held || !envelope || !obligationProofOrigin(state, step)
       || !pending || pending.protocol_version !== 2 || pending.signature !== envelope.signature
+      || pending.attempt_id !== envelope.attempt_id || pending.ordinal !== envelope.ordinal
       || pending.goal_id !== plan.goal_id || pending.plan_id !== plan.plan_id || pending.step_id !== step.step_id
       || pending.actor?.actor_id !== envelope.owner.actor_id || pending.actor.epoch !== envelope.owner.actor_epoch
       || pending.operations?.length !== 1 || pending.operations[0].name !== 'place_candidate'

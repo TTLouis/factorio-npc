@@ -2,6 +2,7 @@ import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, PathfinderWaypoint } from 'factorio:runtime'
 import type { ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
+import type { FluidQueuedBinding } from './operation_admission'
 
 export enum TaskStates {
   IDLE = 'idle',
@@ -155,6 +156,7 @@ export interface PlayerParametersPlaceEntity {
   entity_name: string
   /** Native candidate registry identity; never accepted on the generic placement wire. */
   placement_candidate?: { candidate_set_id: string, candidate_id: string }
+  preservation_binding?: FluidQueuedBinding
   /** Exact requested placement position. When omitted the runtime finds a local valid position. */
   position?: MapPositionStruct
   /** Factorio direction value (0..15) for precise placement. */
