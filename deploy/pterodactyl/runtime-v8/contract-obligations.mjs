@@ -299,11 +299,24 @@ export function normalizeFluidReceiptBinding(raw) {
   return { operation_key: raw.operation_key, attempt_id: raw.attempt_id, signature: raw.signature, ordinal: raw.ordinal,
     owner, batch_id: raw.batch_id, batch_generation: raw.batch_generation, batch_ref: raw.batch_ref }
 }
+// Allowed-empty native wire sequences have exactly one known representation in
+// JSON: [] or Factorio's plain {}. Missing and exotic values are not emptiness.
+export function isNativeEmptyPreservationSequence(value) {
+  if (!value || typeof value !== 'object') return false
+  if (Array.isArray(value)) return Object.getPrototypeOf(value) === Array.prototype
+    && value.length === 0 && Reflect.ownKeys(value).length === 1
+  return Object.getPrototypeOf(value) === Object.prototype && Reflect.ownKeys(value).length === 0
+}
 function fluidAdmissionUnchecked(raw, plan, step) {
   const proof = normalizeObligationProof(raw?.baseline, step?.obligations)
   const owner = raw?.owner
   const candidate = raw?.candidate
   const operation = raw?.operation
+  // Factorio's JSON serializer emits an empty Lua sequence as {}. Only this
+  // exact empty native shape or an empty array proves the no-clearing field;
+  // absent, nonempty and malformed values remain unknown/refused.
+  const clears = candidate?.clears
+  const noClears = isNativeEmptyPreservationSequence(clears)
   if (raw?.version !== 2 || !proof || proof.version !== 2 || !owner || !candidate
     || JSON.stringify(proof.binding) !== JSON.stringify(step.obligation_proof.binding)
     || owner.goal_id !== plan.goal_id || owner.plan_id !== plan.plan_id || owner.plan_version !== plan.plan_version
@@ -324,7 +337,7 @@ function fluidAdmissionUnchecked(raw, plan, step) {
     || !Number.isSafeInteger(candidate.tick) || !Number.isSafeInteger(candidate.generated_tick)
     || candidate.tick < candidate.generated_tick || candidate.tick - candidate.generated_tick > 3600
     || !supportedFluid({ name: candidate.entity_name, type: candidate.entity_type })
-    || !Array.isArray(candidate.clears) || candidate.clears.length !== 0
+    || !noClears
     || !Array.isArray(candidate.candidate_ports) || !candidate.candidate_ports.length || candidate.candidate_ports.length > 16
     || !Array.isArray(candidate.candidate_storages) || !candidate.candidate_storages.length || candidate.candidate_storages.length > 16) return undefined
   const proposedStorages = candidate.candidate_storages.map(fluidPrototype)
@@ -368,7 +381,7 @@ function fluidAdmissionUnchecked(raw, plan, step) {
       || row.maximum_temperature !== null && ownStorage.minimum_temperature !== null && row.maximum_temperature < ownStorage.minimum_temperature)
     || !step.obligations.outcome.requirements.some(row => row.kind === 'entity_count' && row.prototype === candidate.entity_name
       && (!row.anchor || Math.hypot(candidate.position.x - row.anchor.x, candidate.position.y - row.anchor.y) <= row.radius))) return undefined
-  return clone(raw)
+  return clone({ ...raw, candidate: { ...candidate, clears: [] } })
 }
 export function normalizeFluidAdmission(raw, plan, step) {
   try { return fluidAdmissionUnchecked(raw, plan, step) } catch { return undefined }

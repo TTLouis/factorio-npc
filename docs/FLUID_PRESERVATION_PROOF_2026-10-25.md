@@ -153,3 +153,38 @@ implicit numeric truthiness in this repair. One inherited gather-cancellation
 truthiness pattern predates this repair and was reported separately; it is not
 silently changed by this fluid follow-up. Fresh type/TSTL and engine proof of
 this correction are pending; the old full-gate PASS does not cover it.
+
+Native07 and combined primary engine02 subsequently passed on f2d1cb76 native
+and e8b5d6dc host: the actual virgin pump and all fluid controls passed, alongside
+the actual exported atomic DTO. All32 loaded native files matched raw hashes.
+This was still native transport/geometry proof, separate from a full Memory
+certificate lifecycle. The new external real-loop proof correctly exposed two
+host wire-shape defects before sending any boiler: empty admission_journal was
+`{}` (F2 owns its canonical journal correction), then native candidate.clears
+was `{}`. Both engine failure traces and exact cleanup are retained unchanged.
+
+The shared fluid admission normalizer now accepts only known-empty [] or a
+plain empty native object for clears and returns canonical clears[]. It never
+mutates the original reply or committed proof. Missing, nonempty, scalar,
+exotic-prototype and extra-field values remain unproven; no clearing permission
+is granted. The exact2.0.77 reply and matching frozen proof are retained in
+fixtures/native-fluid-empty-clears.json, explicitly a finite offline fixture,
+not historical AW evidence or an invented completion certificate. The exact
+old module refuses that reply; changing ONLY clears to [] makes the old module
+accept it, and the corrected normalizer accepts/canonicalizes the original.
+
+Native-array boundary audit:
+
+| Incoming field | Empty semantics |
+| --- | --- |
+| Frozen candidate clears | Must be known empty; canonicalize []/plain{} to [] |
+| Crafting native_queue at pre-admission idle fence | Must be known empty; same strict predicate; malformed/missing refuses |
+| Candidate ports/storages/protected closure | Required nonempty; []/{} missing fields all refuse |
+| Geometry fluid storages/prototypes/ports | Required nonempty for supported fluid types; no empty conversion |
+| Admission journal | F2-owned canonical nativeAdmissionJournal; no duplicate normalizer here |
+| Stored plan/proof/certificate/history arrays | Harness data, not native JSON sequences; retain original strict rules |
+
+Focused shared161/161 and old-module causal replay pass. Production-hook crafting
+shape controls, full combined gates and actual real-loop certificate/fuel plus
+saved-queue/load evidence remain pending at this source checkpoint. Native files
+are unchanged, so no repeated compile or primary engine is claimed or needed.

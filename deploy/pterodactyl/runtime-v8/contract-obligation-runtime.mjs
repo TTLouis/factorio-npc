@@ -6,7 +6,7 @@ import { renderOperationPreflight, luaString } from './structured-policy.mjs'
 import { batchWatermark, operationSignature } from './operation-reconciliation.mjs'
 import { captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
   obligationProofOrigin, preservedProofMatches, effectivePreservationProof, preservationGeometry, normalizeFluidAdmission,
-  normalizeFluidCertificate, fluidAdditionProof, PreservationProofError, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+  normalizeFluidCertificate, fluidAdditionProof, isNativeEmptyPreservationSequence, PreservationProofError, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 
 function placementReceipt(agent, plan, step) {
   const board = agent.memory.currentPlan(agent.activePlanKey())?.task_board
@@ -37,8 +37,8 @@ async function nativeIdle(agent, fence) {
   const follow = JSON.parse(String(await agent.rcon.command(agent.observationToolCommand('getFollowStatus', {}))))
   await fence()
   return status?.task_state === 'idle' && status.queue_empty === true && status.queue_length === 0 && !status.active_batch
-    && !status.actor?.mining_state?.mining && crafting.task_active === false && crafting.native_queue
-    && Object.keys(crafting.native_queue).length === 0 && !crafting.persisted_owner && follow.active === false
+    && !status.actor?.mining_state?.mining && crafting.task_active === false
+    && isNativeEmptyPreservationSequence(crafting.native_queue) && !crafting.persisted_owner && follow.active === false
 }
 
 // An absent lazy target is advisory unknown, never an inferred connection.
