@@ -184,3 +184,22 @@ be staged or published. Independent review, separate payload repin and merged
 offline validation remain required before integration closeout. No Factorio
 mechanics changed; no live provider/Jev call, autonomous trial or deployment was
 performed. A local merge does not publish the repair to the remote branch.
+
+## October 25 local integration closeout
+
+Independent read-only review approved source `2014a073` and separate payload
+repin `6d8f67e2` with no actionable findings. The existing Jev integration
+checkout merged that exact candidate with `--no-ff` at
+`41a58bf574cea8edddcd0d87ade5c6fc7a9a4cf3`; the merged tree matches the reviewed
+candidate. Fresh merged offline validation passes 103 agent, 3,448 runtime and
+1,378 mod tests, typecheck, Lua build and generated verification. The merged
+payload check and all nine payload tests also pass.
+
+All test-owned container names are absent, including stopped containers. No
+Compose project, network, volume, tunnel or configuration link was created.
+The shared test image and local source/evidence remain retained. Protected
+primary-checkout documentation hashes are unchanged. Full logs and the machine
+readable review, cleanup and final summaries stay in the local handoff directory
+above. The task branch is retained as a clean source/evidence checkpoint.
+No push, live trial, provider/Jev request or deployment occurred; hosted CI was
+not rerun. These results verify runtime recovery, not autonomous gameplay.
