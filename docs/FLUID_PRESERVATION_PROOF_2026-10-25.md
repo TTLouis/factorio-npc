@@ -111,3 +111,28 @@ Most recent completed focused selections before this freeze: pure/shared runtime
 135/135 and native145/145; native queued test includes ten ownership/omission
 negative vectors. Updated idle-watermark checks await the frozen compile/focused
 gate. No final engine/full-gate/payload or deployment approval is claimed.
+
+Snap/registry follow-up checkpoint: native claim lookup snaps all requested
+positions with the SAME placement grid function used by native execution before
+queue or pre-clear decisions. Causal negative uses a small collision box whose
+raw footprint misses while its snapped footprint overlaps, and an injected raw
+queued residual refuses before clearance query/items/create. Registry integrity
+uses a monotonic count plus an independent bounded inventory of original
+headers and complete native guard facts; partial loss with two disjoint genuine
+claims, whole loss and missing inventory/count all refuse before generic queue.
+Inventory is never reconstructed from an unknown surviving subset.
+
+Focused native145/145 and shared runtime135/135 plus combined-engine fixture
+syntax pass. Fixture now checks exact newly-stamped native omission refusal,
+full before/after inventory/entity/ground-item/old-edge equality and unchanged
+queue watermark. It includes native off-grid overlap with a late blocker and
+uses F2's actual exported atomic read and nextSliceNativeState (no duplicate
+projection implementation). It must run only on the fixed combined candidate.
+
+The owner accepted exact previously-admitted same-owner native continuation
+across a load, subject to actual engine proof and review. It is NOT a new
+admission: original key/attempt/signature/semantic owner/session/batch and fresh
+geometry must still match. Fresh configure/startup, changed generation/owner,
+missing/uncertain facts refuse without replay or allowance renewal. No peer-local
+on_load storage mutation is introduced; actual saved-queue/load proof remains
+pending alongside final full/payload/native checks.
