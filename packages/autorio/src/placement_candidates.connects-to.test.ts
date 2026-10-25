@@ -148,6 +148,36 @@ describe('placement candidates that join a live fluid port', () => {
     ] }])
   }
 
+  it('certifies the exact native candidate join only while every nearby possible connection is proved', () => {
+    build_pump()
+    ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    const actor = actor_at(0, 0)
+    actor.is_valid = true
+    actor.status_snapshot = () => ({ actor_id: 18 })
+    actor.get_main_inventory = () => ({ get_item_count: () => 1 })
+    actor.surface.find_entities_filtered = () => Object.values(world)
+    const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+    const read = () => placement_candidate_preflight(actor, set.candidate_set_id, 'candidate-1') as any
+    try {
+      expect(read()).toMatchObject({ ok: true, preservation_join: { version: 1, complete: true,
+        actor_id: 18, surface_index: 1, force_index: 1, entity_name: 'boiler',
+        connects_to: { unit_number: 100, target_port: { storage_index: 1, connection_index: 1 } } } })
+      // The other boiler water port must not silently join an existing object.
+      world[101] = live_entity(101, 'pipe', [{ filter: 'water', ports: [
+        { position: { x: 12.5, y: 20.5 }, target_position: { x: 11.5, y: 20.5 }, flow_direction: 'input-output' },
+      ] }])
+      expect(read().preservation_join).toMatchObject({ complete: false, reason: 'additional_or_changed_connection' })
+      delete world[101]
+      actor.surface.find_entities_filtered = () => Array.from({ length: 65 }, () => world[100])
+      expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_scan_truncated' })
+      actor.surface.find_entities_filtered = () => Object.values(world)
+      const original = world[100].fluidbox.get_pipe_connections
+      world[100].fluidbox.get_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
+      expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_ports_incomplete' })
+    } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
+  })
+
   it('reports fresh bounded rejected-join witnesses then admits a newly cleared layout using native checks', () => {
     build_pump()
     const actor = actor_at(0, 0)

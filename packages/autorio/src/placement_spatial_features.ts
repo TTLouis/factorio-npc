@@ -150,6 +150,26 @@ export function live_fluid_ports(entity: LuaEntity): LiveFluidPort[] {
   return ports
 }
 
+// Preservation cannot borrow a clipped or filtered placement-helper listing as
+// proof that a port is absent. Keep the existing placement helper permissive;
+// expose completeness separately for the strict pre-admission certificate.
+export function complete_live_fluid_ports(entity: LuaEntity) {
+  if (entity.fluidbox.length > MAX_LIVE_FLUID_STORAGES) return { complete: false, ports: [] as LiveFluidPort[] }
+  let expected = 0
+  for (let index = 1; index <= entity.fluidbox.length; index++) {
+    const connections: any[] = entity.fluidbox.get_pipe_connections(index) ?? []
+    if (connections.length > MAX_LIVE_PIPE_CONNECTIONS) return { complete: false, ports: [] as LiveFluidPort[] }
+    for (const connection of connections) {
+      if (connection.connection_type !== 'normal' || !finite_position(connection.position) || !finite_position(connection.target_position)) {
+        return { complete: false, ports: [] as LiveFluidPort[] }
+      }
+      expected += 1
+    }
+  }
+  const ports = live_fluid_ports(entity)
+  return { complete: ports.length === expected, ports }
+}
+
 const PORT_TILE_TOLERANCE = 0.001
 
 function same_tile(left: { x: number, y: number }, right: { x: number, y: number }) {

@@ -272,14 +272,20 @@ function fluid_storage_summary(entity: LuaEntity, index: number) {
           temperature: current_fluid.temperature,
         }
       : undefined,
-    prototypes: prototypes_for_storage,
+    prototypes: prototypes_for_storage.slice(0, MAX_FLUID_STORAGES),
+    prototypes_truncated: prototypes_for_storage.length > MAX_FLUID_STORAGES,
     pipe_connections_truncated: connections.length > MAX_PIPE_CONNECTIONS,
-    pipe_connections: connections.slice(0, MAX_PIPE_CONNECTIONS).map(connection => ({
+    pipe_connections: connections.slice(0, MAX_PIPE_CONNECTIONS).map((connection, connection_index) => ({
+      connection_index: connection_index + 1,
+      connected: connection.target !== undefined,
+      target_valid: connection.target === undefined || connection.target.owner?.valid === true,
       flow_direction: connection.flow_direction,
       connection_type: connection.connection_type,
       position: connection.position,
       target_position: connection.target_position,
       target: entity_summary(connection.target?.owner),
+      target_surface_index: connection.target?.owner?.valid ? connection.target.owner.surface.index : undefined,
+      target_force_index: connection.target?.owner?.valid ? connection.target.owner.force.index : undefined,
       target_fluidbox_index: connection.target_fluidbox_index,
       target_pipe_connection_index: connection.target_pipe_connection_index,
     })),
@@ -620,6 +626,7 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
           }
         : undefined,
     fluid_storage_count: entity.fluids_count,
+    fluid_geometry_version: 2,
     fluid_box_count,
     non_fluidbox_storage_count: math.max(0, entity.fluids_count - fluid_box_count),
     fluid_storages_truncated: fluid_box_count > MAX_FLUID_STORAGES,

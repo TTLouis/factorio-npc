@@ -1612,6 +1612,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return after !== before
   }
 
+  recordPreservationAdmission(key, envelope) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_ADMISSION_RECORDED,
+      source: 'runtime', envelope, now: Date.now() })
+    return after !== before
+  }
+
+  certifyPreservationAddition(key, certificate) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_ADDITION_CERTIFIED,
+      source: 'runtime', certificate, now: Date.now() })
+    return after !== before
+  }
+
   draftContractDefectSuccessor(key, { current, requestId }) {
     const planning = this.planningState(key)
     const old = getActivePlan(planning)
