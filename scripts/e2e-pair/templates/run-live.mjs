@@ -3,6 +3,8 @@ import { measurementReady, measureFactory, topologyReviewApproved } from './auto
 import { issueAndConfirmStrictStop, quiesceAndSave, stopStateConfirmed, waitForStop } from './runner-terminal.mjs';
 import { trialStopDecision } from './trial-stop-policy.mjs';
 import { operatorStopReason } from './pair-stop-policy.mjs';
+import {frozenModels} from './frozen-models.mjs';
+import {roleResponseMismatch} from './model-profile.mjs';
 import {beginColdIntake,readLaunchStop} from './launch-control.mjs';
 import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
@@ -71,7 +73,7 @@ try {
   if (await fsp.stat('/data/saves/@@SAVE_NAME@@.zip').catch(()=>null)) throw Error('paired lane checkpoint already exists before objective submission');
   if(await fsp.stat('/e2e/stop-before-admission').catch(()=>null))throw Error('Owner stopped lane before starter/objective admission');
   const intake=await beginColdIntake({root:'/e2e',logs:root,identity:{run_id:runId,source,actor_id:before.actor_id,epoch:before.epoch,started_at:started,speed_policy:speedPolicy,construction_limit_ms:constructionLimitMs},giveStarter:()=>json('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(not storage.luna_autonomy_starter_given,"Starter already given"); assert(#a.get_main_inventory().get_contents()==0,"Initial inventory nonempty"); local given={}; for n,c in pairs({["iron-plate"]=8,["burner-mining-drill"]=1,["stone-furnace"]=1,["pistol"]=1,["firearm-magazine"]=10}) do given[n]=a.insert{name=n,count=c}; assert(given[n]==c,"Incomplete starter") end; storage.luna_autonomy_starter_given=true; storage.airi_task_board_ui_inputs={}; rcon.print(helpers.table_to_json({starter=given}))'),prepareIntake:async starter=>{
-  await fsp.writeFile(path.join(root,'e2e-contract.json'),JSON.stringify({started:new Date(started).toISOString(),model:process.env.OPENAI_MODEL,planner_model: 'gpt-6.1-sol',executor_model: 'gpt-6-luna',jev_enabled:true,construction_profile:speedPolicy,sprint_limits:TICK_SPRINT,objective,starter:starter.starter,stop_conditions:["native_automated_1_red_per_game_minute","authoritative_terminal_stop_policy","weekly_remaining_7_percent"],policy_reserve_remaining_percent:5,live_stop_remaining_percent:7,usage_window_duration_minutes:10080,max_provider_calls:null,max_decision_calls:null,operator_gameplay_actions_after_starter:0,corrective_prompts:0,observer_connections_allowed:false,measurement:{wall_minutes:5,game_speed:2,minimum_game_minutes:10,minimum_new_red_packs:10,red_per_game_minute:1,ai_mutations:false,enemy_removal:true,enemy_expansion:false,require_upstream_native_production:true,topology_review_required:true}},null,2));
+  await fsp.writeFile(path.join(root,'e2e-contract.json'),JSON.stringify({started:new Date(started).toISOString(),model:process.env.OPENAI_MODEL,planner_model:frozenModels.planner,executor_model:frozenModels.executor,jev_enabled:true,construction_profile:speedPolicy,sprint_limits:TICK_SPRINT,objective,starter:starter.starter,stop_conditions:["native_automated_1_red_per_game_minute","authoritative_terminal_stop_policy","weekly_remaining_7_percent"],policy_reserve_remaining_percent:5,live_stop_remaining_percent:7,usage_window_duration_minutes:10080,max_provider_calls:null,max_decision_calls:null,operator_gameplay_actions_after_starter:0,corrective_prompts:0,observer_connections_allowed:false,measurement:{wall_minutes:5,game_speed:2,minimum_game_minutes:10,minimum_new_red_packs:10,red_per_game_minute:1,ai_mutations:false,enemy_removal:true,enemy_expansion:false,require_upstream_native_production:true,topology_review_required:true}},null,2));
   console.log(JSON.stringify({event:'trial.started',actor:before.actor_id,seed:before.seed,starter:starter.starter,objective}));
   await fsp.writeFile(path.join(root,'e2e-started.txt'),new Date().toISOString());
   },submitObjective:()=>rcon.command(objective)});
@@ -85,7 +87,7 @@ try {
     // state is reached later in this observation pass.
     goalId ??= events.find(e=>e.event==='planning.goal_admission_steered'&&e.data?.goal_id)?.data.goal_id;
     const delegation={
-      configured:{planner:'gpt-6.1-sol',executor:'gpt-6-luna'},
+      configured:{planner:frozenModels.planner,executor:frozenModels.executor},
       completion_protocol_version:3,
       commitments:events.filter(e=>e.event==='plan.delegation_committed').map(e=>({request_id:e.request_id,data:e.data})),
       contract_refusals:events.filter(e=>e.event==='role.contract_refused').map(e=>({request_id:e.request_id,data:e.data})),
@@ -96,7 +98,7 @@ try {
       handoffs:events.filter(e=>e.event.startsWith('context.')||e.event.startsWith('handoff.')).map(e=>({event:e.event,request_id:e.request_id,data:e.data})),
     };
     await fsp.writeFile(path.join(root,'e2e-delegation-proof.json'),JSON.stringify(delegation,null,2));
-    if(delegation.responses.some(e=>e.model && ((e.role==='planner'&&e.model!=='gpt-6.1-sol')||(e.role==='executor'&&e.model!=='gpt-6-luna')))){result='role_model_mismatch';break;}
+    if(delegation.responses.some(e=>roleResponseMismatch(frozenModels,e))){result='role_model_mismatch';break;}
     const promptEvents = await prompts();
     const calls = promptEvents.filter(e=>e.event==='provider.request').length;
     const decisionEvents = await decisions();

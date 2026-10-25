@@ -2,8 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {pathToFileURL} from 'node:url';
+import {frozenModels} from './frozen-models.mjs';
+import {assertCatalogModels,assertConfiguredModels} from './model-profile.mjs';
 const release=path.dirname(await fs.realpath('/opt/sgluna/start-sgluna.sh'));
 const {Rcon}=await import(pathToFileURL(path.join(release,'src/runtime-v8/common.mjs')));
+const {configuration}=await import(pathToFileURL(path.join(release,'src/runtime-v8/supervisor.mjs')));
+const {resolveAgentRole}=await import(pathToFileURL(path.join(release,'src/runtime-v8/agent-roles.mjs')));
+const effectiveModels=assertConfiguredModels(frozenModels,configuration(JSON.parse(await fs.readFile('/data/sgluna-config.json','utf8')),process.env),resolveAgentRole);
 const rcon=new Rcon(27015,process.env.SGLUNA_RCON_PASSWORD,15000);
 try {
   await rcon.connect();
@@ -57,8 +62,8 @@ try {
   }
   assert.equal(unauth.status,401);assert.equal(auth.status,200);
   const ids=(body.data??[]).map(m=>m.id);
-  assert.ok(ids.includes('gpt-6.1-sol'));assert.ok(ids.includes('gpt-6-luna'));
-  const proof={at:new Date().toISOString(),actor_id:native.actor_id,seed:native.seed,humans:0,speed:1,goal:null,board:null,inventory_empty:true,machine_count:0,native_full_idle:true,empty_queues:true,walking:false,mining:false,follow:false,crafting:false,starter_given:false,provider_requests:provider,jev_requests:jev,catalog:{unauth_status:unauth.status,auth_status:auth.status,both_role_models_present:true,external_inference_calls:0}};
+  const catalogRoles=assertCatalogModels(frozenModels,ids);
+  const proof={at:new Date().toISOString(),actor_id:native.actor_id,seed:native.seed,humans:0,speed:1,goal:null,board:null,inventory_empty:true,machine_count:0,native_full_idle:true,empty_queues:true,walking:false,mining:false,follow:false,crafting:false,starter_given:false,provider_requests:provider,jev_requests:jev,catalog:{unauth_status:unauth.status,auth_status:auth.status,both_role_models_present:true,roles:catalogRoles,effective_role_models:effectiveModels,external_inference_calls:0}};
   await fs.writeFile('/data/logs/supervisor-preflight-proof.json',JSON.stringify(proof,null,2));
   console.log(JSON.stringify(proof));
 }finally{rcon.close();}

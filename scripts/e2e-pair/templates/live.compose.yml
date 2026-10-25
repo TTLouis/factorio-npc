@@ -15,7 +15,7 @@ services:
       - "@@EVIDENCE@@:/e2e"
     environment:
       AI_API_METHOD: "cli-proxy"
-      OPENAI_MODEL: "gpt-6.1-sol,gpt-6-luna"
+      OPENAI_MODEL: "@@ROLE_MODEL_LIST@@"
       OPENAI_API_BASEURL: "http://host.docker.internal:@@RECORDER_PORT@@/v1"
       SERVER_PORT: "@@GAME_PORT@@"
       SAVE_NAME: "@@RUN_ID@@-fresh.zip"

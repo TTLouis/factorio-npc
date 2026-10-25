@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {frozenModels} from './frozen-models.mjs';
+import {assertConfiguredModels} from './model-profile.mjs';
 import {verifyConfiguredCliProxyProviderContract} from './provider-contract-preflight.mjs';
 import {verifyProtocol3Contracts} from './protocol3-provider-preflight.mjs';
 const release=path.dirname(await fs.realpath('/opt/sgluna/start-sgluna.sh'));
@@ -22,8 +24,9 @@ const config=JSON.parse(await fs.readFile('/data/sgluna-config.json','utf8'));
 const {configuration}=await import((await import('node:url')).pathToFileURL(path.join(release,'src/runtime-v8/supervisor.mjs')));
 const {resolveAgentRole}=await import((await import('node:url')).pathToFileURL(path.join(release,'src/runtime-v8/agent-roles.mjs')));
 const roles=configuration(config,process.env);
+const effectiveModels=assertConfiguredModels(frozenModels,roles,resolveAgentRole);
 const {verifyCliProxyProviderContracts}=await import((await import('node:url')).pathToFileURL(path.join(release,'src/runtime-v8/provider.mjs')));
-const providerContract=await verifyConfiguredCliProxyProviderContract(roles,{verifyCliProxyProviderContracts,requestId:'run_aj_provider_contract_preflight'});
+const providerContract=await verifyConfiguredCliProxyProviderContract(roles,{verifyCliProxyProviderContracts,requestId:'run_aj_provider_contract_preflight',frozenModels});
 await fs.mkdir('/data/logs',{recursive:true});
 await fs.writeFile('/data/logs/provider-contract-preflight.json',JSON.stringify(providerContract,null,2));
 const policy=await import((await import('node:url')).pathToFileURL(path.join(release,'src/runtime-v8/structured-policy.mjs')));
@@ -41,9 +44,9 @@ if(!policy.approvedOperationNames().includes('prepare_pump_site'))throw Error('R
 await fs.writeFile('/data/logs/full-tool-catalog-proof.json',JSON.stringify({source:(await fs.readFile('/opt/sgluna/SOURCE_SHA','utf8')).trim(),roles:toolCatalogProof,prepare_pump_site_action:true,external_inference_calls:0},null,2));
 const planner=resolveAgentRole(roles,'planner').model;
 const executor=resolveAgentRole(roles,'executor').model;
-if(planner!=='gpt-6.1-sol'||executor!=='gpt-6-luna')throw Error('Unexpected role model selection');
+assertConfiguredModels(frozenModels,roles,resolveAgentRole);
 console.log(JSON.stringify({planner_model:planner,executor_model:executor}));
-const report={candidate:(await fs.readFile('/opt/sgluna/SOURCE_SHA','utf8')).trim(),runtime_modules_compared:shipped.length,mismatches,mod_files_compared:modFiles.length,mod_mismatches:modMismatches,active_control_sha256:hash(await fs.readFile(path.join(active,'control.lua'),'utf8')),model:process.env.OPENAI_MODEL,effective_ai_api_method:roles.aiApiMethod,effective_provider_profile:roles.profile,provider_contract_status:providerContract.status,provider_contract_external_inference_calls:providerContract.external_inference_calls,provider_contract_roles:providerContract.roles.map(r=>({role:r.role,model:r.model,profile:r.profile,model_family:r.capabilities.model_family,tools_kept_when_closed:r.capabilities.tools_kept_when_closed,closed_tool_choice:r.body.tool_choice,closed_tool_count:r.body.tools.length})),jev_token_present:Boolean(process.env.TYPESAFE_API_KEY?.trim()),config_model:config.model??config.providerModel??null};
+const report={frozen_models:frozenModels,effective_role_models:effectiveModels,candidate:(await fs.readFile('/opt/sgluna/SOURCE_SHA','utf8')).trim(),runtime_modules_compared:shipped.length,mismatches,mod_files_compared:modFiles.length,mod_mismatches:modMismatches,active_control_sha256:hash(await fs.readFile(path.join(active,'control.lua'),'utf8')),model:process.env.OPENAI_MODEL,effective_ai_api_method:roles.aiApiMethod,effective_provider_profile:roles.profile,provider_contract_status:providerContract.status,provider_contract_external_inference_calls:providerContract.external_inference_calls,provider_contract_roles:providerContract.roles.map(r=>({role:r.role,model:r.model,profile:r.profile,model_family:r.capabilities.model_family,tools_kept_when_closed:r.capabilities.tools_kept_when_closed,closed_tool_choice:r.body.tool_choice,closed_tool_count:r.body.tools.length})),jev_token_present:Boolean(process.env.TYPESAFE_API_KEY?.trim()),config_model:config.model??config.providerModel??null};
 await fs.mkdir('/data/logs',{recursive:true});await fs.writeFile('/data/logs/deployment-verification.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));
 if(mismatches.length||modMismatches.length||!report.jev_token_present||report.candidate!=='@@CANDIDATE@@')process.exitCode=1;
 
