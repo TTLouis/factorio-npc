@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fluid_source_observation } from './fluid_source_observation'
-import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor, freeze_fluid_preservation_candidate, placement_candidate_matches, placement_preservation_execution_allowed } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor, freeze_fluid_preservation_candidate, placement_candidate_matches, placement_preservation_execution_allowed, placement_preservation_queue_binding } from './placement_candidates'
 import { new_basic_operation_controller } from './basic_operations'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_task_manager } from './task_manager'
@@ -182,6 +182,16 @@ describe('placement candidates that join a live fluid port', () => {
       world[100].fluidbox.get_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
       expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_ports_incomplete' })
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
+  })
+
+  it('permits a virgin empty claim registry but refuses initialized missing history at queue and create', () => {
+    const actor = actor_at(10, 20)
+    expect(placement_preservation_queue_binding(actor, 'boiler', 10, 20, 0)).toEqual({ required: false })
+    expect(placement_preservation_execution_allowed(actor, 'boiler', 10, 20, 0, undefined, undefined, {})).toBe(true)
+    expect(placement_preservation_execution_allowed(actor, 'boiler', 10, 20, 0, undefined, {} as any, {})).toBe(false)
+    ;(globalThis as any).storage.sgluna_fluid_preservation_claims_initialized = true
+    expect(placement_preservation_queue_binding(actor, 'boiler', 10, 20, 0)).toEqual({ required: true })
+    expect(placement_preservation_execution_allowed(actor, 'boiler', 10, 20, 0, undefined, undefined, {})).toBe(false)
   })
 
   it('carries a nonrenewable native guard through the real queued boiler task and refuses a late second neighbour before mutation', () => {
