@@ -1,3 +1,5 @@
+import { completedSliceAnchor } from './next-slice-state.mjs'
+import { nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice, settleNextSliceExit } from './next-slice-liveness.mjs'
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -3993,6 +3995,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // happen now (a round or turn is open) or fails is never an error: the wake
   // proceeds on the existing conversation and the next slice close retries.
   async planSliceCloseWake({ route, planningState, goalEvaluation, withinTurn = false }) {
+    const boundaryOwner = nextSliceOwner(this)
+    const current = () => { if (!ownsNextSlice(this, boundaryOwner)) throw new AgentLoopError('Slice planner wake cancelled or superseded') }
     const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId // captured before any await: a superseding reset can clear the request
     const plan = planningState ? getActivePlanningPlan(planningState) : undefined
     // The NPC time split of the slice just closed: the mark advances here, once per slice close.
@@ -4018,6 +4022,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason: 'slice_close',
       }, { requestId })
     }
+    current()
     const wake = { verifiedResults: verified.text, restaged: false }
     if (!planningState?.goal) return wake
     // Never restage a planner that has nothing healthy to be re-briefed on: a
@@ -4027,7 +4032,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // U11: a verified slice scores the shelf ranking whose picked node it refined; then Jev ranks the complete
     // candidate set for this pickup (shadow: recorded and scored; advisory: orders the packet's candidates only).
     await this.jev.onSliceClosed()
+    current()
     const { candidates: shelfCandidates, ranking } = await this.shelfCandidatesForPickup({ route, planningState, withinTurn })
+    current()
     // U6: the slice is closed, so the executor's work is done. Control returns to the
     // planner conversation (parked at the plan commit, untouched by executor traffic),
     // which the wake below then briefs with the verified results.
@@ -4035,6 +4042,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // request visibly (endSliceWithoutPlanner) and no model runs.
     if (this.agentContext.role === EXECUTOR_ROLE) {
       const returned = await this.returnControlToPlannerWithRetry({ route, planningState, withinTurn, reason: 'slice_close', requestId, shelfCandidates })
+      current()
       if (!returned.returned) return { ...wake, unavailable: { route, reason: returned.reason ?? 'planner_unavailable' } }
       if (!returned.resumed) {
         await this.jev.markShelfApplied(ranking) // the ordered candidates reached the fresh planner's packet
@@ -4061,6 +4069,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('context.restage_refused', { role: PLANNER_ROLE, checkpoint, reason: 'turn_superseded', message: cleanMemoryText(error instanceof Error ? error.message : String(error), 200) }, { requestId })
       throw error
     }
+    current()
     const restage = withinTurn ? this.restageInTurn : this.restageBetweenTurns
     const result = await restage.call(this, {
       checkpoint,
@@ -4071,6 +4080,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       softLimitTokens,
       requestId,
     })
+    current()
     if (result.restaged === true) await this.jev.markShelfApplied(ranking) // the ordered candidates reached the packet
     return { ...wake, restaged: result.restaged === true, checkpoint, result }
   }
@@ -4775,8 +4785,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // visibly with the goal still active between slices (Resume re-drives it from the verified state);
   // no model is woken, and in particular the executor does not author the next slice.
   async endSliceWithoutPlanner({ route, reason }) {
+    const owner = nextSliceOwner(this)
+    const current = () => { if (!ownsNextSlice(this, owner)) throw new AgentLoopError('Planner handoff settlement cancelled or superseded') }
     const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
+    await settleNextSliceExit(this, { owner, reason: 'planner_handoff_unavailable', failure: new Error(`next_slice_planner_unavailable: ${reason}`) })
+    current()
     await this.persistState()
+    current()
     const state = this.peekPlanState(this.activePlanKey())
     this.active = false
     const chatMessage = `The plan slice is verified complete, but I could not hand the goal back to the planner (${reason}), so I stopped without waking a model. The goal stays active between slices. ${RESUME_HINT}`
@@ -4787,6 +4802,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       task_board: visibleTaskBoard(state?.task_board),
       usage: this.traceRequest?.usage,
     })
+    current()
     this.traceRequest = null
     // After request.completed (which reads as idle), so the UI shows a waiting marker for the goal and
     // the supervisor's activity hook syncs the task board; the row also carries the request id.
@@ -11319,16 +11335,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // reads "completed" here, so without this check a restart or a provider
   // failure at the slice boundary stranded the goal silently.
   goalAwaitingNextSlice(key = this.activePlanKey()) {
-    const legacy = this.memory.currentPlan?.(key)
-    if (legacy?.status !== 'completed') return false
-    const planning = this.memory.planningState?.(key)
-    if (planning?.goal?.status !== GOAL_STATUS.ACTIVE) return false
-    if (legacy.goal_id && planning.goal.goal_id && legacy.goal_id !== planning.goal.goal_id) return false
-    const hasShelf = (planning.roadmap?.nodes?.length ?? 0) > 0
-    if (!planning.goal.definition && !hasShelf) return false
-    const plan = getActivePlanningPlan(planning)
-    return !plan || plan.status === PLAN_STATUS.COMPLETED
+    return Boolean(completedSliceAnchor(this.memory.planningState?.(key)))
   }
+
+  async settleNextSliceExit(options) {
+    return settleNextSliceExit(this, options)
+  }
+
 
   // Reads the goal's conditions from the game and records any baseline a
   // goal_start counter still lacks. Called when the goal is defined, so the
@@ -11795,12 +11808,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.chatRequestPending = false
     try {
       await this.applyStartRestage()
-      return this.withPauseNotice(await this.runTurnRedriving(generation))
+      const result = await this.runTurnRedriving(generation)
+      if (ownsFailure()) await this.settleNextSliceExit({ reason: 'guarded_turn_returned' })
+      return this.withPauseNotice(result)
     }
     catch (error) {
       if (!ownsFailure()) throw error
       const message = error instanceof Error ? error.message : String(error)
       const planState = this.memory.currentPlan?.(this.activePlanKey())
+      if (this.goalAwaitingNextSlice()) {
+        await this.settleNextSliceExit({ failure: error, reason: 'guarded_authoring_failure' })
+        if (!ownsFailure()) throw error
+      }
       // The request-wide output ceiling (5 per-turn caps) is final for this
       // request: no fresh generation, no recovery call. The goal ends
       // visibly and Resume starts a new request with a new allowance.
@@ -12149,18 +12168,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // started as a separate guarded run; allowContinuation: false suppresses the
   // continuation altogether. `droppedOperationsNote` tells the planner why the
   // operations in the reply that closed the slice were not run.
-  async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true, withinTurn = false, droppedOperationsNote = '' } = {}) {
+  async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true, withinTurn = false, droppedOperationsNote = '', nextSliceBoundary } = {}) {
+    const boundaryOwner = nextSliceOwner(this)
+    const assertBoundary = () => { if (!ownsNextSlice(this, boundaryOwner)) throw new Error('Next-slice continuation cancelled or superseded') }
     let planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
-    const reducerPlanAfterCompletion = planningAfterCompletion
-      ? getActivePlanningPlan(planningAfterCompletion)
-      : undefined
+    const recoveredAnchor = nextSliceBoundary && completedSliceAnchor(planningAfterCompletion)
+    const recoveredBoundary = Boolean(nextSliceBoundary && recoveredAnchor?.boundary_key === nextSliceBoundary)
+    const reducerPlanAfterCompletion = recoveredBoundary
+      ? planningAfterCompletion.plans.find(plan => plan.plan_id === recoveredAnchor.plan_id)
+      : planningAfterCompletion ? getActivePlanningPlan(planningAfterCompletion) : undefined
     // A defined goal is complete only when the game says so. Check it at every
     // finished plan slice; a finished slice is never proof on its own.
     const goalDefinition = planningAfterCompletion?.goal?.definition
     let goalEvaluation
     if (goalDefinition
       && !pendingAmendment
-      && completionState?.status === 'completed'
+      && (completionState?.status === 'completed' || recoveredBoundary)
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED) {
       goalEvaluation = await this.evaluateGoalCompletion()
@@ -12171,13 +12194,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const goalUnmet = goalEvaluation !== undefined && !goalEvaluation.satisfied
     const boundedSliceCompleted = !pendingAmendment
-      && completionState?.status === 'completed'
+      && (completionState?.status === 'completed' || recoveredBoundary)
       && planningAfterCompletion?.goal?.status === 'active'
       && ((Array.isArray(planningAfterCompletion?.roadmap?.nodes) && planningAfterCompletion.roadmap.nodes.length > 0) || goalUnmet)
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED
 
     if (boundedSliceCompleted && allowContinuation) {
-      const completedBoard = visibleTaskBoard(completionState.task_board)
+      const completedBoard = recoveredBoundary ? undefined : visibleTaskBoard(completionState.task_board)
+      await registerNextSlice(this, { reason: 'verified_final_step_of_bounded_slice' })
+      assertBoundary()
       await this.traceEvent('outcome.validated', {
         kind: 'plan_slice_completed',
         source: 'step_completion_gate',
@@ -12185,16 +12210,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_id: reducerPlanAfterCompletion.plan_id,
         task_board: completedBoard,
       })
+      assertBoundary()
       await this.closeOutputSlice('next_shelf_slice')
+      assertBoundary()
       const sliceClose = await this.planSliceCloseWake({ route: 'next_shelf_slice', planningState: planningAfterCompletion, goalEvaluation, withinTurn })
+      assertBoundary()
       if (sliceClose.unavailable) return this.endSliceWithoutPlanner(sliceClose.unavailable)
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'next_shelf_slice',
         steering_mode: planningAfterCompletion.steering?.current_mode,
       })
+      assertBoundary()
       await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion) // 2.8 hook: shelf -> active plan skill search
+      assertBoundary()
       await refreshGoalRequirementsAtShelfPickup(this, planningAfterCompletion) // live requirements for the next slice
+      assertBoundary()
+      const native = await nextSliceNativeState(this, boundaryOwner)
+      assertBoundary()
+      if (native.busy || native.unknown || native.uncertain) throw new AgentLoopError('next_slice_native_unproven: native ownership changed before authoring')
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         const unmet = goalEvaluation
@@ -12210,7 +12244,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         )
       }
       finally {
-        this.reasoningTriggerSource = null
+        if (ownsNextSlice(this, boundaryOwner)) this.reasoningTriggerSource = null
       }
     }
 
@@ -12887,8 +12921,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return false
   }
   async closeOutputSlice(route) {
+    const owner = decisionBudgetOwner(this)
     this.lifecycleEnter('slice.close', { route })
     await this.closeContinuationSlice(route)
+    if (!ownsDecisionBudgets(this, owner)) throw new AgentLoopError('Slice close cancelled or superseded')
     const before = this.sliceOutputCeiling()
     const baseline = markRequestSliceClosed(this.traceRequest)
     if (baseline === undefined) return

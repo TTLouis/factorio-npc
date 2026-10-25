@@ -206,6 +206,9 @@ export class FakeFactorio {
       const id = /remote\.call\("autorio_skills","get",'([^']+)'\)/.exec(text)?.[1]
       return JSON.stringify(this.skills[id] ?? { ok: false, error: 'unknown_skill' })
     }
+    if (text.includes('remote.call("autorio_crafting","status")')) {
+      return JSON.stringify({ task_active: false, native_queue: {}, persisted_owner: null })
+    }
     if (text.includes('remote.call("autorio_follow","status")')) {
       return JSON.stringify({ active: false, healthy: false, controller_live: false, state: 'idle' })
     }

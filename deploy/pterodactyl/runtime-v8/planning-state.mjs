@@ -1,3 +1,4 @@
+import { completedSliceAnchor, nextSliceTransition, restoreNextSlice, stepProgressMark } from './next-slice-state.mjs'
 // Durable planning state: Goal / Roadmap Shelf / Active Plan.
 //
 // Canonical direction: docs/NPC_PLANNING_ROADMAP.md (sections 1, 2, 3, 5, 6, 8,
@@ -23,7 +24,7 @@
 //     operations or into plan steps.
 
 import { authoredCompletionContractSupported, completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
-import { storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, compileObligations, contractDefectShape, preservedProofMatches, effectivePreservationProof, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+import { storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, contractDefectShape, preservedProofMatches, effectivePreservationProof, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
@@ -404,6 +405,7 @@ export const PLANNING_EVENT = Object.freeze({
   // A model_recoverable pause is being resumed automatically (pause-class.mjs). The reducer counts the attempt per step identity
   // and per goal, durably, and refuses an attempt whose goal, plan, plan version or step is no longer the live one.
   RUN_AUTO_RESUME_STARTED: 'RUN_AUTO_RESUME_STARTED',
+  NEXT_SLICE_TRANSITION: 'NEXT_SLICE_TRANSITION',
   // Single-writer runtime fields. null clears the field.
   CONDITION_WAIT_RECORDED: 'CONDITION_WAIT_RECORDED',
   PROVIDER_RECOVERY_RECORDED: 'PROVIDER_RECOVERY_RECORDED',
@@ -675,12 +677,6 @@ const STICKY_PAUSE_CLASSES = Object.freeze([PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AU
 // What a verified-world-progress reset compares. Admission is not progress: only the step finishing, evidence the reducer
 // accepted for the step, or a `deterministic_verification` landing in the step's receipt ledger (a batch receipt whose effect the
 // harness verified) change it.
-function stepProgressMark(plan, stepId) {
-  const progress = plan.execution?.step_progress?.[stepId]
-  const receipts = Array.isArray(plan.execution?.receipts?.[stepId]) ? plan.execution.receipts[stepId] : []
-  const lastReceiptSeq = receipts.reduce((max, item) => (item.kind === 'deterministic_verification' && item.ref ? Math.max(max, item.seq ?? 0) : max), 0)
-  return `${progress?.status ?? 'none'}|${progress?.accepted_evidence?.length ?? 0}|${lastReceiptSeq}`
-}
 
 /**
  * The automatic-resume allowance for the live goal / plan / plan version / step, read from durable run state.
@@ -691,14 +687,17 @@ function stepProgressMark(plan, stepId) {
  */
 export function autoResumeAllowance(state, { limits = MODEL_RECOVERABLE_RESUME_LIMITS } = {}) {
   const goalId = state?.goal?.goal_id
-  const plan = getActivePlan(state)
-  const step = plan?.steps?.[plan.active_step_index]
+  const episode = restoreNextSlice(state?.run?.next_slice, state)
+  const anchor = episode && episode.phase !== 'committed' ? completedSliceAnchor(state) : undefined
+  const plan = anchor ? state.plans.find(candidate => candidate.plan_id === anchor.plan_id) : getActivePlan(state)
+  const step = anchor ? plan.steps.at(-1) : plan?.steps?.[plan.active_step_index]
   const base = { per_step: limits.per_step, per_goal: limits.per_goal, step_attempts: 0, goal_attempts: 0, limit_kind: undefined }
+  if (state?.run?.next_slice_fault) return { ...base, goal_id: goalId, limit_kind: 'state' }
   if (!goalId || !plan || !step) return { ...base, goal_id: goalId }
   const stepKey = `${plan.plan_id}|${plan.plan_version}|${step.step_id}`
   const held = state.run?.auto_resume?.goal_id === goalId ? state.run.auto_resume : null
   const entry = held?.steps?.find(item => item.step_key === stepKey)
-  const mark = stepProgressMark(plan, step.step_id)
+  const mark = anchor ? episode.progress_mark : stepProgressMark(plan, step.step_id)
   const progressed = !!entry && entry.mark !== mark
   const stepAttempts = entry && !progressed ? entry.attempts : 0
   const goalAttempts = held?.goal_total ?? 0
@@ -709,6 +708,7 @@ export function autoResumeAllowance(state, { limits = MODEL_RECOVERABLE_RESUME_L
     plan_version: plan.plan_version,
     step_id: step.step_id,
     step_key: stepKey,
+    ...(anchor ? { boundary_key: anchor.boundary_key } : {}),
     mark,
     progressed,
     step_attempts: stepAttempts,
@@ -751,6 +751,8 @@ export function createEmptyRunState() {
     pause_subkind: '',
     // Durable, bounded count of automatic model_recoverable resumes (see autoResumeAllowance). Survives resume and restart.
     auto_resume: null,
+    next_slice: null,
+    next_slice_fault: false,
     paused_at: null,
     resumed_at: null,
     pause_count: 0,
@@ -3316,13 +3318,18 @@ Object.assign(HANDLERS, {
     }
   },
 
+  [PLANNING_EVENT.NEXT_SLICE_TRANSITION](state, event, now) {
+    return nextSliceTransition(state, event, now)
+  },
+
   [PLANNING_EVENT.RUN_AUTO_RESUME_STARTED](state, event, now) {
     if (!runEventAllowed(state, event)) return state
     const run = state.run ?? createEmptyRunState()
     if (!run.paused || run.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return state
     const allowance = autoResumeAllowance(state)
     // Fail closed on stale correlation: the attempt must name the live goal, plan, plan version and step.
-    if (!allowance.step_key
+    if (!allowance.step_key || allowance.limit_kind
+      || (allowance.boundary_key && event.boundary_key !== allowance.boundary_key)
       || text(event.plan_id, 200) !== allowance.plan_id
       || event.plan_version !== allowance.plan_version
       || text(event.step_id, 200) !== allowance.step_id) return state
@@ -3343,7 +3350,9 @@ Object.assign(HANDLERS, {
     }
     return {
       ...state,
-      run: { ...run, auto_resume: next, updated_at: now },
+      run: { ...run, auto_resume: next,
+        ...(allowance.boundary_key ? { next_slice: { ...run.next_slice, phase: 'claimed',
+          claimed_attempt: allowance.step_attempts + 1, owner: { ...run.next_slice.owner, request_id: text(event.request_id, 200) }, updated_at: now } } : {}), updated_at: now },
       updated_at: now,
       log: logEntry(state, {
         type: PLANNING_EVENT.RUN_AUTO_RESUME_STARTED,
@@ -4289,7 +4298,7 @@ function restoreReplacementLineage(raw) {
   }
 }
 
-function restoreRun(raw) {
+function restoreRun(raw, state) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const paused = raw.paused === true
   const reason = paused ? text(raw.pause_reason, RUN_STATE_LIMITS.pauseReason) : ''
@@ -4300,6 +4309,8 @@ function restoreRun(raw) {
     pause_code: paused ? (text(raw.pause_code, RUN_STATE_LIMITS.pauseCode) || pauseCodeOf(reason)) : '',
     ...(paused ? pauseClassFields(raw) : { pause_class: '', pause_subkind: '' }),
     auto_resume: restoreAutoResume(raw.auto_resume),
+    next_slice: restoreNextSlice(raw.next_slice, state),
+    next_slice_fault: raw.next_slice_fault === true || (raw.next_slice != null && !restoreNextSlice(raw.next_slice, state)),
     paused_at: finiteNumber(raw.paused_at) ?? null,
     resumed_at: finiteNumber(raw.resumed_at) ?? null,
     pause_count: Number.isSafeInteger(raw.pause_count) && raw.pause_count >= 0 ? raw.pause_count : 0,
@@ -4386,7 +4397,7 @@ export function restorePlanningState(raw) {
           reason: text(raw.last_reasoning_reset.reason, 200) || null,
         }
       : null,
-    run: restoreRun(raw.run),
+    run: restoreRun(raw.run, { goal, plans }),
     ...((raw.operation_ledger || raw.run?.pending_operation) ? { operation_ledger: operationLedger(raw.operation_ledger, raw.run?.pending_operation) } : {}),
     context_restages: restoreContextRestages(raw.context_restages),
     ...(() => {

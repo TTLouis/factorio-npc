@@ -120,7 +120,8 @@ try {
     }
     const operatorReason=await requestedStop();
     if(operatorReason){result=operatorReason;break;}
-    const stopDecision=trialStopDecision({canonical,events,startedAt:started,now:Date.now(),pausedSince,goalId,actorId:before.actor_id,native:last,speedPolicy,constructionLimitMs,hardFloorReached:Boolean(await fsp.stat('/e2e/stop-at-hard-floor').catch(()=>null))});
+    const stopDecision=trialStopDecision({canonical,events,startedAt:started,now:Date.now(),pausedSince,goalId,actorId:before.actor_id,native:last,controller:JSON.parse(await fsp.readFile('/data/.sgluna/controller-state.json','utf8').catch(()=>'null')),speedPolicy,constructionLimitMs,hardFloorReached:Boolean(await fsp.stat('/e2e/stop-at-hard-floor').catch(()=>null))});
+    if(stopDecision.action==='request_settlement')await fsp.writeFile('/data/.sgluna/next-slice-settle-request.json',JSON.stringify(stopDecision.request));
     pausedSince=stopDecision.pausedSince;
     await fsp.writeFile(path.join(root,'e2e-stop-decision.json'),JSON.stringify(stopDecision,null,2));
     console.log(JSON.stringify(stopDecision.evidence));
@@ -131,7 +132,7 @@ try {
       const refreshedEvents=await behavior();
       const refreshedState=JSON.parse(await fsp.readFile('/data/.sgluna/npc-state.json','utf8').catch(()=>'{}'));
       const refreshedCanonical=refreshedState.planning_states?.find(p=>p.state?.goal)?.state;
-      const confirmedDecision=trialStopDecision({canonical:refreshedCanonical,events:refreshedEvents,startedAt:started,now:Date.now(),pausedSince,goalId,actorId:before.actor_id,native:refreshedNative,speedPolicy,constructionLimitMs,hardFloorReached:Boolean(await fsp.stat('/e2e/stop-at-hard-floor').catch(()=>null))});
+      const confirmedDecision=trialStopDecision({canonical:refreshedCanonical,events:refreshedEvents,startedAt:started,now:Date.now(),pausedSince,goalId,actorId:before.actor_id,native:refreshedNative,controller:JSON.parse(await fsp.readFile('/data/.sgluna/controller-state.json','utf8').catch(()=>'null')),speedPolicy,constructionLimitMs,hardFloorReached:Boolean(await fsp.stat('/e2e/stop-at-hard-floor').catch(()=>null))});
       pausedSince=confirmedDecision.pausedSince;
       await fsp.writeFile(path.join(root,'e2e-stop-decision.json'),JSON.stringify(confirmedDecision,null,2));
       if(confirmedDecision.action==='stop'){last=refreshedNative;result=confirmedDecision.result;terminalEvidence=confirmedDecision.evidence;break;}
