@@ -401,6 +401,7 @@ export const PLANNING_EVENT = Object.freeze({
   // Run state (3.3 move 3). The goal's run is paused or running; a pause never
   // touches plan semantics, the active step or approval state.
   RUN_PAUSED: 'RUN_PAUSED',
+  RUN_MODEL_RECOVERY_STOPPED: 'RUN_MODEL_RECOVERY_STOPPED',
   RUN_RESUMED: 'RUN_RESUMED',
   // A model_recoverable pause is being resumed automatically (pause-class.mjs). The reducer counts the attempt per step identity
   // and per goal, durably, and refuses an attempt whose goal, plan, plan version or step is no longer the live one.
@@ -434,6 +435,7 @@ export const PLANNING_EVENT = Object.freeze({
   PRESERVATION_OBSERVED: 'PRESERVATION_OBSERVED',
   PRESERVATION_ADMISSION_RECORDED: 'PRESERVATION_ADMISSION_RECORDED',
   PRESERVATION_ADDITION_CERTIFIED: 'PRESERVATION_ADDITION_CERTIFIED',
+  ARGUMENT_CORRECTION_CLAIMED: 'ARGUMENT_CORRECTION_CLAIMED',
   AUTHORIZATION_APPROVAL_RECORDED: 'AUTHORIZATION_APPROVAL_RECORDED',
   // World facts that outlive a goal: NPC placement receipts and reserved containers.
   NPC_PLACEMENT_RECORDED: 'NPC_PLACEMENT_RECORDED',
@@ -779,16 +781,64 @@ export function createEmptyRunState() {
 // plans already resolve to undefined.
 export const MAX_RETAINED_PLANS = 64
 
-function retainPlans(plans, activePlanId) {
+function retainPlans(plans, activePlanId, goal) {
   if (!Array.isArray(plans)) return []
   if (plans.length <= MAX_RETAINED_PLANS) return plans
-  const recent = plans.slice(-MAX_RETAINED_PLANS)
-  if (!activePlanId || recent.some(plan => plan?.plan_id === activePlanId)) return recent
-  const active = plans.find(plan => plan?.plan_id === activePlanId)
-  return active ? [active, ...recent.slice(1)] : recent
+  const ledger = restoreArgumentCorrections(goal?.argument_corrections, goal?.goal_id, goal?.created_at)
+  // While allowance can remain, retain its immutable origin dependencies in
+  // the same existing 64-plan bound. At 64 claims storage is explicitly spent;
+  // losing old origins can never turn that exhausted ledger into fresh credit.
+  const critical = new Set([activePlanId])
+  // Active proof dependencies take priority over retry audit dependencies. A
+  // capacity conflict may disable correction, never erase active proof lineage.
+  for (const id of critical) {
+    const held = plans.find(plan => plan?.plan_id === id)
+    for (const step of held?.steps ?? []) if (step.obligation_proof?.binding?.plan_id) critical.add(step.obligation_proof.binding.plan_id)
+    for (const ref of held?.carried_forward_evidence ?? []) {
+      const origin = plans.find(plan => typeof ref === 'string' && ref.startsWith(`${plan.plan_id}:`))
+      if (origin) critical.add(origin.plan_id)
+    }
+  }
+  const pinned = new Set(critical)
+  for (const row of !ledger.invalid && ledger.claims.length < 64 ? ledger.claims : []) {
+    if (pinned.size < MAX_RETAINED_PLANS) pinned.add(row.plan_id)
+  }
+  const required = plans.filter(plan => pinned.has(plan?.plan_id)).slice(-MAX_RETAINED_PLANS)
+  const room = MAX_RETAINED_PLANS - required.length
+  const recent = room > 0 ? plans.filter(plan => !pinned.has(plan?.plan_id)).slice(-room) : []
+  const kept = new Set([...required, ...recent])
+  return plans.filter(plan => kept.has(plan))
 }
 
 // --- sanitizers ------------------------------------------------------------
+
+function restoreArgumentCorrections(raw, goalId, createdAt) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !['version', 'goal_id', 'initialized_at', 'claims'].includes(key))
+    || raw.version !== 1 || raw.goal_id !== goalId || !Number.isFinite(raw.initialized_at)
+    || raw.initialized_at < 0 || raw.initialized_at !== createdAt || !Array.isArray(raw.claims) || raw.claims.length > 64) return { invalid: true }
+  const ids = new Set()
+  for (const row of raw.claims) {
+    if (!row || Object.keys(row).some(key => !['goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'request_id', 'reason', 'operation_signature', 'at'].includes(key))
+      || row.goal_id !== goalId || ['plan_id', 'step_id', 'semantic_step_id', 'request_id', 'reason'].some(key => typeof row[key] !== 'string' || !row[key] || row[key].length > 240)
+      || !Number.isSafeInteger(row.plan_version) || row.plan_version < 1 || !Number.isFinite(row.at) || row.at < 0
+      || !/^[a-f0-9]{64}$/.test(row.operation_signature) || ids.has(row.semantic_step_id)) return { invalid: true }
+    ids.add(row.semantic_step_id)
+  }
+  return { version: 1, goal_id: goalId, initialized_at: raw.initialized_at, claims: clone(raw.claims) }
+}
+
+// A missing legacy ledger or semantic lineage is unknown, never a fresh retry.
+// Goal-scoped claims survive successor IDs, requests and conversation restages.
+export function argumentCorrectionAvailable(state) {
+  const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
+  const ledger = restoreArgumentCorrections(state?.goal?.argument_corrections, state?.goal?.goal_id, state?.goal?.created_at)
+  if (ledger.invalid || ledger.claims.length >= 64 || state?.goal?.status !== GOAL_STATUS.ACTIVE
+    || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status) || plan.goal_id !== state.goal.goal_id
+    || typeof step?.semantic_step_id !== 'string' || !step.semantic_step_id || state.run?.paused
+    || ledger.claims.some(row => row.semantic_step_id === step.semantic_step_id)) return false
+  return ledger.claims.every(row => state.plans?.some(origin => origin.goal_id === row.goal_id && origin.plan_id === row.plan_id
+    && origin.plan_version === row.plan_version && origin.steps.some(item => item.step_id === row.step_id && item.semantic_step_id === row.semantic_step_id)))
+}
 
 function sanitizeGoal(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
@@ -805,6 +855,7 @@ function sanitizeGoal(raw) {
   const definition = restoreGoalDefinition(raw.definition)
   return {
     goal_id: goalId,
+    ...(Object.hasOwn(raw, 'argument_corrections') ? { argument_corrections: restoreArgumentCorrections(raw.argument_corrections, goalId, raw.created_at) } : {}),
     ...(satisfaction ? { satisfaction, satisfied_at: finiteNumber(raw.satisfied_at) ?? satisfaction.at } : {}),
     ...(definition ? { definition } : {}),
     ...(raw.fresh_context_recovery_used === true ? { fresh_context_recovery_used: true } : {}),
@@ -818,7 +869,9 @@ function sanitizeGoal(raw) {
     owner: text(raw.owner, 128) || 'unknown',
     objective: text(raw.objective, 1000),
     constraints: stringList(raw.constraints, { max: 24, maxLength: 300 }),
-    status: Object.values(GOAL_STATUS).includes(raw.status) ? raw.status : GOAL_STATUS.ACTIVE,
+    // Never trim/coerce malformed input into ACTIVE. Keep bounded diagnostic
+    // strings exactly; all execution authorities require the exact enum.
+    status: typeof raw.status === 'string' && raw.status.length > 0 && raw.status.length <= 60 ? raw.status : 'invalid',
     created_at: finiteNumber(raw.created_at) ?? 0,
     updated_at: finiteNumber(raw.updated_at) ?? finiteNumber(raw.created_at) ?? 0,
   }
@@ -2127,12 +2180,15 @@ export function applyPlanningEvent(state, event) {
 Object.assign(HANDLERS, {
   [PLANNING_EVENT.GOAL_ACCEPTED](state, event, now) {
     const sequence = nextSequence(state)
+    const goalId = text(event.goal_id, 120) || `goal_${fingerprint(`${sequence}|${now}|${text(event.objective, 200)}`)}_${sequence}`
+    if (goalId === state.goal?.goal_id) return state // duplicate acceptance cannot renew this immutable goal's allowances
     const goal = sanitizeGoal({
-      goal_id: text(event.goal_id, 120) || `goal_${fingerprint(`${sequence}|${now}|${text(event.objective, 200)}`)}_${sequence}`,
+      goal_id: goalId,
       owner: event.owner,
       objective: event.objective,
       constraints: event.constraints,
       status: GOAL_STATUS.ACTIVE,
+      argument_corrections: { version: 1, goal_id: goalId, initialized_at: now, claims: [] },
       created_at: now,
       updated_at: now,
     })
@@ -2388,7 +2444,7 @@ Object.assign(HANDLERS, {
     return {
       ...state,
       sequence,
-      plans: retainPlans([...plans, plan], plan.plan_id),
+      plans: retainPlans([...plans, plan], plan.plan_id, state.goal),
       active_plan_id: plan.plan_id,
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.DRAFT_CREATED, at: now, plan_id: plan.plan_id }),
@@ -2832,7 +2888,7 @@ Object.assign(HANDLERS, {
     return withReasoningReset({
       ...state,
       sequence,
-      plans: retainPlans([...plans, successor], successor.plan_id),
+      plans: retainPlans([...plans, successor], successor.plan_id, state.goal),
       active_plan_id: successor.plan_id,
       // The user's revision takes the goal out of its pause: a blocked plan
       // that was also paused must not leave the successor's run paused.
@@ -2904,6 +2960,22 @@ Object.assign(HANDLERS, {
         revision: result.grant.revision,
       }),
     }
+  },
+
+  [PLANNING_EVENT.ARGUMENT_CORRECTION_CLAIMED](state, event, now) {
+    const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
+    if (!isRuntimeAuthority(event.source) || !argumentCorrectionAvailable(state) || event.request_consumed !== 0
+      || event.goal_id !== state.goal.goal_id || event.plan_id !== plan.plan_id || event.plan_version !== plan.plan_version
+      || event.step_id !== step.step_id || event.semantic_step_id !== step.semantic_step_id
+      || (state.operation_ledger?.records?.length ?? 0) !== 0
+      || !checkGrant(authorizationOf(state), state.goal, { grant_id: event.grant_id, grant_revision: event.grant_revision,
+        actor_id: event.actor_id, actor_epoch: event.actor_epoch }).ok) return state
+    const claim = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
+      step_id: step.step_id, semantic_step_id: step.semantic_step_id, request_id: event.request_id,
+      reason: event.reason, operation_signature: event.operation_signature, at: now }
+    const ledger = restoreArgumentCorrections({ ...state.goal.argument_corrections, claims: [...state.goal.argument_corrections.claims, claim] }, state.goal.goal_id, state.goal.created_at)
+    if (ledger.invalid) return state
+    return { ...state, goal: { ...state.goal, argument_corrections: ledger, updated_at: now } }
   },
 
   [PLANNING_EVENT.PRESERVATION_OBSERVED](state, event, now) {
@@ -3091,7 +3163,7 @@ Object.assign(HANDLERS, {
     return withReasoningReset({
       ...state,
       sequence,
-      plans: retainPlans([...plans, successor], successor.plan_id),
+      plans: retainPlans([...plans, successor], successor.plan_id, state.goal),
       active_plan_id: successor.plan_id,
       authorization: nextAuth,
       // The accept branch is the only place a replacement is counted: a re-draft of the same successor never passes here.
@@ -3371,6 +3443,21 @@ Object.assign(HANDLERS, {
     }
   },
 
+  // This closes model recovery only. Native effects, controllers and existing
+  // pause authority retain their owners even when their settlement is unknown.
+  [PLANNING_EVENT.RUN_MODEL_RECOVERY_STOPPED](state, event, now) {
+    const plan = getActivePlan(state)
+    if (!state.goal || state.goal.status === GOAL_STATUS.ACTIVE || event.source !== 'runtime'
+      || event.goal_id !== state.goal.goal_id || event.goal_status !== state.goal.status
+      || event.plan_id !== (plan?.plan_id ?? null) || event.plan_version !== (plan?.plan_version ?? null)
+      || event.step_id !== (plan?.steps?.[plan.active_step_index]?.step_id ?? null)
+      || !text(event.request_id, 240)) return state
+    const stop = { version: 1, source: 'runtime', goal_id: event.goal_id, goal_status: event.goal_status, plan_id: event.plan_id,
+      plan_version: event.plan_version, step_id: event.step_id, request_id: text(event.request_id, 240),
+      reason: 'inactive_goal_recovery_refused', native_idle: event.native_idle === true, at: now }
+    return { ...state, run: { ...(state.run ?? createEmptyRunState()), model_recovery_stop: stop }, updated_at: now }
+  },
+
   [PLANNING_EVENT.NEXT_SLICE_TRANSITION](state, event, now) {
     return nextSliceTransition(state, event, now)
   },
@@ -3418,6 +3505,7 @@ Object.assign(HANDLERS, {
   },
 
   [PLANNING_EVENT.RUN_RESUMED](state, event, now) {
+    if (state.run?.model_recovery_stop_fault || state.run?.model_recovery_stop?.goal_id === state.goal?.goal_id) return state
     if (!runEventAllowed(state, event)) return state
     const run = state.run
     if (!run?.paused) return state
@@ -4376,6 +4464,16 @@ function restoreReplacementLineage(raw) {
 
 function restoreRun(raw, state) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const candidateStop = boundedRecord(raw.model_recovery_stop)
+  const stopPlan = getActivePlan(state)
+  const validStop = candidateStop?.version === 1 && candidateStop.source === 'runtime'
+    && candidateStop.goal_id === state.goal?.goal_id && state.goal?.status !== GOAL_STATUS.ACTIVE
+    && candidateStop.goal_status === state.goal?.status && candidateStop.reason === 'inactive_goal_recovery_refused'
+    && typeof candidateStop.request_id === 'string' && candidateStop.request_id.length > 0 && candidateStop.request_id.length <= 240
+    && Number.isFinite(candidateStop.at) && typeof candidateStop.native_idle === 'boolean'
+    && candidateStop.plan_id === (stopPlan?.plan_id ?? null) && candidateStop.plan_version === (stopPlan?.plan_version ?? null)
+    && candidateStop.step_id === (stopPlan?.steps?.[stopPlan.active_step_index]?.step_id ?? null)
+  const recoveryStopFault = raw.model_recovery_stop_fault === true || (raw.model_recovery_stop != null && !validStop)
   const paused = raw.paused === true
   const reason = paused ? text(raw.pause_reason, RUN_STATE_LIMITS.pauseReason) : ''
   const locators = raw.locators && typeof raw.locators === 'object' && !Array.isArray(raw.locators) ? raw.locators : {}
@@ -4390,9 +4488,11 @@ function restoreRun(raw, state) {
     paused_at: finiteNumber(raw.paused_at) ?? null,
     resumed_at: finiteNumber(raw.resumed_at) ?? null,
     pause_count: Number.isSafeInteger(raw.pause_count) && raw.pause_count >= 0 ? raw.pause_count : 0,
-    condition_wait: paused ? null : boundedRecord(raw.condition_wait),
+    condition_wait: paused && !validStop ? null : boundedRecord(raw.condition_wait),
     provider_recovery: boundedRecord(raw.provider_recovery),
-    persistent_runtime: paused ? null : boundedRecord(raw.persistent_runtime),
+    ...(validStop ? { model_recovery_stop: clone(candidateStop) } : {}),
+    ...(recoveryStopFault ? { model_recovery_stop_fault: true } : {}),
+    persistent_runtime: paused && !validStop ? null : boundedRecord(raw.persistent_runtime),
     pending_operation: sanitizePendingOperation(raw.pending_operation),
     locators: {
       durable_last_operations: sanitizeDurableOperations(locators.durable_last_operations),
@@ -4451,7 +4551,7 @@ export function restorePlanningState(raw) {
       : empty
   }
   const activePlanId = text(raw.active_plan_id, 200)
-  const plans = retainPlans(Array.isArray(raw.plans) ? raw.plans : [], activePlanId).map(restorePlan).filter(Boolean)
+  const plans = retainPlans(Array.isArray(raw.plans) ? raw.plans : [], activePlanId, raw.goal).map(restorePlan).filter(Boolean)
   return {
     version: PLANNING_STATE_VERSION,
     sequence: Number.isSafeInteger(raw.sequence) ? raw.sequence : plans.length,
@@ -4473,7 +4573,7 @@ export function restorePlanningState(raw) {
           reason: text(raw.last_reasoning_reset.reason, 200) || null,
         }
       : null,
-    run: restoreRun(raw.run, { goal, plans }),
+    run: restoreRun(raw.run, { goal, plans, active_plan_id: plans.some(plan => plan.plan_id === activePlanId) ? activePlanId : null }),
     ...((raw.operation_ledger || raw.run?.pending_operation) ? { operation_ledger: operationLedger(raw.operation_ledger, raw.run?.pending_operation) } : {}),
     context_restages: restoreContextRestages(raw.context_restages),
     ...(() => {

@@ -1,0 +1,422 @@
+{
+  "schema": 1,
+  "baseline_source": "2959fd309f529b7af5bd69953ca8b4012d99006f",
+  "reporter_fixture_sha256": "14eb968cb093959de773669f3b16f7ad17df27bd5c411ccaae271051d711b7aa",
+  "sealed_raw_manifest_sha256": "144fc7f0b3b3c5b9afc4269c959f82a4470636f077b79c64f832151d907f40c7",
+  "pre_stop_timestamp": "2026-10-25T15:16:58.024Z",
+  "first_cancel": "2026-10-25T15:16:58.192Z",
+  "pre_stop_history_source": "sealed/raw/b/data/logs/e2e-planning-state-history.jsonl:22",
+  "pre_stop_history_row_sha256": "8cdc59e70dce2814acb7d85a7e4ed928315ec96b9f00838f687fd6f3e848b001",
+  "goal": {
+    "goal_id": "goal_0moe2wn_1",
+    "owner": "<server>",
+    "objective": "Build a new automated factory that continuously produces at least one automation-science-pack per game minute from natural resources.",
+    "constraints": [],
+    "status": "active",
+    "created_at": 1792939524763,
+    "updated_at": 1792939920434,
+    "definition": {
+      "scope": "long_horizon",
+      "summary": "Build a new automated factory that continuously produces at least one automation science pack per game minute from natural resources.",
+      "done_when": [
+        {
+          "id": "done_1",
+          "kind": "production_rate",
+          "item_name": "automation-science-pack",
+          "per_minute": 1,
+          "window_minutes": 1
+        }
+      ],
+      "source": "main_planner",
+      "defined_at": 1792939730459
+    },
+    "review_continuation_steps": [
+      "goal_0moe2wn_1_p3_v1_s4_089fwsk"
+    ],
+    "review_notes": {
+      "goal_0moe2wn_1_p3_v1_s4_089fwsk": "Planner review: keep the committed step unchanged. The fresh native topology explicitly identifies drill 27’s drop_target as furnace 28, and both entities report working. An empty ingredient slot during active smelting does not establish a disconnected route: the current ingredient may already be consumed into crafting progress. Do not dismantle or relocate this cell on that evidence. Continue bounded production/output observation, collect the required ten copper plates from the freshly verified exact furnace, and verify electronics against its actual technology state. If output fails to advance, diagnose the current exact entities and their fuel/output states before attempting any repair. The ten-plate inventory and electronics-researched checkpoint remains unchanged."
+    }
+  },
+  "plan": {
+    "plan_id": "goal_0moe2wn_1_p9",
+    "plan_version": 1,
+    "goal_id": "goal_0moe2wn_1",
+    "roadmap_revision_id": "goal_0moe2wn_1_r2",
+    "roadmap_node_ids": [
+      "steam-electricity"
+    ],
+    "development_mode": "vertical",
+    "refinement_grounding": {
+      "ready_node_ids": [],
+      "not_ready": [
+        {
+          "node_id": "steam-electricity",
+          "reason": "dependencies_unsatisfied"
+        }
+      ]
+    },
+    "steering_at_draft": {
+      "mode": "vertical",
+      "steering_sequence": 7,
+      "critical_path": null,
+      "diverges_from_steering": false
+    },
+    "status": "COMMITTED",
+    "steps": [
+      {
+        "step_id": "goal_0moe2wn_1_p9_v1_s1_1r3ndke",
+        "semantic_step_id": "goal_0moe2wn_1_p9_v1_s1_1r3ndke",
+        "description": "Install one boiler within two tiles of (51.5, 5), preserving offshore pump 30 and retaining one steam engine and one lab.",
+        "completion_contract": {
+          "mode": "all",
+          "requirements": [
+            {
+              "id": "requirement_1",
+              "kind": "entity_count",
+              "prototype": "boiler",
+              "minimum": 1,
+              "radius": 2,
+              "anchor": {
+                "x": 51.5,
+                "y": 5
+              }
+            },
+            {
+              "id": "requirement_2",
+              "kind": "inventory_count",
+              "item_name": "steam-engine",
+              "minimum": 1
+            },
+            {
+              "id": "requirement_3",
+              "kind": "inventory_count",
+              "item_name": "lab",
+              "minimum": 1
+            },
+            {
+              "id": "requirement_4",
+              "kind": "entity_exists",
+              "unit_number": 30
+            }
+          ],
+          "confidence": 0
+        },
+        "obligation_protocol": 1,
+        "obligations": {
+          "outcome": {
+            "mode": "all",
+            "requirements": [
+              {
+                "id": "requirement_1",
+                "kind": "entity_count",
+                "prototype": "boiler",
+                "minimum": 1,
+                "radius": 2,
+                "anchor": {
+                  "x": 51.5,
+                  "y": 5
+                }
+              },
+              {
+                "id": "requirement_2",
+                "kind": "inventory_count",
+                "item_name": "steam-engine",
+                "minimum": 1
+              },
+              {
+                "id": "requirement_3",
+                "kind": "inventory_count",
+                "item_name": "lab",
+                "minimum": 1
+              }
+            ],
+            "confidence": 0
+          },
+          "preserve": [
+            30
+          ]
+        },
+        "obligation_proof": {
+          "version": 2,
+          "intent_signature": "41048d763f9a1b74822b39626bee55fc35ab46cd21be92fec807d3d416eaaa1a",
+          "actor_id": 13,
+          "actor_epoch": 1,
+          "request_id": "req_mvnxwfb8_1",
+          "captured_at": 1792941381826,
+          "preserved": [
+            {
+              "entity": {
+                "unit_number": 30,
+                "name": "offshore-pump",
+                "type": "offshore-pump",
+                "position": {
+                  "x": 53.5,
+                  "y": 5.5
+                },
+                "direction": 4
+              },
+              "actor_id": 13,
+              "surface_index": 1,
+              "force_index": 1,
+              "fluid": {
+                "version": 3,
+                "storages": [
+                  {
+                    "index": 1,
+                    "local_volume": 100,
+                    "prototypes": [
+                      {
+                        "index": 1,
+                        "production_type": "output",
+                        "volume": 100,
+                        "filter": null,
+                        "minimum_temperature": null,
+                        "maximum_temperature": null
+                      }
+                    ],
+                    "ports": [
+                      {
+                        "index": 1,
+                        "position": {
+                          "x": 53.5,
+                          "y": 5.5
+                        },
+                        "target_position": {
+                          "x": 52.5,
+                          "y": 5.5
+                        },
+                        "connection_type": "normal",
+                        "flow_direction": "output",
+                        "connected": false,
+                        "target": null
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "binding": {
+            "goal_id": "goal_0moe2wn_1",
+            "plan_id": "goal_0moe2wn_1_p9",
+            "plan_version": 1,
+            "step_id": "goal_0moe2wn_1_p9_v1_s1_1r3ndke",
+            "semantic_step_id": "goal_0moe2wn_1_p9_v1_s1_1r3ndke"
+          }
+        },
+        "execution_guidance": {
+          "approach": "Use a fresh boiler placement candidate connected to pump 30, near (51.5,5), and install the single held boiler. Stop at the new entity observation boundary.",
+          "rationale": "Direct connection uses the held boiler without crafting pipes. Fuel, steam production, engine connection and loaded electricity require subsequent stages grounded in the installed boiler's actual ports.",
+          "constraints": [
+            "Preserve offshore pump 30 and its native fluid geometry.",
+            "Retain one steam engine and one lab; installation consumes one held boiler.",
+            "Inspect the new boiler identity and actual water and steam ports before further connections."
+          ],
+          "skillIds": [],
+          "materialSupply": null
+        },
+        "completion_mode": "deterministic",
+        "contract_status": "bound",
+        "completion_confidence": "grounded",
+        "reduced_confidence": false
+      }
+    ],
+    "active_step_index": 0,
+    "derived_from_plan_id": null,
+    "superseded_by_plan_id": null,
+    "origin": "live_task_board",
+    "created_at": 1792941382029,
+    "updated_at": 1792941382142,
+    "committed_at": 1792941382142,
+    "completed_at": null,
+    "blocker": null,
+    "execution": {
+      "step_progress": {
+        "goal_0moe2wn_1_p9_v1_s1_1r3ndke": {
+          "status": "active",
+          "accepted_evidence": [],
+          "batches_attempted": 0,
+          "batches_since_evidence": 0,
+          "operations_attempted": 0,
+          "failure_counts": {},
+          "contract_satisfied": false,
+          "unsatisfiable": null,
+          "completed_at": null
+        }
+      },
+      "batches_attempted": 0,
+      "receipts": {
+        "goal_0moe2wn_1_p9_v1_s1_1r3ndke": [
+          {
+            "batch_id": "",
+            "kind": "step_completion_contract_validated",
+            "ref": "checkpoint/step_1",
+            "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"entity_count\",\"prototype\":\"boiler\",\"minimum\":1,\"radius\":2,\"anchor\":{\"x\":51.5,\"y\":5}},{\"id\":\"requirement_2\",",
+            "at": 1792941382109,
+            "source": "runtime",
+            "seq": 1
+          }
+        ]
+      },
+      "receipts_seeded": true
+    },
+    "advisory": {
+      "planner_focus_step_id": "goal_0moe2wn_1_p9_v1_s1_1r3ndke",
+      "planner_focus_at": 1792941393926,
+      "steering_note": null
+    },
+    "carried_forward_evidence": [],
+    "lifecycle": [
+      {
+        "status": "DRAFT",
+        "at": 1792941382108,
+        "reason": "live_task_board"
+      },
+      {
+        "status": "COMMITTED",
+        "at": 1792941382142,
+        "reason": "auto_commit_runtime_validated"
+      }
+    ],
+    "runtime_validation": {
+      "passed": true,
+      "validated_at": 1792941382142,
+      "scope": "completion_contracts",
+      "unsupported_step_ids": []
+    }
+  },
+  "closed_unsent": {
+    "operation_key": "req_mvnxwfb8_1/batch_22",
+    "request_id": "req_mvnxwfb8_1",
+    "attempt_id": "req_mvnxwfb8_1/batch_22",
+    "protocol_version": 2,
+    "ordinal": 22,
+    "scopes": [
+      "*"
+    ],
+    "state": "sent",
+    "goal_id": "goal_0moe2wn_1",
+    "plan_id": "goal_0moe2wn_1_p9",
+    "step_id": "goal_0moe2wn_1_p9_v1_s1_1r3ndke",
+    "actor": {
+      "actor_id": 13,
+      "epoch": 1
+    },
+    "signature": "fc5dd513124ec7b284e00a76b4d948801ab1746c90826f1127a0a0c813b1fd50",
+    "operations": [
+      {
+        "trace_operation_id": "req_mvnxwfb8_1/op_1",
+        "name": "place_candidate",
+        "effect_class": "place"
+      }
+    ],
+    "baseline": {
+      "generation": 1,
+      "max_batch_id": 21,
+      "active": null
+    },
+    "effect": "not_happened",
+    "verdict": null,
+    "reason": "cancelled_before_transport",
+    "batch_id": null,
+    "sent_at": 1792941394087,
+    "reconciled_at": null
+  },
+  "candidate_tool_result": {
+    "value": {
+      "schema": 1,
+      "ts": "2026-10-25T15:16:27.793Z",
+      "seq": 1741,
+      "event": "tool.result",
+      "request_id": "req_mvnxwfb8_1",
+      "turn": 24,
+      "actor_id": 13,
+      "epoch": 1,
+      "data": {
+        "phase": "result",
+        "tool_call_id": "call_xZfz7UVYagPfUHWr3X11gtGR",
+        "name": "getPlacementCandidates",
+        "cached": false,
+        "original_output_chars": 10083,
+        "output_chars": 10083,
+        "output": "{\"ok\":true,\"entity_name\":\"boiler\",\"ordering\":\"nearest_to_anchor_first\",\"legal_candidate_count\":768,\"returned_candidate_count\":8,\"candidates\":[{\"id\":\"candidate-1\",\"position\":{\"x\":52,\"y\":5.5},\"direction\":4,\"distance_from_center\":0.7071067811865476,\"footprint\":{\"tile_width\":2,\"tile_height\":3,\"grid\":{\"x_offset\":0,\"y_offset\":0.5},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":4},\"right_bottom\":{\"x\":53,\"y\":7}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":4.2109375},\"right_bottom\":{\"x\":52.7890625,\"y\":6.7890625}}},\"distance_from_anchor\":1.5,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":4.5},\"direction\":0},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":6.5},\"direction\":8},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":5.5},\"direction\":4}]},{\"id\":\"candidate-2\",\"position\":{\"x\":52,\"y\":4.5},\"direction\":4,\"distance_from_center\":0.7071067811865476,\"footprint\":{\"tile_width\":2,\"tile_height\":3,\"grid\":{\"x_offset\":0,\"y_offset\":0.5},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":3},\"right_bottom\":{\"x\":53,\"y\":6}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":3.2109375},\"right_bottom\":{\"x\":52.7890625,\"y\":5.7890625}}},\"distance_from_anchor\":1.8027756377319946,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":3.5},\"direction\":0},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":5.5},\"direction\":8},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":4.5},\"direction\":4}]},{\"id\":\"candidate-3\",\"position\":{\"x\":52.5,\"y\":4},\"direction\":0,\"distance_from_center\":1.4142135623730951,\"footprint\":{\"tile_width\":3,\"tile_height\":2,\"grid\":{\"x_offset\":0.5,\"y_offset\":0},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":3},\"right_bottom\":{\"x\":54,\"y\":5}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":3.2109375},\"right_bottom\":{\"x\":53.7890625,\"y\":4.7890625}}},\"distance_from_anchor\":1.8027756377319946,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":4.5},\"direction\":12},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":53.5,\"y\":4.5},\"direction\":4},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":3.5},\"direction\":0}]},{\"id\":\"candidate-4\",\"position\":{\"x\":52,\"y\":6.5},\"direction\":4,\"distance_from_center\":1.5811388300841898,\"footprint\":{\"tile_width\":2,\"tile_height\":3,\"grid\":{\"x_offset\":0,\"y_offset\":0.5},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":5},\"right_bottom\":{\"x\":53,\"y\":8}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":5.2109375},\"right_bottom\":{\"x\":52.7890625,\"y\":7.7890625}}},\"distance_from_anchor\":1.8027756377319946,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":5.5},\"direction\":0},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":7.5},\"direction\":8},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":6.5},\"direction\":4}]},{\"id\":\"candidate-5\",\"position\":{\"x\":51.5,\"y\":5},\"direction\":0,\"distance_from_center\":0,\"footprint\":{\"tile_width\":3,\"tile_height\":2,\"grid\":{\"x_offset\":0.5,\"y_offset\":0},\"tile_box\":{\"left_top\":{\"x\":50,\"y\":4},\"right_bottom\":{\"x\":53,\"y\":6}},\"world_box\":{\"left_top\":{\"x\":50.2109375,\"y\":4.2109375},\"right_bottom\":{\"x\":52.7890625,\"y\":5.7890625}}},\"distance_from_anchor\":2.0615528128088303,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":50.5,\"y\":5.5},\"direction\":12},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":5.5},\"direction\":4},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":4.5},\"direction\":0}]},{\"id\":\"candidate-6\",\"position\":{\"x\":51.5,\"y\":6},\"direction\":0,\"distance_from_center\":1,\"footprint\":{\"tile_width\":3,\"tile_height\":2,\"grid\":{\"x_offset\":0.5,\"y_offset\":0},\"tile_box\":{\"left_top\":{\"x\":50,\"y\":5},\"right_bottom\":{\"x\":53,\"y\":7}},\"world_box\":{\"left_top\":{\"x\":50.2109375,\"y\":5.2109375},\"right_bottom\":{\"x\":52.7890625,\"y\":6.7890625}}},\"distance_from_anchor\":2.0615528128088303,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":50.5,\"y\":6.5},\"direction\":12},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":6.5},\"direction\":4},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":5.5},\"direction\":0}]},{\"id\":\"candidate-7\",\"position\":{\"x\":52,\"y\":5.5},\"direction\":12,\"distance_from_center\":0.7071067811865476,\"footprint\":{\"tile_width\":2,\"tile_height\":3,\"grid\":{\"x_offset\":0,\"y_offset\":0.5},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":4},\"right_bottom\":{\"x\":53,\"y\":7}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":4.2109375},\"right_bottom\":{\"x\":52.7890625,\"y\":6.7890625}}},\"distance_from_anchor\":1.5,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":6.5},\"direction\":8},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":4.5},\"direction\":0},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":5.5},\"direction\":12}]},{\"id\":\"candidate-8\",\"position\":{\"x\":52,\"y\":4.5},\"direction\":12,\"distance_from_center\":0.7071067811865476,\"footprint\":{\"tile_width\":2,\"tile_height\":3,\"grid\":{\"x_offset\":0,\"y_offset\":0.5},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":3},\"right_bottom\":{\"x\":53,\"y\":6}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":3.2109375},\"right_bottom\":{\"x\":52.7890625,\"y\":5.7890625}}},\"distance_from_anchor\":1.8027756377319946,\"fluid_ports\":[{\"storage_index\":1,\"connection_index\":1,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":5.5},\"direction\":8},{\"storage_index\":1,\"connection_index\":2,\"production_type\":\"input\",\"filter\":\"water\",\"flow_direction\":\"input-output\",\"connection_type\":\"normal\",\"position\":{\"x\":52.5,\"y\":3.5},\"direction\":0},{\"storage_index\":2,\"connection_index\":1,\"production_type\":\"output\",\"filter\":\"steam\",\"flow_direction\":\"output\",\"connection_type\":\"normal\",\"position\":{\"x\":51.5,\"y\":4.5},\"direction\":12}]}],\"candidates_may_be_incomplete\":true,\"candidates_incomplete_reason\":\"clearance_check_limit\",\"clearance_probes\":400,\"center\":{\"x\":51.5,\"y\":5},\"radius\":8,\"anchor\":{\"ok\":true,\"unit_number\":30,\"entity_name\":\"offshore-pump\",\"position\":{\"x\":53.5,\"y\":5.5}},\"scanned\":1156,\"candidate_set_id\":\"placement-10\",\"generated_tick\":159811,\"expires_tick\":163411,\"obstructions\":{\"label\":\"rejected_footprint_samples_not_candidates\",\"source\":\"native_placement_checks\",\"observed_tick\":159811,\"actor_id\":13,\"interpretation\":\"observed_collision_mask_intersections_not_exhaustive_rejection_causes\",\"surface_index\":1,\"force_index\":1,\"scope\":\"sampled_footprints\",\"examined_count\":3,\"rejected_count\":388,\"unknown_count\":0,\"samples\":[{\"position\":{\"x\":52.5,\"y\":5},\"direction\":0,\"footprint\":{\"tile_width\":3,\"tile_height\":2,\"grid\":{\"x_offset\":0.5,\"y_offset\":0},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":4},\"right_bottom\":{\"x\":54,\"y\":6}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":4.2109375},\"right_bottom\":{\"x\":53.7890625,\"y\":5.7890625}}},\"terrain_tiles\":{},\"entities\":[{\"name\":\"offshore-pump\",\"type\":\"offshore-pump\",\"unit_number\":30,\"position\":{\"y\":5.5,\"x\":53.5},\"reason\":\"entity_collision_mask_overlap\"}],\"unknown\":false,\"truncated\":false},{\"position\":{\"x\":52.5,\"y\":6},\"direction\":0,\"footprint\":{\"tile_width\":3,\"tile_height\":2,\"grid\":{\"x_offset\":0.5,\"y_offset\":0},\"tile_box\":{\"left_top\":{\"x\":51,\"y\":5},\"right_bottom\":{\"x\":54,\"y\":7}},\"world_box\":{\"left_top\":{\"x\":51.2109375,\"y\":5.2109375},\"right_bottom\":{\"x\":53.7890625,\"y\":6.7890625}}},\"terrain_tiles\":{},\"entities\":[{\"name\":\"offshore-pump\",\"type\":\"offshore-pump\",\"unit_number\":30,\"position\":{\"y\":5.5,\"x\":53.5},\"reason\":\"entity_collision_mask_overlap\"}],\"unknown\":false,\"truncated\":false},{\"position\":{\"x\":53,\"y\":4.5},\"direction\":4,\"footprint\":{\"tile_width\":2,\"tile_height\":3,\"grid\":{\"x_offset\":0,\"y_offset\":0.5},\"tile_box\":{\"left_top\":{\"x\":52,\"y\":3},\"right_bottom\":{\"x\":54,\"y\":6}},\"world_box\":{\"left_top\":{\"x\":52.2109375,\"y\":3.2109375},\"right_bottom\":{\"x\":53.7890625,\"y\":5.7890625}}},\"terrain_tiles\":{},\"entities\":[{\"name\":\"offshore-pump\",\"type\":\"offshore-pump\",\"unit_number\":30,\"position\":{\"y\":5.5,\"x\":53.5},\"reason\":\"entity_collision_mask_overlap\"}],\"unknown\":false,\"truncated\":false}],\"truncated\":true}}"
+      }
+    },
+    "source": "sealed/raw/b/data/logs/sgluna-behavior.jsonl:1741",
+    "exactLine": "{\"schema\":1,\"ts\":\"2026-10-25T15:16:27.793Z\",\"seq\":1741,\"event\":\"tool.result\",\"request_id\":\"req_mvnxwfb8_1\",\"turn\":24,\"actor_id\":13,\"epoch\":1,\"data\":{\"phase\":\"result\",\"tool_call_id\":\"call_xZfz7UVYagPfUHWr3X11gtGR\",\"name\":\"getPlacementCandidates\",\"cached\":false,\"original_output_chars\":10083,\"output_chars\":10083,\"output\":\"{\\\"ok\\\":true,\\\"entity_name\\\":\\\"boiler\\\",\\\"ordering\\\":\\\"nearest_to_anchor_first\\\",\\\"legal_candidate_count\\\":768,\\\"returned_candidate_count\\\":8,\\\"candidates\\\":[{\\\"id\\\":\\\"candidate-1\\\",\\\"position\\\":{\\\"x\\\":52,\\\"y\\\":5.5},\\\"direction\\\":4,\\\"distance_from_center\\\":0.7071067811865476,\\\"footprint\\\":{\\\"tile_width\\\":2,\\\"tile_height\\\":3,\\\"grid\\\":{\\\"x_offset\\\":0,\\\"y_offset\\\":0.5},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":4},\\\"right_bottom\\\":{\\\"x\\\":53,\\\"y\\\":7}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":4.2109375},\\\"right_bottom\\\":{\\\"x\\\":52.7890625,\\\"y\\\":6.7890625}}},\\\"distance_from_anchor\\\":1.5,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":4.5},\\\"direction\\\":0},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":6.5},\\\"direction\\\":8},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":5.5},\\\"direction\\\":4}]},{\\\"id\\\":\\\"candidate-2\\\",\\\"position\\\":{\\\"x\\\":52,\\\"y\\\":4.5},\\\"direction\\\":4,\\\"distance_from_center\\\":0.7071067811865476,\\\"footprint\\\":{\\\"tile_width\\\":2,\\\"tile_height\\\":3,\\\"grid\\\":{\\\"x_offset\\\":0,\\\"y_offset\\\":0.5},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":3},\\\"right_bottom\\\":{\\\"x\\\":53,\\\"y\\\":6}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":3.2109375},\\\"right_bottom\\\":{\\\"x\\\":52.7890625,\\\"y\\\":5.7890625}}},\\\"distance_from_anchor\\\":1.8027756377319946,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":3.5},\\\"direction\\\":0},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":5.5},\\\"direction\\\":8},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":4.5},\\\"direction\\\":4}]},{\\\"id\\\":\\\"candidate-3\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":4},\\\"direction\\\":0,\\\"distance_from_center\\\":1.4142135623730951,\\\"footprint\\\":{\\\"tile_width\\\":3,\\\"tile_height\\\":2,\\\"grid\\\":{\\\"x_offset\\\":0.5,\\\"y_offset\\\":0},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":3},\\\"right_bottom\\\":{\\\"x\\\":54,\\\"y\\\":5}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":3.2109375},\\\"right_bottom\\\":{\\\"x\\\":53.7890625,\\\"y\\\":4.7890625}}},\\\"distance_from_anchor\\\":1.8027756377319946,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":4.5},\\\"direction\\\":12},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":53.5,\\\"y\\\":4.5},\\\"direction\\\":4},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":3.5},\\\"direction\\\":0}]},{\\\"id\\\":\\\"candidate-4\\\",\\\"position\\\":{\\\"x\\\":52,\\\"y\\\":6.5},\\\"direction\\\":4,\\\"distance_from_center\\\":1.5811388300841898,\\\"footprint\\\":{\\\"tile_width\\\":2,\\\"tile_height\\\":3,\\\"grid\\\":{\\\"x_offset\\\":0,\\\"y_offset\\\":0.5},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":5},\\\"right_bottom\\\":{\\\"x\\\":53,\\\"y\\\":8}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":5.2109375},\\\"right_bottom\\\":{\\\"x\\\":52.7890625,\\\"y\\\":7.7890625}}},\\\"distance_from_anchor\\\":1.8027756377319946,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":5.5},\\\"direction\\\":0},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":7.5},\\\"direction\\\":8},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":6.5},\\\"direction\\\":4}]},{\\\"id\\\":\\\"candidate-5\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":5},\\\"direction\\\":0,\\\"distance_from_center\\\":0,\\\"footprint\\\":{\\\"tile_width\\\":3,\\\"tile_height\\\":2,\\\"grid\\\":{\\\"x_offset\\\":0.5,\\\"y_offset\\\":0},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":50,\\\"y\\\":4},\\\"right_bottom\\\":{\\\"x\\\":53,\\\"y\\\":6}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":50.2109375,\\\"y\\\":4.2109375},\\\"right_bottom\\\":{\\\"x\\\":52.7890625,\\\"y\\\":5.7890625}}},\\\"distance_from_anchor\\\":2.0615528128088303,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":50.5,\\\"y\\\":5.5},\\\"direction\\\":12},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":5.5},\\\"direction\\\":4},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":4.5},\\\"direction\\\":0}]},{\\\"id\\\":\\\"candidate-6\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":6},\\\"direction\\\":0,\\\"distance_from_center\\\":1,\\\"footprint\\\":{\\\"tile_width\\\":3,\\\"tile_height\\\":2,\\\"grid\\\":{\\\"x_offset\\\":0.5,\\\"y_offset\\\":0},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":50,\\\"y\\\":5},\\\"right_bottom\\\":{\\\"x\\\":53,\\\"y\\\":7}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":50.2109375,\\\"y\\\":5.2109375},\\\"right_bottom\\\":{\\\"x\\\":52.7890625,\\\"y\\\":6.7890625}}},\\\"distance_from_anchor\\\":2.0615528128088303,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":50.5,\\\"y\\\":6.5},\\\"direction\\\":12},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":6.5},\\\"direction\\\":4},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":5.5},\\\"direction\\\":0}]},{\\\"id\\\":\\\"candidate-7\\\",\\\"position\\\":{\\\"x\\\":52,\\\"y\\\":5.5},\\\"direction\\\":12,\\\"distance_from_center\\\":0.7071067811865476,\\\"footprint\\\":{\\\"tile_width\\\":2,\\\"tile_height\\\":3,\\\"grid\\\":{\\\"x_offset\\\":0,\\\"y_offset\\\":0.5},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":4},\\\"right_bottom\\\":{\\\"x\\\":53,\\\"y\\\":7}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":4.2109375},\\\"right_bottom\\\":{\\\"x\\\":52.7890625,\\\"y\\\":6.7890625}}},\\\"distance_from_anchor\\\":1.5,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":6.5},\\\"direction\\\":8},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":4.5},\\\"direction\\\":0},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":5.5},\\\"direction\\\":12}]},{\\\"id\\\":\\\"candidate-8\\\",\\\"position\\\":{\\\"x\\\":52,\\\"y\\\":4.5},\\\"direction\\\":12,\\\"distance_from_center\\\":0.7071067811865476,\\\"footprint\\\":{\\\"tile_width\\\":2,\\\"tile_height\\\":3,\\\"grid\\\":{\\\"x_offset\\\":0,\\\"y_offset\\\":0.5},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":3},\\\"right_bottom\\\":{\\\"x\\\":53,\\\"y\\\":6}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":3.2109375},\\\"right_bottom\\\":{\\\"x\\\":52.7890625,\\\"y\\\":5.7890625}}},\\\"distance_from_anchor\\\":1.8027756377319946,\\\"fluid_ports\\\":[{\\\"storage_index\\\":1,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":5.5},\\\"direction\\\":8},{\\\"storage_index\\\":1,\\\"connection_index\\\":2,\\\"production_type\\\":\\\"input\\\",\\\"filter\\\":\\\"water\\\",\\\"flow_direction\\\":\\\"input-output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":3.5},\\\"direction\\\":0},{\\\"storage_index\\\":2,\\\"connection_index\\\":1,\\\"production_type\\\":\\\"output\\\",\\\"filter\\\":\\\"steam\\\",\\\"flow_direction\\\":\\\"output\\\",\\\"connection_type\\\":\\\"normal\\\",\\\"position\\\":{\\\"x\\\":51.5,\\\"y\\\":4.5},\\\"direction\\\":12}]}],\\\"candidates_may_be_incomplete\\\":true,\\\"candidates_incomplete_reason\\\":\\\"clearance_check_limit\\\",\\\"clearance_probes\\\":400,\\\"center\\\":{\\\"x\\\":51.5,\\\"y\\\":5},\\\"radius\\\":8,\\\"anchor\\\":{\\\"ok\\\":true,\\\"unit_number\\\":30,\\\"entity_name\\\":\\\"offshore-pump\\\",\\\"position\\\":{\\\"x\\\":53.5,\\\"y\\\":5.5}},\\\"scanned\\\":1156,\\\"candidate_set_id\\\":\\\"placement-10\\\",\\\"generated_tick\\\":159811,\\\"expires_tick\\\":163411,\\\"obstructions\\\":{\\\"label\\\":\\\"rejected_footprint_samples_not_candidates\\\",\\\"source\\\":\\\"native_placement_checks\\\",\\\"observed_tick\\\":159811,\\\"actor_id\\\":13,\\\"interpretation\\\":\\\"observed_collision_mask_intersections_not_exhaustive_rejection_causes\\\",\\\"surface_index\\\":1,\\\"force_index\\\":1,\\\"scope\\\":\\\"sampled_footprints\\\",\\\"examined_count\\\":3,\\\"rejected_count\\\":388,\\\"unknown_count\\\":0,\\\"samples\\\":[{\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":5},\\\"direction\\\":0,\\\"footprint\\\":{\\\"tile_width\\\":3,\\\"tile_height\\\":2,\\\"grid\\\":{\\\"x_offset\\\":0.5,\\\"y_offset\\\":0},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":4},\\\"right_bottom\\\":{\\\"x\\\":54,\\\"y\\\":6}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":4.2109375},\\\"right_bottom\\\":{\\\"x\\\":53.7890625,\\\"y\\\":5.7890625}}},\\\"terrain_tiles\\\":{},\\\"entities\\\":[{\\\"name\\\":\\\"offshore-pump\\\",\\\"type\\\":\\\"offshore-pump\\\",\\\"unit_number\\\":30,\\\"position\\\":{\\\"y\\\":5.5,\\\"x\\\":53.5},\\\"reason\\\":\\\"entity_collision_mask_overlap\\\"}],\\\"unknown\\\":false,\\\"truncated\\\":false},{\\\"position\\\":{\\\"x\\\":52.5,\\\"y\\\":6},\\\"direction\\\":0,\\\"footprint\\\":{\\\"tile_width\\\":3,\\\"tile_height\\\":2,\\\"grid\\\":{\\\"x_offset\\\":0.5,\\\"y_offset\\\":0},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":51,\\\"y\\\":5},\\\"right_bottom\\\":{\\\"x\\\":54,\\\"y\\\":7}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":51.2109375,\\\"y\\\":5.2109375},\\\"right_bottom\\\":{\\\"x\\\":53.7890625,\\\"y\\\":6.7890625}}},\\\"terrain_tiles\\\":{},\\\"entities\\\":[{\\\"name\\\":\\\"offshore-pump\\\",\\\"type\\\":\\\"offshore-pump\\\",\\\"unit_number\\\":30,\\\"position\\\":{\\\"y\\\":5.5,\\\"x\\\":53.5},\\\"reason\\\":\\\"entity_collision_mask_overlap\\\"}],\\\"unknown\\\":false,\\\"truncated\\\":false},{\\\"position\\\":{\\\"x\\\":53,\\\"y\\\":4.5},\\\"direction\\\":4,\\\"footprint\\\":{\\\"tile_width\\\":2,\\\"tile_height\\\":3,\\\"grid\\\":{\\\"x_offset\\\":0,\\\"y_offset\\\":0.5},\\\"tile_box\\\":{\\\"left_top\\\":{\\\"x\\\":52,\\\"y\\\":3},\\\"right_bottom\\\":{\\\"x\\\":54,\\\"y\\\":6}},\\\"world_box\\\":{\\\"left_top\\\":{\\\"x\\\":52.2109375,\\\"y\\\":3.2109375},\\\"right_bottom\\\":{\\\"x\\\":53.7890625,\\\"y\\\":5.7890625}}},\\\"terrain_tiles\\\":{},\\\"entities\\\":[{\\\"name\\\":\\\"offshore-pump\\\",\\\"type\\\":\\\"offshore-pump\\\",\\\"unit_number\\\":30,\\\"position\\\":{\\\"y\\\":5.5,\\\"x\\\":53.5},\\\"reason\\\":\\\"entity_collision_mask_overlap\\\"}],\\\"unknown\\\":false,\\\"truncated\\\":false}],\\\"truncated\\\":true}}\"}}",
+    "rowSha256": "f9a3bf66401c3ffe9da95400a44a5a6f0666ef1c175016ca5a6ef683274859c0"
+  },
+  "issued_wire": [
+    {
+      "source": "sealed/raw/b/data/logs/provider-full-responses.jsonl:81",
+      "row_sha256": "ccacf0075443a52f8edf6a220e6c8693b6aee2e861bf10e474e4b3344b0e2444",
+      "tap_request_id": "tap_83",
+      "timestamp": "2026-10-25T15:16:21.44Z",
+      "response_id": "resp_0c3140d0b16a7ace016ade1d34b00c87d19de35e72c8aa7078",
+      "model": "gpt-6.1-sol",
+      "messages": [
+        {
+          "content": "{\"chatMessage\":\"Next I’ll install the held boiler beside the offshore pump, preserving the pump and retaining the steam engine and lab. The next stage will inspect the installed boiler’s water connection and steam outlet; this installation alone does not establish electricity.\",\"plan\":[\"Install one boiler within two tiles of (51.5, 5), preserving offshore pump 30 and retaining one steam engine and one lab.\"],\"currentStep\":0,\"operations\":[],\"roadmapNodeIds\":[\"steam-electricity\"],\"developmentMode\":\"vertical\",\"stepCompletions\":[{\"kind\":\"deterministic\",\"checkpoint\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"entity_count\",\"prototype\":\"boiler\",\"minimum\":1,\"anchor\":{\"x\":51.5,\"y\":5},\"radius\":2},{\"kind\":\"inventory_count\",\"item_name\":\"steam-engine\",\"minimum\":1},{\"kind\":\"inventory_count\",\"item_name\":\"lab\",\"minimum\":1},{\"kind\":\"entity_exists\",\"unit_number\":30}]},\"obligations\":{\"outcome\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"entity_count\",\"prototype\":\"boiler\",\"minimum\":1,\"anchor\":{\"x\":51.5,\"y\":5},\"radius\":2},{\"kind\":\"inventory_count\",\"item_name\":\"steam-engine\",\"minimum\":1},{\"kind\":\"inventory_count\",\"item_name\":\"lab\",\"minimum\":1}]},\"preserve\":[30]}}],\"executionGuidance\":[{\"approach\":\"Use a fresh boiler placement candidate connected to pump 30, near (51.5,5), and install the single held boiler. Stop at the new entity observation boundary.\",\"rationale\":\"Direct connection uses the held boiler without crafting pipes. Fuel, steam production, engine connection and loaded electricity require subsequent stages grounded in the installed boiler's actual ports.\",\"constraints\":[\"Preserve offshore pump 30 and its native fluid geometry.\",\"Retain one steam engine and one lab; installation consumes one held boiler.\",\"Inspect the new boiler identity and actual water and steam ports before further connections.\"],\"skillIds\":[],\"materialSupply\":null}]}",
+          "tool_calls": null
+        }
+      ]
+    },
+    {
+      "source": "sealed/raw/b/data/logs/provider-full-responses.jsonl:82",
+      "row_sha256": "2281476fabc2b7aa18ebf79ccd359dbb4b456eb289d18aee1f5c1fe6d8a1258c",
+      "tap_request_id": "tap_84",
+      "timestamp": "2026-10-25T15:16:27.506Z",
+      "response_id": "resp_0c3302f5969f78d6016ade1d4869f487d1adbe54b9c6e7415e",
+      "model": "gpt-6-luna",
+      "messages": [
+        {
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_xZfz7UVYagPfUHWr3X11gtGR",
+              "type": "function",
+              "function": {
+                "name": "getPlacementCandidates",
+                "arguments": "{\"entity_name\":\"boiler\",\"anchor\":{\"unit_number\":30},\"center\":{\"x\":51.5,\"y\":5},\"radius\":8,\"limit\":8}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "sealed/raw/b/data/logs/provider-full-responses.jsonl:83",
+      "row_sha256": "a3cfd4f8ee361cc8f00e215f535c0e929e03be3e13850587b316d0aa38e3543e",
+      "tap_request_id": "tap_85",
+      "timestamp": "2026-10-25T15:16:33.458Z",
+      "response_id": "resp_097cdb97abd601aa016ade1d4c927887d1b1ce79e98e8cb4e0",
+      "model": "gpt-6-luna",
+      "messages": [
+        {
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_YPrvHfvfm8buloKCw6KiV3ZW",
+              "type": "function",
+              "function": {
+                "name": "submitPlan",
+                "arguments": "{\"stepId\":\"goal_0moe2wn_1_p9_v1_s1_1r3ndke\",\"operations\":[{\"name\":\"place_candidate\",\"args\":{\"candidate_set_id\":\"placement-10\",\"candidate_id\":\"candidate-1\"}}],\"checkpoint\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"entity_count\",\"prototype\":\"boiler\",\"minimum\":1},{\"kind\":\"inventory_count\",\"item_name\":\"steam-engine\",\"minimum\":1},{\"kind\":\"inventory_count\",\"item_name\":\"lab\",\"minimum\":1},{\"kind\":\"authoritative_operation_receipt\",\"operation_name\":\"place_candidate\"}]}}"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "missing_native_reply": [
+    {
+      "method": "autorio_preflight.fluid_preservation_candidate",
+      "rawReplyAvailable": false,
+      "fixtureSubstitution": null,
+      "reason": "Implicit native preservation-join preflight reply is not separately retained in traces. The ordinary getPlacementCandidates tool result is a different response and must not be substituted or called the raw preflight."
+    }
+  ],
+  "baseline_functions": "export async function prepareFluidPreservationAdmission(agent, { operations, pending } = {}) {\n  const key = agent.activePlanKey()\n  const planning = agent.memory.planningState?.(key)\n  const plan = getActivePlan(planning)\n  const step = plan?.steps?.[plan.active_step_index]\n  if (step?.obligation_proof?.version !== 2) return undefined\n  const fail = code => { throw new PreservationProofError(code, { stage: 'admission', category: code.endsWith('_limit_exhausted') ? 'exhausted' : 'unproven' }) }\n  const owner = agent.captureCheckpointOwner()\n  const fence = async () => {\n    await agent.assertCheckpointOwnerCurrent(owner)\n    const records = agent.memory.pendingOperations?.(key) ?? []\n    if (agent.currentPendingAmendment() || agent.batchInFlight || records.length !== 1\n      || records[0].operation_key !== pending?.operation_key || records[0].signature !== pending?.signature) fail('preservation_admission_not_safe')\n  }\n  await fence()\n  if (!obligationProofOrigin(planning, step) || !pending || pending.signature !== operationSignature(operations)) fail('preservation_admission_owner_unproven')\n  if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')\n  const fresh = { ...await captureObligationProof(agent, step.obligations, fence), binding: step.obligation_proof.binding }\n  const effective = effectivePreservationProof(plan, step, { plans: agent.memory.planningState(agent.activePlanKey()).plans })\n  if (!effective || !preservedProofMatches(effective, fresh)) fail('preservation_baseline_changed')\n  const protectedEntities = fluidPreservationEntities(planning, plan, step, effective)\n  if (fluidPreservationMutationUnsafe(effective, operations, protectedEntities)) fail('preservation_protected_mutation_refused')\n  const placements = operations?.filter(row => ['place_candidate', 'place_entity', 'execute_construction_plan'].includes(row.name)) ?? []\n  if (!placements.length) return undefined\n  // Nonfluid placement cannot add a fluid edge. This is fresh native prototype\n  // evidence, never a name/prose assumption; candidates may not clear assets.\n  let allNonfluid = true\n  for (const operation of placements) {\n    let checked\n    try { checked = JSON.parse(String(await agent.rcon.command(renderOperationPreflight({ name: operation.name, args: operation.args })))) }\n    catch { await fence(); fail('preservation_candidate_read_unavailable') }\n    await fence()\n    const output = checked?.preservation_nonfluid_output\n    if (checked.ok !== true || output?.version !== 1 || output.fluid_port_count !== 0\n      || output.actor_id !== fresh.actor_id || fresh.preserved.some(row => row.surface_index !== output.surface_index || row.force_index !== output.force_index)\n      || operation.name === 'place_candidate' && checked.preservation_clears_count !== 0) allNonfluid = false\n  }\n  if (allNonfluid) {\n    if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')\n    await fence()\n    return undefined\n  }\n  if (operations?.length !== 1 || operations[0].name !== 'place_candidate') fail('preservation_exact_single_candidate_required')\n  let preflight\n  const args = operations[0].args\n  const current = await agent.assertCurrent(); await fence()\n  if (typeof current.session !== 'string' || !current.session) fail('preservation_native_session_unproven')\n  const nativeOwner = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,\n    semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch, session: current.session }\n  const context = { signature: pending.signature, owner: nativeOwner }\n  const freeze = `/silent-command rcon.print(helpers.table_to_json(remote.call(\"autorio_preflight\",\"fluid_preservation_candidate\",${luaString(args.candidate_set_id)},${luaString(args.candidate_id)},${luaString(pending.operation_key)},{${step.obligations.preserve.join(',')}},helpers.json_to_table(${luaString(JSON.stringify(context))}))))`\n  try { preflight = JSON.parse(String(await agent.rcon.command(freeze))) }\n  catch { await fence(); fail('preservation_candidate_read_unavailable') }\n  await fence()\n  if (preflight?.ok !== true && ['preservation_native_claim_limit_exhausted', 'preservation_claim_history_missing', 'preservation_guard_already_claimed'].includes(preflight?.code)) fail(preflight.code)\n  const rawStatus = await agent.readTaskStatusRaw()\n  await fence()\n  const status = typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus\n  const baseline = batchWatermark(status)\n  const journal = nativeAdmissionJournal(status?.admission_journal)\n  if (!await nativeIdle(agent, fence) || !baseline || !baseline.idle || baseline.queue_length !== 0\n    || baseline.generation !== pending.baseline?.generation || baseline.max_batch_id !== pending.baseline?.max_batch_id\n    || !journal.known || journal.unresolved || journal.records.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')\n  const envelope = normalizeFluidAdmission({ version: 2, operation_key: pending.operation_key, attempt_id: pending.attempt_id,\n    ordinal: pending.ordinal, signature: pending.signature,\n    request_id: pending.request_id, board_step_id: agent.memory.currentPlan(key)?.task_board?.active_step_id,\n    owner: { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,\n      semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch },\n    baseline: fresh, operation: operations[0], candidate: preflight?.ok === true ? preflight.preservation_join : undefined,\n    native_idle: true, native_generation: baseline.generation, native_max_batch_id: baseline.max_batch_id, created_at: Date.now() }, plan, step)\n  if (!envelope) fail('preservation_candidate_join_unproven')\n  await fence()\n  if (!agent.memory.recordPreservationAdmission?.(key, envelope)) fail(Object.keys(plan.execution.preservation_admissions ?? {}).length >= 64\n    ? 'preservation_admission_limit_exhausted' : 'preservation_admission_record_refused')\n  await agent.persistState({ strict: true })\n  await fence()\n  if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')\n  await agent.traceEvent('contract.fluid_admission_prepared', { request_id: envelope.request_id, goal_id: plan.goal_id,\n    plan_id: plan.plan_id, step_id: step.step_id, operation_key: envelope.operation_key,\n    reason: 'native_candidate_single_additive_join_before_transport' })\n  await fence()\n  const final = batchWatermark(await agent.readTaskStatusRaw())\n  await fence()\n  if (!final?.idle || final.queue_length !== 0 || final.generation !== baseline.generation\n    || final.max_batch_id !== baseline.max_batch_id || !await nativeIdle(agent, fence)) fail('preservation_pre_admission_boundary_changed')\n  await fence()\n  return envelope\n}\n\n// The frozen edge endpoint is protected even when it is not separately named\n// in preserve. Bulk cut/clear/opaque composites carry no complete affected-ID\n// witness in this protocol, so they cannot prove preservation before transport.\nexport function fluidPreservationMutationUnsafe(proof, operations, extraEntities = []) {\n  const entities = (proof?.preserved ?? []).flatMap(row => [row.entity,\n    ...(row.fluid?.storages ?? []).flatMap(storage => storage.ports.flatMap(port => port.target ? [port.target.entity] : []))])\n  entities.push(...extraEntities)\n  return (operations ?? []).some(operation =>\n    ['clear_construction_area', 'reserve_construction_area', 'prepare_pump_site', 'execute_construction_plan'].includes(operation.name)\n    || ['rotate_entity', 'mine_entity_exact'].includes(operation.name) && entities.some(entity => entity.unit_number === operation.args?.unit_number)\n    || operation.name === 'mine_entity' && entities.some(entity => entity.name === operation.args?.entity_name))\n}\n\nfunction fluidPreservationEntities(planning, plan, step, effective) {\n  const entities = []\n  const prefix = new Set(plan.carried_forward_evidence ?? [])\n  for (const origin of planning.plans ?? []) {\n    if (origin.goal_id !== plan.goal_id) continue\n    for (const prior of origin.steps ?? []) {\n      const same = origin.plan_id === plan.plan_id && prior.step_id === step.step_id\n      const preceding = origin.plan_id === plan.plan_id && origin.steps.indexOf(prior) < plan.active_step_index\n        || prefix.has(`${origin.plan_id}:${prior.step_id}`)\n      if (!same && !(preceding && origin.execution.step_progress?.[prior.step_id]?.status === 'completed'\n        && origin.execution.step_progress[prior.step_id].contract_satisfied === true)) continue\n      if (!obligationProofOrigin(planning, prior)) continue\n      for (const raw of Object.values(origin.execution.preservation_admissions ?? {})) {\n        const admission = normalizeFluidAdmission(raw, origin, prior)\n        if (!admission || admission.owner.actor_id !== effective.actor_id || admission.owner.actor_epoch !== effective.actor_epoch) continue\n        entities.push(...admission.candidate.protected_geometry.map(row => row.entity))\n      }\n      for (const raw of origin.execution.preservation_certificates ?? []) {\n        const certificate = normalizeFluidCertificate(raw, origin, prior)\n        if (certificate && certificate.proof.actor_id === effective.actor_id && certificate.proof.actor_epoch === effective.actor_epoch) entities.push(certificate.built.entity)\n      }\n    }\n  }\n  return entities\n}\n\n",
+  "baseline_functions_sha256": "3347d028135b3a0c3356a2dec40926682efd6e6282d8ace869b094eb6e188a6d",
+  "substitution_notice": "Implicit freeze/native idle/raw capture replies unavailable. Baseline replay explicitly substitutes idle+absent journal, actual immutable preserved proof, and native refusal for candidate without connects_to; exact native refusal code is not historical evidence. New explicit eligibility DTO is a future native substitution, not an AX reply."
+}

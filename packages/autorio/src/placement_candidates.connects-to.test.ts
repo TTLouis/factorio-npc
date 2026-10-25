@@ -194,6 +194,27 @@ describe('placement candidates that join a live fluid port', () => {
     expect(placement_preservation_execution_allowed(actor, 'boiler', 10, 20, 0, undefined, undefined, {})).toBe(false)
   })
 
+  it('distinguishes supported anchor-only missing relation from unknown/unsupported native fluid facts', () => {
+    build_pump()
+    ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, fluidbox_prototypes: boiler.fluidbox_prototypes.map(row => ({ ...row })),
+      items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    const actor = actor_at(0, 0)
+    actor.is_valid = true; actor.status_snapshot = () => ({ actor_id: 18 })
+    actor.get_main_inventory = () => ({ get_item_count: () => 1 })
+    actor.surface.find_entities_filtered = () => Object.values(world)
+    try {
+      const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', anchor: { unit_number: 100 }, limit: 1 })
+      const read = () => placement_candidate_preflight(actor, set.candidate_set_id, set.candidates[0].id) as any
+      expect(read()).toMatchObject({ ok: true, preservation_clears_count: 0, preservation_eligibility: {
+        version: 1, kind: 'relation_required', actor_id: 18, entity_name: 'boiler', candidate_set_id: set.candidate_set_id,
+        candidate_id: set.candidates[0].id, fluid_port_count: 3 } })
+      expect(read().preservation_join).toBeUndefined()
+      ;(globalThis as any).prototypes.entity.boiler.fluidbox_prototypes[0].volume = undefined
+      expect(read().preservation_eligibility).toBeUndefined()
+    } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
+  })
+
   it('carries a nonrenewable native guard through the real queued boiler task and refuses a late second neighbour before mutation', () => {
     build_pump()
     Object.assign(world[100], { type: 'offshore-pump', direction: 0, fluids_count: 1, get_fluid: () => undefined })

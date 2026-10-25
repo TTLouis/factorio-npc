@@ -9,7 +9,7 @@ import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
 import { answersStepContract, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:fluid-fixture'
-function world({ trace, persist, read, journal, craftingQueue, secondOperation, doneMinimum = 99 } = {}) {
+function world({ trace, persist, read, response, executorReply, journal, craftingQueue, secondOperation, doneMinimum = 99 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const game = new FakeFactorio({ inventory: { boiler: 1, coal: 2 } })
   game.status.actor_id = 10
@@ -21,6 +21,8 @@ function world({ trace, persist, read, journal, craftingQueue, secondOperation, 
   game.command = async text => {
     if (text.includes('projection="next_slice_ownership_v1"')) return native(text)
     await read?.({ text, game, memory, agent })
+    const substituted = await response?.({ text, game, memory, agent })
+    if (substituted !== undefined) return typeof substituted === 'string' ? substituted : JSON.stringify(substituted)
     if (text.includes('entity_geometry')) {
       const id = Number(/entity_geometry["'],\s*(\d+)/.exec(text)?.[1])
       return JSON.stringify(fluidGeometry(id, game.connected === true))
@@ -33,6 +35,9 @@ function world({ trace, persist, read, journal, craftingQueue, secondOperation, 
       const pending = memory.pendingOperations(KEY)[0]
       const held = getActivePlan(memory.planningState(KEY)); const step = held.steps[held.active_step_index]
       candidate.operation_key = pending?.operation_key; candidate.signature = pending?.signature
+      const selected = /fluid_preservation_candidate["'],\s*["']([^"']+)["'],\s*["']([^"']+)["']/.exec(text)
+      candidate.candidate_set_id = selected?.[1] ?? candidate.candidate_set_id
+      candidate.candidate_id = selected?.[2] ?? candidate.candidate_id
       candidate.native_baseline = { generation: pending.baseline.generation, max_batch_id: pending.baseline.max_batch_id }
       candidate.owner = { goal_id: held.goal_id, plan_id: held.plan_id, plan_version: held.plan_version, step_id: step.step_id,
         semantic_step_id: step.semantic_step_id ?? step.step_id, actor_id: 10, actor_epoch: 3, session: game.status.session }
@@ -84,6 +89,8 @@ function world({ trace, persist, read, journal, craftingQueue, secondOperation, 
         executionGuidance: ['Join the existing pump with one boiler.', 'Supply one coal to the installed boiler.'].map(approach =>
           ({ approach, rationale: 'Preserve pump identity and all prior edges.', constraints: [], skillIds: [], materialSupply: null })) })
       const held = getActivePlan(memory.planningState(KEY)); const step = held.steps[held.active_step_index]
+      const reply = await executorReply?.({ held, step, game, agent, memory })
+      if (reply !== undefined) return reply
       if (held.active_step_index === 0) return planReply({ stepId: step.step_id,
         operations: [{ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }] })
       return planReply({ stepId: step.step_id, operations: [secondOperation ?? { name: 'supply_entity', args: { unit_number: 2, items: [{ item_name: 'coal', count: 1 }] } }] })

@@ -72,6 +72,97 @@ export async function reconcilePreservationProof(agent, step, fresh, fence) {
   return true
 }
 
+// Shared early and last-moment eligibility. This never grants a join or changes
+// an operation. Only an explicit native argument DTO can permit correction.
+export async function checkFluidPreservationEligibility(agent, { operations, preflight, pending } = {}) {
+  const key = agent.activePlanKey()
+  const planning = agent.memory.planningState?.(key)
+  const plan = getActivePlan(planning)
+  const step = plan?.steps?.[plan.active_step_index]
+  if (step?.obligation_proof?.version !== 2 || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return
+  const index = operations?.findIndex((operation, i) => operation.name === 'place_candidate'
+    && preflight?.[i]?.preservation_eligibility?.kind === 'relation_required') ?? -1
+  if (index < 0) return
+  const owner = agent.captureCheckpointOwner()
+  const amendment = agent.currentPendingAmendment()
+  const intake = agent.requestAdmissionOwner
+  const fail = code => { throw new PreservationProofError(code, { stage: 'admission' }) }
+  const fence = async () => {
+    await agent.assertCheckpointOwnerCurrent(owner)
+    if (amendment || agent.currentPendingAmendment() !== amendment || agent.requestAdmissionOwner !== intake || agent.batchInFlight) fail('preservation_admission_not_safe')
+    const records = agent.memory.pendingOperations?.(key) ?? []
+    if (pending ? records.length !== 1 || records[0].operation_key !== pending.operation_key || records[0].signature !== pending.signature : records.length !== 0) fail('preservation_admission_not_safe')
+  }
+  await fence()
+  if (!obligationProofOrigin(planning, step) || !await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')
+  const actor = await agent.assertCurrent(); await fence()
+  if (typeof actor.session !== 'string' || !actor.session) fail('preservation_native_session_unproven')
+  const fresh = { ...await captureObligationProof(agent, step.obligations, fence), binding: step.obligation_proof.binding }
+  const effective = effectivePreservationProof(plan, step, { plans: planning.plans })
+  if (!effective || !preservedProofMatches(effective, fresh)) fail('preservation_baseline_changed')
+  const checked = preflight[index]; const dto = checked.preservation_eligibility; const operation = operations[index]
+  if (operations.length !== 1 || checked.ok !== true || checked.preservation_clears_count !== 0
+    || dto.version !== 1 || dto.actor_id !== fresh.actor_id
+    || fresh.preserved.some(row => row.surface_index !== dto.surface_index || row.force_index !== dto.force_index)
+    || dto.candidate_set_id !== operation.args?.candidate_set_id || dto.candidate_id !== operation.args?.candidate_id
+    || !['offshore-pump', 'boiler', 'steam-engine', 'pipe'].includes(dto.entity_name)
+    || !Number.isSafeInteger(dto.fluid_port_count) || dto.fluid_port_count < 1 || dto.fluid_port_count > 16
+    || !Number.isSafeInteger(dto.generated_tick) || !Number.isSafeInteger(dto.observed_tick)
+    || dto.observed_tick < dto.generated_tick || dto.observed_tick - dto.generated_tick > 3600
+    || checked.preservation_join !== undefined) fail('preservation_candidate_eligibility_unproven')
+  const raw = await agent.readTaskStatusRaw(); await fence()
+  const status = typeof raw === 'string' ? JSON.parse(raw) : raw
+  const watermark = batchWatermark(status); const journal = nativeAdmissionJournal(status?.admission_journal)
+  if (!watermark?.idle || watermark.queue_length !== 0 || !journal.known || journal.unresolved
+    || pending && (watermark.generation !== pending.baseline?.generation || watermark.max_batch_id !== pending.baseline?.max_batch_id
+      || journal.records.some(row => row.operation_key === pending.operation_key))) fail('preservation_pre_admission_receipt_boundary_unproven')
+  await fence()
+  const error = new PreservationProofError('preservation_candidate_relation_required', { category: 'argument', stage: 'admission' })
+  error.preflight = { ok: false, code: error.code, refusal_class: 'argument', operation_index: index,
+    operation: operation.name, detail: 'Native candidate has no declared fluid relation. Obtain a fresh connects_to candidate; anchor is distance ordering only.' }
+  error.fluidCandidateArgument = { owner, amendment, intake, operations: structuredClone(operations), native_session: actor.session,
+    native_generation: watermark.generation, native_max_batch_id: watermark.max_batch_id,
+    pending: pending ? structuredClone(pending) : undefined, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch }
+  throw error
+}
+
+export async function confirmFluidCandidateArgumentUnsent(agent, error) {
+  const proof = error?.fluidCandidateArgument
+  const fail = () => { throw new PreservationProofError('preservation_argument_zero_send_unproven', { stage: 'correction' }) }
+  if (!proof) fail()
+  const key = agent.activePlanKey()
+  const synchronousFence = () => {
+    agent.assertCheckpointOwnerIdentity(proof.owner)
+    if (proof.amendment || agent.currentPendingAmendment() !== proof.amendment || agent.requestAdmissionOwner !== proof.intake
+      || agent.batchInFlight || (agent.memory.pendingOperations?.(key) ?? []).length !== 0) fail()
+  }
+  const fence = async () => { await agent.assertCheckpointOwnerCurrent(proof.owner); synchronousFence() }
+  await fence()
+  const actor = await agent.assertCurrent(); await fence()
+  if (actor.actor_id !== proof.actor_id || actor.epoch !== proof.actor_epoch || actor.session !== proof.native_session) fail()
+  const planning = agent.memory.planningState(key); const plan = getActivePlan(planning); const step = plan?.steps?.[plan.active_step_index]
+  if (!obligationProofOrigin(planning, step)) fail()
+  if (proof.pending) {
+    const closed = planning.operation_ledger?.closed?.find(row => row.operation_key === proof.pending.operation_key)
+    if (!closed || closed.signature !== proof.pending.signature || closed.attempt_id !== proof.pending.attempt_id
+      || closed.ordinal !== proof.pending.ordinal || closed.goal_id !== plan.goal_id || closed.plan_id !== plan.plan_id
+      || closed.step_id !== step.step_id || closed.actor?.actor_id !== proof.actor_id || closed.actor.epoch !== proof.actor_epoch
+      || closed.effect !== 'not_happened' || closed.reason !== 'cancelled_before_transport') fail()
+  }
+  const fresh = { ...await captureObligationProof(agent, step.obligations, fence), binding: step.obligation_proof.binding }
+  if (!preservedProofMatches(effectivePreservationProof(plan, step, { plans: planning.plans }), fresh)
+    || fresh.actor_id !== proof.actor_id || fresh.actor_epoch !== proof.actor_epoch || !await nativeIdle(agent, fence)) fail()
+  const raw = await agent.readTaskStatusRaw(); synchronousFence()
+  const status = typeof raw === 'string' ? JSON.parse(raw) : raw
+  const watermark = batchWatermark(status); const journal = nativeAdmissionJournal(status?.admission_journal)
+  if (!watermark?.idle || watermark.queue_length !== 0 || watermark.generation !== proof.native_generation
+    || watermark.max_batch_id !== proof.native_max_batch_id || !journal.known || journal.unresolved
+    || proof.pending && journal.records.some(row => row.operation_key === proof.pending.operation_key)) fail()
+  synchronousFence()
+  return { reason: 'native_idle_journal_absent_exact_unsent_settled', operation_key: proof.pending?.operation_key ?? null,
+    signature: operationSignature(proof.operations), native_generation: watermark.generation, native_max_batch_id: watermark.max_batch_id }
+}
+
 export async function prepareFluidPreservationAdmission(agent, { operations, pending } = {}) {
   const key = agent.activePlanKey()
   const planning = agent.memory.planningState?.(key)
@@ -99,16 +190,19 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   // Nonfluid placement cannot add a fluid edge. This is fresh native prototype
   // evidence, never a name/prose assumption; candidates may not clear assets.
   let allNonfluid = true
+  const eligibility = []
   for (const operation of placements) {
     let checked
     try { checked = JSON.parse(String(await agent.rcon.command(renderOperationPreflight({ name: operation.name, args: operation.args })))) }
     catch { await fence(); fail('preservation_candidate_read_unavailable') }
     await fence()
+    eligibility.push(checked)
     const output = checked?.preservation_nonfluid_output
     if (checked.ok !== true || output?.version !== 1 || output.fluid_port_count !== 0
       || output.actor_id !== fresh.actor_id || fresh.preserved.some(row => row.surface_index !== output.surface_index || row.force_index !== output.force_index)
       || operation.name === 'place_candidate' && checked.preservation_clears_count !== 0) allNonfluid = false
   }
+  await checkFluidPreservationEligibility(agent, { operations, preflight: eligibility, pending })
   if (allNonfluid) {
     if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')
     await fence()

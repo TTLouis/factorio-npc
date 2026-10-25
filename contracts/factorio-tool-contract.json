@@ -347,7 +347,8 @@
       "pterodactyl_layer": "staging-base"
     },
     "place_candidate": {
-      "native_preservation_preflight_fields": ["preservation_join", "preservation_nonfluid_output", "preservation_clears_count"],
+      "native_preservation_preflight_fields": ["preservation_join", "preservation_nonfluid_output", "preservation_clears_count", "preservation_eligibility"],
+      "native_preservation_argument_projection": { "version": 1, "kind": "relation_required", "meaning": "resolved supported fluid candidate lacks declared connects_to; anchor is ordering only", "not_authority": ["connection", "placement", "completion"], "unknown_absent": true },
       "native_preservation_join_projection": { "version": 4, "required": ["candidate_ports", "candidate_storages", "operation_key", "signature", "owner", "native_baseline", "protected_geometry"], "storage_constraints": ["index", "production_type", "volume", "filter", "minimum_temperature", "maximum_temperature"], "harness_only_freeze_remote": ["autorio_preflight", "fluid_preservation_candidate"], "closure_limit": 16, "claim_limit": 64 },
       "args": [
         "candidate_set_id",

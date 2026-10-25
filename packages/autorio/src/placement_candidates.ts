@@ -1091,9 +1091,18 @@ export function placement_candidate_preflight(actor: ControlledActor, candidate_
   // Only the native registry supplies entity identity and geometry.
   const { set, candidate } = resolved
   const planned_footprint = planned_placement_footprint(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
+  // Anchor ordering does not declare a fluid join. Report this known argument
+  // distinction explicitly; absence of a join field in an old DTO is unknown.
+  const fluid_ports = candidate_fluid_ports(prototypes.entity[set.entity_name], candidate.position, candidate.direction)
+  const join: any = preservation_candidate_join(actor, set, candidate)
+  const relation_required = join.reason === 'relation_required' && fluid_ports && fluid_ports.length > 0
   return { ...placement_item_preflight(actor, set.entity_name), ...(planned_footprint ? { planned_footprint } : {}),
     preservation_clears_count: candidate.clears?.length ?? 0,
-    ...(candidate.connects_to ? { preservation_join: preservation_candidate_join(actor, set, candidate) } : {}) }
+    ...(relation_required ? { preservation_eligibility: { version: 1, kind: 'relation_required',
+      actor_id: set.actor_id, surface_index: set.surface_index, force_index: set.force_index,
+      candidate_set_id: set.id, candidate_id: candidate.id, entity_name: set.entity_name,
+      generated_tick: set.generated_tick, observed_tick: game.tick, fluid_port_count: fluid_ports.length } } : {}),
+    ...(candidate.connects_to ? { preservation_join: join } : {}) }
 }
 
 function preservation_candidate_join(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate) {
@@ -1112,6 +1121,7 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   const ports = candidate_fluid_ports(prototype, candidate.position, candidate.direction)
   if (!ports || expected !== ports.length || expected > 16 || expected < 1
     || ports.some(port => port.connection_type !== 'normal') || (candidate.clears?.length ?? 0) > 0) return unavailable('candidate_ports_incomplete_or_clearing')
+  if (!candidate.connects_to) return unavailable('relation_required')
   const storages = fluidboxes.map((storage, index) => ({ index: storage.index ?? index + 1,
     production_type: storage.production_type, volume: storage.volume, filter: storage.filter?.name,
     minimum_temperature: storage.minimum_temperature, maximum_temperature: storage.maximum_temperature }))

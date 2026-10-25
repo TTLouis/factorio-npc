@@ -1637,6 +1637,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return after !== before
   }
 
+  claimArgumentCorrection(key, args) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { ...args, type: PLANNING_EVENT.ARGUMENT_CORRECTION_CLAIMED,
+      source: 'runtime', now: Date.now() })
+    return after !== before
+  }
+
   certifyPreservationAddition(key, certificate) {
     const before = this.planningState(key)
     const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_ADDITION_CERTIFIED,
@@ -2406,8 +2413,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           nodes: (planning.roadmap.nodes ?? []).map(node => ({ ...node })),
         }
       : null
+    const goal = { ...planning.goal }
+    delete goal.argument_corrections // harness execution accounting is not model-authored goal context
     const visible = {
-      goal: { ...planning.goal },
+      goal,
       roadmap,
       steering: steeringContextForDraft(planning),
       plan_tracker: planTrackerView(planning),
