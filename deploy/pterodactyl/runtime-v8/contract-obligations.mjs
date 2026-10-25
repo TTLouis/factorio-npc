@@ -48,21 +48,32 @@ export function normalizeObligations(raw) {
 export function storedObligations(raw) {
   try { return normalizeObligations(raw) } catch { return undefined }
 }
-export function compileObligations(raw) {
+export function obligationContractContext(raw) {
+  if (raw === undefined || raw === null) return undefined
   const typed = normalizeObligations(raw)
-  return sanitizeStepCompletionContract({ mode: 'all', requirements: [
+  return { expectedRequirements: [
     ...typed.outcome.requirements,
     ...typed.preserve.map(unit_number => ({ kind: 'entity_exists', unit_number })),
-  ].map(({ id: _id, ...requirement }, index) => ({ ...requirement, id: `obligation_${index + 1}` })) })
+  ].map(({ id: _id, ...requirement }, index) => ({ ...requirement, id: `obligation_${index + 1}` })) }
 }
-function predicates(contract) {
-  const normalized = sanitizeStepCompletionContract(contract)
+export function compileObligations(raw) {
+  const context = obligationContractContext(raw)
+  return sanitizeStepCompletionContract({ mode: 'all', requirements: context.expectedRequirements }, context)
+}
+
+function predicates(contract, context) {
+  const normalized = sanitizeStepCompletionContract(contract, context)
   return JSON.stringify({ mode: normalized.mode, requirements: normalized.requirements.map(({ id: _id, ...row }) => row)
     .map(row => Object.fromEntries(Object.entries(row).sort(([a], [b]) => a.localeCompare(b))))
     .map(row => JSON.stringify(row)).sort() })
 }
 export function obligationContractMatches(contract, obligations) {
-  try { return predicates(contract) === predicates(compileObligations(obligations)) } catch { return false }
+  try {
+    const context = obligationContractContext(obligations)
+    const expected = compileObligations(obligations)
+    return predicates(contract, context) === predicates(expected, context)
+      && sanitizeStepCompletionContract(contract, context).mode === 'all'
+  } catch { return false }
 }
 export function contractDefectShape(step) {
   const typed = storedObligations(step?.obligations)

@@ -1,10 +1,10 @@
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
-import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import { getActivePlan, isStepContractPending, PLAN_STATUS } from './planning-state.mjs'
 import { evaluateCompletionContract } from './step-completion.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { renderOperationPreflight, luaString } from './structured-policy.mjs'
 import { batchWatermark, operationSignature } from './operation-reconciliation.mjs'
-import { captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
+import { obligationContractContext, captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
   obligationProofOrigin, preservedProofMatches, effectivePreservationProof, preservationGeometry, normalizeFluidAdmission,
   normalizeFluidCertificate, fluidAdditionProof, isNativeEmptyPreservationSequence, PreservationProofError, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 
@@ -280,6 +280,9 @@ export async function recoverContractObligations(agent, { trigger = 'settlement'
   const plan = getActivePlan(planning)
   const step = plan?.steps?.[plan.active_step_index]
   if ((!step?.obligations && step?.obligation_protocol !== 1) || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)) return undefined
+  // Pending activation is not a compiled-contract defect. The ordinary activation
+  // backstop binds this exact committed intent before admission; it grants no successor.
+  if (isStepContractPending(step)) return undefined
   const mismatched = !step.obligations || !obligationContractMatches(step.completion_contract, step.obligations)
   let owner = agent.captureCheckpointOwner()
   const base = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version, step_id: step.step_id,
@@ -341,7 +344,7 @@ export async function recoverContractObligations(agent, { trigger = 'settlement'
   const expected = compileObligations(step.obligations)
   const facts = await agent.completionFactsForContract(expected, undefined, [], { committedIdentity: true })
   await fence()
-  if (!evaluateCompletionContract(expected, facts).satisfied) return pause('declared_outcomes_not_verified')
+  if (!evaluateCompletionContract(expected, facts, obligationContractContext(step.obligations)).satisfied) return pause('declared_outcomes_not_verified')
   await agent.traceEvent('contract.defect_detected', { ...base, reason: CONTRACT_DEFECT_REASON, placement_ref: placed.ref,
     preserved_units: step.obligations.preserve, disposition: 'one_bounded_successor' })
   await fence()

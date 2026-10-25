@@ -24,7 +24,7 @@ import { completedSliceAnchor, nextSliceTransition, restoreNextSlice, stepProgre
 //     operations or into plan steps.
 
 import { authoredCompletionContractSupported, completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
-import { storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, contractDefectShape, preservedProofMatches, effectivePreservationProof, normalizeFluidAdmission, normalizeFluidCertificate, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+import { obligationContractContext, storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, contractDefectShape, preservedProofMatches, effectivePreservationProof, normalizeFluidAdmission, normalizeFluidCertificate, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
@@ -941,10 +941,10 @@ export function sanitizeShelfNode(raw, { sequence = 0, trusted = false } = {}) {
  * contract, or prose-only. Prose-only steps are explicitly marked
  * reduced-confidence so the UI and the deadlock detector treat them differently.
  */
-export function sanitizeOptionalCompletionContract(raw) {
+export function sanitizeOptionalCompletionContract(raw, context) {
   if (raw === undefined || raw === null) return undefined
-  const contract = sanitizeStepCompletionContract(raw)
-  return completionContractSupported(contract) ? contract : undefined
+  const contract = sanitizeStepCompletionContract(raw, context)
+  return completionContractSupported(contract, context) ? contract : undefined
 }
 
 function sanitizeStep(raw, { planId, planVersion, sequence, goalId, bindProof = false }) {
@@ -953,20 +953,21 @@ function sanitizeStep(raw, { planId, planVersion, sequence, goalId, bindProof = 
   if (typeof source !== 'object' || Array.isArray(source)) return undefined
   const description = text(source.description, 500)
   if (!description) return undefined
-  const contract = sanitizeOptionalCompletionContract(source.completion_contract)
   const stepId = text(source.step_id, 200)
     || `${planId}_v${planVersion}_s${sequence}_${fingerprint(`${planId}|${sequence}|${description}`)}`
   // A deterministic step whose checkpoint is not authored yet (its contract is
   // requested when the step is about to start). Only an explicit stored marker
   // makes a step pending: old saves, semantic steps and prose steps have none.
-  const pending = !contract && source.completion_mode === 'deterministic' && source.contract_status === 'pending'
-  const binding = contract ? sanitizeContractBinding(source.contract_binding) : undefined
   const obligations = storedObligations(source.obligations)
   const semanticStepId = text(source.semantic_step_id, 200) || stepId
   let proof = normalizeObligationProof(source.obligation_proof, obligations)
   if (proof && bindProof && !proof.binding) proof = { ...proof, binding: { goal_id: goalId, plan_id: planId,
     plan_version: planVersion, step_id: stepId, semantic_step_id: semanticStepId } }
   if (proof && !obligationProofOwned(proof, { goalId, semanticStepId })) proof = undefined
+  const context = proof ? obligationContractContext(obligations) : undefined
+  const contract = sanitizeOptionalCompletionContract(source.completion_contract, context)
+  const pending = !contract && source.completion_mode === 'deterministic' && source.contract_status === 'pending'
+  const binding = contract ? sanitizeContractBinding(source.contract_binding) : undefined
   return {
     step_id: stepId,
     ...(source.semantic_step_id || obligations ? { semantic_step_id: semanticStepId } : {}),
@@ -2089,8 +2090,9 @@ export function checkStepContractBind(state, event) {
   if (plan.execution.step_progress[step.step_id]?.status === 'completed') return refuse('step_already_completed')
   if (!isStepContractPending(step)) return refuse('step_not_pending')
   if (!STEP_CONTRACT_BINDINGS.includes(event.binding)) return refuse('binding_not_recognized')
-  const contract = sanitizeOptionalCompletionContract(event.contract)
-  if (!contract || !authoredCompletionContractSupported(contract)) return refuse('contract_unsupported')
+  const context = step.obligation_proof && obligationProofOrigin(state, step) ? obligationContractContext(step.obligations) : undefined
+  const contract = sanitizeOptionalCompletionContract(event.contract, context)
+  if (!contract || !(context ? completionContractSupported(contract, context) : authoredCompletionContractSupported(contract))) return refuse('contract_unsupported')
   if (step.obligation_protocol === 1 && (!step.obligations || !step.obligation_proof || !obligationProofOrigin(state, step)
     || !obligationContractMatches(contract, step.obligations))) return refuse('contract_obligation_mismatch')
   return { ok: true, plan, index, step, contract }

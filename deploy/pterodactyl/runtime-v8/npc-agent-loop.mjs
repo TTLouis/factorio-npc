@@ -13,7 +13,7 @@ import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.m
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding } from './contract-obligations.mjs'
+import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding } from './contract-obligations.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
@@ -276,11 +276,11 @@ const ACTION_OMISSION_REPAIR_MESSAGE = 'Finite canonical work remains, but no ex
 // The act-or-block repair also has to offer the Slice C close: a planner that
 // judges a prose-only step already done has no operation to submit, and live
 // (goal_mueryuql) it repeated plan: [] until the repair failed.
-function actionOmissionRepairMessage(state) {
+function actionOmissionRepairMessage(state, context) {
   const board = state?.task_board
   const index = Number.isSafeInteger(board?.active_index) ? board.active_index : -1
   const step = index >= 0 && Array.isArray(board?.steps) ? board.steps[index] : undefined
-  if (!step?.id || completionContractSupported(step.completion_contract)) return ACTION_OMISSION_REPAIR_MESSAGE
+  if (!step?.id || completionContractSupported(step.completion_contract, context)) return ACTION_OMISSION_REPAIR_MESSAGE
   return `${ACTION_OMISSION_REPAIR_MESSAGE} If the evidence you already hold shows that the active prose-only step ${JSON.stringify(cleanMemoryText(step.description, 200))} is complete, close it with semanticCompletion {"stepId":${JSON.stringify(step.id)},"rationale":"..."} and add the operations for the next step if one remains. Do not answer plan: [] while later steps remain.`
 }
 const ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE = 'The targeted observation budget for this decision is complete. Do not observe again or switch to another read-only tool. Submit the next executable operation now, or keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact still-missing fact or truthful blocker.'
@@ -956,15 +956,15 @@ function safeProviderRecovery(value) {
   }
 }
 
-function worldStateContract(contract) {
-  return completionContractSupported(contract)
+function worldStateContract(contract, context) {
+  return completionContractSupported(contract, context)
     && contract.mode !== 'semantic_unknown'
     && contract.requirements?.length > 0
     && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
 }
 
-function freshSettlementContract(contract) {
-  return completionContractSupported(contract) && contract.mode !== 'semantic_unknown'
+function freshSettlementContract(contract, context) {
+  return completionContractSupported(contract, context) && contract.mode !== 'semantic_unknown'
     && contract.requirements?.length > 0
     && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind)
       || requirement?.kind === 'authoritative_operation_receipt')
@@ -973,8 +973,8 @@ function freshSettlementContract(contract) {
 // Repair unit G: why a fresh read of a committed checkpoint cannot decide the step (undefined when every requirement was
 // read). A stale identity (the exact target is not bound to this request) or a read that returned no count/entity answer
 // never closes a step.
-function freshCheckpointReadGap(contract, facts) {
-  for (const requirement of sanitizeStepCompletionContract(contract).requirements ?? []) {
+function freshCheckpointReadGap(contract, facts, context) {
+  for (const requirement of sanitizeStepCompletionContract(contract, context).requirements ?? []) {
     const fact = facts?.[requirement.id]
     if (!fact || fact.stale === true) return { reason: 'checkpoint_target_stale', requirement_id: requirement.id }
     if (requirement.kind === 'authoritative_operation_receipt') {
@@ -993,17 +993,17 @@ function freshCheckpointReadGap(contract, facts) {
   return undefined
 }
 
-function activeStepCheckpointSnapshot(board) {
+function activeStepCheckpointSnapshot(board, context) {
   const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
   const step = index === undefined ? undefined : board?.steps?.[index]
-  return step ? { stepId: step.id, checkpoint: persistedStepCheckpoint(board, step.id) } : undefined
+  return step ? { stepId: step.id, checkpoint: persistedStepCheckpoint(board, step.id, context) } : undefined
 }
 
-function persistedStepCheckpoint(board, stepId) {
+function persistedStepCheckpoint(board, stepId, context) {
   if (!board || !stepId) return undefined
   const step = Array.isArray(board.steps) ? board.steps.find(item => item?.id === stepId) : undefined
-  const contract = sanitizeStepCompletionContract(step?.completion_contract)
-  return completionContractSupported(contract) ? { contract, durable: true } : undefined
+  const contract = sanitizeStepCompletionContract(step?.completion_contract, context)
+  return completionContractSupported(contract, context) ? { contract, durable: true } : undefined
 }
 
 function conditionWaitLifecycleMatches(wait, deployment) {
@@ -7064,7 +7064,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // until the checkpoint holds, the machine stops, or the game-data deadline.
   checkpointWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey()), isWorking = unitNumber => this.liveObservedExactTarget(unitNumber)?.working === true) {
     if (!state || state.status !== 'active' || !state.task_board?.active_step_id) return undefined
-    const checkpoint = persistedStepCheckpoint(state.task_board, state.task_board.active_step_id)
+    const checkpoint = this.persistedStepCheckpoint(state.task_board, state.task_board.active_step_id)
     const requirement = checkpointWaitRequirement(checkpoint?.contract, isWorking)
     if (!requirement) return undefined
     return makeConditionWait(requirement, {
@@ -7223,7 +7223,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // observed working machine.
   waitFactTargets(state, preferredUnits = []) {
     const stepId = state?.task_board?.active_step_id
-    const contract = stepId ? persistedStepCheckpoint(state.task_board, stepId)?.contract : undefined
+    const contract = stepId ? this.persistedStepCheckpoint(state.task_board, stepId)?.contract : undefined
     const requirements = checkpointMachineRequirements(contract)
     if (requirements.length > 0) return requirements.map(requirement => ({ unitNumber: requirement.unit_number, requirement }))
     const preferred = (preferredUnits ?? []).filter(unit => Number.isSafeInteger(unit)).slice(0, WAIT_FACT_MAX_MACHINES)
@@ -7268,7 +7268,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { routed: true, conditionWait: existing }
     }
 
-    const contract = persistedStepCheckpoint(previousState.task_board, stepId)?.contract
+    const contract = this.persistedStepCheckpoint(previousState.task_board, stepId)?.contract
     const requirement = checkpointWaitRequirement(contract, () => true)
     const unitNumber = requirement?.unit_number ?? mostRecentWorkingUnit(this.liveEntityObservations?.values?.())
     if (!Number.isSafeInteger(unitNumber)) return decline('no_machine_known')
@@ -8250,10 +8250,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // `draft` is false for a committed (frozen) plan, whose checkpoint is immutable and never re-judged against a later
   // batch here: the commit-time stock guard owns that case.
-  async validatePlannerCheckpointContract(contract, operations = [], { draft = true, plannerOnlyDraft = false, step } = {}) {
-    const normalized = sanitizeStepCompletionContract(contract)
-    if (!completionContractSupported(normalized)) {
-      return { accepted: false, reason: 'unsupported_or_malformed_contract' }
+  async validatePlannerCheckpointContract(contract, operations = [], { draft = true, plannerOnlyDraft = false, step, obligations = step?.obligations } = {}) {
+    const context = obligationContractContext(obligations)
+    const normalized = sanitizeStepCompletionContract(contract, context)
+    if (!completionContractSupported(normalized, context)) {
+      return { accepted: false, reason: context && completionContractSupported(contract) ? 'contract_obligation_mismatch' : 'unsupported_or_malformed_contract' }
     }
     if (step?.obligation_protocol === 1 && (!step.obligations || !step.obligation_proof)) return { accepted: false, reason: 'obligation_provenance_unreadable' }
     if (step?.obligations) {
@@ -8264,7 +8265,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!await reconcilePreservationProof(this, step, fresh, () => this.assertCheckpointOwnerCurrent(owner))) return { accepted: false, reason: 'preservation_baseline_changed' }
     }
     // A draft whose own batch would undo its checkpoint can never close: reject it so the planner redrafts.
-    const contradiction = draft ? checkpointBatchContradiction(normalized, operations) : undefined
+    const contradiction = draft ? checkpointBatchContradiction(normalized, operations, context) : undefined
     if (contradiction) {
       return { accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) }
     }
@@ -8407,6 +8408,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // (assessment_only_conflicts_with_execution), so a semantic declaration never sits beside admitted operations.
       if (declaration.kind === 'semantic') continue
       if (declaration.obligations) {
+        const compiled = compileObligations(declaration.obligations)
+        if (!completionContractSupported(compiled, obligationContractContext(declaration.obligations))) throw await this.checkpointRejectionError({ reason: 'typed_compilation_unrepresentable' })
+        if (!declaration.checkpoint && (index === plan.currentStep || index === firstReducerIndex)) declaration.checkpoint = compiled
         const owner = this.captureCheckpointOwner()
         declaration.obligationProof = await captureObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
         if (declaration.checkpoint && !obligationContractMatches(declaration.checkpoint, declaration.obligations)) {
@@ -8437,7 +8441,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (!grounded.ok) throw await this.checkpointRejectionError({ accepted: false, reason: grounded.reason, requirement_id: requirement.id })
       }
       if (index === plan.currentStep) {
-        const validation = await this.validatePlannerCheckpointContract(declaration.checkpoint, operations, { plannerOnlyDraft })
+        const validation = await this.validatePlannerCheckpointContract(declaration.checkpoint, operations, { plannerOnlyDraft, obligations: declaration.obligations })
         if (!validation.accepted) throw await this.checkpointRejectionError(validation)
       }
     }
@@ -8496,7 +8500,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
     const frozen = FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
 
-    const existing = persistedStepCheckpoint(board, step.id)
+    const existing = this.persistedStepCheckpoint(board, step.id)
     const incoming = sanitizeStepCompletionContract(plan.checkpoint)
     const incomingSignature = JSON.stringify(incoming)
     const existingSignature = existing ? JSON.stringify(existing.contract) : ''
@@ -8535,7 +8539,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!validation.accepted) throw await this.checkpointRejectionError(validation, { stepId: step.id })
     this.memory.setStepCompletionContract?.(key, step.id, validation.contract)
     const updated = this.memory.currentPlan?.(key)
-    const persisted = persistedStepCheckpoint(updated?.task_board, step.id)
+    const persisted = this.persistedStepCheckpoint(updated?.task_board, step.id)
     if (!persisted || JSON.stringify(persisted.contract) !== incomingSignature) {
       throw new AgentLoopError('deterministic_checkpoint_failed_to_persist')
     }
@@ -8814,9 +8818,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // binds the step.
   async ensureActiveStepContract({ trigger, closedStepId, closedBy } = {}) {
     const key = this.requestInfo?.memoryKey ?? this.activePlanKey()
-    const plan = getActivePlanningPlan(this.memory.planningState?.(key))
+    const planning = this.memory.planningState?.(key)
+    const plan = getActivePlanningPlan(planning)
     const step = plan?.steps?.[plan.active_step_index]
-    if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status) || !isStepContractPending(step)
+    if (planning?.run?.paused || !plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status) || !isStepContractPending(step)
       || plan.execution?.step_progress?.[step.step_id]?.status === 'completed') return { ok: true, skipped: true }
     this.stepContractsInFlight ??= new Map()
     const flightKey = JSON.stringify([plan.goal_id, plan.plan_id, plan.plan_version, step.step_id])
@@ -8867,7 +8872,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         outcome = undefined
       }
       if (outcome === undefined) {
-        const facts = await this.gatherStepContractFacts()
+        const facts = step.obligations ? undefined : await this.gatherStepContractFacts()
         await this.assertCheckpointOwnerCurrent(owner)
         outcome = await this.requestStepContract({ key, step, requestId, facts, activationCurrent: () => this.checkpointOwnerCurrent(owner) })
       }
@@ -8886,19 +8891,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (!outcome.ok) return failed(outcome.reason, outcome.attempts)
     await this.assertCheckpointOwnerCurrent(owner)
+    if (step.obligations && this.currentPendingAmendment()) return { ok: true, skipped: true, deferred: 'pending_amendment' }
     const bound = this.memory.bindStepCompletionContract?.(key, {
       planId: plan.plan_id, stepId: step.step_id, contract: outcome.contract, binding: outcome.prediction ? 'prediction' : 'just_in_time', requestId,
     })
     if (!bound?.ok) return failed(`bind_refused: ${bound?.reason ?? 'unsupported'}`, outcome.attempts)
     // Every close path reads the BOARD contract, so the bind is proven there before anything relies on it.
     const state = this.memory.currentPlan?.(key)
-    const persisted = persistedStepCheckpoint(state?.task_board, state?.task_board?.active_step_id)
-    if (!persisted || completionContractSignature(persisted.contract) !== completionContractSignature(outcome.contract)) return failed('bound_contract_not_persisted', outcome.attempts)
-    await this.persistState()
+    const persisted = this.persistedStepCheckpoint(state?.task_board, state?.task_board?.active_step_id)
+    if (!persisted || this.contractSignature(persisted.contract) !== this.contractSignature(outcome.contract)) return failed('bound_contract_not_persisted', outcome.attempts)
+    await this.persistState({ strict: true })
+    await this.assertCheckpointOwnerCurrent(owner)
     await this.traceEvent(outcome.prediction ? 'plan.contract_prediction_bound' : 'plan.contract_bound_just_in_time', {
       ...base, trigger, reason: outcome.prediction ? 'assumed_outcome_verified_and_fresh_contract_valid' : 'step_activated_without_contract', attempts: outcome.attempts,
       requirement_kinds: outcome.contract.requirements.map(item => item.kind),
     }, { requestId })
+    await this.assertCheckpointOwnerCurrent(owner)
     return { ok: true, bound: true, state }
   }
 
@@ -8958,8 +8966,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async assertCheckpointOwnerCurrent(owner, options) {
+    if (this.traceRequest !== owner.requestTrace) this.assertCheckpointOwnerIdentity(owner, options)
     await this.assertCurrent()
     if (this.checkpointOwnerCurrent(owner, options)) return
+    if (this.traceRequest !== owner.requestTrace) this.assertCheckpointOwnerIdentity(owner, options)
     await this.traceEvent('step.reconciliation_superseded', {
       request_id: owner.requestTrace?.id, reason: 'checkpoint_owner_changed', plan_id: owner.planId, step_id: owner.stepId,
     }, { requestId: owner.requestTrace?.id })
@@ -8985,27 +8995,36 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlan = getActivePlanningPlan(this.memory.planningState?.(key))
     if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false }
     const recoveryRequestId = this.traceRequest?.id
+    // Typed pending activation has no authored contract to repair. Bind its complete
+    // unchanged intent before settlement or admission can mistake null for a defect.
+    const canonicalStep = reducerPlan.steps[reducerPlan.active_step_index]
+    if (canonicalStep?.obligations && isStepContractPending(canonicalStep)) {
+      if (this.currentPendingAmendment() || this.batchInFlight || this.memory.pendingOperation?.(key)
+        || this.memory.currentPlan?.(key)?.condition_wait || this.memory.planningState?.(key)?.run?.paused) return { closed: false }
+      const ensured = await this.ensureActiveStepContract({ trigger: 'settlement_activation' })
+      if (!ensured.ok) return { closed: false, contractRecovery: await this.pauseForStepContract(ensured.failure), recoveryRequestId }
+    }
     const contractRecovery = await recoverContractObligations(this, { trigger })
     if (contractRecovery !== undefined) return { closed: false, contractRecovery, recoveryRequestId }
-    const contract = persistedStepCheckpoint(board, step.id)?.contract
-    if (!contract || !freshSettlementContract(contract)) return { closed: false }
+    const contract = this.persistedStepCheckpoint(this.memory.currentPlan?.(key)?.task_board, step.id)?.contract
+    if (!contract || !freshSettlementContract(contract, this.currentContractContext())) return { closed: false }
     const continuationOwner = this.captureCheckpointOwner()
     const identity = {
       goalId: previousState.goal_id, canonicalGoalId: this.memory.planningState?.(key)?.goal?.goal_id,
       planId: reducerPlan.plan_id, planVersion: reducerPlan.plan_version, stepId: step.id,
-      contract: completionContractSignature(contract), generation: this.generation,
+      contract: this.contractSignature(contract), generation: this.generation,
       handoffId: this.agentContext.handoffId, conversationSeq: this.agentContext.conversationSeq,
     }
     const identityChanged = () => {
       const current = this.memory.currentPlan?.(key)
       const planning = this.memory.planningState?.(key)
       const plan = getActivePlanningPlan(planning)
-      const checkpoint = persistedStepCheckpoint(current?.task_board, identity.stepId)?.contract
+      const checkpoint = this.persistedStepCheckpoint(current?.task_board, identity.stepId)?.contract
       return current?.status !== 'active' || current.goal_id !== identity.goalId
         || planning?.goal?.goal_id !== identity.canonicalGoalId
         || plan?.plan_id !== identity.planId || plan?.plan_version !== identity.planVersion
         || current.task_board?.active_step_id !== identity.stepId
-        || !checkpoint || completionContractSignature(checkpoint) !== identity.contract
+        || !checkpoint || this.contractSignature(checkpoint) !== identity.contract
         || this.generation !== identity.generation || this.agentContext.handoffId !== identity.handoffId
         || this.agentContext.conversationSeq !== identity.conversationSeq
     }
@@ -9051,9 +9070,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     if (identityChanged()) return skip('settlement_identity_changed')
-    const evaluation = evaluateCompletionContract(contract, facts)
+    const evaluation = this.evaluateCompletionContract(contract, facts)
     if (!evaluation.satisfied) {
-      const gap = freshCheckpointReadGap(contract, facts)
+      const gap = freshCheckpointReadGap(contract, facts, this.currentContractContext())
       return gap ? skip(gap.reason, { requirement_id: gap.requirement_id }) : { closed: false }
     }
     if (identityChanged()) return skip('settlement_identity_changed')
@@ -9145,15 +9164,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async evaluateWorldStateCheckpoint(checkpoint) {
     const contract = checkpoint?.contract
-    if (!worldStateContract(contract)) return undefined
-    const active = activeStepCheckpointSnapshot(this.memory.currentPlan?.(this.activePlanKey())?.task_board)
+    if (!worldStateContract(contract, this.currentContractContext())) return undefined
+    const active = this.activeStepCheckpointSnapshot(this.memory.currentPlan?.(this.activePlanKey())?.task_board)
     const committedIdentity = Boolean(active?.checkpoint?.contract
-      && completionContractSignature(active.checkpoint.contract) === completionContractSignature(contract))
+      && this.contractSignature(active.checkpoint.contract) === this.contractSignature(contract))
     // Monitoring an immutable checkpoint does not grant mutation authority.
     // A handoff drops live operation bindings, but the committed predicate still
     // names the same exact machine; callers retain their actor/epoch fences.
     const facts = await this.completionFactsForContract(contract, undefined, [], { committedIdentity })
-    return evaluateCompletionContract(contract, facts)
+    return this.evaluateCompletionContract(contract, facts)
   }
 
   async settleIdleStepCheckpoint() {
@@ -9199,7 +9218,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async completionFactsForContract(contract, verification, operationNames, { committedIdentity = false } = {}) {
     const facts = {}
-    const normalized = sanitizeStepCompletionContract(contract)
+    const normalized = sanitizeStepCompletionContract(contract, this.currentContractContext())
     const planning = this.memory.planningState?.(this.activePlanKey())
     const receiptPlan = getActivePlanningPlan(planning)
     const durableNames = activeStepVerifiedOperationNames(planning)
@@ -9512,7 +9531,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       batch_id: batchId, step_id: step.id,
     })
 
-    const checkpoint = persistedStepCheckpoint(board, step.id)
+    const checkpoint = this.persistedStepCheckpoint(board, step.id)
     if (!checkpoint?.contract) {
       await this.declineStepClose('batch_receipt', 'semantic_completion_requires_planner', {
         active_step_id: step.id,
@@ -9534,7 +9553,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch {}
 
     const facts = await this.completionFactsForContract(checkpoint.contract, verification, operationNames)
-    const evaluation = evaluateCompletionContract(checkpoint.contract, facts)
+    const evaluation = this.evaluateCompletionContract(checkpoint.contract, facts)
     await this.traceEvent('step.completion_checked', {
       active_step_id: step.id,
       status: evaluation.status,
@@ -10107,6 +10126,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     if (result?.ok) await this.waitForRequestAdmission(this.persistState())
     return result
+  }
+
+  // Extended contracts are accepted only against the current canonical typed
+  // program and its original proof. Board/model fields cannot mint this context.
+  currentContractContext(step) {
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const plan = getActivePlanningPlan(planning)
+    const canonical = step ?? plan?.steps?.[plan.active_step_index]
+    return canonical?.obligations && obligationProofOrigin(planning, canonical)
+      ? obligationContractContext(canonical.obligations) : undefined
+  }
+
+  persistedStepCheckpoint(board, stepId) {
+    return persistedStepCheckpoint(board, stepId, this.currentContractContext())
+  }
+
+  activeStepCheckpointSnapshot(board) {
+    return activeStepCheckpointSnapshot(board, this.currentContractContext())
+  }
+
+  contractSignature(contract) {
+    return completionContractSignature(contract, this.currentContractContext())
+  }
+
+  evaluateCompletionContract(contract, facts) {
+    return evaluateCompletionContract(contract, facts, this.currentContractContext())
   }
 
   // --- MW2b operation reconciliation -----------------------------------------------------------------------------------------
@@ -14554,7 +14599,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const step = state.task_board?.steps?.[state.task_board?.active_index]
     const retained = step?.completion_contract
     const modeChanged = plan.assessmentOnly === true || plan.stepCompletions?.[plan.currentStep]?.kind === 'semantic'
-    const contractChanged = retained && plan.checkpoint && completionContractSignature(retained) !== completionContractSignature(plan.checkpoint)
+    const contractChanged = retained && plan.checkpoint && this.contractSignature(retained) !== this.contractSignature(plan.checkpoint)
     if (!retained || (!modeChanged && !contractChanged)) return
     await this.traceEvent('plan.preflight_checkpoint_change_rejected', {
       request_id: requestId, reason: 'preflight_correction_preserves_result_checkpoint',
@@ -15234,7 +15279,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const latestVerification = [...(state?.task_board?.evidence ?? [])].reverse().find(item => item?.kind === 'deterministic_verification')
     if (!latestVerification) return ''
     this.pendingFiniteNoOperationPlan = plan
-    return this.executorControlGuidance(actionOmissionRepairMessage(state))
+    return this.executorControlGuidance(actionOmissionRepairMessage(state, this.currentContractContext()))
   }
 
   async preflightOperations(operations) {
@@ -15521,7 +15566,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // not be read (transport/JSON error, a not-ok answer, or a kind the evaluator cannot read) carries read:false and no
   // satisfied flag. The contract result is tri-state: satisfied true | false | undefined (cannot be decided).
   async liveCheckpointState(contract) {
-    const normalized = sanitizeStepCompletionContract(contract)
+    const normalized = sanitizeStepCompletionContract(contract, this.currentContractContext())
     const byId = {}
     for (const requirement of normalized.requirements ?? []) {
       if (!WORLD_STATE_REQUIREMENT_KINDS.has(requirement.kind)) {
@@ -15558,9 +15603,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!key || !Array.isArray(operations) || operations.length === 0) return undefined
     const state = this.memory.currentPlan?.(key)
     const stepId = state?.status === 'active' ? state.task_board?.active_step_id : undefined
-    const contract = stepId ? persistedStepCheckpoint(state.task_board, stepId)?.contract : undefined
+    const contract = stepId ? this.persistedStepCheckpoint(state.task_board, stepId)?.contract : undefined
     if (!contract) return undefined
-    const conflict = checkpointBatchContradiction(contract, operations)
+    const conflict = checkpointBatchContradiction(contract, operations, this.currentContractContext())
     if (!conflict) return undefined
     const live = await this.liveCheckpointState(contract)
     await this.assertCurrent()
@@ -16361,7 +16406,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'semantic_completion_contract_pending'
       throw error
     }
-    if (completionContractSupported(step.completion_contract)) {
+    if (completionContractSupported(step.completion_contract, this.currentContractContext())) {
       const error = new AgentLoopError('semantic_completion_cannot_bypass_deterministic_contract')
       error.failureClass = 'plan_category'
       error.code = 'semantic_completion_contract_exists'
@@ -16871,7 +16916,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     // The active step's own checkpoint as it stood BEFORE this batch; the
     // checkpoint pass below re-records one shaped by the new batch.
-    const checkpointBeforeBatch = activeStepCheckpointSnapshot(previousState?.task_board)
+    const checkpointBeforeBatch = this.activeStepCheckpointSnapshot(previousState?.task_board)
     const runtimeHealthy = persistentRuntimeHealthy(persistentRuntime)
     const heldForSemanticAdmission = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     const initialPlannerAdmission = this.plannerOnlyDraftCandidate(plan)
@@ -17007,7 +17052,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const state = await this.beginActionOmissionRepair(plan, 'no_operation_for_remaining_plan')
       if (state?.status === 'active') {
         this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
-        this.messages.push({ role: 'user', content: `[HARNESS] ${this.executorControlGuidance(actionOmissionRepairMessage(state))}${plan.plan.length === 0 ? this.unmetGoalNote() : ''}` })
+        this.messages.push({ role: 'user', content: `[HARNESS] ${this.executorControlGuidance(actionOmissionRepairMessage(state, this.currentContractContext()))}${plan.plan.length === 0 ? this.unmetGoalNote() : ''}` })
         return this.runTurn()
       }
     }
@@ -17394,7 +17439,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               throw unbound
             }
             const after = ensured.state ?? this.memory.currentPlan?.(this.activePlanKey())
-            const bound = persistedStepCheckpoint(after?.task_board, after?.task_board?.active_step_id)
+            const bound = this.persistedStepCheckpoint(after?.task_board, after?.task_board?.active_step_id)
             this.messages.push({
               role: 'user',
               content: `[HARNESS] The active step had no completion checkpoint yet, so no operation from that batch ran. ${bound ? `The harness has now bound its checkpoint: ${JSON.stringify(bound.contract)}.` : 'The checkpoint is being bound.'} Send the operations for this step again under that checkpoint.`,

@@ -32,8 +32,8 @@ export function normalizeStepCompletions(descriptions, values) {
   })
 }
 
-export function completionContractSignature(contract) {
-  const value = sanitizeStepCompletionContract(contract)
+export function completionContractSignature(contract, context) {
+  const value = sanitizeStepCompletionContract(contract, context)
   return JSON.stringify({ mode: value.mode, requirements: value.requirements })
 }
 
