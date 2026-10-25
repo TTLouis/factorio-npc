@@ -601,6 +601,11 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     found: true,
     distance: math.sqrt(squared_distance(actor.position, entity.position)),
     entity: entity_summary(entity),
+    surface_index: entity.surface.index,
+    force_index: entity.force.index,
+    actor_id: actor.status_snapshot().actor_id,
+    actor_surface_index: actor.surface.index,
+    actor_force_index: actor.force.index,
     item_io: inserter
       ? {
           pickup_position: entity.pickup_position,

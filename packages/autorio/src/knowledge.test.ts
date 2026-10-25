@@ -523,6 +523,8 @@ describe('entity geometry knowledge', () => {
     is_valid: true,
     position: { x: 0, y: 0 },
     surface: { index: 1 },
+    force: { index: 1, name: 'player' },
+    status_snapshot: () => ({ actor_id: 18 }),
   } as any
 
   afterEach(() => {
@@ -537,7 +539,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 100,
       position: { x: 1, y: 0 },
       direction: 2,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
     }
     const destination = {
       valid: true,
@@ -546,7 +548,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 101,
       position: { x: 3, y: 0 },
       direction: 0,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
     }
     const inserter = {
       valid: true,
@@ -555,7 +557,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 42,
       position: { x: 2, y: 0 },
       direction: 2,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 0,
       fluidbox: { length: 0 },
@@ -569,6 +571,11 @@ describe('entity geometry knowledge', () => {
     expect(entity_geometry_for_actor(actor, 42)).toMatchObject({
       found: true,
       distance: 2,
+      actor_id: 18,
+      actor_surface_index: 1,
+      actor_force_index: 1,
+      surface_index: 1,
+      force_index: 1,
       entity: { name: 'inserter', unit_number: 42, position: { x: 2, y: 0 } },
       item_io: {
         pickup_position: { x: 1, y: 0 },
@@ -588,7 +595,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 50,
       position: { x: 10, y: 5 },
       direction: 4,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 0,
       fluidbox: { length: 0 },
@@ -613,7 +620,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 90,
       position: { x: 21, y: 20 },
       direction: 0,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
     }
     const fluidbox = {
       length: 2,
@@ -645,7 +652,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 77,
       position: { x: 20, y: 20 },
       direction: 2,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 2,
       fluidbox,
@@ -689,7 +696,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 81,
       position: { x: 4, y: 4 },
       direction: 0,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 1,
       fluidbox: { length: 0 },

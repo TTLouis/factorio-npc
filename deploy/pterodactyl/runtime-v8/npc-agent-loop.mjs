@@ -10,6 +10,8 @@ import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.m
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
+import { captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin } from './contract-obligations.mjs'
+import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
@@ -3260,6 +3262,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // MW5: the player-objective grant at goal admission and the replacement wake. Off unless the supervisor turns it on (the same
     // pattern as completionProtocolVersion), so a loop built without it keeps the pre-MW5 blocked-awaiting-user behaviour exactly.
     this.replacementWakeEnabled = options.replacementWake === true
+    // Production requires typed intent on every new deterministic draft. Saved
+    // pre-provenance plans remain readable; they cannot mint repair certificates.
+    this.requireTypedObligations = options.requireTypedObligations === true
     this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default is prefix-aware (restageSoftLimitTokens)
     this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
     this.providerCallsByGeneration = new Map() // the same count per loop generation: restageContext refuses only while a round of the CURRENT generation is in flight
@@ -3576,6 +3581,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requestId = this.traceRequest?.id
     const reviewOwner = this.captureCheckpointOwner()
     const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan?.(key), trigger: 'before_planner_review' })
+    if (fresh.contractRecovery) return fresh.contractRecovery
     // Contract binding may intentionally cancel this turn after durably pausing
     // the newly active step. Preserve that terminal receipt, but never a result
     // outlived by replacement work during its final trace write.
@@ -8193,10 +8199,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // `draft` is false for a committed (frozen) plan, whose checkpoint is immutable and never re-judged against a later
   // batch here: the commit-time stock guard owns that case.
-  async validatePlannerCheckpointContract(contract, operations = [], { draft = true, plannerOnlyDraft = false } = {}) {
+  async validatePlannerCheckpointContract(contract, operations = [], { draft = true, plannerOnlyDraft = false, step } = {}) {
     const normalized = sanitizeStepCompletionContract(contract)
     if (!completionContractSupported(normalized)) {
       return { accepted: false, reason: 'unsupported_or_malformed_contract' }
+    }
+    if (step?.obligation_protocol === 1 && (!step.obligations || !step.obligation_proof)) return { accepted: false, reason: 'obligation_provenance_unreadable' }
+    if (step?.obligations) {
+      if (!obligationContractMatches(normalized, step.obligations)) return { accepted: false, reason: 'contract_obligation_mismatch' }
+      if (!obligationProofOrigin(this.memory.planningState?.(this.activePlanKey()), step)) return { accepted: false, reason: 'obligation_provenance_wrong_owner' }
+      const owner = this.captureCheckpointOwner()
+      const fresh = await captureObligationProof(this, step.obligations, () => this.assertCheckpointOwnerCurrent(owner))
+      if (!await reconcilePreservationProof(this, step, fresh, () => this.assertCheckpointOwnerCurrent(owner))) return { accepted: false, reason: 'preservation_baseline_changed' }
     }
     // A draft whose own batch would undo its checkpoint can never close: reject it so the planner redrafts.
     const contradiction = draft ? checkpointBatchContradiction(normalized, operations) : undefined
@@ -8282,7 +8296,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // A saved legacy draft may be resumed unchanged; newly authored drafts must declare every outcome.
     const legacyDraft = held?.status === PLAN_STATUS.DRAFT && held.steps?.every(step => !step.completion_mode)
       && JSON.stringify(held.steps.map(step => step.description)) === JSON.stringify(plan.plan)
-    if (legacyDraft && !plan.stepCompletions) return
+    if (legacyDraft && !plan.stepCompletions && !this.requireTypedObligations) return
     if (!plan.stepCompletions || plan.stepCompletions.length !== plan.plan.length) {
       const error = new AgentLoopError('missing_step_completions: supply stepCompletions aligned with every plan description before commit')
       error.failureClass = 'plan_category'
@@ -8290,6 +8304,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     const plannerOnlyDraft = this.plannerOnlyDraftCandidate(plan)
+    if (this.requireTypedObligations && plan.assessmentOnly !== true
+      && plan.stepCompletions.some(row => row.kind === 'deterministic' && !row.obligations)) {
+      const error = new AgentLoopError('typed_step_obligations_required: declare obligations {outcome:{mode:"all",requirements:[...]},preserve:[exact unit numbers]} for each deterministic step. Outcomes describe intended results; preserve identifies existing structures and cannot be replaced by added global counts. No draft was committed.')
+      error.failureClass = 'plan_category'
+      error.code = 'missing_step_obligations'
+      throw error
+    }
     const firstReducerIndex = held && [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(held.status)
       ? (held.carried_forward_evidence?.length ?? 0)
       : 0
@@ -8334,6 +8355,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Only an assessmentOnly draft reaches a semantic declaration here, and one with operations was refused above
       // (assessment_only_conflicts_with_execution), so a semantic declaration never sits beside admitted operations.
       if (declaration.kind === 'semantic') continue
+      if (declaration.obligations) {
+        const owner = this.captureCheckpointOwner()
+        declaration.obligationProof = await captureObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
+        if (declaration.checkpoint && !obligationContractMatches(declaration.checkpoint, declaration.obligations)) {
+          throw await this.checkpointRejectionError({ reason: 'contract_obligation_mismatch' })
+        }
+      }
       if (!declaration.checkpoint) {
         // A step declared without a checkpoint is bound when it is about to start. The step that runs first cannot wait: that is
         // the step at currentStep and the first step the reducer will hold (index 0, or after a replacement's carried prefix),
@@ -8487,6 +8515,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
     const generation = this.generation // the slice-progress credit below belongs to this lineage only
     const requestId = this.traceRequest?.id
+    const closeOwner = this.captureCheckpointOwner()
+    const preservation = await verifyPreservationBeforeClose(this)
+    await this.assertCheckpointOwnerCurrent(closeOwner)
+    if (!preservation.ok) {
+      const owner = this.captureCheckpointOwner()
+      await this.traceEvent('contract.preservation_close_refused', { request_id: requestId, trigger, reason: preservation.reason,
+        goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId })
+      await this.assertCheckpointOwnerCurrent(owner)
+      return { closed: false, reason: preservation.reason,
+        contractPause: await this.pauseForStepContract({ reason: preservation.reason, owner }) }
+    }
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
       source: 'deterministic_runtime',
@@ -8574,6 +8613,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // append to the conversation, mutate the agent context's request counters and count in providerCallsByGeneration (which
   // makes a restage refuse). Reserve and usage are charged to the request; the generation output cap is left alone.
   async requestStepContract(args) {
+    if (args.step?.obligation_protocol === 1 && (!args.step.obligations || !args.step.obligation_proof)) return { ok: false, reason: 'obligation_provenance_unreadable', attempts: 0 }
+    if (args.step?.obligations) {
+      const contract = compileObligations(args.step.obligations)
+      const validation = await this.validatePlannerCheckpointContract(contract, [], { plannerOnlyDraft: true, step: args.step })
+      return validation.accepted ? { ok: true, contract, attempts: 0 } : { ok: false, reason: validation.reason, attempts: 0 }
+    }
     // The call has its own controller like the other side calls: cancel() and reset() abort it, and an aborted call is stale.
     const controller = args.controller ?? new AbortController()
     this.stepContractAborts ??= new Set()
@@ -8665,7 +8710,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!parsed.ok) reason = parsed.reason
       else {
         // The same validator a commit runs on an active step: supported, grounded in the live game.
-        const validation = await this.validatePlannerCheckpointContract(parsed.checkpoint, [], { draft: true, plannerOnlyDraft: true })
+        const validation = await this.validatePlannerCheckpointContract(parsed.checkpoint, [], { draft: true, plannerOnlyDraft: true, step })
         if (validation.accepted) {
           const late = await staleKind()
           if (late?.stale) return { stale: late.stale, attempts }
@@ -8871,6 +8916,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!key || previousState?.status !== 'active' || !step) return { closed: false }
     const reducerPlan = getActivePlanningPlan(this.memory.planningState?.(key))
     if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false }
+    const recoveryRequestId = this.traceRequest?.id
+    const contractRecovery = await recoverContractObligations(this, { trigger })
+    if (contractRecovery !== undefined) return { closed: false, contractRecovery, recoveryRequestId }
     const contract = persistedStepCheckpoint(board, step.id)?.contract
     if (!contract || !freshSettlementContract(contract)) return { closed: false }
     const continuationOwner = this.captureCheckpointOwner()
@@ -8960,7 +9008,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       source: 'deterministic_completion_contract',
       steeringRecommendation,
     })
-    if (!closed.closed) return { closed: false, reason: closed.reason, state: closed.state, ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}) }
+    if (!closed.closed) return { closed: false, reason: closed.reason, state: closed.state, ...(closed.contractPause ? { contractPause: closed.contractPause } : {}), ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}) }
     const terminalOwner = closed.contractPause ? this.captureCheckpointOwner() : undefined
     await this.traceEvent('plan.step_closed_on_fresh_read', {
       ...base,
@@ -9465,6 +9513,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         state: closed.state ?? planState,
         contract: checkpoint.contract,
         ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}),
+        ...(closed.contractPause ? { contractPause: closed.contractPause } : {}),
       }
     }
     return { verified: true, state: closed.state, contract: checkpoint.contract, ...(closed.contractPause ? { contractPause: closed.contractPause } : {}) }
@@ -12234,6 +12283,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
     if (stepCompletion?.contractPause) return stepCompletion.contractPause
     if (!pendingAmendment && !stepCompletion?.verified) {
+      const corrected = await recoverContractObligations(this, { trigger: 'native_completion' })
+      if (corrected !== undefined) return corrected
+    }
+    if (!pendingAmendment && !stepCompletion?.verified) {
       const production = await continueProductionTask(this)
       if (production !== undefined) return production
     }
@@ -14038,7 +14091,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (laterIndexes.length > 0) {
         const discarded = laterIndexes.filter(index => plan.stepCompletions[index].checkpoint !== undefined).length
         plan.stepCompletions = plan.stepCompletions.map((declaration, index) =>
-          laterIndexes.includes(index) ? { kind: 'deterministic' } : declaration)
+          laterIndexes.includes(index) ? { kind: 'deterministic', ...(declaration.obligations ? { obligations: declaration.obligations } : {}) } : declaration)
         plan.laterContractsDeferred = { step_count: laterIndexes.length, discarded_checkpoints: discarded }
       }
       const declared = plan.stepCompletions[normalizedPlan.currentStep]
@@ -16551,6 +16604,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw error
       }
       if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+      if (fresh.contractRecovery) return fresh.contractRecovery
       if (fresh.contractPause) return fresh.contractPause
       if (fresh.closed) return this.continueAfterFreshStepClose(fresh, plan, before)
     }

@@ -4,6 +4,7 @@ import { goalUiView } from './goal-definition.mjs'
 import { repairControlJson } from './control-json-repair.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { plannerControlToolDefinitions } from './structured-policy.mjs'
+import { normalizeObligations } from './contract-obligations.mjs'
 
 export function normalizeStepCompletions(descriptions, values) {
   if (!Array.isArray(values) || values.length !== descriptions.length) {
@@ -11,16 +12,17 @@ export function normalizeStepCompletions(descriptions, values) {
   }
   return values.map((value, index) => {
     if (value?.kind === 'deterministic') {
+      const obligations = value.obligations === undefined ? undefined : normalizeObligations(value.obligations)
       // No checkpoint at all declares a step whose contract is requested when the step is about to start. A checkpoint
       // that is present must still be supported: it is never silently downgraded to "pending".
       if (value.checkpoint === undefined) {
-        if (Object.keys(value).some(key => !['kind', 'checkpoint'].includes(key))) throw new Error(`stepCompletions[${index}] has unexpected fields`)
-        return { kind: 'deterministic' }
+        if (Object.keys(value).some(key => !['kind', 'checkpoint', 'obligations'].includes(key))) throw new Error(`stepCompletions[${index}] has unexpected fields`)
+        return { kind: 'deterministic', ...(obligations ? { obligations } : {}) }
       }
       const checkpoint = sanitizeStepCompletionContract(value.checkpoint)
       if (!authoredCompletionContractSupported(checkpoint)) throw new Error(`stepCompletions[${index}] requires a supported checkpoint`)
-      if (Object.keys(value).some(key => !['kind', 'checkpoint'].includes(key))) throw new Error(`stepCompletions[${index}] has unexpected fields`)
-      return { kind: 'deterministic', checkpoint }
+      if (Object.keys(value).some(key => !['kind', 'checkpoint', 'obligations'].includes(key))) throw new Error(`stepCompletions[${index}] has unexpected fields`)
+      return { kind: 'deterministic', checkpoint, ...(obligations ? { obligations } : {}) }
     }
     if (value?.kind === 'semantic' && typeof value.rationale === 'string' && value.rationale.trim()) {
       if (Object.keys(value).some(key => !['kind', 'rationale'].includes(key))) throw new Error(`stepCompletions[${index}] has unexpected fields`)
@@ -157,6 +159,7 @@ export function buildStepContractPacket({ planningState, stepId, facts, assumedO
       step_id: target.step_id,
       index: targetIndex,
       description: clip(target.description, limits.stepChars),
+      ...(target.obligations ? { obligations: target.obligations } : {}),
     },
     facts: facts && typeof facts === 'object' ? facts : {},
   }

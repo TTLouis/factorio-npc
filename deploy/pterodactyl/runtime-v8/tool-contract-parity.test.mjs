@@ -7,6 +7,14 @@ import * as staging from '../staging/structured-policy.mjs'
 
 const root = new URL('../../../', import.meta.url)
 const contract = JSON.parse(await readFile(new URL('contracts/factorio-tool-contract.json', root), 'utf8'))
+test('exact geometry preserves explicit native actor/entity scope for obligation certificates', async () => {
+  assert.deepEqual(contract.tools.getEntityGeometry.native_scope_fields,
+    ['actor_id', 'actor_surface_index', 'actor_force_index', 'surface_index', 'force_index'])
+  const source = await readFile(new URL('packages/autorio/src/knowledge.ts', root), 'utf8')
+  for (const field of contract.tools.getEntityGeometry.native_scope_fields) assert.match(source, new RegExp(`\\b${field}:`))
+  assert.match(runtime.toolCommand('getEntityGeometry', { unit_number: 21 }), /autorio_knowledge.*entity_geometry.*21/)
+  assert.equal(runtime.toolCommand('getEntityGeometry', { unit_number: 21 }), staging.toolCommand('getEntityGeometry', { unit_number: 21 }))
+})
 function stagingOperationNames() {
   return staging.approvedOperationNames().sort()
 }

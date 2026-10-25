@@ -2,6 +2,7 @@ import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_
 import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
+import { compileObligations, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { restoreObservationRates } from './observation-rate.mjs'
 import { restoreProductionRecords } from './production-task-runtime.mjs'
@@ -158,12 +159,13 @@ function draftStepsFromBoard(board, draftPlan) {
 
 function completionPolicyFields(entry) {
   if (entry?.kind === 'deterministic') {
+    const intent = entry.obligations ? { obligations: entry.obligations, obligation_proof: entry.obligationProof } : {}
     // A deterministic entry with no checkpoint is a step whose contract is requested when the step is about to start.
     if (entry.checkpoint === undefined || entry.checkpoint === null) {
-      return { completion_mode: 'deterministic', completion_contract: null, contract_status: STEP_CONTRACT_STATUS.PENDING }
+      return { ...intent, completion_mode: 'deterministic', completion_contract: null, contract_status: STEP_CONTRACT_STATUS.PENDING }
     }
     const contract = safeDurableStepCompletionContract(entry.checkpoint)
-    return contract ? { completion_mode: 'deterministic', completion_contract: contract } : undefined
+    return contract ? { ...intent, completion_mode: 'deterministic', completion_contract: contract } : undefined
   }
   if (entry?.kind === 'semantic' && typeof entry.rationale === 'string' && entry.rationale.trim()) {
     return { completion_mode: 'semantic', semantic_rationale: entry.rationale.trim().slice(0, 600), completion_contract: null }
@@ -1596,6 +1598,53 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }, { requestId, now })
   }
 
+  claimContractDefect(key, args) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { ...args, type: PLANNING_EVENT.CONTRACT_DEFECT_CLAIMED,
+      source: 'runtime', now: Date.now() })
+    return after !== before && getActivePlan(after)?.blocker?.kind === 'contract_defect'
+  }
+
+  recordPreservationProof(key, { planId, stepId, proof }) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PRESERVATION_OBSERVED, source: 'runtime',
+      plan_id: planId, step_id: stepId, proof, now: Date.now() })
+    return after !== before
+  }
+
+  draftContractDefectSuccessor(key, { current, requestId }) {
+    const planning = this.planningState(key)
+    const old = getActivePlan(planning)
+    const grant = this.currentGoalGrant(key)
+    if (old?.status !== PLAN_STATUS.BLOCKED || old.blocker?.kind !== 'contract_defect' || !grant) return { ok: false, reason: 'contract_defect_claim_required' }
+    const steps = old.steps.slice(old.active_step_index).map((step, index) => {
+      const { step_id: _id, contract_binding: _binding, ...kept } = step
+      return { ...kept, semantic_step_id: step.semantic_step_id ?? step.step_id,
+        ...(index === 0 ? { completion_contract: compileObligations(step.obligations), contract_status: STEP_CONTRACT_STATUS.BOUND } : {}) }
+    })
+    const verdict = this.requestReplacementPlan(key, { plan_id: old.plan_id,
+      grant: { grant_id: grant.grant_id, revision: grant.revision }, current,
+      requested_result: grant.requested_result, action_scope: 'recovery', impacts: {},
+      reason: { code: CONTRACT_DEFECT_REASON, detail: old.blocker.detail, evidence_refs: old.blocker.evidence_refs }, steps,
+    }, { requestId })
+    const next = getActivePlan(this.planningState(key))
+    return { ok: verdict.decision === REPLACEMENT_DECISION.ACCEPT && next?.plan_id !== old.plan_id,
+      reason: verdict.reason, plan: next }
+  }
+
+  activateContractDefectSuccessor(key, planId) {
+    const plan = getActivePlan(this.planningState(key))
+    const state = this.planByNpc.get(key)
+    if (!state || plan?.plan_id !== planId || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)
+      || plan.replacement?.reason?.code !== CONTRACT_DEFECT_REASON) return false
+    state.status = 'active'
+    state.blocker = ''
+    state.pause_reason = ''
+    state.task_board = setTaskBoardStatus(state.task_board, 'active', { now: Date.now() })
+    this.syncPlanningState(key, state)
+    return true
+  }
+
   /** A user's answer to a pending question (or a standing approval for named subjects). Never the planner or Jev. */
   recordAuthorizationApproval(key, approval, { now = Date.now(), requestId, source = 'user' } = {}) {
     const before = authorizationOf(this.planningState(key))
@@ -2151,6 +2200,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         // The draft keeps its lineage. On a revised plan the board leads with
         // the predecessor's verified steps, which are not this plan's steps.
         steps: draftStepsFromBoard(state.task_board, active).map((step, index) => ({ ...step,
+          ...(active.steps[index]?.obligations ? { obligations: active.steps[index].obligations, obligation_proof: active.steps[index].obligation_proof } : {}),
           ...(active.steps[index]?.execution_guidance ? { execution_guidance: active.steps[index].execution_guidance } : {}),
         })),
       })

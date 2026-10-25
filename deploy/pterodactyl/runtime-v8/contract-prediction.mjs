@@ -130,7 +130,7 @@ export async function takeContractPrediction(agent, { plan, step, closedStepId, 
       const status = await deploymentStatus(agent.rcon, { requireAllowed: true })
       if (status.actor_id !== record.actor || status.epoch !== record.epoch) { reason = 'prediction_actor_changed'; stale = true }
       else {
-        const validation = await agent.validatePlannerCheckpointContract(outcome.contract, [], { draft: true, plannerOnlyDraft: true })
+        const validation = await agent.validatePlannerCheckpointContract(outcome.contract, [], { draft: true, plannerOnlyDraft: true, step })
         if (!(await nativeCurrent(agent, record, { next: true }))) { reason = 'prediction_owner_changed'; stale = true }
         else if (!validation.accepted) reason = `fresh_validation_${validation.reason}`
         else {
