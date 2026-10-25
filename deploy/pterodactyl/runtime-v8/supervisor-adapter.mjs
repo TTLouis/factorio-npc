@@ -494,3 +494,19 @@ function installObservationDiffs(Base) {
 installObservationDiffs(BaseNpcAgentLoop)
 
 export * from '../staging/supervisor-adapter.mjs'
+
+// One fixed read-only command runs all existing ownership getters in the same
+// native event. No model text or mutation enters this projection.
+export const NEXT_SLICE_OWNERSHIP_COMMAND = '/silent-command rcon.print(helpers.table_to_json({projection="next_slice_ownership_v1",tick=game.tick,deployment=remote.call("sgluna_deployment","status"),operations=remote.call("autorio_operations","status"),crafting=remote.call("autorio_crafting","status"),follow=remote.call("autorio_follow","status")}))'
+export async function readNextSliceOwnership(rcon) {
+  const value = JSON.parse(String(await rcon.command(NEXT_SLICE_OWNERSHIP_COMMAND)))
+  const native = value?.deployment
+  if (value?.projection !== 'next_slice_ownership_v1' || !Number.isSafeInteger(value.tick) || value.tick < 0
+    || native?.revision !== 'sgluna-deploy-v8-npc-staging' || native.mode !== 'npc' || native.allowed !== true
+    || native.actor_kind !== 'standalone_character' || !Number.isSafeInteger(native.actor_id) || native.actor_id <= 0
+    || !Number.isSafeInteger(native.epoch) || native.epoch <= 0 || typeof native.session !== 'string' || !native.session
+    || typeof native.idle !== 'boolean' || native.actor_interface !== true || native.operations !== true || native.tools !== true) {
+    throw new Error('Next-slice atomic native ownership unavailable')
+  }
+  return value
+}

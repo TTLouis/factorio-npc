@@ -46,7 +46,7 @@ export function trialStopDecision({ canonical, events = [], startedAt, now, paus
       && predecessor.steps.every(item => predecessor.execution?.step_progress?.[item.step_id]?.status === 'completed')
       ? `next_slice|${goalId}|${predecessor.plan_id}|${predecessor.plan_version}|${step.step_id}` : undefined
     if (!boundary) return finish('continue', 'controller_running')
-    const fresh = controller?.schema === 1 && typeof controller.instance_id === 'string'
+    const fresh = controller?.schema === 1 && controller.ready === true && controller.stopping === false && typeof controller.instance_id === 'string'
       && controller.goal_id === goalId && controller.actor_id === actorId && controller.epoch === native?.epoch
       && controller.boundary_key === boundary && controller.applicable === true
       && controller.run_paused === false && Number.isFinite(controller.observed_at)
@@ -63,10 +63,11 @@ export function trialStopDecision({ canonical, events = [], startedAt, now, paus
     const known = typeof operations?.task_state === 'string' && Number.isSafeInteger(operations.queue_length)
       && typeof operations.queue_empty === 'boolean' && typeof craft?.task_active === 'boolean'
       && craft.native_queue && typeof follow?.active === 'boolean'
+    if (operations?.admission_journal?.records !== undefined && !Array.isArray(operations.admission_journal.records)) return finish('wait', 'next_slice_native_ownership_unknown')
     if (!known) return finish('wait', 'next_slice_native_ownership_unknown')
     const busy = operations.task_state !== 'idle' || operations.queue_length !== 0 || operations.queue_empty !== true
       || Boolean(operations.active_batch) || craft.task_active || Object.keys(craft.native_queue).length > 0
-      || Boolean(craft.persisted_owner) || follow.active
+      || Boolean(craft.persisted_owner) || follow.active || operations.actor?.mining_state?.mining
       || operations.admission_journal?.records?.some(row => ['admitting', 'uncertain'].includes(row.state))
     if (busy) return finish('continue', 'next_slice_native_work_owned')
     const ack = controller.settlement

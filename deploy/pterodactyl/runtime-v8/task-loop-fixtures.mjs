@@ -184,6 +184,15 @@ export class FakeFactorio {
   }
 
   async command(text) {
+    if (text.includes('projection="next_slice_ownership_v1"')) {
+      // All four existing status getters are sampled synchronously before any
+      // promise resumes, mirroring one native read-only event.
+      const commands = ['sgluna_deployment', 'autorio_operations', 'autorio_crafting', 'autorio_follow']
+      const reads = commands.map(name => FakeFactorio.prototype.command.call(this, `/silent-command rcon.print(helpers.table_to_json(remote.call("${name}","status")))`))
+      const [deployment, operations, crafting, follow] = await Promise.all(reads.map(async read => JSON.parse(await read)))
+      return JSON.stringify({ projection: 'next_slice_ownership_v1', tick: this.gameTick, deployment, operations, crafting, follow })
+    }
+
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
@@ -207,10 +216,10 @@ export class FakeFactorio {
       return JSON.stringify(this.skills[id] ?? { ok: false, error: 'unknown_skill' })
     }
     if (text.includes('remote.call("autorio_crafting","status")')) {
-      return JSON.stringify({ task_active: false, native_queue: {}, persisted_owner: null })
+      return JSON.stringify(this.craftingStatus ?? { task_active: false, native_queue: {}, persisted_owner: null })
     }
     if (text.includes('remote.call("autorio_follow","status")')) {
-      return JSON.stringify({ active: false, healthy: false, controller_live: false, state: 'idle' })
+      return JSON.stringify(this.followStatus ?? { active: false, healthy: false, controller_live: false, state: 'idle' })
     }
     if (text.includes('remote.call("autorio_preflight","operation"')) {
       return JSON.stringify(this.preflight(text))

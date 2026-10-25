@@ -10176,7 +10176,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && this.requestAdmissionOwner === expectedOwner.intakeToken && this.pendingInteractionAmendment === expectedOwner.amendment)
     const emit = (event, data) => current() ? this.traceEvent(event, data, { requestId: pending.request_id })
       : this.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0, event,
-        request_id: pending.request_id, actor_id: pending.actor_id, epoch: pending.actor_epoch, data })
+        request_id: pending.request_id, actor_id: pending.actor?.actor_id, epoch: pending.actor?.epoch, data })
     // D2: the game never saw this send, so it did not put a batch in flight: back to what was true before it.
     if (current() && this.batchInFlightBeforeSend !== undefined) {
       this.batchInFlight = this.batchInFlightBeforeSend === true
@@ -11751,13 +11751,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const controllerOwner = decisionBudgetOwner(this)
     const requestTrace = this.traceRequest
     const checkpointOwner = this.captureCheckpointOwner()
+    const intakeOwner = this.requestAdmissionOwner
+    const amendmentOwner = this.pendingInteractionAmendment
     try {
       await this.tickSprintBoundary?.('guarded_turn')
       this.assertCheckpointOwnerIdentity(checkpointOwner)
       return await this.runGuardedTurn()
     }
     finally {
-      if (ownsDecisionBudgets(this, controllerOwner) && this.traceRequest === requestTrace) this.turnConversation = null
+      if (ownsDecisionBudgets(this, controllerOwner) && this.traceRequest === requestTrace
+        && this.requestAdmissionOwner === intakeOwner && this.pendingInteractionAmendment === amendmentOwner) this.turnConversation = null
       this.controllerBusyCount--
     }
   }
@@ -11810,6 +11813,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let failureOwner = decisionBudgetOwner(this)
     const failureIntake = this.requestAdmissionOwner
     const failureAmendment = this.pendingInteractionAmendment
+    const settlementOrigin = nextSliceOwner(this)
+    const settlementOwner = () => ({ ...settlementOrigin, boundary: completedSliceAnchor(this.memory.planningState?.(this.activePlanKey()))?.boundary_key })
     // Conversation/role restages keep this request. Reset/cancel or a new trace
     // object do not; an old catch must not fail or clean up their replacement.
     const ownsFailure = () => ownsDecisionBudgets(this, failureOwner)
@@ -11833,7 +11838,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     try {
       await this.applyStartRestage()
       const result = await this.runTurnRedriving(generation)
-      if (ownsFailure()) await this.settleNextSliceExit({ reason: 'guarded_turn_returned' })
+      if (ownsFailure()) await this.settleNextSliceExit({ owner: settlementOwner(), reason: 'guarded_turn_returned' })
       return this.withPauseNotice(result)
     }
     catch (error) {
@@ -11841,7 +11846,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const message = error instanceof Error ? error.message : String(error)
       const planState = this.memory.currentPlan?.(this.activePlanKey())
       if (this.goalAwaitingNextSlice()) {
-        await this.settleNextSliceExit({ failure: error, reason: 'guarded_authoring_failure' })
+        await this.settleNextSliceExit({ owner: settlementOwner(), failure: error, reason: 'guarded_authoring_failure' })
         if (!ownsFailure()) throw error
       }
       const proofFailure = preservationFailure(error) ?? preservationFailure(error?.cause)

@@ -1967,11 +1967,15 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   // synchronous cancel below may intentionally advance this identity.
   let owner = decisionBudgetOwner(agent)
   let traceOwner = agent.traceRequest
+  const authoringBoundary = agent.goalAwaitingNextSlice?.() === true
+  let admissionOwner = agent.requestAdmissionOwner
+  const amendmentOwner = agent.pendingInteractionAmendment
   let state
   const key = `npc:${agent.npcId ?? 'sgluna'}`
   const interrupted = () => options.isCancelled?.()
     ? { recovered: false, reason: 'cancelled_after_fire', state }
     : !ownsDecisionBudgets(agent, owner) || agent.traceRequest !== traceOwner
+      || agent.requestAdmissionOwner !== admissionOwner || agent.pendingInteractionAmendment !== amendmentOwner
       ? { recovered: false, reason: 'decision_owner_superseded', state: agent.memory?.currentPlan?.(key) ?? state }
       : undefined
   const cancelled = async (stopped, stage) => {
@@ -1983,6 +1987,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     catch {}
     return stopped
   }
+  if (admissionOwner && (authoringBoundary || admissionOwner.phase === 'intake')) return { recovered: false, reason: 'next_slice_intake_owned' }
   await agent.loadPersistentState?.()
   let stopped = interrupted()
   if (stopped) return cancelled(stopped, 'load_persistent_state')
@@ -2029,6 +2034,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   }
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
+  admissionOwner = agent.requestAdmissionOwner
   traceOwner = agent.traceRequest
   const decisionBudgetScope = captureDecisionBudgets(agent, { requestId: recoveryRequestId })
   owner = decisionBudgetScope
@@ -3137,7 +3143,7 @@ export class Session {
     const delayMs = MODEL_RECOVERABLE_RESUME_DELAY_MS
     const correlation = {
       ...actor,
-      ...(allowance.boundary_key ? { boundary_key: allowance.boundary_key } : {}),
+      ...(allowance.boundary_key ? { boundary_key: allowance.boundary_key, native_session: this.lastStatus?.session } : {}),
       goal_id: allowance.goal_id,
       plan_id: allowance.plan_id,
       plan_version: allowance.plan_version,
@@ -3227,6 +3233,7 @@ export class Session {
     }
     if (current?.actor_id !== correlation.actor_id) return 'actor_changed'
     if (current?.epoch !== correlation.epoch) return 'epoch_changed'
+    if (correlation.boundary_key && (!correlation.native_session || current.session !== correlation.native_session)) return 'session_changed'
     const key = this.planKey()
     const record = this.agent.memory.pauseRecord(key)
     if (!record?.paused) return 'no_longer_paused'
@@ -3258,7 +3265,12 @@ export class Session {
       actor_epoch: correlation.epoch,
     }
     const finish = () => { if (this.modelResume?.token === token) this.modelResume = null }
+    const boundaryAgent = this.agent
+    const boundaryAdmission = this.agent.requestAdmissionOwner
+    const boundaryAmendment = this.agent.pendingInteractionAmendment
     const cancelled = () => token.cancelled === true || this.stopping === true
+      || correlation.boundary_key && (this.agent !== boundaryAgent || this.modelResume?.token !== token || Boolean(boundaryAdmission)
+        || this.agent.requestAdmissionOwner !== boundaryAdmission || this.agent.pendingInteractionAmendment !== boundaryAmendment)
     const abortCancelled = async () => {
       finish()
       await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
@@ -3543,6 +3555,11 @@ export class Session {
   }
 
   nextSliceControlView() {
+    if (this.nextSliceControlAgent !== this.agent) {
+      this.nextSliceControlAgent = this.agent
+      this.nextSliceControlInstance = nonce()
+      this.nextSliceSettlement = null
+    }
     this.nextSliceControlInstance ??= nonce()
     return { ...nextSliceControlView(this), instance_id: this.nextSliceControlInstance,
       settlement: this.nextSliceSettlement ?? null }
@@ -3588,8 +3605,15 @@ export class Session {
     this.queueEvent(async () => {
       try {
         const request = await this.readNextSliceSettlementRequest()
+        const owner = this.agent && nextSliceOwner(this.agent)
+        const cancel = this.cancelGeneration
         const boundary = await inspectNextSliceLiveness(this, { withinEvent: true })
-        if (request) this.nextSliceSettlement = { ...request, settled_at: Date.now(), disposition: boundary.action, native_reconciled: boundary.native_reconciled === true }
+        const view = this.nextSliceControlView()
+        if (request && boundary.native_reconciled === true && this.cancelGeneration === cancel
+          && ownsNextSlice(this.agent, owner) && request.instance_id === view.instance_id
+          && request.goal_id === view.goal_id && request.boundary_key === view.boundary_key) {
+          this.nextSliceSettlement = { ...request, settled_at: Date.now(), disposition: boundary.action, native_reconciled: true }
+        }
         return boundary.action === 'not_applicable' ? await inspectControllerLiveness(this) : boundary
       }
       finally { this.controllerProbeQueued = false; void this.publishNextSliceControl() }
@@ -3753,7 +3777,10 @@ export class Session {
         await resumeSprintStartup(this.rcon)
       } catch (error) { watchdog.close(); throw error }
     }
+    this.nextSliceControlInstance = nonce()
+    this.nextSliceSettlement = null
     this.ready = true
+    await this.publishNextSliceControl()
     this.uiInputPoll = setInterval(() => {
       if (!this.stopping) this.drainTaskBoardUiInputs()
     }, UI_INPUT_POLL_MS)

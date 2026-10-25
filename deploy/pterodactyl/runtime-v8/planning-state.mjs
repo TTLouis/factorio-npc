@@ -690,7 +690,7 @@ const STICKY_PAUSE_CLASSES = Object.freeze([PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AU
 export function autoResumeAllowance(state, { limits = MODEL_RECOVERABLE_RESUME_LIMITS } = {}) {
   const goalId = state?.goal?.goal_id
   const episode = restoreNextSlice(state?.run?.next_slice, state)
-  const anchor = episode && episode.phase !== 'committed' ? completedSliceAnchor(state) : undefined
+  const anchor = completedSliceAnchor(state)
   const plan = anchor ? state.plans.find(candidate => candidate.plan_id === anchor.plan_id) : getActivePlan(state)
   const step = anchor ? plan.steps.at(-1) : plan?.steps?.[plan.active_step_index]
   const base = { per_step: limits.per_step, per_goal: limits.per_goal, step_attempts: 0, goal_attempts: 0, limit_kind: undefined }
@@ -699,8 +699,11 @@ export function autoResumeAllowance(state, { limits = MODEL_RECOVERABLE_RESUME_L
   const stepKey = `${plan.plan_id}|${plan.plan_version}|${step.step_id}`
   const held = state.run?.auto_resume?.goal_id === goalId ? state.run.auto_resume : null
   const entry = held?.steps?.find(item => item.step_key === stepKey)
-  const mark = anchor ? episode.progress_mark : stepProgressMark(plan, step.step_id)
-  const progressed = !!entry && entry.mark !== mark
+  const mark = anchor ? episode?.progress_mark ?? stepProgressMark(plan, step.step_id) : stepProgressMark(plan, step.step_id)
+  const completedAt = plan.execution?.step_progress?.[step.step_id]?.completed_at
+  const markFault = Boolean(anchor && entry && entry.mark !== mark
+    && !(entry.last_at > 0 && Number.isFinite(completedAt) && entry.last_at < completedAt))
+  const progressed = !!entry && entry.mark !== mark && !markFault
   const stepAttempts = entry && !progressed ? entry.attempts : 0
   const goalAttempts = held?.goal_total ?? 0
   return {
@@ -715,7 +718,7 @@ export function autoResumeAllowance(state, { limits = MODEL_RECOVERABLE_RESUME_L
     progressed,
     step_attempts: stepAttempts,
     goal_attempts: goalAttempts,
-    limit_kind: goalAttempts >= limits.per_goal ? 'goal' : stepAttempts >= limits.per_step ? 'step' : undefined,
+    limit_kind: markFault ? 'state' : goalAttempts >= limits.per_goal ? 'goal' : stepAttempts >= limits.per_step ? 'step' : undefined,
   }
 }
 
@@ -3377,7 +3380,7 @@ Object.assign(HANDLERS, {
     if (!run.paused || run.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return state
     const allowance = autoResumeAllowance(state)
     // Fail closed on stale correlation: the attempt must name the live goal, plan, plan version and step.
-    if (!allowance.step_key || allowance.limit_kind
+    if (!allowance.step_key || allowance.limit_kind || (allowance.boundary_key && !restoreNextSlice(run.next_slice, state))
       || (allowance.boundary_key && event.boundary_key !== allowance.boundary_key)
       || text(event.plan_id, 200) !== allowance.plan_id
       || event.plan_version !== allowance.plan_version

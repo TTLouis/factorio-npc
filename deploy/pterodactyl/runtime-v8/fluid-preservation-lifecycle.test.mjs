@@ -31,6 +31,7 @@ function world({ trace, persist, read } = {}) {
   const rows = []; const calls = []
   let agent
   game.command = async text => {
+    if (text.includes('projection="next_slice_ownership_v1"')) return native(text)
     await read?.({ text, game, memory, agent })
     if (text.includes('entity_geometry')) {
       const id = Number(/entity_geometry["'],\s*(\d+)/.exec(text)?.[1])
@@ -137,3 +138,37 @@ test('typed proof admission failure durably guard-pauses without replacement aut
   assert.ok(w.rows.some(row => row.event === 'contract.preservation_refused' && row.data.code === 'preservation_admission_native_busy'
     && row.data.category === 'unproven' && row.data.stage === 'admission' && row.data.retryable === false))
 })
+
+for (const seam of ['strict_envelope_persist', 'prepared_trace']) {
+  test(`real production hook retains same-owner amendment at ${seam} without native send or next step`, async () => {
+    let injected = false
+    let amendment
+    let request
+    let callsAtSeam
+    const inject = ({ agent }) => {
+      if (injected) return
+      injected = true
+      amendment = { text: 'Later compatible instruction', source: 'user', seam }
+      request = agent.traceRequest
+      callsAtSeam = w.calls.length
+      agent.pendingInteractionAmendment = amendment
+    }
+    const w = world({
+      persist: context => {
+        if (seam === 'strict_envelope_persist' && context.options?.strict
+          && Object.keys(getActivePlan(context.memory.planningState(KEY))?.execution?.preservation_admissions ?? {}).length) inject(context)
+      },
+      trace: context => { if (seam === 'prepared_trace' && context.row.event === 'contract.fluid_admission_prepared') inject(context) },
+    })
+    await assert.rejects(w.start(), { code: 'preservation_admission_not_safe', category: 'unproven', stage: 'admission' })
+    assert.equal(injected, true)
+    assert.equal(w.game.mutations.length, 0)
+    assert.equal(w.calls.length, callsAtSeam)
+    assert.equal(w.agent.pendingInteractionAmendment, amendment)
+    assert.equal(w.agent.traceRequest, request)
+    assert.equal(w.memory.pendingOperations(KEY).length, 0)
+    assert.equal(w.held().status, 'COMMITTED')
+    assert.equal(w.held().active_step_index, 0)
+    assert.equal(w.held().execution.preservation_certificates, undefined)
+  })
+}

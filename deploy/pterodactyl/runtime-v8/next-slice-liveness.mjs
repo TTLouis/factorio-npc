@@ -1,23 +1,24 @@
 import { classifyRequestFailure, PAUSE_CLASS } from './pause-class.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
-import { deploymentStatus } from './supervisor-adapter.mjs'
+import { readNextSliceOwnership } from './supervisor-adapter.mjs'
 import { preservationFailure } from './contract-obligations.mjs'
+import { batchWatermark } from './operation-reconciliation.mjs'
 
 export function nextSliceOwner(agent) {
-  return { generation: agent.generation, lineage: agent.agentContext?.lineageSequence, trace: agent.traceRequest,
+  return { agent, generation: agent.generation, lineage: agent.agentContext?.lineageSequence, trace: agent.traceRequest,
     admission: agent.requestAdmissionOwner, amendment: agent.pendingInteractionAmendment,
     actor: agent.epoch ? { ...agent.epoch } : null,
     goal: agent.memory.planningState?.(agent.activePlanKey())?.goal?.goal_id,
     boundary: completedSliceAnchor(agent.memory.planningState?.(agent.activePlanKey()))?.boundary_key }
 }
 export function ownsNextSlice(agent, owner) {
-  return agent.generation === owner.generation && agent.agentContext?.lineageSequence === owner.lineage
+  return agent === owner.agent && agent.generation === owner.generation && agent.agentContext?.lineageSequence === owner.lineage
     && agent.traceRequest === owner.trace && agent.requestAdmissionOwner === owner.admission
     && agent.pendingInteractionAmendment === owner.amendment
     && agent.memory.planningState?.(agent.activePlanKey())?.goal?.goal_id === owner.goal
     && completedSliceAnchor(agent.memory.planningState?.(agent.activePlanKey()))?.boundary_key === owner.boundary
     && (!owner.validate || owner.validate())
-    && agent.epoch?.actor_id === owner.actor?.actor_id && agent.epoch?.epoch === owner.actor?.epoch
+    && agent.epoch?.actor_id === owner.actor?.actor_id && agent.epoch?.epoch === owner.actor?.epoch && agent.epoch?.session === owner.actor?.session
 }
 function assertOwner(agent, owner) {
   if (!ownsNextSlice(agent, owner)) throw new Error('Next-slice transition cancelled or superseded')
@@ -55,7 +56,7 @@ export function nextSliceControlView(session, now = Date.now(), { inspecting = f
     intake: agent?.requestAdmissionOwner ? 1 : 0,
     wake: session.modelResume || session.autoResume || session.intakeRetry ? 1 : 0,
     contract: agent?.stepContractsInFlight?.size ?? 0 }
-  return { schema: 1, observed_at: now, actor_id: actor.actor_id, epoch: actor.epoch,
+  return { schema: 1, observed_at: now, ready: session.ready === true, stopping: session.stopping === true, actor_id: actor.actor_id, epoch: actor.epoch,
     goal_id: planning?.goal?.goal_id, request_id: agent?.traceRequest?.id,
     generation: agent?.generation, boundary_key: anchor?.boundary_key,
     unsettled: (agent?.memory.pendingOperations?.(key)?.length ?? 0) > 0 || Boolean(agent?.batchInFlight),
@@ -65,29 +66,35 @@ export function nextSliceControlView(session, now = Date.now(), { inspecting = f
 }
 
 export async function nextSliceNativeState(agent, owner, expectedActor = owner.expectedActor ?? owner.actor) {
-  const native = await deploymentStatus(agent.rcon, { requireAllowed: true })
+  const first = await readNextSliceOwnership(agent.rcon)
   assertOwner(agent, owner)
-  if (expectedActor && (native.actor_id !== expectedActor.actor_id || native.epoch !== expectedActor.epoch)) throw new Error('Next-slice actor changed')
-  const raw = await agent.readTaskStatusRaw()
+  const final = await readNextSliceOwnership(agent.rcon)
   assertOwner(agent, owner)
-  const status = JSON.parse(String(raw))
-  const crafting = JSON.parse(String(await agent.rcon.command(agent.observationToolCommand('getCraftingStatus', {}))))
-  assertOwner(agent, owner)
-  const follow = JSON.parse(String(await agent.rcon.command(agent.observationToolCommand('getFollowStatus', {}))))
-  assertOwner(agent, owner)
-  const finalNative = await deploymentStatus(agent.rcon, { requireAllowed: true })
-  assertOwner(agent, owner)
-  if (native.actor_id !== finalNative.actor_id || native.epoch !== finalNative.epoch
-    || native.last_batch_id !== finalNative.last_batch_id || native.last_batch_seq !== finalNative.last_batch_seq) throw new Error('Next-slice native ownership changed')
-  const unknown = typeof status.task_state !== 'string' || !Number.isSafeInteger(status.queue_length)
-    || typeof status.queue_empty !== 'boolean' || typeof crafting.task_active !== 'boolean'
-    || !crafting.native_queue || typeof follow.active !== 'boolean'
+  const native = final.deployment
+  if (!expectedActor?.session || first.deployment.actor_id !== expectedActor.actor_id || first.deployment.epoch !== expectedActor.epoch
+    || first.deployment.session !== expectedActor.session || native.actor_id !== expectedActor.actor_id
+    || native.epoch !== expectedActor.epoch || native.session !== expectedActor.session) throw new Error('Next-slice native actor or session changed')
+  const status = final.operations
+  const crafting = final.crafting
+  const follow = final.follow
+  const firstMark = batchWatermark(first.operations)
+  const finalMark = batchWatermark(status)
+  const craftOwner = value => JSON.stringify([value?.task_active, value?.native_queue, value?.persisted_owner, value?.last_result])
+  const followOwner = value => JSON.stringify([value?.active, value?.state, value?.player_name, value?.target_player, value?.desired_distance, value?.updated_tick, value?.code, value?.controller_live, value?.healthy])
+  const changed = !firstMark || !finalMark || JSON.stringify(firstMark) !== JSON.stringify(finalMark)
+    || craftOwner(first.crafting) !== craftOwner(crafting) || followOwner(first.follow) !== followOwner(follow)
+  const journal = status?.admission_journal?.records
+  const unknown = !Number.isSafeInteger(firstMark?.generation) || !Number.isSafeInteger(finalMark?.generation)
+    || [first, final].some(value => typeof value.operations?.task_state !== 'string' || !Number.isSafeInteger(value.operations.queue_length)
+      || typeof value.operations.queue_empty !== 'boolean' || typeof value.crafting?.task_active !== 'boolean'
+      || !value.crafting.native_queue || typeof value.follow?.active !== 'boolean'
+      || value.operations.admission_journal?.records !== undefined && !Array.isArray(value.operations.admission_journal.records))
   const pending = agent.memory.pendingOperations?.(agent.activePlanKey()) ?? (agent.memory.pendingOperation?.(agent.activePlanKey()) ? [agent.memory.pendingOperation(agent.activePlanKey())] : [])
-  const uncertain = pending.length > 0 || agent.batchInFlight || status.admission_journal?.records?.some(row => ['admitting', 'uncertain'].includes(row.state))
-  const busy = finalNative.idle !== true || native.idle !== true || status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0
-    || Boolean(status.active_batch) || crafting.task_active || Object.keys(crafting.native_queue ?? {}).length > 0
-    || Boolean(crafting.persisted_owner) || follow.active || status.actor?.mining_state?.mining
-  return { native: finalNative, status, unknown, uncertain, busy }
+  const uncertain = changed || pending.length > 0 || agent.batchInFlight || (Array.isArray(journal) && journal.some(row => ['admitting', 'uncertain'].includes(row.state)))
+  const busy = native.idle !== true || status?.task_state !== 'idle' || status?.queue_empty !== true || status?.queue_length !== 0
+    || Boolean(status?.active_batch) || crafting?.task_active || Object.keys(crafting?.native_queue ?? {}).length > 0
+    || Boolean(crafting?.persisted_owner) || follow?.active || status?.actor?.mining_state?.mining
+  return { native, status, unknown, uncertain, busy }
 }
 
 // Shared normal/error settlement. It never executes a draft or changes the
@@ -154,14 +161,14 @@ export async function inspectNextSliceLiveness(session, { withinEvent = false, f
   const agent = session.agent
   const owner = nextSliceOwner(agent)
   const cancel = session.cancelGeneration
-  const actor = session.currentActorCorrelation?.()
+  const actor = { ...session.currentActorCorrelation?.(), session: session.lastStatus?.session }
   owner.expectedActor = actor
   owner.validate = () => {
     const view = nextSliceControlView(session, Date.now(), { inspecting: true, withinEvent })
     const live = session.currentActorCorrelation?.()
     return !session.stopping && session.ready && session.agent === agent && session.cancelGeneration === cancel
       && !view.owned && view.boundary_key === before.boundary_key
-      && live?.actor_id === actor?.actor_id && live?.epoch === actor?.epoch
+      && live?.actor_id === actor?.actor_id && live?.epoch === actor?.epoch && session.lastStatus?.session === actor.session
       && !agent.currentPendingAmendment?.()
   }
   session.nextSliceLivenessRunning = true

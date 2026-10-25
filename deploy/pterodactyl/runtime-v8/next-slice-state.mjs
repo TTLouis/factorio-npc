@@ -29,10 +29,10 @@ export function restoreNextSlice(raw, state) {
   if (!plan || plan.status !== 'COMPLETED' || step?.step_id !== raw.step_id
     || plan.steps.some(candidate => plan.execution?.step_progress?.[candidate.step_id]?.status !== 'completed')) return null
   const boundary = `next_slice|${raw.goal_id}|${plan.plan_id}|${plan.plan_version}|${step.step_id}`
-  if (raw.boundary_key !== boundary) return null
+  if (raw.boundary_key !== boundary || raw.progress_mark !== stepProgressMark(plan, step.step_id)) return null
   const owner = raw.owner && typeof raw.owner === 'object' ? raw.owner : {}
   return { schema: 1, phase: raw.phase, goal_id: raw.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
-    step_id: step.step_id, boundary_key: boundary, progress_mark: typeof raw.progress_mark === 'string' && raw.progress_mark.length <= 80 ? raw.progress_mark : stepProgressMark(plan, step.step_id),
+    step_id: step.step_id, boundary_key: boundary, progress_mark: stepProgressMark(plan, step.step_id),
     reason: String(raw.reason ?? '').slice(0, 240), failure_class: String(raw.failure_class ?? '').slice(0, 40),
     claimed_attempt: Number.isSafeInteger(raw.claimed_attempt) && raw.claimed_attempt > 0 ? raw.claimed_attempt : 0,
     owner: { request_id: finiteId(owner.request_id) ? owner.request_id : undefined,

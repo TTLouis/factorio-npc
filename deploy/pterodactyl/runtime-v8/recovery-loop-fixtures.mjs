@@ -279,6 +279,7 @@ export class FurnaceFactorio extends FakeFactorio {
   // --- admission and completion -------------------------------------------------------------------------------------------------
 
   async command(text) {
+    if (text.includes('projection="next_slice_ownership_v1"')) return super.command(text)
     if (text.includes('remote.call("autorio_operations","status")')) {
       const pending = this.pendingBatch
       return JSON.stringify({
@@ -536,7 +537,7 @@ export function recoverySession(world, { actorId = ACTOR_ID, epoch = EPOCH } = {
     lastErrorAt: 0,
     cancelGeneration: 0,
     config: { chatPlayers: { allow_all: true } },
-    lastStatus: { actor_id: actorId, epoch },
+    lastStatus: { actor_id: actorId, epoch, session: world.game.status.session },
     liveStatus: { actor_id: actorId, epoch },
     eventQueue: Promise.resolve(),
     agentLive: { phase: 'idle', activity: [], debug: undefined },

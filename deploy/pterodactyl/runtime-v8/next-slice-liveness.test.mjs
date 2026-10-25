@@ -9,6 +9,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 import { inspectNextSliceLiveness, nextSliceControlView, settleNextSliceExit } from './next-slice-liveness.mjs'
 import { recoverySession, settle } from './recovery-loop-fixtures.mjs'
+import { recoverInterruptedAgentPlan } from './supervisor.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 
 const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/run-aw-next-slice.json', import.meta.url), 'utf8'))
@@ -53,7 +54,6 @@ function awWorld(lane, provider) {
       return JSON.stringify({ found: true, entity: { unit_number: lane.pump, name: 'offshore-pump', type: 'offshore-pump', position: { x: 48, y: 0 }, direction: 4 },
         fluid_box_count: 1, actor_id: game.status.actor_id, actor_surface_index: 1, actor_force_index: 1, surface_index: 1, force_index: 1 })
     }
-    if (text.includes('autorio_crafting')) return JSON.stringify({ task_active: false, native_queue: {}, persisted_owner: null })
     return command(text)
   }
   let calls = 0
@@ -150,7 +150,7 @@ for (const change of ['cancel', 'intake', 'amendment', 'actor', 'queued', 'provi
     const reached = new Promise(resolve => { entered = resolve })
     const command = w.game.command.bind(w.game)
     w.game.command = async text => {
-      if (text.includes('autorio_crafting')) { entered(); await held }
+      if (text.includes('projection="next_slice_ownership_v1"')) { entered(); await held }
       return command(text)
     }
     const pending = inspectNextSliceLiveness(w.session)
@@ -176,7 +176,7 @@ for (const nativeState of ['busy', 'unknown', 'pending']) {
     if (nativeState === 'busy') w.game.status.idle = false
     if (nativeState === 'unknown') {
       const command = w.game.command.bind(w.game)
-      w.game.command = text => text.includes('autorio_crafting') ? '{}' : command(text)
+      w.game.command = text => text.includes('projection="next_slice_ownership_v1"') ? '{}'  : command(text)
     }
     if (nativeState === 'pending') w.memory.pendingOperations = () => [{ operation_id: 'unsettled' }]
     const result = await inspectNextSliceLiveness(w.session)
@@ -416,3 +416,319 @@ test('unknown supervisor-event errors stay classified guard errors at the shared
   assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 0)
   assert.equal(w.calls(), 0)
 })
+
+test('native batch watermark advancing during reconciliation refuses an orphan recovery claim', async () => {
+  const w = orphanSession()
+  const command = w.game.command.bind(w.game)
+  w.game.command = async text => {
+    if (text.includes('projection="next_slice_ownership_v1"')) w.game.batchId++
+    return command(text)
+  }
+  await inspectNextSliceLiveness(w.session)
+  await settle(w.session)
+  assert.equal(w.memory.pauseRecord(w.key).pause_class, 'guard')
+  assert.match(w.memory.pauseRecord(w.key).pause_reason, /next_slice_native_unproven/)
+  assert.equal(w.session.modelResume, null)
+  assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 0)
+  assert.equal(w.calls(), 0)
+})
+
+test('duplicate fired callback cannot consume the next boundary wake or replenish an allowance', async () => {
+  const w = awWorld(fixture.lanes[0], () => { throw new Error('provider_semantic_alignment_failed: offline model failure') })
+  const { session } = recoverySession({ ...w, trace: w.rows }, { actorId: w.game.status.actor_id, epoch: w.game.status.epoch })
+  try {
+    await session.queueEvent(async () => null)
+    await settle(session)
+    const first = session.modelResume
+    clearTimeout(first.timer); first.timer = null
+    const one = session.fireModelResume(first.token)
+    const duplicate = session.fireModelResume(first.token)
+    await Promise.all([one, duplicate])
+    await settle(session)
+    assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 1)
+    assert.ok(session.modelResume)
+    assert.notEqual(session.modelResume.token, first.token)
+    assert.equal(w.memory.pauseRecord(w.key).pause_class, 'model_recoverable')
+  } finally { stopWake(session) }
+})
+test('recovery preload cannot cancel real B pre-Base intake while generation/trace still match', async () => {
+  const w = orphanSession()
+  let releaseA, enterA, releaseB, enterB
+  const aHeld = new Promise(resolve => { releaseA = resolve })
+  const aEntered = new Promise(resolve => { enterA = resolve })
+  const bHeld = new Promise(resolve => { releaseB = resolve })
+  const bEntered = new Promise(resolve => { enterB = resolve })
+  const load = w.agent.loadPersistentState.bind(w.agent)
+  let first = true
+  w.agent.loadPersistentState = async () => { if (first) { first = false; enterA(); await aHeld }; return load() }
+  const read = w.agent.readInteractionTaskStatus.bind(w.agent)
+  w.agent.readInteractionTaskStatus = async () => { const result = await read(); enterB(); await bHeld; return result }
+  w.agent.interactionDecisionProvider = undefined
+  w.agent.interactionProvider = async () => ({ content: JSON.stringify({ intent: 'chat_only', queue_conflict: false, reply: 'Here.' }) })
+  const pending = recoverInterruptedAgentPlan(w.agent, 'offline_startup', {})
+  await aEntered
+  const runningB = w.agent.request('How is the factory?', { sender: 'Louis' })
+  await bEntered
+  const newer = w.agent.requestAdmissionOwner
+  const trace = w.agent.traceRequest
+  const generation = w.agent.generation
+  const before = w.memory.snapshot()
+  const messages = structuredClone(w.agent.messages)
+  const base = structuredClone(w.agent.baseMessages)
+  const budgets = [w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining]
+  try {
+    releaseA()
+    const result = await pending.catch(error => ({ recovered: 'threw', message: error.message }))
+    assert.equal(result.recovered, false, JSON.stringify({ result, offline_provider_calls: w.calls(), newer_owner_preserved: w.agent.requestAdmissionOwner === newer }))
+    assert.equal(w.agent.requestAdmissionOwner, newer)
+    assert.equal(w.agent.traceRequest, trace)
+    assert.equal(w.agent.generation, generation)
+    assert.deepEqual(w.memory.snapshot(), before)
+    assert.deepEqual(w.agent.messages, messages)
+    assert.deepEqual(w.agent.baseMessages, base)
+    assert.deepEqual([w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining], budgets)
+    assert.equal(w.calls(), 0)
+  } finally { releaseB(); await runningB.catch(() => undefined); stopWake(w.session) }
+})
+
+for (const disposition of ['return', 'error']) {
+  test(`originating A ${disposition} cannot adopt real B held before Base generation/trace advance`, async () => {
+    const w = orphanSession()
+    startAuthoring(w)
+    let finishA, enterA, finishB, enterB
+    const aHeld = new Promise(resolve => { finishA = resolve })
+    const aEntered = new Promise(resolve => { enterA = resolve })
+    const bHeld = new Promise(resolve => { finishB = resolve })
+    const bEntered = new Promise(resolve => { enterB = resolve })
+    w.agent.runTurnRedriving = async () => { enterA(); await aHeld; if (disposition === 'error') throw new Error('old A failure'); return { chatMessage: 'old A return' } }
+    const runningA = w.agent.runGuarded()
+    const rejection = disposition === 'error' ? assert.rejects(runningA, /old A failure/) : undefined
+    await aEntered
+    const read = w.agent.readInteractionTaskStatus.bind(w.agent)
+    w.agent.readInteractionTaskStatus = async () => { const result = await read(); enterB(); await bHeld; return result }
+    w.agent.interactionDecisionProvider = undefined
+    w.agent.interactionProvider = async () => ({ content: JSON.stringify({ intent: 'chat_only', queue_conflict: false, reply: 'Here.' }) })
+    const runningB = w.agent.request('How is the factory?', { sender: 'Louis' })
+    await bEntered
+    const token = w.agent.requestAdmissionOwner
+    assert.equal(token.phase, 'intake')
+    const trace = w.agent.traceRequest
+    const generation = w.agent.generation
+    const messages = structuredClone(w.agent.messages)
+    const base = structuredClone(w.agent.baseMessages)
+    const budgets = [w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining]
+    const memory = w.memory.snapshot()
+    try {
+      finishA()
+      if (rejection) await rejection; else await runningA
+      assert.equal(w.agent.requestAdmissionOwner, token)
+      assert.equal(w.agent.traceRequest, trace)
+      assert.equal(w.agent.generation, generation)
+      assert.deepEqual(w.agent.messages, messages)
+      assert.deepEqual(w.agent.baseMessages, base)
+      assert.deepEqual([w.agent.reasoningBudgetOverride, w.agent.observationBudgetOverride, w.agent.observationBudgetRemaining], budgets)
+      assert.deepEqual(w.memory.snapshot(), memory)
+      assert.equal(w.calls(), 0)
+    } finally {
+      finishB()
+      await runningB.catch(() => undefined)
+      stopWake(w.session)
+    }
+  })
+}
+for (const mark of ['missing', 'malformed', 'inconsistent']) {
+  test(`restored ${mark} progress mark cannot replenish an exhausted completed boundary`, async () => {
+    const w = orphanSession()
+    await inspectNextSliceLiveness(w.session)
+    await settle(w.session)
+    stopWake(w.session)
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const allowance = w.memory.autoResumeAllowance(w.key)
+      assert.equal(w.memory.recordAutoResumeStarted(w.key, { ...allowance, request_id: `spent_${attempt}` }).recorded, true)
+    }
+    const snapshot = w.memory.snapshot()
+    const run = snapshot.planning_states[0].state.run
+    if (mark === 'missing') delete run.next_slice.progress_mark
+    if (mark === 'malformed') run.next_slice.progress_mark = { forged: true }
+    if (mark === 'inconsistent') run.next_slice.progress_mark = 'completed|999|999'
+    w.memory.restore(snapshot)
+    const claimed = w.memory.recordAutoResumeStarted(w.key, { ...w.memory.autoResumeAllowance(w.key), request_id: 'forbidden_third' })
+    assert.equal(claimed.recorded, false)
+    assert.equal(w.memory.planningState(w.key).run.next_slice_fault, true)
+    assert.equal(w.memory.planningState(w.key).run.auto_resume.goal_total, 2)
+    assert.equal(w.memory.autoResumeAllowance(w.key).limit_kind, 'state')
+    assert.equal(w.calls(), 0)
+  })
+}
+for (const transition of ['batch_pulse', 'crafting', 'follow', 'session', 'missing_projection']) {
+  test(`protocol-real atomic ownership refuses late ${transition} without wake or reconciled acknowledgement`, async () => {
+    const w = orphanSession()
+    const command = w.game.command.bind(w.game)
+    let projections = 0
+    let deploymentReads = 0
+    let changed = false
+    const mutate = () => {
+      if (changed) return
+      changed = true
+      if (transition === 'batch_pulse') w.game.batchId++
+      if (transition === 'crafting') w.game.craftingStatus = { task_active: true, native_queue: { coal: 1 }, persisted_owner: { operation_id: 8 } }
+      if (transition === 'follow') w.game.followStatus = { active: true, state: 'following', controller_live: true }
+      if (transition === 'session') w.game.status.session = 'replacement-native-session-same-actor-and-epoch'
+    }
+    w.game.command = async text => {
+      if (text.includes('projection="next_slice_ownership_v1"')) {
+        if (++projections === 2) {
+          mutate()
+          if (transition === 'missing_projection') return '{}'
+        }
+      } else {
+        // The same protocol-real fault also exercises the immutable earlier
+        // sequential reader: task pulse after task read, craft after craft
+        // read, follow/session after follow read. No nonexistent guard fields.
+        if (text.includes('remote.call("sgluna_deployment","status")')) deploymentReads++
+        if (transition === 'batch_pulse' && text.includes('remote.call("autorio_crafting","status")')) mutate()
+        if (transition === 'crafting' && text.includes('remote.call("autorio_follow","status")')) mutate()
+        if (['follow', 'session'].includes(transition) && deploymentReads === 2) mutate()
+        if (text.includes('remote.call("autorio_crafting","status")') && w.game.craftingStatus) return JSON.stringify(w.game.craftingStatus)
+        if (text.includes('remote.call("autorio_follow","status")') && w.game.followStatus) return JSON.stringify(w.game.followStatus)
+      }
+      return command(text)
+    }
+    try {
+      const result = await inspectNextSliceLiveness(w.session)
+      await settle(w.session)
+      assert.equal(changed, true)
+      assert.equal(w.session.modelResume, null)
+      assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 0)
+      assert.equal(w.calls(), 0)
+      assert.notEqual(result.native_reconciled, true)
+      assert.equal(w.session.nextSliceSettlement, undefined)
+    } finally { stopWake(w.session) }
+  })
+}
+
+for (const takeover of ['new_pretrace_intake', 'runtime_replacement', 'native_inconsistent']) {
+  test(`actual ownership publication refuses stale settlement acknowledgement after ${takeover}`, async t => {
+    const w = orphanSession()
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'next-slice-ack-race-'))
+    w.session.root = root
+    t.after(async () => { stopWake(w.session); await w.session.publishNextSliceControl(); await fsp.rm(root, { recursive: true, force: true }) })
+    await w.session.publishNextSliceControl()
+    const initial = w.session.nextSliceControlView()
+    const request = { schema: 1, request_id: 'race_request', instance_id: initial.instance_id, actor_id: initial.actor_id,
+      epoch: initial.epoch, goal_id: initial.goal_id, boundary_key: initial.boundary_key, requested_at: Date.now() }
+    await fsp.writeFile(path.join(root, '.sgluna/next-slice-settle-request.json'), JSON.stringify(request))
+    let release, enter
+    const held = new Promise(resolve => { release = resolve })
+    const entered = new Promise(resolve => { enter = resolve })
+    const command = w.game.command.bind(w.game)
+    let projections = 0
+    w.game.command = async text => {
+      if (text.includes('projection="next_slice_ownership_v1"') && ++projections === 2) { enter(); await held }
+      return command(text)
+    }
+    w.session.pollControllerLiveness()
+    await entered
+    let replacement
+    if (takeover === 'new_pretrace_intake') w.agent.requestAdmissionOwner = { phase: 'intake', held: true }
+    if (takeover === 'runtime_replacement') {
+      replacement = awWorld(fixture.lanes[0], () => { throw new Error('Unexpected replacement provider call') })
+      replacement.agent.controllerBusyCount = 1
+      w.session.agent = replacement.agent
+    }
+    if (takeover === 'native_inconsistent') w.game.craftingStatus = { task_active: true, native_queue: { coal: 1 }, persisted_owner: { operation_id: 9 } }
+    const state = w.memory.snapshot()
+    const trace = w.agent.traceRequest
+    release()
+    await settle(w.session)
+    await w.session.publishNextSliceControl()
+    const view = JSON.parse(await fsp.readFile(path.join(root, '.sgluna/controller-state.json')))
+    assert.equal(view.settlement, null)
+    assert.equal(w.session.modelResume, null)
+    assert.equal(w.calls(), 0)
+    if (takeover !== 'native_inconsistent') {
+      assert.deepEqual(w.memory.snapshot(), state)
+      assert.equal(w.agent.traceRequest, trace)
+      assert.equal(view.owned, true)
+    }
+    if (takeover === 'runtime_replacement') assert.notEqual(view.instance_id, initial.instance_id)
+    if (takeover === 'native_inconsistent') assert.equal(w.memory.pauseRecord(w.key).pause_class, 'guard')
+  })
+}
+
+test('missing restored episode and later draft IDs retain the completed-predecessor ledger allowance', async () => {
+  const w = orphanSession()
+  await inspectNextSliceLiveness(w.session); await settle(w.session); stopWake(w.session)
+  for (let attempt = 1; attempt <= 2; attempt++) assert.equal(w.memory.recordAutoResumeStarted(w.key,
+    { ...w.memory.autoResumeAllowance(w.key), request_id: `spent_${attempt}` }).recorded, true)
+  const legacy = w.memory.planByNpc.get(w.key)
+  legacy.status = 'active'
+  w.memory.ensurePlanningDraft(w.key, legacy)
+  const snapshot = w.memory.snapshot()
+  delete snapshot.planning_states[0].state.run.next_slice
+  w.memory.restore(JSON.parse(JSON.stringify(snapshot)))
+  const allowance = w.memory.autoResumeAllowance(w.key)
+  assert.ok(allowance.plan_id.endsWith('_p7'))
+  assert.equal(allowance.step_attempts, 2)
+  assert.equal(allowance.goal_attempts, 2)
+  assert.equal(allowance.limit_kind, 'step')
+  assert.equal(w.memory.recordAutoResumeStarted(w.key, { ...allowance, request_id: 'forbidden_draft_reset' }).recorded, false)
+})
+test('a post-completion ledger mark mismatch cannot manufacture verified progress', async () => {
+  const w = orphanSession()
+  await inspectNextSliceLiveness(w.session); await settle(w.session); stopWake(w.session)
+  const first = w.memory.autoResumeAllowance(w.key)
+  assert.equal(w.memory.recordAutoResumeStarted(w.key, { ...first, request_id: 'spent_one' }).recorded, true)
+  w.memory.planningState(w.key).run.auto_resume.steps[0].mark = 'forged_completed_progress'
+  const allowance = w.memory.autoResumeAllowance(w.key)
+  assert.equal(allowance.limit_kind, 'state')
+  assert.equal(allowance.step_attempts, 1)
+  assert.equal(w.memory.recordAutoResumeStarted(w.key, { ...allowance, request_id: 'forbidden_progress_reset' }).recorded, false)
+})
+test('real verified terminal progress still refreshes only the terminal allowance and keeps the goal total', async () => {
+  const w = orphanSession()
+  await inspectNextSliceLiveness(w.session); await settle(w.session); stopWake(w.session)
+  const allowance = w.memory.autoResumeAllowance(w.key)
+  const plan = w.memory.planningState(w.key).plans.at(-1)
+  w.memory.planningState(w.key).run.auto_resume = { goal_id: allowance.goal_id, goal_total: 1,
+    steps: [{ step_key: allowance.step_key, plan_id: allowance.plan_id, plan_version: allowance.plan_version,
+      step_id: allowance.step_id, attempts: 1, mark: 'active|0|0', last_at: plan.execution.step_progress[allowance.step_id].completed_at - 1 }] }
+  const progressed = w.memory.autoResumeAllowance(w.key)
+  assert.equal(progressed.progressed, true)
+  assert.equal(progressed.step_attempts, 0)
+  assert.equal(progressed.goal_attempts, 1)
+  assert.equal(w.memory.recordAutoResumeStarted(w.key, { ...progressed, request_id: 'verified_terminal_boundary' }).recorded, true)
+  assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 2)
+})
+for (const cut of ['before_claim', 'after_claim', 'request_owned']) {
+  test(`restart at ${cut} automatically continues with the original boundary budget and no draft replay`, async () => {
+    const old = orphanSession()
+    await inspectNextSliceLiveness(old.session); await settle(old.session); stopWake(old.session)
+    if (cut !== 'before_claim') {
+      const allowance = old.memory.autoResumeAllowance(old.key)
+      old.memory.recordAutoResumeStarted(old.key, { ...allowance, request_id: 'lost_worker' })
+      if (cut === 'request_owned') {
+        old.memory.dispatchPlanningEvent(old.key, { type: 'RUN_RESUMED', now: Date.now(), source: 'runtime', goal_id: allowance.goal_id, reason: 'lost_worker' })
+        old.memory.recordNextSliceTransition(old.key, { phase: 'request_owned', boundary_key: allowance.boundary_key, owner: { request_id: 'lost_worker' } })
+      }
+    }
+    const snapshot = JSON.parse(JSON.stringify(old.memory.snapshot()))
+    const valid = planReply({ plan: ['Gather ten coal after restart'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
+    const w = awWorld(fixture.lanes[0], () => valid)
+    w.memory.restore(snapshot)
+    const before = structuredClone(w.memory.planningState(w.key).plans)
+    assert.deepEqual(JSON.parse(JSON.stringify(before)), fixture.lanes[0].snapshot.planning_states[0].state.plans)
+    const { session } = recoverySession({ ...w, trace: w.rows }, { actorId: w.game.status.actor_id, epoch: w.game.status.epoch })
+    try {
+      await session.queueEvent(async () => null); await settle(session)
+      const pending = session.modelResume
+      assert.ok(pending)
+      clearTimeout(pending.timer); pending.timer = null
+      await session.fireModelResume(pending.token); await settle(session)
+      assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, cut === 'before_claim' ? 1 : 2)
+      assert.deepEqual(w.memory.planningState(w.key).plans.slice(0, 5), before)
+      assert.equal(w.game.mutations.length, 1)
+      assert.equal(w.geometryReads(), 0)
+    } finally { stopWake(session) }
+  })
+}

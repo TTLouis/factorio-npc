@@ -167,7 +167,7 @@ function orphanInput() {
   Object.assign(input.canonical.plans[0], { status: 'COMPLETED', execution: { step_progress: { s: { status: 'completed' } } } })
   Object.assign(input.native, { epoch: 3, operations: { task_state: 'idle', queue_empty: true, queue_length: 0 },
     crafting_status: { task_active: false, native_queue: {} }, follow: { active: false } })
-  input.controller = { schema: 1, instance_id: 'runtime-instance', observed_at: input.now,
+  input.controller = { schema: 1, ready: true, stopping: false, instance_id: 'runtime-instance', observed_at: input.now,
     applicable: true, boundary_key: `next_slice|${goalId}|p|1|s`, goal_id: goalId, actor_id: 6, epoch: 3,
     run_paused: false, ownership: { worker: 0, provider: 0, queued: 0, event: 0, intake: 0, wake: 0, condition: 0, contract: 0 } }
   return input
@@ -187,7 +187,7 @@ test('runner distinguishes slow/queued/native work, missing or stale observation
     const input = orphanInput(); input.controller.ownership[key] = 1
     assert.equal(trialStopDecision(input).action, 'continue', key)
   }
-  for (const change of ['absent', 'old', 'future', 'actor', 'epoch', 'goal', 'boundary', 'shape']) {
+  for (const change of ['absent', 'old', 'future', 'actor', 'epoch', 'goal', 'boundary', 'shape', 'not_ready', 'stopping']) {
     const input = orphanInput()
     if (change === 'absent') delete input.controller
     if (change === 'old') input.controller.observed_at -= 10001
@@ -197,6 +197,8 @@ test('runner distinguishes slow/queued/native work, missing or stale observation
     if (change === 'goal') input.controller.goal_id = 'other'
     if (change === 'boundary') input.controller.boundary_key = 'other'
     if (change === 'shape') delete input.controller.ownership.provider
+    if (change === 'not_ready') input.controller.ready = false
+    if (change === 'stopping') input.controller.stopping = true
     assert.equal(trialStopDecision(input).reason, 'next_slice_controller_ownership_unknown', change)
   }
   const busy = orphanInput(); busy.native.follow.active = true
