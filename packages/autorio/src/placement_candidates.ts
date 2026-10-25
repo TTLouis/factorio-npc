@@ -126,6 +126,8 @@ declare const storage: {
   sgluna_placement_candidate_next_id?: number
   sgluna_fluid_preservation_claims?: Record<string, NativeFluidGuard>
   sgluna_fluid_preservation_claims_initialized?: boolean
+  sgluna_fluid_preservation_claim_inventory?: Record<string, any>
+  sgluna_fluid_preservation_claim_count?: number
 }
 
 function candidate_sets() {
@@ -919,6 +921,38 @@ function native_fact_equal(left: any, right: any): boolean {
   const keys = Object.keys(left)
   return keys.length === Object.keys(right).length && keys.every(key => native_fact_equal(left[key as string], right[key as string]))
 }
+function copy_native_fact(value: any): any {
+  if (!value || typeof value !== 'object') return value
+  const result: Record<string, any> = {}
+  for (const raw of Object.keys(value)) {
+    const key = raw as string
+    result[key] = copy_native_fact(value[key])
+  }
+  return result
+}
+function claim_header(guard: NativeFluidGuard) {
+  if (!guard?.join || !valid_fluid_owner(guard.owner) || !prototypes.entity[guard.join.entity_name]) return undefined
+  const position = snap_placement_center(prototypes.entity[guard.join.entity_name], guard.join.position, guard.join.direction)
+  return { operation_key: guard.operation_key, signature: guard.signature, owner: { ...guard.owner }, candidate_set_id: guard.candidate_set_id,
+    candidate_id: guard.candidate_id, surface_index: guard.join.surface_index, force_index: guard.join.force_index,
+    entity_name: guard.join.entity_name, position, direction: guard.join.direction,
+    footprint: placement_footprint(prototypes.entity[guard.join.entity_name], position, guard.join.direction).world_box }
+}
+function claim_registry_valid() {
+  const claims = storage.sgluna_fluid_preservation_claims ?? {}
+  const inventory = storage.sgluna_fluid_preservation_claim_inventory ?? {}
+  const keys = Object.keys(claims)
+  if (!storage.sgluna_fluid_preservation_claims_initialized) return keys.length === 0 && Object.keys(inventory).length === 0
+    && (storage.sgluna_fluid_preservation_claim_count === undefined || storage.sgluna_fluid_preservation_claim_count === 0)
+  const count = storage.sgluna_fluid_preservation_claim_count
+  return typeof count === 'number' && count >= 1 && count <= 64 && count === math.floor(count)
+    && keys.length === count && Object.keys(inventory).length === count && keys.every(raw => {
+      const key = raw as string
+      const header = claim_header(claims[key])
+      return !!header && header.operation_key === key && !!inventory[key] && native_fact_equal(header, inventory[key].header)
+        && native_fact_equal(claims[key], inventory[key].guard_facts)
+    })
+}
 
 function protected_geometry(actor: ControlledActor, ids: number[]) {
   const pending = [...ids]
@@ -940,6 +974,7 @@ function protected_geometry(actor: ControlledActor, ids: number[]) {
 function preservation_guard_matches(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate) {
   const guard = candidate.preservation_guard
   if (!guard) return true
+  if (!claim_registry_valid()) return false
   if (!native_fact_equal(guard, storage.sgluna_fluid_preservation_claims?.[guard.operation_key]) || !current_fluid_owner(actor, guard.owner)) return false
   if (!actor.surface.can_place_entity({ name: set.entity_name, position: candidate.position, direction: candidate.direction,
     force: actor.force, ...placement_check_args(set.entity_name) })) return false
@@ -963,6 +998,7 @@ function native_admission_baseline() {
 // Harness-only native claim. Unknown/bulk geometry cannot be frozen. A claim
 // cannot be rebound to another operation or renewed with a changed baseline.
 export function freeze_fluid_preservation_candidate(actor: ControlledActor | undefined, candidate_set_id: string, candidate_id: string, operation_key: string, protected_ids: number[], context: { signature: string, owner: FluidPreservationOwner }) {
+  if (!claim_registry_valid()) return { ok: false, code: 'preservation_claim_history_missing' }
   if (!actor?.is_valid || typeof operation_key !== 'string' || operation_key.length < 1 || operation_key.length > 240
     || !Array.isArray(protected_ids) || protected_ids.length < 1 || protected_ids.length > 8
     || protected_ids.some(id => typeof id !== 'number' || id < 1 || math.floor(id) !== id)
@@ -992,6 +1028,12 @@ export function freeze_fluid_preservation_candidate(actor: ControlledActor | und
   claims[operation_key] ??= candidate.preservation_guard
   if (!native_fact_equal(claims[operation_key], candidate.preservation_guard)) return { ok: false, code: 'preservation_guard_already_claimed' }
   storage.sgluna_fluid_preservation_claims = claims
+  storage.sgluna_fluid_preservation_claim_inventory ??= {}
+  if (!storage.sgluna_fluid_preservation_claim_inventory[operation_key]) {
+    storage.sgluna_fluid_preservation_claim_inventory[operation_key] = { header: claim_header(candidate.preservation_guard),
+      guard_facts: copy_native_fact(candidate.preservation_guard) }
+    storage.sgluna_fluid_preservation_claim_count = (storage.sgluna_fluid_preservation_claim_count ?? 0) + 1
+  }
   storage.sgluna_fluid_preservation_claims_initialized = true
   return { ok: true, preservation_join: { ...candidate.preservation_guard.join, version: 4,
     operation_key, signature: context.signature, owner: candidate.preservation_guard.owner,
@@ -1006,14 +1048,17 @@ function placement_claims(actor: ControlledActor, entity_name: string, x?: numbe
   for (const guard of claims) {
     if (guard.join.surface_index !== actor.surface.index) continue
     if (x === undefined || y === undefined) { if (fluidboxes.length > 0) result.push(guard); continue }
-    const own = placement_footprint(prototypes.entity[entity_name], { x, y }, direction).world_box
-    const held = placement_footprint(prototypes.entity[guard.join.entity_name], guard.join.position, guard.join.direction).world_box
+    const position = snap_placement_center(prototypes.entity[entity_name], { x, y }, direction)
+    const own = placement_footprint(prototypes.entity[entity_name], position, direction).world_box
+    const heldPosition = snap_placement_center(prototypes.entity[guard.join.entity_name], guard.join.position, guard.join.direction)
+    const held = placement_footprint(prototypes.entity[guard.join.entity_name], heldPosition, guard.join.direction).world_box
     if (own.left_top.x < held.right_bottom.x && own.right_bottom.x > held.left_top.x
       && own.left_top.y < held.right_bottom.y && own.right_bottom.y > held.left_top.y) result.push(guard)
   }
   return result
 }
 export function placement_preservation_queue_binding(actor: ControlledActor, entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }) {
+  if (!claim_registry_valid()) return { required: true }
   const claims = placement_claims(actor, entity_name, x, y, direction)
   if (storage.sgluna_fluid_preservation_claims_initialized && !Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length) return { required: true }
   if (!claims.length) return { required: false }
@@ -1028,6 +1073,7 @@ export function placement_preservation_queue_binding(actor: ControlledActor, ent
 }
 export function placement_preservation_execution_allowed(actor: ControlledActor, entity_name: string, x: number | undefined, y: number | undefined, direction: number | undefined,
   proof: { candidate_set_id: string, candidate_id: string } | undefined, binding: FluidQueuedBinding | undefined, status: any) {
+  if (!claim_registry_valid()) return false
   const claims = placement_claims(actor, entity_name, x, y, direction)
   if (storage.sgluna_fluid_preservation_claims_initialized && !Object.keys(storage.sgluna_fluid_preservation_claims ?? {}).length) return false
   if (!claims.length) return binding === undefined

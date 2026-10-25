@@ -5,6 +5,7 @@ import { new_basic_operation_controller } from './basic_operations'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_task_manager } from './task_manager'
 import { new_operation_admission } from './operation_admission'
+import { placement_footprint, snap_placement_center } from './placement_geometry'
 
 // Geometry fixtures still establish the native water-read prerequisite.
 function observe_water(actor: any) {
@@ -190,7 +191,8 @@ describe('placement candidates that join a live fluid port', () => {
     const heldPrototype = world[100].fluidbox.get_prototype
     world[100].fluidbox.get_prototype = (index: number) => ({ ...heldPrototype(index), volume: 100 })
     ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
-    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, collision_box: { left_top: { x: -1.29, y: -0.79 }, right_bottom: { x: 1.29, y: 0.79 } },
+      items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
     const actor = actor_at(10, 20)
     actor.character = { valid: true }
     actor.status_snapshot = () => ({ actor_id: 18, kind: 'standalone_character' })
@@ -235,7 +237,32 @@ describe('placement candidates that join a live fluid port', () => {
       const task = manager.player_state.parameters_place_entity!
       expect(placement_preservation_execution_allowed(actor, task.entity_name, task.position?.x, task.position?.y, task.direction,
         task.placement_candidate, task.preservation_binding, manager.get_status_snapshot())).toBe(true)
-      for (const fault of ['epoch', 'session', 'goal', 'semantic_step', 'signature', 'operation', 'generation', 'proof_omission', 'binding_omission', 'missing_journal']) {
+      const tiny = { name: 'tiny-box', type: 'container', tile_width: 1, tile_height: 1,
+        collision_box: { left_top: { x: -0.05, y: -0.05 }, right_bottom: { x: 0.05, y: 0.05 } },
+        items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+      ;(globalThis as any).prototypes.entity['tiny-box'] = tiny
+      const offGrid = { x: candidate.position.x + 1.45, y: candidate.position.y + 0.5 }
+      const heldBox = placement_footprint((globalThis as any).prototypes.entity.boiler, candidate.position, candidate.direction).world_box
+      const rawBox = placement_footprint(tiny, offGrid, 0).world_box
+      const snappedBox = placement_footprint(tiny, snap_placement_center(tiny, offGrid, 0), 0).world_box
+      expect(rawBox.left_top.x).toBeGreaterThan(heldBox.right_bottom.x)
+      expect(snappedBox.left_top.x).toBeLessThan(heldBox.right_bottom.x)
+      expect(basic.submit_placement('tiny-box', offGrid.x, offGrid.y, 0)).toBe(false)
+      // Inject the same legacy/raw queued task to exercise pre-clear residual
+      // detection. A late blocker would require clearing at the snapped tile.
+      ;(globalThis as any).storage = JSON.parse(queued)
+      const rawTask = manager.player_state.parameters_place_entity!
+      rawTask.entity_name = 'tiny-box'; rawTask.position = offGrid; rawTask.direction = 0
+      rawTask.placement_candidate = undefined; rawTask.preservation_binding = undefined
+      const query = vi.fn(() => [])
+      actor.surface.find_entities_filtered = query
+      actor.surface.can_place_entity = () => false
+      runtime.state_placing(actor)
+      expect(basic.status().last_result).toMatchObject({ code: 'placement_candidate_unavailable', completed: false })
+      expect(query).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled()
+      actor.surface.find_entities_filtered = () => Object.values(world)
+      actor.surface.can_place_entity = () => true
+      for (const fault of ['epoch', 'session', 'goal', 'semantic_step', 'signature', 'operation', 'generation', 'proof_omission', 'binding_omission', 'missing_journal', 'registry_whole_loss', 'registry_inventory_loss', 'registry_count_loss']) {
         ;(globalThis as any).storage = JSON.parse(queued)
         nativeEpoch = 3; nativeSession = 'native-session'
         const held = manager.player_state.parameters_place_entity!
@@ -249,6 +276,9 @@ describe('placement candidates that join a live fluid port', () => {
         if (fault === 'proof_omission') held.placement_candidate = undefined
         if (fault === 'binding_omission') held.preservation_binding = undefined
         if (fault === 'missing_journal') (globalThis as any).storage.sgluna_operation_admissions = []
+        if (fault === 'registry_whole_loss') (globalThis as any).storage.sgluna_fluid_preservation_claims = {}
+        if (fault === 'registry_inventory_loss') delete (globalThis as any).storage.sgluna_fluid_preservation_claim_inventory
+        if (fault === 'registry_count_loss') delete (globalThis as any).storage.sgluna_fluid_preservation_claim_count
         runtime.state_placing(actor)
         expect(basic.status().last_result, fault).toMatchObject({ code: 'placement_candidate_unavailable', completed: false })
         expect(create, fault).not.toHaveBeenCalled(); expect(remove, fault).not.toHaveBeenCalled()
@@ -263,6 +293,22 @@ describe('placement candidates that join a live fluid port', () => {
       expect(basic.status().last_result).toMatchObject({ code: 'placement_candidate_unavailable', completed: false })
       expect(create).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled()
       expect(placement_candidate_matches(actor, { candidate_set_id: set.candidate_set_id, candidate_id: candidate.id }, 'boiler', candidate.position.x, candidate.position.y, candidate.direction)).toBe(false)
+      delete world[101]
+      // A second disjoint genuine claim makes partial loss distinguishable
+      // from the already-covered entirely-empty registry case.
+      world[102] = live_entity(102, 'offshore-pump', [{ filter: 'water', ports: [
+        { position: { x: 48.5, y: 20.5 }, target_position: { x: 49.5, y: 20.5 }, flow_direction: 'output' },
+      ] }])
+      Object.assign(world[102], { type: 'offshore-pump', direction: 0, position: { x: 48.5, y: 20.5 }, fluids_count: 1, get_fluid: () => undefined })
+      world[102].fluidbox.get_capacity = () => 100
+      world[102].fluidbox.get_prototype = () => ({ index: 1, volume: 100, production_type: 'output', filter: { name: 'water' } })
+      const second: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 102 } })
+      expect(freeze_fluid_preservation_candidate(actor, second.candidate_set_id, second.candidates[0].id, 'req/second', [102], context)).toMatchObject({ ok: true })
+      expect(Object.keys((globalThis as any).storage.sgluna_fluid_preservation_claims)).toHaveLength(2)
+      delete (globalThis as any).storage.sgluna_fluid_preservation_claims['req/first']
+      expect(Object.keys((globalThis as any).storage.sgluna_fluid_preservation_claims)).toHaveLength(1)
+      expect(basic.submit_placement('boiler', candidate.position.x, candidate.position.y, candidate.direction)).toBe(false)
+      expect(create).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled()
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit']; (globalThis as any).remote = originalRemote }
   })
 
