@@ -554,7 +554,9 @@ test('shelf pickup runs a complete search for the next shelf node and logs Jev\'
 
 test('the shelf pickup and ceiling hooks are wired in the live loop (not only implemented)', async () => {
   const source = await fsp.readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'npc-agent-loop.mjs'), 'utf8')
-  const wake = source.indexOf("route: 'next_shelf_slice'")
+  // The same route also names earlier wake classification; anchor the actual emitted wake.
+  const event = source.indexOf("await this.traceEvent('planner.wake'", source.indexOf('const sliceClose = await this.planSliceCloseWake'))
+  const wake = source.indexOf("route: 'next_shelf_slice'", event)
   const hook = source.indexOf('await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion)')
   assert.ok(wake > 0 && hook > wake && hook - wake < 400, 'the shelf pickup search runs right after the next_shelf_slice wake')
   assert.match(source, /\[SKILL_OFFERS_PREFIX\]: \(\) => skillOffersContext\(this\)/)

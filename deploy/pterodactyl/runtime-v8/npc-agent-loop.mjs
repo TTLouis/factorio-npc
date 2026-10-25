@@ -10130,7 +10130,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const amendment = this.pendingInteractionAmendment
     const current = () => {
       this.assertCheckpointOwnerIdentity(owner)
-      if (this.requestAdmissionOwner !== intake || this.pendingInteractionAmendment !== amendment || this.currentPendingAmendment()) throw new AgentLoopError('Prepared operation cancelled or superseded')
+      if (this.requestAdmissionOwner !== intake || this.pendingInteractionAmendment !== amendment) throw new AgentLoopError('Prepared operation cancelled or superseded')
     }
     const planning = this.memory.planningState?.(key)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
@@ -11812,8 +11812,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requestTrace = this.traceRequest
     const requestId = requestTrace?.id
     let failureOwner = decisionBudgetOwner(this)
-    const failureIntake = this.requestAdmissionOwner
-    const failureAmendment = this.pendingInteractionAmendment
+    let failureIntake = this.requestAdmissionOwner
+    let failureAmendment = this.pendingInteractionAmendment
     const settlementOrigin = nextSliceOwner(this)
     const settlementOwner = () => ({ ...settlementOrigin, boundary: completedSliceAnchor(this.memory.planningState?.(this.activePlanKey()))?.boundary_key })
     // Conversation/role restages keep this request. Reset/cancel or a new trace
@@ -11936,6 +11936,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // Our own synchronous reset intentionally advances generation and lineage.
         // Keep ownership of this failure, then fence the awaited trace below again.
         failureOwner = decisionBudgetOwner(this)
+        failureIntake = this.requestAdmissionOwner
+        failureAmendment = this.pendingInteractionAmendment
       }
       if (requestTrace) {
         await this.traceEvent('request.failed', {
@@ -17686,17 +17688,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const sendOwner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
       const sendIntake = this.requestAdmissionOwner
       const sendAmendment = this.pendingInteractionAmendment
+      const sendBatchInFlight = this.batchInFlight
       const operationOwnerKey = this.activePlanKey()
       const assertSendOwner = pending => {
         this.assertCheckpointOwnerIdentity(sendOwner)
-        if (this.requestAdmissionOwner !== sendIntake || this.pendingInteractionAmendment !== sendAmendment || this.currentPendingAmendment()) throw new AgentLoopError('Operation admission cancelled or superseded')
+        if (this.requestAdmissionOwner !== sendIntake || this.pendingInteractionAmendment !== sendAmendment) throw new AgentLoopError('Operation admission cancelled or superseded')
         if (pending) {
-          const held = this.memory.pendingOperations?.(operationOwnerKey) ?? []
-          if (held.length !== 1 || held[0].operation_key !== pending.operation_key || held[0].signature !== pending.signature
+          const records = this.memory.pendingOperations?.(operationOwnerKey) ?? []
+          const held = records.filter(record => record.operation_key === pending.operation_key)
+          if (held.length !== 1 || held[0].signature !== pending.signature
             || held[0].attempt_id !== pending.attempt_id || held[0].ordinal !== pending.ordinal
             || held[0].goal_id !== pending.goal_id || held[0].plan_id !== pending.plan_id || held[0].step_id !== pending.step_id
             || held[0].actor?.actor_id !== pending.actor?.actor_id || held[0].actor?.epoch !== pending.actor?.epoch
-            || this.batchInFlight) throw new AgentLoopError('Operation admission unsent ownership changed')
+            || this.batchInFlight !== sendBatchInFlight) throw new AgentLoopError('Operation admission unsent ownership changed')
         }
       }
       let fluidAdmission

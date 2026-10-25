@@ -473,7 +473,7 @@ test('between-slices recovery cannot leak its spent executor budget into later p
   const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
   const longGoal = { scope: 'long_horizon', summary: 'Launch one rocket.', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }
   const draft = item => slice(item, { goal: longGoal })
-  const w = world([draft('copper-ore'), act('copper-ore'), () => { throw new Error('scripted restart gap') },
+  const w = world([draft('copper-ore'), act('copper-ore'), () => { throw new Error('provider_semantic_alignment_failed: scripted restart gap') },
     draft('iron-ore'), reads(nearby('spend1', 'rock-huge'), nearby('spend2', 'tree-01'), nearby('spend3', 'coal'), nearby('spend4', 'stone')),
     act('iron-ore'), reads(nearby('planner1', 'iron-ore'), nearby('planner2', 'water')),
     reads(['planner3', 'getPlacementCandidates', { entity_name: 'burner-mining-drill', target_resource: 'iron-ore', radius: 16, limit: 1 }]),
@@ -483,16 +483,29 @@ test('between-slices recovery cannot leak its spent executor budget into later p
   await assert.rejects(w.agent.completed(), /scripted restart gap/)
   assert.equal(w.agent.goalAwaitingNextSlice(), true)
   const before = budgets(w.agent)
+  // The supervisor owns and durably counts the boundary wake before the
+  // observation decision; this test compares only the decision's extra charge.
+  const unclaimed = w.memory.autoResumeAllowance(KEY)
+  assert.equal(w.memory.recordAutoResumeStarted(KEY, { ...unclaimed, request_id: 'req_slice_budget' }).recorded, true)
+  await w.agent.persistState({ strict: true })
   const allowance = w.memory.autoResumeAllowance(KEY)
-  const recovered = await recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: 'req_slice_budget' })
+  assert.equal(allowance.goal_attempts, 1)
+  const boundaryEntry = structuredClone(w.memory.planningState(KEY).run.auto_resume.steps.find(entry => entry.step_key === allowance.step_key))
+  const recovered = await recoverInterruptedAgentPlan(w.agent, 'runtime_restart', {}, { requestId: 'req_slice_budget', allowModelRecoverable: true })
   assert.equal(recovered.recovered, true)
   assert.equal(w.calls[4].remaining, 4)
   assert.equal(w.calls[5].remaining, 0, 'the recovery C3 executor really spent its four reads')
   assert.deepEqual(budgets(w.agent), before, 'the between-slices recovery wake restores all decision fields')
   const afterAllowance = w.memory.autoResumeAllowance(KEY)
-  for (const field of ['per_step', 'per_goal', 'goal_attempts', 'step_attempts']) {
+  for (const field of ['per_step', 'per_goal', 'goal_attempts']) {
     assert.equal(afterAllowance[field], allowance[field], `${field} is unchanged by the recovery decision`)
   }
+  // The current allowance now belongs to the newly committed semantic step.
+  // Compare the original boundary's durable entry, not the new step's zero.
+  const afterBoundaryEntry = w.memory.planningState(KEY).run.auto_resume.steps.find(entry => entry.step_key === allowance.step_key)
+  assert.equal(afterBoundaryEntry.attempts, 1)
+  assert.equal(afterBoundaryEntry.mark, allowance.mark)
+  assert.deepEqual(afterBoundaryEntry, boundaryEntry)
   const cleanup = w.rows('decision.budgets_restored').find(row => (row.request_id ?? row.data.request_id) === 'req_slice_budget')
   assert.equal(cleanup?.data.reason, 'decision_scope_finished')
   w.game.inventory['iron-ore'] = 10
@@ -601,7 +614,7 @@ function holdRecoveryMethod(agent, name, predicate = () => true) {
 
 async function slicePreparationWorld() {
   const longGoal = { scope: 'long_horizon', summary: 'Launch one rocket.', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }
-  const w = world([slice('copper-ore', { goal: longGoal }), act('copper-ore'), () => { throw new Error('scripted preparation gap') }])
+  const w = world([slice('copper-ore', { goal: longGoal }), act('copper-ore'), () => { throw new Error('provider_semantic_alignment_failed: scripted preparation gap') }])
   await w.agent.request('Launch one rocket.', { sender: 'Louis' })
   w.game.inventory['copper-ore'] = 10
   await assert.rejects(w.agent.completed(), /scripted preparation gap/)

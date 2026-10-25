@@ -189,7 +189,7 @@ for (const nativeState of ['busy', 'unknown', 'pending']) {
 }
 test('unknown authoring failure remains a guard; operator pause stays untouched', async () => {
   const w = orphanSession()
-  const result = await settleNextSliceExit(w.agent, { failure: new Error('unrecognized semantic corruption') })
+  const result = await settleNextSliceExit(w.agent, { failure: new Error('scripted preparation gap') })
   assert.equal(result.pause_class, 'guard')
   assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 0)
   const state = structuredClone(w.memory.planningState(w.key))
@@ -817,3 +817,22 @@ for (const journalKind of ['admitting', 'uncertain', 'malformed', 'missing', 'ne
     assert.equal(w.calls(), 0)
   })
 }
+
+
+test('direct unclaimed startup counts once before model and a settled duplicate claim cannot replenish it', async () => {
+  const w = awWorld(fixture.lanes[0], () => {
+    assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 1, 'strictly counted before every model request')
+    return planReply({ plan: ['Gather ten coal toward the existing goal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
+  })
+  const before = w.memory.autoResumeAllowance(w.key)
+  assert.equal(before.goal_attempts, 0)
+  const result = await recoverInterruptedAgentPlan(w.agent, 'offline_startup', {}, { requestId: 'startup_single_claim' })
+  assert.equal(result.recovered, true)
+  assert.ok(w.calls() > 0)
+  assert.equal(w.memory.autoResumeAllowance(w.key).goal_attempts, 1)
+  const counted = structuredClone(w.memory.planningState(w.key).run.auto_resume)
+  const calls = w.calls()
+  assert.equal(w.memory.recordAutoResumeStarted(w.key, { ...before, request_id: 'startup_single_claim' }).recorded, false)
+  assert.deepEqual(w.memory.planningState(w.key).run.auto_resume, counted)
+  assert.equal(w.calls(), calls)
+})

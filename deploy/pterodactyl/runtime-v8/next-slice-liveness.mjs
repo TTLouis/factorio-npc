@@ -100,11 +100,14 @@ export async function nextSliceNativeState(agent, owner, expectedActor = owner.e
 // Shared normal/error settlement. It never executes a draft or changes the
 // completed predecessor. Only a known model failure enters the existing 2/6 wake.
 export async function settleNextSliceExit(agent, { failure, reason = 'worker_returned', owner = nextSliceOwner(agent) } = {}) {
-  assertOwner(agent, owner)
   const key = agent.activePlanKey()
   const planning = agent.memory.planningState?.(key)
   const episode = planning?.run?.next_slice
   const anchor = completedSliceAnchor(planning)
+  // Ordinary finite/active-plan returns have no liveness transition to own.
+  // Role handoffs and consumed amendments in those paths remain legitimate.
+  if (!anchor && !episode) return { action: 'not_applicable' }
+  assertOwner(agent, owner)
   if (!anchor) {
     if (episode && episode.phase !== 'committed') {
       agent.memory.recordNextSliceTransition?.(key, { phase: 'committed', boundary_key: episode.boundary_key, reason: 'next_transition_committed' })
