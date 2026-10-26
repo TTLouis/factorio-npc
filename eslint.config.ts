@@ -32,6 +32,7 @@ export default antfu(
     files: [
       'deploy/**/*.mjs',
       'tools/**/*.mjs',
+      'scripts/**/*.mjs',
       'tests/factorio/runner/**/*.mjs',
     ],
     rules: {
@@ -45,6 +46,7 @@ export default antfu(
     files: [
       'deploy/**/*.test.mjs',
       'tools/**/*.test.mjs',
+      'scripts/**/*.test.mjs',
     ],
     rules: {
       // Production deployment tests are intentionally executed with
@@ -109,6 +111,9 @@ export default antfu(
     },
   },
   {
-    ignores: ['models/*', '**/.pixi'],
+    // Raw paired-run templates contain @@bindings@@ and byte-pinned historical
+    // baselines. pair.test.mjs parses every rendered module without executing it;
+    // its provenance checks also reject accidental changes to frozen inputs.
+    ignores: ['models/*', '**/.pixi', 'scripts/e2e-pair/templates/**'],
   },
 )

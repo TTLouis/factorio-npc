@@ -193,8 +193,8 @@ for (const variant of ['missing_receipt', 'busy', 'pending', 'preservation_chang
     assert.equal(result.goalStatus, 'paused')
     assert.equal(w.game.mutations.length, 1)
     assert.equal(w.memory.planningState(KEY).goal.replacements_accepted ?? 0, 0)
-    assert.ok(w.rows.some(row => /^contract.defect_(refused|exhausted)$/.test(row.event)))
-    const reason = w.rows.find(row => /^contract.defect_(refused|exhausted)$/.test(row.event)).data.reason
+    assert.ok(w.rows.some(row => /^contract.defect_(?:refused|exhausted)$/.test(row.event)))
+    const reason = w.rows.find(row => /^contract.defect_(?:refused|exhausted)$/.test(row.event)).data.reason
     assert.match(reason, { missing_receipt: /^same_step_completed_placement_receipt_required$/, busy: /^native_busy$/,
       pending: /^operation_unsettled$/, preservation_changed: /^native_proof_unreadable:/,
       revoked: /^current_recovery_grant_required$/, limit: /^semantic_step_limit_exhausted$/, legacy: /^provenance_unproven$/ }[variant])
@@ -560,7 +560,7 @@ for (const seam of ['persist', 'trace', 'final_owner']) {
     }
     const assertOwner = w.agent.assertCheckpointOwnerCurrent.bind(w.agent)
     w.agent.assertCheckpointOwnerCurrent = async (...args) => {
-      const caller = new Error().stack.split('\n')[2]
+      const caller = new Error('capture checkpoint caller').stack.split('\n')[2]
       await assertOwner(...args)
       if (armed && !fired && seam === 'final_owner' && caller.includes('NpcAgentLoop.applyStepClose')) stage(w.agent)
     }
@@ -618,7 +618,7 @@ for (const change of ['pending', 'batch']) {
     const assertOwner = w.agent.assertCheckpointOwnerCurrent.bind(w.agent)
     let fired = false
     w.agent.assertCheckpointOwnerCurrent = async (...args) => {
-      const caller = new Error().stack.split('\n')[2]
+      const caller = new Error('capture checkpoint caller').stack.split('\n')[2]
       await assertOwner(...args)
       if (!fired && caller.includes('NpcAgentLoop.applyStepClose')) {
         fired = true

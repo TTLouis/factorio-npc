@@ -9,7 +9,7 @@ import {definePair,kitRoot} from './pair.mjs'
 const candidate='c'.repeat(40)
 async function fixture(reason) {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'paired-launch-boundary-'))
-  const pair=definePair({candidate,published:'b'.repeat(40),imageId:'sha256:'+'d'.repeat(64)})
+  const pair=definePair({candidate,published:'b'.repeat(40),imageId:`sha256:${'d'.repeat(64)}`})
   await fs.writeFile(path.join(root,'pair.json'),JSON.stringify(pair))
   await fs.copyFile(path.join(kitRoot,'coordinator/pair-common.ps1'),path.join(root,'pair-common.ps1'))
   for(const id of ['a','b']) {
@@ -26,7 +26,7 @@ function stop(f,reason) {
 }
 for(const reason of ['owner_canceled','shared_quota_evidence_stale','weekly_remaining_floor_reached']) {
   test(`actual coordinator stop ${reason} from owned preflight identity prevents the starter and intake`,async()=>{
-    const f=await fixture(reason);let starter=0,intake=0
+    const f=await fixture(reason);let starter=0; let intake=0
     try {
       await fs.writeFile(path.join(f.laneRoot,'data/logs/prelaunch-cold-proof.json'),JSON.stringify({...f.identity,helper_root:f.laneRoot,phase:'prelaunch'}))
       stop(f,reason)
@@ -37,7 +37,7 @@ for(const reason of ['owner_canceled','shared_quota_evidence_stale','weekly_rema
     } finally {await fs.rm(f.root,{recursive:true,force:true})}
   })
   test(`actual coordinator stop ${reason} between starter and intake prevents submission without a goal identity`,async()=>{
-    const f=await fixture(reason);let intake=0,starter=0
+    const f=await fixture(reason);let intake=0; let starter=0
     try {
       await assert.rejects(beginColdIntake({root:f.laneRoot,logs:path.join(f.laneRoot,'data/logs'),identity:f.identity,
         giveStarter:async()=>{starter++;return {}},prepareIntake:async()=>{stop(f,reason)},submitObjective:async()=>{intake++}}),{code:'launch_canceled',reason})
@@ -89,7 +89,7 @@ test('a launch-scoped stop adopts only its own newly persisted goal and rejects 
     const decision=JSON.parse(await fs.readFile(path.join(f.laneRoot,'data/logs/e2e-supervisor-stop-decision.json'),'utf8'))
     assert.equal(decision.goal_id,'own_new_goal');assert.equal(decision.strict_same_goal_confirmation,false)
     assert.equal(await readLaunchStop(f.laneRoot,launched.control,'own_new_goal'),'owner_canceled')
-    const file=path.join(f.laneRoot,'operator-stop-request.json'),request=JSON.parse(await fs.readFile(file,'utf8'))
+    const file=path.join(f.laneRoot,'operator-stop-request.json'); const request=JSON.parse(await fs.readFile(file,'utf8'))
     for(const edit of [{source:'e'.repeat(40)},{epoch:4},{launchControlId:'other'},{runId:f.pair.lanes[1].runId}]) {
       await fs.writeFile(file,JSON.stringify({...request,...edit}))
       await assert.rejects(readLaunchStop(f.laneRoot,launched.control,'own_new_goal'))
