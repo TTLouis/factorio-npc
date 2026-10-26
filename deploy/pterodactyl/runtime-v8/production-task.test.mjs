@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import test from 'node:test'
 import { compileQuantities } from './quantity-compiler.mjs'
-import { claimMaterials, materialAvailability } from './material-ledger.mjs'
+import { claimMaterials, materialAvailability, materialOwnerKey } from './material-ledger.mjs'
 import { advanceProductionTask, createProductionTask, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 import { continueProductionTask, pruneClosedProductionRecords } from './production-task-runtime.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
@@ -58,7 +58,7 @@ test('unconfigured assemblers cannot receive production materials and a running 
   assert.deepEqual(result.operation, { name: 'wait', args: { ticks: 120 } })
 })
 
-function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, lostAck } = {}) {
+function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, lostAck, provider } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(iron ? an.iron_memory : an.memory))
   const held = () => getActivePlan(memory.planningState(an.key))
@@ -138,7 +138,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   }
   agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
     stateFile: null, traceFile: null, decisionTraceFile: null,
-    provider: async (_messages, context) => { providers.push(context); throw new Error(`No model repair permitted in AN production replay: ${JSON.stringify({ inventory: game.inventory, events: events.slice(-10).map(row => ({ event: row.event, data: row.data })) })}`) } })
+    provider: async (messages, context) => { providers.push(context); if (provider) return provider(messages, context); throw new Error(`No model repair permitted in AN production replay: ${JSON.stringify({ inventory: game.inventory, events: events.slice(-10).map(row => ({ event: row.event, data: row.data })) })}`) } })
   Object.assign(agent, { active: true, epoch: { ...game.status }, lastMemoryKey: an.key,
     requestInfo: { memoryKey: an.key, turnId: 1, sender: '<server>', text: 'Continue the committed steam kit' }, traceRequest: { id: 'run-an-production' } })
   agent.agentContext.beginLineage('executor')
@@ -204,7 +204,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
     feeders: [{ unit_number: 43, output_unit_number: 44 }], fuel: { item_name: 'coal', count: 16 } }
     : { ...poles, ...(furnace ? { producers: [{ recipe_name: 'copper-plate', unit_number: 45 }], fuel: { item_name: 'coal', count: 2 } } : {}) }
   const start = () => agent.commitPlan({ chatMessage: '', stepId: held().steps[held().active_step_index].step_id, plan: [], currentStep: 0, operations: [], productionTask: intent })
-  return { agent, game, memory, held, start, intent, ops, events, providers, machine, preflights: () => preflights }
+  return { agent, game, memory, held, start, intent, ops, events, providers, machine, drill, preflights: () => preflights }
 }
 
 test('recorded AN excessive cable intent is refused by the unchanged native preflight boundary', async () => {
@@ -441,4 +441,126 @@ test('only proven closed steps compact durable records; interrupted/exhausted wo
   assert.equal(pruneClosedProductionRecords(w.memory), 1)
   assert.equal(w.memory.productionTasks.get(openKey).recoveries, 3)
   assert.equal(pruneClosedProductionRecords(w.memory), 0)
+})
+
+// Run AZ (2026-10-26) production admission. Lane A sent an intermediate
+// (iron-gear-wheel 10) for a science-pack step; lane B bound a burner drill and
+// furnace without a fuel allowance. Both reply shapes are replayed on the AN
+// world, whose committed contracts and burner machines are real recorded state.
+const activeStepId = w => w.held().steps[w.held().active_step_index].step_id
+const productionReply = (w, productionTask) => ({ content: JSON.stringify({ chatMessage: '', stepId: activeStepId(w), operations: [], productionTask }) })
+const intermediate = { targets: [{ item_name: 'copper-cable', count: 2 }] }
+function scripted(options, replies) {
+  const w = world({ ...options, provider: async () => {
+    const next = replies(w).shift()
+    if (!next) throw new Error('script exhausted')
+    return next
+  } })
+  w.agent.messages = []; w.agent.baseMessages = []
+  return w
+}
+const failed = w => w.events.filter(row => row.event === 'request.failed')
+
+test('AZ lane A: an intermediate production target is a bounded parse-time correction, not a failed request', async () => {
+  let script
+  const w = scripted({}, w => script ??= [productionReply(w, intermediate), productionReply(w, poles)])
+  await w.agent.runTurn()
+  const refusal = w.events.find(row => row.event === 'recovery.classified' && row.data.reason_code === 'production_scope_mismatch')
+  assert.ok(refusal, JSON.stringify(w.events.slice(-6)))
+  assert.match(refusal.data.reason, /small-electric-pole 2/)
+  assert.match(refusal.data.reason, /unmatched: copper-cable 2\)/)
+  assert.equal(w.providers.length, 2)
+  assert.deepEqual(failed(w), [])
+  assert.deepEqual(w.ops, ['craft_item'], 'only the corrected intent reaches native admission')
+  await w.agent.completed()
+  assert.deepEqual(w.ops, ['craft_item', 'craft_item'])
+  await w.agent.completed()
+  assert.equal(w.memory.currentPlan(an.key).status, 'completed')
+  assert.equal(w.game.inventory['small-electric-pole'], 2)
+})
+
+test('AZ lane A residual: a scope refusal past the parse screen is corrected in commitPlan and continues', async () => {
+  let script
+  const w = scripted({}, w => script ??= [productionReply(w, poles)])
+  await w.agent.commitPlan({ chatMessage: '', stepId: activeStepId(w), plan: [], currentStep: 0, operations: [], productionTask: intermediate })
+  const correction = w.events.find(row => row.event === 'production.admission_correction')
+  assert.deepEqual([correction?.data.reason, correction?.data.attempt, correction?.data.step_id], ['production_scope_mismatch', 1, activeStepId(w)])
+  assert.ok(w.agent.messages.some(row => row.role === 'user' && /productionTask refused \(production_scope_mismatch\).*Nothing ran/.test(row.content)))
+  assert.equal(w.providers.length, 1)
+  assert.deepEqual(failed(w), [])
+  assert.deepEqual(w.ops, ['craft_item'])
+  await w.agent.completed()
+  assert.deepEqual(w.ops, ['craft_item', 'craft_item'])
+  await w.agent.completed()
+  assert.equal(w.memory.currentPlan(an.key).status, 'completed')
+})
+
+test('residual admission corrections are bounded per step, durable across restore and end in a visible guard pause', async () => {
+  const w = scripted({}, w => [productionReply(w, intermediate)])
+  // Deliberately bypass the parse screen so every refusal reaches commitPlan.
+  w.agent.parsePlanMessageChecked = async message => w.agent.parsePlanMessage(message)
+  const result = await w.agent.commitPlan({ chatMessage: '', stepId: activeStepId(w), plan: [], currentStep: 0, operations: [], productionTask: intermediate })
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(w.providers.length, 2)
+  assert.deepEqual(w.events.filter(row => row.event === 'production.admission_correction').map(row => row.data.attempt), [1, 2])
+  assert.equal(w.events.find(row => row.event === 'production.admission_exhausted')?.data.attempts, 2)
+  assert.equal(w.memory.pauseRecord(an.key).pause_class, 'guard')
+  assert.equal(w.events.find(row => row.event === 'request.completed')?.data.outcome, 'production_admission_exhausted')
+  assert.deepEqual(w.ops, [])
+  assert.equal(w.memory.productionTasks?.size ?? 0, 0, 'a refused intent never becomes durable authority')
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(w.memory.snapshot())
+  assert.deepEqual([...restored.productionAdmissionLedger.values()], [2])
+})
+
+test('AZ lane B: burner bindings without a fuel allowance are refused at parse, and the corrected intent fuels them', async () => {
+  let script
+  const unfueled = w => { const { fuel: _fuel, ...rest } = w.intent; return rest }
+  const w = scripted({ iron: true }, w => script ??= [productionReply(w, unfueled(w)), productionReply(w, w.intent)])
+  await w.agent.runTurn()
+  const refusal = w.events.find(row => row.event === 'recovery.classified' && row.data.reason_code === 'production_fuel_allowance_missing')
+  assert.ok(refusal, JSON.stringify(w.events.slice(-6)))
+  assert.match(refusal.data.reason, /44 stone-furnace, 43 burner-mining-drill/)
+  assert.ok(w.events.some(row => row.event === 'production.read' && row.data.phase === 'admission'))
+  assert.deepEqual(failed(w), [])
+  assert.equal(w.providers.length, 2)
+  for (let i = 0; i < 22 && w.memory.currentPlan(an.key).status !== 'completed'; i++) await w.agent.completed()
+  assert.equal(w.memory.currentPlan(an.key).status, 'completed', JSON.stringify(w.events.slice(-8)))
+  assert.equal(w.game.inventory['iron-plate'], 58)
+  assert.equal(w.ops.filter(name => name === 'supply_entity').length, 2)
+})
+
+test('a production record predating the fuel rule keeps its immutable intent and halts naming the missing grant', async () => {
+  const w = world({ iron: true })
+  const { fuel: _fuel, ...unfueled } = w.intent
+  const o = w.agent.captureCheckpointOwner()
+  const owner = { goal_id: o.goalId, plan_id: o.planId, plan_version: o.planVersion, step_id: o.stepId }
+  w.memory.productionTasks = new Map([[`${o.key}/${materialOwnerKey(owner)}`, createProductionTask({ intent: unfueled, owner, actor_id: 18, epoch: 1 })]])
+  const result = await w.agent.commitPlan({ chatMessage: '', stepId: o.stepId, plan: [], currentStep: 0, operations: [], productionTask: unfueled })
+  assert.equal(result.reason, 'production_fuel_allowance_missing')
+  assert.equal(w.memory.pauseRecord(an.key).pause_class, 'guard')
+  assert.deepEqual(w.ops, [])
+  assert.equal(w.providers.length, 0)
+})
+
+test('a missing fuel allowance and a spent one are distinct durable halts', () => {
+  const recipe = { name: 'iron-plate', enabled: true, hand_craftable_category: false, energy: 3.2,
+    ingredients: [{ name: 'iron-ore', amount: 1 }], products: [{ name: 'iron-plate', amount: 1 }], crafting_machines: [{ name: 'stone-furnace' }] }
+  const burner = { energy_source: 'burner', status_name: 'no_fuel', working: false, input: {}, output: {}, fuel: {}, progress: null }
+  const facts = { ...base, recipes: [recipe], inventory: { 'iron-plate': 8 }, machines: [
+    { ...burner, unit_number: 43, name: 'burner-mining-drill', type: 'mining-drill', drop_target: 44 },
+    { ...burner, unit_number: 44, name: 'stone-furnace', type: 'furnace', recipe: 'iron-plate' },
+  ] }
+  const intent = { targets: [{ item_name: 'iron-plate', count: 58 }], producers: [{ recipe_name: 'iron-plate', unit_number: 44 }], feeders: [{ unit_number: 43, output_unit_number: 44 }] }
+  assert.equal(advanceProductionTask(createProductionTask({ intent, owner, actor_id: 18, epoch: 1 }), facts).reason, 'production_fuel_allowance_missing')
+  const spent = { ...createProductionTask({ intent: { ...intent, fuel: { item_name: 'coal', count: 1 } }, owner, actor_id: 18, epoch: 1 }), fuel_used: 1 }
+  assert.equal(advanceProductionTask(spent, facts).reason, 'production_fuel_allowance_exhausted')
+})
+
+test('the parse screen leaves a stale stepId to the step-identity correction', async () => {
+  const w = world()
+  const other = w.held().steps.find(step => step.step_id !== activeStepId(w)).step_id
+  const plan = await w.agent.parsePlanMessageChecked({ content: JSON.stringify({ chatMessage: '', stepId: other, operations: [], productionTask: intermediate }) })
+  assert.equal(plan.stepId, other)
+  assert.deepEqual(w.events.filter(row => row.event === 'production.read'), [])
 })

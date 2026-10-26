@@ -11,7 +11,7 @@ import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeProductionIntent } from './production-task.mjs'
 import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
-import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, startProductionTask } from './production-task-runtime.mjs'
+import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
@@ -313,6 +313,8 @@ const LOST_ACK_RETRY_BUDGET = 1
 // apart from the shared plan_category corrections so neither spends the other's allowance.
 const EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT = 2
 const EXECUTOR_STEP_IDENTITY_LEDGER_MAX = 128
+// Corrections per committed active step for a production intent refused in commitPlan after passing the parse-time screen.
+const PRODUCTION_ADMISSION_CORRECTION_LIMIT = 2
 // Steps remembered for the once-per-step read reopen after a review from a harness-closed read phase (reopenReadsForReview).
 const REVIEW_READ_REOPEN_STEP_LIMIT = 64
 const REVIEW_NOTES_CHARS = MAX_REVIEW_NOTES_CHARS
@@ -14531,6 +14533,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (plan[REFRESHED_ENTITY_PLAN]?.action !== undefined && plan[REFRESHED_ENTITY_PLAN].action !== 'bound') return plan
     await this.validatePreflightCorrectionScope(plan)
     await this.validateLocalFluidSearchBlocker(plan)
+    // Refused here, an intent the active step cannot admit is an ordinary plan_category correction; refused only in
+    // commitPlan, it failed the request (Run AZ lane A: intermediate target).
+    if (plan.productionTask) await screenProductionTask(this, plan, { collectionOnly: Boolean(this.entityRefreshAdmission) })
     const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
       const error = new AgentLoopError(grounding.message)
@@ -16690,14 +16695,45 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async pauseForExecutorStepIdentity(expected) {
-    const chatMessage = `I paused this goal: my step executor kept sending actions for a step that is not the active one, so I stopped instead of guessing. ${RESUME_HINT}`
-    const state = await this.pausePersistentPlan('executor_step_identity_exhausted', { pause_class: PAUSE_CLASS.GUARD })
+    return this.pauseForExecutorCorrection('executor_step_identity_exhausted', expected?.stepId,
+      `I paused this goal: my step executor kept sending actions for a step that is not the active one, so I stopped instead of guessing. ${RESUME_HINT}`)
+  }
+
+  // Residual production admission refusals (startProductionTask) are raised before any record, claim or native work, so
+  // the executor may correct them like a parse-time refusal. Its own per-step allowance keeps a restage from renewing it.
+  async correctProductionAdmission(plan, error) {
+    const requestId = this.traceRequest?.id
+    await this.assertCurrent()
+    const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const stepId = committed?.steps?.[committed.active_step_index]?.step_id
+    const ledger = this.memory.productionAdmissionLedger ??= new Map()
+    const key = this.executorStepIdentityKey(committed)
+    const used = ledger.get(key) ?? 0
+    const details = { request_id: requestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId, step_id: stepId,
+      reason: error.code, limit: PRODUCTION_ADMISSION_CORRECTION_LIMIT }
+    if (used >= PRODUCTION_ADMISSION_CORRECTION_LIMIT) {
+      await this.traceEvent('production.admission_exhausted', { ...details, attempts: used }, { requestId })
+      return this.pauseForExecutorCorrection('production_admission_exhausted', stepId,
+        `I paused this goal: my step executor kept sending a production task this step cannot admit (${error.code}), so I stopped instead of guessing. ${RESUME_HINT}`)
+    }
+    ledger.delete(key)
+    ledger.set(key, used + 1)
+    while (ledger.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
+    await this.persistState()
+    await this.traceEvent('production.admission_correction', { ...details, attempt: used + 1 }, { requestId })
+    this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+    this.messages.push({ role: 'user', content: `[HARNESS] productionTask refused (${error.code}): ${error.message}. Nothing ran; the committed plan is unchanged.` })
+    return this.runTurn()
+  }
+
+  async pauseForExecutorCorrection(reason, stepId, chatMessage) {
+    const state = await this.pausePersistentPlan(reason, { pause_class: PAUSE_CLASS.GUARD })
     const taskBoard = visibleTaskBoard(state?.task_board)
     await this.traceEvent('request.completed', {
       chat_message: chatMessage,
-      outcome: 'executor_step_identity_exhausted',
-      reason: 'executor_step_identity_exhausted',
-      step_id: expected?.stepId,
+      outcome: reason,
+      reason,
+      step_id: stepId,
       task_board: taskBoard,
       usage: this.traceRequest?.usage,
     })
@@ -16753,7 +16789,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       if (renewed) return continueEntityRefresh(this, renewed)
     }
-    if (plan.productionTask) return startProductionTask(this, { ...plan, stepId: productionStepId }, { collectionOnly: Boolean(this.entityRefreshAdmission) })
+    if (plan.productionTask) {
+      const collectionOnly = Boolean(this.entityRefreshAdmission)
+      try { return await startProductionTask(this, { ...plan, stepId: productionStepId }, { collectionOnly }) }
+      catch (error) {
+        // A harness collection continuation is not an executor reply, so the executor is not asked to correct it.
+        if (error?.productionAdmissionRefused !== true || collectionOnly) throw error
+        return this.correctProductionAdmission(plan, error)
+      }
+    }
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
     const supplyReview = await this.reviewExecutorSupplyDrift(plan)
     if (supplyReview !== undefined) return supplyReview

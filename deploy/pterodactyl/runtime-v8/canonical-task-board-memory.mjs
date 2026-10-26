@@ -2988,6 +2988,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       // Executor step-identity corrections spent per goal/plan/step (npc-agent-loop correctExecutorStepIdentity): durable so a
       // restage, a new request or a restart inside the same step cannot renew the allowance.
       executor_step_identity_ledger: [...(this.executorStepIdentityLedger ?? new Map()).entries()].slice(-128),
+      // Residual production admission corrections spent per goal/plan/step (correctProductionAdmission), durable likewise.
+      production_admission_ledger: [...(this.productionAdmissionLedger ?? new Map()).entries()].slice(-128),
       ...(this.intakeRetryRecord ? { intake_retry: this.intakeRetryRecord } : {}),
       planning_states: [...this.planningByNpc.entries()].map(([key, state]) => ({
         key,
@@ -3140,6 +3142,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)
     this.executorObservationRates = restoreObservationRates(snapshot?.executor_observation_rates)
     this.executorStepIdentityLedger = restoreExecutorStepIdentityLedger(snapshot?.executor_step_identity_ledger)
+    this.productionAdmissionLedger = restoreExecutorStepIdentityLedger(snapshot?.production_admission_ledger)
     this.intakeRetryRecord = sanitizeIntakeRetry(snapshot?.intake_retry)
     if (snapshot?.jev_judgment_ledger) {
       const restoredLedger = restoreJevLedger(snapshot.jev_judgment_ledger)

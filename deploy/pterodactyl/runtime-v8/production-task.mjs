@@ -60,6 +60,18 @@ export function productionScopeMatches(intent, contract) {
   return contract?.mode === 'all' && intent.targets.every(target => Math.max(0, ...(contract.requirements ?? [])
     .filter(row => row.kind === 'inventory_count' && row.item_name === target.item_name).map(row => row.minimum)) === target.count)
 }
+// The refusal states the committed finite targets the executor may name, so a
+// correction does not depend on rereading the contract.
+export function productionScopeMismatch(intent, contract) {
+  const required = new Map()
+  for (const row of contract?.mode === 'all' ? contract.requirements ?? [] : []) {
+    if (row.kind === 'inventory_count') required.set(row.item_name, Math.max(required.get(row.item_name) ?? 0, row.minimum))
+  }
+  const list = rows => rows.map(([name, count]) => `${name} ${count}`).join(', ')
+  if (!required.size) return 'Targets must exactly match finite inventory requirements of this committed step, and it has none in an all-mode contract'
+  const unmatched = intent.targets.filter(target => required.get(target.item_name) !== target.count).map(row => [row.item_name, row.count])
+  return `Targets must exactly match finite inventory requirements of this committed step (required: ${list([...required].sort(([a], [b]) => a.localeCompare(b)))}; unmatched: ${list(unmatched)}). The harness compiles ingredients and intermediates from native recipes`
+}
 export function createProductionTask({ intent, owner, actor_id, epoch, ledger, protected_stock = {}, collectionOnly = false, now = Date.now() }) {
   intent = normalizeProductionIntent(intent)
   materialOwnerKey(owner)
@@ -147,7 +159,10 @@ export function advanceProductionTask(raw, facts, now = Date.now()) {
   }
   const refuel = machine => {
     const fuel = task.intent.fuel
-    if (!fuel || task.fuel_used >= fuel.count) return halt(task, 'production_fuel_allowance_exhausted')
+    // Admission refuses a burner binding without an allowance; a record that
+    // predates that rule names the missing grant instead of a spent one.
+    if (!fuel) return halt(task, 'production_fuel_allowance_missing')
+    if (task.fuel_used >= fuel.count) return halt(task, 'production_fuel_allowance_exhausted')
     if (spendable(fuel.item_name) < 1) return acquire(fuel.item_name, 1)
     return emit({ name: 'supply_entity', args: { unit_number: machine.unit_number, items: [{ item_name: fuel.item_name, count: 1 }] } }, 1)
   }

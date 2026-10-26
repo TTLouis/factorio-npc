@@ -4,7 +4,7 @@ import { parseInventoryCounts } from './handoff-packet.mjs'
 import { materialOwnerKey } from './material-ledger.mjs'
 import { normalizeCounts, recipeForItem } from './quantity-compiler.mjs'
 import { restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
-import { advanceProductionTask, createProductionTask, machineFacts, normalizeProductionIntent, productionScopeMatches, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
+import { advanceProductionTask, createProductionTask, machineFacts, normalizeProductionIntent, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
 export function restoreProductionRecords(rows) {
@@ -133,23 +133,73 @@ async function factsFor(agent, s, task, status) {
     fresh: true, inventory: normalizeCounts(Object.fromEntries(inventory)), recipes, machines }
 }
 
-export async function startProductionTask(agent, plan, { collectionOnly = false } = {}) {
+// Refusals raised before any production record, ledger claim or native work
+// exists. The executor can correct each one by resubmitting; nothing ran.
+function admissionRefusal(agent, code, message) {
+  const error = agent.roleContractError(code, message)
+  error.productionAdmissionRefused = true
+  return error
+}
+function isActiveStep(agent, s, stepId) {
+  return [s.owner.stepId, agent.memory.currentPlan?.(s.owner.key)?.task_board?.active_step_id].includes(stepId)
+}
+// A burner machine the task keeps running can only be refuelled from the
+// intent's fuel allowance. Unreadable identities are left to the runtime's
+// exact identity checks instead of being guessed here.
+async function burnerBindings(agent, s, intent) {
+  const burners = []
+  for (const unit_number of new Set([...intent.producers, ...intent.feeders].map(row => row.unit_number))) {
+    let raw
+    try { raw = String(await agent.rcon.command(agent.observationToolCommand('getEntityStatus', { unit_number }))) }
+    catch { raw = '' }
+    await checked(agent, s.owner, agent.traceEvent('production.read', { tool: 'getEntityStatus', args: { unit_number }, chars: raw.length,
+      phase: 'admission', plan_id: s.owner.planId, step_id: s.owner.stepId }))
+    let detail
+    try { detail = JSON.parse(raw) }
+    catch { continue }
+    if (detail?.found === true && detail.entity?.unit_number === unit_number && detail.entity.energy_source === 'burner') burners.push(`${unit_number} ${detail.entity.name}`)
+  }
+  return burners
+}
+// One admission rule for both seams: the executor parse refuses an intent the
+// active committed step cannot admit as a bounded correction, and
+// startProductionTask re-checks it before creating durable authority.
+export async function admitProductionIntent(agent, plan, { collectionOnly = false } = {}) {
   const s = scope(agent)
-  if (agent.completionProtocolVersion < 3 || agent.agentContext.role !== 'executor'
-    || ![s.owner.stepId, agent.memory.currentPlan?.(s.owner.key)?.task_board?.active_step_id].includes(plan.stepId)
+  if (agent.completionProtocolVersion < 3 || agent.agentContext.role !== 'executor' || !isActiveStep(agent, s, plan.stepId)
     || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(s.plan?.status) || plan.operations?.length !== 0
-    || plan.semanticCompletion || plan.checkpoint || plan.plannerReview) throw agent.roleContractError('invalid_production_task', 'productionTask requires the committed executor step, empty operations and no completion/review claim')
-  const intent = normalizeProductionIntent(plan.productionTask)
-  if (!productionScopeMatches(intent, s.step.completion_contract)) throw agent.roleContractError('production_scope_mismatch', 'Targets must exactly match finite inventory requirements of this committed step')
+    || plan.semanticCompletion || plan.checkpoint || plan.plannerReview) throw admissionRefusal(agent, 'invalid_production_task', 'productionTask requires the committed executor step, empty operations and no completion/review claim')
+  let intent
+  try { intent = normalizeProductionIntent(plan.productionTask) }
+  catch (cause) { throw admissionRefusal(agent, 'invalid_production_task', cause.message) }
+  if (!productionScopeMatches(intent, s.step.completion_contract)) throw admissionRefusal(agent, 'production_scope_mismatch', productionScopeMismatch(intent, s.step.completion_contract))
   const supply = s.step.execution_guidance?.materialSupply
-  if (supply?.mode === 'direct_feed' && intent.resources.some(row => row.item_name === supply.resource)) throw agent.roleContractError('production_supply_drift', 'Direct-feed steps cannot acquire their ore by hand')
+  if (supply?.mode === 'direct_feed' && intent.resources.some(row => row.item_name === supply.resource)) throw admissionRefusal(agent, 'production_supply_drift', 'Direct-feed steps cannot acquire their ore by hand')
+  // An existing record is immutable and keeps its own allowance; it is checked
+  // for identity below instead of being refused for a rule it predates.
+  if (!collectionOnly && !intent.fuel && !agent.memory.productionTasks?.has(recordKey(s))) {
+    const burners = await burnerBindings(agent, s, intent)
+    if (burners.length) throw admissionRefusal(agent, 'production_fuel_allowance_missing', `Bound burner machines can only be refuelled from a fuel allowance {item_name, count}, which this intent omits: ${burners.join(', ')}`)
+  }
+  return { s, intent }
+}
+// Parse-time screen for the executor reply. A stepId naming another step is
+// left to commitPlan's step-identity correction, which says which step is active.
+export async function screenProductionTask(agent, plan, options) {
+  const s = scope(agent)
+  if (!s.step || !isActiveStep(agent, s, plan.stepId)) return
+  await admitProductionIntent(agent, plan, options)
+}
+
+export async function startProductionTask(agent, plan, { collectionOnly = false } = {}) {
+  const { s, intent } = await admitProductionIntent(agent, plan, { collectionOnly })
   agent.memory.productionTasks ??= new Map()
   pruneClosedProductionRecords(agent.memory)
   if (agent.memory.productionRestoreFault) return pause(agent, s.owner, 'production_ledger_unreadable')
   const key = recordKey(s)
   const previous = agent.memory.productionTasks.get(key)
-  if (previous && JSON.stringify(previous.intent) !== JSON.stringify(intent)) throw agent.roleContractError('production_intent_immutable', 'An admitted production intent cannot change its targets, bindings or fuel allowance')
-  if (previous && (previous.collection_only === true) !== collectionOnly) throw agent.roleContractError('production_intent_immutable', 'A harness collection continuation cannot change production authority')
+  if (previous && JSON.stringify(previous.intent) !== JSON.stringify(intent)) throw admissionRefusal(agent, 'production_intent_immutable', 'An admitted production intent cannot change its targets, bindings or fuel allowance')
+  if (previous && (previous.collection_only === true) !== collectionOnly) throw admissionRefusal(agent, 'production_intent_immutable', 'A harness collection continuation cannot change production authority')
   if (!previous) {
     if (agent.memory.productionTasks.size >= PRODUCTION_RECORD_LIMIT) return pause(agent, s.owner, 'production_ledger_exhausted')
     const status = await checked(agent, s.owner, deploymentStatus(agent.rcon, { requireAllowed: true }))
