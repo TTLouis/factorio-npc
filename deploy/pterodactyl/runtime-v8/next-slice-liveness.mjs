@@ -2,7 +2,7 @@ import { classifyRequestFailure, PAUSE_CLASS } from './pause-class.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 import { readNextSliceOwnership } from './supervisor-adapter.mjs'
 import { preservationFailure } from './contract-obligations.mjs'
-import { batchWatermark } from './operation-reconciliation.mjs'
+import { batchWatermark, unresolvedNativeAdmissions } from './operation-reconciliation.mjs'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 
 export function nextSliceOwner(agent) {
@@ -90,7 +90,10 @@ export async function nextSliceNativeState(agent, owner, expectedActor = owner.e
       || typeof value.operations.queue_empty !== 'boolean' || typeof value.crafting?.task_active !== 'boolean'
       || !value.crafting.native_queue || typeof value.follow?.active !== 'boolean')
   const pending = agent.memory.pendingOperations?.(agent.activePlanKey()) ?? (agent.memory.pendingOperation?.(agent.activePlanKey()) ? [agent.memory.pendingOperation(agent.activePlanKey())] : [])
-  const uncertain = changed || journals.some(journal => journal.unresolved) || pending.length > 0 || agent.batchInFlight
+  const planning = agent.memory.planningState?.(agent.activePlanKey())
+  const records = [...pending, ...(planning?.operation_ledger?.closed ?? [])]
+  const uncertain = changed || [first, final].some(value => unresolvedNativeAdmissions(value.operations, records, value.deployment).length > 0)
+    || pending.length > 0 || agent.batchInFlight
   const busy = native.idle !== true || status?.task_state !== 'idle' || status?.queue_empty !== true || status?.queue_length !== 0
     || Boolean(status?.active_batch) || crafting?.task_active || Object.keys(crafting?.native_queue ?? {}).length > 0
     || Boolean(crafting?.persisted_owner) || follow?.active || status?.actor?.mining_state?.mining

@@ -3,10 +3,16 @@ import { getActivePlan, isStepContractPending, PLAN_STATUS } from './planning-st
 import { evaluateCompletionContract } from './step-completion.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { renderOperationPreflight, luaString } from './structured-policy.mjs'
-import { batchWatermark, operationSignature } from './operation-reconciliation.mjs'
+import { batchWatermark, operationSignature, unresolvedNativeAdmissions } from './operation-reconciliation.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
   obligationProofOrigin, preservedProofMatches, effectivePreservationProof, preservationGeometry, normalizeFluidAdmission,
   normalizeFluidCertificate, fluidAdditionProof, isNativeEmptyPreservationSequence, PreservationProofError, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+
+function nativeUnresolved(agent, status, actor) {
+  const planning = agent.memory.planningState(agent.activePlanKey())
+  return unresolvedNativeAdmissions(status, [...(planning.operation_ledger?.records ?? []),
+    ...(planning.operation_ledger?.closed ?? [])], actor).length > 0
+}
 
 function placementReceipt(agent, plan, step) {
   const board = agent.memory.currentPlan(agent.activePlanKey())?.task_board
@@ -113,7 +119,7 @@ export async function checkFluidPreservationEligibility(agent, { operations, pre
   const raw = await agent.readTaskStatusRaw(); await fence()
   const status = typeof raw === 'string' ? JSON.parse(raw) : raw
   const watermark = batchWatermark(status); const journal = nativeAdmissionJournal(status?.admission_journal)
-  if (!watermark?.idle || watermark.queue_length !== 0 || !journal.known || journal.unresolved
+  if (!watermark?.idle || watermark.queue_length !== 0 || !journal.known || nativeUnresolved(agent, status, actor)
     || pending && (watermark.generation !== pending.baseline?.generation || watermark.max_batch_id !== pending.baseline?.max_batch_id
       || journal.records.some(row => row.operation_key === pending.operation_key))) fail('preservation_pre_admission_receipt_boundary_unproven')
   await fence()
@@ -156,7 +162,7 @@ export async function confirmFluidCandidateArgumentUnsent(agent, error) {
   const status = typeof raw === 'string' ? JSON.parse(raw) : raw
   const watermark = batchWatermark(status); const journal = nativeAdmissionJournal(status?.admission_journal)
   if (!watermark?.idle || watermark.queue_length !== 0 || watermark.generation !== proof.native_generation
-    || watermark.max_batch_id !== proof.native_max_batch_id || !journal.known || journal.unresolved
+    || watermark.max_batch_id !== proof.native_max_batch_id || !journal.known || nativeUnresolved(agent, status, actor)
     || proof.pending && journal.records.some(row => row.operation_key === proof.pending.operation_key)) fail()
   synchronousFence()
   return { reason: 'native_idle_journal_absent_exact_unsent_settled', operation_key: proof.pending?.operation_key ?? null,
@@ -221,6 +227,7 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   catch { await fence(); fail('preservation_candidate_read_unavailable') }
   await fence()
   if (preflight?.ok !== true && ['preservation_native_claim_limit_exhausted', 'preservation_claim_history_missing', 'preservation_guard_already_claimed'].includes(preflight?.code)) fail(preflight.code)
+  const actor = await agent.assertCurrent(); await fence()
   const rawStatus = await agent.readTaskStatusRaw()
   await fence()
   const status = typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus
@@ -228,7 +235,7 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   const journal = nativeAdmissionJournal(status?.admission_journal)
   if (!await nativeIdle(agent, fence) || !baseline || !baseline.idle || baseline.queue_length !== 0
     || baseline.generation !== pending.baseline?.generation || baseline.max_batch_id !== pending.baseline?.max_batch_id
-    || !journal.known || journal.unresolved || journal.records.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')
+    || !journal.known || nativeUnresolved(agent, status, actor) || journal.records.some(row => row.operation_key === pending.operation_key)) fail('preservation_pre_admission_receipt_boundary_unproven')
   const envelope = normalizeFluidAdmission({ version: 2, operation_key: pending.operation_key, attempt_id: pending.attempt_id,
     ordinal: pending.ordinal, signature: pending.signature,
     request_id: pending.request_id, board_step_id: agent.memory.currentPlan(key)?.task_board?.active_step_id,

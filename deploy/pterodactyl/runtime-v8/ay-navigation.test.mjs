@@ -20,6 +20,14 @@ test('AY exact retained navigation journal settles terminal partial movement wit
   }).refuse, true)
 })
 
+test('native partial bookkeeping uses the same exact proof; original action remains non-replayable', () => {
+  const status = structuredClone(ay.native)
+  Object.assign(status.admission_journal[0], { state: 'partial', ok: false, error: 'exact_terminal_navigation_cancelled' })
+  assert.equal(reconcilePendingOperation(ay.pending, { status, actor: ay.actor }).reason, 'exact_terminal_navigation_cancelled')
+  status.receipt_journal = []
+  assert.notEqual(reconcilePendingOperation(ay.pending, { status, actor: ay.actor }).reason, 'exact_terminal_navigation_cancelled')
+})
+
 for (const [name, mutate] of [
   ['actor', (s, p, a) => { a.actor_id++ }],
   ['epoch', (s, p, a) => { a.epoch++ }],
@@ -39,6 +47,9 @@ for (const [name, mutate] of [
   ['started accounting', s => { s.receipt_journal[0].tasks_started = 0 }],
   ['unknown error', s => { s.admission_journal[0].error = 'unknown_mutation' }],
   ['duplicate admission', s => { s.admission_journal.push(structuredClone(s.admission_journal[0])) }],
+  ['non-array receipts', s => { s.receipt_journal = {} }],
+  ['duplicate receipt', s => { s.receipt_journal.push(structuredClone(s.receipt_journal[0])) }],
+  ['conflicting receipt ref', s => { s.receipt_journal.push({ ...s.receipt_journal[0], batch_id: 102 }) }],
 ]) test(`AY terminal navigation fences ${name}, including a restored closed record`, () => {
   const s = structuredClone(ay.native); const p = structuredClone(ay.pending); const a = structuredClone(ay.actor)
   mutate(s, p, a)

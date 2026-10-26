@@ -200,6 +200,9 @@ export function pinned_operation_batch_refs() {
   const status = { receipt_journal: storage.sgluna_task_receipt_journal ?? [], batch_generation: storage.sgluna_task_batch_generation ?? 1 }
   for (const stored of storage.sgluna_operation_admissions ?? []) {
     const record = reconcile_record(stored, status)
+    // Unpinning permits receipt eviction. Preserve this terminal decision before
+    // releasing its only witness, even when no later admission refresh occurs.
+    if (record.state === 'partial' && record.error === 'exact_terminal_navigation_cancelled') Object.assign(stored, record)
     if (!admission_unresolved(record)) continue
     for (const slot of record.slots) for (const ref of slot.batch_refs) refs.push(ref.batch_ref)
   }
@@ -285,6 +288,11 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.ok = false
     record.error = 'exact_terminal_gather_cancelled'
   }
+  else if (admission_unresolved(record) && terminal_navigation_cancellation(record, status)) {
+    record.state = 'partial'
+    record.ok = false
+    record.error = 'exact_terminal_navigation_cancelled'
+  }
   else if (admission_unresolved(record) && (record.generation !== status.batch_generation || refs.some(ref => {
     const receipt = receipt_for(ref)
     return receipt !== undefined && receipt.state !== 'completed'
@@ -293,6 +301,32 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.error = 'batch_reconciliation_required'
   }
   return record
+}
+
+// Exact navigation-only cancellation is terminal partial movement (including
+// possible obstacle clearing), never destination success or replay authority.
+export function terminal_navigation_cancellation(record: OperationAdmission, status: { receipt_journal: TaskBatchReceipt[], batch_generation: number }) {
+  if (record.generation !== status.batch_generation || !integer(record.actor_id) || !integer(record.epoch)
+    || record.slots.length !== record.operation_count || !record.slots.length) return false
+  const ref = record.slots[0]?.batch_refs[0]
+  if (!ref || !integer(ref.batch_id) || ref.batch_generation !== record.generation || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return false
+  for (let index = 0; index < record.slots.length; index++) {
+    const slot = record.slots[index]
+    if (!slot.ok || slot.index !== index + 1 || !['walk_to_position', 'walk_to_entity'].includes(slot.operation ?? '')
+      || slot.queued_tasks !== 1 || slot.batch_refs.length !== 1 || slot.batch_refs[0].batch_id !== ref.batch_id
+      || slot.batch_refs[0].batch_generation !== ref.batch_generation || slot.batch_refs[0].batch_ref !== ref.batch_ref) return false
+  }
+  if (!Array.isArray(status.receipt_journal)) return false
+  const matches = status.receipt_journal.filter(row => row.batch_ref === ref.batch_ref
+    || row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation)
+  if (matches.length !== 1) return false
+  const receipt = matches[0]
+  return receipt.batch_ref === ref.batch_ref && receipt.batch_id === ref.batch_id && receipt.batch_generation === ref.batch_generation
+    && receipt.state === 'cancelled' && receipt.reason === 'navigation_unreachable' && receipt.task_count === record.slots.length
+    && receipt.task_types.length === receipt.task_count && receipt.task_types.every(type => type === 'walking_to_entity')
+    && integer(receipt.tasks_started) && receipt.tasks_started <= receipt.task_count
+    && integer(receipt.started_count) && receipt.started_count >= receipt.tasks_started && receipt.tick >= record.tick
+    && receipt.outcome === undefined && !receipt.refused_count && !(receipt.refusals?.length)
 }
 
 // A cancelled gather-only batch has no hidden delivery/crafting/building tail.

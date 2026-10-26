@@ -356,7 +356,8 @@ function terminalNavigationCancellation(admission, status, pending) {
   const slots = admission.slots
   if (!['admitted', 'uncertain', 'partial'].includes(admission.state) || status?.status_error || status?.error
     || !nativeAdmissionJournal(status.admission_journal?.records ?? status.admission_journal).known
-    || admission.ok !== true || admission.error && admission.error !== 'batch_reconciliation_required'
+    || !(admission.ok === true && (!admission.error || admission.error === 'batch_reconciliation_required')
+      || admission.state === 'partial' && admission.ok === false && admission.error === 'exact_terminal_navigation_cancelled')
     || status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch
     || !Array.isArray(slots) || slots.length !== pending.operations.length || !slots.length) return null
   const ref = slots[0]?.batch_refs?.[0]
@@ -367,9 +368,13 @@ function terminalNavigationCancellation(admission, status, pending) {
     && slot.queued_tasks === 1 && slot.batch_refs?.length === 1
     && slot.batch_refs[0].batch_id === ref.batch_id && slot.batch_refs[0].batch_generation === ref.batch_generation
     && slot.batch_refs[0].batch_ref === ref.batch_ref)) return null
-  const receipt = status.receipt_journal?.find(row => row.batch_id === ref.batch_id
-    && row.batch_generation === ref.batch_generation && row.batch_ref === ref.batch_ref)
+  if (!Array.isArray(status.receipt_journal) || !status.receipt_journal.every(isRecord)) return null
+  const matches = status.receipt_journal.filter(row => row.batch_ref === ref.batch_ref
+    || row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation)
+  if (matches.length !== 1) return null
+  const receipt = matches[0]
   if (!receipt || receipt.state !== 'cancelled' || receipt.reason !== 'navigation_unreachable'
+    || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation || receipt.batch_ref !== ref.batch_ref
     || receipt.task_count !== slots.length || !Array.isArray(receipt.task_types)
     || receipt.task_types.length !== slots.length || !receipt.task_types.every(type => type === 'walking_to_entity')
     || !Number.isSafeInteger(receipt.tasks_started) || receipt.tasks_started < 1 || receipt.tasks_started > receipt.task_count
@@ -384,7 +389,7 @@ function terminalNavigationCancellation(admission, status, pending) {
 export function unresolvedNativeAdmissions(status, records = [], actor) {
   const journal = status?.admission_journal?.records ?? status?.admission_journal
   if (!nativeAdmissionJournal(journal).known) return [{ reason: 'native_admission_journal_unreadable' }]
-  return Array.isArray(journal) ? journal.filter(row => ['uncertain', 'admitting'].includes(row.state)
+  return Array.isArray(journal) ? journal.filter(row => ['uncertain', 'admitting', 'admitted'].includes(row.state)
     && !records.some(record => record.operation_key === row.operation_key
       && reconcilePendingOperation(record, { status, actor }).reason === 'exact_terminal_navigation_cancelled')) : []
 }
@@ -443,7 +448,7 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     if (admission.state === 'admitted') return { verdict: RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, effect: EFFECT.IN_FLIGHT, reason: 'exact_admission_in_flight', batch_id: batchId }
     if (admission.state === 'not_admitted') return { verdict: RECONCILE_VERDICT.NOT_ADMITTED, effect: EFFECT.NOT_HAPPENED, reason: 'exact_admission_proven_absent' }
     const refs = (admission.slots ?? []).flatMap(slot => slot.batch_refs ?? [])
-    if (refs.some(ref => (status?.receipt_journal ?? []).some(receipt => receipt.batch_ref === ref.batch_ref && receipt.state === 'cancelled'))) {
+    if (refs.some(ref => (Array.isArray(status?.receipt_journal) ? status.receipt_journal : []).some(receipt => receipt?.batch_ref === ref.batch_ref && receipt.state === 'cancelled'))) {
       return { verdict: RECONCILE_VERDICT.ADMITTED_CANCELLED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'exact_batch_cancelled' }
     }
     if (Number.isSafeInteger(admission.generation) && Number.isSafeInteger(status?.batch_generation) && admission.generation !== status.batch_generation) {
