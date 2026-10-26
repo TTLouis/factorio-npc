@@ -1,5 +1,6 @@
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { deploymentStatus } from './supervisor-adapter.mjs'
+import { unresolvedNativeAdmissions } from './operation-reconciliation.mjs'
 
 export const CONTROLLER_LIVENESS = Object.freeze({ idleMs: 20000, probeMs: 10000, perStep: 2, perGoal: 6, records: 128 })
 
@@ -127,9 +128,14 @@ export async function inspectControllerLiveness(session, { now = Date.now() } = 
       native_reads: 3, native_idle: idle, observed_idle_ms: now - held.since, native_batch_id: status?.last_completed_batch?.batch_id })
     if (!current(session, s)) return { action: 'stale' }
     if (!idle) return { action: 'deferred' }
-    const journal = status.admission_journal?.records ?? status.admission_journal
+    // Residual missed receipt: use the ordinary owned settlement before deciding
+    // that a terminal navigation row means native work is still uncertain.
+    await s.agent.settleOutstandingOperation(text, undefined, { actor: native, requestId: s.owner.requestTrace?.id, receiptOwner: s.owner })
+    if (!current(session, s)) return { action: 'stale' }
+    const planning = s.agent.memory.planningState?.(s.owner.key)
+    const records = [...(planning?.operation_ledger?.records ?? []), ...(planning?.operation_ledger?.closed ?? [])]
     if (s.agent.memory.pendingOperation?.(s.owner.key) || s.agent.batchInFlight
-      || Array.isArray(journal) && journal.some(row => ['uncertain', 'admitting'].includes(row.state))) {
+      || unresolvedNativeAdmissions(status, records, native).length) {
       return pause(session, s, 'controller_native_outcome_uncertain')
     }
     await emit(session, s, 'idle_detected', 'unpaused_idle_controller', { observed_idle_ms: now - held.since })

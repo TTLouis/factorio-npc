@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { candidateWorld, KEY } from './fluid-candidate-recovery-fixtures.mjs'
@@ -6,6 +7,43 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { argumentCorrectionAvailable, restorePlanningState, serializePlanningState, applyPlanningEvent } from './planning-state.mjs'
 import { checkFluidPreservationEligibility } from './contract-obligation-runtime.mjs'
 import { buildPendingOperation, sanitizePendingOperation } from './operation-reconciliation.mjs'
+
+for (const mismatch of [false, true]) test(`fluid candidate lifecycle after retained terminal navigation; host proof mismatch=${mismatch}`, async () => {
+  const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8'))
+  const w = await candidateWorld()
+  let installed = false
+  const native = w.game.command.bind(w.game)
+  w.game.command = async text => {
+    const raw = await native(text)
+    if (!text.includes('autorio_operations","status')) return raw
+    const status = JSON.parse(raw)
+    const planning = w.memory.planningState(KEY)
+    const plan = planning?.plans.find(row => row.plan_id === planning.active_plan_id)
+    if (!plan) return raw
+    if (!installed) {
+      const record = { ...ay.pending, goal_id: plan.goal_id, plan_id: plan.plan_id, step_id: plan.steps[0].step_id,
+        actor: { actor_id: 10, epoch: 3 } }
+      assert.ok(w.memory.recordPendingOperation(KEY, record))
+      assert.ok(w.memory.clearPendingOperation(KEY, { operationKey: record.operation_key }))
+      installed = true
+    }
+    const admission = structuredClone(ay.native.admission_journal[0])
+    Object.assign(admission, { actor_id: 10, epoch: 3 })
+    if (mismatch) admission.signature = 'wrong'
+    status.admission_journal = [...status.admission_journal, admission]
+    status.receipt_journal = [...status.receipt_journal, ...ay.native.receipt_journal]
+    return JSON.stringify(status)
+  }
+  if (mismatch) {
+    await assert.rejects(w.start(), /preservation_pre_admission_receipt_boundary_unproven/)
+    assert.equal(w.game.mutations.length, 0)
+  } else {
+    await w.start()
+    assert.equal(w.game.mutations.length, 1)
+    assert.ok(w.rows.some(row => row.event === 'operations.preflight_recoverable'))
+    assert.equal(w.memory.planningState(KEY).goal.argument_corrections.claims.length, 1)
+  }
+})
 
 test('early native known-argument eligibility -> durable existing allowance -> fresh certified proposal -> one placement -> unchanged fuel', async () => {
   const w = await candidateWorld()

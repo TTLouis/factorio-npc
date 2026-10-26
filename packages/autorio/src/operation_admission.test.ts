@@ -1,11 +1,61 @@
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { new_operation_admission, pinned_operation_batch_refs, terminal_gather_cancellation } from './operation_admission'
+import { new_operation_admission, pinned_operation_batch_refs, terminal_gather_cancellation, terminal_navigation_cancellation } from './operation_admission'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
 const identity = { operation_key: 'request/operation', attempt_id: 'attempt-1', actor_id: 7, epoch: 3, signature: 'hash-1', ordinal: 1, operation_count: 1 }
 const ref = { batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1' }
+
+describe('AY terminal navigation admission bookkeeping', () => {
+  function fixture() {
+    let added = 0
+    const receipt = { ...ref, state: 'cancelled', task_count: 1, task_types: ['walking_to_entity'],
+      tick: 200, reason: 'navigation_unreachable', started_count: 1, tasks_started: 1 }
+    const receipts: any[] = []
+    const status = () => ({ batch_generation: 1, tasks_added: added, receipt_journal: receipts })
+    const admission = new_operation_admission(actor, status)
+    admission.begin(identity)
+    added++
+    admission.slot(identity.operation_key, 1, { ok: true, operation: 'walk_to_position', batch_refs: [ref] })
+    admission.finish(identity.operation_key, { ok: true })
+    receipts.push(receipt)
+    return { admission, receipt, receipts, status }
+  }
+  it('seals partial movement once, survives restore and receipt expiry, and frees unresolved capacity/history', () => {
+    const f = fixture()
+    expect(f.admission.status().records[0]).toMatchObject({ state: 'partial', ok: false, error: 'exact_terminal_navigation_cancelled' })
+    // Receipt pruning asks for pins before any next admission. Releasing the
+    // terminal witness must persist its classification first.
+    ;(globalThis as any).storage.sgluna_task_receipt_journal = f.receipts
+    ;(globalThis as any).storage.sgluna_task_batch_generation = 1
+    expect(pinned_operation_batch_refs()).toEqual([])
+    expect((globalThis as any).storage.sgluna_operation_admissions[0].state).toBe('partial')
+    ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+    f.receipts.length = 0
+    expect(f.admission.status().records[0].state).toBe('partial')
+    for (let ordinal = 2; ordinal <= 140; ordinal++) {
+      const key = `later/${ordinal}`
+      expect(f.admission.begin({ ...identity, ordinal, operation_key: key, attempt_id: key }).ok).toBe(true)
+      f.admission.slot(key, 1, { ok: true, operation: 'wait', batch_refs: [] })
+      f.admission.finish(key, { ok: true })
+    }
+    expect(f.admission.status().records.some(row => row.operation_key === identity.operation_key)).toBe(false)
+    expect(f.admission.status().records.every(row => row.state === 'completed')).toBe(true)
+  })
+  it.each(['mixed', 'duplicate', 'ref', 'generation', 'started', 'actor'] as const)('retains %s uncertainty', mode => {
+    const f = fixture()
+    const record = (globalThis as any).storage.sgluna_operation_admissions[0]
+    if (mode === 'mixed') record.slots[0].operation = 'place_entity'
+    if (mode === 'duplicate') f.receipts.push({ ...f.receipt })
+    if (mode === 'ref') f.receipt.batch_ref = 'wrong'
+    if (mode === 'generation') record.generation++
+    if (mode === 'started') f.receipt.tasks_started = 0
+    if (mode === 'actor') record.actor_id = 0
+    expect(terminal_navigation_cancellation(record, f.status() as any)).toBe(false)
+    expect(f.admission.status().records[0].state).not.toBe('partial')
+  })
+})
 
 describe('AR terminal partial gather accounting', () => {
   function fixture() {

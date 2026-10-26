@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import fs from 'node:fs'
 import { ao, aoWorld, preserveAoRepair } from './run-ao-fixture.mjs'
 import { CONTROLLER_LIVENESS, inspectControllerLiveness } from './controller-liveness.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
@@ -38,6 +39,46 @@ async function poll(w, now) {
     await w.session.eventQueue
   } finally { Date.now = clock }
 }
+
+test('missed AY navigation receipt is reconciled by Session watchdog and automatically continues with native uncertain row retained', async () => {
+  const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
+  const w = await stranded()
+  // Native witness is the retained AY shape; AO supplies the existing real
+  // Session next-transition fixture. Only ownership identities are substituted.
+  const pending = { ...ay.pending, goal_id: w.held().goal_id, plan_id: w.held().plan_id,
+    step_id: w.held().steps[1].step_id, actor: { actor_id: 19, epoch: 1 } }
+  const status = structuredClone(ay.native)
+  status.admission_journal[0].actor_id = 19
+  assert.ok(w.memory.recordPendingOperation(ao.key, pending))
+  const original = w.agent.readTaskStatusRaw.bind(w.agent)
+  w.agent.readTaskStatusRaw = async () => w.game.mutations.length === 1 ? JSON.stringify(status) : original()
+  const now = Date.now()
+  await poll(w, now)
+  await poll(w, now + CONTROLLER_LIVENESS.idleMs)
+  await w.agent.contractPrediction?.flight
+  assert.equal(w.memory.pendingOperations(ao.key).some(row => row.operation_key === pending.operation_key), false)
+  assert.equal(w.game.mutations.length, 2)
+  assert.equal(status.admission_journal[0].state, 'uncertain')
+  assert.ok(w.events.some(row => row.event === 'operation.reconciled' && row.data.reason === 'exact_terminal_navigation_cancelled' && row.data.settled))
+  assert.ok(w.events.some(row => row.event === 'controller.recovery_completed'))
+})
+
+test('request replacement during navigation live-actor read cannot settle replacement work or spend recovery', async () => {
+  const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
+  let armed = false
+  const w = await stranded({ readHook: ({ text, agent }) => {
+    if (armed && text.includes('sgluna_deployment')) { armed = false; agent.traceRequest = { id: 'replacement', usage: {} } }
+  } })
+  const pending = { ...ay.pending, goal_id: w.held().goal_id, plan_id: w.held().plan_id,
+    step_id: w.held().steps[1].step_id, actor: { actor_id: 19, epoch: 1 } }
+  const status = structuredClone(ay.native); status.admission_journal[0].actor_id = 19
+  assert.ok(w.memory.recordPendingOperation(ao.key, pending))
+  armed = true
+  await assert.rejects(w.agent.settleOutstandingOperation(JSON.stringify(status)), /cancelled|superseded|stale/i)
+  assert.equal(w.memory.pendingOperation(ao.key).operation_key, pending.operation_key)
+  assert.equal(w.game.mutations.length, 1)
+  assert.equal(w.memory.controllerRecoveries?.size ?? 0, 0)
+})
 
 test('injected exact AO missed wake is detected and automatically continues through the real supervisor queue', async () => {
   const w = await stranded()

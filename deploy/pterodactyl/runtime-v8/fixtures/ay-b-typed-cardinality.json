@@ -1,0 +1,136 @@
+{
+  "source": "AY B retained canonical plan goal_1h7s8kx_1_p6 step2",
+  "obligations": {
+    "outcome": {
+      "mode": "all",
+      "requirements": [
+        {
+          "id": "requirement_1",
+          "kind": "inventory_count",
+          "item_name": "offshore-pump",
+          "minimum": 1
+        },
+        {
+          "id": "requirement_2",
+          "kind": "inventory_count",
+          "item_name": "boiler",
+          "minimum": 1
+        },
+        {
+          "id": "requirement_3",
+          "kind": "inventory_count",
+          "item_name": "steam-engine",
+          "minimum": 1
+        },
+        {
+          "id": "requirement_4",
+          "kind": "inventory_count",
+          "item_name": "small-electric-pole",
+          "minimum": 4
+        },
+        {
+          "id": "requirement_5",
+          "kind": "inventory_count",
+          "item_name": "pipe",
+          "minimum": 8
+        },
+        {
+          "id": "requirement_6",
+          "kind": "inventory_count",
+          "item_name": "coal",
+          "minimum": 20
+        },
+        {
+          "id": "requirement_7",
+          "kind": "inventory_count",
+          "item_name": "lab",
+          "minimum": 1
+        }
+      ],
+      "confidence": 0
+    },
+    "preserve": [
+      37,
+      38,
+      39
+    ]
+  },
+  "obligation_proof": {
+    "version": 1,
+    "intent_signature": "ff1aea080e2cff0da176491da8ede8c940753063b4e6c07823e28da04b1acdd6",
+    "actor_id": 17,
+    "actor_epoch": 1,
+    "request_id": "req_mvo5kxs2_1",
+    "captured_at": 1792953641187,
+    "preserved": [
+      {
+        "entity": {
+          "unit_number": 37,
+          "name": "burner-mining-drill",
+          "type": "mining-drill",
+          "position": {
+            "x": -45,
+            "y": -52
+          },
+          "direction": 0
+        },
+        "actor_id": 17,
+        "surface_index": 1,
+        "force_index": 1,
+        "item_io": {
+          "drop_position": {
+            "x": -45.5,
+            "y": -53.296875
+          },
+          "drop_target": {
+            "unit_number": 38,
+            "name": "stone-furnace",
+            "type": "furnace",
+            "position": {
+              "x": -45,
+              "y": -54
+            },
+            "direction": 0
+          }
+        }
+      },
+      {
+        "entity": {
+          "unit_number": 38,
+          "name": "stone-furnace",
+          "type": "furnace",
+          "position": {
+            "x": -45,
+            "y": -54
+          },
+          "direction": 0
+        },
+        "actor_id": 17,
+        "surface_index": 1,
+        "force_index": 1
+      },
+      {
+        "entity": {
+          "unit_number": 39,
+          "name": "stone-furnace",
+          "type": "furnace",
+          "position": {
+            "x": -38,
+            "y": -29
+          },
+          "direction": 0
+        },
+        "actor_id": 17,
+        "surface_index": 1,
+        "force_index": 1
+      }
+    ],
+    "binding": {
+      "goal_id": "goal_1h7s8kx_1",
+      "plan_id": "goal_1h7s8kx_1_p6",
+      "plan_version": 1,
+      "step_id": "goal_1h7s8kx_1_p6_v1_s2_1j62g34",
+      "semantic_step_id": "goal_1h7s8kx_1_p6_v1_s2_1j62g34"
+    }
+  }
+}

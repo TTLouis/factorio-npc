@@ -88,10 +88,35 @@ for (const lane of fixture.lanes) {
       && row.data.preservation_failure.category === 'unproven' && row.data.preservation_failure.stage === 'capture'))
   })
 }
-test('actual supervisor detects injected AW orphan and automatically claims/commits same-goal ordinary next slice', async () => {
+function retainedNavigation(w, { mismatch = false, changeSecondSample = false } = {}) {
+  const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8'))
+  const planning = w.memory.planningState(w.key)
+  const plan = planning.plans.find(row => row.plan_id === planning.active_plan_id)
+  const record = { ...ay.pending, goal_id: planning.goal.goal_id, plan_id: plan.plan_id,
+    step_id: plan.steps.at(-1).step_id, actor: { actor_id: w.game.status.actor_id, epoch: w.game.status.epoch } }
+  assert.ok(w.memory.recordPendingOperation(w.key, record))
+  assert.ok(w.memory.clearPendingOperation(w.key, { operationKey: record.operation_key }))
+  const native = w.game.command.bind(w.game)
+  let samples = 0
+  w.game.command = async text => {
+    const result = await native(text)
+    if (!text.includes('projection="next_slice_ownership_v1"')) return result
+    const sample = JSON.parse(result)
+    const status = structuredClone(ay.native)
+    status.admission_journal[0].actor_id = record.actor.actor_id
+    status.admission_journal[0].epoch = record.actor.epoch
+    if (mismatch) status.admission_journal[0].signature = 'wrong'
+    if (changeSecondSample && ++samples % 2 === 0) status.admission_journal[0].work_mark++
+    sample.operations = status
+    return JSON.stringify(sample)
+  }
+}
+
+for (const navigation of [false, true]) test(`actual supervisor detects injected AW orphan and automatically commits next slice; retained AY navigation=${navigation}`, async () => {
   const lane = fixture.lanes[0]
   const valid = planReply({ plan: ['Gather ten coal toward the existing factory goal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
   const w = awWorld(lane, () => valid)
+  if (navigation) retainedNavigation(w)
   const goal = structuredClone(w.memory.planningState(w.key).goal)
   const before = structuredClone(w.memory.planningState(w.key).plans)
   // Inject the original residual projection, bypassing worker exit prevention.
@@ -114,6 +139,16 @@ test('actual supervisor detects injected AW orphan and automatically claims/comm
   assert.ok(after.plans.some(plan => !before.some(old => old.plan_id === plan.plan_id) && ['COMMITTED', 'EXECUTING'].includes(plan.status)), JSON.stringify(w.rows.slice(-10)))
   assert.ok(w.calls() > 0)
   assert.equal(session.modelResume, null)
+})
+
+for (const unsafe of ['mismatch', 'changeSecondSample']) test(`next-slice retained navigation preserves ${unsafe} guard`, async () => {
+  const w = orphanSession()
+  retainedNavigation(w, { [unsafe]: true })
+  await inspectNextSliceLiveness(w.session)
+  await settle(w.session)
+  stopWake(w.session)
+  assert.equal(w.memory.pauseRecord(w.key).pause_class, 'guard')
+  assert.equal(w.calls(), 0)
 })
 
 function orphanSession() {
