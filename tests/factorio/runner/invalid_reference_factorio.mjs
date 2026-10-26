@@ -122,7 +122,7 @@ try {
     .push('executor', 'luna:collect-output', () => copperReply([{ name: 'move_items_exact', args: { item_name: 'copper-plate', unit_number: unit, max_count: 10, to_entity: false } }]))
   const world = delegatedRecoveryWorld({ game: rcon, model })
   const status = await deploymentStatus(rcon, { requireAllowed: true })
-  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
   ctx.session.queuePlayerRequest('TTLouis', 'Craft the furnace, then smelt and collect ten copper plates')
   await settle(ctx.session)

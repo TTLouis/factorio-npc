@@ -518,7 +518,7 @@ export function recoveryWorld({ game, model, stateFile = null, memory = new Cano
 
 // The production Session around an agent: the real event queue, the real onAgentActivity hook, the real game-line, player-request and
 // UI-control entry points. Only the I/O edges are stubbed (chat goes to an array, the Task Board UI is a no-op).
-export function recoverySession(world, { actorId = ACTOR_ID, epoch = EPOCH } = {}) {
+export function recoverySession(world, { actorId = ACTOR_ID, epoch = EPOCH, sessionId = world.game.status?.session } = {}) {
   const { agent } = world
   const chat = []
   const logs = []
@@ -537,7 +537,7 @@ export function recoverySession(world, { actorId = ACTOR_ID, epoch = EPOCH } = {
     lastErrorAt: 0,
     cancelGeneration: 0,
     config: { chatPlayers: { allow_all: true } },
-    lastStatus: { actor_id: actorId, epoch, session: world.game.status.session },
+    lastStatus: { actor_id: actorId, epoch, session: sessionId },
     liveStatus: { actor_id: actorId, epoch },
     eventQueue: Promise.resolve(),
     agentLive: { phase: 'idle', activity: [], debug: undefined },

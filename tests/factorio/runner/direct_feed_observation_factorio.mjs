@@ -115,7 +115,7 @@ try {
   world.agent.routePostStepDecision = async () => ({ route: 'targeted_observation', decision_called: true,
     steering: { observation_budget: 1, observation_relevance: { source: 'typed_relevance', threshold: 0.5, selected_families: ['research_state'], budget: 1 } } })
   const status = await deploymentStatus(rcon, { requireAllowed: true })
-  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
   ctx.session.queuePlayerRequest('TTLouis', objective); await settle(ctx.session); healthy()
   const original = structuredClone(getActivePlan(world.memory.planningState(KEY)))
