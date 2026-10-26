@@ -212,6 +212,40 @@ test('a non-outcome root checkpoint mismatch is refused before persistence with 
   assert.deepEqual(routeRows(w).map(entry => entry.data.reason_code), ['invalid_semantic_checkpoint'])
 })
 
+// Six outcome rows and three preserved units: a supported nine-predicate typed contract, above the eight-row
+// authoring limit for an untyped checkpoint.
+const WIDE_OUTCOME = { mode: 'all', requirements: ['burner-inserter', 'iron-plate', 'iron-gear-wheel', 'coal', 'stone', 'wood']
+  .map(item_name => ({ kind: 'inventory_count', item_name, minimum: 1 })) }
+// The checkpoint is sent in the declaration, in the root, or omitted for the harness to compile.
+function wideLaneB(row, form) {
+  const draft = routeDraft(row)
+  draft.stepCompletions[0] = { kind: 'deterministic', obligations: { outcome: WIDE_OUTCOME, preserve: [22, 23, 25] }, ...(form === 'declaration' ? { checkpoint: WIDE_OUTCOME } : {}) }
+  if (form === 'root') draft.checkpoint = WIDE_OUTCOME
+  return contentReply(draft)
+}
+const WIDE_COMPILE_TRACE = { declaration: ['outcome_only_checkpoint'], root: ['outcome_only_root_checkpoint'], omitted: [] }
+
+for (const form of ['declaration', 'root', 'omitted']) {
+  test(`a nine-predicate typed contract commits through the route with its checkpoint ${form === 'omitted' ? 'omitted' : `outcome-only in the ${form}`}`, async () => {
+    const row = lane('b')
+    const seen = {}
+    const w = baWorld(row, [row.wire.submit.message, wideLaneB(row, form), stopAt(seen)])
+    const before = structuredClone(w.memory.planningState(w.key).plans)
+    startAuthoring(w)
+    await assert.rejects(w.agent.runGuarded(), new RegExp(STOP))
+    assert.equal(seen.role, 'executor')
+    assert.notEqual(seen.pause.paused, true)
+    const [committed] = newPlans(seen.planning, before)
+    assert.equal(committed.status, 'COMMITTED')
+    const contract = committed.steps[0].completion_contract
+    assert.equal(contract.requirements.length, 9)
+    assert.deepEqual(contract.requirements.filter(item => item.kind === 'entity_exists').map(item => item.unit_number).sort((a, b) => a - b), [22, 23, 25])
+    assert.deepEqual(events(w, 'plan.checkpoint_compiled_from_obligations').map(entry => entry.data.reason), WIDE_COMPILE_TRACE[form])
+    assert.deepEqual(events(w, 'step.checkpoint_change_ignored'), [])
+    assert.deepEqual(routeRows(w), [])
+  })
+}
+
 test('repeated invalid route drafts exhaust the plan_category allowance and keep the visible guard pause', async () => {
   const row = lane('a')
   const w = baWorld(row, [row.wire.submit.message, ...Array(4).fill(row.wire.route.message)])

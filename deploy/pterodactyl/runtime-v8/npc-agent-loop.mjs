@@ -14,7 +14,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
+import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
@@ -8530,8 +8530,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
     const frozen = FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
 
-    const existing = this.persistedStepCheckpoint(board, step.id)
-    const incoming = sanitizeStepCompletionContract(plan.checkpoint)
+    // A typed step's contract is read under its obligations, which admit up to 16 compiled predicates; the generic
+    // limit of 8 applies only to untyped checkpoints. A committed step's obligations are those with a proven origin; a
+    // draft being committed has no origin yet, only the declaration its root was just validated against.
+    const obligations = frozen ? this.currentContractObligations() : storedObligations(plan.stepCompletions?.[plan.currentStep]?.obligations)
+    const context = obligationContractContext(obligations)
+    const existing = persistedStepCheckpoint(board, step.id, context)
+    const incoming = sanitizeStepCompletionContract(plan.checkpoint, context)
     const incomingSignature = JSON.stringify(incoming)
     const existingSignature = existing ? JSON.stringify(existing.contract) : ''
 
@@ -8565,11 +8570,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations, {
       plannerOnlyDraft: this.plannerOnlyDraftCandidate(plan),
+      obligations,
     })
     if (!validation.accepted) throw await this.checkpointRejectionError(validation, { stepId: step.id })
     this.memory.setStepCompletionContract?.(key, step.id, validation.contract)
     const updated = this.memory.currentPlan?.(key)
-    const persisted = this.persistedStepCheckpoint(updated?.task_board, step.id)
+    const persisted = persistedStepCheckpoint(updated?.task_board, step.id, context)
     if (!persisted || JSON.stringify(persisted.contract) !== incomingSignature) {
       throw new AgentLoopError('deterministic_checkpoint_failed_to_persist')
     }
@@ -10160,12 +10166,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Extended contracts are accepted only against the current canonical typed
   // program and its original proof. Board/model fields cannot mint this context.
-  currentContractContext(step) {
+  currentContractObligations(step) {
     const planning = this.memory.planningState?.(this.activePlanKey())
     const plan = getActivePlanningPlan(planning)
     const canonical = step ?? plan?.steps?.[plan.active_step_index]
-    return canonical?.obligations && obligationProofOrigin(planning, canonical)
-      ? obligationContractContext(canonical.obligations) : undefined
+    return canonical?.obligations && obligationProofOrigin(planning, canonical) ? canonical.obligations : undefined
+  }
+
+  currentContractContext(step) {
+    const obligations = this.currentContractObligations(step)
+    return obligations ? obligationContractContext(obligations) : undefined
   }
 
   persistedStepCheckpoint(board, stepId) {
