@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import vm from 'node:vm'
 import { execFileSync } from 'node:child_process'
 import { definePair, freezePair, render, assertNativeSeed, imageTeardownDecision, sharedQuotaDecision, kitRoot, files } from './pair.mjs'
 import {operatorStopReason} from './templates/pair-stop-policy.mjs'
@@ -11,7 +12,7 @@ import {verifyPeerSuccess} from './coordinator/verify-peer-success.mjs'
 const sha=x=>crypto.createHash('sha256').update(x).digest('hex')
 const repo=path.resolve(kitRoot,'../..')
 const candidate=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim()
-const opts={candidate,published:'b'.repeat(40),imageId:'sha256:'+ 'c'.repeat(64)}
+const opts={candidate,published:'b'.repeat(40),imageId:`sha256:${ 'c'.repeat(64)}`}
 const pair=definePair(opts)
 const quota=(extra={})=>({pairId:pair.pairId,remainingPercent:25,observedAt:1000,source:'get_usage_limits',observedBy:'parent:/root',matchingWeeklyWindows:1,windowDurationMins:10080,...extra})
 const cap={pairId:pair.pairId,imageId:pair.imageId,imageTag:pair.imageTag,tagInitiallyAbsent:true}
@@ -66,6 +67,11 @@ test('real freezer is candidate agnostic, input-only and immutable; generated la
   const input=fixture()
   try {
     const frozen=freezePair(input)
+    // Parse raw templates only after their typed bindings have been rendered.
+    // SourceTextModule never links imports or executes gameplay/provider code.
+    for (const file of files(input.output).filter(file => file.endsWith('.mjs'))) {
+      assert.equal(new vm.SourceTextModule(fs.readFileSync(path.join(input.output, file), 'utf8'), { identifier: file }).status, 'unlinked', file)
+    }
     assert.equal(frozen.candidate,candidate)
     assert.throws(()=>freezePair(input),/replace/)
     const read=(id,name)=>fs.readFileSync(path.join(input.output,id,name),'utf8')

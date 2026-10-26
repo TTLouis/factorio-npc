@@ -23,17 +23,28 @@ concurrency:
 jobs:
   tooling:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Paired freezer regressions inspect the immediate parent source.
+          fetch-depth: 2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Check offline local runner behavior
         run: bash tests/tooling/test-local.test.sh
       - name: Check native CI evidence and cleanup behavior
         run: bash tests/tooling/test-factorio-ci.test.sh
       - name: Check native suite failure aggregation
         run: bash tests/tooling/test-factorio-suite.test.sh
+      - name: Check paired harness contracts and rendered module syntax
+        run: |
+          command -v pwsh >/dev/null || { echo 'PowerShell is required by the offline paired-harness tests' >&2; exit 1; }
+          node --experimental-vm-modules --test scripts/e2e-pair/*.test.mjs
 
   lint:
     runs-on: ubuntu-latest

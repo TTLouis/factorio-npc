@@ -51,7 +51,11 @@ record actual versions rather than assuming all images match host Node.
 
 CI and package gates target `main` and `experiment/jev-agent-architecture`.
 The historical `feat/npc-transition-work` branch no longer triggers these gates.
-Existing job/check names stay unchanged. The local composite action
+Existing job/check names stay unchanged. Tooling also runs the paired harness's
+Node tests (with PowerShell available) and parses every rendered JavaScript
+module without executing it. Raw `@@binding@@` templates and byte-pinned
+historical inputs are excluded from direct ESLint parsing; ordinary Node
+scripts and tests remain linted. The local composite action
 [setup-workspace](../.github/actions/setup-workspace/action.yml) installs the
 pinned pnpm dependencies on Node 24 for lint, unit and build jobs. Native jobs
 install/build inside their Dockerfile and need no second host dependency install.

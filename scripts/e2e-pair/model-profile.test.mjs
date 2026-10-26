@@ -9,7 +9,7 @@ import {pathToFileURL} from 'node:url';
 import {definePair,freezePair,kitRoot} from './pair.mjs';
 const repo=path.resolve(kitRoot,'../..');
 const candidate=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
-const opts={candidate,published:'b'.repeat(40),imageId:'sha256:'+'c'.repeat(64)};
+const opts={candidate,published:'b'.repeat(40),imageId:`sha256:${'c'.repeat(64)}`};
 const luna={planner:'gpt-6-luna',executor:'gpt-6-luna',overwatch:'gpt-6-luna'};
 test('Terra/Luna is the default; explicit Sol/Luna and Luna/Luna retain strict role validation',()=>{
   assert.deepEqual(definePair(opts).models,{...luna,planner:'gpt-6.1-terra'});
@@ -27,7 +27,7 @@ for(const selected of [undefined,{...luna,planner:'gpt-6.1-sol'},luna])test(`rea
     const output=path.join(temp,'pair');freezePair({...opts,repo,output,nativeDir,nativeManifest,nativeBuildSource:candidate,models:selected});
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output,'pair.json'))).models,expected);
     for(const id of ['a','b']){
-      const root=path.join(output,id), read=name=>fs.readFileSync(path.join(root,name),'utf8');
+      const root=path.join(output,id); const read=name=>fs.readFileSync(path.join(root,name),'utf8');
       assert.ok(read('live.compose.yml').includes(`OPENAI_MODEL: "${expected.planner},${expected.executor}"`));
       for(const file of ['lane.json','run-intent.json']){const value=JSON.parse(read(file));assert.deepEqual(value.models,expected);assert.equal(value.overwatchReasoning,'low');}
       const frozen=await import(pathToFileURL(path.join(root,'frozen-models.mjs')));assert.deepEqual(frozen.frozenModels,expected);assert.equal(frozen.overwatchReasoning,'low');

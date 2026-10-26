@@ -9,8 +9,8 @@ export const kitRoot = path.dirname(fileURLToPath(import.meta.url))
 const sha = value => crypto.createHash('sha256').update(value).digest('hex')
 const json = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value, { flag: 'wx' }) }
-const writeJson = (file, value) => write(file, JSON.stringify(value, null, 2) + '\n')
-const check = (ok, message) => { if (!ok) throw Error(message) }
+const writeJson = (file, value) => write(file, `${JSON.stringify(value, null, 2)  }\n`)
+const check = (ok, message) => { if (!ok) throw new Error(message) }
 const git = (repo, ...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 })
 const hashText = value => sha(value.replaceAll('\r', ''))
 export function files(root, prefix = '') {
@@ -25,7 +25,7 @@ export function definePair({ version = 'aw', date = '2026-10-25', candidate, pub
   check(/^[a-z]{2,8}$/.test(version) && /^\d{4}-\d{2}-\d{2}$/.test(date), 'Invalid version/date')
   check(/^[a-f0-9]{40}$/.test(candidate) && /^[a-f0-9]{40}$/.test(published), 'Exact candidate and published SHA required')
   check(/^sha256:[a-f0-9]{64}$/.test(imageId), 'Immutable image ID required')
-  check(seeds.length === 2 && seeds.every(n => Number.isInteger(n) && n > 0 && n <= 0xffffffff) && seeds[0] !== seeds[1], 'Two explicit distinct nonzero uint32 seeds required')
+  check(seeds.length === 2 && seeds.every(n => Number.isInteger(n) && n > 0 && n <= 0xFFFFFFFF) && seeds[0] !== seeds[1], 'Two explicit distinct nonzero uint32 seeds required')
   const day = date.replaceAll('-', '')
   const pairId = `red-automation-${day}${version}`
   return { schema: 1, pairId, candidate, published, imageId, imageTag: `factorio-npc:run-${version}-${day}`,
@@ -54,7 +54,7 @@ export function runtimeManifest(repo, candidate) {
   const installer = git(repo, 'show', `${candidate}:deploy/pterodactyl/payload-src/installer.sh`)
   const out = []
   for (const family of ['runtime-v8', 'staging']) {
-    const match = installer.match(new RegExp('for file in ([^;]+); do\\s*cp "\\$WORK/source/deploy/pterodactyl/' + family + '/\\$file"'))
+    const match = installer.match(new RegExp(`for file in ([^;]+); do\\s*cp "\\$WORK/source/deploy/pterodactyl/${  family  }/\\$file"`))
     check(match, `Cannot enumerate installer ${family} modules`)
     for (const name of match[1].trim().split(/\s+/)) out.push({ family, name, sha256: hashText(git(repo, 'show', `${candidate}:deploy/pterodactyl/${family}/${name}`)) })
   }
@@ -75,7 +75,7 @@ export function freezePair({ repo, output, nativeDir, nativeManifest, nativeBuil
   check(JSON.stringify(actualPaths) === JSON.stringify(expectedNative.map(e => e.path).sort()), 'Native manifest path mismatch')
   for (const e of expectedNative) {
     const bytes = fs.readFileSync(path.join(nativeDir, e.path))
-    check(sha(/\.(lua|json)$/.test(e.path) || e.path === 'LICENSE' ? bytes.toString('utf8').replaceAll('\r', '') : bytes) === e.sha256, 'Native compile hash mismatch')
+    check(sha(/\.(?:lua|json)$/.test(e.path) || e.path === 'LICENSE' ? bytes.toString('utf8').replaceAll('\r', '') : bytes) === e.sha256, 'Native compile hash mismatch')
   }
   const provenance = json(path.join(kitRoot, 'av-provenance.json'))
   for (const e of provenance.copied_helper_inputs) check(sha(fs.readFileSync(path.join(kitRoot, 'templates', e.path))) === e.template_sha256, `Unreviewed template change: ${e.path}`)
@@ -98,16 +98,16 @@ export function freezePair({ repo, output, nativeDir, nativeManifest, nativeBuil
     for (const file of files(path.join(kitRoot, 'templates'))) {
       write(path.join(root, file), render(fs.readFileSync(path.join(kitRoot, 'templates', file), 'utf8'), bindings))
     }
-    write(path.join(root, 'candidate-sha.txt'), pair.candidate + '\n')
-    write(path.join(root, 'release-image-id.txt'), pair.imageId + '\n')
+    write(path.join(root, 'candidate-sha.txt'), `${pair.candidate  }\n`)
+    write(path.join(root, 'release-image-id.txt'), `${pair.imageId  }\n`)
     writeJson(path.join(root, 'expected-runtime.json'), expectedRuntime)
-    write(path.join(root, 'expected-prompt-sha256.txt'), promptHash + '\n')
+    write(path.join(root, 'expected-prompt-sha256.txt'), `${promptHash  }\n`)
     writeJson(path.join(root, 'expected-native-mod.json'), expectedNative)
     writeJson(path.join(root, 'lane.json'), { ...lane, pairId: pair.pairId, candidate: pair.candidate, imageId: pair.imageId, models: pair.models, overwatchReasoning: pair.overwatchReasoning })
     writeJson(path.join(root, 'map-gen-settings.json'), { seed: lane.seed })
     write(path.join(root, 'frozen-compose/compose.yml'), composeBase)
     write(path.join(root, 'frozen-compose/compose.e2e.yml'), composeE2e)
-    write(path.join(root, 'proxy-tunnel/target-port.txt'), lane.tunnelPort + '\n')
+    write(path.join(root, 'proxy-tunnel/target-port.txt'), `${lane.tunnelPort  }\n`)
     fs.mkdirSync(path.join(root, 'data/logs'), { recursive: true })
     fs.mkdirSync(path.join(root, 'data/saves'), { recursive: true })
     fs.mkdirSync(path.join(root, 'overwatch'), { recursive: true })

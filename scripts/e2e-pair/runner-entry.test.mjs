@@ -16,13 +16,13 @@ import {quiesceAndSave,waitForStop} from './templates/runner-terminal.mjs'
 for(const models of [undefined,{planner:'gpt-6-luna',executor:'gpt-6-luna',overwatch:'gpt-6-luna'}]) for(const reason of ['owner_canceled','shared_quota_evidence_stale','weekly_remaining_floor_reached'])for(const stage of ['before_intake','pending_initial_llm','pending_goal_jev',...(reason==='owner_canceled'?['response_planner_mismatch','response_executor_mismatch']:[])]) {
   test(`complete runner entry + actual coordinator: ${models?'Luna/Luna':'Terra/Luna'} ${reason} at ${stage}`,async()=>{
     const root=await fs.mkdtemp(path.join(os.tmpdir(),'paired-runner-entry-'))
-    const pair=definePair({candidate:'c'.repeat(40),published:'b'.repeat(40),imageId:'sha256:'+'d'.repeat(64),models}),lane=pair.lanes[0],laneRoot=path.join(root,'a')
-    let submits=0,nativeReads=0,starters=0,stopped=false,closed=false,stopCommands=0
+    const pair=definePair({candidate:'c'.repeat(40),published:'b'.repeat(40),imageId:`sha256:${'d'.repeat(64)}`,models}); const lane=pair.lanes[0]; const laneRoot=path.join(root,'a')
+    let submits=0; let nativeReads=0; let starters=0; let stopped=false; let closed=false; let stopCommands=0
     const mismatch=stage.startsWith('response_')
     try {
       await fs.writeFile(path.join(root,'pair.json'),JSON.stringify(pair));await fs.copyFile(path.join(kitRoot,'coordinator/pair-common.ps1'),path.join(root,'pair-common.ps1'))
       for(const id of ['a','b']){await fs.mkdir(path.join(root,id,'data/logs'),{recursive:true});await fs.mkdir(path.join(root,id,'data/saves'));await fs.writeFile(path.join(root,id,'live-container.cid'),'a'.repeat(64));await fs.writeFile(path.join(root,id,'deployed-node-path.txt'),'/opt/sgluna/.sgluna/releases/fixture/node/bin/node')}
-      if(mismatch)await fs.writeFile(path.join(laneRoot,'data/logs/sgluna-behavior.jsonl'),JSON.stringify({event:'provider.response',data:{role:stage.includes('planner')?'planner':'executor',provider:{model:'gpt-unapproved'}}})+'\n')
+      if(mismatch)await fs.writeFile(path.join(laneRoot,'data/logs/sgluna-behavior.jsonl'),`${JSON.stringify({event:'provider.response',data:{role:stage.includes('planner')?'planner':'executor',provider:{model:'gpt-unapproved'}}})}\n`)
       await fs.copyFile(path.join(kitRoot,'templates/snapshot.lua'),path.join(laneRoot,'snapshot.lua'))
       await fs.writeFile(path.join(root,'quota-latest.json'),JSON.stringify({pairId:pair.pairId,source:'get_usage_limits',observedBy:'parent:/root',matchingWeeklyWindows:1,windowDurationMins:10080,remainingPercent:reason==='weekly_remaining_floor_reached'?7:20,observedAt:Date.now()-(reason==='shared_quota_evidence_stale'?180001:0)}))
       const dispatch=()=>{execFileSync('pwsh',['-NoProfile','-File',path.join(kitRoot,'control-dispatch.test.ps1'),'-Root',root,'-Lane','a','-Reason',reason,'-Kit',kitRoot],{encoding:'utf8'});stopped=true}
@@ -34,7 +34,7 @@ for(const models of [undefined,{planner:'gpt-6-luna',executor:'gpt-6-luna',overw
         async connect(){}close(){closed=true}
         async command(command) {
           if(command==='!luna stop')stopCommands++
-          if(command.startsWith('!luna Build')){assert.equal(stopped,false,'No intake after acknowledged stop');submits++;return 'queued: '+stage}
+          if(command.startsWith('!luna Build')){assert.equal(stopped,false,'No intake after acknowledged stop');submits++;return `queued: ${stage}`}
           if(command.includes('Starter already given')){starters++;return JSON.stringify({starter:{}})}
           if(command.includes('local sprint_guard')){nativeReads++;if(stage.startsWith('pending_')&&nativeReads===2)dispatch()}
           return JSON.stringify({seed:lane.seed,humans:0,speed:1,inventory:[],machines:[],red_unlocked:false,green_researched:false,board:null,actor_id:42,epoch:3})
