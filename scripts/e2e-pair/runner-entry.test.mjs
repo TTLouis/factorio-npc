@@ -14,7 +14,7 @@ import {operatorStopReason} from './templates/pair-stop-policy.mjs'
 import {quiesceAndSave,waitForStop} from './templates/runner-terminal.mjs'
 
 for(const models of [undefined,{planner:'gpt-6-luna',executor:'gpt-6-luna',overwatch:'gpt-6-luna'}]) for(const reason of ['owner_canceled','shared_quota_evidence_stale','weekly_remaining_floor_reached'])for(const stage of ['before_intake','pending_initial_llm','pending_goal_jev',...(reason==='owner_canceled'?['response_planner_mismatch','response_executor_mismatch']:[])]) {
-  test(`complete runner entry + actual coordinator: ${models?'Luna/Luna':'Sol/Luna'} ${reason} at ${stage}`,async()=>{
+  test(`complete runner entry + actual coordinator: ${models?'Luna/Luna':'Terra/Luna'} ${reason} at ${stage}`,async()=>{
     const root=await fs.mkdtemp(path.join(os.tmpdir(),'paired-runner-entry-'))
     const pair=definePair({candidate:'c'.repeat(40),published:'b'.repeat(40),imageId:'sha256:'+'d'.repeat(64),models}),lane=pair.lanes[0],laneRoot=path.join(root,'a')
     let submits=0,nativeReads=0,starters=0,stopped=false,closed=false,stopCommands=0

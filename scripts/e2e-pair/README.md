@@ -109,15 +109,18 @@ changes to the source checkout's Compose files cannot redirect setup or cleanup.
 node scripts/e2e-pair/pair.mjs freeze test-results/freeze-input.json
 ```
 
-The legacy default remains planner `gpt-6.1-sol`, executor `gpt-6-luna`, and
-low-reasoning `gpt-6-luna` overwatch. For an explicitly authorized Luna/Luna
-trial add this field to the freeze input before freezing:
+The default is planner `gpt-6.1-terra`, executor `gpt-6-luna`, and
+low-reasoning `gpt-6-luna` overwatch (owner selection, October 26, 2026).
+The ordered deployment setting is `OPENAI_MODEL=gpt-6.1-terra,gpt-6-luna`.
+An explicit Sol/Luna baseline remains available by selecting planner
+`gpt-6.1-sol`. For an explicitly authorized Luna/Luna trial add this field to
+the freeze input before freezing:
 
 ```json
 "models": { "planner": "gpt-6-luna", "executor": "gpt-6-luna", "overwatch": "gpt-6-luna" }
 ```
 
-Only those two role profiles are approved. Unknown models, extra/missing roles
+Only Terra/Luna, Sol/Luna and Luna/Luna role profiles are supported. Unknown models, extra/missing roles
 and expensive overwatch are rejected. `pair.json`, lane/run intent and the
 manifest-covered `frozen-models.mjs` retain each role. Compose receives the ordered
 planner/executor `OPENAI_MODEL` list, including duplicate Luna IDs. Deployment
@@ -127,6 +130,34 @@ must prove both closed-tool role contracts, and observed provider responses must
 match the selected role. Same-model roles never lose their identity. The parent
 must select the declared Luna low-reasoning observer; no silent upgrade is allowed.
 A new profile requires a new frozen output; never edit AW/AX or an existing freeze.
+
+### Proposed model comparison (no trials scheduled)
+
+Use planner/executor order throughout. Compare Terra/Luna against a fresh
+Sol/Luna baseline first to isolate the planner change. The owner's additional
+candidates are Sol/Terra and Terra/Terra; executor Terra needs a separately
+reviewed profile extension before freezing. The default executor stays Luna.
+Model availability and exact effective role IDs must pass cold preflight;
+there is no automatic fallback from an unavailable Terra model.
+
+For a fair comparison, hold the reviewed runtime/native source, goal, starter,
+normal-speed profile, provider settings, role reasoning/output limits, Jev,
+recovery budgets and acceptance contract fixed. Use the same seed set in
+separate fresh worlds for every profile and multiple seeds/repeats when
+authorized. The current pair requires distinct seeds within a pair and one
+shared model profile: compare matching seed sets across separate frozen pairs,
+never by editing individual lanes. Balance run order and concurrency to reduce
+provider-load and cache effects. Historical runs provide context only when
+their runtime/profile differs.
+
+Report native goal success and verified production, completed plan steps,
+refusals/recoveries, wall time to verified milestones, and per-role request
+latency (median/p95), calls and token usage. Preserve the full plans and traces
+under the existing E2E reporting contract; identify cache use, overlapping time,
+partial/failed runs and unavailable pricing. Request latency is not measured
+thinking time. Select on verified capability and speed together; no performance
+claim follows from the default change or offline serializer tests. Each live
+trial still requires explicit owner authorization.
 
 No default candidate/image is chosen. Existing output is never replaced. The
 result contains `a/`, `b/`, `pair.json`, coordinator scripts and a pair manifest.
