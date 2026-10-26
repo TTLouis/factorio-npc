@@ -13568,6 +13568,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     recoveryAttempt = 0,
     recoveryKind,
     providerMessagesOverride,
+    closedCorrection = false,
   }) {
     this.assertModelRecoveryAllowed()
     const recoveryOwner = this.captureModelRecoveryOwner()
@@ -13995,14 +13996,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (controlRepair) Object.defineProperty(message, '_sglunaControlRepair', { value: controlRepair, configurable: true, enumerable: false })
     }
 
-    if (Array.isArray(closedRoundCalls) && closedRoundCalls.length > 0) {
+    // A closed correction admits only its content: the caller refuses its calls, so nothing here may run them.
+    if (!closedCorrection && Array.isArray(closedRoundCalls) && closedRoundCalls.length > 0) {
       const salvaged = await this.salvageClosedRoundCalls(message, closedRoundCalls, {
         current, generation, round, recoveryAttempt, recoveryKind, omissionRepair,
       })
       if (salvaged) return salvaged
     }
 
-    const observed = await this.handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair, allowTools: effectiveAllowTools })
+    const observed = closedCorrection ? undefined
+      : await this.handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair, allowTools: effectiveAllowTools })
     if (observed) return observed
 
     if (omissionRepair && !effectiveAllowTools && message.tool_calls !== undefined) {
@@ -14074,6 +14077,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           allowTools: true,
           recoveryAttempt: 1,
           recoveryKind: 'output_budget_exhaustion',
+          closedCorrection,
           providerMessagesOverride: [
             ...providerMessages.map(item => ({ ...item })),
             { role: 'user', content: OUTPUT_BUDGET_RECOVERY_MESSAGE },
@@ -18520,7 +18524,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
   // A route draft gets the same bounded plan_category correction as a turn's draft, on the request's shared allowance.
   // Without it one refused route draft was a terminal guard pause (Run BA, both lanes). Only refusals raised before
-  // anything is committed are corrected here; exhaustion and every other failure still fail the route.
+  // anything is committed are corrected here; exhaustion and every other failure still fail the route. Validation and
+  // traces await, so the route's owner is checked after each await before any counter, message or commit changes.
   async commitRecoveryRouteDraft(generation, message, roundBase, owner, route) {
     for (let correction = 1; ; correction++) {
       let plan
@@ -18528,6 +18533,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan = await this.parsePlanMessageChecked(message, { recovery: true })
       }
       catch (error) {
+        this.assertModelRecoveryAllowed(owner)
         if (error?.failureClass !== 'plan_category' || error?.details?.deterministic_no_retry === true) throw error
         this.planCategoryRetries++
         const reason = error instanceof Error ? error.message : String(error)
@@ -18541,19 +18547,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           recovery_route: route,
           ...(error?.details && typeof error.details === 'object' ? error.details : {}),
         })
-        if (this.planCategoryRetries > this.maxToolValidationRetries) throw error
         this.assertModelRecoveryAllowed(owner)
+        if (this.planCategoryRetries > this.maxToolValidationRetries) throw error
         if (typeof message.content === 'string') this.messages.push({ role: 'assistant', content: cleanMemoryText(message.content, 4000) })
         this.messages.push({
           role: 'user',
           content: `[HARNESS] Recovery draft refused (${this.planCategoryRetries}/${this.maxToolValidationRetries}; ${error.code}): ${reason} Tools stay closed for this recovery route. Return the corrected strict-JSON plan.`,
         })
         const current = await this.assertCurrent()
-        message = await this.callProvider(current, generation, { round: roundBase + correction, allowTools: false, recoveryAttempt: 0 })
         this.assertModelRecoveryAllowed(owner)
-        if (message?.tool_calls !== undefined) throw new AgentLoopError('recovery route correction returned observation tools; tools are closed')
+        // closedCorrection: no closed-round salvage or targeted observation runs for this reply; only its content counts.
+        message = await this.callProvider(current, generation, { round: roundBase + correction, allowTools: false, recoveryAttempt: 0, closedCorrection: true })
+        this.assertModelRecoveryAllowed(owner)
+        const toolCalls = message?.tool_calls !== undefined || message?._sglunaClosedRoundCalls?.length > 0
+        if (toolCalls && !contentCarriesPlan(message?.content)) throw new AgentLoopError('recovery route correction requested tools; tools are closed')
         continue
       }
+      this.assertModelRecoveryAllowed(owner)
       this.planCategoryRetries = 0
       return await this.commitPlan(plan)
     }

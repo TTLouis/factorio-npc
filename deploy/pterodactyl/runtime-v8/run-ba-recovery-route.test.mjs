@@ -10,10 +10,15 @@ import { FakeFactorio } from './task-loop-fixtures.mjs'
 // checkpoint equal to the declared outcome only). The route had no correction round, so each lane guard-paused.
 const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/run-ba-recovery-route.json', import.meta.url), 'utf8'))
 const lane = name => fixture.lanes.find(row => row.lane === name)
-// The live provider layer drops an empty tool_calls array before the loop sees the reply (provider-base.mjs).
+// The live provider layer drops an empty tool_calls array before the loop sees the reply, and moves the calls of a
+// closed round into the non-enumerable _sglunaClosedRoundCalls (provider-base.mjs).
 function wireMessage(message) {
   const out = structuredClone(message)
   if (out.tool_calls === null || (Array.isArray(out.tool_calls) && out.tool_calls.length === 0)) delete out.tool_calls
+  if (out.closedRoundCalls) {
+    Object.defineProperty(out, '_sglunaClosedRoundCalls', { configurable: true, enumerable: false, value: out.closedRoundCalls })
+    delete out.closedRoundCalls
+  }
   return out
 }
 
@@ -82,6 +87,20 @@ function stopAt(seen) {
     throw new Error(STOP)
   }
 }
+// Supersedes the request once validation of the given reply content has finished awaiting, before its result is used.
+function supersedeAfterValidating(w, content) {
+  const validate = w.agent.parsePlanMessageChecked.bind(w.agent)
+  w.agent.parsePlanMessageChecked = async (message, options) => {
+    const supersede = () => {
+      if (message?.content !== content) return
+      w.agent.requestAdmissionOwner = { superseding: 'newer intake' }
+      w.agent.planCategoryRetries = 7 // the replacement's own allowance state
+    }
+    try { const plan = await validate(message, options); supersede(); return plan }
+    catch (error) { supersede(); throw error }
+  }
+}
+const routeRows = w => events(w, 'recovery.classified').filter(entry => entry.data.recovery_route)
 const fromPreservationRefusal = w => assert.deepEqual(events(w, 'replan.started').map(entry => entry.data.reason), ['preservation_type_unsupported'])
 // Scripted correction (Terra never got this round): its route draft with obligations on every later step.
 function correctedLaneA(row) {
@@ -178,5 +197,64 @@ test('an authority change during a route correction call drops the stale reply w
   assert.equal(events(w, 'context.stale_reply_redriven').length, 1)
   assert.equal(events(w, 'plan.accepted').length, 0)
   assert.equal(seen.role, 'planner')
+  assert.deepEqual(seen.planning.plans, before)
+})
+
+test('a correction reply carrying closed-round tool calls runs no observation and fails the route visibly', async () => {
+  const row = lane('a')
+  const toolsOnly = { role: 'assistant', content: '', closedRoundCalls: [{ name: 'getInventoryItems', arguments: '{}' }] }
+  const w = baWorld(row, [row.wire.submit.message, row.wire.route.message, toolsOnly])
+  const before = structuredClone(w.memory.planningState(w.key).plans)
+  startAuthoring(w)
+  await assert.rejects(w.agent.runGuarded(), /provider_jev_recovery_route_failed: recovery route correction requested tools; tools are closed/)
+  assert.equal(w.calls.length, 3)
+  assert.deepEqual(w.rows.filter(entry => entry.event.startsWith('closed_round.')).map(entry => entry.event), [])
+  assert.equal(w.agent.messages.some(message => message.role === 'tool'), false)
+  assert.deepEqual(w.memory.planningState(w.key).plans, before)
+  assert.equal(w.memory.pauseRecord(w.key).pause_class, 'guard')
+})
+
+test('a corrected plan beside stray closed-round calls commits from its content alone', async () => {
+  const row = lane('a')
+  const seen = {}
+  const corrected = { ...correctedLaneA(row), closedRoundCalls: [{ name: 'getInventoryItems', arguments: '{}' }] }
+  const w = baWorld(row, [row.wire.submit.message, row.wire.route.message, corrected, stopAt(seen)])
+  const before = structuredClone(w.memory.planningState(w.key).plans)
+  startAuthoring(w)
+  await assert.rejects(w.agent.runGuarded(), new RegExp(STOP))
+  assert.equal(seen.role, 'executor')
+  assert.equal(newPlans(seen.planning, before)[0].status, 'COMMITTED')
+  assert.deepEqual(w.rows.filter(entry => entry.event.startsWith('closed_round.')).map(entry => entry.event), [])
+})
+
+test('an authority change while a refused route draft validates leaves the replacement allowance and diagnostics untouched', async () => {
+  const row = lane('a')
+  const seen = {}
+  const w = baWorld(row, [row.wire.submit.message, row.wire.route.message, world => {
+    seen.retriesAtRedrive = world.agent.planCategoryRetries
+    return stopAt(seen)(world, w.calls.at(-1))
+  }])
+  supersedeAfterValidating(w, row.wire.route.message.content)
+  const before = structuredClone(w.memory.planningState(w.key).plans)
+  startAuthoring(w)
+  await assert.rejects(w.agent.runGuarded(), new RegExp(STOP))
+  assert.equal(seen.retriesAtRedrive, 7)
+  assert.deepEqual(routeRows(w), [])
+  assert.equal(w.calls.some(args => harnessCorrections(args).length > 0), false)
+  assert.equal(events(w, 'context.stale_reply_redriven').length, 1)
+  assert.deepEqual(seen.planning.plans, before)
+})
+
+test('an authority change while a valid route draft validates commits nothing', async () => {
+  const row = lane('b')
+  const seen = {}
+  const w = baWorld(row, [row.wire.submit.message, row.wire.route.message, stopAt(seen)])
+  supersedeAfterValidating(w, row.wire.route.message.content)
+  const before = structuredClone(w.memory.planningState(w.key).plans)
+  startAuthoring(w)
+  await assert.rejects(w.agent.runGuarded(), new RegExp(STOP))
+  assert.equal(seen.role, 'planner')
+  assert.equal(events(w, 'plan.accepted').length, 0)
+  assert.equal(events(w, 'context.stale_reply_redriven').length, 1)
   assert.deepEqual(seen.planning.plans, before)
 })
