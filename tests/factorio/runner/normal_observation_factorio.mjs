@@ -260,7 +260,7 @@ try {
     stateFile: path.join(results, 'normal-observation-state.json') })
   world.agent.provider = (messages, context) => bridge.roleProvider(messages, context)
   const status = await deploymentStatus(rcon, { requireAllowed: true })
-  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
   ctx.session.queuePlayerRequest('TTLouis', 'Clear the furnace iron output, recover five copper plates, then craft and hold a lab to unlock automation science packs')
   await settle(ctx.session); healthy()

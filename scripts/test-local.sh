@@ -14,20 +14,21 @@
 # Run from Git Bash on Windows (or any POSIX shell with Docker Desktop).
 #
 # Usage:
+#   scripts/test-local.sh tooling   # shell runner and native orchestration regressions
 #   scripts/test-local.sh agent     # ordinary-agent vitest suite used by CI
 #   scripts/test-local.sh runtime   # node --test: deploy/pterodactyl staging + runtime-v8
 #   scripts/test-local.sh mod       # autorio: vitest, tsc --noEmit, Lua build, check-generated-lua
-#   scripts/test-local.sh all       # agent + runtime + mod
+#   scripts/test-local.sh all       # tooling + agent + runtime + mod
 
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 {agent|runtime|mod|all}" >&2
+  echo "usage: $0 {tooling|agent|runtime|mod|all}" >&2
   exit 2
 }
 
 cmd="${1:-}"
-case "$cmd" in agent|runtime|mod|all) ;; *) usage ;; esac
+case "$cmd" in tooling|agent|runtime|mod|all) ;; *) usage ;; esac
 [[ $# -eq 1 ]] || usage
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,6 +94,15 @@ run_container() {
     --name "$run_scope-$lane" --cidfile "$cid_host_dir/$lane.cid" "$@"
 }
 
+run_tooling() {
+  echo "== tooling: offline shell runner regressions =="
+  run_container tooling \
+    -v "$host_root/scripts:/src/scripts:ro" \
+    -v "$host_root/tests/tooling:/src/tests/tooling:ro" \
+    -v "$host_root/tests/factorio/run.sh:/src/tests/factorio/run.sh:ro" \
+    npc-dev bash -c "bash tests/tooling/test-local.test.sh && bash tests/tooling/test-factorio-ci.test.sh && bash tests/tooling/test-factorio-suite.test.sh"
+}
+
 run_agent() {
   echo "== agent: ordinary-agent vitest suite =="
   # Keep installed dependencies in the image, but read current source, package
@@ -139,6 +149,9 @@ run_runtime() {
 run_mod() {
   echo "== mod: autorio vitest + tsc --noEmit + Lua build + check-generated-lua =="
   run_container mod \
+    -v "$host_root/packages/autorio/package.json:/src/packages/autorio/package.json:ro" \
+    -v "$host_root/packages/autorio/tsconfig.json:/src/packages/autorio/tsconfig.json:ro" \
+    -v "$host_root/packages/autorio/vitest.config.ts:/src/packages/autorio/vitest.config.ts:ro" \
     -v "$host_root/packages/autorio/src:/src/packages/autorio/src:ro" \
     -v "$host_root/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
     -v "$host_root/packages/autorio/graphics:/src/packages/autorio/graphics:ro" \
@@ -147,6 +160,9 @@ run_mod() {
 }
 
 case "$cmd" in
+  tooling)
+    run_tooling
+    ;;
   agent)
     run_agent
     ;;
@@ -157,6 +173,7 @@ case "$cmd" in
     run_mod
     ;;
   all)
+    run_tooling
     run_agent
     run_runtime
     run_mod

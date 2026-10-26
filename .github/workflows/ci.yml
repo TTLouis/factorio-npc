@@ -4,13 +4,11 @@ on:
   push:
     branches:
       - main
-      - feat/npc-transition-work
       - experiment/jev-agent-architecture
 
   pull_request:
     branches:
       - main
-      - feat/npc-transition-work
       - experiment/jev-agent-architecture
 
   workflow_dispatch:
@@ -34,19 +32,15 @@ jobs:
         run: bash tests/tooling/test-local.test.sh
       - name: Check native CI evidence and cleanup behavior
         run: bash tests/tooling/test-factorio-ci.test.sh
+      - name: Check native suite failure aggregation
+        run: bash tests/tooling/test-factorio-suite.test.sh
 
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/setup-workspace
       - name: Lint
         run: pnpm run lint
 
@@ -55,13 +49,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/setup-workspace
       - name: Test ordinary agent and Autorio contracts
         run: pnpm run test --run
 
@@ -70,14 +58,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/setup-workspace
 
       - name: Typecheck
         run: pnpm run build && pnpm run typecheck
@@ -205,45 +186,19 @@ jobs:
         run: node --test deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
 
   factorio-npc-deterministic:
-    if: github.ref == 'refs/heads/feat/npc-transition-work' || github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.base_ref == 'feat/npc-transition-work' || github.base_ref == 'experiment/jev-agent-architecture'
+    if: github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.base_ref == 'experiment/jev-agent-architecture'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       NPC_TEST_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
 
       - name: Build deterministic Factorio NPC image once
         run: docker build -f tests/factorio/Dockerfile -t factorio-npc-test .
 
-      - name: Run deterministic Factorio NPC harness
-        run: bash scripts/test-factorio-ci.sh default
-
-      - name: Run topology context full-loop regression
-        run: bash scripts/test-factorio-ci.sh fresh-topology fresh-topology
-
-      - name: Run direct-feed observation full-loop regression
-        run: bash scripts/test-factorio-ci.sh direct-feed-observation direct-feed-observation
-
-      - name: Run partial transfer recovery full-loop regression
-        run: bash scripts/test-factorio-ci.sh partial-transfer partial-transfer
-
-      - name: Run ground-item pickup placement regression
-        run: bash scripts/test-factorio-ci.sh ground-item-pickup ground-item-pickup
-
-      - name: Run placement clearing full-loop regression
-        run: bash scripts/test-factorio-ci.sh placement-clearing placement-clearing
-
-      - name: Run water reach approach regression
-        run: bash scripts/test-factorio-ci.sh water-reach-approach water-reach-approach
+      - name: Run all deterministic Factorio regressions
+        run: bash scripts/test-factorio-suite.sh
 
       - name: Preserve deterministic native evidence
         if: ${{ always() }}

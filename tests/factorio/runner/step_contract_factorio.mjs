@@ -264,7 +264,7 @@ try {
   // Contract calls traverse the actual serializer, never answersStepContract.
   world.agent.provider = (messages, context) => bridge.roleProvider(messages, context)
   const status = await deploymentStatus(rcon, { requireAllowed: true })
-  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
   ctx.session.queuePlayerRequest('TTLouis', 'Craft steam equipment, place a water-connected pump and boiler, then power a lab')
   await settle(ctx.session)

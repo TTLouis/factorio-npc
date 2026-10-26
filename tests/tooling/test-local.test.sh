@@ -18,10 +18,19 @@ case "$1" in
     lane=runtime
     for arg in "$@"; do
       case "$arg" in
+        npc-static-*-tooling) lane=tooling ;;
         npc-static-*-agent) lane=agent ;;
         npc-static-*-mod) lane=mod ;;
       esac
     done
+    if [[ "$lane" == tooling ]]; then
+      [[ "${!#}" == *'bash tests/tooling/test-factorio-suite.test.sh'* ]]
+    fi
+    if [[ "$lane" == mod ]]; then
+      for file in package.json tsconfig.json vitest.config.ts; do
+        [[ "$*" == *"/packages/autorio/$file:/src/packages/autorio/$file:ro"* ]]
+      done
+    fi
     if [[ "$lane" == agent ]]; then
       for required in \
         '/packages/agent/src:/src/packages/agent/src:ro' \
@@ -70,12 +79,14 @@ export PATH="$fixture/bin:$PATH"
 runner="$fixture/repo with spaces/scripts/test-local.sh"
 
 bash "$runner" all
-[[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == 3 ]]
+[[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == 4 ]]
 {
+  IFS= read -r tooling_run
   IFS= read -r agent_run
   IFS= read -r runtime_run
   IFS= read -r mod_run
 } < <(grep '^run ' "$DOCKER_TEST_LOG")
+[[ "$tooling_run" == *'-tooling '* ]]
 [[ "$agent_run" == *'-agent '* ]]
 [[ "$runtime_run" == *'-runtime '* ]]
 [[ "$mod_run" == *'-mod '* ]]
@@ -87,7 +98,7 @@ grep -F 'pnpm --filter @factorio-npc/agent run test --run' "$DOCKER_TEST_LOG" >/
 if grep -E '/\.env:|/repo with spaces:/src' "$DOCKER_TEST_LOG"; then exit 1; fi
 
 # Each selector runs only its own lane, including the new ordinary-agent gate.
-for lane in agent runtime mod; do
+for lane in tooling agent runtime mod; do
   : > "$DOCKER_TEST_LOG"
   bash "$runner" "$lane"
   [[ "$(grep -c '^run ' "$DOCKER_TEST_LOG")" == 1 ]]
@@ -96,7 +107,7 @@ done
 
 # A failure in any lane stops all before subsequent work and cleans its CID.
 expected_runs=0
-for lane in agent runtime mod; do
+for lane in tooling agent runtime mod; do
   expected_runs=$((expected_runs + 1))
   : > "$DOCKER_TEST_LOG"
   set +e
@@ -123,4 +134,4 @@ grep -F 'Retained owned container IDs' "$fixture/unavailable.log" >/dev/null
 if bash "$runner" invalid; then exit 1; fi
 if bash "$runner" all unexpected; then exit 1; fi
 [[ ! -s "$DOCKER_TEST_LOG" ]]
-echo 'PASS: three ordered lanes, current agent mounts/CI command, portable paths, isolated selectors, failure propagation, owned cleanup, daemon loss evidence, invalid arguments'
+echo 'PASS: four ordered lanes, current agent mounts/CI command, portable paths, isolated selectors, failure propagation, owned cleanup, daemon loss evidence, invalid arguments'

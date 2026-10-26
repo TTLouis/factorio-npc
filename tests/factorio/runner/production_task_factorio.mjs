@@ -138,7 +138,7 @@ try {
     .push('planner', 'AN:finite-furnace-output', planner('copper-plate', 2, { mode: 'manual_bootstrap', resource: 'copper-ore' }))
     .push('executor', 'AN:harness-fuel-wait-collect', execute({ targets: [{ item_name: 'copper-plate', count: 2 }], producers: [{ recipe_name: 'copper-plate', unit_number: fixture.furnace }], fuel: { item_name: 'coal', count: 2 } }))
   const world = recoveryWorld({ game: rcon, model, completionProtocolVersion: 3 })
-  ctx = { world, model, ...recoverySession(world, { actorId: identity.actor_id, epoch: identity.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: identity.actor_id, epoch: identity.epoch, sessionId: identity.session }) }
   ctx.session.ensureAuthorization = () => deploymentStatus(rcon, { requireAllowed: true })
   const commit = world.agent.commitPlan.bind(world.agent)
   world.agent.commitPlan = plan => {

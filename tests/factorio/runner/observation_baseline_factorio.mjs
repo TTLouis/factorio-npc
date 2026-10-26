@@ -166,7 +166,7 @@ try {
   }
   const world = delegatedRecoveryWorld({ game: rcon, model, decisionScript })
   const status = await deploymentStatus(rcon, { requireAllowed: true })
-  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
   ctx.session.queuePlayerRequest('TTLouis', 'Smelt copper then iron then copper in this furnace, craft one lab from those plates and place it')
   await settle(ctx.session)

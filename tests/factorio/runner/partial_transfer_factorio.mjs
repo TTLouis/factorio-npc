@@ -12,6 +12,7 @@ import { recoveryWorld, recoverySession, ScriptedModel, settle, KEY } from '../p
 import { PLANNER_MODEL, EXECUTOR_MODEL } from '../pterodactyl/runtime-v8/invalid-reference-fixtures.mjs'
 import { configuration, Session } from '../pterodactyl/runtime-v8/supervisor.mjs'
 import { providerRequest } from '../pterodactyl/runtime-v8/provider.mjs'
+import { providerToolDefinitions, executorProviderToolDefinitions, planningOnlyProviderToolDefinitions, executionOnlyProviderToolDefinitions } from '../pterodactyl/runtime-v8/structured-policy.mjs'
 import { planReply, jevContractLog } from '../pterodactyl/runtime-v8/task-loop-fixtures.mjs'
 
 let forbiddenFetchCalls = 0
@@ -175,7 +176,12 @@ try {
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', AI_API_METHOD: 'cli-proxy', OPENAI_API_KEY: 'fixture-only-not-a-real-key', OPENAI_API_BASEURL: 'https://fixture.example.test/v1', OPENAI_MODEL: `${PLANNER_MODEL},${EXECUTOR_MODEL}` })
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null, fetchImpl: async (_url, options) => {
     const body = JSON.parse(options.body)
-    assert.equal(body.tools.length, 41); assert.ok(body.tools.some(tool => tool.function?.name === 'getPumpSitePreparation')); assert.equal(body.tool_choice, context.allowTools === false ? 'none' : 'auto')
+    const expectedTools = context.completionProtocolVersion >= 3
+      ? context.role === 'executor' ? executionOnlyProviderToolDefinitions : planningOnlyProviderToolDefinitions
+      : context.role === 'executor' ? executorProviderToolDefinitions : providerToolDefinitions
+    // Continuation requests may shorten descriptions; identities and schemas stay exact.
+    const contracts = tools => tools.map(({ type, function: tool }) => ({ type, name: tool.name, parameters: tool.parameters }))
+    assert.deepEqual(contracts(body.tools), contracts(expectedTools), 'wire must preserve current role-specific tool identities and schemas'); assert.ok(body.tools.some(tool => tool.function?.name === 'getPumpSitePreparation')); assert.equal(body.tool_choice, context.allowTools === false ? 'none' : 'auto')
     wire.push({ role: context.role, model: body.model, tool_choice: body.tool_choice, tools: body.tools.length })
     const message = await model.provide(body.messages, context)
     return new Response(JSON.stringify({ choices: [{ finish_reason: message.tool_calls ? 'tool_calls' : 'stop', message: { role: 'assistant', ...message } }], usage: { prompt_tokens: 2000, completion_tokens: 120 } }), { status: 200 })
@@ -183,7 +189,7 @@ try {
   const decisionScript = (_state, questions) => ({ overrides: Object.fromEntries(Object.keys(questions).filter(key => key.startsWith('need_')).map(key => [key, { noul: 0.9 }])) })
   const world = recoveryWorld({ game: rcon, model, decisionScript, agentRoleConfig: bridge.config, roleProvider: (messages, context) => bridge.roleProvider(messages, context), stateFile: path.join(results, `partial-transfer-${mode}-state.json`) })
   const status = await deploymentStatus(rcon, { requireAllowed: true })
-  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
   ctx.session.queuePlayerRequest('TTLouis', goal.summary)
   await settle(ctx.session); healthy()

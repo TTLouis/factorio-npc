@@ -14,11 +14,13 @@ bash scripts/test-local.sh all
 The script launches Docker containers; it does not run tests inside your host
 Node environment. It uses reviewed mounts, `--pull never` and `--network none`,
 prints run-owned container names, records IDs and cleans up on exit. It does not
-install dependencies. `all` runs `agent`, `runtime`, then `mod`, stopping on the
-first failure. `agent` selects the ordinary-agent Vitest suite used by CI, reading
+install dependencies. `all` runs `tooling`, `agent`, `runtime`, then `mod`, stopping on the
+first failure. `tooling` exercises runner routing, failure propagation,
+interruption, evidence retention and cleanup using fake Docker calls. `agent` selects the ordinary-agent Vitest suite used by CI, reading
 current source, package scripts, configuration and the shared contract through
 read-only mounts. `runtime` selects staging/runtime-v8 tests; `mod` selects Autorio
-tests, typecheck, Lua build and generated-Lua verification.
+tests, typecheck, Lua build and generated-Lua verification, using this checkout's
+package scripts, TypeScript configuration and Vitest setup.
 
 Do not run host `pnpm`, `vitest`, `eslint`, `tstl`, package installation or hook
 installation in this workspace: its `node_modules` directories are WSL symlinks.
@@ -44,6 +46,36 @@ These are useful ordinary checks, not a replacement for the full CI workflow.
 The [CI configuration](../.github/workflows/ci.yml) owns the complete job list.
 The Factorio test Dockerfile separately pins its build environment and engine;
 record actual versions rather than assuming all images match host Node.
+
+## GitHub Actions
+
+CI and package gates target `main` and `experiment/jev-agent-architecture`.
+The historical `feat/npc-transition-work` branch no longer triggers these gates.
+Existing job/check names stay unchanged. The local composite action
+[setup-workspace](../.github/actions/setup-workspace/action.yml) installs the
+pinned pnpm dependencies on Node 24 for lint, unit and build jobs. Native jobs
+install/build inside their Dockerfile and need no second host dependency install.
+
+The Jev native job uses one built image for the complete existing CI selection:
+
+```sh
+bash scripts/test-factorio-suite.sh
+```
+
+This runs core/research-combat/resilience/production, fresh topology, direct-feed
+observation, partial transfer, ground-item pickup, placement clearing and water
+reach approach. Each invocation uses [the evidence wrapper](../scripts/test-factorio-ci.sh).
+A failed lane leaves the suite failed while later lanes still run; interruption
+stops the suite. Each lane retains its logs, saves, native/wrapper exit codes and
+container ownership/cleanup receipts under `test-results/factorio-ci/`. Both CI
+and the package gate upload native evidence even after failure (14-day retention).
+The package gate runs the base native lanes on `main` and manual dispatch;
+Jev pushes receive their full native coverage from CI.
+
+Run the shell regression checks alone with `bash scripts/test-local.sh tooling`.
+They do not start Factorio or call providers. Local full test logs remain ignored
+and must not be committed. A hosted workflow pass still requires publication and
+an actual Actions run; local configuration checks cannot establish that result.
 
 ## Match evidence to the claim
 

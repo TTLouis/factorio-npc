@@ -131,7 +131,7 @@ try {
     assert.equal(after.held['copper-plate'], 10); assert.equal(after.output['copper-plate'] ?? 0, 0)
     assert.equal(after.held['copper-ore'], before.held['copper-ore']); assert.deepEqual(after.fuel, before.fuel)
     assert.equal(after.products_finished, before.products_finished, 'Collection must not trigger another supply/production batch')
-    const ctx = recoverySession({ agent, game: rcon }, { actorId: identity.actor_id, epoch: identity.epoch })
+    const ctx = recoverySession({ agent, game: rcon }, { actorId: identity.actor_id, epoch: identity.epoch, sessionId: identity.session })
     const close = agent.settleCompletedStepState.bind(agent)
     agent.settleCompletedStepState = async (state, options) => {
       const result = await close(state, { ...options, allowContinuation: false })

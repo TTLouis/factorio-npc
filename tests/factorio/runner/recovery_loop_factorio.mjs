@@ -86,7 +86,7 @@ const blocked = () => reply([], { chatMessage: 'BLOCKED: cannot verify an execut
 async function harness(model) {
   const status = await deploymentStatus(rcon, { requireAllowed: true })
   const world = recoveryWorld({ game: rcon, model, stateFile })
-  const session = recoverySession(world, { actorId: status.actor_id, epoch: status.epoch })
+  const session = recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session })
   ctx = { model, world, ...session }
   // Reuse the real authorization health read, not the static fixture's fake status.
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })

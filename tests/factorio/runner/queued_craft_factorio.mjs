@@ -117,7 +117,7 @@ try {
       .push('executor', 'craft-after-receipt', reply([craft]))
     const world = recoveryWorld({ game: rcon, model })
     const status = await deploymentStatus(rcon, { requireAllowed: true })
-    ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+    ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
     ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
     ctx.session.queuePlayerRequest('TTLouis', 'Craft one red science pack')
     await settle(ctx.session)

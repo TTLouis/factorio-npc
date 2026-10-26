@@ -184,7 +184,7 @@ try {
   const world = recoveryWorld({ game: rcon, model, decisionScript, agentRoleConfig: bridge.config })
   world.agent.provider = (messages, context) => bridge.roleProvider(messages, context)
   const status = await deploymentStatus(rcon, { requireAllowed: true })
-  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch }) }
+  ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
   ctx.session.queuePlayerRequest('TTLouis', 'Use the held furnace to smelt ten copper plates and unlock electronics')
   await settle(ctx.session); healthy()
