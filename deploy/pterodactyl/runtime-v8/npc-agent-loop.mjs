@@ -8433,6 +8433,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.traceEvent('plan.checkpoint_compiled_from_obligations', { request_id: this.traceRequest?.id,
             reason: 'outcome_only_checkpoint', step_index: index, preserve: [...declaration.obligations.preserve] })
         }
+        // The root checkpoint is the active step's contract too, and the one persisted. When the declaration had none, the
+        // contract compiled for it above never met the root, so the root is held to the same rule here, before persistence.
+        if (index === plan.currentStep && plan.checkpoint
+          && completionContractSignature(plan.checkpoint) !== completionContractSignature(declaration.checkpoint)) {
+          if (!outcomeOnlyCheckpoint(plan.checkpoint, declaration.obligations)) {
+            throw await this.checkpointRejectionError({ reason: 'contract_obligation_mismatch', step_index: index })
+          }
+          plan.checkpoint = declaration.checkpoint
+          await this.traceEvent('plan.checkpoint_compiled_from_obligations', { request_id: this.traceRequest?.id,
+            reason: 'outcome_only_root_checkpoint', step_index: index, preserve: [...declaration.obligations.preserve] })
+        }
       }
       if (!declaration.checkpoint) {
         // A step declared without a checkpoint is bound when it is about to start. The step that runs first cannot wait: that is

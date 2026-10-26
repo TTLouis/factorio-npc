@@ -168,6 +168,50 @@ test('an injected non-outcome route checkpoint mismatch is still refused with it
   assert.deepEqual(events(w, 'recovery.classified').filter(entry => entry.data.recovery_route).map(entry => entry.data.reason_code), ['invalid_semantic_checkpoint'])
 })
 
+// Lane B's route draft with its active checkpoint sent in the supported root field instead of its declaration.
+function rootOnlyLaneB(row, checkpoint) {
+  const draft = routeDraft(row)
+  draft.checkpoint = checkpoint ?? draft.stepCompletions[0].checkpoint
+  delete draft.stepCompletions[0].checkpoint
+  return contentReply(draft)
+}
+
+test('BA lane B with its outcome-only checkpoint at the root commits the compiled preservation rows', async () => {
+  const row = lane('b')
+  const seen = {}
+  const w = baWorld(row, [row.wire.submit.message, rootOnlyLaneB(row), stopAt(seen)])
+  const before = structuredClone(w.memory.planningState(w.key).plans)
+  startAuthoring(w)
+  await assert.rejects(w.agent.runGuarded(), new RegExp(STOP))
+  fromPreservationRefusal(w)
+  assert.equal(seen.role, 'executor')
+  assert.notEqual(seen.pause.paused, true)
+  const [committed] = newPlans(seen.planning, before)
+  assert.equal(committed.status, 'COMMITTED')
+  const contract = committed.steps[0].completion_contract
+  assert.deepEqual(contract.requirements.filter(item => item.kind === 'entity_exists').map(item => item.unit_number).sort((a, b) => a - b), [22, 23, 25])
+  assert.ok(contract.requirements.some(item => item.kind === 'inventory_count' && item.item_name === 'burner-inserter' && item.minimum === 1))
+  assert.deepEqual(events(w, 'plan.checkpoint_compiled_from_obligations').map(entry => [entry.data.reason, entry.data.preserve]),
+    [['outcome_only_root_checkpoint', [22, 23, 25]]])
+  assert.deepEqual(routeRows(w), [])
+  assert.equal(harnessCorrections(w.calls[2]).length, 0)
+})
+
+test('a non-outcome root checkpoint mismatch is refused before persistence with its facts, then corrected through the route', async () => {
+  const row = lane('b')
+  const wrong = rootOnlyLaneB(row, { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'burner-inserter', minimum: 2 }] })
+  const seen = {}
+  const w = baWorld(row, [row.wire.submit.message, wrong, row.wire.route.message, stopAt(seen)])
+  const before = structuredClone(w.memory.planningState(w.key).plans)
+  startAuthoring(w)
+  await assert.rejects(w.agent.runGuarded(), new RegExp(STOP))
+  const [correction] = harnessCorrections(w.calls[2])
+  assert.match(correction.content, /contract_obligation_mismatch; step 0: a checkpoint must be exactly obligations\.outcome plus entity_exists for each preserve unit/)
+  assert.equal(seen.role, 'executor')
+  assert.equal(newPlans(seen.planning, before).length, 1)
+  assert.deepEqual(routeRows(w).map(entry => entry.data.reason_code), ['invalid_semantic_checkpoint'])
+})
+
 test('repeated invalid route drafts exhaust the plan_category allowance and keep the visible guard pause', async () => {
   const row = lane('a')
   const w = baWorld(row, [row.wire.submit.message, ...Array(4).fill(row.wire.route.message)])
