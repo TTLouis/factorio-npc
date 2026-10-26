@@ -87,7 +87,7 @@ const execute = productionTask => () => {
 
 try {
   await fs.mkdir(results, { recursive: true })
-  for (const filename of ['npc-agent-loop.mjs', 'production-task-runtime.mjs', 'production-task.mjs', 'quantity-compiler.mjs', 'material-ledger.mjs', 'structured-policy.mjs']) {
+  for (const filename of ['npc-agent-loop.mjs', 'production-task-runtime.mjs', 'production-repair.mjs', 'production-task.mjs', 'quantity-compiler.mjs', 'material-ledger.mjs', 'structured-policy.mjs']) {
     sourceIdentity[filename] = createHash('sha256').update(await fs.readFile(new URL(`../pterodactyl/runtime-v8/${filename}`, import.meta.url))).digest('hex')
   }
   sourceIdentity.native_control = createHash('sha256').update(await fs.readFile(`${process.env.FACTORIO_ROOT ?? '/opt/factorio'}/mods/autorio_0.1.0/control.lua`)).digest('hex')

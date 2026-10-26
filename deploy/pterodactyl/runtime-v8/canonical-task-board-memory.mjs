@@ -7,6 +7,7 @@ import { obligationContractContext, obligationProofOrigin, compileObligations, C
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { restoreObservationRates } from './observation-rate.mjs'
 import { restoreProductionRecords } from './production-task-runtime.mjs'
+import { restoreHarnessDefaults } from './production-repair.mjs'
 import { restoreControllerRecoveries } from './controller-liveness.mjs'
 import { restoreEntityRefreshClaims } from './entity-refresh.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
@@ -2988,6 +2989,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       // Executor step-identity corrections spent per goal/plan/step (npc-agent-loop correctExecutorStepIdentity): durable so a
       // restage, a new request or a restart inside the same step cannot renew the allowance.
       executor_step_identity_ledger: [...(this.executorStepIdentityLedger ?? new Map()).entries()].slice(-128),
+      // Residual production admission corrections spent per goal/plan/step (correctProductionAdmission), durable likewise.
+      production_admission_ledger: [...(this.productionAdmissionLedger ?? new Map()).entries()].slice(-128),
+      // Harness production repairs spent per goal/plan/step and reason (reportProductionRepairs), durable likewise.
+      production_repair_ledger: [...(this.productionRepairLedger ?? new Map()).entries()].slice(-128),
+      // The model's standing defaults per NPC (recordHarnessDefaults).
+      harness_defaults: [...(this.harnessDefaults ?? new Map()).entries()].slice(-128),
       ...(this.intakeRetryRecord ? { intake_retry: this.intakeRetryRecord } : {}),
       planning_states: [...this.planningByNpc.entries()].map(([key, state]) => ({
         key,
@@ -3140,6 +3147,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)
     this.executorObservationRates = restoreObservationRates(snapshot?.executor_observation_rates)
     this.executorStepIdentityLedger = restoreExecutorStepIdentityLedger(snapshot?.executor_step_identity_ledger)
+    this.productionAdmissionLedger = restoreExecutorStepIdentityLedger(snapshot?.production_admission_ledger)
+    this.productionRepairLedger = restoreExecutorStepIdentityLedger(snapshot?.production_repair_ledger)
+    this.harnessDefaults = restoreHarnessDefaults(snapshot?.harness_defaults)
     this.intakeRetryRecord = sanitizeIntakeRetry(snapshot?.intake_retry)
     if (snapshot?.jev_judgment_ledger) {
       const restoredLedger = restoreJevLedger(snapshot.jev_judgment_ledger)

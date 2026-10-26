@@ -1810,7 +1810,7 @@ export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS
   return ['[HARNESS] Executor facts refreshed after the batch receipt landed (live reads taken now, same labels as the handoff packet; facts only):', ...records.map(record => record.text)].join('\n')
 }
 
-function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology }) {
+function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults }) {
   const records = [
     { key: 'restage', block: 'step', text: `restage: role=${role} checkpoint=${checkpoint}${reason ? ` reason=${oneLine(reason, limits.reasonChars)}` : ''}` },
   ]
@@ -1865,6 +1865,9 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
   }
   const skills = skillIdsOf(state, plan)
   if (skills.length > 0) records.push({ key: 'skills', block: 'step', drop: 'skills', text: `loaded_skills: ${skills.join(', ')}` })
+  // Slots and values are already bounded by normalizeHarnessDefaults.
+  const defaults = role === 'executor' && harnessDefaults ? Object.entries(harnessDefaults).map(([slot, value]) => `${slot}=${value}`) : []
+  if (defaults.length > 0) records.push({ key: 'harness_defaults', block: 'step', text: `harness_defaults (written by you with defaults:{...}; applied when a productionTask leaves them out and the game accepts them): ${defaults.join(' ')}` })
   const runtimeLine = scalarLine(runtime, RUNTIME_KEYS, limits.runtimeChars)
   if (runtimeLine) records.push({ key: 'runtime', block: 'step', drop: 'runtime', text: `runtime: ${runtimeLine}` })
   records.push(...jevFactRecords(jevFacts, jevHints, limits))
@@ -1916,8 +1919,9 @@ export function estimateTokens(chars) {
  * @param {object} [args.executorFacts] D2: harness-read facts for a fresh executor ({recipes, counts, machine, residual, historical_entities, fluid_source_hints}); each record is labelled fresh, stale or historical
  * @param {object} [args.topology] bounded native topology observations for either role; never execution authority
  * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
+ * @param {object} [args.harnessDefaults] the executor's own standing defaults ({burner_fuel}), shown in its step block
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, topology, previousContextChars, now, sequence, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults, previousContextChars, now, sequence, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -1930,7 +1934,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...goalRecords(planningState, limits),
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
-    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology }),
+    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults }),
     ...shelfCandidateRecords(shelfCandidates, limits),
   ]
 

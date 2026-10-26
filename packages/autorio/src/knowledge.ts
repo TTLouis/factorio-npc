@@ -387,12 +387,10 @@ function harvested_from_names(item_name: string) {
   return names.length > 0 ? names.slice(0, MAX_RECIPE_MATCHES) : undefined
 }
 
-const MAX_FUEL_ITEMS = 6
-
 // Fuel facts for burner machines, from item and resource prototypes only: every item whose fuel category a burner
 // accepts (with its fuel value), the resources whose mining yields it (`mined_from`) and the trees and rocks whose mining yields
-// it (`harvested_from`). Items some natural source yields come first, then name order, so the bounded list keeps the natively
-// obtainable fuels. An item with neither has no derived source, which is not a claim that nothing yields it.
+// it (`harvested_from`). The list is complete, so the harness can choose among all accepted fuels. Items some natural source
+// yields come first, then name order. An item with neither has no derived source, which is not a claim that nothing yields it.
 function burner_fuel_summary(categories: string[]) {
   const accepted: Record<string, boolean> = {}
   for (const category of categories) accepted[category] = true
@@ -409,12 +407,9 @@ function burner_fuel_summary(categories: string[]) {
   }
   sort_named(sourced)
   sort_named(unsourced)
-  const ordered: Array<{ name: string, category: string, fuel_value: number, mined_from: string[] | undefined, harvested_from: string[] | undefined }> = [...sourced, ...unsourced]
   return {
     categories,
-    matched_count: ordered.length,
-    truncated: ordered.length > MAX_FUEL_ITEMS,
-    items: ordered.slice(0, MAX_FUEL_ITEMS),
+    items: [...sourced, ...unsourced],
   }
 }
 

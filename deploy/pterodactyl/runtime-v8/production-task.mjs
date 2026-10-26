@@ -2,6 +2,8 @@ import { compileQuantities, itemName, normalizeCounts, normalizeTargets, quantit
 import { checkpointMaterialOwner, claimMaterials, materialAvailability, materialOwnerKey, releaseMaterials, restoreMaterialLedger } from './material-ledger.mjs'
 
 export const PRODUCTION_LIMITS = Object.freeze({ transitions: 256, recoveries: 3, duration_ms: 30 * 60000, stalled_ms: 60000, recipe_reads: 32, batch_items: 100 })
+// Resource bindings one intent may carry (schema and normalization).
+export const PRODUCTION_RESOURCE_BINDINGS_MAX = 16
 const nameSchema = { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,199}$', minLength: 1, maxLength: 200 }
 const countSchema = { type: 'integer', minimum: 1, maximum: 10000 }
 const unitSchema = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }
@@ -12,7 +14,7 @@ export const PRODUCTION_TASK_SCHEMA = {
   properties: {
     targets: { ...rows(16, { item_name: nameSchema, count: countSchema }), minItems: 1 },
     producers: rows(8, { recipe_name: nameSchema, unit_number: unitSchema }),
-    resources: rows(16, { item_name: nameSchema, method: { type: 'string', enum: ['gather_resource', 'harvest_product'] } }),
+    resources: rows(PRODUCTION_RESOURCE_BINDINGS_MAX, { item_name: nameSchema, method: { type: 'string', enum: ['gather_resource', 'harvest_product'] } }),
     feeders: rows(8, { unit_number: unitSchema, output_unit_number: unitSchema }),
     fuel: { type: 'object', additionalProperties: false, required: ['item_name', 'count'], properties: { item_name: nameSchema, count: countSchema } },
   },
@@ -28,7 +30,7 @@ export function normalizeProductionIntent(raw) {
   exact(raw, ['targets', 'producers', 'resources', 'fuel', 'feeders'])
   const targets = normalizeTargets(raw.targets)
   const producers = raw.producers ?? []; const resources = raw.resources ?? []; const feeders = raw.feeders ?? []
-  if (!Array.isArray(producers) || producers.length > 8 || !Array.isArray(resources) || resources.length > 16 || !Array.isArray(feeders) || feeders.length > 8) throw new Error('production_binding_limit')
+  if (!Array.isArray(producers) || producers.length > 8 || !Array.isArray(resources) || resources.length > PRODUCTION_RESOURCE_BINDINGS_MAX || !Array.isArray(feeders) || feeders.length > 8) throw new Error('production_binding_limit')
   const recipes = new Set(); const leaves = new Set(); const units = new Set()
   return { targets,
     producers: producers.map(row => {
@@ -59,6 +61,24 @@ export function productionScopeMatches(intent, contract) {
   // automated-rate goal, semantic step or arbitrary model request into authority.
   return contract?.mode === 'all' && intent.targets.every(target => Math.max(0, ...(contract.requirements ?? [])
     .filter(row => row.kind === 'inventory_count' && row.item_name === target.item_name).map(row => row.minimum)) === target.count)
+}
+// The finite held-item targets a production intent may name for this
+// contract, item name -> count in name order.
+export function finiteInventoryTargets(contract) {
+  const required = new Map()
+  for (const row of contract?.mode === 'all' ? contract.requirements ?? [] : []) {
+    if (row.kind === 'inventory_count') required.set(row.item_name, Math.max(required.get(row.item_name) ?? 0, row.minimum))
+  }
+  return new Map([...required].sort(([a], [b]) => a.localeCompare(b)))
+}
+// The refusal states the committed finite targets the executor may name, so a
+// correction does not depend on rereading the contract.
+export function productionScopeMismatch(intent, contract) {
+  const required = finiteInventoryTargets(contract)
+  const list = rows => rows.map(([name, count]) => `${name} ${count}`).join(', ')
+  if (!required.size) return 'Targets must exactly match finite inventory requirements of this committed step, and it has none in an all-mode contract'
+  const unmatched = intent.targets.filter(target => required.get(target.item_name) !== target.count).map(row => [row.item_name, row.count])
+  return `Targets must exactly match finite inventory requirements of this committed step (required: ${list([...required])}; unmatched: ${list(unmatched)}). The harness compiles ingredients and intermediates from native recipes`
 }
 export function createProductionTask({ intent, owner, actor_id, epoch, ledger, protected_stock = {}, collectionOnly = false, now = Date.now() }) {
   intent = normalizeProductionIntent(intent)
@@ -147,7 +167,10 @@ export function advanceProductionTask(raw, facts, now = Date.now()) {
   }
   const refuel = machine => {
     const fuel = task.intent.fuel
-    if (!fuel || task.fuel_used >= fuel.count) return halt(task, 'production_fuel_allowance_exhausted')
+    // Admission refuses a burner binding without an allowance; a record that
+    // predates that rule names the missing grant instead of a spent one.
+    if (!fuel) return halt(task, 'production_fuel_allowance_missing')
+    if (task.fuel_used >= fuel.count) return halt(task, 'production_fuel_allowance_exhausted')
     if (spendable(fuel.item_name) < 1) return acquire(fuel.item_name, 1)
     return emit({ name: 'supply_entity', args: { unit_number: machine.unit_number, items: [{ item_name: fuel.item_name, count: 1 }] } }, 1)
   }
