@@ -1,8 +1,8 @@
 // Explicit trial allowlist. This is not provider auto-detection or a mismatch waiver.
-export const defaultModels = Object.freeze({planner:'gpt-6.1-sol',executor:'gpt-6-luna',overwatch:'gpt-6-luna'});
+export const defaultModels = Object.freeze({planner:'gpt-6.1-terra',executor:'gpt-6-luna',overwatch:'gpt-6-luna'});
 export function validateFrozenModels(models) {
   if (!models || Object.keys(models).sort().join(',') !== 'executor,overwatch,planner'
-    || !['gpt-6.1-sol','gpt-6-luna'].includes(models.planner)
+    || !['gpt-6.1-terra','gpt-6.1-sol','gpt-6-luna'].includes(models.planner)
     || models.executor !== 'gpt-6-luna' || models.overwatch !== 'gpt-6-luna') throw Error('Unapproved frozen role model profile');
   return {...models};
 }

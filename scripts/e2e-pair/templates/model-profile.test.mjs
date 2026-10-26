@@ -15,7 +15,7 @@ import * as profile from './model-profile.mjs';
 import {frozenModels} from './frozen-models.mjs';
 const luna={planner:'gpt-6-luna',executor:'gpt-6-luna',overwatch:'gpt-6-luna'};
 const env=models=>({AI_API_METHOD:'cli-proxy',OPENAI_MODEL:`${models.planner},${models.executor}`,OPENAI_API_BASEURL:'https://offline.invalid/v1',OPENAI_API_KEY:'never-send-fixture',TYPESAFE_API_KEY:'offline-fixture'});
-for(const models of [profile.defaultModels,luna])test(`real configuration/closed tools/protocol3 preserve BOTH roles: ${models.planner}/${models.executor}`,async()=>{
+for(const models of [profile.defaultModels,{...luna,planner:'gpt-6.1-sol'},luna])test(`real configuration/closed tools/protocol3 preserve BOTH roles: ${models.planner}/${models.executor}`,async()=>{
   const original=globalThis.fetch;let calls=0;globalThis.fetch=()=>{calls++;throw Error('External network forbidden');};
   try{
     const config=configuration({},env(models));
@@ -78,5 +78,14 @@ test('actual rendered supervisor preflight accepts Luna-only catalog with both r
   assert.equal(proof.catalog.roles.length,2);assert.deepEqual(proof.catalog.roles.map(r=>r.model),['gpt-6-luna','gpt-6-luna']);
   await assert.rejects(entry('supervisor-preflight.mjs',{wrongRole:true}),/Frozen planner model mismatch/);
   await assert.rejects(entry('supervisor-preflight.mjs',{catalog:['gpt-6.1-sol']}),/Frozen planner model absent/);
+});
+test('Terra/Luna deployment and cold preflight bind exact roles and refuse a catalog without Terra',async()=>{
+  const models=profile.defaultModels,catalog=[models.planner,models.executor];
+  const {out}=await entry('verify-deployment.mjs',{models,catalog});
+  assert.deepEqual(out.get('/data/logs/deployment-verification.json').effective_role_models,['planner','executor'].map(role=>({role,model:models[role]})));
+  const {out:preflight}=await entry('supervisor-preflight.mjs',{models,catalog});
+  assert.deepEqual(preflight.get('/data/logs/supervisor-preflight-proof.json').catalog.roles.map(r=>r.model),catalog);
+  await assert.rejects(entry('supervisor-preflight.mjs',{models,catalog:['gpt-6.1-sol','gpt-6-luna']}),/Frozen planner model absent/);
+  await assert.rejects(entry('verify-deployment.mjs',{models,catalog,wrongRole:true}),/Frozen planner model mismatch/);
 });
 test('rendered module selects approved frozen roles, independently of runtime configuration',()=>{assert.deepEqual(profile.validateFrozenModels(frozenModels),frozenModels);});
