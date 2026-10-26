@@ -183,3 +183,34 @@ Final pin-boundary audit and proof:
 - If the host still has an unresolved hold but its required receipts genuinely
   disappeared, native partial text alone cannot clear it: host reconciliation
   stays guarded. This is honest missing-evidence handling, not fabricated proof.
+
+## Reviewed local integration closeout
+
+Parent independent immutable review approved f5c0d0dd09ba2ddbe13f8597ebc4f67667e16bc1
+and parent0ab81b16 for bounded local landing. The existing og-port-integration
+checkout was clean44e822e26772387781b32f368f540e30ee370987 before takeover; prior
+coordinator was idle. Protected primary experiment checkout was not modified.
+
+- No-ff integration merge:260395269b1b5b397ab691a85b4a6b7b416a1ffa.
+  Its complete tree equals reviewed f5c0d0dd exactly.
+- Separate immutable installer repin:70a4025ed712d3e4b8d97819a5701bdbf32b792f.
+  PAYLOAD_REF is260395269b1b5b397ab691a85b4a6b7b416a1ffa in generator/test/install.
+  Payload source SHA256 remains
+  19117c3b218685876c3d6fe71babd431ea0d3cc101f51557ae02961bacade104.
+- Local test-results/ay-landing/payload-generate.log and payload-check.log:
+  generator/check exit0 and9payload tests PASS. Source bytes unchanged; only the
+  immutable loader ref changed. Channel eggs need no generated-byte change.
+- Final merged scripts/test-local.sh all at70a4025e: exit0;103agent,
+  3935runtime/staging,1390mod tests PASS; typecheck/Lua/generated-Lua PASS.
+  Full merged-all.log remains local. No other broad builds/native reruns.
+- Reviewed source and prior integration candidate are ancestors of landing;
+  production-tree comparison differs only in required generator/test/install
+  pin files. This final closeout adds documentation only.
+- Owned npc-static-1672-9798 agent/runtime/mod gate containers used the reviewed
+  runner, recorded IDs, --rm and exit cleanup. Final Docker inventory contains
+  no npc-static containers. No live provider, new trial, push or deployment.
+
+Integration ownership is released after this closeout. The clean task/evidence
+checkout and its branch remain retained; no history or private evidence was
+published or deleted. Final landing remains local, awaiting the parent's final
+read-only confirmation.
