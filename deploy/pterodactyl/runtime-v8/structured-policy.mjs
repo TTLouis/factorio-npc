@@ -1001,13 +1001,13 @@ export const plannerControlToolDefinitions = [{
 
 plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions = {
   type: 'array', maxItems: 30,
-  description: 'Required on newly authored plans: one declaration per plan description at the same index. In an execution plan the entry at currentStep carries its deterministic checkpoint; later entries are {kind:"deterministic"} and their checkpoints are requested when each step is about to start. Semantic declarations are accepted only with assessmentOnly:true.',
+  description: 'Required on newly authored plans: one declaration per plan description at the same index. In an execution plan the entry at currentStep carries its deterministic checkpoint; later entries are {kind:"deterministic",obligations} and their checkpoints are requested when each step is about to start. Semantic declarations are accepted only with assessmentOnly:true.',
   items: { oneOf: [
     { type: 'object', additionalProperties: false, required: ['kind'], properties: {
       kind: { type: 'string', enum: ['deterministic'] },
       checkpoint: plannerControlToolDefinitions[0].function.parameters.properties.checkpoint,
       obligations: { type: 'object', additionalProperties: false, required: ['outcome', 'preserve'],
-        description: 'Typed immutable intent for a step combining new outcomes with preservation. Declare outcome predicates separately from preserve exact unit numbers; the harness reads preservation geometry and compiles the completion contract. Future global counts explicitly in outcome remain future outcomes. Supply this when preserving existing structures; never encode preservation as extra global counts.',
+        description: 'Typed immutable intent for a step: its new outcomes and any preserved structures. Declare outcome predicates separately from preserve exact unit numbers; the harness reads preservation geometry and compiles the completion contract. Future global counts explicitly in outcome remain future outcomes. Required on every deterministic step of a new draft, with preserve:[] when nothing is preserved; never encode preservation as extra global counts.',
         properties: { outcome: plannerControlToolDefinitions[0].function.parameters.properties.checkpoint,
           preserve: { type: 'array', maxItems: 8, uniqueItems: true, items: { type: 'integer', minimum: 1 } } } },
     } },

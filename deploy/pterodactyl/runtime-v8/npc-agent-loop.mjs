@@ -14,7 +14,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
+import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
@@ -674,7 +674,7 @@ When a draft intentionally refines one or more existing Shelf nodes, add roadmap
 
 For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
 
-On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for the step at currentStep of an execution plan and {kind:"deterministic"} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start; {kind:"semantic",rationale:"..."} only in an assessmentOnly:true plan. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
+On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for the step at currentStep of an execution plan and {kind:"deterministic",obligations} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start; {kind:"semantic",rationale:"..."} only in an assessmentOnly:true plan. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
 
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, research_completed {technology}, entity_inventory_count, entity_count {prototype, minimum, optional radius and state:working|powered}, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. An entity_count anchor {x,y} always requires an explicit radius from 1 to 256; never drop scope to make a predicate valid. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the step complete. Runtime remains completion authority for supported deterministic contracts. Semantic declarations belong only to assessmentOnly:true plans; unknown current measurements are not a reason to downgrade an intended world result to an assessment.
 
@@ -3510,7 +3510,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return [{ role: 'system', content: `${role === EXECUTOR_ROLE ? executionOnlyPrompt(roleSystemPrompt(executorPrompt, role)) : sharedPrompt}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}${ratePrompt}` }]
     }
     const plannerDelegation = this.completionProtocolVersion >= 2 && this.executorHandoffEnabled && role !== EXECUTOR_ROLE
-      ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step: a deterministic checkpoint for the first step and {kind:"deterministic"} for each later step, whose checkpoint the harness requests when that step is about to start. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
+      ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step: a deterministic checkpoint for the first step and {kind:"deterministic",obligations} for each later step, whose checkpoint the harness requests when that step is about to start. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
       : ''
     return [{ role: 'system', content: roleSystemPrompt(this.systemPrompt, role === EXECUTOR_ROLE ? EXECUTOR_ROLE : PLANNER_ROLE) + plannerDelegation }]
   }
@@ -8421,7 +8421,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const owner = this.captureCheckpointOwner()
         declaration.obligationProof = await captureObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
         if (declaration.checkpoint && !obligationContractMatches(declaration.checkpoint, declaration.obligations)) {
-          throw await this.checkpointRejectionError({ reason: 'contract_obligation_mismatch' })
+          // Every recorded mismatch (Runs AW-BA, both planner models) was this shape: the outcome restated without the
+          // preservation rows. The harness owns those rows, so it compiles them instead of spending a correction round.
+          if (!outcomeOnlyCheckpoint(declaration.checkpoint, declaration.obligations)) {
+            throw await this.checkpointRejectionError({ reason: 'contract_obligation_mismatch', step_index: index })
+          }
+          const authored = declaration.checkpoint
+          declaration.checkpoint = compiled
+          if (index === plan.currentStep && plan.checkpoint
+            && completionContractSignature(plan.checkpoint) === completionContractSignature(authored)) plan.checkpoint = compiled
+          await this.traceEvent('plan.checkpoint_compiled_from_obligations', { request_id: this.traceRequest?.id,
+            reason: 'outcome_only_checkpoint', step_index: index, preserve: [...declaration.obligations.preserve] })
+        }
+        // The root checkpoint is the active step's contract too, and the one persisted. When the declaration had none, the
+        // contract compiled for it above never met the root, so the root is held to the same rule here, before persistence.
+        if (index === plan.currentStep && plan.checkpoint
+          && completionContractSignature(plan.checkpoint) !== completionContractSignature(declaration.checkpoint)) {
+          if (!outcomeOnlyCheckpoint(plan.checkpoint, declaration.obligations)) {
+            throw await this.checkpointRejectionError({ reason: 'contract_obligation_mismatch', step_index: index })
+          }
+          plan.checkpoint = declaration.checkpoint
+          await this.traceEvent('plan.checkpoint_compiled_from_obligations', { request_id: this.traceRequest?.id,
+            reason: 'outcome_only_root_checkpoint', step_index: index, preserve: [...declaration.obligations.preserve] })
         }
       }
       if (!declaration.checkpoint) {
@@ -8480,7 +8501,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const detail = contradiction
       ? `; requirement=${validation.requirement_id}; operation ${validation.operation_index + 1} (${validation.operation}) ${validation.effect === 'removes_entity' ? `mines unit ${validation.unit_number}` : `takes ${validation.item_name} out of unit ${validation.unit_number}`}, which undoes the checkpoint it is submitted with`
-      : validation.requirement_id ? `; requirement=${validation.requirement_id}` : ''
+      : validation.reason === 'contract_obligation_mismatch'
+        ? `; step ${validation.step_index}: a checkpoint must be exactly obligations.outcome plus entity_exists for each preserve unit, or be omitted for the harness to compile it`
+        : validation.requirement_id ? `; requirement=${validation.requirement_id}` : ''
     const error = new AgentLoopError(`deterministic_checkpoint_rejected: ${validation.reason}${detail}`)
     error.failureClass = 'plan_category'
     error.code = 'invalid_semantic_checkpoint'
@@ -8507,8 +8530,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
     const frozen = FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
 
-    const existing = this.persistedStepCheckpoint(board, step.id)
-    const incoming = sanitizeStepCompletionContract(plan.checkpoint)
+    // A typed step's contract is read under its obligations, which admit up to 16 compiled predicates; the generic
+    // limit of 8 applies only to untyped checkpoints. A committed step's obligations are those with a proven origin; a
+    // draft being committed has no origin yet, only the declaration its root was just validated against.
+    const obligations = frozen ? this.currentContractObligations() : storedObligations(plan.stepCompletions?.[plan.currentStep]?.obligations)
+    const context = obligationContractContext(obligations)
+    const existing = persistedStepCheckpoint(board, step.id, context)
+    const incoming = sanitizeStepCompletionContract(plan.checkpoint, context)
     const incomingSignature = JSON.stringify(incoming)
     const existingSignature = existing ? JSON.stringify(existing.contract) : ''
 
@@ -8542,11 +8570,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations, {
       plannerOnlyDraft: this.plannerOnlyDraftCandidate(plan),
+      obligations,
     })
     if (!validation.accepted) throw await this.checkpointRejectionError(validation, { stepId: step.id })
     this.memory.setStepCompletionContract?.(key, step.id, validation.contract)
     const updated = this.memory.currentPlan?.(key)
-    const persisted = this.persistedStepCheckpoint(updated?.task_board, step.id)
+    const persisted = persistedStepCheckpoint(updated?.task_board, step.id, context)
     if (!persisted || JSON.stringify(persisted.contract) !== incomingSignature) {
       throw new AgentLoopError('deterministic_checkpoint_failed_to_persist')
     }
@@ -10137,12 +10166,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Extended contracts are accepted only against the current canonical typed
   // program and its original proof. Board/model fields cannot mint this context.
-  currentContractContext(step) {
+  currentContractObligations(step) {
     const planning = this.memory.planningState?.(this.activePlanKey())
     const plan = getActivePlanningPlan(planning)
     const canonical = step ?? plan?.steps?.[plan.active_step_index]
-    return canonical?.obligations && obligationProofOrigin(planning, canonical)
-      ? obligationContractContext(canonical.obligations) : undefined
+    return canonical?.obligations && obligationProofOrigin(planning, canonical) ? canonical.obligations : undefined
+  }
+
+  currentContractContext(step) {
+    const obligations = this.currentContractObligations(step)
+    return obligations ? obligationContractContext(obligations) : undefined
   }
 
   persistedStepCheckpoint(board, stepId) {
@@ -13556,6 +13589,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     recoveryAttempt = 0,
     recoveryKind,
     providerMessagesOverride,
+    closedCorrection = false,
   }) {
     this.assertModelRecoveryAllowed()
     const recoveryOwner = this.captureModelRecoveryOwner()
@@ -13983,14 +14017,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (controlRepair) Object.defineProperty(message, '_sglunaControlRepair', { value: controlRepair, configurable: true, enumerable: false })
     }
 
-    if (Array.isArray(closedRoundCalls) && closedRoundCalls.length > 0) {
+    // A closed correction admits only its content: the caller refuses its calls, so nothing here may run them.
+    if (!closedCorrection && Array.isArray(closedRoundCalls) && closedRoundCalls.length > 0) {
       const salvaged = await this.salvageClosedRoundCalls(message, closedRoundCalls, {
         current, generation, round, recoveryAttempt, recoveryKind, omissionRepair,
       })
       if (salvaged) return salvaged
     }
 
-    const observed = await this.handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair, allowTools: effectiveAllowTools })
+    const observed = closedCorrection ? undefined
+      : await this.handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair, allowTools: effectiveAllowTools })
     if (observed) return observed
 
     if (omissionRepair && !effectiveAllowTools && message.tool_calls !== undefined) {
@@ -14062,6 +14098,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           allowTools: true,
           recoveryAttempt: 1,
           recoveryKind: 'output_budget_exhaustion',
+          closedCorrection,
           providerMessagesOverride: [
             ...providerMessages.map(item => ({ ...item })),
             { role: 'user', content: OUTPUT_BUDGET_RECOVERY_MESSAGE },
@@ -18506,6 +18543,53 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       goalStatus: [GOAL_STATUS.COMPLETED, GOAL_STATUS.CANCELLED].includes(goalStatus) ? goalStatus : 'inactive',
       taskBoard: visibleTaskBoard(state?.task_board) }
   }
+  // A route draft gets the same bounded plan_category correction as a turn's draft, on the request's shared allowance.
+  // Without it one refused route draft was a terminal guard pause (Run BA, both lanes). Only refusals raised before
+  // anything is committed are corrected here; exhaustion and every other failure still fail the route. Validation and
+  // traces await, so the route's owner is checked after each await before any counter, message or commit changes.
+  async commitRecoveryRouteDraft(generation, message, roundBase, owner, route) {
+    for (let correction = 1; ; correction++) {
+      let plan
+      try {
+        plan = await this.parsePlanMessageChecked(message, { recovery: true })
+      }
+      catch (error) {
+        this.assertModelRecoveryAllowed(owner)
+        if (error?.failureClass !== 'plan_category' || error?.details?.deterministic_no_retry === true) throw error
+        this.planCategoryRetries++
+        const reason = error instanceof Error ? error.message : String(error)
+        await this.recoveryDiagnostic({
+          failure_class: 'plan_category',
+          reason_code: error.code,
+          reason,
+          retry: this.planCategoryRetries,
+          retry_limit: this.maxToolValidationRetries,
+          tools_enabled: false,
+          recovery_route: route,
+          ...(error?.details && typeof error.details === 'object' ? error.details : {}),
+        })
+        this.assertModelRecoveryAllowed(owner)
+        if (this.planCategoryRetries > this.maxToolValidationRetries) throw error
+        if (typeof message.content === 'string') this.messages.push({ role: 'assistant', content: cleanMemoryText(message.content, 4000) })
+        this.messages.push({
+          role: 'user',
+          content: `[HARNESS] Recovery draft refused (${this.planCategoryRetries}/${this.maxToolValidationRetries}; ${error.code}): ${reason} Tools stay closed for this recovery route. Return the corrected strict-JSON plan.`,
+        })
+        const current = await this.assertCurrent()
+        this.assertModelRecoveryAllowed(owner)
+        // closedCorrection: no closed-round salvage or targeted observation runs for this reply; only its content counts.
+        message = await this.callProvider(current, generation, { round: roundBase + correction, allowTools: false, recoveryAttempt: 0, closedCorrection: true })
+        this.assertModelRecoveryAllowed(owner)
+        const toolCalls = message?.tool_calls !== undefined || message?._sglunaClosedRoundCalls?.length > 0
+        if (toolCalls && !contentCarriesPlan(message?.content)) throw new AgentLoopError('recovery route correction requested tools; tools are closed')
+        continue
+      }
+      this.assertModelRecoveryAllowed(owner)
+      this.planCategoryRetries = 0
+      return await this.commitPlan(plan)
+    }
+  }
+
   async recoverPlanRoute(generation, reason, roundBase) {
     if (this.freshContextRecoveryInProgress) throw new AgentLoopError(`provider_action_omission_repair_failed: fresh_context_recovery_exhausted: ${reason instanceof Error ? reason.message : String(reason)}`)
     const admittedGoal = this.memory.planningState?.(this.activePlanKey())?.goal
@@ -18879,8 +18963,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             roundBase + 1,
           )
         }
-        const plan = this.parsePlanMessage(message)
-        return await this.commitPlan(plan)
+        return await this.commitRecoveryRouteDraft(generation, message, roundBase, recoveryOwner, routed.route)
       }
       catch (error) {
         if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error

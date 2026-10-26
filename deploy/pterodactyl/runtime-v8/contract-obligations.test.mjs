@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { compileObligations, normalizeObligations, contractDefectShape, preservationGeometry, obligationProofOrigin, obligationSignature, effectivePreservationProof, preservedProofMatches } from './contract-obligations.mjs'
+import { compileObligations, normalizeObligations, contractDefectShape, outcomeOnlyCheckpoint, preservationGeometry, obligationProofOrigin, obligationSignature, effectivePreservationProof, preservedProofMatches } from './contract-obligations.mjs'
 import { recoverContractObligations } from './contract-obligation-runtime.mjs'
 import { getActivePlan, PLANNING_EVENT } from './planning-state.mjs'
 import { configuration, Session, recoverInterruptedAgentPlan } from './supervisor.mjs'
@@ -144,6 +144,19 @@ test('shared validator rejects the exact AV corrected checkpoint against frozen 
   const future = world({ firstIntent: global })
   await future.start()
   assert.equal((await future.agent.validatePlannerCheckpointContract(compileObligations(global), [], { plannerOnlyDraft: true, step: future.held().steps[0] })).accepted, true)
+})
+
+test('only a checkpoint restating exactly the declared outcome counts as the harness-compiled preserving contract', () => {
+  const outcome = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'burner-inserter', minimum: 1 }] }
+  const intent = { outcome, preserve: [22, 23] }
+  assert.equal(outcomeOnlyCheckpoint(structuredClone(outcome), intent), true)
+  assert.equal(outcomeOnlyCheckpoint(structuredClone(outcome), { outcome, preserve: [] }), false)
+  assert.equal(outcomeOnlyCheckpoint({ ...outcome, mode: 'any' }, intent), false)
+  assert.equal(outcomeOnlyCheckpoint({ mode: 'all', requirements: [{ ...outcome.requirements[0], minimum: 2 }] }, intent), false)
+  assert.equal(outcomeOnlyCheckpoint({ mode: 'all', requirements: [...outcome.requirements, { kind: 'entity_exists', unit_number: 22 }] }, intent), false)
+  // The AV global-count translation stays a mismatch.
+  assert.equal(outcomeOnlyCheckpoint(correctedReply.checkpoint, typed), false)
+  assert.equal(outcomeOnlyCheckpoint(structuredClone(typed.outcome), typed), true)
 })
 
 test('residual count-translation miss runs real completion -> one successor -> next original semantic step, with one placement only', async () => {

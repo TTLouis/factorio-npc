@@ -75,6 +75,15 @@ export function obligationContractMatches(contract, obligations) {
       && sanitizeStepCompletionContract(contract, context).mode === 'all'
   } catch { return false }
 }
+// A draft checkpoint that states exactly the declared outcome leaves out only the entity_exists rows the harness derives
+// from preserve, so its compiled contract is the same commitment. Any other difference is a real mismatch.
+export function outcomeOnlyCheckpoint(contract, obligations) {
+  try {
+    const typed = normalizeObligations(obligations)
+    return typed.preserve.length > 0 && sanitizeStepCompletionContract(contract).mode === 'all'
+      && predicates(contract) === predicates(typed.outcome)
+  } catch { return false }
+}
 export function contractDefectShape(step) {
   const typed = storedObligations(step?.obligations)
   const proof = normalizeObligationProof(step?.obligation_proof, typed)

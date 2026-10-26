@@ -151,9 +151,12 @@ function draftStepsFromBoard(board, draftPlan) {
   const prefixVerified = carried > 0
     && steps.length > carried
     && steps.slice(0, carried).every(step => step?.status === 'completed')
-  return (prefixVerified ? steps.slice(carried) : steps).map(step => ({
+  // A typed step's contract may be wider than the generic 8 predicates; it is kept when it is exactly the compiled
+  // obligations of the draft step at the same index.
+  return (prefixVerified ? steps.slice(carried) : steps).map((step, index) => ({
     description: step.description,
-    completion_contract: safeDurableStepCompletionContract(step.completion_contract),
+    completion_contract: safeDurableStepCompletionContract(step.completion_contract)
+      ?? safeDurableStepCompletionContract(step.completion_contract, draftPlan?.steps?.[index]),
     ...(step.completion_mode ? { completion_mode: step.completion_mode, semantic_rationale: step.semantic_rationale } : {}),
     ...(step.contract_status === STEP_CONTRACT_STATUS.PENDING ? { contract_status: STEP_CONTRACT_STATUS.PENDING } : {}),
   }))
@@ -2200,8 +2203,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {
     const state = key ? this.planByNpc.get(key) : undefined
-    const normalized = safeDurableStepCompletionContract(contract)
-    if (!state || state.status !== 'active' || !normalized || !state.task_board || !Array.isArray(state.task_board.steps)) return state
+    if (!state || state.status !== 'active' || !state.task_board || !Array.isArray(state.task_board.steps)) return state
     // Completion meaning freezes with the committed reducer plan. Guard BEFORE
     // touching the legacy compatibility board so no post-commit Jev/checkpoint
     // pass can make compatibility code reason from semantics different from the
@@ -2211,6 +2213,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (active && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(active.status)) return state
     const index = state.task_board.steps.findIndex(step => step?.id === stepId)
     if (index < 0) return state
+    // A typed draft step's contract may also be read under the obligations the draft recorded for it, which admit up
+    // to 16 compiled predicates instead of the generic 8.
+    const offset = active ? boardPlanAlignment(state.task_board, active) : undefined
+    const normalized = safeDurableStepCompletionContract(contract)
+      ?? safeDurableStepCompletionContract(contract, offset === undefined ? undefined : active.steps[index - offset])
+    if (!normalized) return state
     const previous = state.task_board.steps[index]
     const steps = state.task_board.steps.slice()
     steps[index] = {

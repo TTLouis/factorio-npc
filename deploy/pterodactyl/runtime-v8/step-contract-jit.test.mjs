@@ -300,16 +300,16 @@ test('a semantic completion claim on a pending step is refused with semantic_com
 })
 
 test('prompt load: the shared and executor prompts carry the step-contract wording and the executor variants name no draft fields', () => {
-  assert.match(COMPACT_CONTINUATION_PROMPT, /the currentStep entry is \{kind:"deterministic",checkpoint:\{mode,requirements\}\} and later entries are \{kind:"deterministic"\}/)
-  assert.match(CLOSED_CONTROL_PROMPT, /at currentStep and \{kind:"deterministic"\} for each later step/)
+  assert.match(COMPACT_CONTINUATION_PROMPT, /the currentStep entry is \{kind:"deterministic",checkpoint:\{mode,requirements\}\} and later entries are \{kind:"deterministic",obligations\}/)
+  assert.match(CLOSED_CONTROL_PROMPT, /at currentStep and \{kind:"deterministic",obligations\} for each later step/)
   assert.match(COMPACT_CONTINUATION_PROMPT, /\nEvery step of a new execution draft is deterministic\./)
   for (const prompt of [EXECUTOR_COMPACT_CONTINUATION_PROMPT, EXECUTOR_CLOSED_CONTROL_PROMPT]) {
     assert.doesNotMatch(prompt, /stepCompletions|currentStep|later entries/)
   }
   const world = harness({ script: [] })
   const system = world.agent.rolePrefixMessages(PLANNER_ROLE)[0].content
-  assert.match(system, /for the step at currentStep of an execution plan and \{kind:"deterministic"\} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start;/)
-  assert.match(system, /a deterministic checkpoint for the first step and \{kind:"deterministic"\} for each later step, whose checkpoint the harness requests when that step is about to start\./)
+  assert.match(system, /for the step at currentStep of an execution plan and \{kind:"deterministic",obligations\} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start;/)
+  assert.match(system, /a deterministic checkpoint for the first step and \{kind:"deterministic",obligations\} for each later step, whose checkpoint the harness requests when that step is about to start\./)
   assert.doesNotMatch(world.agent.rolePrefixMessages(EXECUTOR_ROLE)[0].content, /stepCompletions aligned with every step, with a deterministic checkpoint for every step/)
 })
 

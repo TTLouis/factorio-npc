@@ -676,7 +676,7 @@ test('the planner system prompt says execution plans declare deterministic check
   const world = harness(() => draft())
   await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
   const system = world.calls[0].filter(message => message.role === 'system').map(message => message.content ?? '').join('\n')
-  assert.match(system, /\{kind:"deterministic",checkpoint:\{mode:"all",requirements:\[\.\.\.\]\}\} for the step at currentStep of an execution plan and \{kind:"deterministic"\} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start; \{kind:"semantic",rationale:"\.\.\."\} only in an assessmentOnly:true plan\. You choose the intended outcome/)
+  assert.match(system, /\{kind:"deterministic",checkpoint:\{mode:"all",requirements:\[\.\.\.\]\}\} for the step at currentStep of an execution plan and \{kind:"deterministic",obligations\} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start; \{kind:"semantic",rationale:"\.\.\."\} only in an assessmentOnly:true plan\. You choose the intended outcome/)
   assert.match(system, /Semantic declarations belong only to assessmentOnly:true plans; unknown current measurements are not a reason to downgrade an intended world result to an assessment\./)
   assert.doesNotMatch(system, /for world-changing steps or waits|for observation\/assessment only|Reserve semantic declarations/)
 })
