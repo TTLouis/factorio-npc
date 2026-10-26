@@ -11,6 +11,7 @@
 // status and traces the verdict.
 
 import { createHash } from 'node:crypto'
+import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 
 export const PENDING_OPERATION_LIMITS = Object.freeze({
   operations: 16,
@@ -348,6 +349,46 @@ export function terminalGatherCancellation(admission, status, pending) {
   return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'gather' }
 }
 
+// A failed walk can change position (and clear obstacles). Only a complete exact
+// navigation-only terminal witness releases its outstanding-work hold;
+// this is terminal partial movement, never proof of reaching the destination.
+function terminalNavigationCancellation(admission, status, pending) {
+  const slots = admission.slots
+  if (!['admitted', 'uncertain', 'partial'].includes(admission.state) || status?.status_error || status?.error
+    || !nativeAdmissionJournal(status.admission_journal?.records ?? status.admission_journal).known
+    || admission.ok !== true || admission.error && admission.error !== 'batch_reconciliation_required'
+    || status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch
+    || !Array.isArray(slots) || slots.length !== pending.operations.length || !slots.length) return null
+  const ref = slots[0]?.batch_refs?.[0]
+  if (!ref || !Number.isSafeInteger(ref.batch_id) || ref.batch_id < 1 || ref.batch_generation !== admission.generation
+    || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return null
+  if (!slots.every((slot, i) => slot.index === i + 1 && slot.ok === true
+    && ['walk_to_position', 'walk_to_entity'].includes(slot.operation) && slot.operation === pending.operations[i].name
+    && slot.queued_tasks === 1 && slot.batch_refs?.length === 1
+    && slot.batch_refs[0].batch_id === ref.batch_id && slot.batch_refs[0].batch_generation === ref.batch_generation
+    && slot.batch_refs[0].batch_ref === ref.batch_ref)) return null
+  const receipt = status.receipt_journal?.find(row => row.batch_id === ref.batch_id
+    && row.batch_generation === ref.batch_generation && row.batch_ref === ref.batch_ref)
+  if (!receipt || receipt.state !== 'cancelled' || receipt.reason !== 'navigation_unreachable'
+    || receipt.task_count !== slots.length || !Array.isArray(receipt.task_types)
+    || receipt.task_types.length !== slots.length || !receipt.task_types.every(type => type === 'walking_to_entity')
+    || !Number.isSafeInteger(receipt.tasks_started) || receipt.tasks_started < 1 || receipt.tasks_started > receipt.task_count
+    || !Number.isSafeInteger(receipt.started_count) || receipt.started_count < receipt.tasks_started
+    || !Number.isSafeInteger(admission.tick) || !Number.isSafeInteger(receipt.tick) || receipt.tick < admission.tick
+    || receipt.outcome || receipt.refused_count || receipt.refusals?.length) return null
+  return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'navigation' }
+}
+
+// An uncertain native admission is still blocking unless the host retained its
+// exact identity and the same terminal rule can be re-proven from fresh journals.
+export function unresolvedNativeAdmissions(status, records = [], actor) {
+  const journal = status?.admission_journal?.records ?? status?.admission_journal
+  if (!nativeAdmissionJournal(journal).known) return [{ reason: 'native_admission_journal_unreadable' }]
+  return Array.isArray(journal) ? journal.filter(row => ['uncertain', 'admitting'].includes(row.state)
+    && !records.some(record => record.operation_key === row.operation_key
+      && reconcilePendingOperation(record, { status, actor }).reason === 'exact_terminal_navigation_cancelled')) : []
+}
+
 export function reconcilePendingOperation(pending, { status, actor } = {}) {
   if (typeof status === 'string') { try { status = JSON.parse(status) } catch { status = null } }
   const lineage = pending?.actor ?? {}
@@ -390,6 +431,9 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     // A sealed exact receipt describes historical work by its original actor.
     // Unfinished work from an old actor is never resumed or assumed complete.
     if (staleActor) return staleActor
+    const navigation = terminalNavigationCancellation(admission, status, pending)
+    if (navigation) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
+      reason: 'exact_terminal_navigation_cancelled', ...navigation }
     const gather = terminalGatherCancellation(admission, status, pending)
     if (gather) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
       reason: 'exact_terminal_gather_cancelled', ...gather }
@@ -487,8 +531,8 @@ export function reconciliationFacts(result, pending) {
     batch_id: result?.batch_id ?? null,
     operations: (pending?.operations ?? []).map(operation => operation.name),
     effect_classes: [...new Set((pending?.operations ?? []).map(operation => operation.effect_class))],
-    ...(result?.recovery_kind === 'gather' ? { recovery_kind: 'gather', receipt_tick: result.receipt_tick, batch_ref: result.batch_ref } : {}),
-    ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && result?.recovery_kind !== 'gather'
+    ...(['gather', 'navigation'].includes(result?.recovery_kind) ? { recovery_kind: result.recovery_kind, receipt_tick: result.receipt_tick, batch_ref: result.batch_ref } : {}),
+    ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !['gather', 'navigation'].includes(result?.recovery_kind)
       ? { completed_tasks: result.completed_tasks, refused_tasks: result.refused_tasks } : {}),
     ...(result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
       ? { applied_slots: result.applied_slots ?? [], refused_slots: result.refused_slots ?? [], refusal_codes: result.refusal_codes ?? [], unrun_slots: result.unrun_slots ?? 0 }
@@ -499,6 +543,7 @@ export function reconciliationFacts(result, pending) {
 /** One sentence for the model: what the game's batch records prove, and what that allows. Never says "succeeded" for an uncertain effect. */
 export function reconciliationGuidance(result, pending) {
   const facts = JSON.stringify(reconciliationFacts(result, pending))
+  if (result?.reason === 'exact_terminal_navigation_cancelled') return `Operation reconciliation: the exact navigation-only batch ended unreachable with idle native queues. Movement may have occurred; the destination is not verified. Re-observe current position and the unchanged checkpoint before choosing the next action. Facts: ${facts}`
   if (result?.reason === 'exact_terminal_gather_cancelled') return `Operation reconciliation: the exact gather-only batch terminated with partial acquisition. No slot quantity is assumed complete or absent. Keep the effect hold until the harness reads fresh inventory and computes only the unchanged checkpoint deficit; do not replay the batch. Facts: ${facts}`
   if (result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL) {
     return `Operation reconciliation: the exact native receipt accounts for every transfer task: ${result.completed_tasks} completed and ${result.refused_tasks} refused without moving anything. This is partial work, not batch success. Do not replay the completed prefix or the original batch. Re-observe current inventories and the target, then choose only the missing effects for the same committed step. Facts: ${facts}`

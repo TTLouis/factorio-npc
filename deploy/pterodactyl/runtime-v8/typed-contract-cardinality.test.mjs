@@ -13,9 +13,17 @@ import { EXECUTOR_ROLE } from './agent-roles.mjs'
 
 const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/ax-a-typed-cardinality.json', import.meta.url), 'utf8'))
 const KEY = fixture.pre_failure.snapshot.planning_states[0].key
-function world({ phase = 'pre_failure', reply, onRead } = {}) {
+function world({ phase = 'pre_failure', reply, onRead, typedSubstitution } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  memory.restore({ version: 1, ...structuredClone(fixture[phase].snapshot) })
+  const snapshot = { version: 1, ...structuredClone(fixture[phase].snapshot) }
+  if (typedSubstitution) {
+    const step = getActivePlan(snapshot.planning_states[0].state).steps[1]
+    step.obligations = structuredClone(typedSubstitution.obligations)
+    step.obligation_proof = { ...structuredClone(typedSubstitution.obligation_proof), binding: step.obligation_proof.binding }
+    step.obligation_proof.actor_id = 14
+    for (const preserved of step.obligation_proof.preserved) preserved.actor_id = 14
+  }
+  memory.restore(snapshot)
   const plan = getActivePlan(memory.planningState(KEY))
   const game = new FakeFactorio({ inventory: Object.fromEntries(fixture.native_observed.inventory.map(row => [row.name, row.count])) })
   Object.assign(game.status, { actor_id: 14, epoch: 1, surface_index: 1, force_index: 1, connected_players: 0 })
@@ -54,6 +62,20 @@ test('AX-A exact pre-failure activation binds every original predicate without a
   assert.deepEqual(w.plan().steps[1].obligation_proof, original.steps[1].obligation_proof)
   assert.equal(w.plan().plan_id, original.plan_id)
   assert.equal(w.plan().plan_version, original.plan_version)
+  assert.equal(w.calls(), 0)
+  assert.equal(w.game.mutations.length, 0)
+})
+
+test('AY-B exact seven inventory outcomes plus three preserved identities bind through production activation', async () => {
+  const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-b-typed-cardinality.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
+  const w = world({ typedSubstitution: ay })
+  // Reuse the existing activation fixture's lifecycle ownership; predicates and
+  // preserved native entity snapshots are the retained AY contract unchanged.
+  const result = await w.agent.ensureActiveStepContract({ trigger: 'step_close', closedStepId: 'step_1', closedBy: 'deterministic_completion_contract' })
+  assert.equal(result.ok, true, JSON.stringify(result.failure))
+  assert.equal(w.plan().steps[1].completion_contract.requirements.length, 10)
+  assert.deepEqual(JSON.parse(JSON.stringify(w.plan().steps[1].obligations)), ay.obligations)
+  assert.deepEqual(w.plan().steps[1].completion_contract.requirements.filter(row => row.kind === 'entity_exists').map(row => row.unit_number), [37, 38, 39])
   assert.equal(w.calls(), 0)
   assert.equal(w.game.mutations.length, 0)
 })
