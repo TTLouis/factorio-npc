@@ -5,6 +5,7 @@ import { materialOwnerKey } from './material-ledger.mjs'
 import { normalizeCounts, recipeForItem } from './quantity-compiler.mjs'
 import { restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
 import { advanceProductionTask, createProductionTask, machineFacts, normalizeProductionIntent, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
+import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
 export function restoreProductionRecords(rows) {
@@ -143,23 +144,82 @@ function admissionRefusal(agent, code, message) {
 function isActiveStep(agent, s, stepId) {
   return [s.owner.stepId, agent.memory.currentPlan?.(s.owner.key)?.task_board?.active_step_id].includes(stepId)
 }
+// Admission reads decide only whether to refuse or repair; a failed read is
+// treated as unknown, never as a fact.
+async function admissionRead(agent, s, tool, args) {
+  let raw
+  try { raw = String(await agent.rcon.command(agent.observationToolCommand(tool, args))) }
+  catch { raw = '' }
+  await checked(agent, s.owner, agent.traceEvent('production.read', { tool, args, chars: raw.length,
+    phase: 'admission', plan_id: s.owner.planId, step_id: s.owner.stepId }))
+  return raw
+}
+async function admissionJson(agent, s, tool, args) {
+  try { return JSON.parse(await admissionRead(agent, s, tool, args)) }
+  catch { return undefined }
+}
 // A burner machine the task keeps running can only be refuelled from the
 // intent's fuel allowance. Unreadable identities are left to the runtime's
 // exact identity checks instead of being guessed here.
 async function burnerBindings(agent, s, intent) {
   const burners = []
   for (const unit_number of new Set([...intent.producers, ...intent.feeders].map(row => row.unit_number))) {
-    let raw
-    try { raw = String(await agent.rcon.command(agent.observationToolCommand('getEntityStatus', { unit_number }))) }
-    catch { raw = '' }
-    await checked(agent, s.owner, agent.traceEvent('production.read', { tool: 'getEntityStatus', args: { unit_number }, chars: raw.length,
-      phase: 'admission', plan_id: s.owner.planId, step_id: s.owner.stepId }))
-    let detail
-    try { detail = JSON.parse(raw) }
-    catch { continue }
-    if (detail?.found === true && detail.entity?.unit_number === unit_number && detail.entity.energy_source === 'burner') burners.push(`${unit_number} ${detail.entity.name}`)
+    const detail = await admissionJson(agent, s, 'getEntityStatus', { unit_number })
+    if (detail?.found === true && detail.entity?.unit_number === unit_number && detail.entity.energy_source === 'burner') burners.push({ unit_number, name: detail.entity.name })
   }
   return burners
+}
+const burnerList = burners => burners.map(row => `${row.unit_number} ${row.name}`).join(', ')
+// Each bound burner's draw and accepted fuel categories, from the native recipe
+// (producer) or mining (feeder drill) facts that list its prototype, and the
+// complete fuel list a recipe read names. Undefined when any of it is missing.
+async function burnerFuelFacts(agent, s, intent, burners) {
+  const details = new Map(); let fuels
+  const recipe = async name => {
+    if (!details.has(name)) {
+      const detail = await admissionJson(agent, s, 'getRecipeDetails', { item_or_recipe: name, requested_count: 1 })
+      details.set(name, detail?.found === true ? detail : undefined)
+      if (Array.isArray(detail?.burner_fuels?.items) && detail.burner_fuels.truncated === false) fuels ??= detail.burner_fuels.items
+    }
+    return details.get(name)?.recipes?.find(row => row.name === name)
+  }
+  const facts = []
+  for (const burner of burners) {
+    const producer = intent.producers.find(row => row.unit_number === burner.unit_number)
+    let machine = producer && (await recipe(producer.recipe_name))?.crafting_machines?.find(row => row.name === burner.name)
+    const feeder = intent.feeders.find(row => row.unit_number === burner.unit_number)
+    const output = feeder && intent.producers.find(row => row.unit_number === feeder.output_unit_number)
+    for (const input of !machine && output ? (await recipe(output.recipe_name))?.ingredients ?? [] : []) {
+      const mining = await admissionJson(agent, s, 'getMiningDetails', { resource_or_item: input.name })
+      machine = mining?.found === true ? mining.resources?.flatMap(row => row.drills ?? []).find(row => row.name === burner.name) : undefined
+      if (machine) break
+    }
+    if (machine?.energy_source !== 'burner' || !(machine.energy_watts > 0) || !Array.isArray(machine.fuel_categories)) return undefined
+    facts.push({ ...burner, energy_watts: machine.energy_watts, burner_effectivity: machine.burner_effectivity, fuel_categories: machine.fuel_categories })
+  }
+  return fuels && { burners: facts, fuels: fuels.filter(fuel => fuel.fuel_value > 0 && facts.every(row => row.fuel_categories.includes(fuel.category))) }
+}
+const PRODUCTION_REPAIRS = {
+  production_scope_mismatch: async (agent, s, intent) => {
+    const repaired = repairTargets(intent, s.step.completion_contract)
+    return repaired && { intent: { ...intent, targets: repaired.targets }, rule: repaired.rule, note: repaired.note }
+  },
+  production_fuel_allowance_missing: async (agent, s, intent, defaults) => {
+    const burners = await burnerBindings(agent, s, intent)
+    const facts = burners.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
+    const inventory = facts && parseInventoryCounts(await admissionRead(agent, s, 'getInventoryItems', {}))
+    if (!inventory) return undefined
+    const held = Object.fromEntries(inventory)
+    const choice = chooseBurnerFuel({ fuels: facts.fuels, held, preferred: defaults?.burner_fuel })
+    if (!choice.fuel) return undefined
+    const fuel = choice.fuel
+    const count = fuelAllowanceCount(facts.burners, fuel, held[fuel.name] ?? 0)
+    const method = fuel.mined_from?.length ? 'gather_resource' : fuel.harvested_from?.length ? 'harvest_product' : undefined
+    const bind = method && !intent.resources.some(row => row.item_name === fuel.name)
+    const categories = [...new Set(facts.burners.flatMap(row => row.fuel_categories))].join('+')
+    return { intent: { ...intent, resources: bind ? [...intent.resources, { item_name: fuel.name, method }] : intent.resources, fuel: { item_name: fuel.name, count } },
+      rule: choice.rule, note: `fuel set to ${fuel.name} with cap ${count} (${choice.rule}${choice.ignored ? `; your default burner_fuel ${choice.ignored} is not an accepted fuel these machines can get` : ''}) for the bound burner machines ${burnerList(facts.burners)}, which burn ${categories} fuel. The cap covers every bound burner at full draw for the task's ${PRODUCTION_LIMITS.duration_ms / 60000}-minute limit; one item goes in only when a machine runs out${bind ? `. Added resource ${fuel.name} via ${method} so the task can fetch more` : ''}` }
+  },
 }
 // One admission rule for both seams: the executor parse refuses an intent the
 // active committed step cannot admit as a bounded correction, and
@@ -179,16 +239,37 @@ export async function admitProductionIntent(agent, plan, { collectionOnly = fals
   // for identity below instead of being refused for a rule it predates.
   if (!collectionOnly && !intent.fuel && !agent.memory.productionTasks?.has(recordKey(s))) {
     const burners = await burnerBindings(agent, s, intent)
-    if (burners.length) throw admissionRefusal(agent, 'production_fuel_allowance_missing', `Bound burner machines can only be refuelled from a fuel allowance {item_name, count}, which this intent omits: ${burners.join(', ')}`)
+    if (burners.length) throw admissionRefusal(agent, 'production_fuel_allowance_missing', `Bound burner machines can only be refuelled from a fuel allowance {item_name, count}, which this intent omits: ${burnerList(burners)}`)
   }
   return { s, intent }
+}
+// Admission with harness repairs: a refusal the table can answer from the
+// committed step and fresh game facts is repaired and admitted again. Each
+// reason is repaired at most once per reply and only while `repairable` allows;
+// anything else stays the refusal the executor corrects.
+export async function prepareProductionTask(agent, plan, { collectionOnly = false, defaults = {}, repairable = () => true } = {}) {
+  const repairs = []
+  let current = plan
+  for (;;) {
+    try {
+      await admitProductionIntent(agent, current, { collectionOnly })
+      return { plan: current, repairs }
+    } catch (error) {
+      const repair = Object.hasOwn(PRODUCTION_REPAIRS, error?.code ?? '') ? PRODUCTION_REPAIRS[error.code] : undefined
+      if (collectionOnly || error?.productionAdmissionRefused !== true || !repair || repairs.some(row => row.code === error.code) || !repairable(error.code)) throw error
+      const repaired = await repair(agent, scope(agent), normalizeProductionIntent(current.productionTask), defaults)
+      if (!repaired) throw error
+      repairs.push({ code: error.code, rule: repaired.rule, note: repaired.note })
+      current = { ...current, productionTask: repaired.intent }
+    }
+  }
 }
 // Parse-time screen for the executor reply. A stepId naming another step is
 // left to commitPlan's step-identity correction, which says which step is active.
 export async function screenProductionTask(agent, plan, options) {
   const s = scope(agent)
-  if (!s.step || !isActiveStep(agent, s, plan.stepId)) return
-  await admitProductionIntent(agent, plan, options)
+  if (!s.step || !isActiveStep(agent, s, plan.stepId)) return undefined
+  return prepareProductionTask(agent, plan, options)
 }
 
 export async function startProductionTask(agent, plan, { collectionOnly = false } = {}) {

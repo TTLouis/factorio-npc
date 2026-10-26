@@ -11,7 +11,8 @@ import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeProductionIntent } from './production-task.mjs'
 import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
-import { continueProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
+import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
+import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
@@ -315,6 +316,10 @@ const EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT = 2
 const EXECUTOR_STEP_IDENTITY_LEDGER_MAX = 128
 // Corrections per committed active step for a production intent refused in commitPlan after passing the parse-time screen.
 const PRODUCTION_ADMISSION_CORRECTION_LIMIT = 2
+// Harness repairs per committed active step and refusal reason: a repeat of the same gap goes back to the executor.
+const PRODUCTION_REPAIR_LIMIT = 1
+// What the parse-time production screen admitted or repaired, carried on the plan to commitPlan.
+const PRODUCTION_PREPARED = Symbol('productionPrepared')
 // Steps remembered for the once-per-step read reopen after a review from a harness-closed read phase (reopenReadsForReview).
 const REVIEW_READ_REOPEN_STEP_LIMIT = 64
 const REVIEW_NOTES_CHARS = MAX_REVIEW_NOTES_CHARS
@@ -3790,6 +3795,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       jevFacts, // U11 advisory: bounded facts Jev's observation families add (never replacing a mandatory record)
       jevHints,
       executorFacts: packetRole === EXECUTOR_ROLE ? executorFacts : undefined, // D2: harness-read facts for a fresh executor, labelled fresh / stale / historical
+      harnessDefaults: packetRole === EXECUTOR_ROLE ? this.memory.harnessDefaults?.get(this.activePlanKey()) : undefined,
       // Reserve the native geometry room; callProvider replaces it with fresh topology. A mandatory execution brief must not
       // crowd that block out, and the room is the block's real size (none when no block is produced), not the whole slot.
       topology: this.completionProtocolVersion >= 3 ? undefined : topology,
@@ -14219,6 +14225,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let executionGuidance
     let plannerReview
     let productionTask
+    let harnessDefaults
     let reviewCheckpointIgnored = false
     let baseMessage = message
     if (typeof message?.content === 'string') {
@@ -14234,6 +14241,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             || !raw.stepId || raw.checkpoint || raw.semanticCompletion || raw.plannerReview || raw.observationRequest) {
             throw this.roleContractError('invalid_production_task', 'productionTask requires an executor stepId, empty operations and no completion/review/read request')
           }
+        }
+        if (Object.hasOwn(raw, 'defaults')) {
+          try { harnessDefaults = normalizeHarnessDefaults(raw.defaults) }
+          catch (cause) { throw this.roleContractError('invalid_defaults', cause.message) }
         }
         if (Object.hasOwn(raw, 'executionGuidance')) {
           try { executionGuidance = normalizeExecutionGuidance(raw.executionGuidance, raw.plan?.length) }
@@ -14341,7 +14352,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         // 2.6: the model's answer to a time review; traced, never executed.
         if (Object.prototype.hasOwnProperty.call(raw, 'timeReview')) timeReview = parseTimeReview(raw.timeReview)
-        if (productionTask || executionGuidance || plannerReview || assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition || stepId !== undefined
+        if (productionTask || harnessDefaults || executionGuidance || plannerReview || assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition || stepId !== undefined
           || Object.prototype.hasOwnProperty.call(raw, 'timeReview')
           || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
@@ -14362,6 +14373,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             executionGuidance: _executionGuidance,
             plannerReview: _plannerReview,
             productionTask: _productionTask,
+            defaults: _defaults,
             ...base
           } = raw
           // With the step id given, plan and currentStep are not needed from the executor.
@@ -14389,6 +14401,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (executionGuidance) plan.executionGuidance = executionGuidance
     if (plannerReview) plan.plannerReview = plannerReview
     if (productionTask) plan.productionTask = productionTask
+    if (harnessDefaults) plan.defaults = harnessDefaults
     if (reviewCheckpointIgnored) plan.reviewCheckpointIgnored = true
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
@@ -14534,8 +14547,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.validatePreflightCorrectionScope(plan)
     await this.validateLocalFluidSearchBlocker(plan)
     // Refused here, an intent the active step cannot admit is an ordinary plan_category correction; refused only in
-    // commitPlan, it failed the request (Run AZ lane A: intermediate target).
-    if (plan.productionTask) await screenProductionTask(this, plan, { collectionOnly: Boolean(this.entityRefreshAdmission) })
+    // commitPlan, it failed the request (Run AZ lane A: intermediate target). A refusal the harness can answer from the
+    // committed step and fresh game facts is repaired instead (Run AZ lane B: burners without fuel), reported in commitPlan.
+    if (plan.productionTask) {
+      const prepared = await screenProductionTask(this, plan, this.productionRepairOptions(plan))
+      if (prepared) plan[PRODUCTION_PREPARED] = { original: plan.productionTask, repairs: prepared.repairs }
+      if (prepared?.repairs.length) plan.productionTask = prepared.plan.productionTask
+    }
     const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
       const error = new AgentLoopError(grounding.message)
@@ -16726,6 +16744,79 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.runTurn()
   }
 
+  // Production admission with harness repairs (prepareProductionTask). A repair the parse screen made arrives on the plan;
+  // a reply that reached commitPlan without the screen is prepared here. Each repair is reported to the model before the
+  // task runs. A refusal nothing repairs is a bounded executor correction.
+  async startExecutorProduction(plan, stepId, prepared) {
+    const collectionOnly = Boolean(this.entityRefreshAdmission)
+    let production = { ...plan, stepId }
+    try {
+      if (!collectionOnly && !prepared) {
+        const fresh = await prepareProductionTask(this, production, this.productionRepairOptions(plan))
+        prepared = { original: plan.productionTask, repairs: fresh.repairs }
+        production = fresh.plan
+      }
+      if (prepared?.repairs.length) await this.reportProductionRepairs(plan, prepared)
+      return await startProductionTask(this, production, { collectionOnly })
+    } catch (error) {
+      // A harness collection continuation is not an executor reply, so the executor is not asked to correct it.
+      if (error?.productionAdmissionRefused !== true || collectionOnly) throw error
+      return this.correctProductionAdmission(plan, error)
+    }
+  }
+
+  productionRepairKey(code) {
+    const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    return JSON.stringify([...JSON.parse(this.executorStepIdentityKey(committed)), code])
+  }
+
+  productionRepairOptions(plan) {
+    return {
+      collectionOnly: Boolean(this.entityRefreshAdmission),
+      // A default sent in this reply applies to this reply's production task.
+      defaults: { ...this.memory.harnessDefaults?.get(this.activePlanKey()), ...plan.defaults },
+      repairable: code => (this.memory.productionRepairLedger?.get(this.productionRepairKey(code)) ?? 0) < PRODUCTION_REPAIR_LIMIT,
+    }
+  }
+
+  async reportProductionRepairs(plan, { original, repairs }) {
+    const requestId = this.traceRequest?.id
+    await this.assertCurrent()
+    const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const stepId = committed?.steps?.[committed.active_step_index]?.step_id
+    const ledger = this.memory.productionRepairLedger ??= new Map()
+    for (const repair of repairs) {
+      const key = this.productionRepairKey(repair.code)
+      const used = ledger.get(key) ?? 0
+      ledger.delete(key)
+      ledger.set(key, used + 1)
+    }
+    while (ledger.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
+    await this.persistState()
+    for (const repair of repairs) {
+      await this.traceEvent('production.admission_repaired', { request_id: requestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
+        step_id: stepId, reason: repair.code, rule: repair.rule, note: repair.note }, { requestId })
+    }
+    this.messages.push({ role: 'assistant', content: JSON.stringify({ ...plan, productionTask: original }) })
+    this.messages.push({ role: 'user', content: `[HARNESS] Your productionTask was repaired and is running: ${repairs.map(row => `${row.note} (refused as ${row.code})`).join('; ')}. Nothing else in your reply changed.` })
+  }
+
+  // The model's standing defaults (production-repair.mjs HARNESS_DEFAULT_SLOTS), kept per NPC across restarts and shown
+  // in every executor step block. Whether a value fits is decided against the game where it is used.
+  async recordHarnessDefaults(defaults) {
+    const key = this.activePlanKey()
+    const store = this.memory.harnessDefaults ??= new Map()
+    const previous = store.get(key)
+    const next = { ...previous, ...defaults }
+    if (JSON.stringify(next) === JSON.stringify(previous)) return
+    store.delete(key)
+    store.set(key, next)
+    while (store.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) store.delete(store.keys().next().value)
+    await this.persistState()
+    const requestId = this.traceRequest?.id
+    await this.traceEvent('harness.defaults_set', { request_id: requestId, role: this.agentContext.role, defaults: next, previous: previous ?? null }, { requestId })
+  }
+
   async pauseForExecutorCorrection(reason, stepId, chatMessage) {
     const state = await this.pausePersistentPlan(reason, { pause_class: PAUSE_CLASS.GUARD })
     const taskBoard = visibleTaskBoard(state?.task_board)
@@ -16762,6 +16853,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.validatePlannerRoleOutput(plan)
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
     const productionStepId = plan.productionTask ? plan.stepId : undefined
+    const productionPrepared = plan[PRODUCTION_PREPARED]
+    const harnessDefaults = plan.defaults
     const miningStepId = plan.stepId
     await this.validatePreflightCorrectionScope(plan)
     try {
@@ -16774,6 +16867,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
+    if (harnessDefaults) await this.recordHarnessDefaults(harnessDefaults)
     if (refreshed) return continueEntityRefresh(this, refreshed)
     const missing = plan.operations.find(operation => EXACT_ENTITY_TARGET_OPERATIONS.has(operation.name) && !this.liveObservedExactTarget(operation.args?.unit_number))
     if (missing) {
@@ -16789,15 +16883,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       if (renewed) return continueEntityRefresh(this, renewed)
     }
-    if (plan.productionTask) {
-      const collectionOnly = Boolean(this.entityRefreshAdmission)
-      try { return await startProductionTask(this, { ...plan, stepId: productionStepId }, { collectionOnly }) }
-      catch (error) {
-        // A harness collection continuation is not an executor reply, so the executor is not asked to correct it.
-        if (error?.productionAdmissionRefused !== true || collectionOnly) throw error
-        return this.correctProductionAdmission(plan, error)
-      }
-    }
+    if (plan.productionTask) return this.startExecutorProduction(plan, productionStepId, productionPrepared)
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
     const supplyReview = await this.reviewExecutorSupplyDrift(plan)
     if (supplyReview !== undefined) return supplyReview
