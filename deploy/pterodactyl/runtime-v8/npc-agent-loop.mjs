@@ -318,8 +318,6 @@ const EXECUTOR_STEP_IDENTITY_LEDGER_MAX = 128
 const PRODUCTION_ADMISSION_CORRECTION_LIMIT = 2
 // Harness repairs per committed active step and refusal reason: a repeat of the same gap goes back to the executor.
 const PRODUCTION_REPAIR_LIMIT = 1
-// What the parse-time production screen admitted or repaired, carried on the plan to commitPlan.
-const PRODUCTION_PREPARED = Symbol('productionPrepared')
 // Steps remembered for the once-per-step read reopen after a review from a harness-closed read phase (reopenReadsForReview).
 const REVIEW_READ_REOPEN_STEP_LIMIT = 64
 const REVIEW_NOTES_CHARS = MAX_REVIEW_NOTES_CHARS
@@ -14243,6 +14241,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         }
         if (Object.hasOwn(raw, 'defaults')) {
+          if (this.agentContext.role !== EXECUTOR_ROLE) throw this.roleContractError('invalid_defaults', 'defaults are written by the step executor')
           try { harnessDefaults = normalizeHarnessDefaults(raw.defaults) }
           catch (cause) { throw this.roleContractError('invalid_defaults', cause.message) }
         }
@@ -14548,12 +14547,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.validateLocalFluidSearchBlocker(plan)
     // Refused here, an intent the active step cannot admit is an ordinary plan_category correction; refused only in
     // commitPlan, it failed the request (Run AZ lane A: intermediate target). A refusal the harness can answer from the
-    // committed step and fresh game facts is repaired instead (Run AZ lane B: burners without fuel), reported in commitPlan.
-    if (plan.productionTask) {
-      const prepared = await screenProductionTask(this, plan, this.productionRepairOptions(plan))
-      if (prepared) plan[PRODUCTION_PREPARED] = { original: plan.productionTask, repairs: prepared.repairs }
-      if (prepared?.repairs.length) plan.productionTask = prepared.plan.productionTask
-    }
+    // committed step and fresh game facts passes here; commitPlan repairs it again from fresher facts and reports it.
+    if (plan.productionTask) await screenProductionTask(this, plan, this.productionRepairOptions(plan))
     const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
       const error = new AgentLoopError(grounding.message)
@@ -16744,19 +16739,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.runTurn()
   }
 
-  // Production admission with harness repairs (prepareProductionTask). A repair the parse screen made arrives on the plan;
-  // a reply that reached commitPlan without the screen is prepared here. Each repair is reported to the model before the
-  // task runs. A refusal nothing repairs is a bounded executor correction.
-  async startExecutorProduction(plan, stepId, prepared) {
+  // Production admission with harness repairs (prepareProductionTask), from the facts at commit time. Each repair is
+  // reported to the model before admission; startProductionTask still checks the repaired intent. A refusal nothing
+  // repairs is a bounded executor correction.
+  async startExecutorProduction(plan, stepId) {
     const collectionOnly = Boolean(this.entityRefreshAdmission)
     let production = { ...plan, stepId }
     try {
-      if (!collectionOnly && !prepared) {
-        const fresh = await prepareProductionTask(this, production, this.productionRepairOptions(plan))
-        prepared = { original: plan.productionTask, repairs: fresh.repairs }
-        production = fresh.plan
+      if (!collectionOnly) {
+        const prepared = await prepareProductionTask(this, production, this.productionRepairOptions(plan))
+        if (prepared.repairs.length) await this.reportProductionRepairs(plan, prepared.repairs)
+        production = prepared.plan
       }
-      if (prepared?.repairs.length) await this.reportProductionRepairs(plan, prepared)
       return await startProductionTask(this, production, { collectionOnly })
     } catch (error) {
       // A harness collection continuation is not an executor reply, so the executor is not asked to correct it.
@@ -16779,7 +16773,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async reportProductionRepairs(plan, { original, repairs }) {
+  async reportProductionRepairs(plan, repairs) {
     const requestId = this.traceRequest?.id
     await this.assertCurrent()
     const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
@@ -16797,8 +16791,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('production.admission_repaired', { request_id: requestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
         step_id: stepId, reason: repair.code, rule: repair.rule, note: repair.note }, { requestId })
     }
-    this.messages.push({ role: 'assistant', content: JSON.stringify({ ...plan, productionTask: original }) })
-    this.messages.push({ role: 'user', content: `[HARNESS] Your productionTask was repaired and is running: ${repairs.map(row => `${row.note} (refused as ${row.code})`).join('; ')}. Nothing else in your reply changed.` })
+    this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+    this.messages.push({ role: 'user', content: `[HARNESS] The harness repaired your productionTask before admission: ${repairs.map(row => `${row.note} (refused as ${row.code})`).join('; ')}. Nothing else in your reply changed.` })
   }
 
   // The model's standing defaults (production-repair.mjs HARNESS_DEFAULT_SLOTS), kept per NPC across restarts and shown
@@ -16853,7 +16847,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.validatePlannerRoleOutput(plan)
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
     const productionStepId = plan.productionTask ? plan.stepId : undefined
-    const productionPrepared = plan[PRODUCTION_PREPARED]
     const harnessDefaults = plan.defaults
     const miningStepId = plan.stepId
     await this.validatePreflightCorrectionScope(plan)
@@ -16883,7 +16876,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       if (renewed) return continueEntityRefresh(this, renewed)
     }
-    if (plan.productionTask) return this.startExecutorProduction(plan, productionStepId, productionPrepared)
+    if (plan.productionTask) return this.startExecutorProduction(plan, productionStepId)
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
     const supplyReview = await this.reviewExecutorSupplyDrift(plan)
     if (supplyReview !== undefined) return supplyReview

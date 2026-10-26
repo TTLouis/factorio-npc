@@ -4,7 +4,7 @@ import { parseInventoryCounts } from './handoff-packet.mjs'
 import { materialOwnerKey } from './material-ledger.mjs'
 import { normalizeCounts, recipeForItem } from './quantity-compiler.mjs'
 import { restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
-import { advanceProductionTask, createProductionTask, machineFacts, normalizeProductionIntent, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
+import { advanceProductionTask, createProductionTask, finiteInventoryTargets, machineFacts, normalizeProductionIntent, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, PRODUCTION_RESOURCE_BINDINGS_MAX, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
@@ -201,7 +201,9 @@ async function burnerFuelFacts(agent, s, intent, burners) {
 }
 const PRODUCTION_REPAIRS = {
   production_scope_mismatch: async (agent, s, intent) => {
-    const repaired = repairTargets(intent, s.step.completion_contract)
+    const named = intent.targets.some(row => finiteInventoryTargets(s.step.completion_contract).has(row.item_name))
+    const inventory = named ? undefined : parseInventoryCounts(await admissionRead(agent, s, 'getInventoryItems', {}))
+    const repaired = repairTargets(intent, s.step.completion_contract, inventory && Object.fromEntries(inventory))
     return repaired && { intent: { ...intent, targets: repaired.targets }, rule: repaired.rule, note: repaired.note }
   },
   production_fuel_allowance_missing: async (agent, s, intent, defaults) => {
@@ -215,7 +217,11 @@ const PRODUCTION_REPAIRS = {
     const fuel = choice.fuel
     const count = fuelAllowanceCount(facts.burners, fuel, held[fuel.name] ?? 0)
     const method = fuel.mined_from?.length ? 'gather_resource' : fuel.harvested_from?.length ? 'harvest_product' : undefined
-    const bind = method && !intent.resources.some(row => row.item_name === fuel.name)
+    // A binding the intent could not admit (binding limit, a direct-feed step's own resource) is left out: the fuel
+    // then comes from held stock only.
+    const supply = s.step.execution_guidance?.materialSupply
+    const bind = method && !intent.resources.some(row => row.item_name === fuel.name) && intent.resources.length < PRODUCTION_RESOURCE_BINDINGS_MAX
+      && !(supply?.mode === 'direct_feed' && supply.resource === fuel.name)
     const categories = [...new Set(facts.burners.flatMap(row => row.fuel_categories))].join('+')
     return { intent: { ...intent, resources: bind ? [...intent.resources, { item_name: fuel.name, method }] : intent.resources, fuel: { item_name: fuel.name, count } },
       rule: choice.rule, note: `fuel set to ${fuel.name} with cap ${count} (${choice.rule}${choice.ignored ? `; your default burner_fuel ${choice.ignored} is not an accepted fuel these machines can get` : ''}) for the bound burner machines ${burnerList(facts.burners)}, which burn ${categories} fuel. The cap covers every bound burner at full draw for the task's ${PRODUCTION_LIMITS.duration_ms / 60000}-minute limit; one item goes in only when a machine runs out${bind ? `. Added resource ${fuel.name} via ${method} so the task can fetch more` : ''}` }

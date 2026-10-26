@@ -34,15 +34,18 @@ export function restoreHarnessDefaults(rows) {
 const list = rows => rows.map(row => `${row.item_name} ${row.count}`).join(', ')
 
 // Named targets keep their item at the committed count and unrequired ones are
-// dropped; when nothing named is required, the committed targets replace them.
-export function repairTargets(intent, contract) {
+// dropped. When nothing named is required, only a single committed target not
+// yet held is an unambiguous replacement; any other case is the executor's.
+export function repairTargets(intent, contract, held) {
   const required = finiteInventoryTargets(contract)
   if (!required.size) return undefined
   const kept = intent.targets.filter(row => required.has(row.item_name)).map(row => ({ item_name: row.item_name, count: required.get(row.item_name) }))
-  const targets = kept.length ? kept : [...required].map(([item_name, count]) => ({ item_name, count }))
+  const unmet = held ? [...required].filter(([name, count]) => (held[name] ?? 0) < count) : []
+  if (!kept.length && unmet.length !== 1) return undefined
+  const targets = kept.length ? kept : unmet.map(([item_name, count]) => ({ item_name, count }))
   const dropped = intent.targets.filter(row => !required.has(row.item_name))
-  return { targets, rule: kept.length ? 'committed_counts' : 'committed_targets',
-    note: `targets set to ${list(targets)} from the committed checkpoint${dropped.length ? ` (not in it: ${list(dropped)})` : ''}` }
+  return { targets, rule: kept.length ? 'committed_counts' : 'only_unmet_committed_target',
+    note: `targets set to ${list(targets)} from the committed checkpoint${kept.length ? '' : ', its only target not yet held'}${dropped.length ? ` (not in it: ${list(dropped)})` : ''}` }
 }
 
 const natural = fuel => Boolean(fuel.mined_from?.length || fuel.harvested_from?.length)

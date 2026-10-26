@@ -5,7 +5,7 @@ import { compileQuantities } from './quantity-compiler.mjs'
 import { claimMaterials, materialAvailability, materialOwnerKey } from './material-ledger.mjs'
 import { advanceProductionTask, createProductionTask, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 import { continueProductionTask, pruneClosedProductionRecords } from './production-task-runtime.mjs'
-import { chooseBurnerFuel, fuelAllowanceCount } from './production-repair.mjs'
+import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
@@ -78,7 +78,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   const burnerFuels = { categories: ['chemical'], matched_count: 3, truncated: false, items: [
     { name: 'coal', category: 'chemical', fuel_value: 4e6, mined_from: ['coal'], harvested_from: [] },
     { name: 'solid-fuel', category: 'chemical', fuel_value: 12e6, mined_from: [], harvested_from: [] },
-    { name: 'wood', category: 'chemical', fuel_value: 2e6, mined_from: ['tree-01'], harvested_from: [] }] }
+    { name: 'wood', category: 'chemical', fuel_value: 2e6, mined_from: [], harvested_from: ['tree-01'] }] }
   if (fuelFacts) recipes[0].crafting_machines = [{ name: 'stone-furnace', ...burnerFacts(90000) }]
   if (furnace) {
     recipes.push({ name: 'copper-plate', enabled: true, hand_craftable_category: false, energy: 3.2,
@@ -475,15 +475,14 @@ function scripted(options, replies) {
 const failed = w => w.events.filter(row => row.event === 'request.failed')
 
 const repaired = w => w.events.filter(row => row.event === 'production.admission_repaired').map(row => row.data)
-const repairMessage = w => w.agent.messages.find(row => row.role === 'user' && row.content.startsWith('[HARNESS] Your productionTask was repaired'))?.content
+const repairMessage = w => w.agent.messages.find(row => row.role === 'user' && row.content.startsWith('[HARNESS] The harness repaired your productionTask'))?.content
 
-test('AZ lane A: an intermediate production target is repaired to the committed targets and reported, with no second reply', async () => {
+test('AZ lane A: an intermediate production target is repaired to the only unmet committed target and reported, with no second reply', async () => {
   let script
   const w = scripted({}, w => script ??= [productionReply(w, intermediate)])
   await w.agent.runTurn()
-  assert.deepEqual(repaired(w).map(row => [row.reason, row.rule, row.step_id]), [['production_scope_mismatch', 'committed_targets', activeStepId(w)]])
-  // No named target is committed, so every finite committed target replaces them; held ones are already met.
-  assert.match(repairMessage(w), /targets set to boiler 1, coal 10, lab 1, offshore-pump 1, pipe 10, small-electric-pole 2, steam-engine 1 from the committed checkpoint \(not in it: copper-cable 2\) \(refused as production_scope_mismatch\)/)
+  assert.deepEqual(repaired(w).map(row => [row.reason, row.rule, row.step_id]), [['production_scope_mismatch', 'only_unmet_committed_target', activeStepId(w)]])
+  assert.match(repairMessage(w), /targets set to small-electric-pole 2 from the committed checkpoint, its only target not yet held \(not in it: copper-cable 2\) \(refused as production_scope_mismatch\)/)
   assert.ok(w.agent.messages.some(row => row.role === 'assistant' && JSON.parse(row.content).productionTask?.targets?.[0]?.item_name === 'copper-cable'), 'the model sees its own intent before the repair')
   assert.equal(w.events.some(row => row.event === 'recovery.classified' && row.data.reason_code === 'production_scope_mismatch'), false)
   assert.equal(w.providers.length, 1)
@@ -611,9 +610,26 @@ test('a default the machines cannot use is ignored and named, and an invalid def
   assert.deepEqual(w.memory.harnessDefaults.get(w.agent.activePlanKey()), { burner_fuel: 'solid-fuel' }, 'the default stays the model\'s to change')
 })
 
+test('target repair keeps named committed items at committed counts and otherwise needs exactly one unmet committed target', () => {
+  const contract = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'small-electric-pole', minimum: 2 }, { kind: 'inventory_count', item_name: 'lab', minimum: 1 }] }
+  const intent = targets => ({ targets, producers: [], resources: [], feeders: [] })
+  assert.deepEqual(repairTargets(intent([{ item_name: 'lab', count: 3 }, { item_name: 'copper-cable', count: 2 }]), contract).targets, [{ item_name: 'lab', count: 1 }])
+  assert.equal(repairTargets(intent([{ item_name: 'copper-cable', count: 2 }]), contract, { lab: 1 }).targets[0].item_name, 'small-electric-pole')
+  assert.equal(repairTargets(intent([{ item_name: 'copper-cable', count: 2 }]), contract, {}), undefined, "two unmet committed targets stay the executor's choice")
+  assert.equal(repairTargets(intent([{ item_name: 'copper-cable', count: 2 }]), contract, undefined), undefined, 'an unreadable inventory is not a fact')
+  assert.equal(repairTargets(intent([{ item_name: 'copper-cable', count: 2 }]), { mode: 'any', requirements: contract.requirements }, { lab: 1 }), undefined)
+})
+
+test('only the step executor can write harness defaults', async () => {
+  const w = world()
+  w.agent.agentContext.beginLineage('planner')
+  await assert.rejects(async () => w.agent.parsePlanMessage({ content: JSON.stringify({ chatMessage: '', plan: [], currentStep: 0, operations: [], defaults: { burner_fuel: 'coal' } }) }),
+    error => error.code === 'invalid_defaults' && /written by the step executor/.test(error.message))
+})
+
 test('burner fuel choice and cap follow the native facts only', () => {
   const coal = { name: 'coal', category: 'chemical', fuel_value: 4e6, mined_from: ['coal'] }
-  const wood = { name: 'wood', category: 'chemical', fuel_value: 2e6, mined_from: ['tree-01'] }
+  const wood = { name: 'wood', category: 'chemical', fuel_value: 2e6, harvested_from: ['tree-01'] }
   const solid = { name: 'solid-fuel', category: 'chemical', fuel_value: 12e6, mined_from: [], harvested_from: [] }
   const fuels = [coal, solid, wood]
   assert.equal(chooseBurnerFuel({ fuels, held: { coal: 3, 'solid-fuel': 2, wood: 1 } }).fuel, wood, 'natural before crafted, then least energy')

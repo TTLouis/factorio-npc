@@ -2,6 +2,8 @@ import { compileQuantities, itemName, normalizeCounts, normalizeTargets, quantit
 import { checkpointMaterialOwner, claimMaterials, materialAvailability, materialOwnerKey, releaseMaterials, restoreMaterialLedger } from './material-ledger.mjs'
 
 export const PRODUCTION_LIMITS = Object.freeze({ transitions: 256, recoveries: 3, duration_ms: 30 * 60000, stalled_ms: 60000, recipe_reads: 32, batch_items: 100 })
+// Resource bindings one intent may carry (schema and normalization).
+export const PRODUCTION_RESOURCE_BINDINGS_MAX = 16
 const nameSchema = { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,199}$', minLength: 1, maxLength: 200 }
 const countSchema = { type: 'integer', minimum: 1, maximum: 10000 }
 const unitSchema = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }
@@ -12,7 +14,7 @@ export const PRODUCTION_TASK_SCHEMA = {
   properties: {
     targets: { ...rows(16, { item_name: nameSchema, count: countSchema }), minItems: 1 },
     producers: rows(8, { recipe_name: nameSchema, unit_number: unitSchema }),
-    resources: rows(16, { item_name: nameSchema, method: { type: 'string', enum: ['gather_resource', 'harvest_product'] } }),
+    resources: rows(PRODUCTION_RESOURCE_BINDINGS_MAX, { item_name: nameSchema, method: { type: 'string', enum: ['gather_resource', 'harvest_product'] } }),
     feeders: rows(8, { unit_number: unitSchema, output_unit_number: unitSchema }),
     fuel: { type: 'object', additionalProperties: false, required: ['item_name', 'count'], properties: { item_name: nameSchema, count: countSchema } },
   },
@@ -28,7 +30,7 @@ export function normalizeProductionIntent(raw) {
   exact(raw, ['targets', 'producers', 'resources', 'fuel', 'feeders'])
   const targets = normalizeTargets(raw.targets)
   const producers = raw.producers ?? []; const resources = raw.resources ?? []; const feeders = raw.feeders ?? []
-  if (!Array.isArray(producers) || producers.length > 8 || !Array.isArray(resources) || resources.length > 16 || !Array.isArray(feeders) || feeders.length > 8) throw new Error('production_binding_limit')
+  if (!Array.isArray(producers) || producers.length > 8 || !Array.isArray(resources) || resources.length > PRODUCTION_RESOURCE_BINDINGS_MAX || !Array.isArray(feeders) || feeders.length > 8) throw new Error('production_binding_limit')
   const recipes = new Set(); const leaves = new Set(); const units = new Set()
   return { targets,
     producers: producers.map(row => {
