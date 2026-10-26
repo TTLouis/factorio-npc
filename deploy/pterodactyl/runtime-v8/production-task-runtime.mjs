@@ -179,7 +179,8 @@ async function burnerFuelFacts(agent, s, intent, burners) {
     if (!details.has(name)) {
       const detail = await admissionJson(agent, s, 'getRecipeDetails', { item_or_recipe: name, requested_count: 1 })
       details.set(name, detail?.found === true ? detail : undefined)
-      if (Array.isArray(detail?.burner_fuels?.items) && detail.burner_fuels.truncated === false) fuels ??= detail.burner_fuels.items
+      // The mod lists every accepted fuel; a list an older mod cut short is not the whole choice.
+      if (Array.isArray(detail?.burner_fuels?.items) && detail.burner_fuels.truncated !== true) fuels ??= detail.burner_fuels.items
     }
     return details.get(name)?.recipes?.find(row => row.name === name)
   }

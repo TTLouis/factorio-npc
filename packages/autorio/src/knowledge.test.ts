@@ -273,8 +273,6 @@ describe('machine energy and burner fuel knowledge', () => {
     const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
     expect(result.burner_fuels).toEqual({
       categories: ['chemical'],
-      matched_count: 3,
-      truncated: false,
       items: [
         { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
         { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000 },
@@ -320,15 +318,14 @@ describe('machine energy and burner fuel knowledge', () => {
     }
   })
 
-  it('bounds the fuel list and reports the cut without dropping the minable fuels', () => {
+  it('lists every accepted fuel, minable fuels first', () => {
     const many: Record<string, unknown> = {}
     for (let i = 0; i < 9; i++) many[`fuel-${i}`] = { name: `fuel-${i}`, fuel_category: 'chemical', fuel_value: 1000 + i }
     ;(globalThis as any).prototypes.item = items(many)
     const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
-    expect(result.burner_fuels.items).toHaveLength(6)
-    expect(result.burner_fuels.matched_count).toBe(12)
-    expect(result.burner_fuels.truncated).toBe(true)
+    expect(result.burner_fuels.items).toHaveLength(12)
     expect(result.burner_fuels.items[0].name).toBe('coal')
+    expect(result.burner_fuels.truncated).toBeUndefined()
   })
 
   it('carries no fuel facts when no listed machine burns fuel', () => {

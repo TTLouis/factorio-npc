@@ -75,7 +75,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   // Native burner facts (vanilla 2.0 prototypes): what recipe_details and
   // mining_details report for the AN iron machines and accepted fuels.
   const burnerFacts = watts => ({ energy_source: 'burner', energy_watts: watts, burner_effectivity: 1, fuel_categories: ['chemical'] })
-  const burnerFuels = { categories: ['chemical'], matched_count: 3, truncated: false, items: [
+  const burnerFuels = { categories: ['chemical'], items: [
     { name: 'coal', category: 'chemical', fuel_value: 4e6, mined_from: ['coal'], harvested_from: [] },
     { name: 'solid-fuel', category: 'chemical', fuel_value: 12e6, mined_from: [], harvested_from: [] },
     { name: 'wood', category: 'chemical', fuel_value: 2e6, mined_from: [], harvested_from: ['tree-01'] }] }
