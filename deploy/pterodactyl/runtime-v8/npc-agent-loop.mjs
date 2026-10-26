@@ -14,7 +14,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
-import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
+import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
@@ -8421,7 +8421,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const owner = this.captureCheckpointOwner()
         declaration.obligationProof = await captureObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
         if (declaration.checkpoint && !obligationContractMatches(declaration.checkpoint, declaration.obligations)) {
-          throw await this.checkpointRejectionError({ reason: 'contract_obligation_mismatch' })
+          // Every recorded mismatch (Runs AW-BA, both planner models) was this shape: the outcome restated without the
+          // preservation rows. The harness owns those rows, so it compiles them instead of spending a correction round.
+          if (!outcomeOnlyCheckpoint(declaration.checkpoint, declaration.obligations)) {
+            throw await this.checkpointRejectionError({ reason: 'contract_obligation_mismatch', step_index: index })
+          }
+          const authored = declaration.checkpoint
+          declaration.checkpoint = compiled
+          if (index === plan.currentStep && plan.checkpoint
+            && completionContractSignature(plan.checkpoint) === completionContractSignature(authored)) plan.checkpoint = compiled
+          await this.traceEvent('plan.checkpoint_compiled_from_obligations', { request_id: this.traceRequest?.id,
+            reason: 'outcome_only_checkpoint', step_index: index, preserve: [...declaration.obligations.preserve] })
         }
       }
       if (!declaration.checkpoint) {
@@ -8480,7 +8490,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const detail = contradiction
       ? `; requirement=${validation.requirement_id}; operation ${validation.operation_index + 1} (${validation.operation}) ${validation.effect === 'removes_entity' ? `mines unit ${validation.unit_number}` : `takes ${validation.item_name} out of unit ${validation.unit_number}`}, which undoes the checkpoint it is submitted with`
-      : validation.requirement_id ? `; requirement=${validation.requirement_id}` : ''
+      : validation.reason === 'contract_obligation_mismatch'
+        ? `; step ${validation.step_index}: a checkpoint must be exactly obligations.outcome plus entity_exists for each preserve unit, or be omitted for the harness to compile it`
+        : validation.requirement_id ? `; requirement=${validation.requirement_id}` : ''
     const error = new AgentLoopError(`deterministic_checkpoint_rejected: ${validation.reason}${detail}`)
     error.failureClass = 'plan_category'
     error.code = 'invalid_semantic_checkpoint'
@@ -18506,6 +18518,47 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       goalStatus: [GOAL_STATUS.COMPLETED, GOAL_STATUS.CANCELLED].includes(goalStatus) ? goalStatus : 'inactive',
       taskBoard: visibleTaskBoard(state?.task_board) }
   }
+  // A route draft gets the same bounded plan_category correction as a turn's draft, on the request's shared allowance.
+  // Without it one refused route draft was a terminal guard pause (Run BA, both lanes). Only refusals raised before
+  // anything is committed are corrected here; exhaustion and every other failure still fail the route.
+  async commitRecoveryRouteDraft(generation, message, roundBase, owner, route) {
+    for (let correction = 1; ; correction++) {
+      let plan
+      try {
+        plan = await this.parsePlanMessageChecked(message, { recovery: true })
+      }
+      catch (error) {
+        if (error?.failureClass !== 'plan_category' || error?.details?.deterministic_no_retry === true) throw error
+        this.planCategoryRetries++
+        const reason = error instanceof Error ? error.message : String(error)
+        await this.recoveryDiagnostic({
+          failure_class: 'plan_category',
+          reason_code: error.code,
+          reason,
+          retry: this.planCategoryRetries,
+          retry_limit: this.maxToolValidationRetries,
+          tools_enabled: false,
+          recovery_route: route,
+          ...(error?.details && typeof error.details === 'object' ? error.details : {}),
+        })
+        if (this.planCategoryRetries > this.maxToolValidationRetries) throw error
+        this.assertModelRecoveryAllowed(owner)
+        if (typeof message.content === 'string') this.messages.push({ role: 'assistant', content: cleanMemoryText(message.content, 4000) })
+        this.messages.push({
+          role: 'user',
+          content: `[HARNESS] Recovery draft refused (${this.planCategoryRetries}/${this.maxToolValidationRetries}; ${error.code}): ${reason} Tools stay closed for this recovery route. Return the corrected strict-JSON plan.`,
+        })
+        const current = await this.assertCurrent()
+        message = await this.callProvider(current, generation, { round: roundBase + correction, allowTools: false, recoveryAttempt: 0 })
+        this.assertModelRecoveryAllowed(owner)
+        if (message?.tool_calls !== undefined) throw new AgentLoopError('recovery route correction returned observation tools; tools are closed')
+        continue
+      }
+      this.planCategoryRetries = 0
+      return await this.commitPlan(plan)
+    }
+  }
+
   async recoverPlanRoute(generation, reason, roundBase) {
     if (this.freshContextRecoveryInProgress) throw new AgentLoopError(`provider_action_omission_repair_failed: fresh_context_recovery_exhausted: ${reason instanceof Error ? reason.message : String(reason)}`)
     const admittedGoal = this.memory.planningState?.(this.activePlanKey())?.goal
@@ -18879,8 +18932,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             roundBase + 1,
           )
         }
-        const plan = this.parsePlanMessage(message)
-        return await this.commitPlan(plan)
+        return await this.commitRecoveryRouteDraft(generation, message, roundBase, recoveryOwner, routed.route)
       }
       catch (error) {
         if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
