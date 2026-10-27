@@ -19,18 +19,34 @@ details; the planner prefix holds at most six within 32,000 JSON characters.
 Each detail retains the existing 7,000-character compaction bound. Ranking,
 timeouts and cancellation/actor/goal/lineage fences remain deterministic.
 
-The executor prefix contains only the active step's selected skills, at most
-three and 16,000 JSON characters. The larger shared cache survives role changes;
+The planner passes selected `execution_guidance.skillIds` references for each
+step. The harness supplies their matching already-loaded instructions in the
+executor prefix, at most three and 16,000 JSON characters. The executor does not
+search or reopen the skill table: protocol 3 omits `findSkills` and
+`getSkillDetails` from both its ordinary tools and targeted-read enum, and the
+runtime rejects injected calls before any part of that tool batch is sent. A
+caller-supplied prepared batch cannot bypass this check. A missing necessary
+procedure is returned for planner review, not invented by the executor.
+
+The larger shared cache survives role changes;
 it does not send unrelated planner strategies to the executor. A planner cannot
-reference a skill omitted from its rendered context. The existing post-step Jev
+reference a skill omitted from its rendered context, or choose a per-step set
+whose combined detail JSON exceeds the executor's 16,000-character limit.
+Rejecting that draft leaves the planner to select a smaller set before commit;
+the executor does not have to reopen a detail dropped by its smaller ceiling.
+The existing post-step Jev
 summary and handoff remain small; this is not a change to gameplay read rates,
 recovery allowances, native admission or immutable step authority. Protocol 2
 keeps five automatic discovery cards and three retained/rendered details.
 
-The explicit `findSkills` tool accepts one to ten results, default three,
+The planner's explicit `findSkills` tool accepts one to ten results, default three,
 consistently in the advertised schema, serializer, native implementation and
 [contract manifest](../contracts/factorio-tool-contract.json). It remains a
-discovery tool: results do not establish that details were loaded.
+discovery tool: results do not establish that details were loaded. Protocol 1/2
+callers retain their existing discovery surfaces. This change does not add a
+new disk-persisted, revision-pinned skill snapshot; after process restart a
+missing selected procedure needs planner review. In-process role changes and
+context restages retain the logical-task cache as before.
 
 The live supervisor no longer wires `skillDecisionProvider`, so native ranking
 and planner choice require no Jev skill-ranking request, including shadow calls.

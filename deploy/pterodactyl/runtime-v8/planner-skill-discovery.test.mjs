@@ -6,6 +6,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { ensureSkillOffers, parseSkillOffers, skillDiscoveryPolicy } from './skill-offers.mjs'
 import { FakeFactorio, answersStepContract, planReply } from './task-loop-fixtures.mjs'
 import { getActivePlan } from './planning-state.mjs'
+import { executionOnlyProviderToolDefinitions, planningOnlyProviderToolDefinitions, executorProviderToolDefinitions } from './structured-policy.mjs'
 
 const pack = JSON.parse(await readFile(new URL('../../../packages/autorio/src/fixtures/factory-playbooks-v1.json', import.meta.url), 'utf8'))
 const cards = Array.from({ length: 12 }, (_, index) => ({ id: `pattern-${index}`, name: `Pattern ${index}`, summary: `Build pattern ${index}.`, produces: [], needs: [], matched: ['factory'], score: 20-index }))
@@ -16,13 +17,13 @@ const contextIds = messages => {
 }
 
 class LibraryGame extends FakeFactorio {
-  constructor() { super(); this.offers = []; this.reads = []; for (const skill of details) this.skills[skill.id] = skill }
+  constructor(library = details, offered = cards) { super(); this.offers = []; this.reads = []; this.offered = offered; for (const skill of library) this.skills[skill.id] = skill }
   async command(command) {
     if (command.includes('remote.call("autorio_skills","offer"')) {
       const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(command)[1]
       const request = JSON.parse(encoded.replace(/\\(.)/g, '$1'))
       this.offers.push(request)
-      return JSON.stringify({ ok: true, cards: cards.slice(0, request.limit) })
+      return JSON.stringify({ ok: true, cards: this.offered.slice(0, request.limit) })
     }
     if (command.includes('remote.call("autorio_skills","get"')) this.reads.push(command)
     return super.command(command)
@@ -47,19 +48,23 @@ test('separated planner loads six of ten ranked matches, executor and legacy pol
 })
 
 test('real request hands only selected details to executor and traces the actual role exposure without a skill Jev provider', async () => {
-  const game = new LibraryGame()
+  const game = new LibraryGame(pack.skills, pack.skills.map(skill => ({ ...skill, produces: skill.outputs.map(output => output.item), needs: [], matched: [], score: 1 })))
   const memory = new CanonicalTaskBoardMemory()
   const events = []
   const calls = []
   const description = 'Hold the starting iron plate.'
   const checkpoint = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 }] }
   const provider = answersStepContract(async (messages, context) => {
-    calls.push({ role: context.role, ids: contextIds(messages) })
+    calls.push({ role: context.role, ids: contextIds(messages), messages })
     if (context.role === 'planner') return planReply({ plan: [description], currentStep: 0, operations: [],
       goal: { scope: 'finite', summary: 'Hold a plate.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 2 }] },
       stepCompletions: [{ kind: 'deterministic', checkpoint }],
-      executionGuidance: [{ approach: description, rationale: 'Use one relevant loaded pattern.', constraints: [], skillIds: ['pattern-4'], materialSupply: null }],
+      executionGuidance: [{ approach: description, rationale: 'Use one relevant loaded pattern.', constraints: [], skillIds: ['factory-playbook-red-science'], materialSupply: null }],
     })
+    assert.equal(game.reads.length, 6, 'the harness opened the six planner details; the executor performed no lookup')
+    const supplied = messages.find(message => message.content?.startsWith('[SKILL_CONTEXT]')).content
+    assert.match(supplied, /hand-craft that finite bootstrap quantity/)
+    assert.match(supplied, /bootstrap packs outside automated-output accounting/)
     const plan = getActivePlan(memory.planningState('npc:sgluna'))
     return planReply({ stepId: plan.steps[0].step_id, operations: [{ name: 'wait', args: { ticks: 1 } }] })
   }, { contracts: { [description]: checkpoint } })
@@ -71,10 +76,12 @@ test('real request hands only selected details to executor and traces the actual
   assert.equal(calls[0].role, 'planner')
   assert.equal(calls[0].ids.length, 6)
   const executed = calls.find(call => call.role === 'executor')
-  assert.deepEqual(executed?.ids, ['pattern-4'])
+  assert.deepEqual(executed?.ids, ['factory-playbook-red-science'])
+  assert.equal(calls.length, 2, 'one planner handoff and one executor action, with no model skill lookup round')
+  assert.equal(game.reads.length, 6)
   const exposure = events.filter(e => e.event === 'skill.context_presented')
   assert.ok(exposure.some(e => e.data.role === 'planner' && e.data.presented_ids.length === 6))
-  assert.ok(exposure.some(e => e.data.role === 'executor' && e.data.presented_ids.join() === 'pattern-4'))
+  assert.ok(exposure.some(e => e.data.role === 'executor' && e.data.presented_ids.join() === 'factory-playbook-red-science'))
   assert.ok(exposure.every(e => e.data.request_id), 'exposure is request-correlated')
   assert.equal(events.filter(e => e.event === 'decision.request' && e.data.contract === 'skill_choice').length, 0)
 })
@@ -99,4 +106,52 @@ test('the live supervisor does not wire a Jev skill provider while other Jev pro
   const source = await readFile(new URL('./supervisor.mjs', import.meta.url), 'utf8')
   assert.doesNotMatch(source, /skillDecisionProvider\s*:/)
   assert.match(source, /interactionDecisionProvider:\s*jevDecisionProvider/)
+})
+
+test('protocol 3 executor schemas offer neither skill search nor detail lookup, including targeted reads', () => {
+  for (const name of ['findSkills', 'getSkillDetails']) {
+    assert.ok(planningOnlyProviderToolDefinitions.some(tool => tool.function.name === name))
+    assert.ok(executorProviderToolDefinitions.some(tool => tool.function.name === name), 'legacy schema stays compatible')
+    assert.equal(executionOnlyProviderToolDefinitions.some(tool => tool.function.name === name), false)
+    const targeted = executionOnlyProviderToolDefinitions.find(tool => tool.function.name === 'submitPlan').function.parameters.properties.observationRequest
+    assert.equal(targeted.properties.tool.enum.includes(name), false)
+  }
+})
+
+test('planner cannot select more detailed instructions than the focused executor can actually receive', () => {
+  const agent = new NpcAgentLoop({ rcon: { command: async () => '{}' }, provider: async () => {},
+    completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
+  const ids = ['large-a', 'large-b', 'large-c']
+  for (const id of ids) agent.recordLoadedSkillToolResult('getSkillDetails', { id }, {
+    id, summary: 'Large procedural guide.', constraints: Array.from({ length: 10 }, () => ({ description: 'x'.repeat(580) })),
+  })
+  const draft = chosen => ({ plan: ['Build the selected pattern.'], operations: [], executionGuidance: [{
+    approach: 'Follow the selected procedure.', rationale: 'Use the relevant loaded instructions.', constraints: [], skillIds: chosen, materialSupply: null,
+  }] })
+  assert.throws(() => agent.validatePlannerRoleOutput(draft(ids)), error => error.code === 'invalid_execution_guidance' && /executor.*16000/.test(error.message))
+  assert.doesNotThrow(() => agent.validatePlannerRoleOutput(draft(ids.slice(0, 2))))
+})
+
+test('executor role refuses injected library calls before a mixed or caller-prepared batch can reach native tools', async () => {
+  let nativeCalls = 0
+  const agent = new NpcAgentLoop({ rcon: { command: async () => { nativeCalls++; return '{}' } }, provider: async () => {},
+    completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
+  const tool = (name, args = {}) => ({ id: `probe-${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })
+  for (const forbidden of [tool('findSkills', { query: 'science' }), tool('getSkillDetails', { id: 'factory-playbook-red-science' })]) {
+    const message = { tool_calls: [tool('getInventoryItems'), forbidden] }
+    agent.agentContext.role = 'planner'
+    const prepared = agent.prepareToolBatch(message)
+    assert.equal(prepared.length, 2, 'planner can prepare the same approved library tools')
+    agent.agentContext.role = 'executor'
+    assert.throws(() => agent.prepareToolBatch(message), error => error.code === 'executor_skill_lookup_forbidden')
+    await assert.rejects(agent.handleToolBatch(message, prepared), error => error.code === 'executor_skill_lookup_forbidden')
+    const targeted = await agent.handleObservationRequest({ content: JSON.stringify({ observationRequest: {
+      tool: forbidden.function.name, args: JSON.parse(forbidden.function.arguments), stepId: 'step-test', rationale: 'Read a skill.' }, operations: [] }) }, { allowTools: true })
+    assert.equal(targeted._sglunaObservationRefusal.reason, 'executor_skill_lookup_forbidden')
+  }
+  assert.equal(nativeCalls, 0, 'nothing in a refused mixed batch was sent')
+  const prefix = agent.rolePrefixMessages('executor')[0].content
+  assert.match(prefix, /planner selects skillIds/)
+  assert.match(prefix, /do not call findSkills or getSkillDetails/)
+  assert.doesNotMatch(prefix, /Before following any other discovered skill, call getSkillDetails/)
 })

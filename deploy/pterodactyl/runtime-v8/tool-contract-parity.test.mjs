@@ -21,6 +21,11 @@ test('skill discovery maximum agrees across manifest, advertised schema, seriali
   const native = await readFile(new URL('packages/autorio/src/skills.ts', root), 'utf8')
   assert.match(native, /MAX_SKILL_CARDS = 10/)
   assert.match(native, /bounded_limit > MAX_SKILL_CARDS/)
+  for (const name of ['findSkills', 'getSkillDetails']) {
+    assert.equal(contract.tools[name].protocol3_role, 'planner-only')
+    assert.equal(runtime.executionOnlyProviderToolDefinitions.some(tool => tool.function.name === name), false)
+    assert.ok(runtime.planningOnlyProviderToolDefinitions.some(tool => tool.function.name === name))
+  }
 })
 
 test('fluid preservation projection and admission metadata remain native and versioned', async () => {

@@ -33,6 +33,7 @@ export const SKILL_OFFER_LIMIT = 5
 export const SKILL_AUTOLOAD_LIMIT = 3
 export const PLANNER_SKILL_OFFER_LIMIT = 10
 export const PLANNER_SKILL_DETAIL_LIMIT = 6
+export const EXECUTOR_SKILL_CONTEXT_MAX_CHARS = 16000
 // The shared cache must survive planner -> executor -> planner. Rendering is
 // role-specific; the executor still sees at most three selected step skills.
 export function skillDiscoveryPolicy(loop) {
@@ -43,7 +44,7 @@ export function skillDiscoveryPolicy(loop) {
     autoload: planner ? PLANNER_SKILL_DETAIL_LIMIT : SKILL_AUTOLOAD_LIMIT,
     stored: separated ? PLANNER_SKILL_DETAIL_LIMIT : 3,
     rendered: planner ? PLANNER_SKILL_DETAIL_LIMIT : 3,
-    chars: planner ? 32000 : 16000,
+    chars: planner ? 32000 : EXECUTOR_SKILL_CONTEXT_MAX_CHARS,
   }
 }
 export const SKILL_AUTOLOAD_TIMEOUT_MS = 3000

@@ -37,7 +37,7 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
-import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, EXECUTOR_STATE_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, repairPlannerReview, plannerReviewConflicts, PLANNING_ONLY_PROMPT, protocol3SharedPrompt, SHELF_MILESTONE_GUIDANCE } from './role-contracts.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, EXECUTOR_STATE_PROMPT, manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview, repairPlannerReview, plannerReviewConflicts, PLANNER_SKILL_LOOKUP_TOOLS, PLANNING_ONLY_PROMPT, protocol3SharedPrompt, SHELF_MILESTONE_GUIDANCE } from './role-contracts.mjs'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
@@ -226,7 +226,7 @@ import {
 } from './goal-requirements.mjs'
 import { StepReadLedger, stepReadKey, UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
 import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_PLACED_ENTITY_REASON, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchPlacedEntityRead, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet, withoutSupersededPostBatchFact } from './post-batch-facts.mjs'
-import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillDiscoveryPolicy, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
+import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, EXECUTOR_SKILL_CONTEXT_MAX_CHARS, skillDiscoveryPolicy, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -3543,12 +3543,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (cause) { throw this.roleContractError('invalid_execution_guidance', cause.message) }
       // Cache membership alone is insufficient: the bounded prefix may omit
       // an older detail. Only select skills whose details fit the actual
-      // planner context, so every selected detail also fits the executor brief.
+      // planner context. The selected set must also fit the smaller executor prefix.
       const context = this.skillContext()
       const rendered = context ? JSON.parse(context.slice(context.indexOf('\n') + 1)) : []
       const visibleIds = new Set(rendered.map(skill => skill.id))
       const missing = guidance.flatMap(brief => brief.skillIds).filter(id => !visibleIds.has(id))
       if (missing.length > 0) throw this.roleContractError('invalid_execution_guidance', `Select only details present in [SKILL_CONTEXT]: ${[...new Set(missing)].join(', ')}. Open getSkillDetails, or select fewer skills if the context size limit omits a detail.`)
+      for (const brief of guidance) {
+        const selected = rendered.filter(skill => brief.skillIds.includes(skill.id))
+        if (JSON.stringify(selected).length > EXECUTOR_SKILL_CONTEXT_MAX_CHARS) throw this.roleContractError('invalid_execution_guidance', `Selected skill details exceed the executor's ${EXECUTOR_SKILL_CONTEXT_MAX_CHARS}-character context. Select fewer skills for this step so every referenced instruction can be handed off in full.`)
+      }
       if (guidance.some(brief => brief.skillIds.includes('direct-miner-smelting') && brief.materialSupply === undefined)) throw this.roleContractError('invalid_execution_guidance', 'Choose materialSupply explicitly when considering direct-miner-smelting: direct_feed or manual_bootstrap with the resource, or null for a step that does not supply raw material. Dedicated cells remain optional; compare setup and saved time in rationale.')
     }
   }
@@ -3777,7 +3781,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const packetRole = role ?? this.agentContext.role
     const held = planningState ?? this.memory.planningState?.(this.activePlanKey())
     if (!held?.goal?.goal_id) return undefined
-    // Loaded-skill refs ride the step block (ids only; the text loads through getSkillDetails).
+    // Planner-selected refs ride the step block. The harness injects their already-loaded details; executors do not look them up.
     const active = getActivePlanningPlan(held)
     const guidance = active?.steps?.[active.active_step_index]?.execution_guidance
     const skillIds = packetRole === EXECUTOR_ROLE && guidance ? guidance.skillIds
@@ -5352,6 +5356,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     while (skills.length > 1 && JSON.stringify(skills).length > policy.chars) skills.shift()
     const payload = JSON.stringify(skills)
     if (payload.length > policy.chars) return ''
+    if (separatedExecution) return `[SKILL_CONTEXT] Planner-selected skill instructions supplied by the harness for the active execution_guidance.skillIds references. Use these details without searching or reopening the library. Revalidate mutable world facts before acting.\n${payload}`
     return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
   }
 
@@ -13307,6 +13312,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason, controlState: this.controlDecisionState(allowTools),
       } })
     }
+    if (this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE
+      && PLANNER_SKILL_LOOKUP_TOOLS.includes(intent.observationRequest?.tool)) return reject('executor_skill_lookup_forbidden')
     let request
     try {
       request = normalizeObservationRequest(intent.observationRequest, { normalTools: allowTools === true })
@@ -14753,9 +14760,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return checkpointBatchContradiction(plan.checkpoint, plan.operations)
   }
 
+  assertExecutorSkillHandoffTools(calls) {
+    if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE) return
+    const refused = [...new Set(calls.map(call => call?.function?.name).filter(name => PLANNER_SKILL_LOOKUP_TOOLS.includes(name)))]
+    if (refused.length === 0) return
+    void this.traceEvent('skill.executor_lookup_refused', { request_id: this.traceRequest?.id, role: EXECUTOR_ROLE,
+      tools: refused, reason: 'planner_selected_skill_handoff', batch_effect: 'not_sent' })
+    throw this.roleContractError('executor_skill_lookup_forbidden', 'Use the planner-selected skill references and harness-supplied [SKILL_CONTEXT]. Skill discovery and detail lookup belong to the planner; request plannerReview if necessary instructions are unavailable.')
+  }
+
   prepareToolBatch(message) {
     try {
       const rawCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : []
+      this.assertExecutorSkillHandoffTools(rawCalls)
       const partialBatchEligible = rawCalls.length > MAX_OBSERVATION_TOOL_CALLS_PER_BATCH
         && rawCalls.every(tool => isObservationToolName(tool?.function?.name))
         && rawCalls.every(tool => tool?.function?.name !== 'measureTransportThroughput')
@@ -14877,6 +14894,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async handleToolBatch(message, prepared = this.prepareToolBatch(message)) {
+    // Check again at dispatch: a caller-supplied prepared batch cannot bypass
+    // the executor role boundary (including closed/targeted read paths).
+    this.assertExecutorSkillHandoffTools([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)])
     // Result traces can wait on queued file writes. Keep the owner from before any await;
     // never stamp an old native answer with a replacement request's actor or trace state.
     const batchOwner = { generation: this.generation, lineage: this.agentContext.lineageSequence,
