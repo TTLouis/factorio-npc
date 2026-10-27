@@ -736,6 +736,14 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     }
     return true
   }
+  // Deciding whether an owned blocker is idle scans around it (neighbours that feed it, entities its pole powers). Those
+  // scans are reads too: they extend the evaluated area, and a scan into a chunk the NPC does not see keeps the blocker
+  // and makes the footprint unseen rather than blocked.
+  clearance_memo.readable = (area) => {
+    if (evaluated_area === undefined) evaluated_area = { left_top: { x: area.left_top.x, y: area.left_top.y }, right_bottom: { x: area.right_bottom.x, y: area.right_bottom.y } }
+    else extend_box(evaluated_area, area)
+    return area_visible(area)
+  }
   const obstruction_samples: Array<ReturnType<typeof placement_obstruction_sample>> = []
 
   function consider(position: { x: number, y: number }, direction: number, target?: LiveFluidPort) {
@@ -783,11 +791,18 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     if (!natively_placeable) {
       // Refused only for ground items and clearable entities: still a candidate, and placing it clears them.
       let clearance: ReturnType<typeof placement_clearance>
+      clearance_memo.saw_not_visible = false
       if (clearance_probes < MAX_CLEARANCE_PROBES) {
         clearance_probes++
         clearance = placement_clearance(actor, prototype, request.entity_name, position, direction, protect, clearance_memo, true)
       }
       else clearance_probes_capped = true
+      if (clearance === undefined && clearance_memo.saw_not_visible) {
+        // A blocker here could be idle or feed a machine in a chunk the NPC does not see: not a candidate, and not a
+        // verified refusal either.
+        not_visible_rejected++
+        return undefined
+      }
       if (clearance === undefined) {
         rejected++
         if (obstruction_samples.length < 3) obstruction_samples.push(placement_obstruction_sample(actor, prototype, position, direction))

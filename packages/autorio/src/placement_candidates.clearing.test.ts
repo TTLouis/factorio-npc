@@ -808,4 +808,57 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       expect(controller.status().last_result).toMatchObject({ code: 'not_placeable' })
     })
   })
+
+  // Review O3-R2-1: whether an owned blocker is idle is decided by scanning around it (what feeds it, what its pole powers).
+  // Those scans are world reads too: one reaching a chunk the NPC does not see keeps the blocker and makes the footprint
+  // unseen, so an unseen machine can never decide the answer, and the map context covers the scanned area.
+  describe('clearance scans and map visibility (review O3-R2-1)', () => {
+    // Only chunk (0, 0), tiles 0..31, is visible to the NPC.
+    function chunk_zero_npc(blockers: any[]) {
+      register(...blockers)
+      const actor: any = npc(world(blockers), inventory_with(10), { x: 20, y: 10 })
+      actor.force = { ...ACTOR_FORCE, manual_mining_speed_modifier: 0, is_chunk_charted: () => true, is_chunk_visible: (_surface: any, chunk: Pos) => chunk.x === 0 && chunk.y === 0 }
+      return actor
+    }
+    function over(blockers: any[], at: Pos) {
+      return create_placement_candidate_set(chunk_zero_npc(blockers), { entity_name: 'stone-furnace', covers_position: at, center: { x: at.x - 0.5, y: at.y - 0.5 }, radius: 3, limit: 4 }) as any
+    }
+
+    it('an owned chest whose feeding scan reaches an unseen chunk is unseen, not idle and not verified blocked, with or without a hidden inserter', () => {
+      const at = { x: 30.5, y: 10.5 }
+      const alone = over([chest(at)], at)
+      const target = chest(at)
+      const hidden = chest({ x: 33.5, y: 10.5 }, { name: 'inserter', type: 'inserter', drop_target: target })
+      const fed = over([target, hidden], at)
+      for (const result of [alone, fed]) {
+        expect(result.ok).toBe(true)
+        expect(result.returned_candidate_count).toBe(0)
+        expect(result.spatial_status).toBe('search_incomplete')
+        expect(result.search_completeness.complete).toBe(false)
+        expect(result.search_completeness.reason).toBe('area_not_fully_visible')
+        expect(result.search_completeness.not_visible_rejected_count).toBeGreaterThan(0)
+        expect(result.map_context.evaluated_area.right_bottom.x).toBeGreaterThan(32)
+        expect(result.map_context.evaluated_area_coverage.fogged_chunks).toBeGreaterThan(0)
+      }
+      // The hidden inserter changed nothing the model reads.
+      expect(fed.search_completeness).toEqual(alone.search_completeness)
+      expect(JSON.stringify(fed)).not.toContain('"inserter"')
+    })
+
+    it('inside the visible chunk the scan still protects a fed chest and still clears an idle one', () => {
+      const at = { x: 16.5, y: 16.5 }
+      const idle = over([chest(at)], at)
+      expect(idle.returned_candidate_count).toBeGreaterThan(0)
+      expect(idle.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', reason: 'own_idle_entity' }])
+      expect(idle.search_completeness.not_visible_rejected_count).toBe(0)
+
+      const target = chest(at)
+      const feeding = chest({ x: 18.5, y: 16.5 }, { name: 'inserter', type: 'inserter', drop_target: target })
+      const fed = over([target, feeding], at)
+      expect(fed.returned_candidate_count).toBe(0)
+      expect(fed.spatial_status).toBe('none_in_verified_scope')
+      expect(fed.search_completeness.complete).toBe(true)
+      expect(fed.search_completeness.not_visible_rejected_count).toBe(0)
+    })
+  })
 })
