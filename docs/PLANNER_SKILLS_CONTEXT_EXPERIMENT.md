@@ -25,8 +25,10 @@ executor prefix, at most three and 16,000 JSON characters. The executor does not
 search or reopen the skill table: protocol 3 omits `findSkills` and
 `getSkillDetails` from both its ordinary tools and targeted-read enum, and the
 runtime rejects injected calls before any part of that tool batch is sent. A
-caller-supplied prepared batch cannot bypass this check. A missing necessary
-procedure is returned for planner review, not invented by the executor.
+caller-supplied prepared batch cannot bypass this check. If a necessary
+procedure is missing, the executor is instructed to request planner review
+rather than invent it. That fallback depends on the executor requesting review;
+there is no host-enforced missing-detail check or automatic review transition.
 
 The larger shared cache survives role changes;
 it does not send unrelated planner strategies to the executor. A planner cannot
@@ -45,8 +47,10 @@ consistently in the advertised schema, serializer, native implementation and
 discovery tool: results do not establish that details were loaded. Protocol 1/2
 callers retain their existing discovery surfaces. This change does not add a
 new disk-persisted, revision-pinned skill snapshot; after process restart a
-missing selected procedure needs planner review. In-process role changes and
-context restages retain the logical-task cache as before.
+missing selected procedure needs model-requested planner review. Referenced
+detail delivery after a process restart is not guaranteed by this change.
+In-process role changes and context restages retain the logical-task cache as
+before.
 
 The live supervisor no longer wires `skillDecisionProvider`, so native ranking
 and planner choice require no Jev skill-ranking request, including shadow calls.
