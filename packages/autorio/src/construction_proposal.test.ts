@@ -322,6 +322,16 @@ describe('bounded layout proposals (milestone 4 L6)', () => {
       expect(result).toMatchObject({ ok: false, error: { code: 'ZONE_EXHAUSTED', slot: 'src', reasons: { fixed_collision: 1 } } })
     })
 
+    it('holds a small zone to its exact radius, with no tolerance that admits a nearby cell', () => {
+      const fixed_inserter = { entity_name: 'test-inserter', slot: 'ins', x: 0.5, y: 0.5, direction: 0 }
+      // The only cell that feeds the inserter is (0.5, -0.5), 0.0005 from this centre: five times the radius.
+      const off = propose(build(), [fixed_inserter, { entity_name: 'test-chest', slot: 'src', zone: { center: { x: 0.5005, y: -0.5 }, radius: 0.0001 } }])
+      expect(off).toMatchObject({ ok: false, error: { code: 'ZONE_EXHAUSTED', slot: 'src' } })
+      const on = propose(build(), [fixed_inserter, { entity_name: 'test-chest', slot: 'src', zone: { center: { x: 0.5, y: -0.5 }, radius: 0.0001 } }])
+      expect(on.ok).toBe(true)
+      expect(on.alternatives[0].placements.find((p: any) => p.slot === 'src')).toMatchObject({ x: 0.5, y: -0.5 })
+    })
+
     it('reports the nearest 64 candidates of an oversized zone and says it truncated', () => {
       const f = build()
       const result = propose(f, [ZONED_INSERTER, { ...ZONED_CHEST, zone: { center: { x: 0.5, y: -2.5 }, radius: 8 } }])

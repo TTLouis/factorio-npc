@@ -41,7 +41,6 @@ export const PROPOSAL_MAX_ALTERNATIVES = 4
 
 const CARDINAL_DIRECTIONS = [0, 4, 8, 12]
 const MAX_COORDINATE = 1000000
-const ZONE_EPSILON = 0.000001
 const DISTANCE_SCALE = 1000000
 
 type Position = { x: number, y: number }
@@ -221,6 +220,11 @@ function footprints_conflict(a: PlannedFootprint, b: PlannedFootprint) {
   return footprints_collide(a, b) && overlaps(a.world_box, b.world_box)
 }
 
+// A zone holds exactly the centres within its requested radius: no tolerance, which would widen a small zone.
+function within_zone(slot: ProposalSlot, x: number, y: number) {
+  return (x - slot.x) ** 2 + (y - slot.y) ** 2 <= slot.radius * slot.radius
+}
+
 // The native-legal cells of one zone: every grid-snapped centre within the radius, at each allowed direction, that passes the
 // single-placement spatial checks and does not collide with a fixed placement. At most PROPOSAL_MAX_ZONE_CANDIDATES are kept,
 // the nearest to the zone centre first.
@@ -231,7 +235,6 @@ function zone_candidates(actor: ControlledActor, slot: ProposalSlot, fixed_footp
   const high_x = math.ceil(slot.x + slot.radius) + 1
   const low_y = math.floor(slot.y - slot.radius) - 1
   const high_y = math.ceil(slot.y + slot.radius) + 1
-  const limit = slot.radius * slot.radius + ZONE_EPSILON
   for (const direction of slot.directions) {
     for (let iy = low_y; iy <= high_y; iy++) {
       for (let ix = low_x; ix <= high_x; ix++) {
@@ -241,8 +244,8 @@ function zone_candidates(actor: ControlledActor, slot: ProposalSlot, fixed_footp
           const unknown = check_single_placement(actor, { entity_name: slot.entity_name, x: ix, y: iy, direction, slot: slot.slot }, slot.index, false)
           return { error: { ...(unknown.ok ? { code: 'PLANNED_FOOTPRINT_UNKNOWN', message: `slot ${slot.slot} has no footprint to propose` } : unknown.error), slot: slot.slot } }
         }
+        if (!within_zone(slot, snapped.position.x, snapped.position.y)) continue
         const distance_squared = (snapped.position.x - slot.x) ** 2 + (snapped.position.y - slot.y) ** 2
-        if (distance_squared > limit) continue
         const checked = check_single_placement(actor, { entity_name: slot.entity_name, x: snapped.position.x, y: snapped.position.y, direction, slot: slot.slot }, slot.index, false)
         if (!checked.ok) {
           const code = checked.error.code
@@ -502,7 +505,7 @@ export function propose_construction_layout(actor: ControlledActor, request: Lay
           return refusal('INTERNAL_FIXED_VIOLATION', `slot ${slot.slot} left its fixed position`, { slot: slot.slot })
         }
       }
-      else if ((placement.x - slot.x) ** 2 + (placement.y - slot.y) ** 2 > slot.radius * slot.radius + ZONE_EPSILON) {
+      else if (!within_zone(slot, placement.x, placement.y)) {
         return refusal('INTERNAL_ZONE_VIOLATION', `slot ${slot.slot} left its zone`, { slot: slot.slot })
       }
     }
