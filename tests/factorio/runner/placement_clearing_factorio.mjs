@@ -18,6 +18,9 @@
 //   ANCHOR      an anchor entity is accepted by the production tool and ranks candidates nearest it
 //   REGION      a hard circle region (run BC C) is applied before ranking and truncation, reports its status
 //               dimensions and incomplete search, and a candidate placed through place_candidate stands inside it
+//   MAP         with zero humans the answer carries map_context from the NPC's own knowledge (same surface and
+//               tick, visible window, coverage); a search in chunks the NPC does not see now returns no candidate,
+//               says search_incomplete (area_not_fully_visible), and charts or generates nothing
 //
 // Every operation goes through the production renderer and the protocol-2 authorized batch
 // wrapper. No provider, no inference.
@@ -332,6 +335,32 @@ async function main() {
   evidence.region = { region, unconstrained_first: unconstrained.candidates[0].position, constrained: constrained.candidates.map(candidate => candidate.position),
     search_completeness: completeness, oversize: oversize.search_completeness, placed: standingAtPick[0], result: regionPlaced.result }
   console.log('PASS: REGION - candidates all lie inside the circle although the unconstrained ranking leads outside; stock and oversize status reported; the in-region candidate places natively inside it')
+
+  // ---- MAP ------------------------------------------------------------------
+  // The constrained answer above was read in the actor's own visible window: its map context says so.
+  const mapContext = constrained.map_context
+  assert.equal(mapContext?.source, 'npc_map_knowledge', JSON.stringify(mapContext))
+  assert.equal(mapContext.candidate_authority, 'currently_visible_chunks_only')
+  assert.equal(mapContext.observed_tick, constrained.generated_tick, 'the map facts carry the candidate set tick')
+  assert.equal(typeof mapContext.surface_index, 'number')
+  assert.equal(mapContext.visible_window?.chunk_radius, 2)
+  assert.equal(mapContext.evaluated_area_coverage.visible_chunks, mapContext.evaluated_area_coverage.total_chunks, JSON.stringify(mapContext))
+  assert.equal(constrained.search_completeness.not_visible_rejected_count, 0)
+  // Far outside the 5x5 visible window: a chunk the NPC has not seen. Nothing there is a candidate, the answer is incomplete
+  // rather than empty-and-complete, and the read leaves the chart and generated chunks as they were.
+  const far = { x: fixture.ox + 32 * 12 + 4, y: fixture.oy + 4 }
+  const mapBefore = await lua(`local c={x=math.floor(${far.x}/32),y=math.floor(${far.y}/32)}; rcon.print(helpers.table_to_json({charted=a.force.is_chunk_charted(s,c),generated=s.is_chunk_generated(c)}))`)
+  const unseen = await regionCandidates({ entity_name: 'stone-furnace', center: far, radius: 3, limit: 3 })
+  assert.equal(unseen.ok, true, JSON.stringify(unseen))
+  assert.deepEqual(unseen.candidates, [], 'no candidate in a chunk the NPC does not see now')
+  assert.equal(unseen.spatial_status, 'search_incomplete')
+  assert.equal(unseen.search_completeness.reason, 'area_not_fully_visible')
+  assert.ok(unseen.search_completeness.not_visible_rejected_count > 0)
+  assert.equal(unseen.map_context.evaluated_area_coverage.visible_chunks, 0, JSON.stringify(unseen.map_context))
+  const mapAfter = await lua(`local c={x=math.floor(${far.x}/32),y=math.floor(${far.y}/32)}; rcon.print(helpers.table_to_json({charted=a.force.is_chunk_charted(s,c),generated=s.is_chunk_generated(c)}))`)
+  assert.deepEqual(mapAfter, mapBefore, 'the candidate read charted and generated nothing')
+  evidence.map = { constrained_map_context: mapContext, unseen: { center: far, spatial_status: unseen.spatial_status, search_completeness: unseen.search_completeness, map_context: unseen.map_context }, chunk_before: mapBefore, chunk_after: mapAfter }
+  console.log('PASS: MAP - zero-human map context matches the candidate set; an unseen chunk yields no candidate, an incomplete status, and no chart or generation')
 
   const closing = await lua('rcon.print(helpers.table_to_json({humans=#game.connected_players,speed=game.speed}))')
   assert.equal(closing.humans, 0)

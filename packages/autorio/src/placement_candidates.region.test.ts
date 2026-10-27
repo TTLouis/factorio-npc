@@ -34,7 +34,7 @@ function make_actor(options: ActorOptions = {}) {
   return {
     is_valid: true,
     position: { x: 0, y: 0 },
-    force: { index: 1 },
+    force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
     status_snapshot: () => ({ actor_id: 5 }),
     get_main_inventory: () => ({ get_item_count: (name: string) => name === KIT ? (options.held ?? 1) : 0 }),
     surface: {

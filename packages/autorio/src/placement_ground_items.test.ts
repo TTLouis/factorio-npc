@@ -83,7 +83,7 @@ function npc(surface: any, inventory: any) {
     character: { valid: true },
     position: { x: -33, y: -37 },
     surface,
-    force: { index: 1 },
+    force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
     get_main_inventory: () => inventory,
     entity_build_args: () => ({ force: { index: 1 } }),
     status_snapshot: () => ({ actor_id: 7, kind: 'standalone_character', valid: true, has_character: true, position: { x: -33, y: -37 } }),

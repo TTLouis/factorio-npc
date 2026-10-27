@@ -25,7 +25,7 @@ const FURNACE = {
   items_to_place_this: [{ name: 'stone-furnace', count: 1 }],
 }
 const SPOT = { x: -33.5, y: -35.5 }
-const ACTOR_FORCE = { index: 1, name: 'player' }
+const ACTOR_FORCE = { index: 1, name: 'player', is_chunk_charted: () => true, is_chunk_visible: () => true }
 const NEUTRAL = { index: 3, name: 'neutral' }
 const OTHER_FORCE = { index: 2, name: 'other' }
 const STATUS = { working: 1, normal: 2, no_ingredients: 3 }

@@ -1,7 +1,7 @@
 import type { LuaEntity, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { remember_entity_reference, resolve_entity_reference } from './entity_reference'
-import { is_chunk_known_charted, is_chunk_known_visible, map_knowledge_summary } from './map_knowledge'
+import { chunk_coverage, is_chunk_known_charted, is_chunk_known_visible, map_knowledge_summary } from './map_knowledge'
 import { crafting_categories_support_recipe } from './recipe_categories'
 import { find_world_entities } from './npc_vision'
 
@@ -40,32 +40,7 @@ export function is_position_visible(actor: ControlledActor, surface: LuaSurface,
 }
 
 function map_coverage(actor: ControlledActor, surface: LuaSurface, area: QueryArea) {
-  const min_chunk_x = math.floor(area.left_top.x / 32)
-  const min_chunk_y = math.floor(area.left_top.y / 32)
-  const max_chunk_x = math.floor(area.right_bottom.x / 32)
-  const max_chunk_y = math.floor(area.right_bottom.y / 32)
-  let charted_chunks = 0
-  let visible_chunks = 0
-  let total_chunks = 0
-
-  for (let chunk_x = min_chunk_x; chunk_x <= max_chunk_x; chunk_x++) {
-    for (let chunk_y = min_chunk_y; chunk_y <= max_chunk_y; chunk_y++) {
-      total_chunks++
-      const chunk = { x: chunk_x, y: chunk_y }
-      if (is_chunk_known_charted(actor.force, surface, chunk)) charted_chunks++
-      if (is_chunk_known_visible(actor.force, surface, chunk)) visible_chunks++
-    }
-  }
-
-  return {
-    charted_chunks,
-    uncharted_chunks: total_chunks - charted_chunks,
-    visible_chunks,
-    fogged_chunks: charted_chunks - visible_chunks,
-    total_chunks,
-    partial: charted_chunks > 0 && charted_chunks < total_chunks,
-    visibility_partial: visible_chunks > 0 && visible_chunks < total_chunks,
-  }
+  return chunk_coverage(actor.force, surface, area)
 }
 
 function visible_query_areas(actor: ControlledActor, surface: LuaSurface, area: QueryArea) {

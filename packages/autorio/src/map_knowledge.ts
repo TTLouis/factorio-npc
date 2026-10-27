@@ -55,6 +55,37 @@ export function is_chunk_known_visible(force: LuaForce, surface: LuaSurface, chu
   return knowledge !== undefined && in_visible_window(knowledge, surface, chunk)
 }
 
+// How much of a world area this knowledge covers, counted in whole chunks: charted (explored) and, of those, visible now.
+// fogged chunks were seen before but are not observed now; uncharted chunks were never seen.
+export function chunk_coverage(force: LuaForce, surface: LuaSurface, area: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) {
+  const min_chunk_x = math.floor(area.left_top.x / 32)
+  const min_chunk_y = math.floor(area.left_top.y / 32)
+  const max_chunk_x = math.floor(area.right_bottom.x / 32)
+  const max_chunk_y = math.floor(area.right_bottom.y / 32)
+  let charted_chunks = 0
+  let visible_chunks = 0
+  let total_chunks = 0
+
+  for (let chunk_x = min_chunk_x; chunk_x <= max_chunk_x; chunk_x++) {
+    for (let chunk_y = min_chunk_y; chunk_y <= max_chunk_y; chunk_y++) {
+      total_chunks++
+      const chunk = { x: chunk_x, y: chunk_y }
+      if (is_chunk_known_charted(force, surface, chunk)) charted_chunks++
+      if (is_chunk_known_visible(force, surface, chunk)) visible_chunks++
+    }
+  }
+
+  return {
+    charted_chunks,
+    uncharted_chunks: total_chunks - charted_chunks,
+    visible_chunks,
+    fogged_chunks: charted_chunks - visible_chunks,
+    total_chunks,
+    partial: charted_chunks > 0 && charted_chunks < total_chunks,
+    visibility_partial: visible_chunks > 0 && visible_chunks < total_chunks,
+  }
+}
+
 function chunk_area(x: number, y: number) {
   return {
     left_top: { x: x * 32, y: y * 32 },

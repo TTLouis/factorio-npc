@@ -42,7 +42,7 @@ describe('placement candidates', () => {
     }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: ({ position }: any) => position.x === 1.5 && position.y === 0.5,
         find_entities_filtered: () => [],
@@ -93,7 +93,7 @@ describe('placement candidates', () => {
 
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: () => true,
         find_entities_filtered: ({ area }: any) => {
@@ -147,7 +147,7 @@ describe('placement candidates', () => {
 
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: () => true,
         find_entities_filtered: ({ area }: any) => {
@@ -188,7 +188,7 @@ describe('placement candidates', () => {
     }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: () => true,
         find_entities_filtered: () => [{
@@ -219,7 +219,7 @@ describe('placement candidates', () => {
     }
     const actor = {
       position: { x: 20, y: 20 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: () => true,
         find_entities_filtered: () => [],
@@ -268,7 +268,7 @@ describe('placement candidates', () => {
     }
     const actor = {
       position: { x: -70, y: -9 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: ({ position }: any) => Number.isInteger(position.x) && Number.isInteger(position.y),
         find_entities_filtered: () => [],
@@ -316,7 +316,7 @@ describe('placement candidates', () => {
     }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: ({ position, direction }: any) => (
           (direction === 0 && position.x === 0.5 && position.y === 0)
@@ -382,7 +382,7 @@ describe('placement candidates', () => {
     ;(globalThis as any).prototypes.entity = { 'stone-furnace': strictPrototype }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: { can_place_entity: () => true, find_entities_filtered: () => [] },
     } as any
 
@@ -407,7 +407,7 @@ describe('placement candidates', () => {
     }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: { can_place_entity: ({ position, direction }: any) => position.x === 0 && position.y === 0 && direction === 0, find_entities_filtered: () => [] },
     } as any
 
@@ -432,7 +432,7 @@ describe('placement candidates', () => {
     const asked: any[] = []
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: (args: any) => {
           asked.push(args)
@@ -466,7 +466,7 @@ describe('placement candidates', () => {
     const asked: any[] = []
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: { can_place_entity: (args: any) => { asked.push(args); return true }, find_entities_filtered: () => [] },
     } as any
 

@@ -44,7 +44,7 @@ describe('electric-pole placement candidates', () => {
   function actor_with(world: any[], legal: Array<[number, number]>) {
     return {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         index: 1,
         can_place_entity: ({ position }: any) => legal.some(([x, y]) => x === position.x && y === position.y),

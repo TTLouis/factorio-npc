@@ -44,7 +44,7 @@ describe('placement candidate spatial behavior', () => {
     }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: ({ position }: any) => position.x === 0.5 && position.y === 0.5,
         find_entities_filtered: () => [],
@@ -77,7 +77,7 @@ describe('placement candidate spatial behavior', () => {
     }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: () => true,
         find_entities_filtered: () => [],
@@ -111,7 +111,7 @@ describe('placement candidate spatial behavior', () => {
     }
     const actor = {
       position: { x: 10, y: 10 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: ({ position, direction }: any) => position.x === 11.5 && position.y === 10.5 && direction === 4,
         find_entities_filtered: () => [],
@@ -153,7 +153,7 @@ describe('placement candidate spatial behavior', () => {
     }
     const actor = {
       position: { x: 0, y: 0 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         can_place_entity: ({ position }: any) => position.x === 0.5 && position.y === 0.5,
         find_entities_filtered: ({ area }: any) => {

@@ -15,6 +15,7 @@ import { fluid_io_names } from './prototype_knowledge'
 import { type ClearableEntity, type ClearanceMemo, placeable_or_clearable, placement_clearance } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { preservation_geometry_for_actor } from './knowledge'
+import { chunk_coverage, is_chunk_known_visible, KNOWLEDGE_CHUNK_RADIUS, map_knowledge_summary } from './map_knowledge'
 import { current_fluid_owner, current_fluid_admission, queued_fluid_admission, same_fluid_owner, valid_fluid_owner, type FluidPreservationOwner, type FluidQueuedBinding } from './operation_admission'
 
 const MAX_RADIUS = 24
@@ -717,6 +718,22 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   let scanned = 0
   let rejected = 0
   let region_rejected = 0
+  // Map knowledge (M3): a footprint is considered only where every chunk it touches is visible to the NPC now. A fogged or
+  // never-seen chunk is not fresh authority for a placement, so a position there is neither probed nor returned; it is
+  // counted, and the search is then reported incomplete rather than empty. The evaluated area's bounds feed the map context.
+  const chunk_visible: Record<string, boolean> = {}
+  let not_visible_rejected = 0
+  let evaluated_area: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } } | undefined
+  const footprint_visible = (box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) => {
+    for (let chunk_x = math.floor(box.left_top.x / 32); chunk_x <= math.floor((box.right_bottom.x - 0.001) / 32); chunk_x++) {
+      for (let chunk_y = math.floor(box.left_top.y / 32); chunk_y <= math.floor((box.right_bottom.y - 0.001) / 32); chunk_y++) {
+        const key = `${chunk_x}:${chunk_y}`
+        if (chunk_visible[key] === undefined) chunk_visible[key] = is_chunk_known_visible(actor.force, actor.surface, { x: chunk_x, y: chunk_y })
+        if (!chunk_visible[key]) return false
+      }
+    }
+    return true
+  }
   const obstruction_samples: Array<ReturnType<typeof placement_obstruction_sample>> = []
 
   function consider(position: { x: number, y: number }, direction: number, target?: LiveFluidPort) {
@@ -732,7 +749,19 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       region_rejected++
       return undefined
     }
-    if (reservation_intersection(actor.surface, placement_footprint(prototype, position, direction).world_box)) return undefined
+    const world_box = placement_footprint(prototype, position, direction).world_box
+    if (evaluated_area === undefined) evaluated_area = { left_top: { x: world_box.left_top.x, y: world_box.left_top.y }, right_bottom: { x: world_box.right_bottom.x, y: world_box.right_bottom.y } }
+    else {
+      evaluated_area.left_top.x = math.min(evaluated_area.left_top.x, world_box.left_top.x)
+      evaluated_area.left_top.y = math.min(evaluated_area.left_top.y, world_box.left_top.y)
+      evaluated_area.right_bottom.x = math.max(evaluated_area.right_bottom.x, world_box.right_bottom.x)
+      evaluated_area.right_bottom.y = math.max(evaluated_area.right_bottom.y, world_box.right_bottom.y)
+    }
+    if (!footprint_visible(world_box)) {
+      not_visible_rejected++
+      return undefined
+    }
+    if (reservation_intersection(actor.surface, world_box)) return undefined
     const natively_placeable = actor.surface.can_place_entity({
       name: request.entity_name,
       position,
@@ -862,7 +891,8 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   const region_unsearched = region_exceeds_search_limit && join_target === undefined
   // A region the rings cannot reach is a fact of the request itself, so it is named first; the legacy
   // candidates_incomplete_reason beside it still carries a limit hit while searching.
-  const completeness_reason = region_unsearched ? 'region_exceeds_search_limit' : incomplete_reason
+  const completeness_reason = region_unsearched ? 'region_exceeds_search_limit'
+    : incomplete_reason ?? (not_visible_rejected > 0 ? 'area_not_fully_visible' : undefined)
   const spatial_status = selected.length > 0 ? 'candidates_found'
     : completeness_reason !== undefined ? 'search_incomplete' : 'none_in_verified_scope'
   // Advisory only: a prototype that cannot be read for its placement item reports unknown and never aborts the search.
@@ -901,7 +931,9 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       legal_candidate_count: candidates.length,
       returned_count: selected.length,
       region_rejected_count: region_rejected,
+      not_visible_rejected_count: not_visible_rejected,
     },
+    map_context: candidate_map_context(actor, evaluated_area),
     material_status: material,
     execution_eligibility,
     clearance_probes,
@@ -942,6 +974,28 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       samples: obstruction_samples,
       truncated: rejected > obstruction_samples.length || obstruction_samples.some(sample => sample.truncated),
     },
+  }
+}
+
+// The map facts a candidate answer is read against: the same surface and tick as the candidates, how much of the area whose
+// footprints were evaluated (after the region filter) is visible now, fogged or never seen, and the NPC's current visible
+// window. It is read from the NPC's own map knowledge and charts or generates nothing.
+function candidate_map_context(actor: ControlledActor, evaluated_area: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } } | undefined) {
+  const summary = map_knowledge_summary(actor.force)
+  const window = summary.visible_center
+  return {
+    source: 'npc_map_knowledge',
+    observed_tick: game.tick,
+    surface_index: actor.surface.index,
+    surface_name: actor.surface.name,
+    candidate_authority: 'currently_visible_chunks_only',
+    visible_window: window === undefined ? undefined : { surface_index: window.surface_index, chunk: { x: window.x, y: window.y }, chunk_radius: KNOWLEDGE_CHUNK_RADIUS },
+    explored_chunks: summary.explored_chunks,
+    evaluated_area,
+    evaluated_area_coverage: evaluated_area === undefined ? undefined : chunk_coverage(actor.force, actor.surface, {
+      left_top: evaluated_area.left_top,
+      right_bottom: { x: evaluated_area.right_bottom.x - 0.001, y: evaluated_area.right_bottom.y - 0.001 },
+    }),
   }
 }
 
