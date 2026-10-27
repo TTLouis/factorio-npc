@@ -339,7 +339,11 @@ try {
   // nothing here: the runner tries fixed site lists, and the engine's own targets/networks after placement are the verdict.
   {
     await lua(`for _,item in pairs({{"wooden-chest",3},{"burner-inserter",1},{"lab",1},{"small-electric-pole",1},{"burner-mining-drill",1}}) do assert(a.insert{name=item[1],count=item[2]}==item[2]) end; rcon.print("{}")`)
-    const layoutStatus = async id => JSON.parse(await rcon.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","construction_layout_status",${id})))`))
+    const layoutStatus = async id => {
+      const read = JSON.parse(await rcon.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","construction_layout_status",${id})))`))
+      assert.equal(read.ok, true, JSON.stringify(read))
+      return read.layout
+    }
     const quiet = facts => ({ entities: facts.world.entities, inventory: facts.world.inventory, protectedGeometry: facts.world.protectedGeometry, position: facts.world.position })
     const stock = (rows, name) => rows.filter(row => row.name === name).reduce((sum, row) => sum + row.count, 0)
     const validate = (plan_id, placements, connections) => tool('validateConstructionPlan', { plan_id, placements, ...(connections ? { connections } : {}) })
