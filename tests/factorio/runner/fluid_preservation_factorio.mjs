@@ -334,6 +334,162 @@ try {
     // The consumed validation cannot be replayed or described again.
     assert.equal((await witnessOf(id, count)).code, 'construction_plan_unavailable')
   }
+  // Milestone 4 L2/L3: typed layout connections on the real engine. Fixture stock and ore are declared setup; every build
+  // goes through validateConstructionPlan and an authorized execute_construction_plan. The harness's virtual proof chooses
+  // nothing here: the runner tries fixed site lists, and the engine's own targets/networks after placement are the verdict.
+  {
+    await lua(`for _,item in pairs({{"wooden-chest",3},{"burner-inserter",1},{"lab",1},{"small-electric-pole",1},{"burner-mining-drill",1}}) do assert(a.insert{name=item[1],count=item[2]}==item[2]) end; rcon.print("{}")`)
+    const layoutStatus = async id => JSON.parse(await rcon.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","construction_layout_status",${id})))`))
+    const quiet = facts => ({ entities: facts.world.entities, inventory: facts.world.inventory, protectedGeometry: facts.world.protectedGeometry, position: facts.world.position })
+    const stock = (rows, name) => rows.filter(row => row.name === name).reduce((sum, row) => sum + row.count, 0)
+    const validate = (plan_id, placements, connections) => tool('validateConstructionPlan', { plan_id, placements, ...(connections ? { connections } : {}) })
+    const here = (await worldFacts()).world.position
+    const cell = (x, y) => ({ x: Math.floor(x) + 0.5, y: Math.floor(y) + 0.5 })
+    const unitOf = (status, slot) => status.nodes.find(node => node.slot === slot)?.unit_number
+    // L2: a spatially valid layout that cannot run yet says so, separately, and builds nothing.
+    {
+      const before = await worldFacts()
+      let free
+      for (const [dx, dy] of [[2, -4], [-2, -4], [2, 4], [-2, 4], [4, 2], [-4, 2]]) {
+        const spot = cell(here.x + dx, here.y + dy)
+        if ((await validate('native-l2-free-cell', [{ entity_name: 'wooden-chest', ...spot }])).ok === true) { free = spot; break }
+      }
+      assert.ok(free, 'a free cell within build reach')
+      const far = cell(here.x, here.y + 13)
+      const missing = await validate('native-l2-missing-material', [{ entity_name: 'iron-chest', ...free }])
+      const route = await validate('native-l2-out-of-reach', [{ entity_name: 'wooden-chest', ...far }])
+      const port = await validate('native-l2-unproved-port', [{ entity_name: 'wooden-chest', ...free, slot: 'chest' }],
+        [{ kind: 'fluid', from: { slot: 'chest' }, to: { unit_number: boilerId } }])
+      const after = await worldFacts()
+      evidence.l2_layout = { free, far, missing, route, port }
+      for (const [label, result] of [['missing material', missing], ['inaccessible route', route], ['unproved port', port]]) {
+        assert.equal(result.ok, false, `${label}: ${JSON.stringify(result)}`)
+        assert.equal(result.planning_status, 'spatially_valid', `${label}: ${JSON.stringify(result)}`)
+        assert.equal(result.execution_eligible, false, `${label}: ${JSON.stringify(result)}`)
+        assert.equal(result.validation_id, undefined, `${label}: an ineligible layout gets no execution token`)
+      }
+      assert.ok(missing.eligibility_blockers.some(row => row.code === 'ITEMS_MISSING' && row.item_name === 'iron-chest'), JSON.stringify(missing))
+      assert.ok(route.eligibility_blockers.some(row => row.code === 'OUTSIDE_LOCAL_BUILD_REACH'), JSON.stringify(route))
+      assert.ok(port.eligibility_blockers.some(row => row.code === 'CONNECTION_UNPROVEN' && typeof row.staged_requirement === 'string'), JSON.stringify(port))
+      assert.deepEqual(quiet(after), quiet(before), 'planning reads build, consume and move nothing')
+      assert.equal(after.status.queue_length, 0); assert.equal(after.status.task_state, 'idle')
+    }
+    // L3 chest → inserter → existing boiler: the virtual proof must agree with the engine's own pickup and drop targets.
+    {
+      const boiler = await lua(`local b; for _,v in pairs(a.surface.find_entities_filtered{name="boiler"}) do if v.unit_number==${boilerId} then b=v end end; assert(b); rcon.print(helpers.table_to_json({box=b.bounding_box}))`)
+      const { left_top: lt, right_bottom: rb } = boiler.box
+      const sites = []
+      for (let x = Math.floor(lt.x); x < Math.ceil(rb.x); x++) {
+        sites.push({ inserter: { x: x + 0.5, y: Math.floor(lt.y) - 0.5 }, chest: { x: x + 0.5, y: Math.floor(lt.y) - 1.5 } })
+        sites.push({ inserter: { x: x + 0.5, y: Math.ceil(rb.y) + 0.5 }, chest: { x: x + 0.5, y: Math.ceil(rb.y) + 1.5 } })
+      }
+      for (let y = Math.floor(lt.y); y < Math.ceil(rb.y); y++) {
+        sites.push({ inserter: { x: Math.floor(lt.x) - 0.5, y: y + 0.5 }, chest: { x: Math.floor(lt.x) - 1.5, y: y + 0.5 } })
+        sites.push({ inserter: { x: Math.ceil(rb.x) + 0.5, y: y + 0.5 }, chest: { x: Math.ceil(rb.x) + 1.5, y: y + 0.5 } })
+      }
+      const plan = (site, direction) => validate('native-l3-chest-inserter-boiler',
+        [{ entity_name: 'wooden-chest', ...site.chest, slot: 'chest' }, { entity_name: 'burner-inserter', ...site.inserter, direction, slot: 'inserter' }],
+        [{ kind: 'inserter', inserter: { slot: 'inserter' }, pickup: { slot: 'chest' }, drop: { unit_number: boilerId } }])
+      const tried = []
+      let found
+      for (const site of sites) {
+        for (const direction of [0, 4, 8, 12]) {
+          const result = await plan(site, direction)
+          tried.push({ site, direction, ok: result.ok, code: result.error?.code })
+          if (result.ok === true) { found = { site, direction }; break }
+        }
+        if (found) break
+      }
+      assert.ok(found, `a chest/inserter site feeding the boiler: ${JSON.stringify(tried)}`)
+      const reversed = await plan(found.site, (found.direction + 8) % 16)
+      assert.equal(reversed.ok, false, JSON.stringify(reversed))
+      assert.equal(reversed.error.code, 'CONNECTION_GEOMETRY_MISMATCH', JSON.stringify(reversed))
+      const validated = await plan(found.site, found.direction)
+      assert.equal(validated.ok, true, JSON.stringify(validated))
+      assert.equal(validated.execution_eligible, true)
+      const before = await worldFacts()
+      await operation('execute_construction_plan', { validation_id: validated.validation_id, placement_count: validated.placement_count })
+      const after = await worldFacts()
+      const status = await layoutStatus(validated.validation_id)
+      const inserterId = unitOf(status, 'inserter'); const chestId = unitOf(status, 'chest')
+      const native = await lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${inserterId} then i=v end end; assert(i);
+        rcon.print(helpers.table_to_json({pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil,pickup_position=i.pickup_position,drop_position=i.drop_position,direction=i.direction}))`)
+      evidence.l3_inserter = { tried, found, reversed, validated, status, native }
+      assert.equal(status.state, 'complete', JSON.stringify(status))
+      assert.equal(status.production, 'not_asserted')
+      assert.ok(Number.isSafeInteger(inserterId) && Number.isSafeInteger(chestId), JSON.stringify(status))
+      assert.equal(native.pickup, chestId, JSON.stringify(evidence.l3_inserter.native))
+      assert.equal(native.drop, boilerId, JSON.stringify(evidence.l3_inserter.native))
+      assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
+      const [chestNode, inserterNode] = ['chest', 'inserter'].map(slot => status.nodes.find(node => node.slot === slot))
+      assert.ok(chestNode.execution_rank < inserterNode.execution_rank && chestNode.placed_tick <= inserterNode.placed_tick, JSON.stringify(status))
+      assert.equal(stock(after.world.inventory, 'wooden-chest'), stock(before.world.inventory, 'wooden-chest') - 1)
+      assert.equal(stock(after.world.inventory, 'burner-inserter'), stock(before.world.inventory, 'burner-inserter') - 1)
+      assert.deepEqual(after.world.protectedGeometry, before.world.protectedGeometry, 'feeding the boiler leaves its fluid topology unchanged')
+    }
+    // L3 lab/pole: the pole's supply area must actually put the lab on the pole's electric network.
+    {
+      let validated
+      const tried = []
+      for (const [dx, dy] of [[3.5, -6.5], [-1.5, -6.5], [3.5, 6.5], [-1.5, 6.5], [6.5, -3.5], [6.5, 3.5], [-5.5, 6.5], [-5.5, -6.5]]) {
+        const x = Math.floor(here.x + dx) + 0.5; const y = Math.floor(here.y + dy) + 0.5
+        const result = await validate('native-l3-lab-pole', [{ entity_name: 'lab', x, y, slot: 'lab' }, { entity_name: 'small-electric-pole', x: x + 3, y, slot: 'pole' }],
+          [{ kind: 'power', pole: { slot: 'pole' }, consumer: { slot: 'lab' } }])
+        tried.push({ x, y, ok: result.ok, code: result.error?.code })
+        if (result.ok === true) { validated = result; break }
+      }
+      assert.ok(validated, `a free lab/pole site: ${JSON.stringify(tried)}`)
+      await operation('execute_construction_plan', { validation_id: validated.validation_id, placement_count: validated.placement_count })
+      const status = await layoutStatus(validated.validation_id)
+      const labId = unitOf(status, 'lab'); const poleId = unitOf(status, 'pole')
+      const native = await lua(`local l, p; for _,v in pairs(a.surface.find_entities_filtered{name={"lab","small-electric-pole"}}) do if v.unit_number==${labId} then l=v end; if v.unit_number==${poleId} then p=v end end; assert(l and p);
+        rcon.print(helpers.table_to_json({lab=l.electric_network_id,pole=p.electric_network_id}))`)
+      evidence.l3_power = { tried, validated, status, native }
+      assert.equal(status.state, 'complete', JSON.stringify(status))
+      assert.equal(status.production, 'not_asserted')
+      assert.ok(Number.isSafeInteger(native.pole) && native.lab === native.pole, JSON.stringify(native))
+      assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
+      const [labNode, poleNode] = ['lab', 'pole'].map(slot => status.nodes.find(node => node.slot === slot))
+      assert.ok(labNode.execution_rank < poleNode.execution_rank, JSON.stringify(status))
+    }
+    // L3 constrained miner/receiver: the drill is placed first and the receiver must be its actual drop target.
+    {
+      const ore = await lua(`local s=a.surface; local px=math.floor(a.position.x); local py=math.floor(a.position.y); local found
+        for _,o in pairs({{-4,-4},{4,-4},{-4,4},{4,4},{0,-6},{0,6},{-6,0},{6,0}}) do local x=px+o[1]; local y=py+o[2]
+          if s.count_entities_filtered{area={{x-3,y-3},{x+3,y+3}}}==0 then found={x=x,y=y}; break end end
+        assert(found); for dx=-1,0 do for dy=-1,0 do assert(s.create_entity{name="iron-ore",position={found.x+dx+0.5,found.y+dy+0.5},amount=500}) end end
+        rcon.print(helpers.table_to_json(found))`)
+      const chests = [[-0.5, -1.5], [0.5, -1.5], [-0.5, 1.5], [0.5, 1.5], [-1.5, -0.5], [-1.5, 0.5], [1.5, -0.5], [1.5, 0.5]]
+      const tried = []
+      let validated
+      let mismatch
+      for (const direction of [0, 4, 8, 12]) {
+        for (const [dx, dy] of chests) {
+          const result = await validate('native-l3-drill-receiver',
+            [{ entity_name: 'burner-mining-drill', x: ore.x, y: ore.y, direction, slot: 'drill' }, { entity_name: 'wooden-chest', x: ore.x + dx, y: ore.y + dy, slot: 'receiver' }],
+            [{ kind: 'drill_output', drill: { slot: 'drill' }, receiver: { slot: 'receiver' } }])
+          tried.push({ direction, dx, dy, ok: result.ok, code: result.error?.code })
+          if (result.error?.code === 'CONNECTION_GEOMETRY_MISMATCH') mismatch ??= result
+          if (result.ok === true) { validated = result; break }
+        }
+        if (validated) break
+      }
+      assert.ok(validated, `a drill/receiver geometry on the fixture ore: ${JSON.stringify(tried)}`)
+      assert.ok(mismatch, `receivers off the output tile are refused before mutation: ${JSON.stringify(tried)}`)
+      await operation('execute_construction_plan', { validation_id: validated.validation_id, placement_count: validated.placement_count })
+      const status = await layoutStatus(validated.validation_id)
+      const drillId = unitOf(status, 'drill'); const receiverId = unitOf(status, 'receiver')
+      const native = await lua(`local d; for _,v in pairs(a.surface.find_entities_filtered{name="burner-mining-drill"}) do if v.unit_number==${drillId} then d=v end end; assert(d);
+        rcon.print(helpers.table_to_json({drop=d.drop_target and d.drop_target.unit_number or nil,drop_position=d.drop_position,direction=d.direction}))`)
+      evidence.l3_drill = { ore, tried, mismatch, validated, status, native }
+      assert.equal(status.state, 'complete', JSON.stringify(status))
+      assert.equal(status.production, 'not_asserted')
+      assert.equal(native.drop, receiverId, JSON.stringify(native))
+      assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
+      const [drillNode, receiverNode] = ['drill', 'receiver'].map(slot => status.nodes.find(node => node.slot === slot))
+      assert.ok(drillNode.execution_rank < receiverNode.execution_rank && drillNode.placed_tick <= receiverNode.placed_tick, JSON.stringify(status))
+    }
+  }
   // Fault scheduling occurs after the actual correlated candidate was queued,
   // inside the same native callback, before its first execution tick. No wait
   // or second production operation is smuggled into the single-slot batch.
@@ -385,7 +541,7 @@ try {
   evidence.foreign = await geometry(pumpId)
   assert.throws(() => preservationGeometry(evidence.foreign, pumpId))
   evidence.status = 'pass'
-  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam and lost-edge/scope refusal')
+  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam, lost-edge/scope refusal and layout planning/connections')
 } finally {
   if (connection) connection.close()
   await fs.mkdir(path.resolve(arg('results')), { recursive: true })
