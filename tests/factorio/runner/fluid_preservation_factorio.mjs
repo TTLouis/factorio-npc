@@ -470,21 +470,24 @@ try {
         rcon.print(helpers.table_to_json(found))`)
       const chests = [[-0.5, -1.5], [0.5, -1.5], [-0.5, 1.5], [0.5, 1.5], [-1.5, -0.5], [-1.5, 0.5], [1.5, -0.5], [1.5, 0.5]]
       const tried = []
-      let validated
-      let mismatch
+      const plan = (direction, dx, dy) => validate('native-l3-drill-receiver',
+        [{ entity_name: 'burner-mining-drill', x: ore.x, y: ore.y, direction, slot: 'drill' }, { entity_name: 'wooden-chest', x: ore.x + dx, y: ore.y + dy, slot: 'receiver' }],
+        [{ kind: 'drill_output', drill: { slot: 'drill' }, receiver: { slot: 'receiver' } }])
+      let found
       for (const direction of [0, 4, 8, 12]) {
         for (const [dx, dy] of chests) {
-          const result = await validate('native-l3-drill-receiver',
-            [{ entity_name: 'burner-mining-drill', x: ore.x, y: ore.y, direction, slot: 'drill' }, { entity_name: 'wooden-chest', x: ore.x + dx, y: ore.y + dy, slot: 'receiver' }],
-            [{ kind: 'drill_output', drill: { slot: 'drill' }, receiver: { slot: 'receiver' } }])
+          const result = await plan(direction, dx, dy)
           tried.push({ direction, dx, dy, ok: result.ok, code: result.error?.code })
-          if (result.error?.code === 'CONNECTION_GEOMETRY_MISMATCH') mismatch ??= result
-          if (result.ok === true) { validated = result; break }
+          if (result.ok === true) { found = { direction, dx, dy }; break }
         }
-        if (validated) break
+        if (found) break
       }
-      assert.ok(validated, `a drill/receiver geometry on the fixture ore: ${JSON.stringify(tried)}`)
-      assert.ok(mismatch, `receivers off the output tile are refused before mutation: ${JSON.stringify(tried)}`)
+      assert.ok(found, `a drill/receiver geometry on the fixture ore: ${JSON.stringify(tried)}`)
+      // The same receiver on the opposite side of the drill is off the output point and refused before mutation.
+      const mismatch = await plan(found.direction, -found.dx, -found.dy)
+      assert.equal(mismatch.error?.code, 'CONNECTION_GEOMETRY_MISMATCH', JSON.stringify(mismatch))
+      const validated = await plan(found.direction, found.dx, found.dy)
+      assert.equal(validated.ok, true, JSON.stringify(validated))
       await operation('execute_construction_plan', { validation_id: validated.validation_id, placement_count: validated.placement_count })
       const status = await layoutStatus(validated.validation_id)
       const drillId = unitOf(status, 'drill'); const receiverId = unitOf(status, 'receiver')
