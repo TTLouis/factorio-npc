@@ -2,10 +2,12 @@ import type { ControlledActor } from './actors/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
-import { construction_plan_preflight, execute_validated_construction_plan, validate_construction_execution_plan } from './construction_execution'
+import { construction_plan_preflight, execute_validated_construction_plan, resume_construction_layout, validate_construction_execution_plan } from './construction_execution'
 import { construction_layout_status, create_layout_record, record_layout_node_placed } from './construction_layout'
 import { placement_footprint } from './placement_geometry'
+import { new_operation_admission, pinned_operation_batch_refs } from './operation_admission'
 import { new_task_manager } from './task_manager'
+import { TaskStates } from './types'
 
 // Milestone 4, acceptance L2 and L3: a layout with typed connections is proved before anything is built (planning status kept
 // apart from execution eligibility), executed in a deterministic dependency order, and every placed node is bound to a
@@ -835,6 +837,444 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       const after = Object.keys((globalThis as any).storage.sgluna_construction_layouts).map(Number)
       expect(after).toHaveLength(32)
       expect(after).not.toContain(1)
+    })
+  })
+
+  // Milestone 4, acceptance L4 and L5: an execution that ends early is settled node by node, only the proven remainder is
+  // validated and built (on the same record, within a fixed allowance), and an expired or superseded token never reaches or
+  // erases what was admitted.
+  describe('settling and resuming an interrupted layout (milestone 4 L4/L5)', () => {
+    // A chest feeds an inserter that drops into a second chest. Dependency order: src, dst, ins (plan indices 0, 2, 1).
+    const DST = { entity_name: 'test-chest', x: 0.5, y: 1.5, slot: 'dst' }
+    const CHAIN = { kind: 'inserter' as const, inserter: { slot: 'ins' }, pickup: { slot: 'src' }, drop: { slot: 'dst' } }
+    const PLAN = [SRC, INS, DST]
+
+    function wire(f: World) {
+      f.hooks.on_create = (entity) => {
+        if (entity.name === 'test-inserter') {
+          entity.pickup_target = f.created.find(other => other.name === 'test-chest' && other.position.y === -0.5)
+          entity.drop_target = f.created.find(other => other.name === 'test-chest' && other.position.y === 1.5)
+        }
+      }
+    }
+
+    // Executes the plan, builds its first node, then the engine cancels everything that is queued.
+    function interrupted(f: World) {
+      wire(f)
+      const started = start(f, PLAN, [CHAIN])
+      expect(place_next(f)?.[0]).toBe(true)
+      f.manager.cancel_all_tasks('test_cancel')
+      return started
+    }
+
+    function resume(f: World, layout_id: number) {
+      return resume_construction_layout(f.actor, layout_id) as any
+    }
+
+    function execute(f: World, validation: any) {
+      return execute_validated_construction_plan(f.actor, validation.validation_id, validation.placement_count, f.basic, f.manager)
+    }
+
+    function stored() {
+      return JSON.stringify((globalThis as any).storage.sgluna_construction_layouts)
+    }
+
+    it('settles an interrupted layout, keeps the placed node and resumes only the proven remainder on the same record', () => {
+      const f = build()
+      wire(f)
+      const { layout_id } = start(f, PLAN, [CHAIN])
+      expect(layout(layout_id)).toMatchObject({ state: 'running', executions_used: 1, executions_max: 3, executions: [{ number: 1, queued_nodes: [0, 2, 1] }] })
+      expect(layout(layout_id).executions[0].batch_ref).toBeDefined()
+      // Its placement tasks are still the open batch: nothing is settled and nothing may resume.
+      expect(construction_layout_status(layout_id, { actor: f.actor })).toMatchObject({ ok: true, layout: { state: 'running', nodes: [{ state: 'queued' }, { state: 'queued' }, { state: 'queued' }] } })
+      expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_EXECUTION_PENDING' } })
+
+      expect(place_next(f)?.[0]).toBe(true)
+      f.manager.cancel_all_tasks('test_cancel')
+      const status: any = construction_layout_status(layout_id, { actor: f.actor })
+      expect(status.layout).toMatchObject({
+        state: 'paused',
+        pause_reason: 'remainder_unplaced',
+        nodes: [{ state: 'placed', unit_number: 901 }, { state: 'not_placed' }, { state: 'not_placed' }],
+        executions: [{ settled: { placed: [0], not_placed: [2, 1] } }],
+      })
+      // Reading again settles nothing new.
+      const settled_json = stored()
+      construction_layout_status(layout_id, { actor: f.actor })
+      expect(stored()).toBe(settled_json)
+
+      const submit = vi.spyOn(f.basic, 'submit_placement')
+      const validation = resume(f, layout_id)
+      expect(validation).toMatchObject({
+        ok: true,
+        layout_id,
+        placement_count: 2,
+        executions_used: 1,
+        retained: [{ node_id: `layout-${layout_id}:n0`, entity_name: 'test-chest', unit_number: 901 }],
+        remainder: [`layout-${layout_id}:n2`, `layout-${layout_id}:n1`],
+        placements: [{ entity_name: 'test-chest', x: 0.5, y: 1.5, slot: 'dst' }, { entity_name: 'test-inserter', x: 0.5, y: 0.5, direction: 0, slot: 'ins' }],
+      })
+      // The placed chest is an existing endpoint of the connection now, by its unit_number; validating leaves the record alone.
+      expect((globalThis as any).storage.sgluna_validated_construction_plan).toMatchObject({
+        resume_layout_id: layout_id,
+        resume_node_indices: [2, 1],
+        connections: [{ kind: 'inserter', endpoints: { inserter: { slot: 'ins' }, pickup: { unit_number: 901 }, drop: { slot: 'dst' } } }],
+      })
+      expect(stored()).toBe(settled_json)
+      expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+
+      expect(execute(f, validation)).toEqual([true, `Validated construction plan started (layout_id ${layout_id})`])
+      // The same record continues: one more execution, the original node indices, and the retained node is never queued again.
+      expect(Object.keys((globalThis as any).storage.sgluna_construction_layouts)).toEqual([String(layout_id)])
+      expect(submit.mock.calls.map(call => [call[0], call[7]])).toEqual([
+        ['test-chest', { refuse_clearance: true, layout_node: { layout_id, index: 2 } }],
+        ['test-inserter', { refuse_clearance: true, layout_node: { layout_id, index: 1 } }],
+      ])
+      expect(layout(layout_id)).toMatchObject({
+        state: 'running',
+        executions_used: 2,
+        executions: [{ number: 1 }, { number: 2, queued_nodes: [2, 1] }],
+        nodes: [{ state: 'placed', unit_number: 901 }, { state: 'queued' }, { state: 'queued' }],
+      })
+      expect(layout(layout_id).executions[1].batch_ref).toBeDefined()
+      expect(layout(layout_id).pause_reason).toBeUndefined()
+
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({
+        state: 'complete',
+        connections: [{ state: 'verified' }],
+        nodes: [{ state: 'placed', unit_number: 901 }, { state: 'placed', unit_number: 903 }, { state: 'placed', unit_number: 902 }],
+      })
+      // Node 1 was built once; stock was spent once per node.
+      expect(f.created.filter(entity => entity.name === 'test-chest' && entity.position.y === -0.5)).toHaveLength(1)
+      expect(f.surface.create_entity).toHaveBeenCalledTimes(3)
+      expect(f.held['test-chest']).toBe(1)
+      expect(f.held['test-inserter']).toBe(0)
+      expect(layout(layout_id).production).toBe('not_asserted')
+    })
+
+    it('settles a layout cancelled before any node was built and resumes all of it', () => {
+      const f = build()
+      wire(f)
+      const { layout_id } = start(f, PLAN, [CHAIN])
+      f.manager.cancel_all_tasks('test_cancel')
+      const validation = resume(f, layout_id)
+      expect(validation).toMatchObject({ ok: true, placement_count: 3, retained: [], remainder: [`layout-${layout_id}:n0`, `layout-${layout_id}:n2`, `layout-${layout_id}:n1`] })
+      expect(execute(f, validation)[0]).toBe(true)
+      for (let i = 0; i < 3; i++) expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({ state: 'complete', executions_used: 2 })
+    })
+
+    it('settles when another batch is open, not only when its own was cancelled', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      f.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 600 })
+      expect(f.manager.get_status_snapshot().active_batch).toBeDefined()
+      expect(construction_layout_status(layout_id, { actor: f.actor })).toMatchObject({ layout: { state: 'paused', nodes: [{ state: 'placed' }, { state: 'not_placed' }, { state: 'not_placed' }] } })
+    })
+
+    it('settles after a restart: the record survives, the queue and the old batch generation do not', () => {
+      const f = build()
+      wire(f)
+      const { layout_id } = start(f, PLAN, [CHAIN])
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(f.manager.reconcile_startup('restart-2')).toMatchObject({ ok: true, reconciled: true })
+      expect(f.manager.get_status_snapshot().active_batch).toBeUndefined()
+      expect(construction_layout_status(layout_id, { actor: f.actor })).toMatchObject({
+        layout: { state: 'paused', pause_reason: 'remainder_unplaced', nodes: [{ state: 'placed', unit_number: 901 }, { state: 'not_placed' }, { state: 'not_placed' }] },
+      })
+      const validation = resume(f, layout_id)
+      expect(validation).toMatchObject({ ok: true, placement_count: 2 })
+      expect(execute(f, validation)[0]).toBe(true)
+      expect(layout(layout_id).executions[1]).toMatchObject({ number: 2, batch_generation: 2 })
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({ state: 'complete', nodes: [{ unit_number: 901 }, { state: 'placed' }, { state: 'placed' }] })
+    })
+
+    it('spends a fixed allowance of three executions and refuses the fourth', () => {
+      const f = build()
+      wire(f)
+      const { layout_id } = start(f, PLAN, [CHAIN])
+      f.manager.cancel_all_tasks('test_cancel')
+      for (const used of [2, 3]) {
+        const validation = resume(f, layout_id)
+        expect(validation).toMatchObject({ ok: true, placement_count: 3, executions_used: used - 1, executions_max: 3 })
+        expect(execute(f, validation)[0]).toBe(true)
+        expect(layout(layout_id)).toMatchObject({ executions_used: used, executions_max: 3, state: 'running' })
+        f.manager.cancel_all_tasks('test_cancel')
+      }
+      construction_layout_status(layout_id, { actor: f.actor })
+      const before = stored()
+      expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_ALLOWANCE_EXHAUSTED' } })
+      expect(stored()).toBe(before)
+      expect(layout(layout_id)).toMatchObject({ state: 'paused', executions_used: 3, executions_max: 3 })
+      expect(f.surface.create_entity).not.toHaveBeenCalled()
+    })
+
+    it('refuses a token whose layout used its allowance after it was validated', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      const validation = resume(f, layout_id)
+      expect(validation.ok).toBe(true)
+      layout(layout_id).executions_used = 3
+      expect(construction_plan_preflight(f.actor, validation.validation_id, validation.placement_count)).toMatchObject({ ok: false, code: 'construction_plan_stale', evaluation_code: 'LAYOUT_ALLOWANCE_EXHAUSTED' })
+      const before = stored()
+      expect(execute(f, validation)).toEqual([false, expect.stringContaining('LAYOUT_ALLOWANCE_EXHAUSTED')])
+      expect(stored()).toBe(before)
+      expect((globalThis as any).storage.sgluna_validated_construction_plan).toBeUndefined()
+    })
+
+    it('never replays a completed node that was removed: the resume is refused and nothing is rebuilt', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      f.by_unit.get(901).valid = false
+      expect(resume(f, layout_id)).toMatchObject({ ok: false, layout_state: 'paused', error: { code: 'LAYOUT_COMPLETED_NODE_MISSING' } })
+      expect(layout(layout_id)).toMatchObject({
+        state: 'paused',
+        nodes: [{ state: 'missing', unit_number: 901 }, { state: 'not_placed' }, { state: 'not_placed' }],
+      })
+      expect(layout(layout_id).pause_reason).toContain('completed_node_missing')
+      expect((globalThis as any).storage.sgluna_validated_construction_plan).toBeUndefined()
+      expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+      // A late receipt for the missing node does not rebind it.
+      const late: any = { valid: true, name: 'test-chest', unit_number: 4000, position: { x: 0.5, y: -0.5 }, surface: f.surface, force: { index: 1 } }
+      record_layout_node_placed(f.actor, { layout_id, index: 0 }, late)
+      expect(layout(layout_id).nodes[0]).toMatchObject({ state: 'missing', unit_number: 901 })
+    })
+
+    it('refuses a token when a completed node disappears after the remainder was validated', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      const validation = resume(f, layout_id)
+      expect(validation.ok).toBe(true)
+      f.by_unit.get(901).valid = false
+      expect(execute(f, validation)).toEqual([false, expect.stringContaining('LAYOUT_COMPLETED_NODE_MISSING')])
+      // The record keeps the completed node, now marked missing, and the not-placed remainder: nothing is erased.
+      expect(layout(layout_id)).toMatchObject({ executions_used: 1, nodes: [{ state: 'missing', unit_number: 901 }, { state: 'not_placed' }, { state: 'not_placed' }] })
+      expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+    })
+
+    it('refuses to resume an unknown, foreign, complete or mismatched layout', () => {
+      const f = build()
+      expect(resume(f, 999)).toMatchObject({ ok: false, error: { code: 'LAYOUT_UNAVAILABLE' } })
+      expect(resume_construction_layout(f.actor, '1')).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } })
+
+      // Another actor or surface never resumes it, and the refusal settles nothing.
+      const { layout_id } = interrupted(f)
+      const before = stored()
+      const snapshot = (f.actor as any).status_snapshot
+      ;(f.actor as any).status_snapshot = () => ({ ...snapshot(), actor_id: 43 })
+      expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_SCOPE_MISMATCH' } })
+      ;(f.actor as any).status_snapshot = snapshot
+      ;(f.actor as any).surface = { ...f.surface, index: 2 }
+      expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_SCOPE_MISMATCH' } })
+      ;(f.actor as any).surface = f.surface
+      expect(stored()).toBe(before)
+
+      const done = build()
+      wire(done)
+      const finished = start(done, PLAN, [CHAIN])
+      for (let i = 0; i < 3; i++) expect(place_next(done)?.[0]).toBe(true)
+      expect(layout(finished.layout_id).state).toBe('complete')
+      expect(resume(done, finished.layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_COMPLETE' } })
+
+      // Every node placed but the inserter does not target its endpoints: the connection does not hold, and nothing replays.
+      const bad = build()
+      const mismatched = start(bad, PLAN, [CHAIN])
+      for (let i = 0; i < 3; i++) expect(place_next(bad)?.[0]).toBe(true)
+      expect(layout(mismatched.layout_id)).toMatchObject({ state: 'paused', connections: [{ state: 'mismatch' }] })
+      expect(resume(bad, mismatched.layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_CONNECTION_MISMATCH' } })
+      expect(bad.surface.create_entity).toHaveBeenCalledTimes(3)
+    })
+
+    it('reports a remainder it cannot run now as eligibility blockers and stores no token', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      f.held['test-inserter'] = 0
+      const blocked = resume(f, layout_id)
+      expect(blocked).toMatchObject({
+        ok: false,
+        layout_id,
+        planning_status: 'spatially_valid',
+        execution_eligible: false,
+        eligibility_blockers: [{ code: 'ITEMS_MISSING', item_name: 'test-inserter' }],
+        retained: [{ unit_number: 901 }],
+        remainder: [`layout-${layout_id}:n2`, `layout-${layout_id}:n1`],
+      })
+      expect((globalThis as any).storage.sgluna_validated_construction_plan).toBeUndefined()
+      expect(layout(layout_id).executions_used).toBe(1)
+    })
+
+    it('rejects an expired token before admission and leaves the partially completed layout intact', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      const validation = resume(f, layout_id)
+      const before = stored()
+      ;(globalThis as any).game.tick += 3601
+      expect(construction_plan_preflight(f.actor, validation.validation_id, validation.placement_count)).toMatchObject({ ok: false, code: 'construction_plan_expired' })
+      expect(execute(f, validation)).toEqual([false, 'validated construction plan expired; validate the live world again'])
+      // Completed nodes and their receipts stay; the remainder needs a fresh validation of the remainder only.
+      expect(stored()).toBe(before)
+      expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+      const fresh = resume(f, layout_id)
+      expect(fresh).toMatchObject({ ok: true, placement_count: 2 })
+      expect(execute(f, fresh)[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({ state: 'complete', nodes: [{ unit_number: 901 }, { state: 'placed' }, { state: 'placed' }] })
+    })
+
+    it('rejects a superseded resume token, and a newer validation of another plan never alters the layout record', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      const first = resume(f, layout_id)
+      const second = resume(f, layout_id)
+      expect(second.validation_id).toBeGreaterThan(first.validation_id)
+      const before = stored()
+      expect(execute(f, first)).toEqual([false, 'validated construction plan is unavailable or superseded'])
+      expect(stored()).toBe(before)
+
+      // An unrelated plan validated meanwhile replaces the stored token and touches no layout.
+      const other = validate(f, [{ entity_name: 'test-chest', x: 6.5, y: 6.5 }], undefined, 'unrelated')
+      expect(other.ok).toBe(true)
+      expect(stored()).toBe(before)
+      expect(execute(f, second)).toEqual([false, 'validated construction plan is unavailable or superseded'])
+      expect(stored()).toBe(before)
+      expect(layout(layout_id)).toMatchObject({ state: 'paused', nodes: [{ state: 'placed', unit_number: 901 }, { state: 'not_placed' }, { state: 'not_placed' }] })
+
+      // The remainder is validated again and still completes the original layout.
+      const third = resume(f, layout_id)
+      expect(execute(f, third)[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id).state).toBe('complete')
+    })
+
+    it('restores a resumed layout to paused when its placements cannot be queued', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      const validation = resume(f, layout_id)
+      const before = stored()
+      vi.spyOn(f.basic, 'submit_placement').mockReturnValueOnce(true).mockReturnValueOnce(false)
+      expect(execute(f, validation)).toEqual([false, 'unable to queue placement 2'])
+      expect(stored()).toBe(before)
+      expect(layout(layout_id)).toMatchObject({ state: 'paused', pause_reason: 'remainder_unplaced', executions_used: 1 })
+      expect(layout(layout_id).executions).toHaveLength(1)
+      expect((globalThis as any).storage.sgluna_validated_construction_plan).toBeUndefined()
+    })
+
+    it('counts a second receipt for a node bound after a resume, and never binds a node whose execution ended', () => {
+      const f = build()
+      const { layout_id } = interrupted(f)
+      // A receipt for a node that was settled as not placed is stale: it neither binds nor changes the node.
+      construction_layout_status(layout_id, { actor: f.actor })
+      const stale: any = { valid: true, name: 'test-inserter', unit_number: 5000, position: { x: 0.5, y: 0.5 }, surface: f.surface, force: { index: 1 } }
+      record_layout_node_placed(f.actor, { layout_id, index: 1 }, stale)
+      expect(layout(layout_id).nodes[1]).toMatchObject({ state: 'not_placed' })
+      expect(layout(layout_id).nodes[1].unit_number).toBeUndefined()
+      expect(layout(layout_id).duplicate_receipts).toBe(1)
+
+      expect(execute(f, resume(f, layout_id))[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      const duplicate: any = { valid: true, name: 'test-chest', unit_number: 777, position: { x: 0.5, y: 1.5 }, surface: f.surface, force: { index: 1 } }
+      record_layout_node_placed(f.actor, { layout_id, index: 2 }, duplicate)
+      record_layout_node_placed(f.actor, { layout_id, index: 0 }, duplicate)
+      expect(layout(layout_id).nodes[2]).toMatchObject({ state: 'placed', unit_number: 902 })
+      expect(layout(layout_id).nodes[0]).toMatchObject({ state: 'placed', unit_number: 901 })
+      expect(layout(layout_id).duplicate_receipts).toBe(3)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id).state).toBe('complete')
+    })
+
+    describe('admission settlement', () => {
+      const KEY = 'request/execute'
+      const identity = { operation_key: KEY, attempt_id: 'attempt-1', actor_id: 42, epoch: 3, signature: 'sig-1', ordinal: 1, operation_count: 1 }
+
+      beforeEach(() => {
+        ;(globalThis as any).log = vi.fn()
+        ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { authorize: true } }, call: vi.fn((_name: string, _method: string, epoch: number) => epoch === 3) }
+      })
+
+      function admitted(f: World) {
+        wire(f)
+        const admission = new_operation_admission(() => f.actor, () => f.manager.get_status_snapshot() as any)
+        expect(admission.begin(identity).ok).toBe(true)
+        const started = start(f, PLAN, [CHAIN])
+        const active: any = f.manager.get_status_snapshot().active_batch
+        const ref = { batch_id: active.batch_id, batch_generation: active.batch_generation, batch_ref: active.batch_ref }
+        expect(admission.slot(KEY, 1, { ok: true, operation: 'execute_construction_plan', batch_refs: [ref] }).ok).toBe(true)
+        expect(admission.finish(KEY, { ok: true }).record?.state).toBe('admitted')
+        return { admission, layout_id: started.layout_id }
+      }
+
+      it('settles a cancelled layout execution as partial with the exact placed and unplaced node ids, never completed', () => {
+        const f = build()
+        const { admission, layout_id } = admitted(f)
+        expect(admission.status().records[0].state).toBe('admitted')
+        expect(place_next(f)?.[0]).toBe(true)
+        f.manager.cancel_all_tasks('test_cancel')
+        expect(admission.status().records[0]).toMatchObject({
+          state: 'partial',
+          ok: false,
+          error: 'exact_construction_layout_partial',
+          layout_id,
+          placed_node_ids: [`layout-${layout_id}:n0`],
+          not_placed_node_ids: [`layout-${layout_id}:n2`, `layout-${layout_id}:n1`],
+        })
+        // Settlement closes the record's execution; the layout then reads as paused with its remainder.
+        expect(layout(layout_id)).toMatchObject({ executions: [{ settled: { placed: [0], not_placed: [2, 1] } }] })
+        expect(construction_layout_status(layout_id, { actor: f.actor })).toMatchObject({ layout: { state: 'paused', pause_reason: 'remainder_unplaced' } })
+
+        // The partial classification was sealed when the closing receipt was retained, so it outlives that receipt.
+        expect((globalThis as any).storage.sgluna_operation_admissions[0]).toMatchObject({ state: 'partial', error: 'exact_construction_layout_partial', layout_id })
+        expect(pinned_operation_batch_refs()).toEqual([])
+        ;(globalThis as any).storage.sgluna_task_receipt_journal.length = 0
+        expect(admission.status().records[0]).toMatchObject({ state: 'partial', placed_node_ids: ['layout-1:n0'] })
+      })
+
+      it('completes the admission only when the batch really completed with every node placed', () => {
+        const f = build()
+        const { admission, layout_id } = admitted(f)
+        for (let i = 0; i < 3; i++) expect(place_next(f)?.[0]).toBe(true)
+        expect(layout(layout_id).state).toBe('complete')
+        expect(admission.status().records[0]).toMatchObject({ state: 'completed' })
+      })
+
+      it.each([
+        ['another operation', () => { (globalThis as any).storage.sgluna_operation_admissions[0].slots[0].operation = 'place_entity' }],
+        ['another generation', () => { (globalThis as any).storage.sgluna_operation_admissions[0].generation += 1 }],
+        ['an unusable actor identity', () => { (globalThis as any).storage.sgluna_operation_admissions[0].actor_id = 0 }],
+        ['a queued task count that differs from the receipt', () => { (globalThis as any).storage.sgluna_operation_admissions[0].slots[0].queued_tasks += 1 }],
+        ['a receipt that is not a cancellation', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].state = 'uncertain' }],
+        ['a non-placement task', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].task_types[0] = 'mining' }],
+        ['a refused task', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].refused_count = 1 }],
+        ['a receipt of another batch', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].batch_ref = 'batch-g1-99' }],
+        ['a receipt older than the admission', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].tick = 1 }],
+        ['a layout of another batch', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].executions[0].batch_ref = 'batch-g1-99' }],
+        ['a layout of another actor', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].actor_id = 7 }],
+        ['an execution that queued another number of nodes', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].executions[0].queued_nodes.pop() }],
+        ['two layouts claiming the same batch', () => {
+          const layouts = (globalThis as any).storage.sgluna_construction_layouts
+          const original = Object.values<any>(layouts)[0]
+          layouts[9999] = { ...original, layout_id: 9999 }
+        }],
+      ])('leaves the admission unsettled for %s', (_name, mutate) => {
+        const f = build()
+        const { admission, layout_id } = admitted(f)
+        expect(place_next(f)?.[0]).toBe(true)
+        f.manager.cancel_all_tasks('test_cancel')
+        // Retaining the closing receipt already sealed the partial; take the seal off to judge the evidence again.
+        const row = (globalThis as any).storage.sgluna_operation_admissions[0]
+        expect(row.state).toBe('partial')
+        Object.assign(row, { state: 'admitted', ok: true, error: undefined, layout_id: undefined, placed_node_ids: undefined, not_placed_node_ids: undefined })
+        layout(layout_id).executions[0].settled = undefined
+        mutate()
+        expect(admission.status().records[0].state).not.toBe('partial')
+        // Nothing was settled on the strength of a link that did not hold.
+        expect(layout(layout_id)?.executions?.[0]?.settled).toBeUndefined()
+      })
     })
   })
 })
