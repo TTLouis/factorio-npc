@@ -18,6 +18,7 @@
 //
 // A pause with a missing or unknown class is not guessed at. It never auto-resumes, and the caller reports it
 // (recovery.pause_unclassified) so the producer that forgot to declare a class gets fixed.
+import { createHash } from 'node:crypto'
 
 export const PAUSE_CLASS = Object.freeze({
   TRANSPORT: 'transport',
@@ -55,6 +56,15 @@ export const AUTO_RESUMABLE_PAUSE_CLASSES = Object.freeze([PAUSE_CLASS.TRANSPORT
 //   per_goal  per goal_id in total. Never reset by progress; a new goal starts again at zero.
 // Whichever is reached first leaves the plan paused with a UI line (recovery.auto_resume_exhausted, limit_kind step | goal).
 export const MODEL_RECOVERABLE_RESUME_LIMITS = Object.freeze({ per_step: 2, per_goal: 6 })
+
+// Run BB lane B: an executor-review pause carries the evidence it was raised on, so a pause that repeats the same blocker on the
+// same step with no verified progress is not resumed generically again. The evidence is the review reason plus a digest of the
+// rationale text with case, punctuation and spacing removed; any other wording is a changed fact and resumes as before.
+export const REVIEW_BLOCKER_UNCHANGED_REASON = 'review_blocker_unchanged'
+export function reviewPauseEvidence({ reason, rationale }) {
+  const normalized = String(rationale ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  return { kind: 'executor_review', reason: String(reason ?? ''), digest: createHash('sha256').update(`${reason}\n${normalized}`).digest('hex').slice(0, 16) }
+}
 
 // The wait before a model_recoverable resume fires. No backoff curve: the cause is not load, and the attempts are few.
 export const MODEL_RECOVERABLE_RESUME_DELAY_MS = 15_000

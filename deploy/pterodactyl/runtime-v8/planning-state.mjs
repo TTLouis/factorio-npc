@@ -406,6 +406,9 @@ export const PLANNING_EVENT = Object.freeze({
   // A model_recoverable pause is being resumed automatically (pause-class.mjs). The reducer counts the attempt per step identity
   // and per goal, durably, and refuses an attempt whose goal, plan, plan version or step is no longer the live one.
   RUN_AUTO_RESUME_STARTED: 'RUN_AUTO_RESUME_STARTED',
+  // The evidence an executor-review pause was raised on (review reason + rationale digest), kept beside the resume allowance so a
+  // repeat of the same blocker on the same step with no verified progress is not resumed generically again (Run BB lane B).
+  RUN_PAUSE_EVIDENCE_RECORDED: 'RUN_PAUSE_EVIDENCE_RECORDED',
   NEXT_SLICE_TRANSITION: 'NEXT_SLICE_TRANSITION',
   // Single-writer runtime fields. null clears the field.
   CONDITION_WAIT_RECORDED: 'CONDITION_WAIT_RECORDED',
@@ -739,9 +742,45 @@ function restoreAutoResume(raw) {
       attempts: Math.min(entry.attempts, 1000),
       mark: text(entry.mark, 80),
       last_at: finiteNumber(entry.last_at) ?? 0,
+      ...(restorePauseEvidence(entry.resumed_evidence, true) ? { resumed_evidence: restorePauseEvidence(entry.resumed_evidence, true) } : {}),
     }]
   }).slice(-AUTO_RESUME_RETAINED_STEPS)
-  return { goal_id: goalId, goal_total: Number.isSafeInteger(raw.goal_total) && raw.goal_total >= 0 ? Math.min(raw.goal_total, 10000) : 0, steps }
+  return { goal_id: goalId, goal_total: Number.isSafeInteger(raw.goal_total) && raw.goal_total >= 0 ? Math.min(raw.goal_total, 10000) : 0, steps,
+    ...(restorePauseEvidence(raw.pause_evidence, false) ? { pause_evidence: restorePauseEvidence(raw.pause_evidence, false) } : {}) }
+}
+
+// The review evidence stored beside the resume allowance. `resumed` is the copy kept on a step entry (it names the resume request
+// instead of the step key). Anything malformed is dropped: a missing record only means the next repeat resumes as before.
+function restorePauseEvidence(raw, resumed) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const kind = text(raw.kind, 40); const reason = text(raw.reason, 80); const digest = text(raw.digest, 64)
+  if (!kind || !reason || !digest || !Number.isSafeInteger(raw.pause_count)) return null
+  const identity = { pause_count: raw.pause_count, paused_at: finiteNumber(raw.paused_at) ?? 0 }
+  if (resumed) return { kind, reason, digest, ...identity, request_id: text(raw.request_id, 200) }
+  const stepKey = text(raw.step_key, 520)
+  return stepKey ? { step_key: stepKey, ...identity, kind, reason, digest, at: finiteNumber(raw.at) ?? 0 } : null
+}
+
+/**
+ * Run BB lane B: the executor-review pause now standing repeats the blocker evidence of the pause this step was last resumed
+ * from, with no verified progress between them. Same step identity, same review reason, same rationale digest. Returns the
+ * identities of both pauses, or undefined when the evidence changed, progress happened, or either side is missing.
+ */
+export function reviewBlockerRepeat(state) {
+  const run = state?.run
+  if (!run?.paused || run.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE || !String(run.pause_reason ?? '').startsWith('executor_review:')) return undefined
+  const allowance = autoResumeAllowance(state)
+  if (!allowance.step_key || allowance.progressed || allowance.limit_kind === 'state') return undefined
+  const held = run.auto_resume?.goal_id === allowance.goal_id ? run.auto_resume : null
+  const previous = held?.steps?.find(item => item.step_key === allowance.step_key)?.resumed_evidence
+  const current = held?.pause_evidence
+  if (!previous || !current || current.step_key !== allowance.step_key || current.pause_count !== run.pause_count
+    || previous.pause_count === current.pause_count || previous.kind !== current.kind || previous.reason !== current.reason || previous.digest !== current.digest) return undefined
+  return { goal_id: allowance.goal_id, plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: allowance.step_id,
+    step_key: allowance.step_key, step_attempts: allowance.step_attempts, goal_attempts: allowance.goal_attempts,
+    evidence: { kind: current.kind, reason: current.reason, digest: current.digest },
+    previous_pause: { pause_count: previous.pause_count, paused_at: previous.paused_at, resume_request_id: previous.request_id },
+    current_pause: { pause_count: current.pause_count, paused_at: current.paused_at } }
 }
 
 function pauseCodeOf(reason) {
@@ -3482,6 +3521,10 @@ Object.assign(HANDLERS, {
       || text(event.step_id, 200) !== allowance.step_id) return state
     const held = run.auto_resume?.goal_id === state.goal.goal_id ? run.auto_resume : null
     const steps = (held?.steps ?? []).filter(entry => entry.step_key !== allowance.step_key)
+    // The evidence of the pause being resumed now, kept on the step so the next pause can be compared with it.
+    const pending = held?.pause_evidence
+    const resumed = pending?.step_key === allowance.step_key && pending.pause_count === run.pause_count
+      ? { kind: pending.kind, reason: pending.reason, digest: pending.digest, pause_count: pending.pause_count, paused_at: pending.paused_at, request_id: text(event.request_id, 200) } : null
     const next = {
       goal_id: state.goal.goal_id,
       goal_total: (held?.goal_total ?? 0) + 1,
@@ -3493,7 +3536,9 @@ Object.assign(HANDLERS, {
         attempts: allowance.step_attempts + 1,
         mark: allowance.mark,
         last_at: now,
+        ...(resumed ? { resumed_evidence: resumed } : {}),
       }].slice(-AUTO_RESUME_RETAINED_STEPS),
+      ...(pending ? { pause_evidence: pending } : {}),
     }
     return {
       ...state,
@@ -3508,6 +3553,26 @@ Object.assign(HANDLERS, {
         step_id: allowance.step_id,
         reason_code: `attempt_${allowance.step_attempts + 1}`,
       }),
+    }
+  },
+
+  [PLANNING_EVENT.RUN_PAUSE_EVIDENCE_RECORDED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const run = state.run ?? createEmptyRunState()
+    if (!run.paused || run.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return state
+    const allowance = autoResumeAllowance(state)
+    // Fail closed on stale correlation, as an auto-resume attempt does: the pause must be the live goal / plan / version / step's.
+    if (!allowance.step_key || allowance.boundary_key || text(event.plan_id, 200) !== allowance.plan_id
+      || event.plan_version !== allowance.plan_version || text(event.step_id, 200) !== allowance.step_id) return state
+    const kind = text(event.kind, 40); const reason = text(event.reason, 80); const digest = text(event.digest, 64)
+    if (!kind || !reason || !digest) return state
+    const held = run.auto_resume?.goal_id === state.goal.goal_id ? run.auto_resume : null
+    return {
+      ...state,
+      run: { ...run, auto_resume: { goal_id: state.goal.goal_id, goal_total: held?.goal_total ?? 0, steps: held?.steps ?? [],
+        pause_evidence: { step_key: allowance.step_key, pause_count: run.pause_count, paused_at: run.paused_at, kind, reason, digest, at: now } }, updated_at: now },
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.RUN_PAUSE_EVIDENCE_RECORDED, at: now, plan_id: allowance.plan_id, step_id: allowance.step_id, reason_code: reason }),
     }
   },
 

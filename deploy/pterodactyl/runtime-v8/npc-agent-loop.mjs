@@ -82,7 +82,7 @@ import {
   buildFluidsTruncated,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION, authorizationOf, checkGrant } from './authorization.mjs'
-import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, isProviderFailurePause, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
+import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, isProviderFailurePause, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, reviewPauseEvidence, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchFootprintOverlap } from './batch-footprint.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
@@ -3680,7 +3680,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const continuing = held.status !== PLAN_STATUS.BLOCKED
       && this.memory.claimReviewContinuation?.(key, activeStep.step_id, { requestId }) === true
     const pause = () => {
-      if (held.status !== PLAN_STATUS.BLOCKED) this.memory.pausePlan(key, `executor_review:${review.reason}`, { pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+      if (held.status === PLAN_STATUS.BLOCKED) return
+      this.memory.pausePlan(key, `executor_review:${review.reason}`, { pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+      // Run BB lane B: the pause keeps the evidence it was raised on, durably beside the resume allowance, so the supervisor can
+      // tell a repeated identical blocker from a changed one (considerPauseForAutoResume).
+      this.memory.recordPauseEvidence?.(key, { plan_id: held.plan_id, plan_version: held.plan_version, step_id: activeStep.step_id, ...reviewPauseEvidence(review) })
     }
     if (!continuing) pause()
     let chatMessage = continuing
