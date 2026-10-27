@@ -758,6 +758,82 @@ try {
       let targets = await readInserter()
       for (let attempt = 0; attempt < 40 && (targets.pickup === undefined || targets.drop === undefined); attempt++) { await delay(100); targets = await readInserter() }
       assert.equal(targets.pickup, sourceUnit, JSON.stringify(targets)); assert.equal(targets.drop, doneDst.unit_number, JSON.stringify(targets))
+      // Retained parts are read again before a resume: a second small layout is cancelled after its inserter is built and its
+      // item connection verified (the unconnected pole is still to come); the retained inserter is then turned on the engine.
+      {
+        await lua(`assert(a.insert{name="wooden-chest",count=2}==2); assert(a.insert{name="burner-inserter",count=1}==1); rcon.print("{}")`)
+        const rowPlan = (x, y, direction) => validate('native-l4-retained',
+          [{ entity_name: 'wooden-chest', x, y, slot: 'a' }, { entity_name: 'burner-inserter', x: x + 1, y, direction, slot: 'i' }, { entity_name: 'wooden-chest', x: x + 2, y, slot: 'b' },
+            { entity_name: 'small-electric-pole', x: x + 4, y }],
+          [{ kind: 'inserter', inserter: { slot: 'i' }, pickup: { slot: 'a' }, drop: { slot: 'b' } }])
+        const rowTried = []
+        let row
+        for (const [dx, dy] of [[-5, -5], [-5, 5], [-5, -1], [-5, 3], [3, -7], [3, 7], [-7, 2], [2, 2]]) {
+          const x = Math.floor(here.x + dx) + 0.5; const y = Math.floor(here.y + dy) + 0.5
+          for (const direction of [4, 12]) {
+            const result = await rowPlan(x, y, direction)
+            rowTried.push({ x, y, direction, ok: result.ok, code: result.error?.code })
+            if (result.ok === true) { row = { x, y, direction, validated: result }; break }
+          }
+          if (row) break
+        }
+        assert.ok(row, `a second free row for the retained-part layout: ${JSON.stringify(rowTried)}`)
+        const rowId = row.validated.validation_id
+        assert.equal(row.validated.placement_count, 4)
+        const rowStock = (await worldFacts()).world.inventory
+        await lua('game.tick_paused=true; rcon.print("{}")')
+        let rowStatus
+        try {
+          await executeAuthorizedBatch(rcon, session.epoch, [renderOperation(parseOperation(executeOp(row.validated)))])
+          for (let step = 0; step < 24; step++) {
+            await advance(1)
+            rowStatus = await layoutStatus(rowId)
+            if (rowStatus.nodes.filter(node => node.state === 'placed').length >= 3) break
+          }
+          assert.equal(rowStatus.nodes.filter(node => node.state === 'placed').length, 3, JSON.stringify(rowStatus))
+          assert.deepEqual(rowStatus.nodes.filter(node => node.state === 'placed').map(node => node.slot).sort(), ['a', 'b', 'i'], JSON.stringify(rowStatus))
+          await lua('remote.call("autorio_operations","cancel_all_tasks"); rcon.print("{}")')
+        }
+        finally {
+          await lua('game.tick_paused=false; rcon.print("{}")')
+        }
+        const rowIdle = Date.now() + 10000
+        for (;;) {
+          const status = await tool('getTaskStatus', {})
+          if (status.task_state === 'idle' && status.queue_length === 0 && !status.active_batch) break
+          assert.ok(Date.now() < rowIdle, 'native queue did not drain after the cancellation'); await delay(50)
+        }
+        const rowSettled = await layoutStatus(rowId)
+        const inserterNode = rowSettled.nodes.find(node => node.slot === 'i')
+        assert.equal(rowSettled.state, 'paused', JSON.stringify(rowSettled)); assert.equal(rowSettled.pause_reason, 'remainder_unplaced', JSON.stringify(rowSettled))
+        assert.equal(inserterNode.state, 'placed', JSON.stringify(rowSettled)); assert.equal(rowSettled.connections[0].state, 'verified', JSON.stringify(rowSettled))
+        const turn = quarter => lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${inserterNode.unit_number} then i=v end end; assert(i);
+          local before=i.direction; i.direction=(before+${quarter})%16; rcon.print(helpers.table_to_json({before=before,after=i.direction,pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil}))`)
+        const turned = await turn(4)
+        assert.notEqual(turned.after, turned.before, JSON.stringify(turned))
+        const quietTurned = quiet(await worldFacts())
+        const paused = await layoutStatus(rowId)
+        assert.equal(paused.state, 'paused', JSON.stringify(paused))
+        assert.match(paused.pause_reason, new RegExp(`^retained_node_changed: ${inserterNode.node_id}$`), JSON.stringify(paused))
+        const refused = await tool('resumeConstructionLayout', { layout_id: rowId })
+        assert.equal(refused.ok, false, JSON.stringify(refused)); assert.equal(refused.error?.code, 'LAYOUT_RETAINED_NODE_CHANGED', JSON.stringify(refused))
+        assert.deepEqual(quiet(await worldFacts()), quietTurned, 'a refused resume builds and spends nothing')
+        assert.equal(paused.nodes.find(node => node.slot === 'i').unit_number, inserterNode.unit_number, 'the retained inserter keeps its unit and is never rebuilt')
+        assert.equal(paused.executions_used, 1)
+        // Turned back, the retained part holds again; the same layout then builds its last node and completes.
+        const restored = await turn(12)
+        assert.equal(restored.after, turned.before, JSON.stringify(restored))
+        const resumeRow = await tool('resumeConstructionLayout', { layout_id: rowId })
+        assert.equal(resumeRow.ok, true, JSON.stringify(resumeRow)); assert.equal(resumeRow.placement_count, 1)
+        await operation('execute_construction_plan', { validation_id: resumeRow.validation_id, placement_count: resumeRow.placement_count })
+        const rowDone = await layoutStatus(rowId)
+        assert.equal(rowDone.state, 'complete', JSON.stringify(rowDone)); assert.equal(rowDone.executions_used, 2)
+        assert.equal(rowDone.nodes.find(node => node.slot === 'i').unit_number, inserterNode.unit_number)
+        assert.equal(rowDone.connections[0].state, 'verified')
+        const rowAfter = (await worldFacts()).world.inventory
+        assert.equal(stock(rowAfter, 'wooden-chest'), stock(rowStock, 'wooden-chest') - 2); assert.equal(stock(rowAfter, 'burner-inserter'), stock(rowStock, 'burner-inserter') - 1)
+        evidence.l4_retained = { rowTried, row, rowSettled, turned, paused, refused, restored, resumeRow, rowDone }
+      }
       // The expiry wait outlived the 3600-tick freshness of the water read the later offshore-pump steps depend on (the engine
       // fact is that a placement candidate only accepts a recent fluid-source observation); observe it again, as at setup.
       const water = await tool('getFluidSourceTiles', { fluid_name: 'water', search_radius: 16, limit: 8 })
