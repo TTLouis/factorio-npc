@@ -7,8 +7,8 @@ import { find_world_entities } from './npc_vision'
 import { item_output_position } from './placement_candidates'
 import { rotate_cardinal, vector_xy } from './placement_geometry'
 import { planned_placement_footprint } from './placement_preflight'
-import type { BatchIdentity, LayoutEndpointRef, LayoutNode, LayoutRecord, LayoutRecordConnection } from './construction_layout_record'
-import { COMPLETED_NODE_MISSING, current_execution, execution_pending, LAYOUT_EXECUTIONS_MAX, REMAINDER_UNPLACED, settle_execution } from './construction_layout_record'
+import type { BatchIdentity, LayoutEndpointRef, LayoutNode, LayoutRecord, LayoutRecordConnection, RetainedEntityFacts } from './construction_layout_record'
+import { COMPLETED_NODE_MISSING, CONNECTION_NO_LONGER_VERIFIED, current_execution, execution_pending, LAYOUT_EXECUTIONS_MAX, REMAINDER_UNPLACED, RETAINED_NODE_CHANGED, retained_node_changed, settle_execution, settlement_owned_reason } from './construction_layout_record'
 
 // Typed connections between the placements of one validated construction plan, and the layout record that tracks them while
 // the plan executes. Everything here reads engine and prototype facts (prototype `type`, the inserter vectors, the drill's
@@ -656,21 +656,69 @@ function pause_by_settlement(record: LayoutRecord, reason: string) {
     pause(record, reason)
     return
   }
-  const current = record.pause_reason
-  if (current === undefined || current === REMAINDER_UNPLACED || current.startsWith(COMPLETED_NODE_MISSING)) record.pause_reason = reason
+  if (settlement_owned_reason(record.pause_reason)) record.pause_reason = reason
+}
+
+function entity_facts(entity: LuaEntity): RetainedEntityFacts {
+  const direction = protected_read(() => entity.direction as number)
+  return { name: entity.name, position: { x: entity.position.x, y: entity.position.y }, direction: typeof direction === 'number' ? direction : undefined }
+}
+
+// Re-reads a connection that was verified when its last entity was built, against the entities as they stand now (the same
+// native check as at placement). Undefined when it still holds, else why not.
+function connection_reproof(actor: ControlledActor, record: LayoutRecord, connection: LayoutRecordConnection): string | undefined {
+  const entities: Record<string, LuaEntity> = {}
+  for (const role of roles_of(connection)) {
+    const endpoint = connection.endpoints[role]
+    if (endpoint.slot !== undefined) {
+      const node = node_of(record, endpoint)
+      const entity = node !== undefined && node.state === 'placed' ? live_node_entity(actor, node) : undefined
+      if (!entity) return `${CONNECTION_NO_LONGER_VERIFIED}: ${connection.index} (${connection.kind}) ${role} is not an existing placed node`
+      entities[role] = entity
+      continue
+    }
+    const view = resolve_existing_view(actor, endpoint.unit_number!)
+    if (!view?.entity) return `${CONNECTION_NO_LONGER_VERIFIED}: ${connection.index} (${connection.kind}) ${role} ${endpoint.unit_number} is no longer an existing entity of this surface and force`
+    entities[role] = view.entity
+  }
+  const verified = verify_native(connection, entities)
+  return verified.holds ? undefined : `${CONNECTION_NO_LONGER_VERIFIED}: ${connection.index} (${connection.kind}) does not hold on the entities as they stand`
+}
+
+// What a retained part of a layout (a placed node, a verified connection) no longer is, read from the game, or undefined: the
+// first node whose entity was changed, else the first verified connection that no longer holds.
+function retained_reproof(actor: ControlledActor, record: LayoutRecord): string | undefined {
+  for (const node of record.nodes) {
+    if (node.state !== 'placed') continue
+    const entity = live_node_entity(actor, node)
+    if (!entity) return `${RETAINED_NODE_CHANGED}: ${node.node_id} cannot be read`
+    if (retained_node_changed(node, entity_facts(entity))) return `${RETAINED_NODE_CHANGED}: ${node.node_id}`
+  }
+  for (const connection of record.connections) {
+    if (connection.state !== 'verified') continue
+    const reason = connection_reproof(actor, record, connection)
+    if (reason !== undefined) return reason
+  }
+  return undefined
 }
 
 // Settles a layout whose execution may be over. While its placement tasks are still the open task batch nothing changes. Once
 // they are not (finished, cancelled, the batch replaced, the game restarted), every node the execution queued but did not bind
 // was not built by it (binding is atomic with create_entity) and becomes not_placed; a placed node whose entity is gone
-// becomes missing. A layout that placed everything and verified every connection stays complete. Otherwise it is paused, with
-// the reason that stopped it: a missing node, a connection that does not hold, or the unplaced remainder.
+// becomes missing. With an actor the retained parts are read again: a placed node whose entity was moved or turned, or a
+// verified connection that no longer holds, pauses the layout with that reason (and stops a resume) until it is restored.
+// A layout that placed everything and verified every connection stays complete. Otherwise it is paused, with the reason that
+// stopped it: a missing node, a retained part that changed, a connection that does not hold, or the unplaced remainder.
 export function settle_construction_layout(record: LayoutRecord, context: SettlementContext) {
   if (record.state === 'complete') return record
   const execution = current_execution(record)
   if (execution !== undefined && execution_pending(execution, context.active_batch)) return record
+  const actor = context.actor
   if (execution !== undefined) {
-    settle_execution(record, execution, game.tick)
+    settle_execution(record, execution, game.tick, actor === undefined ? undefined : (node) => {
+      const entity = live_node_entity(actor, node)
+      return entity === undefined ? undefined : entity_facts(entity)
+    })
   }
   else {
     for (const node of record.nodes) {
@@ -680,16 +728,23 @@ export function settle_construction_layout(record: LayoutRecord, context: Settle
   let first_missing: LayoutNode | undefined
   let unplaced = 0
   for (const node of record.nodes) {
-    if (node.state === 'placed' && context.actor !== undefined) {
-      const entity = live_node_entity(context.actor, node)
-      if (entity === undefined || entity.name !== node.entity_name) node.state = 'missing'
-    }
+    if (node.state === 'placed' && actor !== undefined && live_node_entity(actor, node) === undefined) node.state = 'missing'
     if (node.state === 'missing' && first_missing === undefined) first_missing = node
     if (node.state === 'not_placed') unplaced++
   }
+  if (actor !== undefined) record.retained_problem = first_missing === undefined ? retained_reproof(actor, record) : undefined
   if (first_missing !== undefined) pause_by_settlement(record, `${COMPLETED_NODE_MISSING}: ${first_missing.node_id}`)
+  else if (record.retained_problem !== undefined) pause_by_settlement(record, record.retained_problem)
   else if (unplaced > 0) pause_by_settlement(record, REMAINDER_UNPLACED)
-  else settle_layout(record)
+  else {
+    // Nothing is wrong and nothing is left: a pause that only a settlement wrote is lifted, and the layout completes if every
+    // connection is verified.
+    if (record.state === 'paused' && settlement_owned_reason(record.pause_reason)) {
+      record.state = 'running'
+      record.pause_reason = undefined
+    }
+    settle_layout(record)
+  }
   return record
 }
 
@@ -753,6 +808,12 @@ export function layout_resume_problem(record: LayoutRecord, node_indices: number
     if (connection.state === 'mismatch') {
       return { code: 'LAYOUT_CONNECTION_MISMATCH', message: `connection ${connection.index} (${connection.kind}) does not hold on the placed entities` }
     }
+  }
+  // What the last settlement that could read the game found: a retained node or verified connection that no longer holds. A
+  // retained node is never rebuilt, so the layout stays paused until the game shows it as it was built.
+  if (record.retained_problem !== undefined) {
+    const node_problem = record.retained_problem.startsWith(RETAINED_NODE_CHANGED)
+    return { code: node_problem ? 'LAYOUT_RETAINED_NODE_CHANGED' : 'LAYOUT_CONNECTION_NO_LONGER_VERIFIED', message: record.retained_problem }
   }
   if ((record.executions_used ?? 1) >= (record.executions_max ?? LAYOUT_EXECUTIONS_MAX)) {
     return { code: 'LAYOUT_ALLOWANCE_EXHAUSTED', message: `construction layout ${record.layout_id} has used its ${record.executions_max ?? LAYOUT_EXECUTIONS_MAX} executions` }
@@ -993,6 +1054,8 @@ export function record_layout_node_placed(actor: ControlledActor, layout_node: {
   node.state = 'placed'
   node.unit_number = entity.unit_number
   node.placed_tick = game.tick
+  node.placed_position = { x: entity.position.x, y: entity.position.y }
+  node.placed_direction = protected_read(() => entity.direction as number)
 
   for (const connection of record.connections) {
     if (connection.state !== 'pending' || !involves(record, connection, node)) continue
@@ -1028,7 +1091,18 @@ export function record_layout_node_placed(actor: ControlledActor, layout_node: {
     connection.state = verified.holds ? 'verified' : 'mismatch'
     if (!verified.holds) pause(record, `connection ${connection.index} (${connection.kind}) does not hold on the placed entities`)
   }
-  settle_layout(record)
+  // A layout completes only if what it retained from earlier executions still is what was built and verified.
+  let remaining = 0
+  for (const other of record.nodes) {
+    if (other.state !== 'placed') remaining++
+  }
+  if (remaining > 0) {
+    settle_layout(record)
+    return
+  }
+  record.retained_problem = retained_reproof(actor, record)
+  if (record.retained_problem !== undefined) pause(record, record.retained_problem)
+  else settle_layout(record)
 }
 
 // A queued node of a layout failed or was refused: the layout cannot continue by itself. Keeps the first reason.

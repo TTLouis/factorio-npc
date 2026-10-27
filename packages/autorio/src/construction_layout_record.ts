@@ -8,10 +8,14 @@ import type { PlacementPoint } from './placement_geometry'
 // record at creation; nothing resets it.
 export const LAYOUT_EXECUTIONS_MAX = 3
 
-// The pause reason a settlement writes when nodes remain unplaced; a reason set by an event (a failed node, a connection that
-// does not hold) is never replaced by it.
+// Pause reasons a settlement writes itself. A reason set by an event (a failed node, a connection that does not hold when it
+// is built) is never replaced by one of these.
 export const REMAINDER_UNPLACED = 'remainder_unplaced'
 export const COMPLETED_NODE_MISSING = 'completed_node_missing'
+export const RETAINED_NODE_CHANGED = 'retained_node_changed'
+export const CONNECTION_NO_LONGER_VERIFIED = 'connection_no_longer_verified'
+
+const POSITION_EPSILON = 0.001
 
 export interface LayoutEndpointRef {
   slot?: string
@@ -33,6 +37,9 @@ export interface LayoutNode {
   state: 'queued' | 'placed' | 'not_placed' | 'missing'
   unit_number?: number
   placed_tick?: number
+  /** What the built entity reported when it was bound: a retained node is only kept while its entity still reports these. */
+  placed_position?: PlacementPoint
+  placed_direction?: number
 }
 
 export interface LayoutRecordConnection {
@@ -53,8 +60,8 @@ export interface LayoutExecution {
   queued_tick: number
   /** Node indices this execution queued, in execution order. */
   queued_nodes: number[]
-  /** Set once the execution ended: which of its nodes were placed and which were not. */
-  settled?: { tick: number, placed: number[], not_placed: number[] }
+  /** Set once the execution ended: which of its nodes were placed, which were not, and which were placed and are gone. */
+  settled?: { tick: number, placed: number[], not_placed: number[], missing?: number[] }
 }
 
 export interface LayoutRecord {
@@ -73,12 +80,21 @@ export interface LayoutRecord {
   executions_used: number
   executions_max: number
   executions: LayoutExecution[]
+  /** Set by a settlement that could read the game: a retained node or verified connection that no longer holds. */
+  retained_problem?: string
 }
 
 export interface BatchIdentity {
   batch_id: number
   batch_generation: number
   batch_ref: string
+}
+
+// The part of an engine entity a retained node is compared with.
+export interface RetainedEntityFacts {
+  name: string
+  position: PlacementPoint
+  direction?: number
 }
 
 export function current_execution(record: LayoutRecord): LayoutExecution | undefined {
@@ -96,21 +112,42 @@ export function execution_pending(execution: LayoutExecution, active_batch: Batc
     && execution.batch_generation === active_batch.batch_generation
 }
 
-// Settles a finished execution from the record alone. Placing a node binds its unit_number in the same call as create_entity,
-// so a node of this execution that is still queued was not built by it: it becomes not_placed. Idempotent: an execution is
-// settled once.
-export function settle_execution(record: LayoutRecord, execution: LayoutExecution, tick: number) {
+// Whether a placed node's entity no longer is what was built: another prototype, moved, or turned. Compared with the facts the
+// entity reported when it was bound (the planned ones for a record that predates them); a direction that cannot be read is
+// not compared.
+export function retained_node_changed(node: LayoutNode, entity: RetainedEntityFacts) {
+  if (entity.name !== node.entity_name) return true
+  const position = node.placed_position ?? node.position
+  if (math.abs(entity.position.x - position.x) > POSITION_EPSILON || math.abs(entity.position.y - position.y) > POSITION_EPSILON) return true
+  const direction = node.placed_direction ?? node.direction
+  return entity.direction !== undefined && entity.direction !== direction
+}
+
+// Whether a reason is one a settlement wrote itself (and may therefore rewrite).
+export function settlement_owned_reason(reason: string | undefined) {
+  return reason === undefined || reason === REMAINDER_UNPLACED || reason.startsWith(COMPLETED_NODE_MISSING)
+    || reason.startsWith(RETAINED_NODE_CHANGED) || reason.startsWith(CONNECTION_NO_LONGER_VERIFIED)
+}
+
+// Settles a finished execution from the record, and from the game when `resolve` can read the entity a node was bound to.
+// Placing a node binds its unit_number in the same call as create_entity, so a node of this execution that is still queued was
+// not built by it: it becomes not_placed. A bound node whose entity can no longer be read becomes missing. Idempotent: an
+// execution is settled once.
+export function settle_execution(record: LayoutRecord, execution: LayoutExecution, tick: number, resolve?: (node: LayoutNode) => RetainedEntityFacts | undefined) {
   if (execution.settled !== undefined) return execution.settled
   const placed: number[] = []
   const not_placed: number[] = []
+  const missing: number[] = []
   for (const index of execution.queued_nodes) {
     const node = record.nodes[index]
     if (node === undefined) continue
     if (node.state === 'queued') node.state = 'not_placed'
+    if (node.state === 'placed' && resolve !== undefined && resolve(node) === undefined) node.state = 'missing'
     if (node.state === 'not_placed') not_placed.push(index)
+    else if (node.state === 'missing') missing.push(index)
     else placed.push(index)
   }
-  execution.settled = { tick, placed, not_placed }
+  execution.settled = missing.length > 0 ? { tick, placed, not_placed, missing } : { tick, placed, not_placed }
   return execution.settled
 }
 
