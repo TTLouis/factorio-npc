@@ -3,7 +3,8 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports, complete_live_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
-import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, placement_tile_size, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import { resolve_entity_placement_item } from './placement_item'
 import { resolve_exact_entity } from './entity_reference'
 import { pole_candidate_facts, pole_reach, protected_read } from './electric_facts'
 import { find_world_entities } from './npc_vision'
@@ -25,6 +26,10 @@ const CANDIDATE_TTL_TICKS = 60 * 60
 // many checks the rest count as rejected, so a dense forest or base cannot stall the single simulation thread.
 const MAX_CLEARANCE_PROBES = 400
 const CARDINAL_DIRECTIONS = [0, 4, 8, 12]
+const MAX_REGION_RADIUS = 256
+const MAX_REGION_SIDE = 512
+// Same tolerance as the step contract's entity_count radius check, so a centre on the boundary is inside.
+const REGION_EPSILON = 0.000001
 
 export interface PlacementCandidateRequest {
   entity_name: string
@@ -43,7 +48,15 @@ export interface PlacementCandidateRequest {
   // when no centre is given, and a build never clears it.
   anchor?: PlacementAnchor
   limit?: number
+  // A hard spatial constraint on the candidate: only positions whose snapped entity centre lies inside it
+  // (boundary inclusive) are candidates. It is applied before ranking and truncation, and it, not radius, sets
+  // the area that is searched.
+  region?: PlacementRegion
 }
+
+export type PlacementRegion =
+  | { shape: 'circle', center: { x: number, y: number }, radius: number }
+  | { shape: 'box', left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
 
 export interface PlacementAnchor {
   unit_number: number
@@ -93,6 +106,8 @@ export interface PlacementCandidate {
   // Entities in the footprint (natural obstructions, the NPC's own idle entities)
   // that placing this candidate mines into the actor inventory first.
   clears?: ClearableEntity[]
+  // Present (true) only when the request carried a region: the snapped centre lies inside it.
+  in_region?: boolean
   preservation_guard?: NativeFluidGuard
 }
 interface NativeFluidGuard {
@@ -115,6 +130,8 @@ interface PlacementCandidateSet {
   force_index: number
   actor_id?: number
   target_resource?: string
+  // The hard region the set was generated under; execution re-checks every candidate against it.
+  region?: PlacementRegion
   // Entities placement must never clear: the request's anchor and join target.
   protected_unit_numbers?: number[]
   candidates: PlacementCandidate[]
@@ -172,6 +189,94 @@ const COVERS_POSITION_DEFAULT_RADIUS = 3
 
 function squared_distance(a: { x: number, y: number }, b: { x: number, y: number }) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
+}
+
+function region_point(raw: any): { x: number, y: number } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const x = raw.x
+  const y = raw.y
+  if (typeof x !== 'number' || typeof y !== 'number' || !finite(x) || !finite(y)) return undefined
+  return { x, y }
+}
+
+/**
+ * Validate a request region and return a fresh normalized copy holding only the known fields. A circle needs a
+ * radius above 0 and at most 256; a box needs an ordered corner pair with each side at most 512.
+ */
+export function normalize_region(raw: unknown): { ok: true, region: PlacementRegion } | { ok: false, error: string } {
+  const value = raw as any
+  if (!value || typeof value !== 'object') return { ok: false, error: 'region must be an object with shape circle or box' }
+  if (value.shape === 'circle') {
+    const center = region_point(value.center)
+    if (!center) return { ok: false, error: 'region.center must be a finite {x, y}' }
+    const radius = value.radius
+    if (typeof radius !== 'number' || !finite(radius) || radius <= 0 || radius > MAX_REGION_RADIUS) {
+      return { ok: false, error: `region.radius must be above 0 and at most ${MAX_REGION_RADIUS}` }
+    }
+    return { ok: true, region: { shape: 'circle', center, radius } }
+  }
+  if (value.shape === 'box') {
+    const left_top = region_point(value.left_top)
+    const right_bottom = region_point(value.right_bottom)
+    if (!left_top || !right_bottom) return { ok: false, error: 'region.left_top and region.right_bottom must be finite {x, y}' }
+    if (left_top.x > right_bottom.x || left_top.y > right_bottom.y) {
+      return { ok: false, error: 'region.left_top must not exceed region.right_bottom on either axis' }
+    }
+    if (right_bottom.x - left_top.x > MAX_REGION_SIDE || right_bottom.y - left_top.y > MAX_REGION_SIDE) {
+      return { ok: false, error: `region box sides must be at most ${MAX_REGION_SIDE}` }
+    }
+    return { ok: true, region: { shape: 'box', left_top, right_bottom } }
+  }
+  return { ok: false, error: 'region.shape must be circle or box' }
+}
+
+/** Membership of a snapped entity centre, boundary inclusive. */
+export function region_contains(region: PlacementRegion, position: { x: number, y: number }) {
+  if (region.shape === 'circle') {
+    return math.sqrt(squared_distance(position, region.center)) <= region.radius + REGION_EPSILON
+  }
+  return position.x >= region.left_top.x && position.x <= region.right_bottom.x
+    && position.y >= region.left_top.y && position.y <= region.right_bottom.y
+}
+
+function region_center(region: PlacementRegion) {
+  if (region.shape === 'circle') return { x: region.center.x, y: region.center.y }
+  return { x: (region.left_top.x + region.right_bottom.x) / 2, y: (region.left_top.y + region.right_bottom.y) / 2 }
+}
+
+// The farthest the region reaches from a point along either axis (the Chebyshev reach the square rings measure).
+function region_reach(region: PlacementRegion, from: { x: number, y: number }) {
+  if (region.shape === 'circle') {
+    return math.max(math.abs(region.center.x - from.x), math.abs(region.center.y - from.y)) + region.radius
+  }
+  return math.max(
+    math.abs(region.left_top.x - from.x), math.abs(region.right_bottom.x - from.x),
+    math.abs(region.left_top.y - from.y), math.abs(region.right_bottom.y - from.y),
+  )
+}
+
+// Half of the prototype's larger tile side, from its own tile size and not from any entity name.
+function footprint_half_extent(prototype: any) {
+  const size = placement_tile_size(prototype, 0)
+  return math.max(size.tile_width, size.tile_height) / 2
+}
+
+/**
+ * Whether the actor holds the item that places this entity, from the same resolver execution uses. Candidates are
+ * listed either way; this only says whether a placement could be queued now. A missing item is a stock shortfall,
+ * not an absence of candidates.
+ */
+function material_status(actor: ControlledActor, entity_name: string) {
+  const resolved = resolve_entity_placement_item(entity_name)
+  if (!resolved.ok) return { status: 'unknown' as const, item_name: resolved.item_name, required_count: 1 }
+  const required_count = resolved.requirement.count
+  const item_name = resolved.requirement.item_name
+  const inventory = actor.get_main_inventory()
+  const held_count = inventory ? inventory.get_item_count(item_name) : undefined
+  if (typeof held_count !== 'number' || held_count !== held_count || held_count < 0) {
+    return { status: 'unknown' as const, item_name, required_count }
+  }
+  return { status: held_count >= required_count ? 'held' as const : 'stock_shortfall' as const, item_name, held_count, required_count }
 }
 
 function rotate_cardinal(vector: { x: number, y: number }, direction: number) {
@@ -549,6 +654,12 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   if (covers !== undefined && (!finite(covers.x) || !finite(covers.y))) {
     return { ok: false as const, error: 'covers_position must be finite', entity_name: request.entity_name }
   }
+  let region: PlacementRegion | undefined
+  if (request.region !== undefined) {
+    const parsed = normalize_region(request.region)
+    if (!parsed.ok) return { ok: false as const, code: 'invalid_region', error: parsed.error, entity_name: request.entity_name }
+    region = parsed.region
+  }
   let join_target: JoinTarget | undefined
   if (request.connects_to !== undefined) {
     const resolved = resolve_join_target(actor, request.connects_to)
@@ -585,9 +696,18 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       water_search: water }
     water_center = samples[0].position
   }
-  const center = request.center ?? covers ?? join_origin ?? water_center ?? anchor?.position ?? actor.position
+  const center = request.center ?? (region !== undefined ? region_center(region) : undefined) ?? covers ?? join_origin ?? water_center ?? anchor?.position ?? actor.position
   if (!finite(center.x) || !finite(center.y)) return { ok: false as const, error: 'center must be finite', entity_name: request.entity_name }
-  const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
+  // With a region the area to search is the region's, not the model's radius: the rings must reach every point of
+  // the region from the centre (one tile of grid snapping, plus the footprint half extent as margin). Past the
+  // native limit the search stays at the limit and says it could not cover the region.
+  let region_exceeds_search_limit = false
+  let radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
+  if (region !== undefined) {
+    const needed = math.max(1, math.ceil(region_reach(region, center) + 0.5 + footprint_half_extent(prototype)))
+    radius = math.min(MAX_RADIUS, needed)
+    region_exceeds_search_limit = needed > MAX_RADIUS
+  }
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
   const directions = directions_for(prototype)
   const check_args = placement_check_args(request.entity_name)
@@ -596,6 +716,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   const candidates: PlacementCandidate[] = []
   let scanned = 0
   let rejected = 0
+  let region_rejected = 0
   const obstruction_samples: Array<ReturnType<typeof placement_obstruction_sample>> = []
 
   function consider(position: { x: number, y: number }, direction: number, target?: LiveFluidPort) {
@@ -604,6 +725,12 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       let joins = false
       for (const port of candidate_fluid_ports(prototype, position, direction) ?? []) if (fluid_ports_join(target, port)) joins = true
       if (!joins) return undefined
+    }
+    // The region is a hard constraint: a centre outside it is neither probed nor ranked, so it can never take a
+    // returned slot from a candidate inside it. Counted, so an empty answer can say what it excluded.
+    if (region !== undefined && !region_contains(region, position)) {
+      region_rejected++
+      return undefined
     }
     if (reservation_intersection(actor.surface, placement_footprint(prototype, position, direction).world_box)) return undefined
     const natively_placeable = actor.surface.can_place_entity({
@@ -654,6 +781,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     }
     if (distance_origin !== undefined) candidate.distance_from_actor = math.sqrt(squared_distance(position, distance_origin))
     if (anchor !== undefined) candidate.distance_from_anchor = math.sqrt(squared_distance(position, anchor.position))
+    if (region !== undefined) candidate.in_region = true
     const output = item_output_position(prototype, position, direction)
     if (output !== undefined) candidate.item_output_position = output
     const fluid_ports = candidate_fluid_ports(prototype, position, direction)
@@ -730,6 +858,18 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   const incomplete_reason = clearance_probes_capped
     ? 'clearance_check_limit'
     : scanned > MAX_SCANNED_POSITIONS ? 'scan_limit' : undefined
+  // Solved join footprints do not depend on the ring radius, so only the ring search can fall short of a region.
+  const region_unsearched = region_exceeds_search_limit && join_target === undefined
+  // A region the rings cannot reach is a fact of the request itself, so it is named first; the legacy
+  // candidates_incomplete_reason beside it still carries a limit hit while searching.
+  const completeness_reason = region_unsearched ? 'region_exceeds_search_limit' : incomplete_reason
+  const spatial_status = selected.length > 0 ? 'candidates_found'
+    : completeness_reason !== undefined ? 'search_incomplete' : 'none_in_verified_scope'
+  // Advisory only: a prototype that cannot be read for its placement item reports unknown and never aborts the search.
+  const material = protected_read(() => material_status(actor, request.entity_name)) ?? { status: 'unknown' as const, item_name: undefined, required_count: 1 }
+  const execution_eligibility = selected.length === 0 ? 'no_candidate'
+    : material.status === 'held' ? 'eligible'
+      : material.status === 'stock_shortfall' ? 'stock_shortfall' : 'material_unknown'
 
   const reach = pole_reach(prototype)
   if (reach !== undefined) {
@@ -748,6 +888,22 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     candidates: selected,
     // Set beside the candidates, not among the rejected samples: more legal candidates may exist than were found.
     ...(incomplete_reason !== undefined ? { candidates_may_be_incomplete: true, candidates_incomplete_reason: incomplete_reason } : {}),
+    region,
+    region_semantics: region !== undefined ? 'entity_center' as const : undefined,
+    spatial_status,
+    search_completeness: {
+      complete: completeness_reason === undefined,
+      reason: completeness_reason,
+      search_shape: join_target === undefined ? 'square_rings' : 'solved_join_footprints',
+      search_center: center,
+      search_radius: radius,
+      evaluated_positions: math.min(scanned, MAX_SCANNED_POSITIONS),
+      legal_candidate_count: candidates.length,
+      returned_count: selected.length,
+      region_rejected_count: region_rejected,
+    },
+    material_status: material,
+    execution_eligibility,
     clearance_probes,
     center,
     radius,
@@ -826,6 +982,7 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
     surface_index: actor.surface.index,
     force_index: actor.force.index,
     target_resource: result.target_resource,
+    region: result.region,
     protected_unit_numbers: protect_list(result),
     candidates: stored,
   }
@@ -877,6 +1034,11 @@ function resolve_placement_candidate(
     }
   }
   if (!candidate) return { ok: false as const, error: 'placement candidate is unavailable' }
+  // Defensive: a set generated under a region only ever stores in-region candidates, so a position outside it means
+  // the stored set was altered or mixed up. Nothing is built from it.
+  if (set.region !== undefined && !region_contains(set.region, candidate.position)) {
+    return { ok: false as const, code: 'placement_candidate_outside_region', error: 'placement_candidate_outside_region: the candidate position is outside the region the set was generated under' }
+  }
 
   const prototype = prototypes.entity[set.entity_name]
   if (!prototype) return { ok: false as const, error: 'entity prototype is no longer available' }
@@ -1087,7 +1249,10 @@ export function placement_preservation_execution_allowed(actor: ControlledActor,
 export function placement_candidate_preflight(actor: ControlledActor, candidate_set_id: string, candidate_id: string) {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
   // A changed join keeps the stale-candidate class; its error text starts with connects_to_port_changed.
-  if (!resolved.ok) return { ok: false, code: 'placement_candidate_unavailable', error: resolved.error }
+  if (!resolved.ok) {
+    if ('code' in resolved && resolved.code === 'placement_candidate_outside_region') return { ok: false, code: 'placement_candidate_outside_region', error: resolved.error }
+    return { ok: false, code: 'placement_candidate_unavailable', error: resolved.error }
+  }
   // Only the native registry supplies entity identity and geometry.
   const { set, candidate } = resolved
   const planned_footprint = planned_placement_footprint(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
@@ -1096,7 +1261,12 @@ export function placement_candidate_preflight(actor: ControlledActor, candidate_
   const fluid_ports = candidate_fluid_ports(prototypes.entity[set.entity_name], candidate.position, candidate.direction)
   const join: any = preservation_candidate_join(actor, set, candidate)
   const relation_required = join.reason === 'relation_required' && fluid_ports && fluid_ports.length > 0
+  // The stored position, direction and region are what execution would use; the runtime checks them against the
+  // active step's committed scope and never trusts model-supplied coordinates.
   return { ...placement_item_preflight(actor, set.entity_name), ...(planned_footprint ? { planned_footprint } : {}),
+    candidate_position: { x: candidate.position.x, y: candidate.position.y },
+    candidate_direction: candidate.direction,
+    candidate_region: set.region,
     preservation_clears_count: candidate.clears?.length ?? 0,
     ...(relation_required ? { preservation_eligibility: { version: 1, kind: 'relation_required',
       actor_id: set.actor_id, surface_index: set.surface_index, force_index: set.force_index,
