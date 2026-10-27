@@ -38,6 +38,7 @@ import {
   STEP_CONTRACT_STATUS,
   applyPlanningEvent,
   autoResumeAllowance,
+  reviewBlockerRepeat,
   createEmptyPlanningState,
   evaluateDeadlockSignals,
   getActivePlan,
@@ -797,6 +798,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       step_id: stepId,
     })
     return { recorded: after !== before, allowance: autoResumeAllowance(after) }
+  }
+
+  // Keep the evidence the standing executor-review pause was raised on beside the resume allowance (planning-state.mjs). The reducer
+  // refuses it unless the pause is the live goal / plan / plan version / step's model_recoverable one; the result says whether it was kept.
+  recordPauseEvidence(key, { plan_id: planId, plan_version: planVersion, step_id: stepId, kind, reason, digest } = {}) {
+    const state = key ? this.planByNpc.get(key) : undefined
+    if (!key || !this.#reducerHoldsGoal(key, state)) return false
+    const before = this.planningByNpc.get(key)
+    const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.RUN_PAUSE_EVIDENCE_RECORDED, goal_id: state.goal_id, plan_id: planId, plan_version: planVersion, step_id: stepId, kind, reason, digest })
+    return after !== before
+  }
+
+  // The standing executor-review pause repeats the blocker evidence of the pause this step was last resumed from, with no verified
+  // progress in between: { evidence, previous_pause, current_pause, ... } or undefined.
+  reviewBlockerRepeat(key) {
+    return reviewBlockerRepeat(key ? this.planningByNpc.get(key) : undefined)
   }
 
   // The legacy board's active step must be the committed plan's active step (matched through the aligned step descriptions, since

@@ -4,7 +4,7 @@ import { parseInventoryCounts } from './handoff-packet.mjs'
 import { materialOwnerKey } from './material-ledger.mjs'
 import { normalizeCounts, recipeForItem } from './quantity-compiler.mjs'
 import { restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
-import { advanceProductionTask, createProductionTask, finiteInventoryTargets, machineFacts, normalizeProductionIntent, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, PRODUCTION_RESOURCE_BINDINGS_MAX, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
+import { advanceProductionTask, bindProductionFuelSource, createProductionTask, finiteInventoryTargets, machineFacts, normalizeProductionIntent, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, PRODUCTION_RESOURCE_BINDINGS_MAX, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
@@ -160,12 +160,15 @@ async function admissionJson(agent, s, tool, args) {
 }
 // A burner machine the task keeps running can only be refuelled from the
 // intent's fuel allowance. Unreadable identities are left to the runtime's
-// exact identity checks instead of being guessed here.
-async function burnerBindings(agent, s, intent) {
+// exact identity checks instead of being guessed here. A repair needs the
+// complete set (`complete`): one unreadable bound machine leaves it undefined.
+async function burnerBindings(agent, s, intent, { complete = false } = {}) {
   const burners = []
   for (const unit_number of new Set([...intent.producers, ...intent.feeders].map(row => row.unit_number))) {
     const detail = await admissionJson(agent, s, 'getEntityStatus', { unit_number })
-    if (detail?.found === true && detail.entity?.unit_number === unit_number && detail.entity.energy_source === 'burner') burners.push({ unit_number, name: detail.entity.name })
+    const read = detail?.found === true && detail.entity?.unit_number === unit_number && typeof detail.entity.energy_source === 'string'
+    if (!read && complete) return undefined
+    if (read && detail.entity.energy_source === 'burner') burners.push({ unit_number, name: detail.entity.name })
   }
   return burners
 }
@@ -200,6 +203,15 @@ async function burnerFuelFacts(agent, s, intent, burners) {
   }
   return fuels && { burners: facts, fuels: fuels.filter(fuel => fuel.fuel_value > 0 && facts.every(row => row.fuel_categories.includes(fuel.category))) }
 }
+// The resource binding that lets a task fetch more of an accepted fuel, from the fuel's native natural source. None
+// when the game names no source, the intent is at its binding limit, or the fuel is the direct-feed step's resource.
+function fuelSourceBinding(s, intent, fuel) {
+  const method = fuel.mined_from?.length ? 'gather_resource' : fuel.harvested_from?.length ? 'harvest_product' : undefined
+  const supply = s.step.execution_guidance?.materialSupply
+  if (!method || intent.resources.some(row => row.item_name === fuel.name) || intent.resources.length >= PRODUCTION_RESOURCE_BINDINGS_MAX
+    || (supply?.mode === 'direct_feed' && supply.resource === fuel.name)) return undefined
+  return { item_name: fuel.name, method }
+}
 const PRODUCTION_REPAIRS = {
   production_scope_mismatch: async (agent, s, intent) => {
     const named = intent.targets.some(row => finiteInventoryTargets(s.step.completion_contract).has(row.item_name))
@@ -208,24 +220,33 @@ const PRODUCTION_REPAIRS = {
     return repaired && { intent: { ...intent, targets: repaired.targets }, rule: repaired.rule, note: repaired.note }
   },
   production_fuel_allowance_missing: async (agent, s, intent, defaults) => {
-    const burners = await burnerBindings(agent, s, intent)
-    const facts = burners.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
+    const burners = await burnerBindings(agent, s, intent, { complete: true })
+    const facts = burners?.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
     const inventory = facts && parseInventoryCounts(await admissionRead(agent, s, 'getInventoryItems', {}))
     if (!inventory) return undefined
     const held = Object.fromEntries(inventory)
     const choice = chooseBurnerFuel({ fuels: facts.fuels, held, preferred: defaults?.burner_fuel })
     if (!choice.fuel) return undefined
     const fuel = choice.fuel
-    const count = fuelAllowanceCount(facts.burners, fuel, held[fuel.name] ?? 0)
-    const method = fuel.mined_from?.length ? 'gather_resource' : fuel.harvested_from?.length ? 'harvest_product' : undefined
-    // A binding the intent could not admit (binding limit, a direct-feed step's own resource) is left out: the fuel
-    // then comes from held stock only.
-    const supply = s.step.execution_guidance?.materialSupply
-    const bind = method && !intent.resources.some(row => row.item_name === fuel.name) && intent.resources.length < PRODUCTION_RESOURCE_BINDINGS_MAX
-      && !(supply?.mode === 'direct_feed' && supply.resource === fuel.name)
+    const bound = intent.resources.some(row => row.item_name === fuel.name)
+    const bind = bound ? undefined : fuelSourceBinding(s, intent, fuel)
+    // A fuel the task cannot bind a source for (binding limit, a direct-feed step's own resource) comes from held
+    // stock only, so its cap is what is held.
+    const count = Math.min(fuelAllowanceCount(facts.burners, fuel, held[fuel.name] ?? 0), bound || bind ? Infinity : held[fuel.name] ?? 0)
+    if (!(count > 0)) return undefined
     const categories = [...new Set(facts.burners.flatMap(row => row.fuel_categories))].join('+')
-    return { intent: { ...intent, resources: bind ? [...intent.resources, { item_name: fuel.name, method }] : intent.resources, fuel: { item_name: fuel.name, count } },
-      rule: choice.rule, note: `fuel set to ${fuel.name} with cap ${count} (${choice.rule}${choice.ignored ? `; your default burner_fuel ${choice.ignored} is not an accepted fuel these machines can get` : ''}) for the bound burner machines ${burnerList(facts.burners)}, which burn ${categories} fuel. The cap covers every bound burner at full draw for the task's ${PRODUCTION_LIMITS.duration_ms / 60000}-minute limit; one item goes in only when a machine runs out${bind ? `. Added resource ${fuel.name} via ${method} so the task can fetch more` : ''}` }
+    return { intent: { ...intent, resources: bind ? [...intent.resources, bind] : intent.resources, fuel: { item_name: fuel.name, count } },
+      rule: choice.rule, note: `fuel set to ${fuel.name} with cap ${count} (${choice.rule}${choice.ignored ? `; your default burner_fuel ${choice.ignored} is not an accepted fuel these machines can get` : ''}) for the bound burner machines ${burnerList(facts.burners)}, which burn ${categories} fuel. The cap covers every bound burner at full draw for the task's ${PRODUCTION_LIMITS.duration_ms / 60000}-minute limit${bound || bind ? '' : ', within the held stock because the task cannot bind a source for it'}; one item goes in only when a machine runs out${bind ? `. Added resource ${fuel.name} via ${bind.method} so the task can fetch more` : ''}` }
+  },
+  // Run BB lane A: an explicit allowance above held stock with no way to fetch more. The binding is added only for a
+  // fuel the bound burners accept and the game names a natural source for; targets and cap stay the executor's.
+  production_fuel_source_unbound: async (agent, s, intent) => {
+    const burners = await burnerBindings(agent, s, intent, { complete: true })
+    const facts = burners?.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
+    const fuel = facts?.fuels.find(row => row.name === intent.fuel?.item_name)
+    const bind = fuel && fuelSourceBinding(s, intent, fuel)
+    return bind && { intent: { ...intent, resources: [...intent.resources, bind] }, rule: 'the native source of the allowance fuel',
+      note: `Added resource ${fuel.name} via ${bind.method} so your fuel allowance ${fuel.name} ${intent.fuel.count} can be met; you hold less than that and the bound burner machines ${burnerList(facts.burners)} accept it` }
   },
 }
 // One admission rule for both seams: the executor parse refuses an intent the
@@ -244,9 +265,17 @@ export async function admitProductionIntent(agent, plan, { collectionOnly = fals
   if (supply?.mode === 'direct_feed' && intent.resources.some(row => row.item_name === supply.resource)) throw admissionRefusal(agent, 'production_supply_drift', 'Direct-feed steps cannot acquire their ore by hand')
   // An existing record is immutable and keeps its own allowance; it is checked
   // for identity below instead of being refused for a rule it predates.
-  if (!collectionOnly && !intent.fuel && !agent.memory.productionTasks?.has(recordKey(s))) {
+  if (!collectionOnly && !agent.memory.productionTasks?.has(recordKey(s))) {
     const burners = await burnerBindings(agent, s, intent)
-    if (burners.length) throw admissionRefusal(agent, 'production_fuel_allowance_missing', `Bound burner machines can only be refuelled from a fuel allowance {item_name, count}, which this intent omits: ${burnerList(burners)}`)
+    if (burners.length && !intent.fuel) throw admissionRefusal(agent, 'production_fuel_allowance_missing', `Bound burner machines can only be refuelled from a fuel allowance {item_name, count}, which this intent omits: ${burnerList(burners)}`)
+    // An allowance is a spending cap, not stock: fuel beyond what is held needs a binding to fetch it (Run BB lane A).
+    const fuel = intent.fuel
+    if (burners.length && !intent.resources.some(row => row.item_name === fuel.item_name)) {
+      const inventory = parseInventoryCounts(await admissionRead(agent, s, 'getInventoryItems', {}))
+      const held = inventory ? Object.fromEntries(inventory)[fuel.item_name] ?? 0 : 0
+      const direct = supply?.mode === 'direct_feed' && supply.resource === fuel.item_name
+      if (held < fuel.count) throw admissionRefusal(agent, 'production_fuel_source_unbound', `The fuel allowance ${fuel.item_name} ${fuel.count} for ${burnerList(burners)} is a cap, not stock: ${inventory ? `you hold ${held}` : 'held stock is unreadable'} and resources has no ${fuel.item_name} binding to fetch more. ${direct ? `This direct-feed step cannot acquire ${fuel.item_name} by hand, so lower the cap to what is held or choose another accepted fuel` : `Add resources {item_name: "${fuel.item_name}", method} or lower the cap to what is held`}`)
+    }
   }
   return { s, intent }
 }
@@ -304,6 +333,15 @@ export async function startProductionTask(agent, plan, { collectionOnly = false 
   return result === undefined ? agent.runTurn() : result
 }
 
+// The fuel source for a residual unbound-fuel halt, from the same native burner and fuel facts admission uses.
+// Undefined when any fact is unreadable or the fuel has no source the task may bind.
+async function residualFuelSource(agent, s, task) {
+  const burners = await burnerBindings(agent, s, task.intent, { complete: true })
+  const facts = burners?.length ? await burnerFuelFacts(agent, s, task.intent, burners) : undefined
+  const fuel = facts?.fuels.find(row => row.name === task.intent.fuel.item_name)
+  return fuel && fuelSourceBinding(s, task.intent, fuel)
+}
+
 export async function recoverProductionFailure(agent) {
   if (!agent.active || agent.currentPendingAmendment()) return undefined
   const s = scope(agent)
@@ -356,6 +394,20 @@ export async function continueProductionTask(agent) {
       catch (error) {
         await agent.assertCheckpointOwnerCurrent(s.owner)
         result = { action: 'pause', reason: error.message, task: { ...task, status: 'paused', pause_reason: error.message } }
+      }
+      if (result.action === 'pause' && !task.collection_only && !task.fuel_source && result.reason === `production_resource_unbound:${task.intent.fuel?.item_name}`) {
+        // Nothing ran for this halt, so the record before it is reconciled; the next pass recompiles from fresh facts.
+        const binding = await residualFuelSource(agent, s, task)
+        const repair = binding ? bindProductionFuelSource(task, binding) : undefined
+        await checked(agent, s.owner, agent.traceEvent('production.recovery', { plan_id: s.owner.planId, step_id: s.owner.stepId,
+          reason: result.reason, mechanism: 'fuel_source_binding', binding, recovery: repair?.task.recoveries ?? task.recoveries,
+          outcome: repair?.action ?? 'unproven' }))
+        if (repair?.action === 'reconcile') {
+          task = repair.task
+          await store(agent, s.owner, key, task)
+          continue
+        }
+        if (repair) result = repair
       }
       task = result.task
       await store(agent, s.owner, key, task)

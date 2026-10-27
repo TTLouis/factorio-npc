@@ -10,17 +10,22 @@ const clone = value => JSON.parse(JSON.stringify(value))
 export const CONTRACT_DEFECT_REASON = 'contract_translation_defect'
 export const CONTRACT_DEFECT_LIMIT = 1
 export class PreservationProofError extends Error {
-  constructor(code, { category = 'unproven', stage = 'capture' } = {}) {
+  // `detail`: bounded diagnostic facts (the refusal that tripped the guard, ledger counts). Traced, never decided on.
+  constructor(code, { category = 'unproven', stage = 'capture', detail } = {}) {
     super(code)
     this.name = 'PreservationProofError'
     this.code = code
     this.category = category
     this.stage = stage
+    // A harness guard, not a provider failure: its pause keeps this code as the reason (pause-class.mjs classifyRequestFailure).
+    this.pause_class = 'guard'
+    this.failure_code = code
+    if (detail && typeof detail === 'object' && !Array.isArray(detail)) this.detail = detail
   }
 }
 export function preservationFailure(error) {
   return error instanceof PreservationProofError
-    ? { code: error.code, category: error.category, stage: error.stage, pause_class: 'guard', retryable: false }
+    ? { ...(error.detail ?? {}), code: error.code, category: error.category, stage: error.stage, pause_class: 'guard', retryable: false }
     : undefined
 }
 const unproven = code => { throw new PreservationProofError(code) }

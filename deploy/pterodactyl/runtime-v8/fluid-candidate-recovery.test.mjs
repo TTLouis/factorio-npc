@@ -7,6 +7,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { argumentCorrectionAvailable, restorePlanningState, serializePlanningState, applyPlanningEvent } from './planning-state.mjs'
 import { checkFluidPreservationEligibility } from './contract-obligation-runtime.mjs'
 import { buildPendingOperation, sanitizePendingOperation } from './operation-reconciliation.mjs'
+import { planReply } from './task-loop-fixtures.mjs'
 
 for (const mismatch of [false, true]) test(`fluid candidate lifecycle after retained terminal navigation; host proof mismatch=${mismatch}`, async () => {
   const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8'))
@@ -429,5 +430,96 @@ test('malformed and other-goal stop markers fail closed without bypassing paused
     w.memory.planningByNpc.set(KEY, restored)
     assert.throws(() => w.agent.assertModelRecoveryAllowed(), /model_recovery_stop_invalid/)
     assert.equal(restorePlanningState(serializePlanningState(restored)).run.model_recovery_stop_fault, true)
+  }
+})
+
+// --- Run BB lane C (2026-10-26): the exhausted-correction guard names what spent and what tripped the credit ---
+
+const STOCK_UNVERIFIED = { ok: false, code: 'batch_stock_unverified_dependency', refusal_class: 'argument', operation: 'place_candidate', operation_index: 0 }
+const NOT_RECIPE_MACHINE = { ok: false, code: 'not_recipe_machine', refusal_class: 'argument', operation: 'set_machine_recipe', operation_index: 0,
+  field: 'unit_number', identity: 23, observed_type: 'furnace', expected_type: 'assembling-machine' }
+const setRecipe = unit => ({ name: 'set_machine_recipe', args: { unit_number: unit, recipe_name: 'iron-plate' } })
+const observeFurnace = (agent, unit, type) => agent.recordLiveEntityObservation({ name: 'stone-furnace', ...(type ? { type } : {}), unit_number: unit,
+  position: { x: 5, y: 5 } }, undefined, 'getNearbyEntities')
+
+test('run BB lane C: batch_stock refusal spends the step claim, a later not_recipe_machine exhausts it, and the guard names both refusals', async () => {
+  let preflights = 0
+  const w = await candidateWorld({
+    response: ({ text }) => {
+      if (!text.includes('autorio_preflight')) return undefined
+      if (text.includes('set_machine_recipe')) return NOT_RECIPE_MACHINE
+      if (text.includes('place_candidate') && preflights++ === 0) return STOCK_UNVERIFIED
+    },
+    executor: ({ agent, step, round }) => {
+      if (round === 0) return undefined // the first reply is the default place_candidate batch, refused batch_stock_unverified_dependency
+      // The in-memory counter starts over (a passed preflight or a restage does that); only the durable claim remains.
+      agent.modelCorrectablePreflightRetries = 0
+      observeFurnace(agent, 23) // type not read: the mod's own preflight is the one that refuses it
+      return planReply({ stepId: step.step_id, operations: [setRecipe(23)] })
+    },
+  })
+  await assert.rejects(w.start(), /argument_correction_limit_exhausted/)
+  assert.equal(w.game.mutations.length, 0, 'neither refused batch reached the game')
+  const claims = w.memory.planningState(KEY).goal.argument_corrections.claims
+  assert.equal(claims.length, 1)
+  assert.deepEqual([claims[0].reason, claims[0].operation_index, claims[0].operation_name], ['batch_stock_unverified_dependency', 0, 'place_candidate'])
+
+  const refused = w.rows.filter(row => row.event === 'contract.preservation_refused').at(-1)
+  assert.equal(refused.data.code, 'argument_correction_limit_exhausted')
+  assert.equal(refused.data.disposition, 'classified_guard_pause')
+  assert.deepEqual([refused.data.preflight_code, refused.data.refusal_class, refused.data.operation_index, refused.data.operation_name],
+    ['not_recipe_machine', 'argument', 0, 'set_machine_recipe'])
+  assert.equal(refused.data.prior_claims.length, 1)
+  assert.deepEqual([refused.data.prior_claims[0].reason, refused.data.prior_claims[0].operation_index, refused.data.prior_claims[0].operation_name],
+    ['batch_stock_unverified_dependency', 0, 'place_candidate'])
+  assert.ok(refused.data.prior_claims[0].request_id); assert.ok(Number.isFinite(refused.data.prior_claims[0].at))
+  assert.deepEqual([refused.data.in_memory_retries, refused.data.retry_limit, refused.data.ledger_claims, refused.data.ledger_claim_cap], [0, 1, 1, 64])
+  assert.equal(refused.data.semantic_step_id, claims[0].semantic_step_id)
+  const failed = w.rows.filter(row => row.event === 'request.failed').at(-1)
+  assert.equal(failed.data.failure_snapshot.guard.preflight_code, 'not_recipe_machine', 'the failed-request snapshot carries the same detail')
+
+  const record = w.memory.pauseRecord(KEY)
+  assert.deepEqual([record.paused, record.pause_class], [true, 'guard'])
+  assert.match(record.pause_reason, /^argument_correction_limit_exhausted: /)
+  const paused = w.rows.filter(row => row.event === 'goal.paused')
+  assert.ok(paused.length >= 1)
+  for (const row of paused) assert.deepEqual([row.data.provider_failure, row.data.cause], [false, 'argument_correction_limit_exhausted'], row.data.pause_reason)
+})
+
+test('run BB lane C: set_machine_recipe on a furnace the live read named is refused at parse, before the durable claim, and the corrected reply proceeds', async () => {
+  const w = await candidateWorld({
+    executor: ({ agent, step, round }) => {
+      if (round !== 0) return undefined
+      observeFurnace(agent, 23, 'furnace')
+      return planReply({ stepId: step.step_id, operations: [setRecipe(23)] })
+    },
+  })
+  await w.start()
+  assert.equal(w.nativeReads.some(text => text.includes('set_machine_recipe')), false, 'no preflight or send named the doomed operation')
+  assert.equal(w.game.mutations.some(text => text.includes('set_machine_recipe')), false)
+  const classified = w.rows.find(row => row.event === 'recovery.classified' && row.data.reason_code === 'recipe_machine_not_configurable')
+  assert.ok(classified, 'an ordinary parse correction')
+  assert.deepEqual([classified.data.failure_class, classified.data.operation_name, classified.data.observed_type], ['plan_category', 'set_machine_recipe', 'furnace'])
+  assert.match(classified.data.reason, /furnace.*selected automatically from the items placed in it/)
+  assert.equal(w.rows.filter(row => row.event === 'operations.preflight_recoverable').length, 0, 'no argument correction was consumed')
+  assert.equal(w.memory.planningState(KEY).goal.argument_corrections.claims.length, 0)
+  assert.equal(w.game.mutations.length, 1, 'the corrected reply placed the boiler')
+  assert.ok(w.game.mutations[0].includes('place_candidate'))
+})
+
+test('run BB lane C: a claim row restores with or without the optional operation fields, and malformed ones restore invalid', async () => {
+  const w = await candidateWorld({ response: ({ text }) => text.includes('autorio_preflight') && text.includes('place_candidate')
+    ? { ok: false, code: 'invalid_fixture_argument', refusal_class: 'argument', operation_index: 0 } : undefined })
+  await w.start()
+  const original = serializePlanningState(w.memory.planningState(KEY))
+  const row = original.goal.argument_corrections.claims[0]
+  assert.deepEqual([row.operation_index, row.operation_name], [0, 'place_candidate'])
+  const restore = change => { const raw = structuredClone(original); change(raw.goal.argument_corrections.claims[0]); return restorePlanningState(raw).goal.argument_corrections }
+  assert.equal(restore(claim => claim).claims.length, 1)
+  const legacy = restore(claim => { delete claim.operation_index; delete claim.operation_name })
+  assert.equal(legacy.invalid, undefined); assert.equal(legacy.claims.length, 1)
+  for (const change of [claim => { claim.operation_index = -1 }, claim => { claim.operation_index = '0' }, claim => { claim.operation_name = 7 },
+    claim => { claim.operation_name = 'x'.repeat(81) }, claim => { claim.extra = true }]) {
+    assert.equal(restore(change).invalid, true)
   }
 })

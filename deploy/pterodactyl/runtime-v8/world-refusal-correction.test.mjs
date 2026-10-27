@@ -777,3 +777,40 @@ test('offshore pump generic placement uses the existing argument correction and 
   assert.equal(w.agent.worldCorrectionRetries ?? 0, 0)
   assert.equal(getActivePlan(w.planning()).steps[1].description, IRON_PLAN[1])
 })
+
+// --- Run BB lane C (2026-10-26): a set_machine_recipe the live observation already shows cannot work is a reply correction ------------
+
+// The observation names the target a furnace, whose recipe is selected from its inputs: the mod would refuse not_recipe_machine, and
+// that refusal is argument class (it would spend the step's one durable argument correction). The reply is refused at parse instead.
+test('run BB lane C: set_machine_recipe on an observed furnace is a plain reply correction, nothing is sent and the corrected batch proceeds', async () => {
+  const preflights = []
+  const game = gameRefusing(undefined, text => { preflights.push(text); return false })
+  const w = world([plannerDraft(), observation(), executor([{ name: 'set_machine_recipe', args: { unit_number: FURNACE, recipe_name: 'iron-plate' } }]), executor(CORRECTED_BATCH())], { game })
+  await runToExecutor(w)
+  assert.equal(w.calls.length, 4, 'planner, observation, refused reply, corrected batch')
+  assert.equal(preflights.some(text => text.includes('set_machine_recipe')), false, 'the doomed batch never reached the mod preflight')
+  assert.equal(w.game.admissions.some(row => JSON.stringify(row).includes('set_machine_recipe')), false)
+  const classified = w.named('recovery.classified').find(row => row.data.reason_code === 'recipe_machine_not_configurable')
+  assert.ok(classified, 'an ordinary plan_category correction')
+  assert.deepEqual([classified.data.failure_class, classified.data.operation_index, classified.data.operation_name, classified.data.observed_type], ['plan_category', 0, 'set_machine_recipe', 'furnace'])
+  const message = harnessMessages([w.calls[3]]).find(text => text.includes('recipe_machine_not_configurable'))
+  assert.ok(message)
+  assert.match(message, /unit 34.*stone-furnace is a furnace.*recipe is selected automatically from the items placed in it/)
+  assert.match(message, /No operation from this batch ran/)
+  assert.equal(w.named('operations.preflight_recoverable').length, 0, 'no argument correction was spent')
+  assert.equal(w.agent.modelCorrectablePreflightRetries, 0)
+  assert.notEqual(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  assert.equal(w.named('operations.ack').length >= 1, true, 'the corrected batch was admitted')
+})
+
+test('run BB lane C: a set_machine_recipe target of unknown type, or an assembling machine, is left to the mod preflight unchanged', async () => {
+  for (const type of [undefined, 'assembling-machine']) {
+    const preflights = []
+    const game = gameRefusing(undefined, text => { preflights.push(text); return false })
+    game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'assembling-machine-1', ...(type ? { type } : {}), unit_number: FURNACE, position: { x: 23, y: -72 }, distance: 8 }] }
+    const w = world([plannerDraft(), observation(), executor([{ name: 'set_machine_recipe', args: { unit_number: FURNACE, recipe_name: 'iron-gear-wheel' } }])], { game })
+    await runToExecutor(w)
+    assert.equal(preflights.some(text => text.includes('set_machine_recipe')), true, `type ${type}: the mod preflight still sees it`)
+    assert.equal(w.named('recovery.classified').some(row => row.data.reason_code === 'recipe_machine_not_configurable'), false)
+  }
+})

@@ -237,6 +237,13 @@ export class DrillFurnaceFactorio extends FurnaceFactorio {
       const name = /"recipe_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
       if (name in RECIPES) return JSON.stringify(recipeDetails(name))
     }
+    // The planner's direct_feed commit reads the resource's drills (Run BB lane B bootstrap gate): the burner drill mines copper.
+    if (text.includes('"mining_details"')) {
+      const name = /"mining_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
+      return JSON.stringify(name === 'copper-ore'
+        ? { found: true, query: name, truncated: false, resources: [{ name, drills: [{ name: 'burner-mining-drill' }], drills_truncated: false }] }
+        : { found: false, query: name })
+    }
     if (text.includes('get_entity_status') && text.includes(String(DRILL_UNIT))) {
       this.readCommands.push('get_entity_status')
       return JSON.stringify({ found: true, entity: { unit_number: DRILL_UNIT, name: 'burner-mining-drill', type: 'mining-drill', working: this.drillWorking(),

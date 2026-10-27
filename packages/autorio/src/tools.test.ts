@@ -229,6 +229,17 @@ describe('exact entity status observation', () => {
     expect((globalThis as any).storage.sgluna_entity_reference_hints[42]).toMatchObject({ surface_index: 1, force_index: 1 })
   })
 
+  it('states whether a crafting machine\'s recipe is configurable (assembling machine) or automatic (furnace), and nothing for other types', async () => {
+    const { lookup, furnace } = fixture()
+    const assembler = { ...furnace(43, 4, 2), name: 'assembling-machine-1', type: 'assembling-machine' }
+    const lab = { ...furnace(44, 5, 2), name: 'lab', type: 'lab' }
+    lookup.mockImplementation(unit => unit === 41 ? furnace(41, 2, 1) : unit === 43 ? assembler : lab)
+    const tools = await tools_interface()
+    expect(tools.get_entity_status(undefined, undefined, 41).entity).toMatchObject({ type: 'furnace', recipe_selection: 'automatic' })
+    expect(tools.get_entity_status(undefined, undefined, 43).entity).toMatchObject({ type: 'assembling-machine', recipe_selection: 'configurable' })
+    expect(tools.get_entity_status(undefined, undefined, 44).entity.recipe_selection).toBeUndefined()
+  })
+
   it('rejects direct-index entities on another surface or force without a nearest fallback', async () => {
     const { find, lookup, furnace } = fixture()
     const own = furnace(41, 2, 1)

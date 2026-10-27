@@ -416,7 +416,7 @@ function detectRejectedBlockerPause(rows) {
     detail: 'world_blocked_without_authoritative_evidence was relabelled recoverable_provider_failure:provider_reported_blocker and paused the same request' }
 }
 
-const AUTO_RESUME_DECISION_EVENTS = new Set(['recovery.auto_resume_scheduled', 'recovery.auto_resume_exhausted', 'recovery.auto_resume_cancelled'])
+const AUTO_RESUME_DECISION_EVENTS = new Set(['recovery.auto_resume_scheduled', 'recovery.auto_resume_exhausted', 'recovery.auto_resume_cancelled', 'recovery.review_blocker_unchanged'])
 
 // A model_recoverable pause that no auto-resume decision follows. Cancelled counts as a decision (the cancel row names why).
 function detectModelRecoverablePauseNotResumed(rows) {

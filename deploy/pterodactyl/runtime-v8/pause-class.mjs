@@ -18,6 +18,7 @@
 //
 // A pause with a missing or unknown class is not guessed at. It never auto-resumes, and the caller reports it
 // (recovery.pause_unclassified) so the producer that forgot to declare a class gets fixed.
+import { createHash } from 'node:crypto'
 
 export const PAUSE_CLASS = Object.freeze({
   TRANSPORT: 'transport',
@@ -55,6 +56,15 @@ export const AUTO_RESUMABLE_PAUSE_CLASSES = Object.freeze([PAUSE_CLASS.TRANSPORT
 //   per_goal  per goal_id in total. Never reset by progress; a new goal starts again at zero.
 // Whichever is reached first leaves the plan paused with a UI line (recovery.auto_resume_exhausted, limit_kind step | goal).
 export const MODEL_RECOVERABLE_RESUME_LIMITS = Object.freeze({ per_step: 2, per_goal: 6 })
+
+// Run BB lane B: an executor-review pause carries the evidence it was raised on, so a pause that repeats the same blocker on the
+// same step with no verified progress is not resumed generically again. The evidence is the review reason plus a digest of the
+// rationale text with case, punctuation and spacing removed; any other wording is a changed fact and resumes as before.
+export const REVIEW_BLOCKER_UNCHANGED_REASON = 'review_blocker_unchanged'
+export function reviewPauseEvidence({ reason, rationale }) {
+  const normalized = String(rationale ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  return { kind: 'executor_review', reason: String(reason ?? ''), digest: createHash('sha256').update(`${reason}\n${normalized}`).digest('hex').slice(0, 16) }
+}
 
 // The wait before a model_recoverable resume fires. No backoff curve: the cause is not load, and the attempts are few.
 export const MODEL_RECOVERABLE_RESUME_DELAY_MS = 15_000
@@ -228,12 +238,27 @@ export function classifyRequestFailure(failure) {
   if (transport) return { pause_class: PAUSE_CLASS.TRANSPORT, pause_subkind: transport.subkind, code: 'provider_transient', source: transport.source }
   const declared = failure && typeof failure === 'object' ? failure.pause_class : undefined
   const code = failureCode(failureMessage(failure)) ?? 'request_failed'
+  // A harness guard that names its own code (PreservationProofError.failure_code) keeps it: the pause reads as that guard, not as a
+  // generic request failure and never as a provider one.
+  const guardCode = failure && typeof failure === 'object' && typeof failure.failure_code === 'string' && SAFE_FAILURE_CODE.test(failure.failure_code) ? failure.failure_code : undefined
+  if (guardCode && isPauseClass(declared)) return { pause_class: declared, pause_subkind: '', code: guardCode, source: 'guard_code' }
   if (isPauseClass(declared)) return { pause_class: declared, pause_subkind: '', code, source: 'declared' }
   const fault = harnessStateFaultCode(failure)
   if (fault) return { pause_class: PAUSE_CLASS.SYSTEM, pause_subkind: '', code: fault, source: 'harness_state_fault' }
   const byCode = REQUEST_FAILURE_CODE_CLASS[code]
   if (byCode) return { pause_class: byCode, pause_subkind: '', code, source: 'failure_code' }
   return { pause_class: PAUSE_CLASS.GUARD, pause_subkind: '', code: 'request_failed', source: 'fallback' }
+}
+
+const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{2,80}$/
+
+// Whether a pause came from the provider/request layer (the goal.paused trace's provider_failure). Decided from the pause's declared
+// class and the failure CODE that prefixes its reason, never from a text search of the reason: a harness guard's detail text may
+// mention "provider" or "request_failed" without the provider having failed. `request_failed` itself is the unplaced fallback.
+export function isProviderFailurePause(record, reason) {
+  if (pauseClassOf(record).pause_class === PAUSE_CLASS.TRANSPORT) return true
+  const code = String(reason ?? record?.pause_reason ?? '').split(':')[0].trim()
+  return code === 'request_failed' || code === 'recoverable_provider_failure' || code.startsWith('provider_')
 }
 
 // Stamp a class on an error where it is raised.

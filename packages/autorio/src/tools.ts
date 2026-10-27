@@ -532,6 +532,8 @@ export function create_tools_remote_interface() {
         rotatable: entity.rotatable,
         amount: entity.type === 'resource' ? entity.amount : undefined,
         recipe: recipe_name,
+        // Native fact: set_machine_recipe accepts an assembling machine only; a furnace picks its recipe from its inputs.
+        recipe_selection: entity.type === 'assembling-machine' ? 'configurable' : entity.type === 'furnace' ? 'automatic' : undefined,
         crafting_progress: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_progress : undefined,
         crafting_speed: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_speed : undefined,
         status: entity.status,

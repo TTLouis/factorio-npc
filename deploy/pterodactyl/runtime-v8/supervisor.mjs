@@ -61,6 +61,7 @@ import {
   MODEL_RECOVERABLE_RESUME_DELAY_MS,
   PAUSE_CLASS,
   pauseClassOf,
+  REVIEW_BLOCKER_UNCHANGED_REASON,
   transportFailureOf,
 } from './pause-class.mjs'
 
@@ -1852,8 +1853,11 @@ export async function pauseStrandedPlanAfterRequestError(session, failure) {
   const classified = classifyRequestFailure(failure instanceof Error ? failure : clean)
   const reasonCode = classified.pause_class === PAUSE_CLASS.TRANSPORT
     ? TRANSIENT_PAUSE_PREFIX
-    : (PAUSE_REASON_CODES.has(classified.code) || classified.source === 'harness_state_fault') ? classified.code : 'request_failed'
-  const reason = `${reasonCode}: ${clean || 'unexpected request failure'}`
+    : (PAUSE_REASON_CODES.has(classified.code) || classified.source === 'harness_state_fault' || classified.source === 'guard_code') ? classified.code : 'request_failed'
+  // A harness guard that carries the refusal that tripped it (PreservationProofError.detail) names it instead of repeating its own code.
+  const trigger = classified.source === 'guard_code' && failure?.detail?.preflight_code
+    ? `${failure.detail.preflight_code}${failure.detail.operation_name ? ` on ${failure.detail.operation_name}` : ''}` : ''
+  const reason = `${reasonCode}: ${trigger ? uiText(trigger, 240) : clean || 'unexpected request failure'}`
   const paused = await agent.pausePersistentPlan?.(reason, { pause_class: classified.pause_class, pause_subkind: classified.pause_subkind })
   if (paused) await session.syncTaskBoardUi?.(paused)
   return paused
@@ -3121,7 +3125,35 @@ export class Session {
     // transport keeps its own scheduler; every other class waits for a person or its own lifecycle recovery.
     if (declared.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return null
     this.lastPauseDecision = decisionKey
+    // Run BB lane B: an executor review that repeats the previous resumed pause's blocker evidence on the same step, with no
+    // verified progress since, gets no further generic resume. It ends in a visible guard pause that names the evidence.
+    const repeat = this.agent.memory.reviewBlockerRepeat?.(key)
+    if (repeat) return this.pauseForUnchangedReviewBlocker(key, record, repeat)
     return this.scheduleModelRecoverableResume(record, allowance)
+  }
+
+  async pauseForUnchangedReviewBlocker(key, record, repeat) {
+    const pauseReason = REVIEW_BLOCKER_UNCHANGED_REASON
+    this.agent.memory.pausePlan?.(key, pauseReason, { pause_class: PAUSE_CLASS.GUARD })
+    await this.agent.persistState?.({ strict: true })
+    this.log(`Auto-resume withheld: the executor review on this step repeats its previous blocker evidence (${repeat.evidence.reason} ${repeat.evidence.digest}); the plan stays paused`)
+    await this.traceRecovery('recovery.review_blocker_unchanged', {
+      pause_class: PAUSE_CLASS.GUARD,
+      reason: pauseReason,
+      review_reason: repeat.evidence.reason,
+      evidence_digest: repeat.evidence.digest,
+      previous_pause: repeat.previous_pause,
+      current_pause: { ...repeat.current_pause, pause_reason: uiText(record.pause_reason, 160) },
+      step_attempts: repeat.step_attempts,
+      goal_attempts: repeat.goal_attempts,
+      goal_id: repeat.goal_id,
+      plan_id: repeat.plan_id,
+      plan_version: repeat.plan_version,
+      step_id: repeat.step_id,
+    })
+    await this.syncTaskBoardUi?.(this.currentPlanState?.())
+    await this.printChat(`I paused because the executor raised the same blocker (${repeat.evidence.reason}) on this step again with nothing verified in between, so another automatic restart would repeat it. The plan stays paused; change the approach or say continue to retry.`)
+    return false
   }
 
   async scheduleModelRecoverableResume(record, allowance) {

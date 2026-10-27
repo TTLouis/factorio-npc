@@ -7,6 +7,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { reserveBudget } from './common.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { PreservationProofError } from './contract-obligations.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
   AUTO_RESUMABLE_PAUSE_CLASSES,
@@ -14,11 +15,13 @@ import {
   HARNESS_STATE_FAULT_CODES,
   harnessStateFaultCode,
   isAutoResumable,
+  isProviderFailurePause,
   MODEL_RECOVERABLE_RESUME_LIMITS,
   PAUSE_CLASS,
   PAUSE_CLASSES,
   pauseClassLabel,
   pauseClassOf,
+  reviewPauseEvidence,
   TRANSPORT_SUBKINDS,
 } from './pause-class.mjs'
 import {
@@ -29,6 +32,7 @@ import {
   PLAN_STATUS,
   PLANNING_EVENT,
   restorePlanningState,
+  reviewBlockerRepeat,
   serializePlanningState,
 } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
@@ -261,6 +265,85 @@ test('the step limit is reached without progress; a new goal starts from zero', 
   other = applyPlanningEvent(other, { type: PLANNING_EVENT.PLAN_COMMITTED, now: tick(), runtime_validation: { passed: true } })
   const fresh = autoResumeAllowance(other)
   assert.deepEqual([fresh.goal_id, fresh.step_attempts, fresh.goal_attempts, fresh.limit_kind], ['goal_next', 0, 0, undefined])
+})
+
+// --- Run BB lane B: no generic resume on an unchanged executor-review blocker -------------------------------------------------
+// Run BB: the executor asked for planner review four times about one missing iron plate; two generic resumes repeated it and the
+// run ended auto_resume_exhausted. The pause keeps the evidence it was raised on beside the resume allowance (review reason + a
+// digest of the rationale), so an identical repeat on the same step with no verified progress is recognised, durably.
+const BLOCKER = 'The new burner drill needs 9 iron plates but only 8 are held, and direct_feed forbids hand-supplying iron ore.'
+const reviewOf = (rationale = BLOCKER, reason = 'approach_infeasible') => reviewPauseEvidence({ reason, rationale })
+
+function reviewPause(state, evidence) {
+  const allowance = autoResumeAllowance(state)
+  const paused = applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: `executor_review:${evidence.reason}`, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+  return applyPlanningEvent(paused, { type: PLANNING_EVENT.RUN_PAUSE_EVIDENCE_RECORDED, now: tick(), source: 'runtime', goal_id: allowance.goal_id,
+    plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: allowance.step_id, ...evidence })
+}
+const resumeAfterAttempt = state => applyPlanningEvent(attempt(state, { request_id: `recovery_${clock}` }), { type: PLANNING_EVENT.RUN_RESUMED, now: tick(), source: 'runtime' })
+
+test('the review evidence is the reason plus a digest that ignores case, punctuation and spacing but not content', () => {
+  const evidence = reviewOf()
+  assert.deepEqual(Object.keys(evidence), ['kind', 'reason', 'digest'])
+  assert.equal(evidence.kind, 'executor_review')
+  assert.equal(reviewOf(BLOCKER.toUpperCase().replace(/ /g, '  ')).digest, evidence.digest)
+  assert.notEqual(reviewOf(BLOCKER.replace('9 iron plates', '10 iron plates')).digest, evidence.digest, 'a changed number is a changed fact')
+  assert.notEqual(reviewOf(BLOCKER, 'local_recovery_exhausted').digest, evidence.digest)
+})
+
+test('an identical executor-review repeat on the same step with no verified progress is recognised; a changed fact or progress is not', () => {
+  const first = reviewPause(committedPlan(), reviewOf())
+  assert.equal(reviewBlockerRepeat(first), undefined, 'nothing was resumed yet, so nothing repeats')
+  const resumed = resumeAfterAttempt(first)
+  assert.equal(resumed.run.auto_resume.steps[0].resumed_evidence.digest, reviewOf().digest, 'the resumed pause evidence is kept on the step')
+
+  const repeat = reviewBlockerRepeat(reviewPause(resumed, reviewOf()))
+  assert.deepEqual([repeat.evidence.reason, repeat.evidence.digest, repeat.step_attempts, repeat.goal_attempts], ['approach_infeasible', reviewOf().digest, 1, 1])
+  assert.notEqual(repeat.previous_pause.pause_count, repeat.current_pause.pause_count, 'two distinct pauses')
+  assert.match(repeat.previous_pause.resume_request_id, /^recovery_/)
+  // Spacing and case alone do not make a new fact.
+  assert.ok(reviewBlockerRepeat(reviewPause(resumed, reviewOf(`  ${BLOCKER.toUpperCase()}  `))))
+
+  // A changed fact, a changed review reason, or a pause that carries no evidence resumes exactly as before.
+  assert.equal(reviewBlockerRepeat(reviewPause(resumed, reviewOf(BLOCKER.replace('8 are held', '9 are held')))), undefined)
+  assert.equal(reviewBlockerRepeat(reviewPause(resumed, reviewOf(BLOCKER, 'local_recovery_exhausted'))), undefined)
+  const bare = applyPlanningEvent(resumed, { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: 'executor_review:approach_infeasible', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+  assert.equal(reviewBlockerRepeat(bare), undefined)
+  // Verified progress between the two pauses.
+  const progressed = receipt(resumed, 'deterministic_verification', 'batch_21')
+  assert.equal(autoResumeAllowance(progressed).progressed, true)
+  assert.equal(reviewBlockerRepeat(reviewPause(progressed, reviewOf())), undefined)
+  // The limits are unchanged: the repeat is a separate decision, not a bigger or smaller allowance.
+  assert.deepEqual({ ...MODEL_RECOVERABLE_RESUME_LIMITS }, { per_step: 2, per_goal: 6 })
+})
+
+test('the review evidence is refused for a stale step, a non-model_recoverable pause, or an unknown goal', () => {
+  const paused = applyPlanningEvent(committedPlan(), { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: 'executor_review:approach_infeasible', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+  const allowance = autoResumeAllowance(paused)
+  const record = overrides => applyPlanningEvent(paused, { type: PLANNING_EVENT.RUN_PAUSE_EVIDENCE_RECORDED, now: tick(), source: 'runtime', goal_id: allowance.goal_id,
+    plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: allowance.step_id, ...reviewOf(), ...overrides })
+  assert.notEqual(record({}), paused)
+  for (const overrides of [{ step_id: 'step_other' }, { plan_id: 'plan_other' }, { plan_version: allowance.plan_version + 1 }, { goal_id: 'goal_other' }, { source: 'main_planner' }, { digest: '' }]) {
+    assert.equal(record(overrides), paused, JSON.stringify(overrides))
+  }
+  const operator = applyPlanningEvent(committedPlan(), { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: 'user_stop', pause_class: PAUSE_CLASS.OPERATOR })
+  assert.equal(applyPlanningEvent(operator, { type: PLANNING_EVENT.RUN_PAUSE_EVIDENCE_RECORDED, now: tick(), source: 'runtime', goal_id: allowance.goal_id,
+    plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: allowance.step_id, ...reviewOf() }), operator)
+})
+
+test('the review evidence and the repeat verdict survive a serialize and restore (a restart)', () => {
+  const standing = reviewPause(resumeAfterAttempt(reviewPause(committedPlan(), reviewOf())), reviewOf())
+  const before = reviewBlockerRepeat(standing)
+  assert.ok(before)
+  const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(standing))))
+  assert.deepEqual(reviewBlockerRepeat(restored), before)
+  assert.deepEqual(autoResumeAllowance(restored).step_attempts, 1)
+  // A restored record that lost its evidence only means the next repeat resumes as before.
+  const damaged = JSON.parse(JSON.stringify(serializePlanningState(standing)))
+  delete damaged.run.auto_resume.pause_evidence
+  assert.equal(reviewBlockerRepeat(restorePlanningState(damaged)), undefined)
+  damaged.run.auto_resume.pause_evidence = { step_key: 'x', digest: 7 }
+  assert.equal(reviewBlockerRepeat(restorePlanningState(damaged)), undefined)
 })
 
 // --- the supervisor on a real agent (run E) -----------------------------------------------------------------------------
@@ -1290,4 +1373,139 @@ test('a restart that finds an ACTIVE plan (a crash mid-step) restages it unchang
   assert.deepEqual(recoveryRows(run.events, 'recovery.auto_resume_plan_not_resumed'), [])
   assert.equal(recoveryRows(run.events, 'runtime.recovery_started').length, 1)
   assert.equal(run.game.mutations.length, 2)
+})
+
+// --- Run BB lane C (2026-10-26): a harness guard keeps its own code and is never labelled a provider failure ---
+
+test('run BB lane C: a PreservationProofError classifies as a guard under its own code, with or without a detail bag', () => {
+  const bare = new PreservationProofError('argument_correction_limit_exhausted', { category: 'exhausted', stage: 'correction' })
+  assert.deepEqual(classifyRequestFailure(bare), { pause_class: 'guard', pause_subkind: '', code: 'argument_correction_limit_exhausted', source: 'guard_code' })
+  assert.equal(bare.detail, undefined)
+  const detailed = new PreservationProofError('argument_correction_limit_exhausted', { stage: 'correction', detail: { preflight_code: 'not_recipe_machine' } })
+  assert.deepEqual(detailed.detail, { preflight_code: 'not_recipe_machine' })
+  // A guard code cannot be forged through the message and a transport signal still wins: waiting is what fixes those.
+  assert.equal(classifyRequestFailure(Object.assign(new PreservationProofError('preservation_type_unsupported'), { http_status: 503 })).pause_class, 'transport')
+  assert.equal(classifyRequestFailure(new Error('argument_correction_limit_exhausted')).code, 'request_failed')
+})
+
+test('run BB lane C: provider_failure follows the pause class and the failure code, not any "provider" or "request_failed" in the reason text', () => {
+  const guard = { pause_class: 'guard' }
+  assert.equal(isProviderFailurePause(guard, 'argument_correction_limit_exhausted: not_recipe_machine on set_machine_recipe'), false)
+  assert.equal(isProviderFailurePause(guard, 'argument_correction_limit_exhausted: request_failed after provider timed out'), false, 'text after the code is not a classification')
+  assert.equal(isProviderFailurePause(guard, 'request_output_ceiling: 10 > 5 output units'), false)
+  assert.equal(isProviderFailurePause({ pause_class: 'system' }, 'checkpoint_requires_active_step: x'), false)
+  // Genuine provider pauses stay provider failures.
+  assert.equal(isProviderFailurePause({ pause_class: 'transport', pause_subkind: 'timeout' }, 'provider_transient: Provider timed out'), true)
+  assert.equal(isProviderFailurePause(guard, 'request_failed: Provider HTTP 400'), true)
+  for (const code of ['provider_recovery_exhausted', 'provider_action_omission_repair_failed', 'provider_semantic_alignment_failed', 'provider_output_budget_exhausted']) {
+    assert.equal(isProviderFailurePause({ pause_class: 'model_recoverable' }, `${code}: x`), true, code)
+  }
+  assert.equal(isProviderFailurePause({ pause_class: 'model_recoverable' }, 'recoverable_provider_failure:requires_machine_retry_exhausted'), true)
+})
+
+test('run BB lane C: the stranded-plan pause of a guard error keeps the guard code and names the refusal; its goal.paused row is not a provider failure', async () => {
+  const { agent, events } = await startedAgent()
+  agent.traceRequest = null // the request has ended: pausePersistentPlan names the pause itself
+  const { session } = sessionFor(agent)
+  const failure = new PreservationProofError('argument_correction_limit_exhausted', { category: 'exhausted', stage: 'correction',
+    detail: { preflight_code: 'not_recipe_machine', operation_index: 0, operation_name: 'set_machine_recipe' } })
+  const paused = await pauseStrandedPlanAfterRequestError(session, failure)
+  assert.equal(paused.status, 'paused')
+  assert.equal(paused.pause_reason, 'argument_correction_limit_exhausted: not_recipe_machine on set_machine_recipe')
+  const record = agent.memory.pauseRecord(KEY)
+  assert.deepEqual([record.pause_class, record.pause_subkind], ['guard', ''])
+  const row = recoveryRows(events, 'goal.paused').at(-1)
+  assert.equal(row.provider_failure, false)
+  assert.equal(row.cause, 'argument_correction_limit_exhausted')
+  assert.equal(row.pause_class, 'guard')
+  assert.equal(await session.considerPauseForAutoResume(), null, 'a guard pause waits for a player Resume')
+  // A genuinely unplaced request failure still reads as request_failed and as a provider failure, as before.
+  const other = await startedAgent()
+  other.agent.traceRequest = null
+  await pauseStrandedPlanAfterRequestError(sessionFor(other.agent).session, new Error('Provider HTTP 400; request will not be retried automatically'))
+  const generic = recoveryRows(other.events, 'goal.paused').at(-1)
+  assert.deepEqual([generic.cause, generic.provider_failure], ['request_failed', true])
+})
+
+// --- Run BB lane B on the real supervisor and agent ---------------------------------------------------------------------------
+// The review pause an executor raises (handlePlannerReview) is recreated with the memory calls it makes: the model_recoverable
+// pause and the evidence it was raised on. A resume is what the supervisor does when its timer fires.
+function raiseReview(run, evidence) {
+  run.memory.pausePlan(KEY, `executor_review:${evidence.reason}`, { pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+  const allowance = run.memory.autoResumeAllowance(KEY)
+  assert.equal(run.memory.recordPauseEvidence(KEY, { plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: allowance.step_id, ...evidence }), true)
+}
+function resumeAttempt(run) {
+  clearTimeout(run.session.modelResume.timer)
+  const { correlation } = run.session.modelResume
+  assert.equal(run.memory.recordAutoResumeStarted(KEY, { ...correlation, request_id: 'recovery_probe' }).recorded, true)
+  assert.equal(run.memory.resumePausedPlan(KEY, { reason: 'auto_resume', pauseClasses: [PAUSE_CLASS.MODEL_RECOVERABLE] }).resumed, true)
+  run.session.modelResume = null
+}
+async function firstReviewResumed(t) {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  raiseReview(run, reviewOf())
+  assert.equal(await run.session.considerPauseForAutoResume(), true, 'the first review pause is resumed generically, as before')
+  resumeAttempt(run)
+  return run
+}
+
+test('Run BB lane B: an identical executor review on the same step ends in a visible guard pause and no second resume is scheduled', async t => {
+  const run = await firstReviewResumed(t)
+  raiseReview(run, reviewOf())
+  assert.equal(await run.session.considerPauseForAutoResume(), false)
+  assert.equal(run.session.modelResume, null)
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_scheduled').length, 1, 'only the first pause was scheduled')
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_exhausted').length, 0, 'the exhaustion guard was not what stopped it')
+  const [row, ...extra] = recoveryRows(run.events, 'recovery.review_blocker_unchanged')
+  assert.equal(extra.length, 0)
+  assert.deepEqual([row.reason, row.pause_class, row.review_reason, row.evidence_digest], ['review_blocker_unchanged', 'guard', 'approach_infeasible', reviewOf().digest])
+  assert.equal(row.previous_pause.resume_request_id, 'recovery_probe')
+  assert.ok(row.current_pause.pause_count > row.previous_pause.pause_count, 'both pause identities are traced')
+  assert.deepEqual([row.step_attempts, row.goal_attempts], [1, 1], 'the limits were not spent or changed')
+  const record = run.memory.pauseRecord(KEY)
+  assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, 'review_blocker_unchanged', 'guard'])
+  assert.match(run.chat.at(-1), /same blocker \(approach_infeasible\) on this step again with nothing verified in between/)
+  // A guard pause is not resumed by a timer, and a repeated goal.paused does not repeat the report.
+  assert.equal(await run.session.considerPauseForAutoResume(), null)
+  assert.equal(recoveryRows(run.events, 'recovery.review_blocker_unchanged').length, 1)
+  // run-check reads the new row as an auto-resume decision.
+  assert.equal(analyzeBehaviorTrace([{ schema: 1, ts: 'x', seq: 1, event: 'goal.paused', data: { pause_class: 'model_recoverable', pause_reason: 'executor_review:approach_infeasible' } },
+    { schema: 1, ts: 'y', seq: 2, event: 'recovery.review_blocker_unchanged', data: row }]).findings.some(finding => finding.signature === 'model_recoverable_pause_not_resumed'), false)
+})
+
+test('Run BB lane B: changed evidence or verified progress keeps the generic resume', async t => {
+  const changed = await firstReviewResumed(t)
+  raiseReview(changed, reviewOf(`${BLOCKER} The only furnace on the map is the copper one.`))
+  assert.equal(await changed.session.considerPauseForAutoResume(), true)
+  assert.deepEqual(recoveryRows(changed.events, 'recovery.auto_resume_scheduled').map(row => row.attempt), [1, 2])
+  assert.equal(recoveryRows(changed.events, 'recovery.review_blocker_unchanged').length, 0)
+  clearTimeout(changed.session.modelResume.timer)
+
+  const progressed = await firstReviewResumed(t)
+  progressed.memory.recordBoardEvidence(KEY, { kind: 'deterministic_verification', ref: 'batch_8', summary: JSON.stringify({ verdict: 'verified_complete' }) })
+  raiseReview(progressed, reviewOf())
+  assert.equal(await progressed.session.considerPauseForAutoResume(), true)
+  assert.equal(recoveryRows(progressed.events, 'recovery.auto_resume_scheduled').at(-1).attempt, 1, 'progress reset the step count')
+  assert.equal(recoveryRows(progressed.events, 'recovery.review_blocker_unchanged').length, 0)
+  clearTimeout(progressed.session.modelResume.timer)
+})
+
+test('Run BB lane B: the decision survives a memory snapshot and a restart', async t => {
+  const run = await firstReviewResumed(t)
+  raiseReview(run, reviewOf())
+  const restoredMemory = new CanonicalTaskBoardMemory()
+  restoredMemory.restore(run.memory.snapshot())
+  assert.deepEqual(restoredMemory.reviewBlockerRepeat(KEY), run.memory.reviewBlockerRepeat(KEY))
+  assert.equal(restoredMemory.reviewBlockerRepeat(KEY).evidence.digest, reviewOf().digest)
+
+  await run.agent.persistState()
+  const world = makeWorld({ stateFile: run.stateFile, mode: 'fail' })
+  await world.agent.loadPersistentState()
+  assert.equal(world.agent.memory.reviewBlockerRepeat(KEY)?.evidence.digest, reviewOf().digest, 'the evidence came back from disk')
+  const restarted = sessionFor(world.agent)
+  assert.equal(await restarted.session.considerPauseForAutoResume(), false)
+  assert.equal(recoveryRows(world.events, 'recovery.auto_resume_scheduled').length, 0)
+  assert.equal(recoveryRows(world.events, 'recovery.review_blocker_unchanged').length, 1)
+  assert.equal(world.agent.memory.pauseRecord(KEY).pause_class, 'guard')
 })
