@@ -1,4 +1,4 @@
-import type { LuaEntity } from 'factorio:runtime'
+import type { LuaEntity, LuaEntityPrototype } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { PlacementPoint, PlacementWorldBox } from './placement_geometry'
 import { has_electric_energy_source, pole_reach, protected_read } from './electric_facts'
@@ -314,7 +314,7 @@ export function entity_view(entity: LuaEntity): EndpointView | undefined {
 
 export type ConnectionProof =
   | { status: 'proved', predicted: Record<string, unknown> }
-  | { status: 'mismatch', reason: string, predicted: Record<string, unknown>, endpoint_role: string, endpoint_box?: WorldBox }
+  | { status: 'mismatch', reason: string, predicted: Record<string, unknown>, endpoint_role: string, endpoint_box?: WorldBox, code?: string }
   | { status: 'unproven', reason: string }
   | { status: 'skipped' }
 
@@ -339,6 +339,50 @@ function inserter_points(view: EndpointView) {
     pickup: { x: view.position.x + pickup_offset.x, y: view.position.y + pickup_offset.y },
     drop: { x: view.position.x + drop_offset.x, y: view.position.y + drop_offset.y },
   }
+}
+
+// Inventory indexes scanned on a prototype. Every item-holding entity type uses indexes below this (the lab's input is 2, an
+// assembler's or furnace's input/output 2 and 3, modules 4).
+const MAX_PROTOTYPE_INVENTORY_INDEX = 10
+
+// Whether a built entity has a native item interface an inserter or drill can act on: an inventory or a transport line. A wall
+// or pole has neither, so standing on an inserter's or drill's point does not make it that inserter's or drill's endpoint.
+function entity_item_interface(entity: LuaEntity): boolean | undefined {
+  const lines = protected_read(() => entity.get_max_transport_line_index())
+  const inventories = protected_read(() => entity.get_max_inventory_index() as number)
+  if (lines === undefined && inventories === undefined) return undefined
+  if ((lines ?? 0) > 0) return true
+  for (let index = 1; index <= (inventories ?? 0); index++) {
+    if (protected_read(() => entity.get_inventory(index as defines.inventory)) !== undefined) return true
+  }
+  return false
+}
+
+// The same fact for a node that is only planned, from its prototype: a belt speed, or a non-empty inventory at some index.
+function prototype_item_interface(prototype: LuaEntityPrototype | undefined): boolean | undefined {
+  if (!prototype) return undefined
+  if (protected_read(() => prototype.belt_speed) !== undefined) return true
+  for (let index = 1; index <= MAX_PROTOTYPE_INVENTORY_INDEX; index++) {
+    const size = protected_read(() => prototype.get_inventory_size(index as defines.inventory))
+    if (size !== undefined && size > 0) return true
+  }
+  return false
+}
+
+function item_interface(view: EndpointView) {
+  return view.entity !== undefined ? entity_item_interface(view.entity) : prototype_item_interface(view.prototype)
+}
+
+// The roles of an item connection that must hold or carry items, checked once the geometry holds.
+function item_endpoints_proof(roles: Array<[string, EndpointView]>, predicted: Record<string, unknown>): ConnectionProof | undefined {
+  for (const [role, view] of roles) {
+    const items = item_interface(view)
+    if (items === undefined) return { status: 'unproven', reason: `the ${role} endpoint's inventories and transport lines cannot be read` }
+    if (!items) {
+      return { status: 'mismatch', code: 'CONNECTION_ENDPOINT_INCOMPATIBLE', reason: `the ${role} endpoint has no inventory or transport line to take items from or give them to`, predicted, endpoint_role: role, endpoint_box: view.box }
+    }
+  }
+  return undefined
 }
 
 function consumes_electricity(view: EndpointView) {
@@ -366,7 +410,7 @@ export function prove_connection(connection: LayoutConnection, views: Record<str
     const predicted = { pickup_point: points.pickup, drop_point: points.drop, pickup_box: pickup.box, drop_box: drop.box }
     if (!point_in_box(points.pickup, pickup.box)) return { status: 'mismatch', reason: 'the inserter pickup point is outside the pickup endpoint', predicted, endpoint_role: 'pickup', endpoint_box: pickup.box }
     if (!point_in_box(points.drop, drop.box)) return { status: 'mismatch', reason: 'the inserter drop point is outside the drop endpoint', predicted, endpoint_role: 'drop', endpoint_box: drop.box }
-    return { status: 'proved', predicted }
+    return item_endpoints_proof([['pickup', pickup], ['drop', drop]], predicted) ?? { status: 'proved', predicted }
   }
   if (kind === 'power') {
     const pole = views.pole
@@ -396,7 +440,7 @@ export function prove_connection(connection: LayoutConnection, views: Record<str
     if (!receiver.box) return { status: 'unproven', reason: 'the receiver collision box cannot be read' }
     const predicted = { output_point: output, receiver_box: receiver.box }
     if (!point_in_box(output, receiver.box)) return { status: 'mismatch', reason: 'the drill output point is outside the receiver', predicted, endpoint_role: 'receiver', endpoint_box: receiver.box }
-    return { status: 'proved', predicted }
+    return item_endpoints_proof([['receiver', receiver]], predicted) ?? { status: 'proved', predicted }
   }
   return { status: 'unproven', reason: `unknown connection kind ${kind}` }
 }
@@ -446,7 +490,7 @@ export function prove_plan_connections(actor: ControlledActor, placements: Layou
     const proof = prove_connection(connection, views)
     if (proof.status === 'mismatch') {
       return { error: {
-        code: 'CONNECTION_GEOMETRY_MISMATCH',
+        code: proof.code ?? 'CONNECTION_GEOMETRY_MISMATCH',
         message: `connection ${connection.index} (${connection.kind}): ${proof.reason}`,
         index: connection.index,
         kind: connection.kind,
@@ -611,6 +655,12 @@ export function layout_node_precheck(actor: ControlledActor, layout_node: { layo
   const record = storage.sgluna_construction_layouts?.[layout_node.layout_id]
   if (!record) return `construction layout ${layout_node.layout_id} is not recorded`
   if (record.state === 'paused') return `construction layout ${record.layout_id} is paused: ${record.pause_reason ?? 'unspecified'}`
+  // The node is built where the actor stands now: a layout recorded on another actor, surface or force never continues here.
+  if (actor.status_snapshot().actor_id !== record.actor_id || actor.surface.index !== record.surface_index || actor.force.index !== record.force_index) {
+    const reason = `construction layout ${record.layout_id} belongs to actor ${record.actor_id} on surface ${record.surface_index} and force ${record.force_index}`
+    pause(record, reason)
+    return reason
+  }
   const node = record_node(record, layout_node.index)
   if (!node) return `construction layout ${record.layout_id} has no node ${layout_node.index}`
   const facing = direction ?? 0
@@ -662,21 +712,27 @@ function target_unit(entity: LuaEntity, field: string) {
   return protected_read(() => (entity as any)[field]?.unit_number as number | undefined)
 }
 
-// The entity an inserter or drill acts on: its native target field once the engine has set it, else the one entity (other
-// than itself and characters) standing on its native pickup/drop point. On 2.0.77 a burner inserter's pickup_target and
-// drop_target are still nil on the tick it is built, while its pickup_position/drop_position are native at once.
-function acting_unit(entity: LuaEntity, target_field: string, point_field: string) {
+// The entity an inserter or drill acts on: its native target field once the engine has set it, else the one entity standing
+// on its native pickup/drop point that has an item interface (an inventory or a transport line; itself and characters
+// excluded). On 2.0.77 a burner inserter's pickup_target and drop_target are still nil on the tick it is built, while its
+// pickup_position/drop_position are native at once. An occupant without an item interface (a wall, a pole) is never taken
+// for the target: it is reported as `ignored`, and a point holding only such occupants verifies nothing.
+function acting_unit(entity: LuaEntity, target_field: string, point_field: string): { unit_number?: number, source: string, point?: Position, ignored?: number[] } {
   const target = target_unit(entity, target_field)
   if (target !== undefined) return { unit_number: target, source: 'target_field' }
   const point = read_point(entity, point_field)
   if (point === undefined) return { source: 'point_unreadable' }
   const found = protected_read(() => find_world_entities(entity.surface, { position: point })) ?? []
   const units: number[] = []
+  const ignored: number[] = []
   for (const other of found) {
-    if (other.valid && other.unit_number !== undefined && other.unit_number !== entity.unit_number && other.type !== 'character') units.push(other.unit_number)
+    if (!other.valid || other.unit_number === undefined || other.unit_number === entity.unit_number || other.type === 'character') continue
+    if (entity_item_interface(other) === true) units.push(other.unit_number)
+    else ignored.push(other.unit_number)
   }
-  if (units.length === 1) return { unit_number: units[0], source: 'entity_at_point', point }
-  return { source: units.length === 0 ? 'nothing_at_point' : 'several_at_point', point }
+  const seen = ignored.length > 0 ? { point, ignored } : { point }
+  if (units.length === 1) return { unit_number: units[0], source: 'item_endpoint_at_point', ...seen }
+  return { source: units.length === 0 ? 'no_item_endpoint_at_point' : 'several_item_endpoints_at_point', ...seen }
 }
 
 // The native check of one connection whose roles are all built: the entities' own target and network fields (an inserter's or
@@ -687,7 +743,14 @@ function verify_native(connection: LayoutRecordConnection, entities: Record<stri
     const inserter = entities.inserter
     const pickup = acting_unit(inserter, 'pickup_target', 'pickup_position')
     const drop = acting_unit(inserter, 'drop_target', 'drop_position')
-    const observed = { pickup_unit_number: pickup.unit_number, pickup_source: pickup.source, drop_unit_number: drop.unit_number, drop_source: drop.source }
+    const observed = {
+      pickup_unit_number: pickup.unit_number,
+      pickup_source: pickup.source,
+      pickup_ignored: pickup.ignored,
+      drop_unit_number: drop.unit_number,
+      drop_source: drop.source,
+      drop_ignored: drop.ignored,
+    }
     const holds = observed.pickup_unit_number !== undefined && observed.pickup_unit_number === entities.pickup.unit_number
       && observed.drop_unit_number !== undefined && observed.drop_unit_number === entities.drop.unit_number
     return { holds, observed }
@@ -700,7 +763,7 @@ function verify_native(connection: LayoutRecordConnection, entities: Record<stri
   }
   if (connection.kind === 'drill_output') {
     const drop = acting_unit(entities.drill, 'drop_target', 'drop_position')
-    const observed = { drop_unit_number: drop.unit_number, drop_source: drop.source }
+    const observed = { drop_unit_number: drop.unit_number, drop_source: drop.source, drop_ignored: drop.ignored }
     return { holds: observed.drop_unit_number !== undefined && observed.drop_unit_number === entities.receiver.unit_number, observed }
   }
   return { holds: false, observed: {} }

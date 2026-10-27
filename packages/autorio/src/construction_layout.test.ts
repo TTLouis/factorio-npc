@@ -15,8 +15,19 @@ import { new_task_manager } from './task_manager'
 type Pos = { x: number, y: number }
 
 const MASK = { layers: { object: true, item: true } }
-function prototype(name: string, type: string, tile: [number, number], half: number, extra: Record<string, any> = {}) {
+// Native item interfaces: an entity's inventories are indexes 1..count (its get_inventory), a prototype's are the indexes its
+// get_inventory_size answers; nothing here has a transport line.
+function item_interface(count: number) {
   return {
+    get_max_inventory_index: () => count,
+    get_inventory: (index: number) => index >= 1 && index <= count ? { valid: true } : undefined,
+    get_max_transport_line_index: () => 0,
+  }
+}
+function prototype(name: string, type: string, tile: [number, number], half: number, extra: Record<string, any> = {}, inventories = 0) {
+  return {
+    inventories,
+    get_inventory_size: (index: number) => index >= 1 && index <= inventories ? 16 : undefined,
     name,
     type,
     tile_width: tile[0],
@@ -30,23 +41,25 @@ function prototype(name: string, type: string, tile: [number, number], half: num
 }
 
 const PROTOTYPES: Record<string, any> = {
-  'test-chest': prototype('test-chest', 'container', [1, 1], 0.4),
+  'test-chest': prototype('test-chest', 'container', [1, 1], 0.4, {}, 1),
   'test-inserter': prototype('test-inserter', 'inserter', [1, 1], 0.15, {
     inserter_pickup_position: { x: 0, y: -1 },
     inserter_drop_position: { x: 0, y: 1.2 },
     electric_energy_source_prototype: {},
   }),
   'test-pole': prototype('test-pole', 'electric-pole', [1, 1], 0.15, { supply_area_distance: 2.5, max_wire_distance: 7.5 }),
-  'test-lab': prototype('test-lab', 'lab', [3, 3], 1.2, { electric_energy_source_prototype: {} }),
+  'test-lab': prototype('test-lab', 'lab', [3, 3], 1.2, { electric_energy_source_prototype: {} }, 2),
   // 2.0 returns the output vector in array form.
   'test-drill': prototype('test-drill', 'mining-drill', [2, 2], 0.9, { vector_to_place_result: [-0.5, -1.3], electric_energy_source_prototype: {} }),
   'test-pipe': prototype('test-pipe', 'pipe', [1, 1], 0.4),
   'test-bare-inserter': prototype('test-bare-inserter', 'inserter', [1, 1], 0.15),
+  // No inventory and no transport line: standing on an inserter's point does not make it that inserter's endpoint.
+  'test-wall': prototype('test-wall', 'wall', [1, 1], 0.29),
 }
-const HELD = { 'test-chest': 3, 'test-inserter': 1, 'test-pole': 1, 'test-lab': 1, 'test-drill': 1, 'test-pipe': 2, 'test-bare-inserter': 1 }
+const HELD = { 'test-chest': 3, 'test-inserter': 1, 'test-pole': 1, 'test-lab': 1, 'test-drill': 1, 'test-pipe': 2, 'test-bare-inserter': 1, 'test-wall': 1 }
 
 const BOILER_UNIT = 500
-const EXISTING_PROTOTYPE = { name: 'test-boiler', type: 'boiler', electric_energy_source_prototype: undefined }
+const EXISTING_PROTOTYPE = { name: 'test-boiler', type: 'boiler', electric_energy_source_prototype: undefined, get_inventory_size: (index: number) => index === 1 ? 1 : undefined }
 
 // A chest at (0.5,-0.5), an inserter at (0.5,0.5) facing north (pickup (0.5,-0.5), drop (0.5,1.7)) and an existing boiler.
 const SRC = { entity_name: 'test-chest', x: 0.5, y: -0.5, slot: 'src' }
@@ -85,6 +98,7 @@ function build(held: Record<string, number> = { ...HELD }) {
       force: { index: 1 },
       prototype: proto,
       bounding_box: placement_footprint(proto, args.position, args.direction ?? 0).world_box,
+      ...item_interface(proto.inventories),
     }
     created.push(entity)
     by_unit.set(entity.unit_number, entity)
@@ -127,6 +141,7 @@ function build(held: Record<string, number> = { ...HELD }) {
       force: { index: 1 },
       prototype: EXISTING_PROTOTYPE,
       bounding_box: { left_top: { x: at.x - half.x, y: at.y - half.y }, right_bottom: { x: at.x + half.x, y: at.y + half.y } },
+      ...item_interface(1),
       ...fields,
     }
     by_unit.set(unit_number, entity)
@@ -306,6 +321,24 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       expect(result.error.predicted.pickup_point).toEqual({ x: 1.5, y: 0.5 })
     })
 
+    it('refuses an inserter or drill endpoint without an item interface, existing or planned, before anything is built', () => {
+      const f = build()
+      // An existing wall exactly where the inserter drops: the geometry holds, the endpoint cannot take items.
+      f.existing(600, { x: 0.5, y: 1.7 }, { x: 0.29, y: 0.29 }, { name: 'test-wall', type: 'wall', prototype: PROTOTYPES['test-wall'], ...item_interface(0) })
+      const existing = validate(f, [SRC, INS], [{ ...FEED, drop: { unit_number: 600 } }])
+      expect(existing).toMatchObject({ ok: false, planning_status: 'spatially_invalid', error: { code: 'CONNECTION_ENDPOINT_INCOMPATIBLE', endpoint_role: 'drop' } })
+      expect(existing.validation_id).toBeUndefined()
+      // A planned wall as the drill's receiver, on the output point.
+      const planned = validate(f, [DRILL_AT, { entity_name: 'test-wall', x: 1.5, y: 0.5, slot: 'receiver' }], [OUTPUT])
+      expect(planned).toMatchObject({ ok: false, planning_status: 'spatially_invalid', error: { code: 'CONNECTION_ENDPOINT_INCOMPATIBLE', endpoint_role: 'receiver' } })
+      expect((globalThis as any).storage.sgluna_validated_construction_plan).toBeUndefined()
+      // Interfaces that cannot be read are unproven, never assumed.
+      f.existing(601, { x: 0.5, y: 1.7 }, { x: 0.29, y: 0.29 }, { get_max_inventory_index: () => { throw new Error('unreadable') }, get_max_transport_line_index: () => { throw new Error('unreadable') } })
+      const unreadable = validate(f, [SRC, INS], [{ ...FEED, drop: { unit_number: 601 } }])
+      expect(unreadable).toMatchObject({ ok: false, planning_status: 'spatially_valid', execution_eligible: false })
+      expect(unreadable.eligibility_blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'CONNECTION_UNPROVEN' })]))
+    })
+
     it('refuses an existing endpoint that is not an entity of this surface and force', () => {
       const f = build()
       expect(validate(f, [SRC, INS], [{ ...FEED, drop: { unit_number: 12345 } }])).toMatchObject({
@@ -386,6 +419,8 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
     })
 
     it('refuses a dependency cycle as a spatial failure once the geometry holds', () => {
+      // Inserters with a fuel inventory (as a burner inserter has) are item endpoints of each other.
+      ;(globalThis as any).prototypes.entity['test-inserter'] = { ...PROTOTYPES['test-inserter'], inventories: 1, get_inventory_size: (index: number) => index === 1 ? 1 : undefined }
       const f = build()
       // ins at (0.5,0.5) picks up from (0.5,-0.5), where ins2 stands; ins2 faces south, so it picks up from (0.5,0.5), which is
       // ins, and drops at (0.5,-1.7) into the sink chest. Each inserter is the other's endpoint: neither can be built first.
@@ -501,7 +536,7 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       expect(place_next(f)?.[0]).toBe(true)
       expect(layout(layout_id)).toMatchObject({
         state: 'complete',
-        connections: [{ state: 'verified', observed: { pickup_unit_number: 901, pickup_source: 'entity_at_point', drop_unit_number: BOILER_UNIT, drop_source: 'entity_at_point' } }],
+        connections: [{ state: 'verified', observed: { pickup_unit_number: 901, pickup_source: 'item_endpoint_at_point', drop_unit_number: BOILER_UNIT, drop_source: 'item_endpoint_at_point' } }],
       })
     })
 
@@ -515,12 +550,66 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
         }
       }
       f.surface.find_entities_filtered.mockImplementation((filter: any) => filter?.position?.x === dropPoint.x && filter.position.y === dropPoint.y
-        ? [f.boiler, { valid: true, unit_number: 4242, type: 'container' }]
+        ? [f.boiler, { valid: true, unit_number: 4242, type: 'container', ...item_interface(1) }]
         : [])
       const { layout_id } = start(f, [INS, SRC], [FEED])
       expect(place_next(f)?.[0]).toBe(true)
       expect(place_next(f)?.[0]).toBe(true)
-      expect(layout(layout_id)).toMatchObject({ state: 'paused', connections: [{ state: 'mismatch', observed: { drop_source: 'several_at_point' } }] })
+      expect(layout(layout_id)).toMatchObject({ state: 'paused', connections: [{ state: 'mismatch', observed: { drop_source: 'several_item_endpoints_at_point' } }] })
+    })
+
+    it('never verifies an inserter by an occupant of its point that has no item interface', () => {
+      // The target fields are not set yet and the only entity on the drop point is a wall: occupancy is not a target.
+      const f = build()
+      const dropPoint = { x: 0.5, y: 1.7 }
+      const wall = { valid: true, name: 'test-wall', unit_number: 4343, type: 'wall', ...item_interface(0) }
+      f.hooks.on_create = (entity) => {
+        if (entity.name === 'test-inserter') {
+          entity.pickup_target = f.created.find(other => other.name === 'test-chest')
+          entity.drop_position = dropPoint
+        }
+      }
+      f.surface.find_entities_filtered.mockImplementation((filter: any) => filter?.position?.x === dropPoint.x && filter.position.y === dropPoint.y ? [wall] : [])
+      const { layout_id } = start(f, [INS, SRC], [FEED])
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({
+        state: 'paused',
+        connections: [{ state: 'mismatch', observed: { pickup_unit_number: 901, drop_unit_number: undefined, drop_source: 'no_item_endpoint_at_point', drop_ignored: [4343] } }],
+      })
+
+      // The same wall beside the boiler on the point is ignored, and the boiler is the one item endpoint there.
+      const g = build()
+      g.hooks.on_create = (entity) => {
+        if (entity.name === 'test-inserter') {
+          entity.pickup_target = g.created.find(other => other.name === 'test-chest')
+          entity.drop_position = dropPoint
+        }
+      }
+      g.surface.find_entities_filtered.mockImplementation((filter: any) => filter?.position?.x === dropPoint.x && filter.position.y === dropPoint.y ? [wall, g.boiler] : [])
+      const second = start(g, [INS, SRC], [FEED])
+      expect(place_next(g)?.[0]).toBe(true)
+      expect(place_next(g)?.[0]).toBe(true)
+      expect(layout(second.layout_id)).toMatchObject({
+        state: 'complete',
+        connections: [{ state: 'verified', observed: { drop_unit_number: BOILER_UNIT, drop_source: 'item_endpoint_at_point', drop_ignored: [4343] } }],
+      })
+    })
+
+    it('refuses a node, before create_entity and without spending stock, once the actor is on another surface than its layout', () => {
+      const f = build()
+      const { layout_id } = start(f, [INS, SRC], [FEED])
+      expect(place_next(f)?.[0]).toBe(true)
+      const before = { ...f.held }
+      ;(f.actor as any).surface = { ...f.surface, index: 2 }
+      const cancelled = vi.spyOn(f.manager, 'cancel_all_tasks')
+      expect(place_next(f)?.[0]).toBe(false)
+      expect(f.basic.status().last_result).toMatchObject({ code: 'layout_connection_unproven', completed: false, layout_node: { layout_id, index: 0 } })
+      expect(f.basic.status().last_result?.layout_refusal).toContain('belongs to actor 42 on surface 1 and force 1')
+      expect(cancelled).toHaveBeenCalledWith('placing:layout_connection_unproven', expect.objectContaining({ failed_before_mutation: true }))
+      expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+      expect(f.held).toEqual(before)
+      expect(layout(layout_id)).toMatchObject({ state: 'paused', nodes: [{ state: 'queued' }, { state: 'placed' }] })
     })
 
     it('ignores a second receipt for a placed node, counts it and never rebinds', () => {
