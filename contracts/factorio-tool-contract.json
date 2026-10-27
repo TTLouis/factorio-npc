@@ -1033,6 +1033,17 @@
       ],
       "surface_policy": "runtime-v8-only"
     },
+    "proposeConstructionLayout": {
+      "remote": [
+        "autorio_planning",
+        "propose_construction_layout"
+      ],
+      "category": "construction",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only"
+    },
     "inspectConstructionIntent": {
       "remote": [
         "autorio_map_construction",
