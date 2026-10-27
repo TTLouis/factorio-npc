@@ -133,7 +133,7 @@ function normalize_endpoint(value: any): LayoutEndpointRef | undefined {
   return valid_integer(value.unit_number, 1, MAX_UNIT_NUMBER) ? { unit_number: value.unit_number } : undefined
 }
 
-function slot_indices(placements: LayoutPlacement[]) {
+export function slot_indices(placements: LayoutPlacement[]) {
   const result: Record<string, number> = {}
   for (let index = 0; index < placements.length; index++) {
     const slot = placements[index].slot
@@ -446,7 +446,34 @@ export function prove_connection(connection: LayoutConnection, views: Record<str
   return { status: 'unproven', reason: `unknown connection kind ${kind}` }
 }
 
-function roles_of(connection: LayoutConnection) {
+// The code of an inserter connection that cannot hold whatever its missing endpoint turns out to be: the inserter and at least
+// one endpoint are known, and a known endpoint does not contain its point or does not allow the item access. A layout proposal
+// uses it to drop a branch before the connection's other slots are assigned. It reports only what prove_connection would report
+// as a mismatch for the same endpoints, and nothing when a known box or access fact cannot be read.
+export function inserter_partial_mismatch(views: Record<string, EndpointView | undefined>): string | undefined {
+  const inserter = views.inserter
+  if (!inserter) return undefined
+  const points = inserter_points(inserter)
+  if (points === undefined) return undefined
+  const roles: Array<[string, EndpointView, ItemAccess]> = []
+  const pickup = views.pickup
+  const drop = views.drop
+  if (pickup !== undefined) {
+    if (!pickup.box) return undefined
+    if (!point_in_box(points.pickup, pickup.box)) return 'CONNECTION_GEOMETRY_MISMATCH'
+    roles.push(['pickup', pickup, 'take'])
+  }
+  if (drop !== undefined) {
+    if (!drop.box) return undefined
+    if (!point_in_box(points.drop, drop.box)) return 'CONNECTION_GEOMETRY_MISMATCH'
+    roles.push(['drop', drop, 'give'])
+  }
+  const access = item_endpoints_proof(roles, {})
+  if (access !== undefined && access.status === 'mismatch') return access.code ?? 'CONNECTION_GEOMETRY_MISMATCH'
+  return undefined
+}
+
+export function roles_of(connection: LayoutConnection) {
   return CONNECTION_ROLES[connection.kind] ?? []
 }
 
@@ -459,7 +486,7 @@ function slots_of(connection: LayoutConnection) {
   return slots
 }
 
-function resolve_existing_view(actor: ControlledActor, unit_number: number) {
+export function resolve_existing_view(actor: ControlledActor, unit_number: number) {
   const entity = resolve_entity_reference(actor, unit_number, 'actor_body')
   if (!entity || !entity.valid) return undefined
   if (entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index) return undefined

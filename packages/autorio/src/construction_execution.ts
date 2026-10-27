@@ -68,7 +68,7 @@ const VALIDATION_MAX_AGE_TICKS = 60 * 60
 // footprint geometry rotates cardinally, so a plan accepts only the four cardinal directions.
 const CARDINAL_DIRECTIONS = [0, 4, 8, 12]
 
-type PlannedFootprint = NonNullable<ReturnType<typeof planned_placement_footprint>>
+export type PlannedFootprint = NonNullable<ReturnType<typeof planned_placement_footprint>>
 
 function valid_integer(value: number, min: number, max: number) {
   return typeof value === 'number' && value === math.floor(value) && value >= min && value <= max
@@ -97,7 +97,7 @@ function overlap_box(a: WorldBox, b: WorldBox): WorldBox {
 
 // Whether two planned footprints may not share space: the rule batch-footprint.mjs applies to one batch's placements.
 // Unreadable collision layers count as colliding, so a joint proof never rests on what could not be read.
-function footprints_collide(a: PlannedFootprint, b: PlannedFootprint) {
+export function footprints_collide(a: PlannedFootprint, b: PlannedFootprint) {
   if (a.colliding_with_tiles_only === true || b.colliding_with_tiles_only === true) return false
   if (a.entity_name === b.entity_name && a.not_colliding_with_itself === true) return false
   if (a.collision_unknown === true || b.collision_unknown === true) return true
@@ -175,7 +175,7 @@ function normalize_request(request: ConstructionExecutionValidationRequest) {
 // consistent: a failure there is `spatially_invalid` with the first error. Only a spatially valid layout is then asked
 // whether it can run now (the eligibility phase): stock, local reach, and connections that cannot be proved before their
 // entities stand. Every eligibility blocker is collected, `error` is the first, and no token is ever stored for them.
-interface PlanEvaluation {
+export interface PlanEvaluation {
   ok: boolean
   planning_status: 'spatially_invalid' | 'spatially_valid'
   execution_eligible: boolean
@@ -188,53 +188,69 @@ interface PlanEvaluation {
   connections?: Array<Record<string, unknown>>
 }
 
-function evaluate_plan(actor: ControlledActor, placements: ConstructionExecutionPlacement[], connections: LayoutConnection[]): PlanEvaluation {
+// The spatial checks of one placement against the world as it is now, without its plan: the placement item resolves, the
+// footprint is known, no NPC reservation covers it, and the engine says it can be placed. Validation runs it for every
+// placement of a plan (`detailed`: a WORLD_COLLISION carries the local observation); a layout proposal runs it for every
+// candidate cell and skips that observation. Nothing here reads or writes plan state.
+export type SinglePlacementCheck =
+  | { ok: true, footprint: PlannedFootprint, requirement: { item_name: string, count: number } }
+  | { ok: false, error: Record<string, unknown> }
+
+export function check_single_placement(actor: ControlledActor, placement: ConstructionExecutionPlacement, index: number, detailed: boolean): SinglePlacementCheck {
+  if (prototypes.entity[placement.entity_name]?.type === 'offshore-pump') return { ok: false, error: {
+    code: 'PLACEMENT_CANDIDATE_REQUIRED', message: 'Offshore pumps require water-first discovery and place_candidate with live native registry ids', index,
+  } }
+  const placement_item = resolve_entity_placement_item(placement.entity_name)
+  if (!placement_item.ok) {
+    return { ok: false, error: {
+      code: 'PLACEMENT_ITEM_UNSUPPORTED',
+      message: `cannot resolve placement item for entity ${placement.entity_name}: ${placement_item.code}`,
+      index,
+      entity_name: placement.entity_name,
+      placement_item_error: placement_item.code,
+      item_name: placement_item.item_name,
+    } }
+  }
+  const position = { x: placement.x, y: placement.y }
+  const footprint = planned_placement_footprint(placement.entity_name, placement.x, placement.y, placement.direction)
+  if (!footprint) return { ok: false, error: { code: 'PLANNED_FOOTPRINT_UNKNOWN', message: `placement ${index} has no footprint to check against the rest of the plan`, index } }
+  if (reservation_intersection(actor.surface, footprint.world_box)) return { ok: false, error: { code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index } }
+  if (!actor.surface.can_place_entity({
+    name: placement.entity_name,
+    position,
+    direction: placement.direction,
+    force: actor.force,
+    ...placement_check_args(placement.entity_name),
+  })) {
+    const error: Record<string, unknown> = {
+      code: 'WORLD_COLLISION',
+      message: `placement ${index} is not placeable in the current world`,
+      index,
+    }
+    if (detailed) {
+      error.placement = placement_geometry(placement, index, footprint)
+      error.spatial_context = local_spatial_observation(actor, {
+        position,
+        half_size: 4,
+        requested_entity_name: placement.entity_name,
+      })
+    }
+    return { ok: false, error }
+  }
+  return { ok: true, footprint, requirement: placement_item.requirement }
+}
+
+export function evaluate_plan(actor: ControlledActor, placements: ConstructionExecutionPlacement[], connections: LayoutConnection[]): PlanEvaluation {
   const spatial_failure = (error: Record<string, unknown>): PlanEvaluation => ({ ok: false, planning_status: 'spatially_invalid', execution_eligible: false, error })
 
   const required: Record<string, number> = {}
   const footprints: PlannedFootprint[] = []
   for (let index = 0; index < placements.length; index++) {
-    const placement = placements[index]
-    if (prototypes.entity[placement.entity_name]?.type === 'offshore-pump') return spatial_failure({
-      code: 'PLACEMENT_CANDIDATE_REQUIRED', message: 'Offshore pumps require water-first discovery and place_candidate with live native registry ids', index,
-    })
-    const placement_item = resolve_entity_placement_item(placement.entity_name)
-    if (!placement_item.ok) {
-      return spatial_failure({
-        code: 'PLACEMENT_ITEM_UNSUPPORTED',
-        message: `cannot resolve placement item for entity ${placement.entity_name}: ${placement_item.code}`,
-        index,
-        entity_name: placement.entity_name,
-        placement_item_error: placement_item.code,
-        item_name: placement_item.item_name,
-      })
-    }
-    const position = { x: placement.x, y: placement.y }
-    const footprint = planned_placement_footprint(placement.entity_name, placement.x, placement.y, placement.direction)
-    if (!footprint) return spatial_failure({ code: 'PLANNED_FOOTPRINT_UNKNOWN', message: `placement ${index} has no footprint to check against the rest of the plan`, index })
-    if (reservation_intersection(actor.surface, footprint.world_box)) return spatial_failure({ code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index })
-    if (!actor.surface.can_place_entity({
-      name: placement.entity_name,
-      position,
-      direction: placement.direction,
-      force: actor.force,
-      ...placement_check_args(placement.entity_name),
-    })) {
-      return spatial_failure({
-        code: 'WORLD_COLLISION',
-        message: `placement ${index} is not placeable in the current world`,
-        index,
-        placement: placement_geometry(placement, index, footprint),
-        spatial_context: local_spatial_observation(actor, {
-          position,
-          half_size: 4,
-          requested_entity_name: placement.entity_name,
-        }),
-      })
-    }
-    const requirement = placement_item.requirement
+    const checked = check_single_placement(actor, placements[index], index, true)
+    if (!checked.ok) return spatial_failure(checked.error)
+    const requirement = checked.requirement
     required[requirement.item_name] = (required[requirement.item_name] ?? 0) + requirement.count
-    footprints.push(footprint)
+    footprints.push(checked.footprint)
   }
 
   // The joint proof: each placement above was checked alone against the world as it is now, which says nothing about the
