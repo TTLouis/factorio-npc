@@ -1030,6 +1030,9 @@
       "surface_policy": "runtime-v8-only"
     },
     "findSkills": {
+      "argument_bounds": {
+        "limit": { "minimum": 1, "maximum": 10, "default": 3 }
+      },
       "remote": [
         "autorio_skills",
         "find"

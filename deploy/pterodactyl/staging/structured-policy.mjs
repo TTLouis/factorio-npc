@@ -778,7 +778,7 @@ export const toolDefinitions = [
     type: 'object',
     properties: {
       query: { type: 'string', minLength: 1, maxLength: 240 },
-      limit: { type: 'integer', minimum: 1, maximum: 5, default: 3 },
+      limit: { type: 'integer', minimum: 1, maximum: 10, default: 3 },
     },
     required: ['query'],
     additionalProperties: false,
@@ -976,7 +976,7 @@ export function toolCommand(name, rawArgs = {}) {
     case 'findSkills': {
       noExtra(args, ['query', 'limit'])
       const query = boundedText(args.query, 'skill search query', 240)
-      const limit = integer(args.limit ?? 3, 'limit', 1, 5)
+      const limit = integer(args.limit ?? 3, 'limit', 1, 10)
       return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","find",${luaString(query)},${limit})))`
     }
     case 'getSkillDetails':

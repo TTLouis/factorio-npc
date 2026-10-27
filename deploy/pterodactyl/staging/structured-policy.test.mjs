@@ -259,7 +259,7 @@ test('tool calls reject unknown names, unsafe names, extras, and out-of-bound sc
   assert.throws(() => toolCommand('getPrototypeDetails', { name: 'inserter', force: 'enemy' }))
   assert.throws(() => toolCommand('getPrototypeDetails', { name: 'inserter\n/c game.clear()' }))
   assert.throws(() => toolCommand('findSkills', { query: '' }))
-  assert.throws(() => toolCommand('findSkills', { query: 'coal', limit: 6 }))
+  assert.throws(() => toolCommand('findSkills', { query: 'coal', limit: 11 }))
   assert.throws(() => toolCommand('findSkills', { query: 'coal', lua: 'game.clear()' }))
   assert.throws(() => toolCommand('getSkillDetails', { id: '../escape' }))
   assert.throws(() => toolCommand('getSkillDetails', { id: 'burner-coal-loop', extra: true }))

@@ -226,7 +226,7 @@ import {
 } from './goal-requirements.mjs'
 import { StepReadLedger, stepReadKey, UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
 import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_PLACED_ENTITY_REASON, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchPlacedEntityRead, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet, withoutSupersededPostBatchFact } from './post-batch-facts.mjs'
-import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
+import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillDiscoveryPolicy, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -2328,8 +2328,6 @@ const POST_STEP_ROUTES = new Set([
   'ask_user',
   'fallback_planner',
 ])
-const SKILL_CONTEXT_MAX_SKILLS = 3
-const SKILL_CONTEXT_MAX_CHARS = 16000
 // 2.9: a compaction that starts (the working context passed its ceiling) folds
 // older tool exchanges until the context is under this share of the ceiling.
 const COMPACTION_LOW_WATERMARK = 0.75
@@ -5333,7 +5331,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!(this.loadedSkillContext instanceof Map)) this.loadedSkillContext = new Map()
     if (this.loadedSkillContext.has(skill.id)) this.loadedSkillContext.delete(skill.id)
     this.loadedSkillContext.set(skill.id, skill)
-    while (this.loadedSkillContext.size > SKILL_CONTEXT_MAX_SKILLS) {
+    while (this.loadedSkillContext.size > skillDiscoveryPolicy(this).stored) {
       const oldest = this.loadedSkillContext.keys().next().value
       if (oldest === undefined) break
       this.loadedSkillContext.delete(oldest)
@@ -5346,11 +5344,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const separatedExecution = this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE
     const held = separatedExecution ? getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey())) : undefined
     const guidance = held?.steps?.[held.active_step_index]?.execution_guidance
-    const skills = [...this.loadedSkillContext.values()].filter(skill => !guidance || guidance.skillIds.includes(skill.id))
+    const policy = skillDiscoveryPolicy(this)
+    const skills = [...this.loadedSkillContext.values()]
+      .filter(skill => !separatedExecution || guidance?.skillIds?.includes(skill.id))
+      .slice(-policy.rendered)
     if (skills.length === 0) return ''
-    while (skills.length > 1 && JSON.stringify(skills).length > SKILL_CONTEXT_MAX_CHARS) skills.shift()
+    while (skills.length > 1 && JSON.stringify(skills).length > policy.chars) skills.shift()
     const payload = JSON.stringify(skills)
-    if (payload.length > SKILL_CONTEXT_MAX_CHARS) return ''
+    if (payload.length > policy.chars) return ''
     return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
   }
 
@@ -9787,7 +9788,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const board = planState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const skills = this.loadedSkillContext instanceof Map
-      ? [...this.loadedSkillContext.values()].slice(-SKILL_CONTEXT_MAX_SKILLS).map(skill => ({
+      ? [...this.loadedSkillContext.values()].slice(-3).map(skill => ({
           id: typeof skill?.id === 'string' ? cleanMemoryText(skill.id, 80) : undefined,
           name: typeof skill?.name === 'string' ? cleanMemoryText(skill.name, 160) : undefined,
           revision: Number.isSafeInteger(skill?.revision) ? skill.revision : undefined,
@@ -13746,6 +13747,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (this.danglingReferencesTraced.size >= 256) this.danglingReferencesTraced.clear()
       this.danglingReferencesTraced.add(traced)
       await this.traceEvent('context.dangling_reference', { round, conversation_seq: this.agentContext.conversationSeq, ...dangling })
+    }
+    if (this.completionProtocolVersion >= 3) {
+      // Record actual assembled exposure, not merely the native library or cache.
+      const skillBlock = providerMessages.find(message => typeof message?.content === 'string' && message.content.startsWith('[SKILL_CONTEXT]'))?.content
+      let presentedSkills = []
+      if (skillBlock) {
+        try { presentedSkills = JSON.parse(skillBlock.slice(skillBlock.indexOf('\n') + 1)).map(skill => skill.id) }
+        catch { /* Payload capture remains authoritative if a prefix is malformed. */ }
+      }
+      await this.traceEvent('skill.context_presented', {
+        request_id: this.traceRequest?.id, round, role: this.agentContext.role, discovery_policy: skillDiscoveryPolicy(this),
+        loaded_ids: [...this.loadedSkillContext.keys()], presented_ids: presentedSkills,
+        context_chars: skillBlock?.length ?? 0,
+      })
     }
     const startedAt = Date.now()
     if (recoveryAttempt > 0 && this.traceRequest) {

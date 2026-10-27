@@ -13,12 +13,12 @@
 //   goal is picked up into the active plan (shelf -> active plan boundary).
 //   The block is shown only in plan-authoring and revision rounds, never in
 //   rounds that carry out a committed step. No per-step re-offers.
-// - Jev's `skill_choice` runs in SHADOW mode (owner, 2026-09-28): its pick is
-//   traced but never reaches the prompt, and the call is not awaited, so it
-//   adds no planning latency. The path is shadow -> advisory ->
-//   part of the decision loop; flip SKILL_CHOICE_MODE, not a user setting.
-// - The harness opens up to three ranked details at a planning boundary. Cards
-//   alone never count as loaded; the model may open other details explicitly.
+// - The live supervisor uses native deterministic ranking without a Jev skill
+//   provider (owner, 2026-10-27). Explicitly injected shadow providers remain
+//   supported by historical ledger/cancellation fixtures only.
+// - Protocol 3 planners open up to six ranked details from ten cards; legacy
+//   contexts open three from five. Cards alone never count as loaded; the
+//   executor renders at most three details selected for its committed step.
 //
 // Seam for 2.8 (e), meaning-based scoring with a local embedding model: it
 // belongs on the mod side next to the keyword score (see skills.ts), always
@@ -26,10 +26,26 @@
 
 import { luaString, toolCommand } from '../staging/structured-policy.mjs'
 import { getActivePlan, nearestShelfRefinementTarget, PLAN_STATUS } from './planning-state.mjs'
+import { PLANNER_ROLE } from './agent-roles.mjs'
 
 export const SKILL_OFFERS_PREFIX = '[SKILL_OFFERS]'
 export const SKILL_OFFER_LIMIT = 5
 export const SKILL_AUTOLOAD_LIMIT = 3
+export const PLANNER_SKILL_OFFER_LIMIT = 10
+export const PLANNER_SKILL_DETAIL_LIMIT = 6
+// The shared cache must survive planner -> executor -> planner. Rendering is
+// role-specific; the executor still sees at most three selected step skills.
+export function skillDiscoveryPolicy(loop) {
+  const separated = loop?.completionProtocolVersion >= 3
+  const planner = separated && loop?.agentContext?.role === PLANNER_ROLE
+  return {
+    offers: planner ? PLANNER_SKILL_OFFER_LIMIT : SKILL_OFFER_LIMIT,
+    autoload: planner ? PLANNER_SKILL_DETAIL_LIMIT : SKILL_AUTOLOAD_LIMIT,
+    stored: separated ? PLANNER_SKILL_DETAIL_LIMIT : 3,
+    rendered: planner ? PLANNER_SKILL_DETAIL_LIMIT : 3,
+    chars: planner ? 32000 : 16000,
+  }
+}
 export const SKILL_AUTOLOAD_TIMEOUT_MS = 3000
 export const SKILL_CARD_MAX_CHARS = 600
 // The mod measures the goal in UTF-8 bytes (Lua strings are bytes).
@@ -116,7 +132,7 @@ export function sanitizeSkillCard(raw) {
 }
 
 // { ok, cards } on success; { ok: false, reason, error? } otherwise.
-export function parseSkillOffers(raw) {
+export function parseSkillOffers(raw, limit = SKILL_OFFER_LIMIT) {
   let parsed
   try { parsed = JSON.parse(String(raw ?? '').trim()) }
   catch { return { ok: false, reason: 'lookup_unreadable' } }
@@ -128,7 +144,7 @@ export function parseSkillOffers(raw) {
   for (const card of rawCards) {
     const clean = sanitizeSkillCard(card)
     if (clean && !cards.some(existing => existing.id === clean.id)) cards.push(clean)
-    if (cards.length >= SKILL_OFFER_LIMIT) break
+    if (cards.length >= Math.min(PLANNER_SKILL_OFFER_LIMIT, Math.max(1, limit))) break
   }
   return { ok: true, cards }
 }
@@ -372,7 +388,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
 async function rankWithJev(loop, offer, trigger) {
   const base = { trigger, deterministic_order: offer.cards.map(card => card.id), mode: SKILL_CHOICE_MODE }
   if (typeof loop.skillDecisionProvider !== 'function') {
-    await loop.traceEvent('skill.ranked', { ...base, offer_seq: offer.seq, source: 'deterministic', outcome: 'skipped', reason: 'jev_unavailable' })
+    await loop.traceEvent('skill.ranked', { ...base, mode: 'deterministic', offer_seq: offer.seq, source: 'deterministic', outcome: 'skipped', reason: 'deterministic_library_ranking' })
     return
   }
   const job = runSkillChoice(loop, offer, trigger, base)
@@ -397,7 +413,7 @@ function skillReadFence(loop) {
 export async function loadOfferedSkillDetails(loop, offer, current = skillReadFence(loop)) {
   if (typeof loop.recordLoadedSkillToolResult !== 'function') return
   const deadline = Date.now() + SKILL_AUTOLOAD_TIMEOUT_MS
-  for (const card of offer.cards.slice(0, SKILL_AUTOLOAD_LIMIT)) {
+  for (const card of offer.cards.slice(0, skillDiscoveryPolicy(loop).autoload)) {
     if (!current() || loop.skillOffers !== offer || !offer.authoring) return
     if (loop.loadedSkillContext?.has(card.id)) continue
     let timer
@@ -414,7 +430,7 @@ export async function loadOfferedSkillDetails(loop, offer, current = skillReadFe
       // The task context keeps its most recent entries when it hits its size
       // ceiling. Keep the highest-ranked offered detail last so lower-ranked
       // supporting patterns cannot crowd it out of the actual planner prompt.
-      for (const ranked of offer.cards.slice(0, SKILL_AUTOLOAD_LIMIT).reverse()) {
+      for (const ranked of offer.cards.slice(0, skillDiscoveryPolicy(loop).autoload).reverse()) {
         const loaded = loop.loadedSkillContext.get(ranked.id)
         if (!loaded) continue
         loop.loadedSkillContext.delete(ranked.id)
@@ -450,7 +466,8 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
     return null
   }
   let raw
-  try { raw = await loop.rcon.command(skillOfferCommand(query)) }
+  const policy = skillDiscoveryPolicy(loop)
+  try { raw = await loop.rcon.command(skillOfferCommand(query, policy.offers)) }
   catch (error) {
     if (!current()) return null
     loop.skillOffers = null
@@ -458,7 +475,7 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
     return null
   }
   if (!current()) return null
-  const parsed = parseSkillOffers(raw)
+  const parsed = parseSkillOffers(raw, policy.offers)
   if (!parsed.ok || parsed.cards.length === 0) {
     loop.skillOffers = null
     await loop.traceEvent('skill.offer_skipped', {
@@ -478,6 +495,8 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
     trigger,
     reason: trigger,
     intent,
+    discovery_policy: policy,
+    role: loop.agentContext?.role,
     offered_ids: offer.cards.map(card => card.id),
     need_counts: needCounts(offer.cards),
     cards: offer.cards.map(card => ({

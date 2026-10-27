@@ -3790,7 +3790,8 @@ export class Session {
       interactionDecisionProvider: jevDecisionProvider,
       steeringDecisionProvider: jevDecisionProvider,
       operationProjectionDecisionProvider: jevDecisionProvider,
-      skillDecisionProvider: jevDecisionProvider,
+      // Skill discovery is deterministic; no shadow/advisory Jev lookup call.
+      // Other Jev routes retain their dedicated decision providers.
       reserve: async context => reserveBudget(
         path.join(this.root, '.sgluna', 'provider-budget.json'),
         this.config.budget,

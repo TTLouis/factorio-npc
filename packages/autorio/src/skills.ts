@@ -653,7 +653,7 @@ const VERIFIED_BONUS = 3
 const OBSERVED_PENALTY = 1
 const LOCKED_NEED_PENALTY = 0.25
 const MAX_LOCKED_PENALTY = 1
-export const MAX_SKILL_CARDS = 5
+export const MAX_SKILL_CARDS = 10
 const CARD_SUMMARY_MAX = 160
 const CARD_LIST_MAX = 5
 
@@ -979,7 +979,7 @@ export function skill_cards_for_goal(goal_text: unknown, limit: unknown = MAX_SK
 export function find_skill_definitions(query: unknown, limit: unknown = 3, world?: SkillWorldView) {
   const normalized = utf8_safe_prefix(clean_text(query, 'skill search query', MAX_RAW_QUERY_CHARS), MAX_FIND_QUERY_BYTES)
   const bounded_limit = positive_integer(limit, 'skill search limit')
-  if (bounded_limit > 5) throw new Error('skill search limit must be at most 5')
+  if (bounded_limit > MAX_SKILL_CARDS) throw new Error(`skill search limit must be at most ${MAX_SKILL_CARDS}`)
   return rank_skills_for_goal(normalized, world, true).slice(0, bounded_limit).map(match => ({
     score: match.score,
     id: match.skill.id,
