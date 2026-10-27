@@ -758,6 +758,10 @@ try {
       let targets = await readInserter()
       for (let attempt = 0; attempt < 40 && (targets.pickup === undefined || targets.drop === undefined); attempt++) { await delay(100); targets = await readInserter() }
       assert.equal(targets.pickup, sourceUnit, JSON.stringify(targets)); assert.equal(targets.drop, doneDst.unit_number, JSON.stringify(targets))
+      // The expiry wait outlived the 3600-tick freshness of the water read the later offshore-pump steps depend on (the engine
+      // fact is that a placement candidate only accepts a recent fluid-source observation); observe it again, as at setup.
+      const water = await tool('getFluidSourceTiles', { fluid_name: 'water', search_radius: 16, limit: 8 })
+      assert.ok(water.samples?.length, JSON.stringify(water))
       evidence.l4_resume = { tried, found, first, interruption, settled, sealed, verdict, resume1, resume2, resume3, receipt, done, targets,
         stock: { before: stockBefore, after: stockAfter } }
       assert.equal((await tool('getTaskStatus', {})).queue_length, 0)
