@@ -12,6 +12,7 @@
 
 import { createHash } from 'node:crypto'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
+import { strictTaskTypesForOperation } from './step-completion.mjs'
 
 export const PENDING_OPERATION_LIMITS = Object.freeze({
   operations: 16,
@@ -48,6 +49,109 @@ function effectScopes(operation) {
   // scopes; an exact entity ID alone cannot establish inventory independence.
   if (scopes.length === 0 || !['move_items', 'move_items_exact'].includes(operation?.name)) scopes.push('*')
   return scopes
+}
+
+// Operations whose single placing task can be the one a cancelled batch failed on (no coordinates, or a validated candidate).
+const PLACEMENT_OPERATIONS = new Set(['place_entity', 'place_candidate'])
+
+// The receipt task types an operation queued, for the operations whose every task has strict runtime completion semantics
+// (step-completion.mjs STRICT_TASKS_BY_OPERATION). Operations that queue a variable number of identical tasks are sized by
+// what the admission slot recorded; anything else is undefined, which keeps the batch unproven.
+function strictQueuedTaskTypes(name, queued) {
+  if (name === 'supply_entity') return Array.from({ length: queued }, () => 'moving_items')
+  if (name === 'execute_construction_plan') return Array.from({ length: queued }, () => 'placing')
+  const types = strictTaskTypesForOperation({ name, args: {} })
+  return Array.isArray(types) && types.length === queued ? types : undefined
+}
+
+/**
+ * Per-operation settlement of ONE batch that the engine cancelled when a placement task refused before it created anything,
+ * derived by the harness from the native receipt and the admission slots. The mod's own admission verdict
+ * (provenRefusal / operation_admission.ts) stays conservative for prefixes that are not pure submissions (a supply_entity
+ * before a placement leaves the row 'uncertain'); this re-derives the same conclusion from facts the receipt records:
+ *   - tasks of one batch are queued in operation order and run strictly one after another (task_manager next_task activates
+ *     the next task only from complete()/refuse() of the previous one, or from the batch closing), so a task that began
+ *     was preceded by the completion of every earlier task;
+ *   - the receipt names the failing task (failed_task_index, set only when it is the task running now) and that it changed
+ *     nothing (failed_before_mutation), and tasks_started proves no later task began;
+ *   - no refused (skipped) operations ride on the receipt, so no earlier task was skipped instead of completed.
+ * Every link is re-checked: one admission row, one batch ref, queued tasks accounting for the whole receipt, the failing task
+ * is a placing task and the first (only) task of its slot, and each earlier slot's receipt tasks have the strict task types
+ * of its operation. Anything else returns null and the batch keeps its unresolved effect.
+ *
+ * With no earlier slot (failed_task_index 0: the placement is the first task) the prefix is empty, the placement is no_effect and
+ * every later operation is not_started; nothing of the batch happened.
+ *
+ * A completed earlier task means the engine finished it, not that a requested quantity moved in full: a supply_entity task
+ * completes when a positive count was inserted, possibly fewer than requested. The settlement says "completed", never "exact".
+ */
+export function cancelledBatchPrefix(admission, status, pendingOperations, { requireIdle = true } = {}) {
+  if (!isRecord(admission) || !['admitted', 'uncertain'].includes(admission.state) || !isRecord(status) || status.status_error || status.error) return null
+  if (requireIdle && (status.task_state !== 'idle' || status.queue_length !== 0 || status.active_batch)) return null
+  const slots = admission.slots
+  if (!Array.isArray(slots) || slots.length < 1 || slots.length !== admission.operation_count || admission.generation !== status.batch_generation) return null
+  if (Array.isArray(pendingOperations) && (pendingOperations.length !== slots.length
+    || pendingOperations.some((operation, index) => operation?.name !== slots[index]?.operation))) return null
+  const ref = slots[0]?.batch_refs?.[0]
+  if (!isRecord(ref) || !Number.isSafeInteger(ref.batch_id) || ref.batch_id < 1 || ref.batch_generation !== admission.generation
+    || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return null
+  const starts = []
+  let queued = 0
+  for (const [index, slot] of slots.entries()) {
+    if (!isRecord(slot) || slot.index !== index + 1 || slot.ok !== true || typeof slot.operation !== 'string'
+      || !Number.isSafeInteger(slot.queued_tasks) || slot.queued_tasks < 1 || slot.queued_tasks > 64
+      || !Array.isArray(slot.batch_refs) || slot.batch_refs.length !== 1
+      || slot.batch_refs[0]?.batch_id !== ref.batch_id || slot.batch_refs[0].batch_generation !== ref.batch_generation
+      || slot.batch_refs[0].batch_ref !== ref.batch_ref) return null
+    starts.push(queued)
+    queued += slot.queued_tasks
+  }
+  if (!Array.isArray(status.receipt_journal)) return null
+  const rows = status.receipt_journal.filter(row => isRecord(row) && (row.batch_ref === ref.batch_ref
+    || row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation))
+  if (rows.length !== 1) return null
+  const receipt = rows[0]
+  const failed = receipt.failed_task_index
+  if (receipt.batch_ref !== ref.batch_ref || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
+    || receipt.state !== 'cancelled' || receipt.failed_before_mutation !== true || receipt.task_count !== queued
+    || receipt.outcome !== undefined || receipt.refused_count !== undefined || (Array.isArray(receipt.refusals) && receipt.refusals.length > 0)
+    || !Array.isArray(receipt.task_types) || receipt.task_types.length !== queued
+    || !Number.isSafeInteger(failed) || failed < 0 || failed >= queued || receipt.tasks_started !== failed + 1
+    || !Number.isSafeInteger(receipt.started_count) || receipt.started_count < receipt.tasks_started
+    || !Number.isSafeInteger(receipt.tick) || !Number.isSafeInteger(admission.tick) || receipt.tick < admission.tick
+    || receipt.task_types[failed] !== 'placing' || typeof receipt.reason !== 'string' || !receipt.reason.startsWith('placing:')) return null
+  const position = starts.indexOf(failed)
+  if (position < 0 || !PLACEMENT_OPERATIONS.has(slots[position].operation) || slots[position].queued_tasks !== 1) return null
+  for (let index = 0; index < position; index++) {
+    const expected = strictQueuedTaskTypes(slots[index].operation, slots[index].queued_tasks)
+    if (!expected || expected.some((type, offset) => receipt.task_types[starts[index] + offset] !== type)) return null
+  }
+  return {
+    applied_slots: slots.slice(0, position).map(slot => slot.index),
+    refused_slots: [slots[position].index],
+    refusal_codes: [text(receipt.reason, 80)].filter(Boolean),
+    unrun_slots: slots.length - position - 1,
+    basis: 'harness_receipt_derivation',
+    receipt: {
+      batch_id: ref.batch_id, batch_generation: ref.batch_generation, batch_ref: ref.batch_ref, reason: text(receipt.reason, 80),
+      task_count: receipt.task_count, failed_task_index: failed, tasks_started: receipt.tasks_started,
+      started_count: receipt.started_count, tick: receipt.tick,
+    },
+  }
+}
+
+// Per-operation dispositions of a settled refusal, for the trace and for the receipt evidence the board keeps.
+//   completed    its tasks ran to completion before the refusal (a delivery moved a positive, possibly partial, count)
+//   no_effect    the refused operation changed nothing
+//   not_started  its tasks never began
+export function settlementRows(operations, refusal) {
+  const applied = new Set(refusal?.applied_slots ?? [])
+  const refused = new Set(refusal?.refused_slots ?? [])
+  return (Array.isArray(operations) ? operations : []).map((operation, index) => ({
+    slot: index + 1,
+    operation: text(operation?.name ?? operation?.operation, 80),
+    disposition: applied.has(index + 1) ? 'completed' : refused.has(index + 1) ? 'no_effect' : 'not_started',
+  }))
 }
 
 export const PENDING_STATE = Object.freeze({
@@ -390,6 +494,9 @@ export function unresolvedNativeAdmissions(status, records = [], actor) {
   const journal = status?.admission_journal?.records ?? status?.admission_journal
   if (!nativeAdmissionJournal(journal).known) return [{ reason: 'native_admission_journal_unreadable' }]
   return Array.isArray(journal) ? journal.filter(row => ['uncertain', 'admitting', 'admitted'].includes(row.state)
+    // A cancelled batch whose exact receipt settles every operation (a completed prefix, then a placement that changed nothing)
+    // is terminal even though the mod left its row 'uncertain'; the receipt stays pinned for as long as the row does.
+    && !cancelledBatchPrefix(row, status, undefined, { requireIdle: false })
     && !records.some(record => record.operation_key === row.operation_key
       && reconcilePendingOperation(record, { status, actor }).reason === 'exact_terminal_navigation_cancelled')) : []
 }
@@ -430,12 +537,21 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     const refusal = provenRefusal(admission, status)
     if (refusal) {
       return { verdict: RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, effect: refusal.applied_slots.length > 0 ? EFFECT.HAPPENED : EFFECT.NOT_HAPPENED,
-        reason: 'exact_refusal_before_mutation', ...refusal }
+        reason: 'exact_refusal_before_mutation', basis: 'native_admission_journal',
+        ...(batchId !== undefined && admission.slots?.[0]?.batch_refs?.[0]?.batch_ref ? { receipt: { batch_id: batchId, batch_generation: admission.generation, batch_ref: admission.slots[0].batch_refs[0].batch_ref } } : {}),
+        settlement_operations: settlementRows(pending.operations, refusal), ...refusal }
     }
     if (admission.state === 'completed') return { verdict: RECONCILE_VERDICT.ADMITTED_COMPLETED, effect: EFFECT.HAPPENED, reason: 'exact_receipts_completed', batch_id: batchId }
     // A sealed exact receipt describes historical work by its original actor.
     // Unfinished work from an old actor is never resumed or assumed complete.
     if (staleActor) return staleActor
+    // The mod leaves a batch whose prefix is not a pure submission (a supply before a placement) 'uncertain'. The exact
+    // receipt still proves which operations completed, so settle it per operation instead of holding the whole batch.
+    const prefix = cancelledBatchPrefix(admission, status, pending.operations)
+    if (prefix) {
+      return { verdict: RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, effect: prefix.applied_slots.length > 0 ? EFFECT.HAPPENED : EFFECT.NOT_HAPPENED, reason: 'exact_cancelled_prefix_before_mutation',
+        settlement_operations: settlementRows(pending.operations, prefix), ...prefix }
+    }
     const navigation = terminalNavigationCancellation(admission, status, pending)
     if (navigation) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
       reason: 'exact_terminal_navigation_cancelled', ...navigation }
@@ -540,7 +656,8 @@ export function reconciliationFacts(result, pending) {
     ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !['gather', 'navigation'].includes(result?.recovery_kind)
       ? { completed_tasks: result.completed_tasks, refused_tasks: result.refused_tasks } : {}),
     ...(result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
-      ? { applied_slots: result.applied_slots ?? [], refused_slots: result.refused_slots ?? [], refusal_codes: result.refusal_codes ?? [], unrun_slots: result.unrun_slots ?? 0 }
+      ? { applied_slots: result.applied_slots ?? [], refused_slots: result.refused_slots ?? [], refusal_codes: result.refusal_codes ?? [], unrun_slots: result.unrun_slots ?? 0,
+          ...(result.basis ? { settlement_basis: result.basis, settlement: result.settlement_operations ?? [], ...(result.receipt ? { settlement_receipt: result.receipt } : {}) } : {}) }
       : {}),
   }
 }
@@ -557,7 +674,10 @@ export function reconciliationGuidance(result, pending) {
     const applied = (result.applied_slots ?? []).length > 0
       ? ` Operations ${result.applied_slots.join(', ')} completed before the refusal; do not repeat them.`
       : ''
-    return `Operation reconciliation (from the game's own admission record): the game refused operations ${(result.refused_slots ?? []).join(', ')} before changing anything, so those did not run and may be corrected and issued again.${applied} Operations after the refusal never started. Facts: ${facts}`
+    const derived = result.basis === 'harness_receipt_derivation'
+      ? ' The harness derived this from the exact native batch receipt: the tasks before the refused placement ran to completion in order (a delivery completes once it moved a positive count, which can be less than requested, so read the real contents of the target rather than assuming the full amount), and no later task started.'
+      : ''
+    return `Operation reconciliation (from the game's own admission record): the game refused operations ${(result.refused_slots ?? []).join(', ')} before changing anything, so those did not run and may be corrected and issued again.${applied} Operations after the refusal never started.${derived} Facts: ${facts}`
   }
   if (result?.effect === EFFECT.NOT_HAPPENED) {
     return `Operation reconciliation (from the game's batch records): the last operation batch never reached the game, so nothing from it ran and it may be issued again. Facts: ${facts}`

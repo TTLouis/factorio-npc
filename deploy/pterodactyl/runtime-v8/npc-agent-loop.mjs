@@ -1195,6 +1195,8 @@ export function receiptEvidence(raw, outcome, context = {}) {
           actor_epoch: context.actor_epoch,
         },
         admitted_batch: context.admitted_batch,
+        // The harness's per-operation settlement of THIS batch (see batchSettlementEvidence), when one was proven.
+        settlement: outcome === 'failed' ? context.settlement : undefined,
       }),
     }
   }
@@ -1204,6 +1206,36 @@ export function receiptEvidence(raw, outcome, context = {}) {
       ref: '',
       summary: cleanMemoryText(raw, 1200),
     }
+  }
+}
+
+// The settlement the harness proved for the batch whose failure receipt is being recorded: which operations completed, which
+// one the engine refused, which never started, bound to the exact pending record (operation key, signature, goal, plan, step,
+// actor, epoch) and the native batch it settled. The board reducer re-validates every binding before it routes on it.
+export function batchSettlementEvidence(settled) {
+  const { result, pending } = settled ?? {}
+  const receipt = result?.receipt
+  if (result?.verdict !== RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION || !pending || !Array.isArray(result.settlement_operations)
+    || typeof receipt?.batch_ref !== 'string' || receipt.batch_ref.length === 0) return undefined
+  return {
+    verdict: result.verdict,
+    reason: result.reason,
+    basis: result.basis,
+    operation_key: pending.operation_key,
+    signature: pending.signature,
+    goal_id: pending.goal_id,
+    plan_id: pending.plan_id,
+    step_id: pending.step_id,
+    actor_id: pending.actor?.actor_id,
+    actor_epoch: pending.actor?.epoch,
+    batch_id: receipt.batch_id,
+    batch_generation: receipt.batch_generation,
+    batch_ref: receipt.batch_ref,
+    ...(Number.isSafeInteger(receipt.failed_task_index) ? { failed_task_index: receipt.failed_task_index, tasks_started: receipt.tasks_started, task_count: receipt.task_count } : {}),
+    applied_slots: result.applied_slots ?? [],
+    refused_slots: result.refused_slots ?? [],
+    unrun_slots: result.unrun_slots ?? 0,
+    operations: result.settlement_operations,
   }
 }
 
@@ -2609,6 +2641,12 @@ function latestRecoverableOperationFailure(state) {
       entity_name: typeof parsed.entity_name === 'string' ? parsed.entity_name : undefined,
       attempt: Number.isSafeInteger(parsed.attempt) ? parsed.attempt : undefined,
       retry_budget: Number.isSafeInteger(parsed.retry_budget) ? parsed.retry_budget : undefined,
+      // A batch settled from its exact native receipt: which operations completed before the refused placement.
+      settled_batch_ref: typeof parsed.settled_batch_ref === 'string' ? cleanMemoryText(parsed.settled_batch_ref, 160) : undefined,
+      completed_operations: Array.isArray(parsed.completed_operations)
+        ? parsed.completed_operations.filter(name => typeof name === 'string').slice(0, 16).map(name => cleanMemoryText(name, 80))
+        : undefined,
+      settlement_basis: typeof parsed.settlement_basis === 'string' ? cleanMemoryText(parsed.settlement_basis, 80) : undefined,
     }
   }
   catch { return undefined }
@@ -10487,6 +10525,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (settled && result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION && (result.applied_slots ?? []).length > 0) {
         this.receiptPrefixSettlement = { result, pending }
       }
+      // Every settled refusal rides on the failure receipt this settlement was proven from, so the board can tell a
+      // settled placement failure (nothing of the batch is unresolved) from one whose batch effect is still unknown.
+      if (settled && result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) this.receiptBatchSettlement = { result, pending }
       const rid = requestId ?? this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
@@ -12119,6 +12160,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const owner = this.captureCheckpointOwner()
     this.noteWorldMutation() // D2: a batch receipt is being read; whatever was observed before it is history
     this.receiptPrefixSettlement = undefined
+    this.receiptBatchSettlement = undefined
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
     try {
@@ -12173,6 +12215,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           batch_id: cancelled.batch_id, batch_generation: cancelled.batch_generation,
           terminal_partial: reconcilePendingOperation(admitted, { status, actor: currentActor }).verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL,
         } : undefined,
+        settlement: batchSettlementEvidence(this.receiptBatchSettlement),
       }
       // The plan and step this batch was admitted under, when the memory
       // recorded one: lets the receipt ledger refuse a receipt whose plan has
@@ -12812,10 +12855,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
       const recoverable = latestRecoverableOperationFailure(this.memory.currentPlan?.(this.activePlanKey()))
       if (recoverable) {
+        const recoverableState = this.memory.currentPlan?.(this.activePlanKey())
         await this.traceEvent('operations.execution_recoverable', {
           failure_class: recoverable.failure_class,
           attempt: recoverable.attempt,
           retry_budget: recoverable.retry_budget,
+          code: recoverable.code,
+          goal_id: recoverableState?.goal_id,
+          step_id: recoverableState?.task_board?.active_step_id,
+          ...(recoverable.settled_batch_ref ? {
+            settled_batch_ref: recoverable.settled_batch_ref,
+            settlement_basis: recoverable.settlement_basis,
+            completed_operations: recoverable.completed_operations,
+            reason: 'settled_batch_placement_refused_before_mutation',
+          } : {}),
         })
       }
       const supplyState = this.memory.currentPlan?.(this.activePlanKey())
@@ -12880,8 +12933,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : supplyRecovery
         ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget}; once these are spent the failure is recorded as the step blocker (the plan and step contract stay unchanged).`
         : ''
-      const recoverableGuidance = recoverable
-        ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
+      const completedBefore = recoverable?.completed_operations?.length > 0
+        ? ` The exact native batch receipt shows these operations completed before the placement was refused, so do not repeat them: ${recoverable.completed_operations.map((name, index) => `${index + 1}. ${name}`).join(', ')} (a delivery completes once it moved a positive count, which can be less than requested; read the target's real contents before topping it up).`
+        : recoverable?.settled_batch_ref
+          ? ' The exact native batch receipt shows the refused placement was the first task of the batch, so nothing in the batch took effect and no later operation started.'
+          : ''
+      const recoverableGuidance = recoverable?.code === 'no_position'
+        ? ` [HARNESS] The engine found no free ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} position: a place_entity without coordinates only searches the tile ring right around where the NPC stands (find_non_colliding_position, radius 1), so this is a local search miss, not proof that the world prevents the step. The committed step and plan are unchanged.${completedBefore} ${recoverable.completed_operations?.length > 0 ? 'Only the placement remains: request' : 'To correct it, request'} placement candidates (getPlacementCandidates, or planPlacement for an anchor) near where the entity is needed and place a returned candidate, or submit a concrete valid position, inside this same step. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked as placement_failed:no_position.`
+        : recoverable
+        ? ` [HARNESS] The engine refused the${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
         : ''
       const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
       // A failed batch's receipt has no completed placement of its own (its last completed batch is an older one).
