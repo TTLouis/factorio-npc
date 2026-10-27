@@ -800,3 +800,20 @@ test('A-R1-1: an unreadable bound producer or feeder during residual recovery se
     assert.deepEqual(w.ops, [])
   }
 })
+
+test('Run BB lane A residual continues through real completed receipts: gathered coal refuels both burners and the step closes', async () => {
+  const w = world({ iron: true, fuelFacts: true })
+  w.game.inventory.coal = 0
+  const mutate = w.game.onMutation
+  w.game.onMutation = text => {
+    if (text.includes("'autorio_operations','gather_resource'") && text.includes('coal')) w.game.inventory.coal = (w.game.inventory.coal ?? 0) + 1
+    return mutate(text)
+  }
+  const intent = { ...w.intent, resources: [{ item_name: 'iron-ore', method: 'gather_resource' }], fuel: { item_name: 'coal', count: 3 } }
+  await fuelRecord(w, intent)()
+  await runIron(w)
+  assert.deepEqual(w.ops.filter(name => ['gather_resource', 'supply_entity'].includes(name)), ['gather_resource', 'supply_entity', 'gather_resource', 'supply_entity'])
+  assert.equal(w.events.filter(row => row.event === 'production.recovery' && row.data.mechanism === 'fuel_source_binding').length, 1, 'the source is bound once')
+  assert.deepEqual(failed(w), [])
+  assert.equal(w.providers.length, 0)
+})
