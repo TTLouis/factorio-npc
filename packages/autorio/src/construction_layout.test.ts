@@ -1188,6 +1188,122 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       expect(layout(layout_id).state).toBe('complete')
     })
 
+    // Milestone 4 L4, retained parts: what a pause leaves standing is read again before the layout resumes or completes.
+    describe('retained nodes and verified connections', () => {
+      // The chest, inserter and second chest of CHAIN, powered by a pole that is built last.
+      const POLE = { entity_name: 'test-pole', x: 2.5, y: 0.5, slot: 'pole' }
+      const POWER = { kind: 'power' as const, pole: { slot: 'pole' }, consumer: { slot: 'ins' } }
+      const LAYOUT = [SRC, INS, DST, POLE]
+
+      function powered(f: World) {
+        f.hooks.on_create = (entity) => {
+          if (entity.name === 'test-inserter') {
+            entity.pickup_target = f.created.find(other => other.name === 'test-chest' && other.position.y === -0.5)
+            entity.drop_target = f.created.find(other => other.name === 'test-chest' && other.position.y === 1.5)
+            entity.electric_network_id = 7
+          }
+          if (entity.name === 'test-pole') entity.electric_network_id = 7
+        }
+      }
+
+      // The item connection is built and verified; the engine cancels before the power pole.
+      function cancelled_before_pole(f: World) {
+        powered(f)
+        const started = start(f, LAYOUT, [CHAIN, POWER])
+        for (let i = 0; i < 3; i++) expect(place_next(f)?.[0]).toBe(true)
+        f.manager.cancel_all_tasks('test_cancel')
+        expect(layout(started.layout_id)).toMatchObject({ connections: [{ state: 'verified' }, { state: 'pending' }] })
+        const inserter = f.created.find(entity => entity.name === 'test-inserter')
+        return { ...started, inserter }
+      }
+
+      it('records what each placed entity reported when it was bound', () => {
+        const f = build()
+        const { layout_id } = cancelled_before_pole(f)
+        const reported = layout(layout_id).nodes.filter((node: any) => node.state === 'placed').map((node: any) => [node.slot, node.placed_position, node.placed_direction])
+        expect(reported).toEqual([
+          ['src', { x: 0.5, y: -0.5 }, 0], ['ins', { x: 0.5, y: 0.5 }, 0], ['dst', { x: 0.5, y: 1.5 }, 0],
+        ])
+      })
+
+      it('pauses and refuses a resume when a retained inserter was turned during the pause, and resumes once it is restored', () => {
+        const f = build()
+        const { layout_id, inserter } = cancelled_before_pole(f)
+        inserter.direction = 8
+        const status: any = construction_layout_status(layout_id, { actor: f.actor })
+        expect(status.layout).toMatchObject({ state: 'paused', pause_reason: `retained_node_changed: layout-${layout_id}:n1`, retained_problem: `retained_node_changed: layout-${layout_id}:n1` })
+        expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_RETAINED_NODE_CHANGED' } })
+        expect((globalThis as any).storage.sgluna_validated_construction_plan).toBeUndefined()
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(3)
+        expect(layout(layout_id).nodes[1]).toMatchObject({ state: 'placed', unit_number: 903 })
+
+        // Restored as it was built, the retained part holds again and only the pole remains.
+        inserter.direction = 0
+        const validation = resume(f, layout_id)
+        expect(validation).toMatchObject({ ok: true, placement_count: 1, remainder: [`layout-${layout_id}:n3`] })
+        expect(layout(layout_id)).toMatchObject({ state: 'paused', pause_reason: 'remainder_unplaced' })
+        expect(layout(layout_id).retained_problem).toBeUndefined()
+        expect(execute(f, validation)[0]).toBe(true)
+        expect(place_next(f)?.[0]).toBe(true)
+        expect(layout(layout_id)).toMatchObject({ state: 'complete', connections: [{ state: 'verified' }, { state: 'verified' }] })
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(4)
+      })
+
+      it('pauses and refuses a resume when a retained node moved or became another prototype', () => {
+        const moved = build()
+        const first = cancelled_before_pole(moved)
+        moved.created.find(entity => entity.name === 'test-chest').position = { x: 3.5, y: -0.5 }
+        expect(resume(moved, first.layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_RETAINED_NODE_CHANGED' } })
+        expect(layout(first.layout_id).pause_reason).toBe(`retained_node_changed: layout-${first.layout_id}:n0`)
+
+        const renamed = build()
+        const second = cancelled_before_pole(renamed)
+        renamed.created.find(entity => entity.name === 'test-chest').name = 'test-locked-chest'
+        expect(resume(renamed, second.layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_RETAINED_NODE_CHANGED' } })
+        expect(renamed.surface.create_entity).toHaveBeenCalledTimes(3)
+      })
+
+      it('pauses and refuses a resume when a verified connection no longer holds on the retained entities', () => {
+        const f = build()
+        const { layout_id, inserter } = cancelled_before_pole(f)
+        const target = inserter.pickup_target
+        inserter.pickup_target = undefined
+        const status: any = construction_layout_status(layout_id, { actor: f.actor })
+        expect(status.layout.state).toBe('paused')
+        expect(status.layout.pause_reason).toContain('connection_no_longer_verified: 0 (inserter)')
+        expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_CONNECTION_NO_LONGER_VERIFIED' } })
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(3)
+        inserter.pickup_target = target
+        expect(resume(f, layout_id)).toMatchObject({ ok: true, placement_count: 1 })
+      })
+
+      it('refuses a token whose retained inserter was turned after the remainder was validated', () => {
+        const f = build()
+        const { layout_id, inserter } = cancelled_before_pole(f)
+        const validation = resume(f, layout_id)
+        expect(validation.ok).toBe(true)
+        inserter.direction = 12
+        expect(execute(f, validation)).toEqual([false, expect.stringContaining('LAYOUT_RETAINED_NODE_CHANGED')])
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(3)
+        expect(layout(layout_id)).toMatchObject({ state: 'paused', executions_used: 1 })
+      })
+
+      it('never completes a layout whose retained node was changed while its last node was being built', () => {
+        const f = build()
+        const { layout_id, inserter } = cancelled_before_pole(f)
+        expect(execute(f, resume(f, layout_id))[0]).toBe(true)
+        inserter.direction = 4
+        expect(place_next(f)?.[0]).toBe(true)
+        expect(layout(layout_id)).toMatchObject({ state: 'paused', retained_problem: `retained_node_changed: layout-${layout_id}:n1` })
+        expect(layout(layout_id).nodes[3]).toMatchObject({ state: 'placed' })
+        expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_RETAINED_NODE_CHANGED' } })
+        // Restored, the settlement lifts its own pause and the layout completes: nothing was rebuilt.
+        inserter.direction = 0
+        expect(construction_layout_status(layout_id, { actor: f.actor })).toMatchObject({ layout: { state: 'complete' } })
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(4)
+      })
+    })
+
     describe('admission settlement', () => {
       const KEY = 'request/execute'
       const identity = { operation_key: KEY, attempt_id: 'attempt-1', actor_id: 42, epoch: 3, signature: 'sig-1', ordinal: 1, operation_count: 1 }
@@ -1232,6 +1348,7 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
         expect(pinned_operation_batch_refs()).toEqual([])
         ;(globalThis as any).storage.sgluna_task_receipt_journal.length = 0
         expect(admission.status().records[0]).toMatchObject({ state: 'partial', placed_node_ids: ['layout-1:n0'] })
+        expect(admission.status().records[0].layout_receipt).toMatchObject({ state: 'cancelled', reason: 'test_cancel', task_count: 3, task_types: ['placing', 'placing', 'placing'], batch_generation: 1 })
       })
 
       it('completes the admission only when the batch really completed with every node placed', () => {
@@ -1240,6 +1357,102 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
         for (let i = 0; i < 3; i++) expect(place_next(f)?.[0]).toBe(true)
         expect(layout(layout_id).state).toBe('complete')
         expect(admission.status().records[0]).toMatchObject({ state: 'completed' })
+      })
+
+      // The row a restart seals, as the runtime reconciler is given it (construction-layout-partial.test.mjs carries the same
+      // literal for its historical case).
+      const RESTART_ROW = {
+        state: 'partial',
+        ok: false,
+        error: 'exact_construction_layout_partial',
+        generation: 1,
+        layout_id: 1,
+        placed_node_ids: ['layout-1:n0'],
+        not_placed_node_ids: ['layout-1:n2', 'layout-1:n1'],
+        layout_receipt: { batch_ref: 'batch-g1-1', batch_id: 1, batch_generation: 1, state: 'uncertain', reason: 'save_load_unfinished', tick: 100, task_count: 3, task_types: ['placing', 'placing', 'placing'] },
+      }
+      const SECOND = { operation_key: 'request/resume', attempt_id: 'attempt-2', actor_id: 42, epoch: 3, signature: 'sig-2', ordinal: 2, operation_count: 1 }
+
+      it('settles an admission across a restart from durable node evidence, then runs only a freshly validated remainder through admission', () => {
+        const f = build()
+        const { admission, layout_id } = admitted(f)
+        expect(place_next(f)?.[0]).toBe(true)
+        // The save is loaded with the batch unfinished: startup retires it as an uncertain receipt and advances the generation.
+        expect(f.manager.reconcile_startup('restart-2')).toMatchObject({ ok: true, reconciled: true, batch_generation: 2 })
+        expect(f.manager.get_status_snapshot().receipt_journal[0]).toMatchObject({ state: 'uncertain', reason: 'save_load_unfinished', batch_generation: 1 })
+        expect(admission.status().records[0]).toMatchObject(RESTART_ROW)
+        expect(admission.status().records[0].layout_receipt).toEqual(RESTART_ROW.layout_receipt)
+        expect(admission.status().records[0].missing_node_ids).toBeUndefined()
+
+        // The next admission reconciles the journal and seals the row; it is no longer unresolved.
+        expect(admission.begin(SECOND).ok).toBe(true)
+        expect((globalThis as any).storage.sgluna_operation_admissions[0]).toMatchObject(RESTART_ROW)
+        expect(layout(layout_id)).toMatchObject({ executions: [{ settled: { placed: [0], not_placed: [2, 1] } }] })
+
+        // Only a freshly validated remainder runs: the chest built before the restart is retained, never rebuilt.
+        const validation = resume(f, layout_id)
+        expect(validation).toMatchObject({ ok: true, placement_count: 2, retained: [{ unit_number: 901 }] })
+        expect(execute(f, validation)[0]).toBe(true)
+        const active: any = f.manager.get_status_snapshot().active_batch
+        expect(active.batch_generation).toBe(2)
+        expect(admission.slot(SECOND.operation_key, 1, { ok: true, operation: 'execute_construction_plan', batch_refs: [{ batch_id: active.batch_id, batch_generation: 2, batch_ref: active.batch_ref }] }).ok).toBe(true)
+        expect(admission.finish(SECOND.operation_key, { ok: true }).record?.state).toBe('admitted')
+        expect(place_next(f)?.[0]).toBe(true)
+        expect(place_next(f)?.[0]).toBe(true)
+        expect(layout(layout_id)).toMatchObject({ state: 'complete', executions_used: 2, nodes: [{ state: 'placed', unit_number: 901 }, { state: 'placed' }, { state: 'placed' }] })
+        expect(f.created.filter(entity => entity.name === 'test-chest' && entity.position.y === -0.5)).toHaveLength(1)
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(3)
+        expect(admission.status().records.map(row => row.state)).toEqual(['partial', 'completed'])
+      })
+
+      it('keeps the restart evidence in the sealed row after the journal evicts the retired receipt', () => {
+        const f = build()
+        const { admission } = admitted(f)
+        expect(place_next(f)?.[0]).toBe(true)
+        f.manager.reconcile_startup('restart-2')
+        expect(admission.begin(SECOND).ok).toBe(true)
+        ;(globalThis as any).storage.sgluna_task_receipt_journal.length = 0
+        expect(admission.status().records[0]).toMatchObject(RESTART_ROW)
+        expect((globalThis as any).storage.sgluna_operation_admissions[0].layout_receipt).toEqual(RESTART_ROW.layout_receipt)
+      })
+
+      it('reports a node whose entity is gone after the restart as missing, pauses the layout and never resumes it', () => {
+        const f = build()
+        const { admission, layout_id } = admitted(f)
+        expect(place_next(f)?.[0]).toBe(true)
+        f.manager.reconcile_startup('restart-2')
+        f.by_unit.get(901).valid = false
+        const original = (globalThis as any).game.get_surface
+        ;(globalThis as any).game.get_surface = () => f.surface
+        try {
+          expect(admission.status().records[0]).toMatchObject({ state: 'partial', placed_node_ids: [], missing_node_ids: [`layout-${layout_id}:n0`], not_placed_node_ids: [`layout-${layout_id}:n2`, `layout-${layout_id}:n1`] })
+        }
+        finally {
+          ;(globalThis as any).game.get_surface = original
+        }
+        expect(layout(layout_id).nodes[0]).toMatchObject({ state: 'missing', unit_number: 901 })
+        expect(construction_layout_status(layout_id, { actor: f.actor })).toMatchObject({ layout: { state: 'paused' } })
+        expect(resume(f, layout_id)).toMatchObject({ ok: false, error: { code: 'LAYOUT_COMPLETED_NODE_MISSING' } })
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+      })
+
+      it('does not settle a retired receipt of the current generation or for another reason', () => {
+        for (const mutate of [
+          (receipt: any) => { receipt.state = 'uncertain'; receipt.reason = 'save_load_unfinished' },
+          (receipt: any) => { receipt.state = 'uncertain'; receipt.reason = 'something_else' },
+        ]) {
+          ;(globalThis as any).storage = {}
+          const f = build()
+          const { admission, layout_id } = admitted(f)
+          expect(place_next(f)?.[0]).toBe(true)
+          f.manager.cancel_all_tasks('test_cancel')
+          const row = (globalThis as any).storage.sgluna_operation_admissions[0]
+          Object.assign(row, { state: 'admitted', ok: true, error: undefined, layout_id: undefined, placed_node_ids: undefined, not_placed_node_ids: undefined, layout_receipt: undefined })
+          layout(layout_id).executions[0].settled = undefined
+          mutate((globalThis as any).storage.sgluna_task_receipt_journal[0])
+          expect(admission.status().records[0].state).not.toBe('partial')
+          expect(layout(layout_id).executions[0].settled).toBeUndefined()
+        }
       })
 
       it.each([
