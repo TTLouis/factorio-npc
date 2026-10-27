@@ -23,7 +23,7 @@ const INSIDE = { candidate: 'candidate-1', position: { x: 12, y: 11 } }
 
 const OBLIGATIONS = { outcome: { mode: 'all', requirements: [{ kind: 'entity_count', prototype: DRILL, minimum: 2, anchor: ANCHOR, radius: 6 }] }, preserve: [] }
 
-function world({ obligations = OBLIGATIONS, contractOnly = false, nativePosition = id => ({ 'candidate-1': INSIDE.position, 'candidate-2': OUTSIDE.position })[id] } = {}) {
+function world({ obligations = OBLIGATIONS, contractOnly = false, secondPick, nativePosition = id => ({ 'candidate-1': INSIDE.position, 'candidate-2': OUTSIDE.position })[id] } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const game = new FakeFactorio({ inventory: { [DRILL]: 2 } })
   game.status.actor_id = 10
@@ -39,6 +39,12 @@ function world({ obligations = OBLIGATIONS, contractOnly = false, nativePosition
         material_status: { status: 'held', item_name: DRILL, held_count: 2, required_count: 1 }, execution_eligibility: 'eligible',
         candidate_set_id: 'placement-1', ordering: 'nearest_to_anchor_first', legal_candidate_count: 2, returned_candidate_count: 2,
         candidates: [{ id: 'candidate-1', position: INSIDE.position, direction: 0, distance_from_anchor: 2.24, in_region: true }, { id: 'candidate-2', position: { x: 15, y: 10 }, direction: 0, distance_from_anchor: 5, in_region: true }] })
+    }
+    if (text.includes('"autorio_preflight"') && /["']place_entity["']/.test(text)) {
+      // Scripted native place_entity preflight: the grid-snapped planned footprint centre of the requested coordinates.
+      const x = Number(/\['x'\]=(-?[\d.]+)/.exec(text)?.[1]); const y = Number(/\['y'\]=(-?[\d.]+)/.exec(text)?.[1])
+      return JSON.stringify({ ok: true, operation: 'place_entity', placement_item: { entity_name: DRILL, item_name: DRILL, count: 1, held_count: 2 },
+        ...(Number.isFinite(x) && Number.isFinite(y) ? { planned_footprint: { entity_name: DRILL, position: { x, y }, direction: 0 } } : {}) })
     }
     if (text.includes("'autorio_preflight'") && text.includes("'place_candidate'")) {
       const id = /candidate_id='(candidate-\d+)'/.exec(text)?.[1]
@@ -82,7 +88,7 @@ function world({ obligations = OBLIGATIONS, contractOnly = false, nativePosition
       mutationsAt.push(game.mutations.length)
       const place = pick => planReply({ stepId: step.step_id, operations: [{ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: pick.candidate } }] })
       if (round++ === 0) return { content: '', tool_calls: [{ id: 'search-1', index: 0, type: 'function', function: { name: 'getPlacementCandidates', arguments: JSON.stringify({ entity_name: DRILL, radius: 8, limit: 8 }) } }] }
-      return round === 2 ? place(OUTSIDE) : place(INSIDE)
+      return round === 2 ? (secondPick ? planReply({ stepId: step.step_id, operations: [secondPick] }) : place(OUTSIDE)) : place(INSIDE)
     }) })
   agent.behaviorTrace = { emit: async row => { rows.push(row) } }
   return { agent, memory, game, rows, searches, calls, mutationsAt, start: () => agent.request('Mine copper ore with drills near the anchor.', { sender: 'Louis' }) }
@@ -157,4 +163,19 @@ test('BC C shape: the anchored area only in the step completion contract (no typ
   assert.equal(w.rows.find(row => row.event === 'operations.placement_scope_refused')?.data.code, 'candidate_outside_committed_region')
   assert.equal(w.game.mutations.length, 1)
   assert.ok(w.game.mutations[0].includes('candidate-1'))
+})
+
+test('review R1-1: a place_entity with explicit coordinates outside the committed circle is refused before admission, then the inside candidate is admitted', async () => {
+  const w = world({ secondPick: { name: 'place_entity', args: { entity_name: DRILL, x: 20, y: 10 } } })
+  await w.start()
+  const refused = w.rows.find(row => row.event === 'operations.placement_scope_refused')
+  assert.equal(refused?.data.code, 'placement_outside_committed_region')
+  assert.equal(refused.data.operation, 'place_entity')
+  assert.deepEqual(refused.data.placement_position, { x: 20, y: 10 })
+  assert.equal(w.rows.find(row => row.event === 'operations.preflight_recoverable')?.data.refusal_class, 'argument')
+  assert.equal(w.mutationsAt.at(-1), 0, 'nothing had been admitted when the executor was asked to correct')
+  assert.match(w.calls.at(-1).messages.map(message => String(message.content ?? '')).join('\n'), /places this place_entity's burner-mining-drill at \(20, 10\), 10 from anchor \(10, 10\)/)
+  assert.equal(w.game.mutations.length, 1)
+  assert.ok(w.game.mutations[0].includes("'place_candidate'") && w.game.mutations[0].includes('candidate-1'))
+  assert.equal(w.rows.some(row => row.event === 'goal.paused'), false)
 })

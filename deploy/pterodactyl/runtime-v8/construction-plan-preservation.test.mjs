@@ -45,9 +45,11 @@ for (const [shape, names] of Object.entries(SHAPES)) {
     await w.start()
     assert.equal(w.game.mutations.length, 1, JSON.stringify(w.rows.filter(row => /failed|paused|refused/.test(row.event)).slice(-4)))
     assert.match(w.game.mutations[0], new RegExp(`'execute_construction_plan',7,${names.length}\\b`))
+    // The fixture step anchors a boiler, so the preflight reads the stored placement list once for the committed-area check (M2);
+    // the preservation gate then makes its decision from its own single admission-time read (O1), never from the earlier one.
     const reads = w.nativeReads.filter(witnessRead)
-    assert.equal(reads.length, 1, 'one witness read, not a second differently-timed one')
-    assert.match(reads[0], new RegExp(`validation_id=7,placement_count=${names.length}`))
+    assert.equal(reads.length, 2, 'one committed-area read at preflight and one preservation read at admission, not more')
+    for (const read of reads) assert.match(read, new RegExp(`validation_id=7,placement_count=${names.length}`))
     assert.equal(Object.keys(getActivePlan(w.memory.planningState(KEY)).execution.preservation_admissions ?? {}).length, 0,
       'a nonfluid composite writes no fluid admission envelope')
   })

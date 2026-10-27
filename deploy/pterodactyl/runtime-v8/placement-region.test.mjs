@@ -24,7 +24,11 @@ const COMMITTED = obligationsFor(drillCount())
 
 const REGION_LUA = "region={shape='circle',center={x=10,y=10},radius=6}"
 
-function agentWith(obligations, { preflight } = {}) {
+// The plan the agent sees as active. Searches are scoped only under a committed plan; admission also under a draft (its first
+// batch's preflight is what commits it).
+const planningWith = status => ({ goal: { goal_id: 'goal-1' }, active_plan_id: 'plan-1', plans: [{ plan_id: 'plan-1', status, active_step_index: 0, steps: [{ step_id: 'step-1' }] }] })
+
+function agentWith(obligations, { preflight, status = 'COMMITTED' } = {}) {
   const game = new FakeFactorio({ inventory: { [DRILL]: 2 }, preflight })
   game.status.actor_id = 10
   const native = game.command.bind(game)
@@ -34,6 +38,7 @@ function agentWith(obligations, { preflight } = {}) {
   agent.epoch = { ...game.status }
   agent.active = true
   agent.currentContractObligations = () => obligations
+  agent.memory.planningState = () => planningWith(status)
   return { agent, game }
 }
 
@@ -109,7 +114,12 @@ test('compilePlacementScope injects, admits, refuses and passes through', () => 
   assert.deepEqual(compilePlacementScope(outside, []), { region: outside, injected: false })
   assert.deepEqual(compilePlacementScope(undefined, []), { region: undefined, injected: false })
   const other = { shape: 'circle', center: { x: 40, y: 40 }, radius: 6 }
-  assert.deepEqual(compilePlacementScope(undefined, [CIRCLE, other]), { region: undefined, injected: false }, 'two counted areas: no single hard region')
+  assert.deepEqual(compilePlacementScope(undefined, [CIRCLE, other]), { refusal: { code: 'region_choice_required', committed_regions: [CIRCLE, other] } },
+    'two counted areas: no single area to inject, and an unscoped search is not sent')
+  const inOther = { shape: 'circle', center: { x: 41, y: 40 }, radius: 3 }
+  assert.deepEqual(compilePlacementScope(inOther, [CIRCLE, other]), { region: inOther, injected: false }, 'a region inside one of them is a choice')
+  const straddling = { shape: 'box', left_top: { x: 10, y: 10 }, right_bottom: { x: 40, y: 40 } }
+  assert.equal(compilePlacementScope(straddling, [CIRCLE, other]).refusal.code, 'region_outside_committed_scope')
   assert.equal(describeRegion(CIRCLE), 'circle center (10, 10) radius 6')
 })
 
@@ -164,7 +174,7 @@ test('a model region wholly inside the committed one is admitted as written; one
     assert.throws(() => agent.observationToolCommand('getPlacementCandidates', { entity_name: DRILL, region }), (error) => {
       assert.equal(error.code, 'region_outside_committed_scope')
       assert.equal(error.failureClass, 'tool_validation')
-      assert.deepEqual(error.details.committed_region, CIRCLE)
+      assert.deepEqual(error.details.committed_regions, [CIRCLE])
       assert.match(error.message, /circle center \(10, 10\) radius 6/)
       assert.match(error.message, /entity_count requirement for burner-mining-drill/)
       return true
@@ -231,4 +241,109 @@ test('a model-supplied position or hash cannot ride on a place_candidate: the op
   const { error, game } = await preflightOf(COMMITTED, nativeFor({ x: 30, y: 30 }), [PLACE])
   assert.equal(error.preflight.code, 'candidate_outside_committed_region')
   assert.equal(game.mutations.length, 0, 'nothing was admitted')
+})
+
+// ---- review O2 round 1 -----------------------------------------------------------------------------------------------
+
+const OTHER = { shape: 'circle', center: { x: 40, y: 40 }, radius: 6 }
+const TWO_AREAS = obligationsFor(drillCount(), drillCount({ id: 'requirement_2', anchor: { x: 40, y: 40 } }))
+
+test('R1-2: two committed areas for one prototype: a search without a region is refused with both areas, one inside either is sent as written', () => {
+  const { agent } = agentWith(TWO_AREAS)
+  assert.throws(() => agent.observationToolCommand('getPlacementCandidates', { entity_name: DRILL, radius: 8, limit: 8 }), error => {
+    assert.equal(error.code, 'region_choice_required')
+    assert.equal(error.failureClass, 'tool_validation')
+    assert.deepEqual(error.details.committed_regions, [CIRCLE, OTHER])
+    assert.match(error.message, /circle center \(10, 10\) radius 6/)
+    assert.match(error.message, /circle center \(40, 40\) radius 6/)
+    return true
+  })
+  const inOther = { shape: 'circle', center: { x: 41, y: 40 }, radius: 3 }
+  assert.ok(agent.observationToolCommand('getPlacementCandidates', { entity_name: DRILL, region: inOther }).includes("region={shape='circle',center={x=41,y=40},radius=3}"))
+  assert.throws(() => agent.observationToolCommand('getPlacementCandidates', { entity_name: DRILL, region: { shape: 'circle', center: { x: 25, y: 25 }, radius: 4 } }),
+    error => error.code === 'region_outside_committed_scope' && /inside one of them/.test(error.message))
+})
+
+test('R1-2: with two committed areas a place_candidate is admitted inside either and refused outside both', async () => {
+  assert.equal((await preflightOf(TWO_AREAS, nativeFor({ x: 41, y: 41 }))).error, undefined)
+  assert.equal((await preflightOf(TWO_AREAS, nativeFor({ x: 25, y: 25 }))).error.preflight.code, 'candidate_outside_committed_region')
+})
+
+const placeEntity = (args, footprint) => ({ operation: { name: 'place_entity', args: { entity_name: DRILL, ...args } },
+  native: () => ({ ok: true, operation: 'place_entity', placement_item: { entity_name: DRILL, item_name: DRILL, count: 1, held_count: 2 }, ...(footprint ? { planned_footprint: { entity_name: DRILL, position: footprint, direction: 0 } } : {}) }) })
+
+test('R1-1: a place_entity whose native planned footprint centre lies outside the committed circle is refused before admission', async () => {
+  const outside = placeEntity({ x: 20, y: 10 }, { x: 20, y: 10 })
+  const { error, game } = await preflightOf(COMMITTED, outside.native, [outside.operation])
+  assert.equal(error.preflight.code, 'placement_outside_committed_region')
+  assert.equal(error.preflight.refusal_class, 'argument')
+  assert.equal(error.preflight.operation, 'place_entity')
+  assert.deepEqual(error.preflight.placement_position, { x: 20, y: 10 })
+  assert.match(error.preflight.correction_message, /places this place_entity's burner-mining-drill at \(20, 10\), 10 from anchor \(10, 10\)/)
+  assert.equal(game.mutations.length, 0)
+  // The snapped centre decides, not the requested coordinates: (16.4, 10) snaps to (16, 10), on the boundary.
+  const snappedInside = placeEntity({ x: 16.4, y: 10 }, { x: 16, y: 10 })
+  assert.equal((await preflightOf(COMMITTED, snappedInside.native, [snappedInside.operation])).error, undefined)
+  const inside = placeEntity({ x: 12, y: 11 }, { x: 12, y: 11 })
+  assert.equal((await preflightOf(COMMITTED, inside.native, [inside.operation])).error, undefined)
+})
+
+test('R1-1: a coordinate-free place_entity of a committed prototype cannot be proven inside and is refused; another prototype is untouched', async () => {
+  const free = placeEntity({}, undefined)
+  const { error } = await preflightOf(COMMITTED, free.native, [free.operation])
+  assert.equal(error.preflight.code, 'placement_region_unproven')
+  assert.match(error.preflight.correction_message, /has no coordinates, so the runtime would choose where/)
+  const furnace = { name: 'place_entity', args: { entity_name: 'stone-furnace' } }
+  assert.equal((await preflightOf(COMMITTED, () => ({ ok: true, operation: 'place_entity' }), [furnace])).error, undefined)
+})
+
+test('R1-1: a construction plan is refused when one validated placement of the committed prototype snaps outside the circle', async () => {
+  const plan = { name: 'execute_construction_plan', args: { validation_id: 7, placement_count: 2 } }
+  const witness = drillPosition => () => ({ ok: true, validation_id: 7, placement_count: 2, construction_placements: [
+    { entity_name: 'stone-furnace', x: 30, y: 30, direction: 0, position: { x: 30, y: 30 }, fluidbox_count: 0 },
+    { entity_name: DRILL, x: drillPosition.x, y: drillPosition.y, direction: 0, ...(drillPosition.snapped ? { position: drillPosition.snapped } : {}), fluidbox_count: 0 }] })
+  const outside = await preflightOf(COMMITTED, witness({ x: 20, y: 10, snapped: { x: 20, y: 10 } }), [plan])
+  assert.equal(outside.error.preflight.code, 'placement_outside_committed_region')
+  assert.equal(outside.error.preflight.operation, 'execute_construction_plan')
+  assert.equal(outside.error.preflight.entity_name, DRILL)
+  const unproven = await preflightOf(COMMITTED, witness({ x: 12, y: 10 }), [plan])
+  assert.equal(unproven.error.preflight.code, 'placement_region_unproven', 'raw coordinates are not the resolved position')
+  // An unusable witness is left to the existing checks (the preservation gate, native re-validation), not refused as out of area.
+  const unreadable = await preflightOf(COMMITTED, () => ({ ok: false, code: 'construction_plan_unavailable' }), [plan])
+  assert.notEqual(unreadable.error?.preflight?.code?.startsWith('placement_'), true)
+  const unrelated = await preflightOf(obligationsFor(drillCount({ anchor: undefined })), () => { throw new Error('no witness read without an anchored requirement') }, [plan])
+  assert.equal(unrelated.error, undefined)
+  const inside = await preflightOf(COMMITTED, witness({ x: 12, y: 10, snapped: { x: 12, y: 10 } }), [plan])
+  assert.notEqual(inside.error?.preflight?.code?.endsWith('committed_region'), true)
+  assert.notEqual(inside.error?.preflight?.code, 'placement_region_unproven')
+})
+
+test('R1-1: planPlacement for a committed prototype is refused with the area as facts; another prototype still plans', () => {
+  const { agent } = agentWith(COMMITTED)
+  assert.throws(() => agent.observationToolCommand('planPlacement', { entity_name: DRILL, position: { x: 30, y: 10 } }), error => {
+    assert.equal(error.code, 'placement_search_unscoped')
+    assert.equal(error.failureClass, 'tool_validation')
+    assert.match(error.message, /circle center \(10, 10\) radius 6/)
+    assert.match(error.message, /getPlacementCandidates for burner-mining-drill is filtered by that area/)
+    return true
+  })
+  assert.match(agent.observationToolCommand('planPlacement', { entity_name: 'stone-furnace' }), /plan_placement/)
+})
+
+test('R1-3: a draft plan does not scope searches, but its first batch is still checked against the contract it would commit', async () => {
+  for (const status of ['DRAFT', 'RUNTIME_VALIDATION', 'READY']) {
+    const { agent } = agentWith(COMMITTED, { status })
+    assert.ok(!agent.observationToolCommand('getPlacementCandidates', { entity_name: DRILL, radius: 8 }).includes('region='), status)
+    assert.match(agent.observationToolCommand('planPlacement', { entity_name: DRILL }), /plan_placement/, status)
+    const { error } = await (async () => {
+      const { agent: gate } = agentWith(COMMITTED, { status, preflight: nativeFor({ x: 20, y: 10 }) })
+      try { await gate.preflightOperations([PLACE]); return {} }
+      catch (failure) { return { error: failure } }
+    })()
+    assert.equal(error?.preflight?.code, 'candidate_outside_committed_region', status)
+  }
+  for (const status of ['COMMITTED', 'EXECUTING']) {
+    const { agent } = agentWith(COMMITTED, { status })
+    assert.ok(agent.observationToolCommand('getPlacementCandidates', { entity_name: DRILL, radius: 8 }).includes(REGION_LUA), status)
+  }
 })
