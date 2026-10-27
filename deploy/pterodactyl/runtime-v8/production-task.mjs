@@ -105,9 +105,19 @@ export function restoreProductionTask(raw) {
   if (raw.last_progress_at < raw.created_at || raw.last_progress_at > raw.deadline_at) throw new Error('invalid_production_progress_clock')
   for (const key of ['transitions', 'recoveries', 'fuel_used']) task[key] = quantity(raw[key], { zero: true })
   if (task.transitions > PRODUCTION_LIMITS.transitions || task.recoveries > PRODUCTION_LIMITS.recoveries || task.fuel_used > (task.intent.fuel?.count ?? 0)) throw new Error('invalid_production_allowance')
+  if (raw.fuel_source !== undefined) task.fuel_source = fuelSource(task, raw.fuel_source)
   return { ...task, status: raw.status, deadline_at: raw.deadline_at, last_progress_at: raw.last_progress_at,
     last_fingerprint: typeof raw.last_fingerprint === 'string' && raw.last_fingerprint.length <= 20000 ? raw.last_fingerprint : null,
     ...(typeof raw.pause_reason === 'string' ? { pause_reason: raw.pause_reason.slice(0, 200) } : {}) }
+}
+// The record's own source for its fuel allowance, kept beside the immutable intent: the allowance item only, one of
+// the intent's acquisition methods, never a second binding for an item the intent already binds.
+function fuelSource(task, raw) {
+  exact(raw, ['item_name', 'method'])
+  const name = itemName(raw.item_name)
+  if (name !== task.intent.fuel?.item_name || !['gather_resource', 'harvest_product'].includes(raw.method)
+    || task.intent.resources.some(row => row.item_name === name)) throw new Error('invalid_production_fuel_source')
+  return { item_name: name, method: raw.method }
 }
 function halt(task, reason) { return { action: 'pause', reason, task: { ...task, status: 'paused', pause_reason: reason } } }
 export function recoverProductionTask(raw, reason) {
@@ -115,6 +125,15 @@ export function recoverProductionTask(raw, reason) {
   if (task.recoveries >= PRODUCTION_LIMITS.recoveries) return halt(task, 'production_recovery_exhausted')
   // The repair is a fresh reconciliation, not a replay of the refused batch.
   return { action: 'reconcile', reason, task: { ...task, recoveries: task.recoveries + 1 } }
+}
+// Run BB lane A residual: an admitted record whose fuel allowance has no way to fetch more. The harness may give it
+// one source for that fuel, from native facts, under unchanged targets and cap; it spends a recovery and is set once.
+export function bindProductionFuelSource(raw, binding) {
+  const task = restoreProductionTask(raw)
+  if (task.status !== 'active' || task.collection_only || task.fuel_source) return halt(task, 'production_fuel_source_unrepairable')
+  const source = fuelSource(task, binding)
+  if (task.recoveries >= PRODUCTION_LIMITS.recoveries) return halt(task, 'production_recovery_exhausted')
+  return { action: 'reconcile', reason: `production_resource_unbound:${source.item_name}`, task: { ...task, recoveries: task.recoveries + 1, fuel_source: source } }
 }
 export function machineFacts(entity) {
   if (!entity || !Number.isSafeInteger(entity.unit_number) || !Array.isArray(entity.inventories)
@@ -158,7 +177,7 @@ export function advanceProductionTask(raw, facts, now = Date.now()) {
     return { action: 'execute', task, operation, bill }
   }
   const acquire = (name, count) => {
-    const binding = task.intent.resources.find(row => row.item_name === name)
+    const binding = task.intent.resources.find(row => row.item_name === name) ?? (task.fuel_source?.item_name === name ? task.fuel_source : undefined)
     if (!binding) return halt(task, `production_resource_unbound:${name}`)
     const n = Math.min(count, PRODUCTION_LIMITS.batch_items)
     return emit(binding.method === 'harvest_product'

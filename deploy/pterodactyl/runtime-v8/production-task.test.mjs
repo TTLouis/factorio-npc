@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import test from 'node:test'
 import { compileQuantities } from './quantity-compiler.mjs'
 import { claimMaterials, materialAvailability, materialOwnerKey } from './material-ledger.mjs'
-import { advanceProductionTask, createProductionTask, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
+import { advanceProductionTask, bindProductionFuelSource, createProductionTask, normalizeProductionIntent, PRODUCTION_LIMITS, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 import { continueProductionTask, pruneClosedProductionRecords } from './production-task-runtime.mjs'
 import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
@@ -678,4 +678,86 @@ test('the parse screen leaves a stale stepId to the step-identity correction', a
   const plan = await w.agent.parsePlanMessageChecked({ content: JSON.stringify({ chatMessage: '', stepId: other, operations: [], productionTask: intermediate }) })
   assert.equal(plan.stepId, other)
   assert.deepEqual(w.events.filter(row => row.event === 'production.read'), [])
+})
+
+// Run BB lane A: the executor sent fuel {coal, 3} with only an iron-ore binding. A cap is not stock; admission must
+// prove a way to fetch the fuel it may spend, and a record that still lacks one is repaired once, durably, or pauses.
+const overCap = (w, count) => ({ ...w.intent, fuel: { item_name: 'coal', count } })
+const fuelRecord = (w, intent, extra = {}) => {
+  const o = w.agent.captureCheckpointOwner()
+  const owner = { goal_id: o.goalId, plan_id: o.planId, plan_version: o.planVersion, step_id: o.stepId }
+  w.memory.productionTasks = new Map([[`${o.key}/${materialOwnerKey(owner)}`, { ...createProductionTask({ intent, owner, actor_id: 18, epoch: 1 }), ...extra }]])
+  return () => w.agent.commitPlan({ chatMessage: '', stepId: o.stepId, plan: [], currentStep: 0, operations: [], productionTask: intent })
+}
+
+test('Run BB lane A: an explicit fuel cap above held stock without a fuel binding is given the native fuel source before admission', async () => {
+  let script
+  const w = scripted({ iron: true, fuelFacts: true }, w => script ??= [productionReply(w, overCap(w, 40))])
+  await w.agent.runTurn()
+  assert.deepEqual(repaired(w).map(row => [row.reason, row.rule]), [['production_fuel_source_unbound', 'the native source of the allowance fuel']])
+  assert.match(repairMessage(w), /Added resource coal via gather_resource so your fuel allowance coal 40 can be met; you hold less than that and the bound burner machines 44 stone-furnace, 43 burner-mining-drill accept it/)
+  const record = [...w.memory.productionTasks.values()][0]
+  assert.deepEqual(record.intent.fuel, { item_name: 'coal', count: 40 }, 'the executor cap is unchanged')
+  assert.deepEqual(record.intent.resources, [{ item_name: 'coal', method: 'gather_resource' }])
+  assert.equal(w.providers.length, 1)
+  assert.deepEqual(failed(w), [])
+  await runIron(w)
+})
+
+test('Run BB lane A without readable fuel facts: the unbound explicit cap is a bounded executor correction naming held stock', async () => {
+  let script
+  const w = scripted({ iron: true }, w => script ??= [productionReply(w, overCap(w, 40)), productionReply(w, w.intent)])
+  await w.agent.runTurn()
+  const refusal = w.events.find(row => row.event === 'recovery.classified' && row.data.reason_code === 'production_fuel_source_unbound')
+  assert.ok(refusal, JSON.stringify(w.events.slice(-6)))
+  assert.match(refusal.data.reason, /fuel allowance coal 40 for 44 stone-furnace, 43 burner-mining-drill is a cap, not stock: you hold 16 and resources has no coal binding/)
+  assert.deepEqual(repaired(w), [])
+  assert.equal(w.providers.length, 2)
+  assert.deepEqual(failed(w), [])
+  await runIron(w)
+})
+
+test('Run BB lane A residual: an admitted record with no way to fetch its fuel gets one durable native source, spends a recovery and gathers', async () => {
+  const w = world({ iron: true, fuelFacts: true })
+  w.game.inventory.coal = 0
+  const intent = { ...w.intent, resources: [{ item_name: 'iron-ore', method: 'gather_resource' }], fuel: { item_name: 'coal', count: 3 } }
+  await fuelRecord(w, intent)()
+  const recovery = w.events.find(row => row.event === 'production.recovery' && row.data.mechanism === 'fuel_source_binding')
+  assert.deepEqual([recovery?.data.reason, recovery?.data.outcome, recovery?.data.binding], ['production_resource_unbound:coal', 'reconcile', { item_name: 'coal', method: 'gather_resource' }])
+  const record = [...w.memory.productionTasks.values()][0]
+  assert.deepEqual(record.intent, normalizeProductionIntent(intent), 'the immutable intent is untouched')
+  assert.deepEqual([record.fuel_source, record.recoveries], [{ item_name: 'coal', method: 'gather_resource' }, 1])
+  const gather = w.events.find(row => row.event === 'production.execute')?.data.operation
+  assert.deepEqual([gather?.name, gather?.args.resource_name, gather?.args.count], ['gather_resource', 'coal', 1])
+  assert.equal(w.memory.pauseRecord(an.key)?.paused ?? false, false)
+  assert.deepEqual(restoreProductionTask(JSON.parse(JSON.stringify(record))).fuel_source, record.fuel_source, 'the source survives a restart')
+  assert.equal(w.providers.length, 0)
+})
+
+test('Run BB lane A residual without readable fuel facts keeps the visible guard pause and sends nothing', async () => {
+  const w = world({ iron: true })
+  w.game.inventory.coal = 0
+  const result = await fuelRecord(w, overCap(w, 3))()
+  assert.equal(result.reason, 'production_resource_unbound:coal')
+  assert.equal(w.events.find(row => row.event === 'production.recovery' && row.data.mechanism === 'fuel_source_binding')?.data.outcome, 'unproven')
+  assert.equal(w.memory.pauseRecord(an.key).pause_class, 'guard')
+  assert.deepEqual(w.ops, [])
+  assert.equal([...w.memory.productionTasks.values()][0].fuel_source, undefined)
+})
+
+test('a residual fuel source is bounded by the recovery limit, set once, and only for the allowance fuel', async () => {
+  const intent = { targets: [{ item_name: 'iron-plate', count: 58 }], producers: [{ recipe_name: 'iron-plate', unit_number: 44 }], fuel: { item_name: 'coal', count: 3 } }
+  const task = createProductionTask({ intent, owner, actor_id: 18, epoch: 1 })
+  const coal = { item_name: 'coal', method: 'gather_resource' }
+  assert.equal(bindProductionFuelSource({ ...task, recoveries: PRODUCTION_LIMITS.recoveries }, coal).reason, 'production_recovery_exhausted')
+  const bound = bindProductionFuelSource(task, coal)
+  assert.equal(bound.action, 'reconcile')
+  assert.equal(bindProductionFuelSource(bound.task, coal).reason, 'production_fuel_source_unrepairable')
+  assert.throws(() => bindProductionFuelSource(task, { item_name: 'wood', method: 'harvest_product' }), /invalid_production_fuel_source/)
+  assert.throws(() => restoreProductionTask({ ...bound.task, fuel_source: { item_name: 'iron-ore', method: 'gather_resource' } }), /invalid_production_fuel_source/)
+  const w = world({ iron: true, fuelFacts: true })
+  w.game.inventory.coal = 0
+  const exhausted = await fuelRecord(w, overCap(w, 3), { recoveries: PRODUCTION_LIMITS.recoveries })()
+  assert.equal(exhausted.reason, 'production_recovery_exhausted')
+  assert.deepEqual(w.ops, [])
 })
