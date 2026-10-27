@@ -228,12 +228,27 @@ export function classifyRequestFailure(failure) {
   if (transport) return { pause_class: PAUSE_CLASS.TRANSPORT, pause_subkind: transport.subkind, code: 'provider_transient', source: transport.source }
   const declared = failure && typeof failure === 'object' ? failure.pause_class : undefined
   const code = failureCode(failureMessage(failure)) ?? 'request_failed'
+  // A harness guard that names its own code (PreservationProofError.failure_code) keeps it: the pause reads as that guard, not as a
+  // generic request failure and never as a provider one.
+  const guardCode = failure && typeof failure === 'object' && typeof failure.failure_code === 'string' && SAFE_FAILURE_CODE.test(failure.failure_code) ? failure.failure_code : undefined
+  if (guardCode && isPauseClass(declared)) return { pause_class: declared, pause_subkind: '', code: guardCode, source: 'guard_code' }
   if (isPauseClass(declared)) return { pause_class: declared, pause_subkind: '', code, source: 'declared' }
   const fault = harnessStateFaultCode(failure)
   if (fault) return { pause_class: PAUSE_CLASS.SYSTEM, pause_subkind: '', code: fault, source: 'harness_state_fault' }
   const byCode = REQUEST_FAILURE_CODE_CLASS[code]
   if (byCode) return { pause_class: byCode, pause_subkind: '', code, source: 'failure_code' }
   return { pause_class: PAUSE_CLASS.GUARD, pause_subkind: '', code: 'request_failed', source: 'fallback' }
+}
+
+const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{2,80}$/
+
+// Whether a pause came from the provider/request layer (the goal.paused trace's provider_failure). Decided from the pause's declared
+// class and the failure CODE that prefixes its reason, never from a text search of the reason: a harness guard's detail text may
+// mention "provider" or "request_failed" without the provider having failed. `request_failed` itself is the unplaced fallback.
+export function isProviderFailurePause(record, reason) {
+  if (pauseClassOf(record).pause_class === PAUSE_CLASS.TRANSPORT) return true
+  const code = String(reason ?? record?.pause_reason ?? '').split(':')[0].trim()
+  return code === 'request_failed' || code === 'recoverable_provider_failure' || code.startsWith('provider_')
 }
 
 // Stamp a class on an error where it is raised.

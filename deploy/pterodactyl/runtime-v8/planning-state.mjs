@@ -818,8 +818,11 @@ function restoreArgumentCorrections(raw, goalId, createdAt) {
     || raw.initialized_at < 0 || raw.initialized_at !== createdAt || !Array.isArray(raw.claims) || raw.claims.length > 64) return { invalid: true }
   const ids = new Set()
   for (const row of raw.claims) {
-    if (!row || Object.keys(row).some(key => !['goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'request_id', 'reason', 'operation_signature', 'at'].includes(key))
+    if (!row || Object.keys(row).some(key => !['goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'request_id', 'reason', 'operation_signature', 'at', 'operation_index', 'operation_name'].includes(key))
       || row.goal_id !== goalId || ['plan_id', 'step_id', 'semantic_step_id', 'request_id', 'reason'].some(key => typeof row[key] !== 'string' || !row[key] || row[key].length > 240)
+      // Optional diagnostics (which operation of the batch the claimed refusal named); rows written before they existed restore as they were.
+      || row.operation_index !== undefined && (!Number.isSafeInteger(row.operation_index) || row.operation_index < 0 || row.operation_index > 4096)
+      || row.operation_name !== undefined && (typeof row.operation_name !== 'string' || row.operation_name.length > 80)
       || !Number.isSafeInteger(row.plan_version) || row.plan_version < 1 || !Number.isFinite(row.at) || row.at < 0
       || !/^[a-f0-9]{64}$/.test(row.operation_signature) || ids.has(row.semantic_step_id)) return { invalid: true }
     ids.add(row.semantic_step_id)
@@ -2974,7 +2977,9 @@ Object.assign(HANDLERS, {
         actor_id: event.actor_id, actor_epoch: event.actor_epoch }).ok) return state
     const claim = { goal_id: plan.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
       step_id: step.step_id, semantic_step_id: step.semantic_step_id, request_id: event.request_id,
-      reason: event.reason, operation_signature: event.operation_signature, at: now }
+      reason: event.reason, operation_signature: event.operation_signature, at: now,
+      ...(Number.isSafeInteger(event.operation_index) ? { operation_index: event.operation_index } : {}),
+      ...(typeof event.operation_name === 'string' && event.operation_name ? { operation_name: event.operation_name.slice(0, 80) } : {}) }
     const ledger = restoreArgumentCorrections({ ...state.goal.argument_corrections, claims: [...state.goal.argument_corrections.claims, claim] }, state.goal.goal_id, state.goal.created_at)
     if (ledger.invalid) return state
     return { ...state, goal: { ...state.goal, argument_corrections: ledger, updated_at: now } }

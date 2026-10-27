@@ -1852,8 +1852,11 @@ export async function pauseStrandedPlanAfterRequestError(session, failure) {
   const classified = classifyRequestFailure(failure instanceof Error ? failure : clean)
   const reasonCode = classified.pause_class === PAUSE_CLASS.TRANSPORT
     ? TRANSIENT_PAUSE_PREFIX
-    : (PAUSE_REASON_CODES.has(classified.code) || classified.source === 'harness_state_fault') ? classified.code : 'request_failed'
-  const reason = `${reasonCode}: ${clean || 'unexpected request failure'}`
+    : (PAUSE_REASON_CODES.has(classified.code) || classified.source === 'harness_state_fault' || classified.source === 'guard_code') ? classified.code : 'request_failed'
+  // A harness guard that carries the refusal that tripped it (PreservationProofError.detail) names it instead of repeating its own code.
+  const trigger = classified.source === 'guard_code' && failure?.detail?.preflight_code
+    ? `${failure.detail.preflight_code}${failure.detail.operation_name ? ` on ${failure.detail.operation_name}` : ''}` : ''
+  const reason = `${reasonCode}: ${trigger ? uiText(trigger, 240) : clean || 'unexpected request failure'}`
   const paused = await agent.pausePersistentPlan?.(reason, { pause_class: classified.pause_class, pause_subkind: classified.pause_subkind })
   if (paused) await session.syncTaskBoardUi?.(paused)
   return paused

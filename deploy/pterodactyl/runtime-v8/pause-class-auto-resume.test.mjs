@@ -7,6 +7,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { reserveBudget } from './common.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { PreservationProofError } from './contract-obligations.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
   AUTO_RESUMABLE_PAUSE_CLASSES,
@@ -14,6 +15,7 @@ import {
   HARNESS_STATE_FAULT_CODES,
   harnessStateFaultCode,
   isAutoResumable,
+  isProviderFailurePause,
   MODEL_RECOVERABLE_RESUME_LIMITS,
   PAUSE_CLASS,
   PAUSE_CLASSES,
@@ -1290,4 +1292,56 @@ test('a restart that finds an ACTIVE plan (a crash mid-step) restages it unchang
   assert.deepEqual(recoveryRows(run.events, 'recovery.auto_resume_plan_not_resumed'), [])
   assert.equal(recoveryRows(run.events, 'runtime.recovery_started').length, 1)
   assert.equal(run.game.mutations.length, 2)
+})
+
+// --- Run BB lane C (2026-10-26): a harness guard keeps its own code and is never labelled a provider failure ---
+
+test('run BB lane C: a PreservationProofError classifies as a guard under its own code, with or without a detail bag', () => {
+  const bare = new PreservationProofError('argument_correction_limit_exhausted', { category: 'exhausted', stage: 'correction' })
+  assert.deepEqual(classifyRequestFailure(bare), { pause_class: 'guard', pause_subkind: '', code: 'argument_correction_limit_exhausted', source: 'guard_code' })
+  assert.equal(bare.detail, undefined)
+  const detailed = new PreservationProofError('argument_correction_limit_exhausted', { stage: 'correction', detail: { preflight_code: 'not_recipe_machine' } })
+  assert.deepEqual(detailed.detail, { preflight_code: 'not_recipe_machine' })
+  // A guard code cannot be forged through the message and a transport signal still wins: waiting is what fixes those.
+  assert.equal(classifyRequestFailure(Object.assign(new PreservationProofError('preservation_type_unsupported'), { http_status: 503 })).pause_class, 'transport')
+  assert.equal(classifyRequestFailure(new Error('argument_correction_limit_exhausted')).code, 'request_failed')
+})
+
+test('run BB lane C: provider_failure follows the pause class and the failure code, not any "provider" or "request_failed" in the reason text', () => {
+  const guard = { pause_class: 'guard' }
+  assert.equal(isProviderFailurePause(guard, 'argument_correction_limit_exhausted: not_recipe_machine on set_machine_recipe'), false)
+  assert.equal(isProviderFailurePause(guard, 'argument_correction_limit_exhausted: request_failed after provider timed out'), false, 'text after the code is not a classification')
+  assert.equal(isProviderFailurePause(guard, 'request_output_ceiling: 10 > 5 output units'), false)
+  assert.equal(isProviderFailurePause({ pause_class: 'system' }, 'checkpoint_requires_active_step: x'), false)
+  // Genuine provider pauses stay provider failures.
+  assert.equal(isProviderFailurePause({ pause_class: 'transport', pause_subkind: 'timeout' }, 'provider_transient: Provider timed out'), true)
+  assert.equal(isProviderFailurePause(guard, 'request_failed: Provider HTTP 400'), true)
+  for (const code of ['provider_recovery_exhausted', 'provider_action_omission_repair_failed', 'provider_semantic_alignment_failed', 'provider_output_budget_exhausted']) {
+    assert.equal(isProviderFailurePause({ pause_class: 'model_recoverable' }, `${code}: x`), true, code)
+  }
+  assert.equal(isProviderFailurePause({ pause_class: 'model_recoverable' }, 'recoverable_provider_failure:requires_machine_retry_exhausted'), true)
+})
+
+test('run BB lane C: the stranded-plan pause of a guard error keeps the guard code and names the refusal; its goal.paused row is not a provider failure', async () => {
+  const { agent, events } = await startedAgent()
+  agent.traceRequest = null // the request has ended: pausePersistentPlan names the pause itself
+  const { session } = sessionFor(agent)
+  const failure = new PreservationProofError('argument_correction_limit_exhausted', { category: 'exhausted', stage: 'correction',
+    detail: { preflight_code: 'not_recipe_machine', operation_index: 0, operation_name: 'set_machine_recipe' } })
+  const paused = await pauseStrandedPlanAfterRequestError(session, failure)
+  assert.equal(paused.status, 'paused')
+  assert.equal(paused.pause_reason, 'argument_correction_limit_exhausted: not_recipe_machine on set_machine_recipe')
+  const record = agent.memory.pauseRecord(KEY)
+  assert.deepEqual([record.pause_class, record.pause_subkind], ['guard', ''])
+  const row = recoveryRows(events, 'goal.paused').at(-1)
+  assert.equal(row.provider_failure, false)
+  assert.equal(row.cause, 'argument_correction_limit_exhausted')
+  assert.equal(row.pause_class, 'guard')
+  assert.equal(await session.considerPauseForAutoResume(), null, 'a guard pause waits for a player Resume')
+  // A genuinely unplaced request failure still reads as request_failed and as a provider failure, as before.
+  const other = await startedAgent()
+  other.agent.traceRequest = null
+  await pauseStrandedPlanAfterRequestError(sessionFor(other.agent).session, new Error('Provider HTTP 400; request will not be retried automatically'))
+  const generic = recoveryRows(other.events, 'goal.paused').at(-1)
+  assert.deepEqual([generic.cause, generic.provider_failure], ['request_failed', true])
 })

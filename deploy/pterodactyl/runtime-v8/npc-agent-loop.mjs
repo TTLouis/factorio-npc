@@ -82,7 +82,7 @@ import {
   buildFluidsTruncated,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION, authorizationOf, checkGrant } from './authorization.mjs'
-import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
+import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, isProviderFailurePause, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchFootprintOverlap } from './batch-footprint.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
@@ -7840,12 +7840,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
   }
 
-  failureSnapshot(stage, message) {
+  // `guard`: the harness guard that stopped the request (preservationFailure), with its diagnostic detail, when there is one.
+  failureSnapshot(stage, message, guard) {
     const request = this.traceRequest
     const planState = this.memory.currentPlan?.(this.activePlanKey())
     return {
       stage,
       message: cleanMemoryText(message, 2000),
+      ...(guard ? { guard } : {}),
       request_id: request?.id,
       turn: request ? this.continuations + 1 : undefined,
       actor_id: this.epoch?.actor_id,
@@ -11722,7 +11724,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       cause: cleanMemoryText(pauseReason.split(':')[0], 120) || 'paused',
       pause_reason: cleanMemoryText(pauseReason, 300),
       pause_class: pauseClassLabel(record),
-      provider_failure: /provider|request_failed/i.test(pauseReason),
+      provider_failure: isProviderFailurePause(record, pauseReason),
       source,
       goal_id: state.goal_id,
       active_step_id: state.task_board?.active_step_id,
@@ -12037,7 +12039,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...(harnessStateFaultCode(error) ? { harness_state_fault: harnessStateFaultCode(error), pause_class: PAUSE_CLASS.SYSTEM } : {}),
           ...(intakeFailure ? { intake_retry_candidate: true } : {}),
           usage: requestTrace.usage,
-          failure_snapshot: this.failureSnapshot('runtime', message),
+          failure_snapshot: this.failureSnapshot('runtime', message, proofFailure),
         }, { requestId })
         if (ownsFailure()) this.traceRequest = null
       }
@@ -14504,6 +14506,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       throw error
     }
+    // The mod accepts set_machine_recipe on an assembling machine only (not_recipe_machine). When the live observation already names
+    // another type, refuse it here as an ordinary reply correction so the doomed batch never reaches argument preflight and cannot spend
+    // the step's one durable argument correction. An unknown type is left to the mod's own preflight.
+    for (const [index, operation] of plan.operations.entries()) {
+      if (operation.name !== 'set_machine_recipe') continue
+      const observed = this.liveObservedExactTarget(operation.args?.unit_number)
+      if (typeof observed?.type !== 'string' || !observed.type || observed.type === 'assembling-machine') continue
+      const error = new AgentLoopError(
+        `set_machine_recipe cannot target unit ${operation.args.unit_number}: the live observation shows ${observed.name ?? 'it'} is a ${observed.type}, and a ${observed.type}'s recipe is selected automatically from the items placed in it, not set. No operation from this batch ran.`,
+      )
+      error.failureClass = 'plan_category'
+      error.code = 'recipe_machine_not_configurable'
+      error.details = { operation_index: index, operation_name: operation.name, unit_number: operation.args.unit_number, observed_name: observed.name, observed_type: observed.type }
+      throw error
+    }
     for (const operation of plan.operations) {
       if (operation.name !== 'mine_entity') continue
       const targets = this.observedMiningTargets(operation.args.entity_name)
@@ -15646,12 +15663,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (error.fluidCandidateArgument && batchOperationSignature(plan.operations) !== batchOperationSignature(error.fluidCandidateArgument.operations)) throw new PreservationProofError('preservation_argument_operation_changed', { stage: 'correction' })
     const claims = planning?.goal?.argument_corrections?.claims
+    const refusedIndex = Number.isSafeInteger(error.preflight?.operation_index) && error.preflight.operation_index >= 0 ? error.preflight.operation_index : 0
+    const refusedName = cleanMemoryText(plan.operations[refusedIndex]?.name, 80)
+    // The refusal that found the budget spent and the claim(s) that spent it, traced with the guard so the pause is attributable.
+    const exhaustionDetail = () => ({ preflight_code: cleanMemoryText(error.preflight?.code, 80), refusal_class: refusalClassLabel(error.preflight),
+      operation_index: refusedIndex, operation_name: refusedName, semantic_step_id: step?.semantic_step_id,
+      prior_claims: (Array.isArray(claims) ? claims : []).filter(row => row.semantic_step_id === step?.semantic_step_id).slice(0, 4).map(row => ({
+        reason: row.reason, request_id: row.request_id, at: row.at, operation_index: row.operation_index, operation_name: row.operation_name })),
+      in_memory_retries: this.modelCorrectablePreflightRetries ?? 0, retry_limit: MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET,
+      ledger_claims: Array.isArray(claims) ? claims.length : undefined, ledger_claim_cap: 64 })
     if ((this.modelCorrectablePreflightRetries ?? 0) >= MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET
-      || durable && Array.isArray(claims) && (claims.length >= 64 || claims.some(row => row.semantic_step_id === step?.semantic_step_id))) throw new PreservationProofError('argument_correction_limit_exhausted', { category: 'exhausted', stage: 'correction' })
+      || durable && Array.isArray(claims) && (claims.length >= 64 || claims.some(row => row.semantic_step_id === step?.semantic_step_id))) throw new PreservationProofError('argument_correction_limit_exhausted', { category: 'exhausted', stage: 'correction', detail: exhaustionDetail() })
     if (durable && !argumentCorrectionAvailable(planning)) throw new PreservationProofError('argument_correction_lineage_unproven', { stage: 'correction' })
     if (durable && !this.memory.claimArgumentCorrection?.(key, { goal_id: active.goal_id, plan_id: active.plan_id,
       plan_version: active.plan_version, step_id: step.step_id, semantic_step_id: step.semantic_step_id,
       request_id: trace?.id, reason: error.preflight.code, operation_signature: batchOperationSignature(plan.operations),
+      operation_index: refusedIndex, operation_name: refusedName,
       grant_id: grant?.grant_id, grant_revision: grant?.revision, actor_id: this.epoch?.actor_id, actor_epoch: this.epoch?.epoch,
       request_consumed: this.modelCorrectablePreflightRetries ?? 0 })) throw new PreservationProofError('argument_correction_claim_refused', { stage: 'correction' })
     this.modelCorrectablePreflightRetries = (this.modelCorrectablePreflightRetries ?? 0) + 1
