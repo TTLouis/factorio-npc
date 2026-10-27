@@ -413,13 +413,18 @@ try {
       const status = await layoutStatus(validated.validation_id)
       const inserterId = unitOf(status, 'inserter'); const chestId = unitOf(status, 'chest')
       const native = await lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${inserterId} then i=v end end; assert(i);
-        rcon.print(helpers.table_to_json({pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil,pickup_position=i.pickup_position,drop_position=i.drop_position,direction=i.direction}))`)
+        local function at(p) local r={}; for _,e in pairs(i.surface.find_entities_filtered{position=p}) do if e.unit_number and e.unit_number~=i.unit_number and e.type~="character" then r[#r+1]=e.unit_number end end; return r end
+        rcon.print(helpers.table_to_json({pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil,pickup_position=i.pickup_position,drop_position=i.drop_position,
+          at_pickup=at(i.pickup_position),at_drop=at(i.drop_position),direction=i.direction,tick=game.tick}))`)
       evidence.l3_inserter = { tried, found, reversed, validated, status, native }
       assert.equal(status.state, 'complete', JSON.stringify(status))
       assert.equal(status.production, 'not_asserted')
       assert.ok(Number.isSafeInteger(inserterId) && Number.isSafeInteger(chestId), JSON.stringify(status))
-      assert.equal(native.pickup, chestId, JSON.stringify(evidence.l3_inserter.native))
-      assert.equal(native.drop, boilerId, JSON.stringify(evidence.l3_inserter.native))
+      // The engine acts on the entity at its native pickup/drop point; its target fields, once set, must name the same ones.
+      assert.deepEqual(native.at_pickup, [chestId], JSON.stringify(native))
+      assert.deepEqual(native.at_drop, [boilerId], JSON.stringify(native))
+      if (native.pickup !== undefined) assert.equal(native.pickup, chestId, JSON.stringify(native))
+      if (native.drop !== undefined) assert.equal(native.drop, boilerId, JSON.stringify(native))
       assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
       const [chestNode, inserterNode] = ['chest', 'inserter'].map(slot => status.nodes.find(node => node.slot === slot))
       assert.ok(chestNode.execution_rank < inserterNode.execution_rank && chestNode.placed_tick <= inserterNode.placed_tick, JSON.stringify(status))
@@ -480,11 +485,13 @@ try {
       const status = await layoutStatus(validated.validation_id)
       const drillId = unitOf(status, 'drill'); const receiverId = unitOf(status, 'receiver')
       const native = await lua(`local d; for _,v in pairs(a.surface.find_entities_filtered{name="burner-mining-drill"}) do if v.unit_number==${drillId} then d=v end end; assert(d);
-        rcon.print(helpers.table_to_json({drop=d.drop_target and d.drop_target.unit_number or nil,drop_position=d.drop_position,direction=d.direction}))`)
+        local r={}; for _,e in pairs(d.surface.find_entities_filtered{position=d.drop_position}) do if e.unit_number and e.unit_number~=d.unit_number and e.type~="character" then r[#r+1]=e.unit_number end end
+        rcon.print(helpers.table_to_json({drop=d.drop_target and d.drop_target.unit_number or nil,drop_position=d.drop_position,at_drop=r,direction=d.direction,tick=game.tick}))`)
       evidence.l3_drill = { ore, tried, mismatch, validated, status, native }
       assert.equal(status.state, 'complete', JSON.stringify(status))
       assert.equal(status.production, 'not_asserted')
-      assert.equal(native.drop, receiverId, JSON.stringify(native))
+      assert.deepEqual(native.at_drop, [receiverId], JSON.stringify(native))
+      if (native.drop !== undefined) assert.equal(native.drop, receiverId, JSON.stringify(native))
       assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
       const [drillNode, receiverNode] = ['drill', 'receiver'].map(slot => status.nodes.find(node => node.slot === slot))
       assert.ok(drillNode.execution_rank < receiverNode.execution_rank && drillNode.placed_tick <= receiverNode.placed_tick, JSON.stringify(status))
