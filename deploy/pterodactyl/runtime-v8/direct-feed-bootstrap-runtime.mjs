@@ -67,7 +67,7 @@ async function placedMachines(agent, cache, names, preserve) {
       counts[placement.entity_name] = (counts[placement.entity_name] ?? 0) + 1
     }
     else if (value?.found === false && value.error === 'exact_entity_not_found' && value.unit_number === placement.unit_number) continue
-    else if (typeof entity?.name === 'string' && Number.isSafeInteger(entity.unit_number)) continue
+    else if (entity?.unit_number === placement.unit_number && typeof entity.name === 'string') continue
     else unresolved.add(placement.entity_name)
   }
   return { counts, unresolved }
@@ -102,14 +102,21 @@ async function factsFor(agent, cache, resource, preserve) {
  *
  * `firstStep` is the index of the first step of the draft that still has to run (earlier ones are completed history carried by a
  * restage). Only a direct_feed step at that index is judged on today's inventory and placements; any later step follows steps
- * that can change both, so its verdict is unknown until it is about to start.
+ * that can change both, so its verdict is unknown until it is about to start. `firstStep: null` means the draft's alignment with
+ * a carried prefix is not known: no step can be told apart from completed history, so none is judged.
  */
 export async function directFeedBootstrapRefusal(agent, plan, { firstStep = 0 } = {}) {
   const guidance = Array.isArray(plan.executionGuidance) ? plan.executionGuidance : []
   const cache = new Map()
   for (const [index, brief] of guidance.entries()) {
     const supply = brief?.materialSupply
-    if (supply?.mode !== 'direct_feed' || index < firstStep) continue
+    if (supply?.mode !== 'direct_feed') continue
+    if (firstStep === null) {
+      await agent.traceEvent('plan.direct_feed_bootstrap_checked', { request_id: agent.traceRequest?.id, step_index: index, resource: supply.resource,
+        verdict: VERDICT.UNKNOWN, reason: 'prefix_alignment_unknown', pairs: [] })
+      continue
+    }
+    if (index < firstStep) continue
     const completion = plan.stepCompletions?.[index]
     const preserve = Array.isArray(completion?.obligations?.preserve) ? completion.obligations.preserve : []
     const protect = (completion?.checkpoint?.requirements ?? []).filter(row => row?.kind === 'inventory_count')

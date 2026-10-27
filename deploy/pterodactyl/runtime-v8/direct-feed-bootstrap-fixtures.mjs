@@ -61,8 +61,10 @@ export function answerBootstrapRead(text, { inventory = {}, recipes = vanillaRec
   if (unit !== undefined) {
     if (failing.includes('getEntityStatus')) throw new Error('rcon unavailable')
     if (unreadable.includes('getEntityStatus')) return 'not json'
-    const name = entities[Number(unit)]
-    return JSON.stringify(name ? { found: true, entity: { unit_number: Number(unit), name } } : { found: false, unit_number: Number(unit), error: missingError })
+    // An entities value may also be a whole entity row ({ unit_number, name }), e.g. a reply about another unit than the one asked.
+    const row = entities[Number(unit)]
+    const entity = typeof row === 'string' ? { unit_number: Number(unit), name: row } : row
+    return JSON.stringify(entity ? { found: true, entity } : { found: false, unit_number: Number(unit), error: missingError })
   }
   if (text.includes('"get_inventory_items"')) {
     return unreadable.includes('getInventoryItems') ? 'not an inventory' : JSON.stringify(Object.entries(inventory).map(([itemName, count]) => ({ name: itemName, count })))

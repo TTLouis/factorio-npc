@@ -878,6 +878,29 @@ for (const [label, options] of [
   })
 }
 
+// B-R2-1: a readable reply about another unit number says nothing about the unit asked for.
+test('Run BB: a placement lookup answered with a different unit number is unresolved, not absent, and does not refuse', async () => {
+  const w = bootstrapWorld([ctx => { recordDrills(ctx.memory, [31]); return bbDraft(ctx.agent, 'direct_feed') }, startFuel],
+    { entities: { 31: { unit_number: 999, name: 'burner-mining-drill' } } })
+  await w.say()
+  assert.equal(w.calls.length, 2)
+  const [checked] = bootstrapChecks(w)
+  assert.equal(checked.verdict, 'unknown')
+  assert.deepEqual(checked.unresolved, ['burner-mining-drill'])
+  assert.equal(w.events.filter(row => row.event === 'role.contract_refused').length, 0)
+  assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'direct_feed')
+})
+
+test('Run BB: a different prototype standing under the asked unit number confirms the drill gone, so the bootstrap is still refused', async () => {
+  const w = bootstrapWorld([ctx => { recordDrills(ctx.memory, [31]); return bbDraft(ctx.agent, 'direct_feed') }, ({ agent }) => bbDraft(agent, 'manual_bootstrap'), startFuel],
+    { entities: { 31: { unit_number: 31, name: 'wooden-chest' } } })
+  await w.say()
+  assert.equal(w.calls.length, 3)
+  const [checked] = bootstrapChecks(w)
+  assert.equal(checked.verdict, 'infeasible')
+  assert.equal(checked.unresolved, undefined)
+})
+
 test('Run BB: a recorded drill past the placement examination cap is unresolved, not absent, and does not refuse', async () => {
   // Nine unpreserved placements, none shown by the game: the eight newest are looked up and confirmed gone, the oldest is never
   // examined, so the facts cannot say it is gone.
@@ -949,6 +972,25 @@ test('Run BB: only the first step still to run is judged on current facts; a res
   const refusal = await directFeedBootstrapRefusal(w.agent, plan, { firstStep: 1 })
   assert.equal(refusal.code, 'direct_feed_bootstrap_infeasible')
   assert.equal(refusal.details.step_index, 1, 'step 0 is completed history, so step 1 is the first to run')
+})
+
+// B-R2-2: the loop derives the first runnable step from the held plan's carried prefix and the draft's own currentStep.
+test('Run BB: over a carried prefix, a currentStep-0 draft is not aligned and judges nothing; the aligned whole-list draft judges only its first runnable step', async () => {
+  const w = bootstrapWorld([])
+  await w.agent.ready?.()
+  const heldDraft = { active_plan_id: 'held_p2', plans: [{ plan_id: 'held_p2', status: 'DRAFT', carried_forward_evidence: ['held_p1:s1'], steps: [] }] }
+  w.agent.memory.planningState = () => heldDraft
+  const twoStep = (currentStep, modes) => ({ plan: ['Built the direct-fed cell earlier.', 'Next step.'], currentStep, operations: [],
+    executionGuidance: modes.map(mode => bbSupply(mode, 'Cell work.')),
+    stepCompletions: [{ kind: 'deterministic', obligations: { preserve: [27, 28] } }, { kind: 'deterministic', obligations: { preserve: [27, 28] } }] })
+  // The completed step 0 used direct_feed; today's eight plates would refuse it if it were judged.
+  await w.agent.validateDirectFeedBootstrap(twoStep(0, ['direct_feed', 'manual_bootstrap']))
+  assert.deepEqual(bootstrapChecks(w).map(row => [row.step_index, row.verdict, row.reason]), [[0, 'unknown', 'prefix_alignment_unknown']])
+  assert.equal(w.reads.length, 0, 'nothing is read for an unaligned draft')
+  await w.agent.validateDirectFeedBootstrap(twoStep(1, ['direct_feed', 'manual_bootstrap']))
+  assert.equal(bootstrapChecks(w).length, 1, 'the aligned draft skips completed step 0 and has no direct_feed step left to judge')
+  await assert.rejects(w.agent.validateDirectFeedBootstrap(twoStep(1, ['manual_bootstrap', 'direct_feed'])),
+    error => error.code === 'direct_feed_bootstrap_infeasible' && error.details.step_index === 1)
 })
 
 for (const mode of ['manual_bootstrap', null]) {
