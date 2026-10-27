@@ -13,6 +13,12 @@ import { conflictingOperation } from './operation-ledger.mjs'
 const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8').replace(/^﻿/, ''))
 const LAYOUT_ID = 41
 
+// The receipt evidence a sealed row carries (what the mod copies from the journal when it seals).
+function sealedCopy(receipt) {
+  const { batch_ref, batch_id, batch_generation, state, reason, tick, task_count, tasks_started, started_count, task_types } = receipt
+  return structuredClone({ batch_ref, batch_id, batch_generation, state, reason, tick, task_count, tasks_started, started_count, task_types })
+}
+
 function fixture() {
   const pending = structuredClone(ay.pending)
   pending.operations = [{ trace_operation_id: 'recovery_mvo6q1lo/op_1', name: 'execute_construction_plan', args: { validation_id: 41, placement_count: 3 }, effect_class: 'place' }]
@@ -31,6 +37,7 @@ function fixture() {
   row.not_placed_node_ids = [`layout-${LAYOUT_ID}:n2`, `layout-${LAYOUT_ID}:n1`]
   const receipt = native.receipt_journal[0]
   Object.assign(receipt, { task_count: 3, task_types: ['placing', 'placing', 'placing'], reason: 'test_cancel', started_count: 1, tasks_started: 1 })
+  row.layout_receipt = sealedCopy(receipt)
   native.last_cancelled_batch = structuredClone(receipt)
   return { pending, native, actor: structuredClone(ay.actor) }
 }
@@ -101,7 +108,6 @@ for (const [name, mutate] of [
   ['a refused task', s => { s.receipt_journal[0].refused_count = 1 }],
   ['an outcome on the receipt', s => { s.receipt_journal[0].outcome = 'cancelled' }],
   ['a bad batch ref', s => { s.receipt_journal[0].batch_ref = 'wrong' }],
-  ['a missing receipt', s => { s.receipt_journal = [] }],
   ['a duplicate receipt', s => { s.receipt_journal.push(structuredClone(s.receipt_journal[0])) }],
   ['a conflicting receipt id', s => { s.receipt_journal.push({ ...s.receipt_journal[0], batch_ref: 'batch-g1-9' }) }],
   ['non-array receipts', s => { s.receipt_journal = {} }],
@@ -132,3 +138,115 @@ test('a row the mod has not sealed as partial stays unresolved: node ids live on
   assert.notEqual(reconcilePendingOperation(pending, { status: native, actor }).verdict, 'admitted_partial')
   assert.equal(unresolvedNativeAdmissions(native, [pending], actor).length, 1)
 })
+
+// The journal evicts a receipt once the sealed record stops pinning it; the sealed row keeps the evidence.
+test('after the journal evicts the receipt the sealed row\'s own receipt evidence settles the same partial', () => {
+  const { pending, native, actor } = fixture()
+  native.receipt_journal = []
+  const result = reconcilePendingOperation(pending, { status: native, actor })
+  assert.equal(result.verdict, 'admitted_partial')
+  assert.equal(result.effect, 'partial_known')
+  assert.equal(result.reason, 'exact_construction_layout_partial')
+  assert.equal(result.receipt_source, 'sealed_row')
+  assert.deepEqual(result.placed_node_ids, [`layout-${LAYOUT_ID}:n0`])
+  assert.equal(reconciliationFacts(result, pending).receipt_source, 'sealed_row')
+  assert.equal(reconcilePendingOperation(pending, { status: fixture().native, actor }).receipt_source, 'journal')
+})
+
+for (const [name, mutate] of [
+  ['no receipt copy', row => { delete row.layout_receipt }],
+  ['a bare reason string with nothing else', row => { delete row.layout_receipt; delete row.placed_node_ids; delete row.not_placed_node_ids; delete row.layout_id }],
+  ['a copy of another batch', row => { row.layout_receipt.batch_ref = 'batch-g1-9' }],
+  ['a copy of another batch id', row => { row.layout_receipt.batch_id = 9 }],
+  ['a copy of another generation', row => { row.layout_receipt.batch_generation = 2 }],
+  ['a copy that was not cancelled', row => { row.layout_receipt.state = 'completed' }],
+  ['a copy with another task count', row => { row.layout_receipt.task_count = 2; row.layout_receipt.task_types.pop() }],
+  ['a copy with a mixed task type', row => { row.layout_receipt.task_types[2] = 'mining' }],
+  ['a copy with no started task', row => { row.layout_receipt.tasks_started = 0 }],
+  ['a copy older than the admission', row => { row.layout_receipt.tick = 1 }],
+  ['a copy with refusals', row => { row.layout_receipt.refused_count = 1 }],
+  ['a copy that is not an object', row => { row.layout_receipt = 'cancelled' }],
+  ['a retired copy at the current generation', row => { Object.assign(row.layout_receipt, { state: 'uncertain', reason: 'save_load_unfinished' }) }],
+  ['a copy retired for another reason', row => { Object.assign(row.layout_receipt, { state: 'uncertain', reason: 'something_else' }) }],
+]) {
+  test(`with the journal receipt evicted, a sealed row with ${name} stays unsettled`, () => {
+    const f = fixture()
+    f.native.receipt_journal = []
+    mutate(f.native.admission_journal[0])
+    assert.notEqual(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).reason, 'exact_construction_layout_partial')
+  })
+}
+
+test('a journal receipt that disagrees with the sealed copy is refused', () => {
+  for (const mutate of [r => { r.tick += 1 }, r => { r.task_types = ['placing', 'placing', 'mining'] }, r => { r.reason = 'other' }, r => { r.started_count = 5 }]) {
+    const f = fixture()
+    mutate(f.native.receipt_journal[0])
+    assert.notEqual(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).reason, 'exact_construction_layout_partial')
+  }
+})
+
+// A restart retires the unfinished batch as an uncertain receipt and advances the generation; the mod then seals the row. The
+// row below has the shape the mod's restart test asserts (RESTART_ROW in packages/autorio/src/construction_layout.test.ts).
+function restarted() {
+  const f = fixture()
+  const row = f.native.admission_journal[0]
+  const retired = { ...f.native.receipt_journal[0], state: 'uncertain', reason: 'save_load_unfinished' }
+  delete retired.tasks_started
+  delete retired.started_count
+  f.native.receipt_journal = [retired]
+  f.native.last_cancelled_batch = undefined
+  f.native.batch_generation = 2
+  row.layout_receipt = sealedCopy(retired)
+  return f
+}
+
+test('a restart-retired batch the mod sealed settles as terminal partial, from the journal receipt or the sealed copy', () => {
+  const f = restarted()
+  const result = reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor })
+  assert.equal(result.verdict, 'admitted_partial')
+  assert.equal(result.effect, 'partial_known')
+  assert.equal(result.reason, 'exact_construction_layout_partial')
+  assert.equal(result.receipt_source, 'journal')
+  assert.deepEqual(result.not_placed_node_ids, [`layout-${LAYOUT_ID}:n2`, `layout-${LAYOUT_ID}:n1`])
+  assert.deepEqual(unresolvedNativeAdmissions(f.native, [f.pending], f.actor), [])
+  f.native.receipt_journal = []
+  assert.equal(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).receipt_source, 'sealed_row')
+  // Not replay authority: the same batch for the same step stays fenced.
+  assert.equal(conflictingOperation({ operation_ledger: { closed: [{ ...f.pending, ...result }] } }, {
+    planId: f.pending.plan_id, stepId: f.pending.step_id, operations: [{ name: 'execute_construction_plan', args: { validation_id: 41, placement_count: 3 } }],
+  }).refuse, true)
+})
+
+test('a placed node that is gone after the restart is reported as missing, and the counts must still add up', () => {
+  const f = restarted()
+  const row = f.native.admission_journal[0]
+  row.missing_node_ids = [`layout-${LAYOUT_ID}:n0`]
+  row.placed_node_ids = {}
+  const result = reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor })
+  assert.equal(result.reason, 'exact_construction_layout_partial')
+  assert.deepEqual(result.missing_node_ids, [`layout-${LAYOUT_ID}:n0`])
+  assert.match(reconciliationGuidance(result, f.pending), /placed and since gone: layout-41:n0/)
+  row.missing_node_ids = [`layout-${LAYOUT_ID}:n1`]
+  assert.notEqual(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).reason, 'exact_construction_layout_partial')
+})
+
+for (const [name, mutate] of [
+  ['a changed actor', f => { f.actor.actor_id++ }],
+  ['a changed epoch', f => { f.actor.epoch++ }],
+  ['a generation that is not older', f => { f.native.batch_generation = 1 }],
+  ['an admission from a newer generation', f => { f.native.admission_journal[0].generation = 3; f.native.admission_journal[0].slots[0].batch_refs[0].batch_generation = 3 }],
+  ['a receipt that is only uncertain for another reason', f => { f.native.receipt_journal[0].reason = 'other'; f.native.admission_journal[0].layout_receipt.reason = 'other' }],
+  ['a row that is not sealed as partial', f => { f.native.admission_journal[0].state = 'uncertain'; f.native.admission_journal[0].error = 'batch_reconciliation_required'; f.native.admission_journal[0].ok = true }],
+  ['a busy queue', f => { f.native.queue_length = 1 }],
+  ['an active batch', f => { f.native.active_batch = { batch_id: 3 } }],
+  ['a non-placement task', f => { f.native.receipt_journal[0].task_types[0] = 'mining'; f.native.admission_journal[0].layout_receipt.task_types[0] = 'mining' }],
+  ['a duplicate journal receipt', f => { f.native.receipt_journal.push(structuredClone(f.native.receipt_journal[0])) }],
+]) {
+  test(`a restart-retired layout batch is fenced by ${name}`, () => {
+    const f = restarted()
+    mutate(f)
+    const result = reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor })
+    assert.notEqual(result.reason, 'exact_construction_layout_partial')
+    assert.notEqual(result.verdict, 'admitted_partial')
+  })
+}
