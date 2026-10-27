@@ -31,7 +31,7 @@ class LibraryGame extends FakeFactorio {
 
 test('separated planner loads six of ten ranked matches, executor and legacy policies stay focused', async () => {
   const game = new LibraryGame()
-  const agent = new NpcAgentLoop({ rcon: game, provider: async () => { throw Error('No inference') }, completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
+  const agent = new NpcAgentLoop({ rcon: game, provider: async () => { throw new Error('No inference') }, completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
   assert.equal(agent.agentContext.role, 'planner')
   agent.epoch = { actor_id: 18, epoch: 3 }
   await ensureSkillOffers(agent, { memoryKey: agent.activePlanKey(), intent: 'new_goal', text: 'Build a factory' })
