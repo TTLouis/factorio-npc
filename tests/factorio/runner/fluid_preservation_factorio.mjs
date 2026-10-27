@@ -221,8 +221,12 @@ try {
       const surfaceIndex = lateWitness.preservation_nonfluid_output.surface_index
       const lateBefore = await worldFacts()
       rcon.queueFault = `local e=game.surfaces[${surfaceIndex}].create_entity{name="tree-01",position={${site.x + 3},${site.y}},force="neutral"}; assert(e); storage.fluid_preservation_late_construction_tree=e;`
-      await assert.rejects(operation('execute_construction_plan', { validation_id: lateId, placement_count: lateCount }), /construction_plan_blocked_no_clear/)
-      assert.equal(rcon.queueFault, undefined, 'the late-blocker fault must have run inside the admission callback')
+      let lateError
+      try { await operation('execute_construction_plan', { validation_id: lateId, placement_count: lateCount }) } catch (caught) { lateError = String(caught?.message ?? caught) }
+      const lateProbe = await lua(`local t=storage.fluid_preservation_late_construction_tree; local p={${site.x + 3},${site.y}}; rcon.print(helpers.table_to_json({injected=t~=nil, tree_valid=t~=nil and t.valid or false, tree_position=t~=nil and t.valid and t.position or nil, tree_box=t~=nil and t.valid and t.bounding_box or nil, pole_can_place_now=a.surface.can_place_entity{name="small-electric-pole",position=p,force=a.force}, poles=#a.surface.find_entities_filtered{name="small-electric-pole",position=p}}))`)
+      evidence.construction_late_blocker_probe = { error: lateError, probe: lateProbe, fault_pending: rcon.queueFault !== undefined }
+      assert.equal(rcon.queueFault, undefined, `the late-blocker fault must have run inside the admission callback: ${JSON.stringify(evidence.construction_late_blocker_probe)}`)
+      assert.match(lateError ?? '', /construction_plan_blocked_no_clear/, JSON.stringify(evidence.construction_late_blocker_probe))
       const lateAfter = await worldFacts()
       const lateResult = lateAfter.status.basic_operation?.last_result
       evidence.construction_late_blocker = { site: { x: site.x, y: site.y }, result: lateResult, before: lateBefore, after: lateAfter }
