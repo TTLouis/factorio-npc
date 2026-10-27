@@ -390,7 +390,9 @@ export function terminal_gather_cancellation(record: OperationAdmission, status:
 // execution built by the exact batch identity it was queued under. The layout's execution is settled from its durable node
 // evidence (a node bound to an entity that can still be read is placed; one still queued was never built; a bound node whose
 // entity is gone is missing) and the admission reports which nodes were which: a partial layout, never completion and never
-// replay authority. The batch ended unfinished when its receipt is cancelled, or, after a restart, when the retained receipt of
+// replay authority. The batch ended unfinished when its receipt is cancelled (at its own generation or, once a boot's startup
+// reconciliation has advanced it, an earlier one: the deployment configuration cancels before startup, and a cancelled queue of
+// an older generation cannot run), or, after a restart, when the retained receipt of
 // a batch of an earlier generation says the save was loaded with it unfinished (startup retires the whole queue, so nothing of
 // that batch can still run). Undefined unless every link is exact: generation, actor, one slot with one batch reference, one
 // receipt for it with only placement tasks (as many as the slot queued and the execution recorded), no refusals, and exactly
@@ -410,9 +412,8 @@ export function terminal_construction_layout_settlement(record: OperationAdmissi
   if (matches.length !== 1) return undefined
   const receipt = matches[0]
   const retired = receipt.state === 'uncertain' && receipt.reason === 'save_load_unfinished' && receipt.batch_generation < status.batch_generation
-  const cancelled = receipt.state === 'cancelled' && receipt.batch_generation === status.batch_generation
   if (receipt.batch_ref !== ref.batch_ref || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
-    || (!cancelled && !retired) || receipt.task_count !== slot.queued_tasks
+    || (receipt.state !== 'cancelled' && !retired) || receipt.task_count !== slot.queued_tasks
     || !Array.isArray(receipt.task_types) || receipt.task_types.length !== receipt.task_count
     || !receipt.task_types.every(type => type === 'placing')
     || (receipt.state === 'cancelled' && (!integer(receipt.tasks_started) || receipt.tasks_started > receipt.task_count

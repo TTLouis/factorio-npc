@@ -47,11 +47,15 @@ interface StoredConstructionPlan {
    */
   resume_layout_id?: number
   resume_node_indices?: number[]
+  /** The deployment epoch and task batch generation a resume token was validated under: a token never survives a rebind or a restart. */
+  resume_stamp?: { epoch: number, generation: number }
 }
 
 declare const storage: {
   sgluna_validated_construction_plan?: StoredConstructionPlan
   sgluna_next_construction_validation_id?: number
+  sgluna_deployment_epoch?: number
+  sgluna_task_batch_generation?: number
 }
 
 const MAX_PLACEMENTS = 16
@@ -372,6 +376,11 @@ export function validate_construction_execution_plan(actor: ControlledActor, req
   }
 }
 
+// The deployment epoch (the guard bumps it at every bind) and the task batch generation (startup reconciliation advances it) now.
+function deployment_stamp() {
+  return { epoch: storage.sgluna_deployment_epoch ?? 0, generation: storage.sgluna_task_batch_generation ?? 1 }
+}
+
 // Why a token that validated a layout's remainder no longer applies, or undefined (also for a token that is not a resume
 // token). Read-only: the layout must still be the one the token was made for, settled, unplaced exactly where validated, and
 // within its allowance.
@@ -381,6 +390,12 @@ function resume_token_problem(plan: StoredConstructionPlan) {
   if (!record) return { code: 'LAYOUT_UNAVAILABLE', message: `construction layout ${plan.resume_layout_id} is no longer recorded` }
   if (record.actor_id !== plan.actor_id || record.surface_index !== plan.surface_index || record.force_index !== plan.force_index) {
     return { code: 'LAYOUT_SCOPE_MISMATCH', message: `construction layout ${record.layout_id} belongs to another actor, surface or force` }
+  }
+  // A remainder is validated for the binding it was validated under: after the guard bound the NPC again, or startup
+  // reconciliation advanced the batch generation, only a fresh validation of the remainder may run.
+  const stamp = deployment_stamp()
+  if (plan.resume_stamp === undefined || plan.resume_stamp.epoch !== stamp.epoch || plan.resume_stamp.generation !== stamp.generation) {
+    return { code: 'LAYOUT_TOKEN_PREDATES_REBIND', message: `the remainder of construction layout ${record.layout_id} was validated before the NPC was bound again or the game restarted; validate it again` }
   }
   return layout_resume_problem(record, plan.resume_node_indices ?? [], open_task_batch())
 }
@@ -450,6 +465,7 @@ export function resume_construction_layout(actor: ControlledActor, layout_id: un
     connections: remainder.connections!.length > 0 ? remainder.connections : undefined,
     resume_layout_id: record.layout_id,
     resume_node_indices: remainder.node_indices,
+    resume_stamp: deployment_stamp(),
   }
   return {
     ok: true,
