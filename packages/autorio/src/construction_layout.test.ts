@@ -55,8 +55,10 @@ const PROTOTYPES: Record<string, any> = {
   'test-bare-inserter': prototype('test-bare-inserter', 'inserter', [1, 1], 0.15),
   // No inventory and no transport line: standing on an inserter's point does not make it that inserter's endpoint.
   'test-wall': prototype('test-wall', 'wall', [1, 1], 0.29),
+  // An inventory the engine forbids inserters to take from.
+  'test-locked-chest': prototype('test-locked-chest', 'container', [1, 1], 0.4, { flags: { 'no-automated-item-removal': true } }, 1),
 }
-const HELD = { 'test-chest': 3, 'test-inserter': 1, 'test-pole': 1, 'test-lab': 1, 'test-drill': 1, 'test-pipe': 2, 'test-bare-inserter': 1, 'test-wall': 1 }
+const HELD = { 'test-chest': 3, 'test-inserter': 1, 'test-pole': 1, 'test-lab': 1, 'test-drill': 1, 'test-pipe': 2, 'test-bare-inserter': 1, 'test-wall': 1, 'test-locked-chest': 1 }
 
 const BOILER_UNIT = 500
 const EXISTING_PROTOTYPE = { name: 'test-boiler', type: 'boiler', electric_energy_source_prototype: undefined, get_inventory_size: (index: number) => index === 1 ? 1 : undefined }
@@ -339,6 +341,28 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       expect(unreadable.eligibility_blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'CONNECTION_UNPROVEN' })]))
     })
 
+    it('honours the native automation flags by direction: no insertion into a pad, no removal from a locked chest', () => {
+      const f = build()
+      // The boiler's prototype forbids automated insertion (as 2.0.77's cargo-landing-pad does): it cannot be a drop endpoint.
+      f.boiler.prototype = { ...EXISTING_PROTOTYPE, flags: { 'no-automated-item-insertion': true } }
+      const drop = validate(f, [SRC, INS], [FEED])
+      expect(drop).toMatchObject({ ok: false, planning_status: 'spatially_invalid', error: { code: 'CONNECTION_ENDPOINT_INCOMPATIBLE', endpoint_role: 'drop' } })
+      expect(drop.error.message).toContain('no-automated-item-insertion')
+      // The same entity may be a pickup endpoint: taking from it is allowed.
+      f.existing(700, { x: 0.5, y: -0.5 }, { x: 0.4, y: 0.4 }, { prototype: { ...EXISTING_PROTOTYPE, flags: { 'no-automated-item-insertion': true } } })
+      f.boiler.prototype = EXISTING_PROTOTYPE
+      expect(validate(f, [INS], [{ ...FEED, pickup: { unit_number: 700 } }])).toMatchObject({ ok: true, execution_eligible: true })
+      // A planned chest whose prototype forbids automated removal cannot be a pickup endpoint.
+      const locked = validate(f, [{ ...SRC, entity_name: 'test-locked-chest' }, INS], [FEED])
+      expect(locked).toMatchObject({ ok: false, planning_status: 'spatially_invalid', error: { code: 'CONNECTION_ENDPOINT_INCOMPATIBLE', endpoint_role: 'pickup' } })
+      expect(locked.error.message).toContain('no-automated-item-removal')
+      // Flags that cannot be read are unproven, never assumed permissive.
+      f.boiler.prototype = { ...EXISTING_PROTOTYPE, get flags() { throw new Error('unreadable') } }
+      const unreadable = validate(f, [SRC, INS], [FEED])
+      expect(unreadable).toMatchObject({ ok: false, planning_status: 'spatially_valid', execution_eligible: false })
+      expect(unreadable.eligibility_blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'CONNECTION_UNPROVEN' })]))
+    })
+
     it('refuses an existing endpoint that is not an entity of this surface and force', () => {
       const f = build()
       expect(validate(f, [SRC, INS], [{ ...FEED, drop: { unit_number: 12345 } }])).toMatchObject({
@@ -550,7 +574,7 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
         }
       }
       f.surface.find_entities_filtered.mockImplementation((filter: any) => filter?.position?.x === dropPoint.x && filter.position.y === dropPoint.y
-        ? [f.boiler, { valid: true, unit_number: 4242, type: 'container', ...item_interface(1) }]
+        ? [f.boiler, { valid: true, unit_number: 4242, type: 'container', prototype: {}, ...item_interface(1) }]
         : [])
       const { layout_id } = start(f, [INS, SRC], [FEED])
       expect(place_next(f)?.[0]).toBe(true)
@@ -593,6 +617,26 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       expect(layout(second.layout_id)).toMatchObject({
         state: 'complete',
         connections: [{ state: 'verified', observed: { drop_unit_number: BOILER_UNIT, drop_source: 'item_endpoint_at_point', drop_ignored: [4343] } }],
+      })
+    })
+
+    it('never verifies an inserter by an occupant of its pickup point that forbids automated removal', () => {
+      const f = build()
+      const pickupPoint = { x: 0.5, y: -0.5 }
+      const locked = { valid: true, name: 'test-locked-chest', unit_number: 4444, type: 'container', prototype: PROTOTYPES['test-locked-chest'], ...item_interface(1) }
+      f.hooks.on_create = (entity) => {
+        if (entity.name === 'test-inserter') {
+          entity.pickup_position = pickupPoint
+          entity.drop_target = f.boiler
+        }
+      }
+      f.surface.find_entities_filtered.mockImplementation((filter: any) => filter?.position?.x === pickupPoint.x && filter.position.y === pickupPoint.y ? [locked] : [])
+      const { layout_id } = start(f, [INS, SRC], [FEED])
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({
+        state: 'paused',
+        connections: [{ state: 'mismatch', observed: { pickup_unit_number: undefined, pickup_source: 'no_item_endpoint_at_point', pickup_ignored: [4444], drop_unit_number: BOILER_UNIT } }],
       })
     })
 

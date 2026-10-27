@@ -347,6 +347,7 @@ const MAX_PROTOTYPE_INVENTORY_INDEX = 10
 
 // Whether a built entity has a native item interface an inserter or drill can act on: an inventory or a transport line. A wall
 // or pole has neither, so standing on an inserter's or drill's point does not make it that inserter's or drill's endpoint.
+// (`get_max_inventory_index()` is not per entity: 8 for a stone wall on 2.0.77, so each index is looked up.)
 function entity_item_interface(entity: LuaEntity): boolean | undefined {
   const lines = protected_read(() => entity.get_max_transport_line_index())
   const inventories = protected_read(() => entity.get_max_inventory_index() as number)
@@ -369,17 +370,52 @@ function prototype_item_interface(prototype: LuaEntityPrototype | undefined): bo
   return false
 }
 
-function item_interface(view: EndpointView) {
-  return view.entity !== undefined ? entity_item_interface(view.entity) : prototype_item_interface(view.prototype)
+// The direction of automated item access an endpoint must allow: an inserter takes from its pickup endpoint and gives to its
+// drop endpoint, a drill gives to its receiver. The native prototype flags that forbid each direction to inserters and loaders.
+type ItemAccess = 'take' | 'give'
+const FORBIDDING_FLAG: Record<ItemAccess, string> = { take: 'no-automated-item-removal', give: 'no-automated-item-insertion' }
+
+// Whether the prototype's flags forbid this direction of automated access; undefined when the flags cannot be read.
+function forbids_access(prototype: LuaEntityPrototype | undefined, access: ItemAccess): boolean | undefined {
+  if (!prototype) return undefined
+  let flags: Record<string, boolean | undefined> | undefined
+  try {
+    flags = prototype.flags as unknown as Record<string, boolean | undefined> | undefined
+  }
+  catch {
+    return undefined
+  }
+  return flags?.[FORBIDDING_FLAG[access]] === true
 }
 
-// The roles of an item connection that must hold or carry items, checked once the geometry holds.
-function item_endpoints_proof(roles: Array<[string, EndpointView]>, predicted: Record<string, unknown>): ConnectionProof | undefined {
-  for (const [role, view] of roles) {
-    const items = item_interface(view)
-    if (items === undefined) return { status: 'unproven', reason: `the ${role} endpoint's inventories and transport lines cannot be read` }
-    if (!items) {
+// Whether an inserter or drill may act on this endpoint in this direction: it has an item interface and its prototype does
+// not forbid that direction of automated access. Undefined when either fact cannot be read.
+function item_access(interface_present: boolean | undefined, prototype: LuaEntityPrototype | undefined, access: ItemAccess): 'allowed' | 'no_interface' | 'forbidden' | undefined {
+  if (interface_present === undefined) return undefined
+  if (!interface_present) return 'no_interface'
+  const forbidden = forbids_access(prototype, access)
+  if (forbidden === undefined) return undefined
+  return forbidden ? 'forbidden' : 'allowed'
+}
+
+function entity_item_access(entity: LuaEntity, access: ItemAccess) {
+  return item_access(entity_item_interface(entity), protected_read(() => entity.prototype), access)
+}
+
+function view_item_access(view: EndpointView, access: ItemAccess) {
+  return view.entity !== undefined ? entity_item_access(view.entity, access) : item_access(prototype_item_interface(view.prototype), view.prototype, access)
+}
+
+// The roles of an item connection, each with the direction it must allow, checked once the geometry holds.
+function item_endpoints_proof(roles: Array<[string, EndpointView, ItemAccess]>, predicted: Record<string, unknown>): ConnectionProof | undefined {
+  for (const [role, view, access] of roles) {
+    const allowed = view_item_access(view, access)
+    if (allowed === undefined) return { status: 'unproven', reason: `the ${role} endpoint's inventories, transport lines or automation flags cannot be read` }
+    if (allowed === 'no_interface') {
       return { status: 'mismatch', code: 'CONNECTION_ENDPOINT_INCOMPATIBLE', reason: `the ${role} endpoint has no inventory or transport line to take items from or give them to`, predicted, endpoint_role: role, endpoint_box: view.box }
+    }
+    if (allowed === 'forbidden') {
+      return { status: 'mismatch', code: 'CONNECTION_ENDPOINT_INCOMPATIBLE', reason: `the ${role} endpoint's prototype forbids automated item ${access === 'take' ? 'removal' : 'insertion'} (${FORBIDDING_FLAG[access]})`, predicted, endpoint_role: role, endpoint_box: view.box }
     }
   }
   return undefined
@@ -410,7 +446,7 @@ export function prove_connection(connection: LayoutConnection, views: Record<str
     const predicted = { pickup_point: points.pickup, drop_point: points.drop, pickup_box: pickup.box, drop_box: drop.box }
     if (!point_in_box(points.pickup, pickup.box)) return { status: 'mismatch', reason: 'the inserter pickup point is outside the pickup endpoint', predicted, endpoint_role: 'pickup', endpoint_box: pickup.box }
     if (!point_in_box(points.drop, drop.box)) return { status: 'mismatch', reason: 'the inserter drop point is outside the drop endpoint', predicted, endpoint_role: 'drop', endpoint_box: drop.box }
-    return item_endpoints_proof([['pickup', pickup], ['drop', drop]], predicted) ?? { status: 'proved', predicted }
+    return item_endpoints_proof([['pickup', pickup, 'take'], ['drop', drop, 'give']], predicted) ?? { status: 'proved', predicted }
   }
   if (kind === 'power') {
     const pole = views.pole
@@ -440,7 +476,7 @@ export function prove_connection(connection: LayoutConnection, views: Record<str
     if (!receiver.box) return { status: 'unproven', reason: 'the receiver collision box cannot be read' }
     const predicted = { output_point: output, receiver_box: receiver.box }
     if (!point_in_box(output, receiver.box)) return { status: 'mismatch', reason: 'the drill output point is outside the receiver', predicted, endpoint_role: 'receiver', endpoint_box: receiver.box }
-    return item_endpoints_proof([['receiver', receiver]], predicted) ?? { status: 'proved', predicted }
+    return item_endpoints_proof([['receiver', receiver, 'give']], predicted) ?? { status: 'proved', predicted }
   }
   return { status: 'unproven', reason: `unknown connection kind ${kind}` }
 }
@@ -713,11 +749,12 @@ function target_unit(entity: LuaEntity, field: string) {
 }
 
 // The entity an inserter or drill acts on: its native target field once the engine has set it, else the one entity standing
-// on its native pickup/drop point that has an item interface (an inventory or a transport line; itself and characters
-// excluded). On 2.0.77 a burner inserter's pickup_target and drop_target are still nil on the tick it is built, while its
-// pickup_position/drop_position are native at once. An occupant without an item interface (a wall, a pole) is never taken
-// for the target: it is reported as `ignored`, and a point holding only such occupants verifies nothing.
-function acting_unit(entity: LuaEntity, target_field: string, point_field: string): { unit_number?: number, source: string, point?: Position, ignored?: number[] } {
+// on its native pickup/drop point that allows this direction of automated access: an item interface (an inventory or a
+// transport line) whose prototype flags do not forbid it (itself and characters excluded). On 2.0.77 a burner inserter's
+// pickup_target and drop_target are still nil on the tick it is built, while its pickup_position/drop_position are native at
+// once. Any other occupant (a wall, a pole, a cargo landing pad as a drop) is never taken for the target: it is reported as
+// `ignored`, and a point holding only such occupants verifies nothing.
+function acting_unit(entity: LuaEntity, target_field: string, point_field: string, access: ItemAccess): { unit_number?: number, source: string, point?: Position, ignored?: number[] } {
   const target = target_unit(entity, target_field)
   if (target !== undefined) return { unit_number: target, source: 'target_field' }
   const point = read_point(entity, point_field)
@@ -727,7 +764,7 @@ function acting_unit(entity: LuaEntity, target_field: string, point_field: strin
   const ignored: number[] = []
   for (const other of found) {
     if (!other.valid || other.unit_number === undefined || other.unit_number === entity.unit_number || other.type === 'character') continue
-    if (entity_item_interface(other) === true) units.push(other.unit_number)
+    if (entity_item_access(other, access) === 'allowed') units.push(other.unit_number)
     else ignored.push(other.unit_number)
   }
   const seen = ignored.length > 0 ? { point, ignored } : { point }
@@ -741,8 +778,8 @@ function acting_unit(entity: LuaEntity, target_field: string, point_field: strin
 function verify_native(connection: LayoutRecordConnection, entities: Record<string, LuaEntity>) {
   if (connection.kind === 'inserter') {
     const inserter = entities.inserter
-    const pickup = acting_unit(inserter, 'pickup_target', 'pickup_position')
-    const drop = acting_unit(inserter, 'drop_target', 'drop_position')
+    const pickup = acting_unit(inserter, 'pickup_target', 'pickup_position', 'take')
+    const drop = acting_unit(inserter, 'drop_target', 'drop_position', 'give')
     const observed = {
       pickup_unit_number: pickup.unit_number,
       pickup_source: pickup.source,
@@ -762,7 +799,7 @@ function verify_native(connection: LayoutRecordConnection, entities: Record<stri
     return { holds: typeof pole_network === 'number' && pole_network === consumer_network, observed }
   }
   if (connection.kind === 'drill_output') {
-    const drop = acting_unit(entities.drill, 'drop_target', 'drop_position')
+    const drop = acting_unit(entities.drill, 'drop_target', 'drop_position', 'give')
     const observed = { drop_unit_number: drop.unit_number, drop_source: drop.source, drop_ignored: drop.ignored }
     return { holds: observed.drop_unit_number !== undefined && observed.drop_unit_number === entities.receiver.unit_number, observed }
   }
