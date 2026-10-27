@@ -3,7 +3,7 @@ import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
 import { execute_prepared_remote_construction_plan, is_prepared_remote_construction_plan } from './map_construction'
-import { placement_check_args } from './placement_geometry'
+import { placement_check_args, snap_placement_center } from './placement_geometry'
 import { prototype_fluidbox_count } from './placement_preflight'
 import { resolve_entity_placement_item } from './placement_item'
 import type { new_task_manager } from './task_manager'
@@ -374,7 +374,9 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
   const evaluation = evaluate_plan(actor, plan.placements)
   if (!evaluation.ok) return { ok: false, code: 'construction_plan_stale', evaluation_code: evaluation.error?.code }
 
-  const construction_placements: Array<{ entity_name: string, x: number, y: number, direction: number, fluidbox_count: number }> = []
+  // `position` is the entity centre the engine uses (the grid snap a coordinate place_entity's planned_footprint uses), so the
+  // runtime tests committed areas against resolved geometry rather than the requested coordinates.
+  const construction_placements: Array<{ entity_name: string, x: number, y: number, direction: number, position: { x: number, y: number }, fluidbox_count: number }> = []
   const entity_names: string[] = []
   let fluidbox_total = 0
   for (const placement of plan.placements) {
@@ -386,6 +388,7 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
       x: placement.x,
       y: placement.y,
       direction: placement.direction ?? 0,
+      position: snap_placement_center(prototypes.entity[placement.entity_name], { x: placement.x, y: placement.y }, placement.direction ?? 0),
       fluidbox_count,
     })
   }

@@ -370,8 +370,8 @@ describe('construction plan preflight (fluid-preservation witness)', () => {
       preservation_clears_count: 0,
       execution_clearance: 'refused',
       construction_placements: [
-        { entity_name: 'stone-furnace', x: -2, y: 0, direction: 0, fluidbox_count: 0 },
-        { entity_name: 'burner-mining-drill', x: 2, y: 0, direction: 4, fluidbox_count: 0 },
+        { entity_name: 'stone-furnace', x: -2, y: 0, direction: 0, position: { x: -2, y: 0 }, fluidbox_count: 0 },
+        { entity_name: 'burner-mining-drill', x: 2, y: 0, direction: 4, position: { x: 2, y: 0 }, fluidbox_count: 0 },
       ],
       preservation_nonfluid_output: {
         version: 1,
@@ -478,6 +478,14 @@ describe('construction plan preflight (fluid-preservation witness)', () => {
     expect((construction_plan_preflight(f.actor, id, 2) as any).preservation_nonfluid_output).toBeUndefined()
     ;(globalThis as any).prototypes.entity['stone-furnace'].fluidbox_prototypes = []
     expect((construction_plan_preflight(f.actor, id, 2) as any).preservation_nonfluid_output).toBeDefined()
+  })
+
+  it('reports each placement at the grid-snapped centre the engine uses, beside the requested coordinates', () => {
+    const f = fixture_with_controller({ 'assembling-machine-1': 1 })
+    const validation: any = validate_construction_execution_plan(f.actor, { plan_id: 'odd-plan', placements: [{ entity_name: 'assembling-machine-1', x: 1, y: -3, direction: 0 }] })
+    expect(validation.ok).toBe(true)
+    const [row] = (construction_plan_preflight(f.actor, validation.validation_id, 1) as any).construction_placements
+    expect(row).toMatchObject({ x: 1, y: -3, position: { x: 1.5, y: -2.5 } })
   })
 
   it('refuses a prepared remote plan with a distinct code and never consumes it', () => {
