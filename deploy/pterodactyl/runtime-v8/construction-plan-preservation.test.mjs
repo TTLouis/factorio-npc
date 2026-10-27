@@ -173,3 +173,64 @@ test('witness verifier binds the exact operation and the fresh preservation scop
     assert.equal(nonfluidConstructionWitness(w, operation, fresh), false, 'a witness that does not state execution_clearance:refused is not accepted')
   }
 })
+
+// Milestone 4 L1 (review O4-R1-1): execute_construction_plan has no generic preflight, so the batch footprint comparison only
+// sees the plan's placements when the loop reads its native witness. A plan beside another placement of the same batch must be
+// compared through the real preflight, in either order, and refused before anything is sent; the corrected batch then runs.
+const LAYERS = ['item', 'object', 'player']
+const footprint = (entity_name, x, y, half) => ({ entity_name, position: { x, y }, direction: 0, collision_layers: LAYERS,
+  world_box: { left_top: { x: x - half, y: y - half }, right_bottom: { x: x + half, y: y + half } } })
+function footprintWitness() {
+  const base = witness(SHAPES.lab_pole)
+  return { ...base, construction_placements: base.construction_placements.map(row => ({ ...row, position: { x: row.x, y: row.y },
+    planned_footprint: footprint(row.entity_name, row.x, row.y, row.entity_name === 'lab' ? 1.2 : 0.15) })) }
+}
+const PLAN = { name: 'execute_construction_plan', args: { validation_id: 7, placement_count: 2 } }
+const poleAt = (x, y) => ({ name: 'place_entity', args: { entity_name: 'small-electric-pole', x, y, direction: 0 } })
+function poleBatchWorld({ order, reply = footprintWitness, batch }) {
+  return candidateWorld({
+    response: ({ text }) => {
+      if (witnessRead(text)) return reply()
+      if (text.includes('autorio_preflight') && text.includes('place_entity') && text.includes('small-electric-pole')) {
+        const x = Number(/\['x'\]=(-?\d+(?:\.\d+)?)/.exec(text)?.[1]); const y = Number(/\['y'\]=(-?\d+(?:\.\d+)?)/.exec(text)?.[1])
+        return { ok: true, operation: 'place_entity', placement_item: { entity_name: 'small-electric-pole', item_name: 'small-electric-pole', count: 1, held_count: 5 },
+          preservation_nonfluid_output: { version: 1, actor_id: 10, surface_index: 1, force_index: 1, entity_name: 'small-electric-pole', fluid_port_count: 0 },
+          planned_footprint: footprint('small-electric-pole', x, y, 0.15) }
+      }
+    },
+    executor: ({ step, round }) => planReply({ stepId: step.step_id, operations: batch ? batch(round) : order(PLAN, round === 0 ? poleAt(10.5, 8.5) : poleAt(20.5, 8.5)) }),
+  })
+}
+const recoverable = w => w.rows.filter(row => row.event === 'operations.preflight_recoverable').map(row => row.data ?? row)
+
+for (const [label, order, overlapIndex] of [['plan first', (plan, pole) => [plan, pole], 1], ['placement first', (plan, pole) => [pole, plan], 1]]) {
+  test(`milestone 4 L1 (${label}): a placement on the plan's lab is refused through the real preflight before any mutation, then the corrected batch runs`, async () => {
+    const w = await poleBatchWorld({ order })
+    await w.start().catch(() => undefined)
+    const [refusal, ...more] = recoverable(w)
+    assert.equal(more.length, 0, JSON.stringify(w.rows.filter(row => /failed|paused|refused/.test(row.event)).slice(-4)))
+    assert.equal(refusal.preflight.code, 'batch_footprint_overlap', JSON.stringify(refusal))
+    assert.equal(refusal.preflight.operation_index, overlapIndex)
+    const plan = label === 'plan first' ? refusal.preflight.batch_footprint.overlaps : refusal.preflight.batch_footprint
+    assert.equal(plan.operation, 'execute_construction_plan')
+    assert.equal(plan.construction_placement_index, 0)
+    assert.equal(plan.entity_name, 'lab')
+    assert.equal(w.game.mutations.length, 1, `nothing from the overlapping batch was sent; only the corrected batch was admitted: ${JSON.stringify(w.rows.filter(row => /failed|paused|refused|rejected|recoverable/.test(row.event)).slice(-3))}`)
+    assert.match(w.game.mutations[0], /'execute_construction_plan',7,2\b/)
+    assert.match(w.game.mutations[0], /'small-electric-pole'/)
+    assert.match(w.game.mutations[0], /20\.5/)
+  })
+}
+
+test('milestone 4 L1: a plan whose witness gives no footprints is refused beside another placement, and runs alone', async () => {
+  const w = await poleBatchWorld({ reply: () => witness(SHAPES.lab_pole), batch: round => round === 0 ? [PLAN, poleAt(20.5, 8.5)] : [PLAN] })
+  await w.start().catch(() => undefined)
+  const [refusal, ...more] = recoverable(w)
+  assert.equal(more.length, 0, JSON.stringify(w.rows.filter(row => /failed|paused|refused/.test(row.event)).slice(-4)))
+  assert.equal(refusal.preflight.code, 'batch_footprint_unproven', JSON.stringify(refusal))
+  assert.equal(refusal.preflight.operation_index, 0)
+  assert.equal(refusal.refusal_class, 'argument')
+  assert.equal(w.game.mutations.length, 1)
+  assert.match(w.game.mutations[0], /'execute_construction_plan',7,2\b/)
+  assert.doesNotMatch(w.game.mutations[0], /'small-electric-pole'/)
+})

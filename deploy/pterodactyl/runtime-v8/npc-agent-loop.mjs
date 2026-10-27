@@ -86,7 +86,7 @@ import {
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION, authorizationOf, checkGrant } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, isProviderFailurePause, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, reviewPauseEvidence, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
-import { batchFootprintOverlap } from './batch-footprint.mjs'
+import { batchFootprintOverlap, batchFootprintUnproven, constructionPlanFootprintsKnown, constructionPlanNeedsFootprints } from './batch-footprint.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
   blockerFacts,
@@ -5720,19 +5720,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // fluid-preservation gate's own admission-time witness read, which alone decides preservation. A witness that cannot be read or
   // does not describe this exact validation (including a remote-prepared plan, whose placements this read does not list) leaves
   // the placements unproven, so the batch is refused here: no later gate checks the committed area.
-  async constructionPlanScopeRefusal(operation, index, assertPreflightCurrent) {
+  async constructionPlanScopeRefusal(operation, index, readWitness) {
     if (operation?.name !== 'execute_construction_plan') return undefined
     const requirements = this.committedPlacementRequirements({ admission: true })
     const anchored = [...new Set(requirements.outcome.requirements.filter(row => row?.kind === 'entity_count' && typeof row.prototype === 'string')
       .map(row => row.prototype))].filter(name => committedPlacementRegions(requirements, name).length > 0)
     if (anchored.length === 0) return undefined
-    const command = constructionPlanWitnessCommand(operation)
-    let witness
-    if (command) {
-      try { witness = JSON.parse(String(await this.rcon.command(command)).trim()) }
-      catch { witness = undefined }
-      await assertPreflightCurrent()
-    }
+    const witness = await readWitness()
     if (witness?.ok === true && witness.validation_id === operation.args.validation_id && witness.placement_count === operation.args.placement_count
       && Array.isArray(witness.construction_placements) && witness.construction_placements.length === operation.args.placement_count) {
       return this.committedPlacementRefusal(operation, witness, index)
@@ -5753,6 +5747,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       detail: facts,
       correction_message: `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${operation.name}) before Autorio admission with code placement_region_unproven; no mutation from this batch ran. ${facts} The committed step is unchanged. A locally validated construction plan, or getPlacementCandidates for ${anchored[0]}, can be checked against that region.`,
     }
+  }
+
+  // The read-only native witness of the exact stored validation an execute_construction_plan operation names (undefined when
+  // it cannot be read). Preflight reads it at most once per operation: for the committed-area check and for the batch
+  // footprint comparison.
+  async readConstructionPlanWitness(operation, assertPreflightCurrent) {
+    const command = constructionPlanWitnessCommand(operation)
+    if (!command) return undefined
+    let witness
+    try { witness = JSON.parse(String(await this.rcon.command(command)).trim()) }
+    catch { witness = undefined }
+    await assertPreflightCurrent()
+    return witness
   }
 
   // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples
@@ -15654,8 +15661,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     for (let index = 0; index < operations.length; index++) {
       const command = renderOperationPreflight(operations[index])
       if (!command) {
-        const outsideCommitted = await this.constructionPlanScopeRefusal(operations[index], index, assertPreflightCurrent)
+        let witnessRead
+        const readWitness = () => (witnessRead ??= this.readConstructionPlanWitness(operations[index], assertPreflightCurrent))
+        const outsideCommitted = await this.constructionPlanScopeRefusal(operations[index], index, readWitness)
         if (!outsideCommitted) {
+          // Milestone 4 L1: a construction plan's placements are compared with the batch's other placements
+          // (batchFootprintOverlap below), from the footprints its native witness gives. Without them the batch is refused.
+          if (constructionPlanNeedsFootprints(operations, index)) {
+            const witness = await readWitness()
+            if (!constructionPlanFootprintsKnown(witness, operations[index])) {
+              const unproven = batchFootprintUnproven(operations[index], index, witness)
+              results.push(unproven)
+              const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${unproven.code}`)
+              failure.preflight = unproven
+              failure.preflightResults = results.slice()
+              throw failure
+            }
+            results.push({ ok: true, operation: operations[index].name, validation: 'not_required', construction_placements: witness.construction_placements })
+            continue
+          }
           results.push({ ok: true, operation: operations[index].name, validation: 'not_required' })
           continue
         }

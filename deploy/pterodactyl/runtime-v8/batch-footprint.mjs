@@ -120,3 +120,47 @@ export function batchFootprintOverlap(operations, preflight) {
   }
   return null
 }
+
+export const BATCH_FOOTPRINT_UNPROVEN_CODE = 'batch_footprint_unproven'
+
+const PLACEMENT_OPERATIONS = new Set(['place_entity', 'place_candidate', 'execute_construction_plan'])
+
+/**
+ * Whether a construction plan's placements must be read before the batch is compared: execute_construction_plan has no
+ * generic preflight, so its footprints come from the native witness, and the batch has another operation that places
+ * something.
+ */
+export function constructionPlanNeedsFootprints(operations, index) {
+  const list = Array.isArray(operations) ? operations : []
+  return list[index]?.name === 'execute_construction_plan'
+    && list.some((operation, other) => other !== index && PLACEMENT_OPERATIONS.has(operation?.name))
+}
+
+/** The witness describes exactly this validation and gives every one of its placements a footprint. */
+export function constructionPlanFootprintsKnown(witness, operation) {
+  const rows = witness?.construction_placements
+  return witness?.ok === true && witness.validation_id === operation?.args?.validation_id
+    && witness.placement_count === operation?.args?.placement_count && Array.isArray(rows) && rows.length === operation.args.placement_count
+    && rows.every(row => box(row?.planned_footprint?.world_box) !== undefined)
+}
+
+/**
+ * The refusal when a construction plan shares its batch with other placements and the native witness does not give the
+ * plan's footprints: the plan cannot be compared with them, so nothing from the batch is sent.
+ */
+export function batchFootprintUnproven(operation, index, witness) {
+  const read = witness === undefined ? 'could not be read'
+    : witness?.ok !== true ? `returned ${typeof witness?.code === 'string' ? witness.code : 'no placement list'}`
+      : `does not give a footprint for each of the ${operation?.args?.placement_count} placements of validation ${operation?.args?.validation_id}`
+  const facts = `the native read of construction plan ${operation?.args?.validation_id} ${read}, so its placements cannot be compared with the other placements of this batch`
+  return {
+    ok: false,
+    code: BATCH_FOOTPRINT_UNPROVEN_CODE,
+    refusal_class: REFUSAL_CLASS.ARGUMENT,
+    operation: operation?.name,
+    operation_index: index,
+    ...(typeof witness?.code === 'string' ? { witness_code: witness.code } : {}),
+    detail: facts,
+    correction_message: `[HARNESS] Refused before admission: no operation from this batch ran. Operation ${index + 1} (${operation?.name}): ${facts}. The plan, the step and the requested result are unchanged.`,
+  }
+}
