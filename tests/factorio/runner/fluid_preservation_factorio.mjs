@@ -688,6 +688,7 @@ try {
       await rcon.command('/silent-command remote.call("autorio_actor","reconcile_after_load")')
       session = await deploymentStatus(rcon, { requireAllowed: true })
       assert.equal(session.session, bootToken); assert.equal(session.epoch, priorSession.epoch + 1); assert.equal(session.actor_id, priorSession.actor_id)
+      probe.epoch = session // the runtime's agent binds to the new epoch too; the later next-slice ownership probe follows it
       const authorizes = await lua(`rcon.print(helpers.table_to_json({old=remote.call("sgluna_deployment","authorize",${priorSession.epoch}),current=remote.call("sgluna_deployment","authorize",${session.epoch})}))`)
       assert.deepEqual(authorizes, { old: false, current: true })
       const refuse = (validation, pattern) => assert.rejects(
