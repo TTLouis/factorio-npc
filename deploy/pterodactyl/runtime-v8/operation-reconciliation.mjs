@@ -655,24 +655,37 @@ function terminalNavigationCancellation(admission, status, pending) {
   return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'navigation' }
 }
 
-// A connected construction layout whose placement batch was cancelled before every node was built. Factorio encodes a present
-// empty Lua array as {}; only that exact empty-object shape is an empty list.
+// A connected construction layout whose placement batch ended before every node was built. Factorio encodes a present empty
+// Lua array as {}; only that exact empty-object shape is an empty list.
 function nodeIdList(value) {
   if (Array.isArray(value)) return value.length <= 16 ? value : undefined
   return isRecord(value) && Object.keys(value).length === 0 ? [] : undefined
 }
 
+const LAYOUT_RECEIPT_FIELDS = ['batch_ref', 'batch_id', 'batch_generation', 'state', 'tick', 'task_count', 'tasks_started', 'started_count']
+// Whether the receipt copy a sealed row carries says what the journal's receipt says (the journal's reason may be longer).
+function sameLayoutReceipt(sealed, journal) {
+  return LAYOUT_RECEIPT_FIELDS.every(field => sealed[field] === journal[field])
+    && text(sealed.reason ?? '', 128) === text(journal.reason ?? '', 128)
+    && Array.isArray(sealed.task_types) && Array.isArray(journal.task_types)
+    && sealed.task_types.length === journal.task_types.length && sealed.task_types.every((type, i) => type === journal.task_types[i])
+}
+
 // The mod seals the admission as partial (exact_construction_layout_partial) from the layout record and the batch receipt;
-// this re-proves the same link from the retained admission row and the native receipt instead of trusting that string: one
-// execute_construction_plan slot, one exact batch reference, one cancelled receipt of placement tasks only (as many as the slot
-// queued), idle native queues, and a node list whose ids belong to that layout and add up to the tasks the batch held. It
-// closes the native admission only: the nodes it names as placed are built, the others are not, and the original batch is
-// never replayed (a resume validates the remainder under a new validation identity).
+// this re-proves the same link from the retained admission row and the batch's receipt identity instead of trusting that
+// string: one execute_construction_plan slot, one exact batch reference, one receipt of placement tasks only (as many as the
+// slot queued) that either says the batch was cancelled or, from an earlier generation, that the save was loaded with it
+// unfinished (the queue was retired, so nothing of it can still run), idle native queues, and node ids that belong to the layout
+// and add up to the tasks the batch held. The receipt is the journal's, or, once the journal has evicted it, the copy the
+// sealed row carries; where both exist they must agree. It closes the native admission only: the nodes it names as placed are
+// built, the others are not (or are missing), and the original batch is never replayed (a resume validates the remainder under
+// a new validation identity).
 function terminalConstructionLayoutPartial(admission, status, pending) {
   const slots = admission.slots
   if (admission.state !== 'partial' || admission.ok !== false || admission.error !== 'exact_construction_layout_partial'
     || status?.status_error || status?.error || !nativeAdmissionJournal(status.admission_journal?.records ?? status.admission_journal).known
     || status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch
+    || !Number.isSafeInteger(status.batch_generation) || !Number.isSafeInteger(admission.generation) || admission.generation > status.batch_generation
     || !Array.isArray(slots) || slots.length !== 1 || admission.operation_count !== 1 || pending.operations.length !== 1) return null
   const slot = slots[0]
   const ref = slot?.batch_refs?.[0]
@@ -683,25 +696,41 @@ function terminalConstructionLayoutPartial(admission, status, pending) {
   if (!Array.isArray(status.receipt_journal) || !status.receipt_journal.every(isRecord)) return null
   const matches = status.receipt_journal.filter(row => row.batch_ref === ref.batch_ref
     || row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation)
-  if (matches.length !== 1) return null
-  const receipt = matches[0]
-  if (receipt.state !== 'cancelled' || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
+  if (matches.length > 1) return null
+  const sealed = admission.layout_receipt
+  if (sealed !== undefined && !isRecord(sealed)) return null
+  let receipt
+  if (matches.length === 1) {
+    receipt = matches[0]
+    if (sealed !== undefined && !sameLayoutReceipt(sealed, receipt)) return null
+  }
+  else {
+    if (sealed === undefined) return null
+    receipt = sealed
+  }
+  const retired = receipt.state === 'uncertain' && receipt.reason === 'save_load_unfinished' && receipt.batch_generation < status.batch_generation
+  const cancelled = receipt.state === 'cancelled' && receipt.batch_generation === status.batch_generation
+  const counted = value => value === undefined || Number.isSafeInteger(value) && value >= 0
+  if ((!cancelled && !retired) || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
     || receipt.batch_ref !== ref.batch_ref || receipt.task_count !== slot.queued_tasks || !Array.isArray(receipt.task_types)
     || receipt.task_types.length !== receipt.task_count || !receipt.task_types.every(type => type === 'placing')
-    || !Number.isSafeInteger(receipt.tasks_started) || receipt.tasks_started < 1 || receipt.tasks_started > receipt.task_count
-    || !Number.isSafeInteger(receipt.started_count) || receipt.started_count < receipt.tasks_started
+    || (receipt.state === 'cancelled' && (!Number.isSafeInteger(receipt.tasks_started) || receipt.tasks_started < 1 || receipt.tasks_started > receipt.task_count
+      || !Number.isSafeInteger(receipt.started_count) || receipt.started_count < receipt.tasks_started))
+    || !counted(receipt.tasks_started) || !counted(receipt.started_count)
     || !Number.isSafeInteger(admission.tick) || !Number.isSafeInteger(receipt.tick) || receipt.tick < admission.tick
     || receipt.outcome || receipt.refused_count || receipt.refusals?.length) return null
   const placed = nodeIdList(admission.placed_node_ids)
   const notPlaced = nodeIdList(admission.not_placed_node_ids)
-  if (!Number.isSafeInteger(admission.layout_id) || admission.layout_id < 1 || !placed || !notPlaced
-    || placed.length + notPlaced.length !== receipt.task_count) return null
+  const missing = admission.missing_node_ids === undefined ? [] : nodeIdList(admission.missing_node_ids)
+  if (!Number.isSafeInteger(admission.layout_id) || admission.layout_id < 1 || !placed || !notPlaced || !missing
+    || placed.length + notPlaced.length + missing.length !== receipt.task_count) return null
   const prefix = `layout-${admission.layout_id}:n`
-  const ids = [...placed, ...notPlaced]
+  const ids = [...placed, ...notPlaced, ...missing]
   if (!ids.every(id => typeof id === 'string' && id.startsWith(prefix) && /^\d{1,2}$/.test(id.slice(prefix.length)))
     || new Set(ids).size !== ids.length) return null
   return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'layout',
-    layout_id: admission.layout_id, placed_node_ids: placed, not_placed_node_ids: notPlaced }
+    layout_id: admission.layout_id, placed_node_ids: placed, not_placed_node_ids: notPlaced, missing_node_ids: missing,
+    receipt_source: matches.length === 1 ? 'journal' : 'sealed_row' }
 }
 
 // An uncertain native admission is still blocking unless the host retained its
@@ -748,6 +777,10 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     }
     if (!Number.isSafeInteger(admission.generation) || !Number.isSafeInteger(status?.batch_generation)
       || admission.generation !== status.batch_generation) {
+      // A layout execution the mod sealed after a restart retired its batch: the sealed row and the batch's receipt identity
+      // prove which nodes stand, for the actor that ran it. The remainder is then validated afresh, never replayed.
+      const historical = staleActor ? null : terminalConstructionLayoutPartial(admission, status, pending)
+      if (historical) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN, reason: 'exact_construction_layout_partial', ...historical }
       return staleActor ?? { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
     }
     // Exact refusal evidence is historical and needs no live actor: nothing refused changed anything.
@@ -873,7 +906,7 @@ export function reconciliationFacts(result, pending) {
     operations: (pending?.operations ?? []).map(operation => operation.name),
     effect_classes: [...new Set((pending?.operations ?? []).map(operation => operation.effect_class))],
     ...(['gather', 'navigation', 'layout'].includes(result?.recovery_kind) ? { recovery_kind: result.recovery_kind, receipt_tick: result.receipt_tick, batch_ref: result.batch_ref } : {}),
-    ...(result?.recovery_kind === 'layout' ? { layout_id: result.layout_id, placed_node_ids: result.placed_node_ids, not_placed_node_ids: result.not_placed_node_ids } : {}),
+    ...(result?.recovery_kind === 'layout' ? { layout_id: result.layout_id, placed_node_ids: result.placed_node_ids, not_placed_node_ids: result.not_placed_node_ids, missing_node_ids: result.missing_node_ids, receipt_source: result.receipt_source } : {}),
     ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !['gather', 'navigation', 'layout'].includes(result?.recovery_kind)
       ? { completed_tasks: result.completed_tasks, refused_tasks: result.refused_tasks } : {}),
     ...(result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
@@ -887,7 +920,7 @@ export function reconciliationFacts(result, pending) {
 export function reconciliationGuidance(result, pending) {
   const facts = JSON.stringify(reconciliationFacts(result, pending))
   if (result?.reason === 'exact_terminal_navigation_cancelled') return `Operation reconciliation: the exact navigation-only batch ended unreachable with idle native queues. Movement may have occurred; the destination is not verified. Re-observe current position and the unchanged checkpoint before choosing the next action. Facts: ${facts}`
-  if (result?.reason === 'exact_construction_layout_partial') return `Operation reconciliation: the exact construction layout batch was cancelled with idle native queues. The layout's placed nodes (${result.placed_node_ids.join(', ') || 'none'}) were built and are kept; its unplaced nodes (${result.not_placed_node_ids.join(', ') || 'none'}) were not built. This is partial work, not batch success, and the original batch is not replayed. Facts: ${facts}`
+  if (result?.reason === 'exact_construction_layout_partial') return `Operation reconciliation: the exact construction layout batch ended unfinished (cancelled, or retired by a restart) with idle native queues. The layout's placed nodes (${result.placed_node_ids.join(', ') || 'none'}) were built and are kept; its unplaced nodes (${result.not_placed_node_ids.join(', ') || 'none'}) were not built${result.missing_node_ids?.length ? `; nodes placed and since gone: ${result.missing_node_ids.join(', ')}` : ''}. This is partial work, not batch success, and the original batch is not replayed. Facts: ${facts}`
   if (result?.reason === 'exact_terminal_gather_cancelled') return `Operation reconciliation: the exact gather-only batch terminated with partial acquisition. No slot quantity is assumed complete or absent. Keep the effect hold until the harness reads fresh inventory and computes only the unchanged checkpoint deficit; do not replay the batch. Facts: ${facts}`
   if (result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL) {
     return `Operation reconciliation: the exact native receipt accounts for every transfer task: ${result.completed_tasks} completed and ${result.refused_tasks} refused without moving anything. This is partial work, not batch success. Do not replay the completed prefix or the original batch. Re-observe current inventories and the target, then choose only the missing effects for the same committed step. Facts: ${facts}`
