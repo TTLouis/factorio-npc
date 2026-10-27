@@ -416,19 +416,29 @@ try {
       const after = await worldFacts()
       const status = await layoutStatus(validated.validation_id)
       const inserterId = unitOf(status, 'inserter'); const chestId = unitOf(status, 'chest')
-      const native = await lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${inserterId} then i=v end end; assert(i);
+      // The engine sets the inserter's own target fields a few ticks after it is built; wait (bounded) until both are set.
+      const readInserter = () => lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${inserterId} then i=v end end; assert(i);
         local function at(p) local r={}; for _,e in pairs(i.surface.find_entities_filtered{position=p}) do if e.unit_number and e.unit_number~=i.unit_number and e.type~="character" then r[#r+1]=e.unit_number end end; return r end
+        local function inv(p) local r={}; for _,e in pairs(i.surface.find_entities_filtered{position=p}) do if e.unit_number and e.unit_number~=i.unit_number and e.type~="character" then r[#r+1]=e.get_max_inventory_index() end end; return r end
         rcon.print(helpers.table_to_json({pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil,pickup_position=i.pickup_position,drop_position=i.drop_position,
-          at_pickup=at(i.pickup_position),at_drop=at(i.drop_position),direction=i.direction,tick=game.tick}))`)
-      evidence.l3_inserter = { tried, found, reversed, validated, status, native }
+          at_pickup=at(i.pickup_position),at_drop=at(i.drop_position),inventories_at_pickup=inv(i.pickup_position),inventories_at_drop=inv(i.drop_position),direction=i.direction,tick=game.tick}))`)
+      const firstRead = await readInserter()
+      let native = firstRead
+      for (let attempt = 0; attempt < 40 && (native.pickup === undefined || native.drop === undefined); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+        native = await readInserter()
+      }
+      evidence.l3_inserter = { tried, found, reversed, validated, status, first_read: firstRead, native }
+      // The engine's own target fields are the verdict, independent of the harness's point fallback.
+      assert.equal(native.pickup, chestId, `the inserter's pickup_target: ${JSON.stringify(native)}`)
+      assert.equal(native.drop, boilerId, `the inserter's drop_target: ${JSON.stringify(native)}`)
+      assert.ok(native.inventories_at_pickup.every(count => count > 0) && native.inventories_at_drop.every(count => count > 0), JSON.stringify(native))
       assert.equal(status.state, 'complete', JSON.stringify(status))
       assert.equal(status.production, 'not_asserted')
       assert.ok(Number.isSafeInteger(inserterId) && Number.isSafeInteger(chestId), JSON.stringify(status))
-      // The engine acts on the entity at its native pickup/drop point; its target fields, once set, must name the same ones.
+      // The engine acts on the entity at its native pickup/drop point, the same ones its target fields name.
       assert.deepEqual(native.at_pickup, [chestId], JSON.stringify(native))
       assert.deepEqual(native.at_drop, [boilerId], JSON.stringify(native))
-      if (native.pickup !== undefined) assert.equal(native.pickup, chestId, JSON.stringify(native))
-      if (native.drop !== undefined) assert.equal(native.drop, boilerId, JSON.stringify(native))
       assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
       const [chestNode, inserterNode] = ['chest', 'inserter'].map(slot => status.nodes.find(node => node.slot === slot))
       assert.ok(chestNode.execution_rank < inserterNode.execution_rank && chestNode.placed_tick <= inserterNode.placed_tick, JSON.stringify(status))
@@ -486,6 +496,12 @@ try {
       // The same receiver on the opposite side of the drill is off the output point and refused before mutation.
       const mismatch = await plan(found.direction, -found.dx, -found.dy)
       assert.equal(mismatch.error?.code, 'CONNECTION_GEOMETRY_MISMATCH', JSON.stringify(mismatch))
+      // A wall on the output point holds no items: the planned receiver is refused as an incompatible endpoint.
+      const wallReceiver = await validate('native-l3-drill-wall-receiver',
+        [{ entity_name: 'burner-mining-drill', x: ore.x, y: ore.y, direction: found.direction, slot: 'drill' }, { entity_name: 'stone-wall', x: ore.x + found.dx, y: ore.y + found.dy, slot: 'receiver' }],
+        [{ kind: 'drill_output', drill: { slot: 'drill' }, receiver: { slot: 'receiver' } }])
+      assert.equal(wallReceiver.planning_status, 'spatially_invalid', JSON.stringify(wallReceiver))
+      assert.equal(wallReceiver.error?.code, 'CONNECTION_ENDPOINT_INCOMPATIBLE', JSON.stringify(wallReceiver))
       const validated = await plan(found.direction, found.dx, found.dy)
       assert.equal(validated.ok, true, JSON.stringify(validated))
       await operation('execute_construction_plan', { validation_id: validated.validation_id, placement_count: validated.placement_count })
@@ -493,15 +509,50 @@ try {
       const drillId = unitOf(status, 'drill'); const receiverId = unitOf(status, 'receiver')
       const native = await lua(`local d; for _,v in pairs(a.surface.find_entities_filtered{name="burner-mining-drill"}) do if v.unit_number==${drillId} then d=v end end; assert(d);
         local r={}; for _,e in pairs(d.surface.find_entities_filtered{position=d.drop_position}) do if e.unit_number and e.unit_number~=d.unit_number and e.type~="character" then r[#r+1]=e.unit_number end end
-        rcon.print(helpers.table_to_json({drop=d.drop_target and d.drop_target.unit_number or nil,drop_position=d.drop_position,at_drop=r,direction=d.direction,tick=game.tick}))`)
-      evidence.l3_drill = { ore, tried, mismatch, validated, status, native }
+        local n={}; for _,e in pairs(d.surface.find_entities_filtered{position=d.drop_position}) do if e.unit_number and e.unit_number~=d.unit_number and e.type~="character" then n[#n+1]=e.get_max_inventory_index() end end
+        rcon.print(helpers.table_to_json({drop=d.drop_target and d.drop_target.unit_number or nil,drop_position=d.drop_position,at_drop=r,inventories_at_drop=n,direction=d.direction,tick=game.tick}))`)
+      evidence.l3_drill = { ore, tried, mismatch, wall_receiver: wallReceiver, validated, status, native }
       assert.equal(status.state, 'complete', JSON.stringify(status))
       assert.equal(status.production, 'not_asserted')
+      // An unfuelled burner drill leaves drop_target unset (o5a4); the one entity on its native drop point, which holds items,
+      // is the receiver. The target field, when the engine has set it, must agree.
       assert.deepEqual(native.at_drop, [receiverId], JSON.stringify(native))
+      assert.ok(native.inventories_at_drop.every(count => count > 0), JSON.stringify(native))
       if (native.drop !== undefined) assert.equal(native.drop, receiverId, JSON.stringify(native))
       assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
       const [drillNode, receiverNode] = ['drill', 'receiver'].map(slot => status.nodes.find(node => node.slot === slot))
       assert.ok(drillNode.execution_rank < receiverNode.execution_rank && drillNode.placed_tick <= receiverNode.placed_tick, JSON.stringify(status))
+    }
+    // An existing entity without an item interface (a wall) exactly on an inserter's drop point is not a drop endpoint; an
+    // existing chest in the same cell, with the same geometry, is.
+    {
+      const spot = await lua(`local s=a.surface; local px=math.floor(a.position.x); local py=math.floor(a.position.y); local found
+        for _,o in pairs({{3,-5},{-3,-5},{3,5},{-3,5},{5,-3},{-5,-3},{5,3},{-5,3}}) do local x=px+o[1]; local y=py+o[2]
+          if s.count_entities_filtered{area={{x-1,y-2},{x+2,y+3}}}==0 and s.can_place_entity{name="wooden-chest",position={x+0.5,y-0.5},force=a.force}
+            and s.can_place_entity{name="wooden-chest",position={x+0.5,y+0.5},force=a.force} and s.can_place_entity{name="wooden-chest",position={x+0.5,y+1.5},force=a.force} then found={x=x,y=y}; break end end
+        assert(found); local w=s.create_entity{name="stone-wall",position={found.x+0.5,found.y-0.5},force=a.force}; assert(w and w.unit_number)
+        rcon.print(helpers.table_to_json({x=found.x,y=found.y,wall=w.unit_number,wall_inventories=w.get_max_inventory_index()}))`)
+      const plan = drop => validate('native-l3-inserter-wall',
+        [{ entity_name: 'wooden-chest', x: spot.x + 0.5, y: spot.y + 1.5, slot: 'chest' }, { entity_name: 'burner-inserter', x: spot.x + 0.5, y: spot.y + 0.5, direction: 8, slot: 'inserter' }],
+        [{ kind: 'inserter', inserter: { slot: 'inserter' }, pickup: { slot: 'chest' }, drop: { unit_number: drop } }])
+      const before = await worldFacts()
+      const wall = await plan(spot.wall)
+      const swap = await lua(`local s=a.surface; for _,e in pairs(s.find_entities_filtered{name="stone-wall",position={${spot.x + 0.5},${spot.y - 0.5}}}) do if e.unit_number==${spot.wall} then e.destroy() end end
+        local c=s.create_entity{name="wooden-chest",position={${spot.x + 0.5},${spot.y - 0.5}},force=a.force}; assert(c and c.unit_number); rcon.print(helpers.table_to_json({chest=c.unit_number}))`)
+      const chest = await plan(swap.chest)
+      await lua(`for _,e in pairs(a.surface.find_entities_filtered{name="wooden-chest",position={${spot.x + 0.5},${spot.y - 0.5}}}) do if e.unit_number==${swap.chest} then e.destroy() end end; rcon.print("{}")`)
+      const after = await worldFacts()
+      evidence.l3_inserter_wall = { spot, wall, chest }
+      assert.equal(wall.ok, false, JSON.stringify(wall))
+      assert.equal(wall.planning_status, 'spatially_invalid', JSON.stringify(wall))
+      assert.equal(wall.error?.code, 'CONNECTION_ENDPOINT_INCOMPATIBLE', JSON.stringify(wall))
+      assert.equal(wall.error?.endpoint_role, 'drop', JSON.stringify(wall))
+      assert.equal(wall.validation_id, undefined)
+      // The control differs only in the endpoint: its geometry holds (the burner inserter stock was spent above, so it is not
+      // eligible to run, which is beside the point here).
+      assert.equal(chest.planning_status, 'spatially_valid', JSON.stringify(chest))
+      assert.deepEqual(quiet(after).inventory, quiet(before).inventory, 'validation spends nothing')
+      assert.equal(after.status.queue_length, 0)
     }
   }
   // Fault scheduling occurs after the actual correlated candidate was queued,
