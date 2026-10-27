@@ -492,22 +492,83 @@ function renderConstructionSites(args) {
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","find_construction_sites",{${fields.join(',')}})))`
 }
 
+const LAYOUT_SLOT_PATTERN = /^[a-z0-9_-]{1,40}$/
+const LAYOUT_MAX_PLACEMENTS = 6
+const LAYOUT_MAX_CONNECTIONS = 8
+// Roles of each connection kind: `slots` must name a placement of this plan, `endpoints` a slot or an existing unit_number.
+const LAYOUT_CONNECTION_ROLES = {
+  inserter: { slots: ['inserter'], endpoints: ['pickup', 'drop'] },
+  power: { slots: ['pole'], endpoints: ['consumer'] },
+  drill_output: { slots: ['drill'], endpoints: ['receiver'] },
+  fluid: { slots: [], endpoints: ['from', 'to'] },
+}
+
+function parseLayoutSlot(value, label) {
+  check(typeof value === 'string' && LAYOUT_SLOT_PATTERN.test(value), `${label} must be 1 to 40 characters of a-z, 0-9, _ or -`)
+  return value
+}
+
+function parseLayoutEndpoint(value, label, slots, slotOnly) {
+  check(value && typeof value === 'object' && !Array.isArray(value), `${label} must be an object`)
+  const keys = Object.keys(value)
+  check(keys.length === 1 && (keys[0] === 'slot' || (!slotOnly && keys[0] === 'unit_number')), `${label} must be {slot}${slotOnly ? '' : ' or {unit_number}'}`)
+  if (keys[0] === 'unit_number') return { unit_number: positiveInteger(value.unit_number, `${label}.unit_number`) }
+  const slot = parseLayoutSlot(value.slot, `${label}.slot`)
+  check(slots.has(slot), `${label} names unknown slot ${slot}`)
+  return { slot }
+}
+
+function parseConstructionConnections(connections, slots) {
+  check(Array.isArray(connections) && connections.length <= LAYOUT_MAX_CONNECTIONS, `connections must contain at most ${LAYOUT_MAX_CONNECTIONS} entries`)
+  return connections.map((connection, index) => {
+    check(connection && typeof connection === 'object' && !Array.isArray(connection), `connections[${index}] must be an object`)
+    const shape = Object.hasOwn(LAYOUT_CONNECTION_ROLES, connection.kind) ? LAYOUT_CONNECTION_ROLES[connection.kind] : undefined
+    check(shape !== undefined, `connections[${index}].kind must be inserter, power, drill_output or fluid`)
+    exactKeys(connection, ['kind', ...shape.slots, ...shape.endpoints])
+    const parsed = { kind: connection.kind }
+    for (const role of shape.slots) parsed[role] = parseLayoutEndpoint(connection[role], `connections[${index}].${role}`, slots, true)
+    for (const role of shape.endpoints) parsed[role] = parseLayoutEndpoint(connection[role], `connections[${index}].${role}`, slots, false)
+    return parsed
+  })
+}
+
 function parseConstructionPlan(args) {
-  exactKeys(args, ['plan_id', 'placements'])
+  exactKeys(args, ['plan_id', 'placements', 'connections'])
   check(Array.isArray(args.placements) && args.placements.length >= 1 && args.placements.length <= 16, 'placements must contain between 1 and 16 entries')
-  return {
-    plan_id: base.factorioName(args.plan_id),
-    placements: args.placements.map((placement, index) => {
-      exactKeys(placement, ['entity_name', 'x', 'y', 'direction'])
-      const parsed = {
-        entity_name: base.factorioName(placement.entity_name),
-        x: finiteCoordinate(placement.x, `placements[${index}].x`),
-        y: finiteCoordinate(placement.y, `placements[${index}].y`),
-      }
-      if (placement.direction !== undefined) parsed.direction = optionalInteger(placement.direction, `placements[${index}].direction`, 0, 15)
-      return parsed
-    }),
+  const slots = new Set()
+  const placements = args.placements.map((placement, index) => {
+    exactKeys(placement, ['entity_name', 'x', 'y', 'direction', 'slot'])
+    const parsed = {
+      entity_name: base.factorioName(placement.entity_name),
+      x: finiteCoordinate(placement.x, `placements[${index}].x`),
+      y: finiteCoordinate(placement.y, `placements[${index}].y`),
+    }
+    if (placement.direction !== undefined) parsed.direction = optionalInteger(placement.direction, `placements[${index}].direction`, 0, 15)
+    if (placement.slot !== undefined) {
+      parsed.slot = parseLayoutSlot(placement.slot, `placements[${index}].slot`)
+      check(!slots.has(parsed.slot), `placements[${index}].slot repeats slot ${parsed.slot}`)
+      slots.add(parsed.slot)
+    }
+    return parsed
+  })
+  const plan = { plan_id: base.factorioName(args.plan_id), placements }
+  if (args.connections !== undefined) {
+    const connections = parseConstructionConnections(args.connections, slots)
+    check(connections.length === 0 || placements.length <= LAYOUT_MAX_PLACEMENTS, `a plan with connections holds at most ${LAYOUT_MAX_PLACEMENTS} placements`)
+    if (connections.length > 0) plan.connections = connections
   }
+  return plan
+}
+
+function renderLayoutEndpoint(endpoint) {
+  return endpoint.slot !== undefined ? `{slot=${base.luaString(endpoint.slot)}}` : `{unit_number=${endpoint.unit_number}}`
+}
+
+function renderConstructionConnection(connection) {
+  const shape = LAYOUT_CONNECTION_ROLES[connection.kind]
+  const fields = [`kind=${base.luaString(connection.kind)}`]
+  for (const role of [...shape.slots, ...shape.endpoints]) fields.push(`${role}=${renderLayoutEndpoint(connection[role])}`)
+  return `{${fields.join(',')}}`
 }
 
 function parseConstructionIntent(args) {
@@ -565,9 +626,11 @@ function renderConstructionPlan(args) {
       `y=${placement.y}`,
     ]
     if (placement.direction !== undefined) fields.push(`direction=${placement.direction}`)
+    if (placement.slot !== undefined) fields.push(`slot=${base.luaString(placement.slot)}`)
     return `{${fields.join(',')}}`
   }).join(',')
-  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","validate_construction_plan",{plan_id=${base.luaString(parsed.plan_id)},placements={${placements}}})))`
+  const connections = parsed.connections === undefined ? '' : `,connections={${parsed.connections.map(renderConstructionConnection).join(',')}}`
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","validate_construction_plan",{plan_id=${base.luaString(parsed.plan_id)},placements={${placements}}${connections}})))`
 }
 
 function parseMiningDetails(args) {
@@ -842,11 +905,41 @@ const reservationDefinitions = [{
       parameters: { type: 'object', additionalProperties: false, required: ['reservation_id', 'revision'], properties: { reservation_id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, revision: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, offset: { type: 'integer', minimum: 0, maximum: 1088 } } } },
 }]
 
+const layoutSlotSchema = { type: 'string', minLength: 1, maxLength: 40, description: 'A name for one placement of this plan: 1 to 40 characters of a-z, 0-9, _ or -, unique within the plan.' }
+const layoutSlotRefSchema = { type: 'object', additionalProperties: false, required: ['slot'], properties: { slot: layoutSlotSchema } }
+const layoutEndpointSchema = {
+  description: 'One end of a connection: a placement of this plan by slot, or an existing entity by unit_number (resolved on the NPC\'s surface and force).',
+  oneOf: [
+    layoutSlotRefSchema,
+    { type: 'object', additionalProperties: false, required: ['unit_number'], properties: { unit_number: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } } },
+  ],
+}
+const layoutConnectionSchema = {
+  oneOf: [
+    {
+      type: 'object', additionalProperties: false, required: ['kind', 'inserter', 'pickup', 'drop'],
+      properties: { kind: { type: 'string', enum: ['inserter'] }, inserter: layoutSlotRefSchema, pickup: layoutEndpointSchema, drop: layoutEndpointSchema },
+    },
+    {
+      type: 'object', additionalProperties: false, required: ['kind', 'pole', 'consumer'],
+      properties: { kind: { type: 'string', enum: ['power'] }, pole: layoutSlotRefSchema, consumer: layoutEndpointSchema },
+    },
+    {
+      type: 'object', additionalProperties: false, required: ['kind', 'drill', 'receiver'],
+      properties: { kind: { type: 'string', enum: ['drill_output'] }, drill: layoutSlotRefSchema, receiver: layoutEndpointSchema },
+    },
+    {
+      type: 'object', additionalProperties: false, required: ['kind', 'from', 'to'],
+      properties: { kind: { type: 'string', enum: ['fluid'] }, from: layoutEndpointSchema, to: layoutEndpointSchema },
+    },
+  ],
+}
+
 const constructionPlanValidationDefinition = {
   type: 'function',
   function: {
     name: 'validateConstructionPlan',
-    description: 'Validate one exact local construction batch against the live world and SGLuna inventory before any placement occurs. Checks 1..16 exact placements for current placeability, pairwise planned collision, local reach, required items, actor/surface/force identity, and returns validation_id plus placement_count. After validation, execute exactly that validation_id and placement_count with execute_construction_plan; do not edit coordinates between validation and execution.',
+    description: 'Validate one exact local construction batch against the live world and SGLuna inventory before any placement occurs. Checks 1..16 exact placements (at most 6 when connections are given) for current placeability, pairwise planned collision, local reach, required items, actor/surface/force identity. A placement may carry a slot name; connections (at most 8) link slots, or existing entities by unit_number, as inserter (inserter slot, pickup and drop endpoints), power (pole slot, consumer), drill_output (drill slot, receiver) or fluid (from, to). Each connection is proved geometrically before anything is built, from the prototype pickup/drop and output vectors, the pole supply area and the live collision boxes; a fluid connection, or one whose prototype vectors cannot be read, cannot be proved before its entities stand. The result carries planning_status (spatially_valid or spatially_invalid) separately from execution_eligible. A spatially invalid layout returns its first error (CONNECTION_GEOMETRY_MISMATCH, CONNECTION_ENDPOINT_UNAVAILABLE, LAYOUT_DEPENDENCY_CYCLE, INVALID_CONNECTION or a placement error). A spatially valid layout that cannot run now returns every eligibility_blockers entry (ITEMS_MISSING, OUTSIDE_LOCAL_BUILD_REACH with route unproven, CONNECTION_UNPROVEN with its staged_requirement) and no validation_id. An eligible layout returns validation_id, placement_count, execution_order and each connection\'s virtual_proof. After validation, execute exactly that validation_id and placement_count with execute_construction_plan; do not edit coordinates between validation and execution. Placements are built in execution_order, and a connected layout\'s connections are checked against the placed entities. Placement and a connection check do not assert working production.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -862,9 +955,11 @@ const constructionPlanValidationDefinition = {
               x: { type: 'number', minimum: -1000000, maximum: 1000000 },
               y: { type: 'number', minimum: -1000000, maximum: 1000000 },
               direction: { type: 'integer', minimum: 0, maximum: 15 },
+              slot: layoutSlotSchema,
             },
           },
         },
+        connections: { type: 'array', maxItems: 8, items: layoutConnectionSchema },
       },
     },
   },
