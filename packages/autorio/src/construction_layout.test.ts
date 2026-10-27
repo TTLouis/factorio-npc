@@ -602,8 +602,13 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
     it('does not leave a record or a queue behind when admission of a placement fails', () => {
       const f = build()
       const validation = validate(f, [INS, SRC], [FEED])
-      vi.spyOn(f.basic, 'submit_placement').mockReturnValueOnce(true).mockReturnValueOnce(false)
+      const submit = vi.spyOn(f.basic, 'submit_placement').mockReturnValueOnce(true).mockReturnValueOnce(false)
       expect(execute_validated_construction_plan(f.actor, validation.validation_id, 2, f.basic, f.manager)).toEqual([false, 'unable to queue placement 2'])
+      // Both submissions were bound to their nodes, in dependency order (the chest, plan index 1, first).
+      expect(submit.mock.calls.map(call => [call[0], call[7]])).toEqual([
+        ['test-chest', { refuse_clearance: true, layout_node: { layout_id: validation.validation_id, index: 1 } }],
+        ['test-inserter', { refuse_clearance: true, layout_node: { layout_id: validation.validation_id, index: 0 } }],
+      ])
       expect((globalThis as any).storage.sgluna_construction_layouts?.[validation.validation_id]).toBeUndefined()
     })
   })
