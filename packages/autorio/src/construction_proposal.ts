@@ -527,4 +527,3 @@ export function propose_construction_layout(actor: ControlledActor, request: Lay
     zoned_slots,
   }
 }
-
