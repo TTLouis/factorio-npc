@@ -10,7 +10,7 @@ import { toolCommand, parseOperation, renderOperation, renderOperationPreflight,
 import { preservationGeometry, preservedProofMatches } from '../pterodactyl/runtime-v8/contract-obligations.mjs'
 import { constructionPlanWitnessCommand, nonfluidConstructionWitness } from '../pterodactyl/runtime-v8/contract-obligation-runtime.mjs'
 import { BATCH_FOOTPRINT_OVERLAP_CODE, batchFootprintOverlap } from '../pterodactyl/runtime-v8/batch-footprint.mjs'
-import { buildPendingOperation, batchWatermark } from '../pterodactyl/runtime-v8/operation-reconciliation.mjs'
+import { buildPendingOperation, batchWatermark, reconcilePendingOperation } from '../pterodactyl/runtime-v8/operation-reconciliation.mjs'
 import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
 import { NEXT_SLICE_OWNERSHIP_COMMAND, readNextSliceOwnership } from '../pterodactyl/runtime-v8/supervisor-adapter.mjs'
 import { nextSliceOwner, nextSliceNativeState } from '../pterodactyl/runtime-v8/next-slice-liveness.mjs'
@@ -599,6 +599,169 @@ try {
       assert.equal(after.status.queue_length, 0)
       assert.equal(gone.pads, 0)
     }
+    // Milestone 4 L4/L5: an execution interrupted after its first node is settled from the game, only the proven remainder is
+    // validated and built on the same layout record, and a superseded or expired token changes nothing that was admitted. The
+    // interruption is the engine's own cancellation (the task manager's cancel_all_tasks) taken after exactly one node was
+    // built: the game is paused and stepped one tick at a time, so no later node can be built before it. Stock is declared setup.
+    {
+      await lua(`assert(a.insert{name="wooden-chest",count=2}==2); assert(a.insert{name="burner-inserter",count=1}==1); rcon.print("{}")`)
+      const chainPlan = (x, y, direction) => validate('native-l4-chain',
+        [{ entity_name: 'wooden-chest', x, y, slot: 'src' }, { entity_name: 'burner-inserter', x: x + 1, y, direction, slot: 'ins' }, { entity_name: 'wooden-chest', x: x + 2, y, slot: 'dst' }],
+        [{ kind: 'inserter', inserter: { slot: 'ins' }, pickup: { slot: 'src' }, drop: { slot: 'dst' } }])
+      const tried = []
+      let found
+      for (const [dx, dy] of [[-5, -3], [-5, 3], [-5, -5], [-5, 5], [3, -5], [3, 5], [-7, 0], [5, 0]]) {
+        const x = Math.floor(here.x + dx) + 0.5; const y = Math.floor(here.y + dy) + 0.5
+        for (const direction of [4, 12]) {
+          const result = await chainPlan(x, y, direction)
+          tried.push({ x, y, direction, ok: result.ok, code: result.error?.code })
+          if (result.ok === true) { found = { x, y, direction, validated: result }; break }
+        }
+        if (found) break
+      }
+      assert.ok(found, `a free chest, inserter, chest row: ${JSON.stringify(tried)}`)
+      const first = found.validated
+      assert.equal(first.placement_count, 3)
+      const layoutId = first.validation_id
+      const executeOp = validation => ({ name: 'execute_construction_plan', args: { validation_id: validation.validation_id, placement_count: validation.placement_count } })
+      const session = await deploymentStatus(rcon, { requireAllowed: true })
+      const ordinal = (await lua('rcon.print(helpers.table_to_json(remote.call("autorio_operation_admission","status")))')).high_water + 1
+      const pending = buildPendingOperation({ requestId: 'native-l4', operationKey: `native-l4/${ordinal}`, attemptId: `native-l4/${ordinal}`, ordinal, protocolVersion: 2,
+        operations: [executeOp(first)], goalId: 'goal_layout_native', planId: 'goal_layout_native_p1', stepId: 'native_l4_step', actor: session,
+        baseline: batchWatermark(await tool('getTaskStatus', {})), now: Date.now() })
+      const stockBefore = (await worldFacts()).world.inventory
+
+      const clock = () => lua('rcon.print(helpers.table_to_json({tick=game.tick,paused=game.tick_paused}))')
+      const advance = async ticks => {
+        const start = (await clock()).tick
+        await lua(`game.ticks_to_run=${ticks}; rcon.print("{}")`)
+        const deadline = Date.now() + 10000
+        let now = await clock()
+        while (now.tick < start + ticks) { assert.ok(Date.now() < deadline, 'the paused game did not run the requested ticks'); await delay(25); now = await clock() }
+        assert.equal(now.tick, start + ticks); assert.equal(now.paused, true)
+      }
+      let interruption
+      await lua('game.tick_paused=true; rcon.print("{}")')
+      try {
+        const paused = await clock()
+        assert.equal(paused.paused, true)
+        await delay(300)
+        assert.equal((await clock()).tick, paused.tick, 'a paused game does not tick')
+        const admission = await executeAuthorizedBatch(rcon, session.epoch, [renderOperation(parseOperation(executeOp(first)))], undefined, pending, undefined)
+        evidence.operations.push({ name: 'execute_construction_plan', args: executeOp(first).args, admission })
+        let seen
+        for (let step = 0; step < 24 && !seen; step++) {
+          await advance(1)
+          const status = await layoutStatus(layoutId)
+          if (status.nodes.some(node => node.state === 'placed')) seen = status
+        }
+        assert.ok(seen, 'the first node of the layout was built within 24 ticks')
+        assert.equal(seen.nodes.filter(node => node.state === 'placed').length, 1, JSON.stringify(seen))
+        assert.equal(seen.state, 'running', JSON.stringify(seen))
+        await lua('remote.call("autorio_operations","cancel_all_tasks"); rcon.print("{}")')
+        interruption = { paused, seen }
+      }
+      finally {
+        await lua('game.tick_paused=false; rcon.print("{}")')
+      }
+      const idleDeadline = Date.now() + 10000
+      for (;;) {
+        const status = await tool('getTaskStatus', {})
+        if (status.task_state === 'idle' && status.queue_length === 0 && !status.active_batch) break
+        assert.ok(Date.now() < idleDeadline, 'native queue did not drain after the cancellation'); await delay(50)
+      }
+
+      // L4 settle: the placed node is retained under its unit, the rest were never built, and the layout reads as paused.
+      const settled = await layoutStatus(layoutId)
+      const src = settled.nodes.find(node => node.slot === 'src')
+      const sourceUnit = src.unit_number
+      assert.equal(src.state, 'placed', JSON.stringify(settled)); assert.ok(Number.isSafeInteger(sourceUnit), JSON.stringify(settled))
+      assert.deepEqual(settled.nodes.filter(node => node.slot !== 'src').map(node => node.state), ['not_placed', 'not_placed'], JSON.stringify(settled))
+      assert.equal(settled.state, 'paused', JSON.stringify(settled)); assert.equal(settled.pause_reason, 'remainder_unplaced', JSON.stringify(settled))
+      assert.equal(settled.executions_used, 1); assert.equal(settled.executions_max, 3)
+      assert.deepEqual(settled.executions[0].settled.placed, [src.index], JSON.stringify(settled))
+      assert.equal(settled.executions[0].settled.not_placed.length, 2)
+      const unitsAt = async (name, position) => {
+        const read = await lua(`local r={}; for _,e in pairs(a.surface.find_entities_filtered{name="${name}",position={${position.x},${position.y}},radius=0.2}) do r[#r+1]=e.unit_number end; rcon.print(helpers.table_to_json({units=r}))`)
+        return Array.isArray(read.units) ? read.units : []
+      }
+      assert.deepEqual(await unitsAt('wooden-chest', src.position), [sourceUnit])
+      for (const node of settled.nodes.filter(node => node.slot !== 'src')) {
+        assert.deepEqual(await unitsAt(node.entity_name, node.position), [], `${node.node_id} was never built`)
+      }
+      // The same cancellation sealed its admission: the exact placed and unplaced nodes, and the runtime re-proves it from the
+      // retained row and the native receipt instead of trusting that string.
+      const sealed = (await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_operation_admission","status",${luaString(pending.operation_key)})))`)).records[0]
+      assert.equal(sealed.state, 'partial', JSON.stringify(sealed)); assert.equal(sealed.error, 'exact_construction_layout_partial', JSON.stringify(sealed))
+      assert.equal(sealed.layout_id, layoutId); assert.deepEqual(sealed.placed_node_ids, [src.node_id])
+      assert.equal(sealed.not_placed_node_ids.length, 2)
+      const nativeStatus = await tool('getTaskStatus', {})
+      const verdict = reconcilePendingOperation(pending, { status: nativeStatus, actor: { actor_id: session.actor_id, epoch: session.epoch } })
+      assert.equal(verdict.verdict, 'admitted_partial', JSON.stringify(verdict)); assert.equal(verdict.reason, 'exact_construction_layout_partial', JSON.stringify(verdict))
+      assert.equal(verdict.effect, 'partial_known')
+
+      // L4 resume: only the remainder is validated, at its stored geometry, with the retained chest as an existing endpoint.
+      const resume1 = await tool('resumeConstructionLayout', { layout_id: layoutId })
+      assert.equal(resume1.ok, true, JSON.stringify(resume1))
+      assert.equal(resume1.layout_id, layoutId); assert.equal(resume1.placement_count, 2); assert.equal(resume1.executions_used, 1)
+      assert.deepEqual(resume1.retained.map(row => row.unit_number), [sourceUnit], JSON.stringify(resume1))
+      assert.equal(resume1.remainder.length, 2)
+      assert.deepEqual(resume1.placements.map(row => row.slot).sort(), ['dst', 'ins'])
+      assert.deepEqual(await layoutStatus(layoutId), settled, 'validating a remainder leaves the layout record alone')
+
+      // L5: a newer remainder validation supersedes the older token, which is refused before admission.
+      const resume2 = await tool('resumeConstructionLayout', { layout_id: layoutId })
+      assert.equal(resume2.ok, true, JSON.stringify(resume2)); assert.ok(resume2.validation_id > resume1.validation_id)
+      const quietBefore = quiet(await worldFacts())
+      const refuse = (validation, pattern) => assert.rejects(
+        executeAuthorizedBatch(rcon, session.epoch, [renderOperation(parseOperation(executeOp(validation)))]), error => pattern.test(String(error?.message ?? error)))
+      await refuse(resume1, /superseded/)
+      assert.deepEqual(await layoutStatus(layoutId), settled, 'a superseded token does not touch the layout')
+      assert.deepEqual(quiet(await worldFacts()), quietBefore, 'a refused token builds and spends nothing')
+
+      // L5: the remaining token expires (3600 ticks); the partially completed layout and its retained node stay as they were.
+      const clockAtExpiry = await clock()
+      assert.ok(resume2.expires_tick > clockAtExpiry.tick)
+      await lua('game.speed=20; rcon.print("{}")')
+      try {
+        const expiryDeadline = Date.now() + 120000
+        while ((await clock()).tick <= resume2.expires_tick) { assert.ok(Date.now() < expiryDeadline, 'the validation did not reach its expiry tick'); await delay(250) }
+      }
+      finally {
+        await lua('game.speed=1; rcon.print("{}")')
+      }
+      await refuse(resume2, /expired/)
+      assert.deepEqual(await layoutStatus(layoutId), settled, 'an expired token does not erase or alter the layout')
+      assert.deepEqual(await unitsAt('wooden-chest', src.position), [sourceUnit])
+
+      // A fresh validation of the remainder continues the same record: node 1 keeps its unit and is not rebuilt.
+      const resume3 = await tool('resumeConstructionLayout', { layout_id: layoutId })
+      assert.equal(resume3.ok, true, JSON.stringify(resume3)); assert.equal(resume3.placement_count, 2)
+      const receipt = await operation('execute_construction_plan', { validation_id: resume3.validation_id, placement_count: resume3.placement_count })
+      const done = await layoutStatus(layoutId)
+      const stockAfter = (await worldFacts()).world.inventory
+      assert.equal(done.layout_id, layoutId); assert.equal(done.state, 'complete', JSON.stringify(done))
+      assert.equal(done.executions_used, 2); assert.equal(done.executions_max, 3)
+      assert.ok(done.nodes.every(node => node.state === 'placed'), JSON.stringify(done))
+      const doneSrc = done.nodes.find(node => node.slot === 'src')
+      assert.equal(doneSrc.unit_number, sourceUnit); assert.equal(doneSrc.placed_tick, src.placed_tick)
+      assert.equal(done.connections[0].state, 'verified', JSON.stringify(done)); assert.equal(done.production, 'not_asserted')
+      assert.deepEqual(await unitsAt('wooden-chest', src.position), [sourceUnit])
+      const doneDst = done.nodes.find(node => node.slot === 'dst'); const doneIns = done.nodes.find(node => node.slot === 'ins')
+      assert.deepEqual(await unitsAt('wooden-chest', doneDst.position), [doneDst.unit_number])
+      assert.deepEqual(await unitsAt('burner-inserter', doneIns.position), [doneIns.unit_number])
+      assert.equal(stock(stockAfter, 'wooden-chest'), stock(stockBefore, 'wooden-chest') - 2, 'each chest was spent once')
+      assert.equal(stock(stockAfter, 'burner-inserter'), stock(stockBefore, 'burner-inserter') - 1)
+      // The inserter built by the resume acts on the retained chest and the new one, by the engine's own target fields.
+      const readInserter = () => lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${doneIns.unit_number} then i=v end end; assert(i);
+        rcon.print(helpers.table_to_json({pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil}))`)
+      let targets = await readInserter()
+      for (let attempt = 0; attempt < 40 && (targets.pickup === undefined || targets.drop === undefined); attempt++) { await delay(100); targets = await readInserter() }
+      assert.equal(targets.pickup, sourceUnit, JSON.stringify(targets)); assert.equal(targets.drop, doneDst.unit_number, JSON.stringify(targets))
+      evidence.l4_resume = { tried, found, first, interruption, settled, sealed, verdict, resume1, resume2, resume3, receipt, done, targets,
+        stock: { before: stockBefore, after: stockAfter } }
+      assert.equal((await tool('getTaskStatus', {})).queue_length, 0)
+    }
   }
   // Fault scheduling occurs after the actual correlated candidate was queued,
   // inside the same native callback, before its first execution tick. No wait
@@ -651,7 +814,7 @@ try {
   evidence.foreign = await geometry(pumpId)
   assert.throws(() => preservationGeometry(evidence.foreign, pumpId))
   evidence.status = 'pass'
-  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam, lost-edge/scope refusal and layout planning/connections')
+  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam, lost-edge/scope refusal, layout planning/connections and interrupted-layout settle/resume')
 } finally {
   if (connection) connection.close()
   await fs.mkdir(path.resolve(arg('results')), { recursive: true })
