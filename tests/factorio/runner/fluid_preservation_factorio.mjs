@@ -206,9 +206,11 @@ try {
       }
       return {}
     }
-    // R1-2: the witness promises a placement-only effect at EXECUTION time. A natural blocker that appears after the batch was
-    // queued (injected inside the same native callback, before the first placing tick) must be refused before any mutation:
-    // the tree stays, nothing is mined or built, the stock is unchanged, and the protected plant is untouched.
+    // R1-2: the witness promises a placement-only effect at EXECUTION time. The first placement runs inside the admitting
+    // callback, right after the submission-time re-evaluation, so the execution window is every later placement. A natural
+    // blocker injected in that callback on the pole's tile (after the batch was queued, before the pole's placing tick) must be
+    // refused before any mutation: the tree stays, nothing is mined or picked up, the pole stays in stock, and the protected
+    // plant is untouched. Only the lab, placed before the blocker existed, was built.
     {
       const site = await validateSite()
       assert.ok(site.validated, 'a deterministic free lab+pole site within build reach of the plant')
@@ -218,7 +220,7 @@ try {
       assert.equal(lateWitness.preservation_nonfluid_output.execution_clearance, 'refused')
       const surfaceIndex = lateWitness.preservation_nonfluid_output.surface_index
       const lateBefore = await worldFacts()
-      rcon.queueFault = `local e=game.surfaces[${surfaceIndex}].create_entity{name="tree-01",position={${site.x},${site.y}},force="neutral"}; assert(e); storage.fluid_preservation_late_construction_tree=e;`
+      rcon.queueFault = `local e=game.surfaces[${surfaceIndex}].create_entity{name="tree-01",position={${site.x + 3},${site.y}},force="neutral"}; assert(e); storage.fluid_preservation_late_construction_tree=e;`
       await assert.rejects(operation('execute_construction_plan', { validation_id: lateId, placement_count: lateCount }), /construction_plan_blocked_no_clear/)
       assert.equal(rcon.queueFault, undefined, 'the late-blocker fault must have run inside the admission callback')
       const lateAfter = await worldFacts()
@@ -230,11 +232,18 @@ try {
       assert.equal(lateAfter.status.queue_length, 0); assert.equal(lateAfter.status.task_state, 'idle')
       const tree = await lua('local t=storage.fluid_preservation_late_construction_tree; rcon.print(helpers.table_to_json({valid=t.valid}))')
       assert.equal(tree.valid, true, 'the late tree must still stand: nothing may be mined to make room')
-      const notTree = rows => rows.filter(row => row.name !== 'tree-01')
-      assert.deepEqual(notTree(lateAfter.world.entities), notTree(lateBefore.world.entities), 'no lab or pole created, nothing else changed')
-      assert.deepEqual(lateAfter.world.inventory, lateBefore.world.inventory, 'actor inventory unchanged (no wood gained, no lab consumed)')
+      const earlyLab = row => row.name === 'lab' && row.x === site.x && row.y === site.y
+      assert.equal(lateAfter.world.entities.filter(earlyLab).length, 1, 'the first placement ran before the blocker existed')
+      assert.equal(lateAfter.world.entities.some(row => row.name === 'small-electric-pole' && row.x === site.x + 3 && row.y === site.y), false, 'the blocked pole was not built')
+      const unchanged = rows => rows.filter(row => row.name !== 'tree-01' && !earlyLab(row))
+      assert.deepEqual(unchanged(lateAfter.world.entities), unchanged(lateBefore.world.entities), 'nothing but the lab and the tree changed')
+      const stock = (rows, name) => rows.filter(row => row.name === name).reduce((sum, row) => sum + row.count, 0)
+      assert.equal(stock(lateAfter.world.inventory, 'lab'), stock(lateBefore.world.inventory, 'lab') - 1, 'only the lab was consumed')
+      const others = rows => rows.filter(row => row.name !== 'lab')
+      assert.deepEqual(others(lateAfter.world.inventory), others(lateBefore.world.inventory), 'pole still in stock, no wood gained')
       assert.deepEqual(lateAfter.world.protectedGeometry, lateBefore.world.protectedGeometry, 'protected topology unchanged')
-      await lua('local t=storage.fluid_preservation_late_construction_tree; assert(t.valid); t.destroy(); rcon.print("{}")')
+      // Fixture teardown so the positive case below starts from the same stock and free site.
+      await lua(`local t=storage.fluid_preservation_late_construction_tree; assert(t.valid); t.destroy(); local l=a.surface.find_entity("lab",{${site.x},${site.y}}); assert(l); l.destroy(); a.insert{name="lab",count=1}; rcon.print("{}")`)
     }
     const { validated } = await validateSite()
     assert.ok(validated, 'a deterministic free lab+pole site within build reach of the plant')
