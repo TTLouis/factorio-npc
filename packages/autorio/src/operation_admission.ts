@@ -410,8 +410,9 @@ export function terminal_construction_layout_settlement(record: OperationAdmissi
   if (matches.length !== 1) return undefined
   const receipt = matches[0]
   const retired = receipt.state === 'uncertain' && receipt.reason === 'save_load_unfinished' && receipt.batch_generation < status.batch_generation
+  const cancelled = receipt.state === 'cancelled' && receipt.batch_generation === status.batch_generation
   if (receipt.batch_ref !== ref.batch_ref || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
-    || (receipt.state !== 'cancelled' && !retired) || receipt.task_count !== slot.queued_tasks
+    || (!cancelled && !retired) || receipt.task_count !== slot.queued_tasks
     || !Array.isArray(receipt.task_types) || receipt.task_types.length !== receipt.task_count
     || !receipt.task_types.every(type => type === 'placing')
     || (receipt.state === 'cancelled' && (!integer(receipt.tasks_started) || receipt.tasks_started > receipt.task_count

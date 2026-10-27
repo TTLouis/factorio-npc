@@ -1465,6 +1465,7 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
         ['a refused task', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].refused_count = 1 }],
         ['a receipt of another batch', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].batch_ref = 'batch-g1-99' }],
         ['a receipt older than the admission', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].tick = 1 }],
+        ['a cancelled receipt of an earlier generation', () => { (globalThis as any).storage.sgluna_task_batch_generation = 2 }],
         ['a layout of another batch', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].executions[0].batch_ref = 'batch-g1-99' }],
         ['a layout of another actor', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].actor_id = 7 }],
         ['an execution that queued another number of nodes', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].executions[0].queued_nodes.pop() }],
