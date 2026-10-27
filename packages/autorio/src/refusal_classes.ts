@@ -77,6 +77,13 @@ export const refusal_class_by_code: Record<string, RefusalClass> = {
   requires_machine: 'world',
   recipe_locked: 'world',
   bootstrap_dependency_unresolved: 'world',
+  // Harness-only witness refusals (fluid-preservation admission): never a model-correction path, so all world.
+  construction_plan_unavailable: 'world',
+  construction_plan_count_mismatch: 'world',
+  construction_plan_remote_unsupported: 'world',
+  construction_plan_scope_mismatch: 'world',
+  construction_plan_expired: 'world',
+  construction_plan_stale: 'world',
   placement_item_missing: 'world',
   placement_item_unreadable: 'world',
   unknown_entity: 'world',

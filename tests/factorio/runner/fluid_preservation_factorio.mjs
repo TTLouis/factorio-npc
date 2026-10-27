@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
 import { toolCommand, parseOperation, renderOperation, renderOperationPreflight, luaString } from '../pterodactyl/runtime-v8/structured-policy.mjs'
 import { preservationGeometry, preservedProofMatches } from '../pterodactyl/runtime-v8/contract-obligations.mjs'
+import { constructionPlanWitnessCommand, nonfluidConstructionWitness } from '../pterodactyl/runtime-v8/contract-obligation-runtime.mjs'
 import { buildPendingOperation, batchWatermark } from '../pterodactyl/runtime-v8/operation-reconciliation.mjs'
 import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
 import { NEXT_SLICE_OWNERSHIP_COMMAND, readNextSliceOwnership } from '../pterodactyl/runtime-v8/supervisor-adapter.mjs'
@@ -136,7 +137,7 @@ try {
     for _,e in pairs(s.find_entities_filtered{area={{ox-14,oy-16},{ox+26,oy+20}}}) do if e.type~="character" then e.destroy() end end;
     local tiles={}; for x=ox-14,ox+26 do for y=oy-16,oy+20 do tiles[#tiles+1]={name=x<ox and "water" or "landfill",position={x,y}} end end; s.set_tiles(tiles,true,false,true);
     storage.fluid_preservation_fixture={x=a.position.x,y=a.position.y,ox=ox,oy=oy,s=s}; assert(a.teleport({ox+5,oy},s)); a.get_main_inventory().clear();
-    for _,item in pairs({{"offshore-pump",2},{"boiler",2},{"steam-engine",1},{"pipe",2},{"coal",5},{"small-electric-pole",1}}) do assert(a.insert{name=item[1],count=item[2]}==item[2]) end;
+    for _,item in pairs({{"offshore-pump",2},{"boiler",2},{"steam-engine",1},{"pipe",2},{"coal",5},{"small-electric-pole",2},{"lab",1}}) do assert(a.insert{name=item[1],count=item[2]}==item[2]) end;
     rcon.print(helpers.table_to_json({center={x=ox,y=oy},actor=a.unit_number,humans=#game.connected_players,speed=game.speed}))`)
   assert.equal(evidence.setup.humans, 0); assert.equal(evidence.setup.speed, 1)
   evidence.water = await tool('getFluidSourceTiles', { fluid_name: 'water', search_radius: 16, limit: 8 })
@@ -189,6 +190,53 @@ try {
   assert.deepEqual(preservationGeometry(await geometry(pumpId), pumpId), joined, 'production counters do not change protected pump topology')
   evidence.pipe = preservationGeometry(await geometry(pipeId), pipeId)
   evidence.engine = preservationGeometry(await geometry(engineId), engineId)
+  // Run BC A/C: a validated nonfluid local batch beside the producing, protected plant. The native witness (read-only)
+  // must bind the exact validation, the runtime verifier must accept it, normal execution must build exactly the batch,
+  // and every protected fluid entity must be unchanged. Fixture stock is declared setup; no model, no teleport.
+  {
+    const witnessOf = async (id, count) => JSON.parse(await rcon.command(constructionPlanWitnessCommand({ name: 'execute_construction_plan', args: { validation_id: id, placement_count: count } })))
+    const quiet = facts => ({ entities: facts.world.entities, inventory: facts.world.inventory, protectedGeometry: facts.world.protectedGeometry, position: facts.world.position })
+    const here = (await worldFacts()).world.position
+    let validated
+    for (const [dx, dy] of [[3.5, -6.5], [-1.5, -6.5], [3.5, 6.5], [-1.5, 6.5], [6.5, -3.5], [6.5, 3.5]]) {
+      const x = Math.floor(here.x + dx) + 0.5; const y = Math.floor(here.y + dy) + 0.5
+      const placements = [{ entity_name: 'lab', x, y, direction: 0 }, { entity_name: 'small-electric-pole', x: x + 3, y, direction: 0 }]
+      const result = await tool('validateConstructionPlan', { plan_id: 'native-lab-pole-beside-plant', placements })
+      if (result.ok === true) { validated = result; break }
+    }
+    assert.ok(validated, 'a deterministic free lab+pole site within build reach of the plant')
+    const id = validated.validation_id; const count = validated.placement_count
+    assert.equal(count, 2)
+    const before = await worldFacts()
+    const witness = await witnessOf(id, count)
+    evidence.construction_witness = witness
+    assert.equal(witness.ok, true, JSON.stringify(witness))
+    assert.equal(witness.preservation_clears_count, 0)
+    assert.equal(witness.preservation_nonfluid_output.fluid_port_count, 0)
+    assert.deepEqual(witness.preservation_nonfluid_output.entity_names, ['lab', 'small-electric-pole'])
+    assert.equal(nonfluidConstructionWitness(witness, { name: 'execute_construction_plan', args: { validation_id: id, placement_count: count } },
+      { actor_id: atomicActor.actor_id, preserved: before.world.protectedGeometry.map(row => ({ surface_index: row.surface_index, force_index: row.force_index })) }), true,
+    JSON.stringify(witness))
+    // Exact binding and read-only behaviour on the real engine.
+    assert.equal((await witnessOf(id + 1, count)).code, 'construction_plan_unavailable')
+    assert.equal((await witnessOf(id, count - 1)).code, 'construction_plan_count_mismatch')
+    const afterReads = await worldFacts()
+    assert.deepEqual(quiet(afterReads), quiet(before), 'witness reads change nothing')
+    assert.equal(afterReads.status.queue_length, 0); assert.equal(afterReads.status.task_state, 'idle')
+    const receipt = await operation('execute_construction_plan', { validation_id: id, placement_count: count })
+    evidence.construction_receipt = receipt
+    const after = await worldFacts()
+    const builtNames = after.world.entities.map(row => row.name)
+    assert.equal(builtNames.filter(name => name === 'lab').length, before.world.entities.filter(row => row.name === 'lab').length + 1)
+    assert.equal(builtNames.filter(name => name === 'small-electric-pole').length, before.world.entities.filter(row => row.name === 'small-electric-pole').length + 1)
+    assert.deepEqual(after.world.protectedGeometry, before.world.protectedGeometry, 'protected pump/boiler/pipe/engine topology is unchanged')
+    for (const row of before.world.entities.filter(entity => entity.id)) {
+      assert.ok(after.world.entities.some(entity => entity.id === row.id && entity.name === row.name && entity.x === row.x && entity.y === row.y),
+        `pre-existing ${row.name} ${row.id} must be untouched`)
+    }
+    // The consumed validation cannot be replayed or described again.
+    assert.equal((await witnessOf(id, count)).code, 'construction_plan_unavailable')
+  }
   // Fault scheduling occurs after the actual correlated candidate was queued,
   // inside the same native callback, before its first execution tick. No wait
   // or second production operation is smuggled into the single-slot batch.

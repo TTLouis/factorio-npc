@@ -19,6 +19,7 @@ const PRODUCERS: Producer[] = [
   { file: 'navigation_position_preflight.ts' },
   { file: 'placement_preflight.ts' },
   { file: 'placement_item.ts' },
+  { file: 'construction_execution.ts', fn: 'construction_plan_preflight' },
   { file: 'placement_candidates.ts', fn: 'placement_candidate_preflight' },
   { file: 'research_preflight.ts' },
   { file: 'research.ts', fn: 'research_error', returns: true },

@@ -2,8 +2,9 @@ import { reservation_intersection } from './area_reservations'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
-import { execute_prepared_remote_construction_plan } from './map_construction'
+import { execute_prepared_remote_construction_plan, is_prepared_remote_construction_plan } from './map_construction'
 import { placement_check_args } from './placement_geometry'
+import { prototype_fluidbox_count } from './placement_preflight'
 import { resolve_entity_placement_item } from './placement_item'
 import type { new_task_manager } from './task_manager'
 
@@ -340,6 +341,77 @@ export function validate_construction_execution_plan(actor: ControlledActor, req
     expires_tick: game.tick + VALIDATION_MAX_AGE_TICKS,
     placements,
     placement_geometry: evaluation.placement_geometry,
+  }
+}
+
+// Read-only witness for the fluid-preservation admission seam: it resolves the exact stored LOCAL validated plan that
+// `execute_validated_construction_plan` would run for (validation_id, placement_count) and proves every effect that matters
+// to a protected fluid plant. It never writes storage, clears, reserves or queues anything. Execution repeats every check.
+//
+// ok:true always means "execution would not be refused by identity, scope, age or live geometry/stock right now". Only when
+// every placement prototype declares zero fluidboxes does it also carry `preservation_nonfluid_output` (a local plan holds
+// placements only: no clearing, rotation or removal, so `preservation_clears_count` is 0 by construction). A fluid-bearing
+// plan stays ok:true WITHOUT that witness, exactly like a fluid single placement, so the harness treats it as unproven
+// and keeps refusing it; the per-placement `fluidbox_count` says why.
+export function construction_plan_preflight(actor: ControlledActor | undefined, validation_id: unknown, placement_count: unknown) {
+  if (!actor || !actor.is_valid) return { ok: false, code: 'no_actor' }
+  if (!valid_integer(validation_id as number, 1, 9007199254740991) || !valid_integer(placement_count as number, 1, MAX_PLACEMENTS)) {
+    return { ok: false, code: 'invalid_preflight_args' }
+  }
+  const id = validation_id as number
+  const count = placement_count as number
+  // A prepared remote (ghost) plan is a different executor path; this witness does not describe it.
+  if (is_prepared_remote_construction_plan(id)) return { ok: false, code: 'construction_plan_remote_unsupported' }
+  const plan = storage.sgluna_validated_construction_plan
+  if (!plan || plan.validation_id !== id) return { ok: false, code: 'construction_plan_unavailable' }
+  if (plan.placements.length !== count) return { ok: false, code: 'construction_plan_count_mismatch' }
+  const identity = actor.status_snapshot()
+  if (identity.actor_id === undefined || identity.actor_id !== plan.actor_id
+    || actor.surface.index !== plan.surface_index || actor.force.index !== plan.force_index) {
+    return { ok: false, code: 'construction_plan_scope_mismatch' }
+  }
+  if (game.tick - plan.created_tick > VALIDATION_MAX_AGE_TICKS) return { ok: false, code: 'construction_plan_expired' }
+  const evaluation = evaluate_plan(actor, plan.placements)
+  if (!evaluation.ok) return { ok: false, code: 'construction_plan_stale', evaluation_code: evaluation.error?.code }
+
+  const construction_placements: Array<{ entity_name: string, x: number, y: number, direction: number, fluidbox_count: number }> = []
+  const entity_names: string[] = []
+  let fluidbox_total = 0
+  for (const placement of plan.placements) {
+    const fluidbox_count = prototype_fluidbox_count(placement.entity_name)
+    fluidbox_total += fluidbox_count
+    entity_names.push(placement.entity_name)
+    construction_placements.push({
+      entity_name: placement.entity_name,
+      x: placement.x,
+      y: placement.y,
+      direction: placement.direction ?? 0,
+      fluidbox_count,
+    })
+  }
+  return {
+    ok: true,
+    validation_id: id,
+    plan_id: plan.plan_id,
+    placement_count: count,
+    created_tick: plan.created_tick,
+    expires_tick: plan.created_tick + VALIDATION_MAX_AGE_TICKS,
+    preservation_clears_count: 0,
+    construction_placements,
+    ...(fluidbox_total === 0
+      ? {
+          preservation_nonfluid_output: {
+            version: 1,
+            actor_id: plan.actor_id,
+            surface_index: plan.surface_index,
+            force_index: plan.force_index,
+            validation_id: id,
+            placement_count: count,
+            entity_names,
+            fluid_port_count: 0,
+          },
+        }
+      : {}),
   }
 }
 

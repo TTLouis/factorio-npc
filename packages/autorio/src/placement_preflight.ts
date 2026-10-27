@@ -3,6 +3,13 @@ import { protected_read } from './electric_facts'
 import { placement_footprint, snap_placement_center } from './placement_geometry'
 import { resolve_entity_placement_item } from './placement_item'
 
+// Number of fluidboxes the prototype declares. One fresh native prototype read backs every nonfluid proof (single
+// placements and validated construction plans alike); it is never a name or prose assumption.
+export function prototype_fluidbox_count(entity_name: string): number {
+  const fluidboxes: any[] = prototypes.entity[entity_name]?.fluidbox_prototypes ?? []
+  return fluidboxes.length
+}
+
 // A read of current held stock, not a reservation or a promise about dispatch.
 // Execution repeats the same resolver/count check before creating an entity.
 export function placement_item_preflight(actor: ControlledActor | undefined, entity_name: string) {
@@ -18,11 +25,9 @@ export function placement_item_preflight(actor: ControlledActor | undefined, ent
     return { ok: false, code: 'placement_item_unreadable', entity_name }
   }
   if (held_count < resolved.requirement.count) return { ok: false, code: 'placement_item_missing', placement_item }
-  const prototype = prototypes.entity[entity_name]
-  const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
   const scope = typeof actor.status_snapshot === 'function' && actor.surface?.index !== undefined && actor.force?.index !== undefined
     ? { actor_id: actor.status_snapshot().actor_id, surface_index: actor.surface.index, force_index: actor.force.index } : undefined
-  return { ok: true, placement_item, ...(scope && fluidboxes.length === 0
+  return { ok: true, placement_item, ...(scope && prototype_fluidbox_count(entity_name) === 0
     ? { preservation_nonfluid_output: { version: 1, ...scope, entity_name, fluid_port_count: 0 } } : {}) }
 }
 

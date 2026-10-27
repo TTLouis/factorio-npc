@@ -302,6 +302,12 @@ export function construction_intent(
   }
 }
 
+// Read-only: does this validation id name a prepared remote (ghost) plan? Ids share one monotonic counter with the
+// local plan, so a match means the executor would take the remote path and never the local one.
+export function is_prepared_remote_construction_plan(validation_id: number): boolean {
+  return storage.sgluna_validated_remote_construction_plan?.validation_id === validation_id
+}
+
 export function execute_prepared_remote_construction_plan(
   actor: ControlledActor,
   validation_id: number,

@@ -324,3 +324,19 @@ test('submitPlan rejects mixed observation/control batches and malformed argumen
     tool_calls: [{ id: 'control-1', type: 'function', function: { name: 'submitPlan', arguments: '{bad json' } }],
   }), /valid JSON/i)
 })
+test('execute_construction_plan keeps its harness-only native preservation witness in the contract and the mod', async () => {
+  const operation = contract.operations.execute_construction_plan
+  const witness = operation.native_preservation_witness
+  assert.equal(witness.version, 1); assert.equal(witness.read_only, true); assert.equal(witness.local_plans_only, true)
+  assert.deepEqual(witness.harness_only_preflight, ['autorio_preflight', 'operation', 'execute_construction_plan'])
+  const execution = await readFile(new URL('packages/autorio/src/construction_execution.ts', root), 'utf8')
+  for (const field of operation.native_preservation_preflight_fields.concat(witness.binds.filter(name => name !== 'actor_id' && name !== 'surface_index' && name !== 'force_index'))) {
+    assert.match(execution, new RegExp(`\\b${field}[:,]`))
+  }
+  for (const code of witness.refusal_codes) assert.match(execution, new RegExp(`'${code}'`))
+  const refusals = await readFile(new URL('packages/autorio/src/refusal_classes.ts', root), 'utf8')
+  for (const code of witness.refusal_codes) assert.match(refusals, new RegExp(`\\b${code}:`))
+  // The general operation metadata stays preflight-free: only the preservation seam asks for the witness.
+  assert.equal(staging.operationMetadataForName('execute_construction_plan').preflight, false)
+  assert.equal(staging.renderOperationPreflight({ name: 'execute_construction_plan', args: { validation_id: 7, placement_count: 2 } }), null)
+})

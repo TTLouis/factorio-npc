@@ -19,7 +19,7 @@ import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
 import { new_combat_controller } from './combat'
 import { new_composite_operation_controller } from './composite_operations'
-import { execute_validated_construction_plan } from './construction_execution'
+import { construction_plan_preflight, execute_validated_construction_plan } from './construction_execution'
 import { new_crafting_controller } from './crafting'
 import { new_defense_controller } from './defense'
 import { create_discovery_remote_interface } from './discovery'
@@ -273,6 +273,9 @@ function operation_preflight(name: string, args: Record<string, any>) {
 
   if (!args || typeof args !== 'object') return reject('invalid_preflight_args')
   if (name === 'walk_to_position') return navigation_position_preflight(actor, args)
+  // Harness-only witness for fluid-preservation admission; the general operation metadata keeps this operation
+  // preflight-free, so only that seam asks. Read-only: see construction_plan_preflight.
+  if (name === 'execute_construction_plan') return { operation: name, ...construction_plan_preflight(actor, args.validation_id, args.placement_count) }
   if (name === 'place_candidate') {
     if (!actor || !actor.is_valid) return reject('no_actor')
     if (typeof args.candidate_set_id !== 'string' || typeof args.candidate_id !== 'string') return reject('invalid_preflight_args')
