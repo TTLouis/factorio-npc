@@ -48,18 +48,21 @@ export function recipeDetails(name, recipes = vanillaRecipes(), ambiguous = []) 
 
 /**
  * Answers the reads the bootstrap check makes, or returns undefined for any other command. Options: `inventory` (name -> count),
- * `recipes`, `drills`, `entities` (unit_number -> entity name that getEntityStatus reports), `unreadable` (tool names answered
- * with text that is not JSON).
+ * `recipes`, `drills`, `entities` (unit_number -> entity name that getEntityStatus reports; any other unit answers the mod's
+ * exact_entity_not_found, or `missingError` when given: e.g. the mod's "no controlled actor" is found:false without an absence),
+ * `unreadable` (tool names answered with text that is not JSON), `failing` (tool names whose read throws).
  */
-export function answerBootstrapRead(text, { inventory = {}, recipes = vanillaRecipes(), drills, entities = {}, unreadable = [], ambiguous = [] } = {}) {
+export function answerBootstrapRead(text, { inventory = {}, recipes = vanillaRecipes(), drills, entities = {}, unreadable = [], ambiguous = [], failing = [], missingError = 'exact_entity_not_found' } = {}) {
   const mining = /"mining_details",\s*['"]([^'"]+)['"]/.exec(text)?.[1]
   if (mining !== undefined) return unreadable.includes('getMiningDetails') ? 'not json' : JSON.stringify(miningDetails(mining, drills))
   const recipe = /"recipe_details",\s*['"]([^'"]+)['"]/.exec(text)?.[1]
   if (recipe !== undefined) return unreadable.includes('getRecipeDetails') ? 'not json' : JSON.stringify(recipeDetails(recipe, recipes, ambiguous))
   const unit = /"get_entity_status",\s*nil,\s*nil,\s*(\d+)/.exec(text)?.[1]
   if (unit !== undefined) {
+    if (failing.includes('getEntityStatus')) throw new Error('rcon unavailable')
+    if (unreadable.includes('getEntityStatus')) return 'not json'
     const name = entities[Number(unit)]
-    return JSON.stringify(name ? { found: true, entity: { unit_number: Number(unit), name } } : { found: false })
+    return JSON.stringify(name ? { found: true, entity: { unit_number: Number(unit), name } } : { found: false, unit_number: Number(unit), error: missingError })
   }
   if (text.includes('"get_inventory_items"')) {
     return unreadable.includes('getInventoryItems') ? 'not an inventory' : JSON.stringify(Object.entries(inventory).map(([itemName, count]) => ({ name: itemName, count })))

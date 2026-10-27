@@ -15,6 +15,7 @@ import { providerRequest } from './provider.mjs'
 import { executionOnlyControlToolDefinitions, planningOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 import { answerBootstrapRead } from './direct-feed-bootstrap-fixtures.mjs'
+import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 
 const KEY = 'npc:sgluna'
 const runAB = JSON.parse(await fs.readFile(new URL('./fixtures/run-ab-executor-review.json', import.meta.url), 'utf8'))
@@ -856,6 +857,98 @@ test('Run BB: a placed machine outside obligations.preserve counts as available'
   assert.deepEqual(bootstrapChecks(w).map(row => row.verdict), ['feasible'])
   assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'direct_feed')
   assert.ok(w.reads.some(text => /get_entity_status.*31/.test(text)), 'the placement was confirmed against the game, not trusted')
+})
+
+// B-R1-1: uncertainty about a recorded placement is never absence.
+const recordDrills = (memory, units) => { for (const unit of units) memory.recordNpcPlacement(KEY, { unit_number: unit, entity_name: 'burner-mining-drill', actor_id: 18, actor_epoch: 3 }) }
+for (const [label, options] of [
+  ['a lookup that throws', { failing: ['getEntityStatus'] }],
+  ['a lookup that cannot be read', { unreadable: ['getEntityStatus'] }],
+  ['a lookup answered without an actor (found:false is not an absence)', { missingError: 'no controlled actor' }],
+]) {
+  test(`Run BB: ${label} for a recorded unpreserved drill is unresolved, not absent, and does not refuse`, async () => {
+    const w = bootstrapWorld([ctx => { recordDrills(ctx.memory, [31]); return bbDraft(ctx.agent, 'direct_feed') }, startFuel], options)
+    await w.say()
+    assert.equal(w.calls.length, 2)
+    assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'direct_feed')
+    const [checked] = bootstrapChecks(w)
+    assert.equal(checked.verdict, 'unknown')
+    assert.deepEqual(checked.unresolved, ['burner-mining-drill'])
+    assert.equal(w.events.filter(row => row.event === 'role.contract_refused').length, 0)
+  })
+}
+
+test('Run BB: a recorded drill past the placement examination cap is unresolved, not absent, and does not refuse', async () => {
+  // Nine unpreserved placements, none shown by the game: the eight newest are looked up and confirmed gone, the oldest is never
+  // examined, so the facts cannot say it is gone.
+  const w = bootstrapWorld([ctx => { recordDrills(ctx.memory, [31, 32, 33, 34, 35, 36, 37, 38, 39]); return bbDraft(ctx.agent, 'direct_feed') }, startFuel])
+  await w.say()
+  assert.equal(w.calls.length, 2)
+  assert.equal(w.reads.filter(text => text.includes('get_entity_status')).length, 8)
+  const [checked] = bootstrapChecks(w)
+  assert.equal(checked.verdict, 'unknown')
+  assert.deepEqual(checked.unresolved, ['burner-mining-drill'])
+  assert.equal(w.events.filter(row => row.event === 'role.contract_refused').length, 0)
+  assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'direct_feed')
+})
+
+test('Run BB: eight recorded drills the game confirms gone leave nothing unresolved, so the bootstrap is still refused', async () => {
+  const w = bootstrapWorld([ctx => { recordDrills(ctx.memory, [31, 32, 33, 34, 35, 36, 37, 38]); return bbDraft(ctx.agent, 'direct_feed') }, ({ agent }) => bbDraft(agent, 'manual_bootstrap'), startFuel])
+  await w.say()
+  assert.equal(w.calls.length, 3)
+  const [checked] = bootstrapChecks(w)
+  assert.equal(checked.verdict, 'infeasible')
+  assert.equal(checked.unresolved, undefined)
+  assert.equal(w.events.find(row => row.event === 'role.contract_refused').data.reason, 'direct_feed_bootstrap_infeasible')
+})
+
+// B-R1-2: held units of the forbidden resource fund nothing.
+test('Run BB: one held iron-ore does not fund the missing plate; the planner is refused and told the ore is held but forbidden by hand', async () => {
+  const w = bootstrapWorld([({ agent }) => bbDraft(agent, 'direct_feed'), ({ agent, messages }) => {
+    const refusal = messages.findLast(row => row.role === 'user' && row.content.includes('direct_feed_bootstrap_infeasible'))
+    assert.ok(refusal, 'the held ore did not rescue the bootstrap')
+    assert.match(refusal.content, /iron-ore 1 is held, but direct_feed forbids hand-supplying it/)
+    assert.match(refusal.content, /still needs 1 iron-ore/)
+    return bbDraft(agent, 'manual_bootstrap')
+  }, startFuel], { inventory: { 'iron-plate': 8, 'stone-furnace': 1, 'iron-ore': 1, coal: 12 } })
+  await w.say()
+  assert.equal(w.calls.length, 3, 'one correction round')
+  assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'manual_bootstrap')
+  assert.deepEqual(bootstrapChecks(w).map(row => row.verdict), ['infeasible'])
+  assert.equal(w.events.find(row => row.event === 'role.contract_refused').data.reason, 'direct_feed_bootstrap_infeasible')
+})
+
+// B-R1-3: a later step follows steps that change inventory and placements.
+const bbSupply = (mode, approach) => ({ ...brief(['direct-miner-smelting']), approach, materialSupply: { mode, resource: 'iron-ore' } })
+const bbTwoStepDraft = agent => {
+  agent.loadedSkillContext.set('direct-miner-smelting', { id: 'direct-miner-smelting', summary: 'Optional direct-feed time savings.' })
+  const plates = inventoryCheckpoint('iron-plate', 12)
+  return draft({ plan: ['Smelt the iron plates for a drill by hand in a separate furnace.', 'Build the direct-fed iron cell and verify the steam-power trigger.'],
+    goal: { scope: 'finite', summary: 'Complete steam power research.', doneWhen: [{ kind: 'research_completed', technology: 'steam-power' }] },
+    stepCompletions: [{ kind: 'deterministic', obligations: { outcome: plates, preserve: [27, 28] } }, { kind: 'deterministic', obligations: { outcome: BB_OUTCOME, preserve: [27, 28] } }],
+    executionGuidance: [bbSupply('manual_bootstrap', 'Hand-smelt a few iron plates in a separate furnace.'), bbSupply('direct_feed', 'Establish a direct-fed iron miner and furnace and verify the steam-power trigger.')] })
+}
+
+test('Run BB: a direct_feed step after a manual_bootstrap step is not judged on today\'s inventory and commits', async () => {
+  const w = bootstrapWorld([({ agent }) => bbTwoStepDraft(agent), startFuel])
+  await w.say()
+  assert.equal(w.calls.length, 2, 'no correction round')
+  assert.deepEqual(w.plan().steps.map(step => step.execution_guidance.materialSupply.mode), ['manual_bootstrap', 'direct_feed'])
+  const checks = bootstrapChecks(w)
+  assert.deepEqual(checks.map(row => [row.step_index, row.verdict, row.reason]), [[1, 'unknown', 'prior_steps_change_facts']])
+  assert.ok(!w.reads.some(text => text.includes('mining_details') || text.includes('get_entity_status')), 'no mining or placement fact is read for a step whose facts earlier steps change')
+  assert.equal(w.events.filter(row => row.event === 'role.contract_refused').length, 0)
+})
+
+test('Run BB: only the first step still to run is judged on current facts; a restage\'s completed prefix does not count', async () => {
+  const w = bootstrapWorld([])
+  const plan = { executionGuidance: [bbSupply('manual_bootstrap', 'Already done.'), bbSupply('direct_feed', 'Build the cell.')],
+    stepCompletions: [{ kind: 'deterministic', obligations: { preserve: [27, 28] } }, { kind: 'deterministic', obligations: { preserve: [27, 28] } }] }
+  assert.equal(await directFeedBootstrapRefusal(w.agent, plan, { firstStep: 0 }), undefined, 'step 1 follows step 0, which still has to run')
+  assert.deepEqual(bootstrapChecks(w).map(row => [row.step_index, row.verdict, row.reason]), [[1, 'unknown', 'prior_steps_change_facts']])
+  const refusal = await directFeedBootstrapRefusal(w.agent, plan, { firstStep: 1 })
+  assert.equal(refusal.code, 'direct_feed_bootstrap_infeasible')
+  assert.equal(refusal.details.step_index, 1, 'step 0 is completed history, so step 1 is the first to run')
 })
 
 for (const mode of ['manual_bootstrap', null]) {

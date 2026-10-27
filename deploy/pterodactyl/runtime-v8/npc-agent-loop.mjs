@@ -14634,8 +14634,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async validateDirectFeedBootstrap(plan) {
     if (!this.roleCannotAuthorOperations() || !Array.isArray(plan.plan) || plan.plan.length === 0 || plan.assessmentOnly === true
       || !Array.isArray(plan.executionGuidance) || !plan.executionGuidance.some(brief => brief?.materialSupply?.mode === 'direct_feed')) return
-    if (FROZEN_PLAN_STATUSES.has(getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))?.status)) return
-    const refusal = await directFeedBootstrapRefusal(this, plan)
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    if (FROZEN_PLAN_STATUSES.has(held?.status)) return
+    // The draft's list is the whole slice; a restage or replacement carries completed steps first. Only the first step still to
+    // run is judged on today's facts: the reducer starts at the carried prefix (or the held active step of a blocked plan), and
+    // the lower of that and the draft's own currentStep is used so a doubtful index never makes a later step look first.
+    const reducerStart = held?.status === PLAN_STATUS.BLOCKED ? held.active_step_index
+      : [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(held?.status) ? held.carried_forward_evidence?.length ?? 0 : 0
+    const firstStep = Math.min(Number.isSafeInteger(plan.currentStep) && plan.currentStep > 0 ? plan.currentStep : 0, Number.isSafeInteger(reducerStart) && reducerStart > 0 ? reducerStart : 0)
+    const refusal = await directFeedBootstrapRefusal(this, plan, { firstStep })
     if (!refusal) return
     await this.traceEvent('role.contract_refused', { request_id: this.traceRequest?.id, reason: refusal.code, role: this.agentContext.role, ...refusal.details })
     const error = this.roleContractError(refusal.code, refusal.message)

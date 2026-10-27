@@ -32,11 +32,17 @@ function craftable(recipe) {
  * @param raw       items the native facts confirm are raw (mined or harvested, no recipe)
  * @param inventory held counts by item name
  * @param placed    NPC-placed machines the step does not preserve, counted by entity name
+ * @param unresolved entity names with a recorded unpreserved placement the facts neither confirm nor refute (a failed lookup, or
+ *                  a placement past the examination cap); a pair that needs such a machine is unknown, never infeasible
  * @param protect   the step checkpoint's inventory_count requirements ({ item_name, minimum })
  */
-export function directFeedBootstrapVerdict({ resource, drills, recipes, raw = [], inventory = {}, placed = {}, protect = [] }) {
+export function directFeedBootstrapVerdict({ resource, drills, recipes, raw = [], inventory: heldInventory = {}, placed = {}, unresolved = [], protect = [] }) {
   const unknown = reason => ({ verdict: VERDICT.UNKNOWN, resource, reason, pairs: [] })
   if (typeof resource !== 'string' || !Array.isArray(drills) || drills.length === 0 || !Array.isArray(recipes)) return unknown('facts_incomplete')
+  // The resource is what direct_feed forbids supplying by hand: held units of it fund nothing in the bill or the machine count.
+  const heldForbidden = heldInventory[resource] ?? 0
+  const inventory = { ...heldInventory, [resource]: 0 }
+  const unresolvedEntities = new Set(Array.isArray(unresolved) ? unresolved : [])
   const rawItems = new Set([...raw, resource])
   const smelting = smeltingRecipes(recipes, resource)
   // What the cell is for is not protected from its own machines; any other counted stock is another checkpoint's (as
@@ -51,6 +57,7 @@ export function directFeedBootstrapVerdict({ resource, drills, recipes, raw = []
   const side = ({ entity, item }) => {
     const count = (item ? held(item) : 0) + (placed[entity] ?? 0)
     if (count >= 1) return { entity, item, available: true, count }
+    if (unresolvedEntities.has(entity)) return { entity, item, unknown: true, unresolved: true }
     const recipe = item ? producerOf(item) : undefined
     if (!recipe) return { entity, item, unknown: true }
     return craftable(recipe) ? { entity, item, craft: true } : { entity, item, locked: true }
@@ -79,6 +86,8 @@ export function directFeedBootstrapVerdict({ resource, drills, recipes, raw = []
     const base = { drill: drill.entity, ...(smelter ? { smelter: smelter.entity } : {}) }
     const missing = [drill, smelter].filter(row => row && !row.available)
     const names = missing.map(row => row.item ?? row.entity)
+    // A machine that may already stand (an unresolved recorded placement) makes the whole pair unknown.
+    if (missing.some(row => row.unresolved)) return { ...base, missing: names, status: VERDICT.UNKNOWN }
     // One machine whose own bill ends in the resource fails the pair whatever the other machine is: building both only
     // draws more from the same stock.
     for (const row of missing) {
@@ -99,7 +108,7 @@ export function directFeedBootstrapVerdict({ resource, drills, recipes, raw = []
   const verdict = pairs.length === 0 ? VERDICT.UNKNOWN
     : pairs.every(pair => pair.status === VERDICT.INFEASIBLE) ? VERDICT.INFEASIBLE
       : pairs.some(pair => pair.status === VERDICT.FEASIBLE) ? VERDICT.FEASIBLE : VERDICT.UNKNOWN
-  return { verdict, resource, reserved, pairs }
+  return { verdict, resource, reserved, pairs, ...(heldForbidden > 0 ? { held_forbidden: heldForbidden } : {}), ...(unresolvedEntities.size > 0 ? { unresolved: [...unresolvedEntities] } : {}) }
 }
 
 function ingredientText(rows) {
@@ -123,7 +132,7 @@ export function directFeedBootstrapMessage(verdict, { stepNumber, inventory = {}
   const resource = verdict.resource
   const parts = distinct.slice(0, PAIR_MESSAGE_LIMIT).map(({ pair }) => {
     const inputs = [...new Set(pair.bill.nodes.flatMap(node => node.ingredients.map(row => row.item_name)))]
-    const heldText = inputs.map(item => [item, inventory[item] ?? 0]).filter(([, count]) => count > 0).map(([item, count]) => `${item} ${count}`).join(', ') || 'none of its inputs'
+    const heldText = inputs.filter(item => item !== resource).map(item => [item, inventory[item] ?? 0]).filter(([, count]) => count > 0).map(([item, count]) => `${item} ${count}`).join(', ') || 'none of its inputs'
     return `crafting ${pair.missing.join(' + ')} (${billText(pair.bill.nodes)}) from what you hold (${heldText}) still needs ${pair.shortfall} ${resource}`
   })
   const others = distinct.slice(PAIR_MESSAGE_LIMIT).map(({ pair }) => `${pair.missing.join(' + ')} needs ${pair.shortfall} ${resource}`)
@@ -131,6 +140,7 @@ export function directFeedBootstrapMessage(verdict, { stepNumber, inventory = {}
   const reserved = Object.entries(verdict.reserved ?? {}).map(([item, count]) => `${item} ${count}`)
   return `${DIRECT_FEED_BOOTSTRAP_CODE}: step ${stepNumber} selects materialSupply direct_feed for ${resource}, which forbids hand-mining or hand-supplying ${resource}, but its cell cannot be built without it. `
     + `Native facts: ${parts.join('; and ')}${others.length ? `; the other candidate bills are larger (${others.join(', ')})` : ''}. `
+    + `${verdict.held_forbidden > 0 ? `${resource} ${verdict.held_forbidden} is held, but direct_feed forbids hand-supplying it, so it funds nothing here. ` : ''}`
     + `Every candidate drill/smelter pair that is not already held or placed outside obligations.preserve ends this way (${pairs.join(', ')})`
     + `${reserved.length ? `; stock protected by this step's checkpoint is excluded (${reserved.join(', ')})` : ''}. `
     + `Nothing was committed. Resubmit with materialSupply manual_bootstrap for ${resource} (a finite bootstrap in a separate furnace), or with the missing machine held or funded first.`

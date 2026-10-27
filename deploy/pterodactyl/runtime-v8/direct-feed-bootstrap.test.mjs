@@ -89,3 +89,33 @@ test('smelting recipes are the hand-uncraftable recipes that consume the resourc
   assert.deepEqual(smeltingRecipes(Object.values(vanillaRecipes()), 'iron-ore').map(recipe => recipe.name), ['iron-plate'])
   assert.deepEqual(smeltingRecipes(Object.values(vanillaRecipes()), 'stone'), [], 'stone is consumed only by a hand craft')
 })
+
+test('a recorded placement the facts cannot confirm or refute is unknown, never absence (B-R1-1)', () => {
+  const unresolved = directFeedBootstrapVerdict(bb({ unresolved: ['burner-mining-drill'] }))
+  assert.notEqual(unresolved.verdict, VERDICT.INFEASIBLE, 'the drill may already stand')
+  assert.deepEqual(unresolved.unresolved, ['burner-mining-drill'])
+  for (const pair of unresolved.pairs.filter(row => row.drill === 'burner-mining-drill')) assert.equal(pair.status, VERDICT.UNKNOWN)
+  // A held or confirmed-placed machine of the same name still wins over the uncertainty.
+  assert.equal(directFeedBootstrapVerdict(bb({ unresolved: ['burner-mining-drill'], placed: { 'burner-mining-drill': 1 } })).verdict, VERDICT.FEASIBLE)
+  // An unresolved smelter makes the pairs that need it unknown even when the drill bill alone cannot be built.
+  const smelter = directFeedBootstrapVerdict(bb({ unresolved: ['stone-furnace', 'steel-furnace'], inventory: { 'iron-plate': 8 } }))
+  assert.notEqual(smelter.verdict, VERDICT.INFEASIBLE)
+  assert.ok(smelter.pairs.every(pair => pair.status === VERDICT.UNKNOWN))
+  // Without the uncertainty the same facts are refused.
+  assert.equal(directFeedBootstrapVerdict(bb({ unresolved: [] })).verdict, VERDICT.INFEASIBLE)
+})
+
+test('held units of the forbidden resource fund neither the bill nor the machine count (B-R1-2)', () => {
+  const inventory = { 'iron-plate': 8, 'stone-furnace': 1, 'iron-ore': 1, coal: 12 }
+  const verdict = directFeedBootstrapVerdict(bb({ inventory }))
+  assert.equal(verdict.verdict, VERDICT.INFEASIBLE)
+  assert.equal(verdict.held_forbidden, 1)
+  const burner = verdict.pairs.find(pair => pair.drill === 'burner-mining-drill')
+  assert.equal(burner.shortfall, 1)
+  assert.deepEqual(burner.bill.acquisition, [{ item_name: 'iron-ore', count: 1 }])
+  const message = directFeedBootstrapMessage(verdict, { stepNumber: 1, inventory })
+  assert.match(message, /iron-ore 1 is held, but direct_feed forbids hand-supplying it/)
+  assert.match(message, /you hold \(iron-plate 8, stone-furnace 1\) still needs 1 iron-ore/)
+  // Held ore never counts as a held machine either: a resource that is itself a machine input stays zero.
+  assert.equal(directFeedBootstrapVerdict(bb({ inventory: { 'iron-plate': 9, 'stone-furnace': 1, 'iron-ore': 50 } })).verdict, VERDICT.FEASIBLE, 'real plates still fund it')
+})
