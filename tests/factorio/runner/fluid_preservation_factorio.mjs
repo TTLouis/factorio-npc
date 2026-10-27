@@ -564,13 +564,15 @@ try {
     {
       const spot = await lua(`local s=a.surface; local px=math.floor(a.position.x); local py=math.floor(a.position.y); local found
         local proto=prototypes.entity["cargo-landing-pad"]; assert(proto, "no cargo-landing-pad prototype")
-        for dx=-6,6 do for dy=-2,8 do local x=px+dx; local y=py+dy
-          if not found and (math.abs(a.position.x-(x+1))>5 or a.position.y<y-9 or a.position.y>y+1) and s.can_place_entity{name="cargo-landing-pad",position={x+1,y-4},force=a.force}
-            and s.can_place_entity{name="wooden-chest",position={x+0.5,y+0.5},force=a.force} and s.can_place_entity{name="wooden-chest",position={x+0.5,y+1.5},force=a.force} then found={x=x,y=y} end end end
-        local function invs(e) local c=0; for k=1,e.get_max_inventory_index() do if e.get_inventory(k) then c=c+1 end end; return c end; assert(found, "no free pad site")
+        local pad_alone=0
+        for dx=-14,14 do for dy=-10,14 do local x=px+dx; local y=py+dy
+          if not found and (math.abs(a.position.x-(x+1))>5 or a.position.y<y-9 or a.position.y>y+1) and s.can_place_entity{name="cargo-landing-pad",position={x+1,y-4},force=a.force} then pad_alone=pad_alone+1
+            if s.can_place_entity{name="wooden-chest",position={x+0.5,y+0.5},force=a.force} and s.can_place_entity{name="wooden-chest",position={x+0.5,y+1.5},force=a.force} then found={x=x,y=y} end end end end
+        local function invs(e) local c=0; for k=1,e.get_max_inventory_index() do if e.get_inventory(k) then c=c+1 end end; return c end
+        assert(found, "no free pad site: pad_alone="..pad_alone.." existing_pads="..s.count_entities_filtered{name="cargo-landing-pad"})
         local pad=s.create_entity{name="cargo-landing-pad",position={found.x+1,found.y-4},force=a.force}; assert(pad and pad.unit_number, "pad not created")
         rcon.print(helpers.table_to_json({x=found.x,y=found.y,pad=pad.unit_number,pad_inventories=invs(pad),no_insertion=proto.flags["no-automated-item-insertion"]==true,no_removal=proto.flags["no-automated-item-removal"]==true}))`)
-      const seePad = await tool('getNearbyEntities', { name: 'cargo-landing-pad', radius: 16, limit: 4 })
+      const seePad = await tool('getNearbyEntities', { name: 'cargo-landing-pad', radius: 24, limit: 4 })
       const before = await worldFacts()
       const into = await validate('native-l3-inserter-into-pad',
         [{ entity_name: 'wooden-chest', x: spot.x + 0.5, y: spot.y + 1.5, slot: 'chest' }, { entity_name: 'burner-inserter', x: spot.x + 0.5, y: spot.y + 0.5, direction: 8, slot: 'inserter' }],
