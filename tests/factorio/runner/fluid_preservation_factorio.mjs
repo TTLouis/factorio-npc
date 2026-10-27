@@ -19,7 +19,8 @@ const arg = name => process.argv[process.argv.indexOf(`--${name}`) + 1]
 const evidence = { status: 'fail', factorio: '2.0.77', transcript: [], operations: [] }
 let connection
 const rcon = { command: async command => {
-  if (rcon.queueFault && command.includes('autorio_operation_admission') && command.includes('SGLUNA_RESULT_')) {
+  // Any authorized batch (admission-journal or plain): the fault runs in the same callback, after the batch was queued.
+  if (rcon.queueFault && command.includes('"sgluna_deployment","authorize"') && command.includes('SGLUNA_RESULT_')) {
     const at = command.lastIndexOf('; rcon.print('); assert.ok(at > 0)
     command = `${command.slice(0, at)}; ${rcon.queueFault}${command.slice(at)}`
     rcon.queueFault = undefined
