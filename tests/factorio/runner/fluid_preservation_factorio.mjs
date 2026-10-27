@@ -872,6 +872,139 @@ try {
         stock: { before: stockBefore, after: stockAfter } }
       assert.equal((await tool('getTaskStatus', {})).queue_length, 0)
     }
+    // Milestone 4 L6: bounded alternatives for fixed and zoned placements. The existing boiler is a fixed endpoint (by unit_number);
+    // a wooden chest and a burner inserter are zoned around it. The proposal is read-only; one returned alternative then goes
+    // through validateConstructionPlan and an authorized execute_construction_plan, and the engine's own pickup/drop targets are
+    // the verdict. Fixture stock is declared setup, and what the block builds is destroyed again.
+    {
+      // An exact reference to an entity the harness did not build needs fresh nearby discovery first, as for the model.
+      const seeBoiler = await tool('getNearbyEntities', { name: 'boiler', radius: 24, limit: 8 })
+      const boiler = await lua(`local b; for _,v in pairs(a.surface.find_entities_filtered{name="boiler"}) do if v.unit_number==${boilerId} then b=v end end; assert(b); rcon.print(helpers.table_to_json({box=b.bounding_box,x=b.position.x,y=b.position.y}))`)
+      const { left_top: lt, right_bottom: rb } = boiler.box
+      const sites = []
+      for (let x = Math.floor(lt.x); x < Math.ceil(rb.x); x++) {
+        sites.push({ inserter: { x: x + 0.5, y: Math.floor(lt.y) - 0.5 }, chest: { x: x + 0.5, y: Math.floor(lt.y) - 1.5 } })
+        sites.push({ inserter: { x: x + 0.5, y: Math.ceil(rb.y) + 0.5 }, chest: { x: x + 0.5, y: Math.ceil(rb.y) + 1.5 } })
+      }
+      for (let y = Math.floor(lt.y); y < Math.ceil(rb.y); y++) {
+        sites.push({ inserter: { x: Math.floor(lt.x) - 0.5, y: y + 0.5 }, chest: { x: Math.floor(lt.x) - 1.5, y: y + 0.5 } })
+        sites.push({ inserter: { x: Math.ceil(rb.x) + 0.5, y: y + 0.5 }, chest: { x: Math.ceil(rb.x) + 1.5, y: y + 0.5 } })
+      }
+      const connections = [{ kind: 'inserter', inserter: { slot: 'inserter' }, pickup: { slot: 'chest' }, drop: { unit_number: boilerId } }]
+      const zones = (chest, inserter, radius) => [
+        { entity_name: 'wooden-chest', slot: 'chest', zone: { center: chest, radius } },
+        { entity_name: 'burner-inserter', slot: 'inserter', zone: { center: inserter, radius } },
+      ]
+      const propose = placements => tool('proposeConstructionLayout', { placements, connections })
+      const tokenState = () => lua('rcon.print(helpers.table_to_json({id=storage.sgluna_validated_construction_plan and storage.sgluna_validated_construction_plan.validation_id or 0,next=storage.sgluna_next_construction_validation_id or 0}))')
+      const inZone = (placement, zone) => Math.hypot(placement.x - zone.center.x, placement.y - zone.center.y) <= zone.radius + 1e-9
+
+      // Negative: zones far from the boiler, where no inserter's drop can reach it. The refusal builds, spends and moves nothing.
+      {
+        const farCenter = { x: Math.floor(boiler.x + 9) + 0.5, y: Math.floor(boiler.y) + 0.5 }
+        const before = await worldFacts()
+        const tokenBefore = await tokenState()
+        const far = await propose(zones(farCenter, { x: farCenter.x, y: farCenter.y + 1 }, 2.5))
+        const after = await worldFacts()
+        evidence.l6_zones_far = { farCenter, far }
+        assert.equal(far.ok, false, JSON.stringify(far))
+        assert.ok(['NO_LAYOUT_ALTERNATIVE', 'ZONE_EXHAUSTED'].includes(far.error?.code), JSON.stringify(far))
+        assert.equal(far.alternatives, undefined, 'a refusal carries no partial plan')
+        if (far.error.code === 'NO_LAYOUT_ALTERNATIVE') assert.ok(far.error.evaluated <= 256 && far.error.budget === 256, JSON.stringify(far))
+        assert.deepEqual(quiet(after), quiet(before), 'a refused proposal builds, consumes and moves nothing')
+        assert.equal(after.status.queue_length, 0); assert.equal(after.status.task_state, 'idle')
+        assert.deepEqual(await tokenState(), tokenBefore, 'a refused proposal stores no validation token')
+      }
+
+      // Positive: the first boiler side whose zones hold at least one alternative.
+      const tried = []
+      let found
+      const beforeProposals = await worldFacts()
+      const tokenBeforeProposals = await tokenState()
+      for (const site of sites) {
+        const placements = zones(site.chest, site.inserter, 2)
+        const result = await propose(placements)
+        tried.push({ site, ok: result.ok, code: result.error?.code, alternatives: result.alternatives?.length, evaluated: result.evaluated ?? result.error?.evaluated, budget_exhausted: result.budget_exhausted ?? result.error?.budget_exhausted })
+        if (result.ok === true && result.alternatives.length > 0) { found = { site, placements, result }; break }
+      }
+      const afterProposals = await worldFacts()
+      assert.ok(found, `a boiler side whose zones hold an alternative: ${JSON.stringify(tried)}`)
+      assert.deepEqual(quiet(afterProposals), quiet(beforeProposals), 'proposals build, consume and move nothing')
+      assert.equal(afterProposals.status.queue_length, 0); assert.equal(afterProposals.status.task_state, 'idle')
+      assert.deepEqual(await tokenState(), tokenBeforeProposals, 'proposals store no validation token')
+      const { result } = found
+      const zoneOf = slot => found.placements.find(row => row.slot === slot).zone
+      assert.equal(result.budget, 256); assert.ok(result.evaluated <= 256, JSON.stringify(result))
+      assert.deepEqual([...result.zoned_slots].sort(), ['chest', 'inserter'], JSON.stringify(result))
+      assert.equal(Object.keys(result.fixed_slots ?? {}).length, 0, JSON.stringify(result))
+      assert.ok(result.alternatives.length >= 1 && result.alternatives.length <= 4, JSON.stringify(result))
+      const keys = new Set()
+      result.alternatives.forEach((alternative, index) => {
+        assert.equal(alternative.id, `alt-${index + 1}`)
+        assert.equal(alternative.planning_status, 'spatially_valid', JSON.stringify(alternative))
+        assert.deepEqual(alternative.placements.map(row => row.slot).sort(), ['chest', 'inserter'])
+        for (const placement of alternative.placements) {
+          assert.equal(placement.fixed, false)
+          assert.ok(inZone(placement, zoneOf(placement.slot)), `${alternative.id} ${placement.slot} inside its zone: ${JSON.stringify(placement)}`)
+        }
+        // The fixed endpoint is the existing boiler: the connection is proved against its own live collision box.
+        const [proof] = alternative.connections
+        assert.equal(proof.kind, 'inserter'); assert.equal(proof.virtual_proof.status, 'proved', JSON.stringify(alternative))
+        const drop = proof.virtual_proof.drop_box
+        assert.ok(Math.abs(drop.left_top.x - lt.x) < 1e-6 && Math.abs(drop.left_top.y - lt.y) < 1e-6 && Math.abs(drop.right_bottom.x - rb.x) < 1e-6 && Math.abs(drop.right_bottom.y - rb.y) < 1e-6, JSON.stringify({ drop, lt, rb }))
+        keys.add(JSON.stringify(alternative.placements))
+      })
+      assert.equal(keys.size, result.alternatives.length, 'every alternative differs')
+
+      // Stock: exactly what the chosen alternative needs (one chest, one inserter), topped up from what the lane has left.
+      const held = async name => stock((await worldFacts()).world.inventory, name)
+      const needed = { 'wooden-chest': 1, 'burner-inserter': 1 }
+      for (const [name, count] of Object.entries(needed)) {
+        const missing = count - await held(name)
+        if (missing > 0) await lua(`assert(a.insert{name="${name}",count=${missing}}==${missing}); rcon.print("{}")`)
+        assert.equal(await held(name), count, `${name}: exactly the stock the alternative needs`)
+      }
+      // Every alternative, passed on unchanged as a fully fixed plan, validates to the same geometry. The top alternative is
+      // validated last, so its token is the live one.
+      const planOf = alternative => alternative.placements.map(({ entity_name, slot, x, y, direction }) => ({ entity_name, slot, x, y, ...(direction === undefined ? {} : { direction }) }))
+      const validations = {}
+      for (const alternative of [...result.alternatives].reverse()) {
+        const plan = planOf(alternative)
+        const validated = await validate(`native-l6-${alternative.id}`, plan, connections)
+        validations[alternative.id] = validated
+        assert.equal(validated.planning_status, 'spatially_valid', JSON.stringify(validated))
+        assert.equal(validated.ok, true, JSON.stringify(validated)); assert.equal(validated.execution_eligible, true)
+        plan.forEach((placement, index) => assert.deepEqual(validated.placement_geometry[index].planned_position, { x: placement.x, y: placement.y }, JSON.stringify(validated)))
+      }
+      const top = result.alternatives[0]
+      const topValidation = validations[top.id]
+      assert.equal(topValidation.placement_count, 2)
+      const stockBefore = (await worldFacts()).world.inventory
+      await operation('execute_construction_plan', { validation_id: topValidation.validation_id, placement_count: topValidation.placement_count })
+      const status = await layoutStatus(topValidation.validation_id)
+      const chestNode = status.nodes.find(node => node.slot === 'chest'); const inserterNode = status.nodes.find(node => node.slot === 'inserter')
+      const readInserter = () => lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${inserterNode.unit_number} then i=v end end; assert(i);
+        rcon.print(helpers.table_to_json({pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil,direction=i.direction,x=i.position.x,y=i.position.y}))`)
+      // The engine sets the inserter's own target fields a few ticks after it is built; wait (bounded) until both are set.
+      let native = await readInserter()
+      for (let attempt = 0; attempt < 40 && (native.pickup === undefined || native.drop === undefined); attempt++) { await delay(100); native = await readInserter() }
+      const stockAfter = (await worldFacts()).world.inventory
+      evidence.l6_zones = { boiler: { unit_number: boilerId, box: boiler.box }, see_boiler: seeBoiler, tried, found: { site: found.site, evaluated: result.evaluated, budget_exhausted: result.budget_exhausted, zone_truncated: result.zone_truncated },
+        alternatives: result.alternatives, validations, top: top.id, status, native, stock: { before: stockBefore, after: stockAfter } }
+      assert.equal(status.state, 'complete', JSON.stringify(status)); assert.equal(status.production, 'not_asserted')
+      assert.equal(status.connections[0].state, 'verified', JSON.stringify(status))
+      for (const placement of top.placements) {
+        const node = status.nodes.find(row => row.slot === placement.slot)
+        assert.deepEqual(node.position, { x: placement.x, y: placement.y }, `${placement.slot} was built where the alternative said`)
+      }
+      // The engine's own target fields are the verdict: the built inserter takes from the chosen chest and gives to the existing boiler.
+      assert.equal(native.pickup, chestNode.unit_number, `the inserter's pickup_target: ${JSON.stringify(native)}`)
+      assert.equal(native.drop, boilerId, `the inserter's drop_target: ${JSON.stringify(native)}`)
+      assert.equal(stock(stockAfter, 'wooden-chest'), stock(stockBefore, 'wooden-chest') - 1); assert.equal(stock(stockAfter, 'burner-inserter'), stock(stockBefore, 'burner-inserter') - 1)
+      // What this block built is removed again, so the space is as the later steps expect.
+      await lua(`local n=0; for _,v in pairs(a.surface.find_entities_filtered{name={"wooden-chest","burner-inserter"}}) do if v.unit_number==${chestNode.unit_number} or v.unit_number==${inserterNode.unit_number} then v.destroy(); n=n+1 end end; assert(n==2); rcon.print("{}")`)
+      assert.equal((await tool('getTaskStatus', {})).queue_length, 0)
+    }
   }
   // Fault scheduling occurs after the actual correlated candidate was queued,
   // inside the same native callback, before its first execution tick. No wait
@@ -924,7 +1057,7 @@ try {
   evidence.foreign = await geometry(pumpId)
   assert.throws(() => preservationGeometry(evidence.foreign, pumpId))
   evidence.status = 'pass'
-  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam, lost-edge/scope refusal, layout planning/connections and interrupted-layout settle/resume')
+  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam, lost-edge/scope refusal, layout planning/connections, interrupted-layout settle/resume and bounded layout alternatives')
 } finally {
   if (connection) connection.close()
   await fs.mkdir(path.resolve(arg('results')), { recursive: true })
