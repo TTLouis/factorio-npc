@@ -419,7 +419,7 @@ try {
       // The engine sets the inserter's own target fields a few ticks after it is built; wait (bounded) until both are set.
       const readInserter = () => lua(`local i; for _,v in pairs(a.surface.find_entities_filtered{name="burner-inserter"}) do if v.unit_number==${inserterId} then i=v end end; assert(i);
         local function at(p) local r={}; for _,e in pairs(i.surface.find_entities_filtered{position=p}) do if e.unit_number and e.unit_number~=i.unit_number and e.type~="character" then r[#r+1]=e.unit_number end end; return r end
-        local function inv(p) local r={}; for _,e in pairs(i.surface.find_entities_filtered{position=p}) do if e.unit_number and e.unit_number~=i.unit_number and e.type~="character" then r[#r+1]=e.get_max_inventory_index() end end; return r end
+        local function invs(e) local c=0; for k=1,e.get_max_inventory_index() do if e.get_inventory(k) then c=c+1 end end; return c end; local function inv(p) local r={}; for _,e in pairs(i.surface.find_entities_filtered{position=p}) do if e.unit_number and e.unit_number~=i.unit_number and e.type~="character" then r[#r+1]=invs(e) end end; return r end
         rcon.print(helpers.table_to_json({pickup=i.pickup_target and i.pickup_target.unit_number or nil,drop=i.drop_target and i.drop_target.unit_number or nil,pickup_position=i.pickup_position,drop_position=i.drop_position,
           at_pickup=at(i.pickup_position),at_drop=at(i.drop_position),inventories_at_pickup=inv(i.pickup_position),inventories_at_drop=inv(i.drop_position),direction=i.direction,tick=game.tick}))`)
       const firstRead = await readInserter()
@@ -509,7 +509,7 @@ try {
       const drillId = unitOf(status, 'drill'); const receiverId = unitOf(status, 'receiver')
       const native = await lua(`local d; for _,v in pairs(a.surface.find_entities_filtered{name="burner-mining-drill"}) do if v.unit_number==${drillId} then d=v end end; assert(d);
         local r={}; for _,e in pairs(d.surface.find_entities_filtered{position=d.drop_position}) do if e.unit_number and e.unit_number~=d.unit_number and e.type~="character" then r[#r+1]=e.unit_number end end
-        local n={}; for _,e in pairs(d.surface.find_entities_filtered{position=d.drop_position}) do if e.unit_number and e.unit_number~=d.unit_number and e.type~="character" then n[#n+1]=e.get_max_inventory_index() end end
+        local function invs(e) local c=0; for k=1,e.get_max_inventory_index() do if e.get_inventory(k) then c=c+1 end end; return c end; local n={}; for _,e in pairs(d.surface.find_entities_filtered{position=d.drop_position}) do if e.unit_number and e.unit_number~=d.unit_number and e.type~="character" then n[#n+1]=invs(e) end end
         rcon.print(helpers.table_to_json({drop=d.drop_target and d.drop_target.unit_number or nil,drop_position=d.drop_position,at_drop=r,inventories_at_drop=n,direction=d.direction,tick=game.tick}))`)
       evidence.l3_drill = { ore, tried, mismatch, wall_receiver: wallReceiver, validated, status, native }
       assert.equal(status.state, 'complete', JSON.stringify(status))
@@ -530,8 +530,8 @@ try {
         for _,o in pairs({{3,-5},{-3,-5},{3,5},{-3,5},{5,-3},{-5,-3},{5,3},{-5,3}}) do local x=px+o[1]; local y=py+o[2]
           if s.count_entities_filtered{area={{x-1,y-2},{x+2,y+3}}}==0 and s.can_place_entity{name="wooden-chest",position={x+0.5,y-0.5},force=a.force}
             and s.can_place_entity{name="wooden-chest",position={x+0.5,y+0.5},force=a.force} and s.can_place_entity{name="wooden-chest",position={x+0.5,y+1.5},force=a.force} then found={x=x,y=y}; break end end
-        assert(found); local w=s.create_entity{name="stone-wall",position={found.x+0.5,found.y-0.5},force=a.force}; assert(w and w.unit_number)
-        rcon.print(helpers.table_to_json({x=found.x,y=found.y,wall=w.unit_number,wall_inventories=w.get_max_inventory_index()}))`)
+        local function invs(e) local c=0; for k=1,e.get_max_inventory_index() do if e.get_inventory(k) then c=c+1 end end; return c end; assert(found); local w=s.create_entity{name="stone-wall",position={found.x+0.5,found.y-0.5},force=a.force}; assert(w and w.unit_number)
+        rcon.print(helpers.table_to_json({x=found.x,y=found.y,wall=w.unit_number,wall_max_inventory_index=w.get_max_inventory_index(),wall_inventories=invs(w)}))`)
       const plan = drop => validate('native-l3-inserter-wall',
         [{ entity_name: 'wooden-chest', x: spot.x + 0.5, y: spot.y + 1.5, slot: 'chest' }, { entity_name: 'burner-inserter', x: spot.x + 0.5, y: spot.y + 0.5, direction: 8, slot: 'inserter' }],
         [{ kind: 'inserter', inserter: { slot: 'inserter' }, pickup: { slot: 'chest' }, drop: { unit_number: drop } }])
@@ -546,6 +546,8 @@ try {
       await lua(`for _,e in pairs(a.surface.find_entities_filtered{name="wooden-chest",position={${spot.x + 0.5},${spot.y - 0.5}}}) do if e.unit_number==${swap.chest} then e.destroy() end end; rcon.print("{}")`)
       const after = await worldFacts()
       evidence.l3_inserter_wall = { spot, see_wall: seeWall, wall, see_chest: seeChest, chest }
+      // The engine's get_max_inventory_index is not per entity (8 for a stone wall on 2.0.77); the wall has no actual inventory.
+      assert.equal(spot.wall_inventories, 0, JSON.stringify(spot))
       assert.equal(wall.ok, false, JSON.stringify(wall))
       assert.equal(wall.planning_status, 'spatially_invalid', JSON.stringify(wall))
       assert.equal(wall.error?.code, 'CONNECTION_ENDPOINT_INCOMPATIBLE', JSON.stringify(wall))
