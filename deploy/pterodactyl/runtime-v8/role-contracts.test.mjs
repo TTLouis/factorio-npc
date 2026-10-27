@@ -14,6 +14,7 @@ import { Session } from './supervisor.mjs'
 import { providerRequest } from './provider.mjs'
 import { executionOnlyControlToolDefinitions, planningOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { answerBootstrapRead } from './direct-feed-bootstrap-fixtures.mjs'
 
 const KEY = 'npc:sgluna'
 const runAB = JSON.parse(await fs.readFile(new URL('./fixtures/run-ab-executor-review.json', import.meta.url), 'utf8'))
@@ -740,6 +741,121 @@ test('direct-feed drift refuses the whole batch before startup fuel or manual or
   assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 2)
   assert.equal(w.events.filter(row => row.event === 'observation.phase_reopened_for_review').length, 0)
   assert.equal(w.calls.length, 4, 'one bounded planner round, no new model allowance or planner loop')
+})
+
+// --- Run BB lane B: the planner's direct_feed cell must be buildable without the resource it forbids by hand --------------------
+// Run BB: the committed step preserved the copper drill 27 and furnace 28 and chose direct_feed for iron-ore while 8 iron plates
+// were held. A new burner drill costs 9 (3 plates + 3 gears of 2), and the missing plate can only be smelted from iron-ore.
+const BB_OUTCOME = { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'steam-power' }] }
+const bbDraft = (agent, mode, preserve = [27, 28]) => {
+  agent.loadedSkillContext.set('direct-miner-smelting', { id: 'direct-miner-smelting', summary: 'Optional direct-feed time savings.' })
+  return draft({ plan: ['Produce the iron plates needed to trigger steam power, and verify the technology unlocks.'],
+    goal: { scope: 'finite', summary: 'Complete steam power research.', doneWhen: [{ kind: 'research_completed', technology: 'steam-power' }] },
+    stepCompletions: [{ kind: 'deterministic', checkpoint: BB_OUTCOME, obligations: { outcome: BB_OUTCOME, preserve } }],
+    executionGuidance: [{ ...brief(['direct-miner-smelting']), approach: 'Establish a direct-fed iron miner and furnace, fuel both, and verify the steam-power trigger.',
+      materialSupply: { mode, resource: 'iron-ore' } }] })
+}
+const burnerCell = unit => ({ unit_number: unit, name: unit === 27 ? 'burner-mining-drill' : 'stone-furnace', type: unit === 27 ? 'mining-drill' : 'furnace',
+  position: { x: unit === 27 ? 47 : 46, y: unit === 27 ? 16 : 14 }, direction: 0 })
+const burnerGeometry = unit => ({ found: true, entity: burnerCell(unit), actor_id: 18, actor_surface_index: 1, actor_force_index: 1, surface_index: 1, force_index: 1,
+  fluid_box_count: 0, fluid_storages_truncated: false, ...(unit === 27 ? { item_io: { drop_position: { x: 46.5, y: 14.7 }, drop_target: burnerCell(28) } } : {}) })
+
+function bootstrapWorld(script, { inventory = { 'iron-plate': 8, 'stone-furnace': 1, coal: 12 }, ...read } = {}) {
+  const game = new FakeFactorio({ inventory })
+  game.knownTechnologies.add('steam-power')
+  const native = game.command.bind(game)
+  const reads = []
+  game.command = async text => {
+    const answered = answerBootstrapRead(text, { inventory: game.inventory, ...read })
+    if (answered !== undefined) { reads.push(text); return answered }
+    if (text.includes('entity_geometry')) return JSON.stringify(burnerGeometry(Number(/entity_geometry["'],\s*(\d+)/.exec(text)?.[1] ?? /unit_number[=: ]+(\d+)/.exec(text)?.[1])))
+    return native(text)
+  }
+  return { ...world(script, { game, objective: 'Complete steam power research.' }), reads }
+}
+const bootstrapChecks = w => w.events.filter(row => row.event === 'plan.direct_feed_bootstrap_checked').map(row => row.data)
+const startFuel = ({ memory }) => ({ stepId: getActivePlan(memory.planningState(KEY)).steps[0].step_id, operations: [gather('coal', 2)] })
+
+test('Run BB: a direct_feed cell that cannot bootstrap without hand-supplied iron-ore is refused at commit with the shortfall, and the planner corrects it', async () => {
+  const w = bootstrapWorld([({ agent }) => bbDraft(agent, 'direct_feed'), ({ agent, game, messages }) => {
+    assert.equal(game.mutations.length, 0)
+    const refusal = messages.findLast(row => row.role === 'user' && row.content.includes('direct_feed_bootstrap_infeasible'))
+    assert.ok(refusal, 'the planner is told why, with a precise code')
+    assert.match(refusal.content, /materialSupply direct_feed for iron-ore/)
+    assert.match(refusal.content, /burner-mining-drill/)
+    assert.match(refusal.content, /iron-plate 8/)
+    assert.match(refusal.content, /still needs 1 iron-ore/)
+    assert.match(refusal.content, /manual_bootstrap/)
+    return bbDraft(agent, 'manual_bootstrap')
+  }, startFuel])
+  await w.say()
+  assert.equal(w.calls.length, 3, 'one correction round, no new model allowance')
+  assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'manual_bootstrap')
+  assert.equal(w.game.mutations.length, 1, 'nothing ran before the corrected plan committed')
+  const [checked, ...later] = bootstrapChecks(w)
+  assert.equal(later.length, 0, 'a manual_bootstrap draft needs no check')
+  assert.deepEqual([checked.verdict, checked.step_index, checked.resource, checked.preserved], ['infeasible', 0, 'iron-ore', [27, 28]])
+  const refused = w.events.find(row => row.event === 'role.contract_refused')
+  assert.equal(refused.data.reason, 'direct_feed_bootstrap_infeasible')
+  assert.ok(w.reads.some(text => text.includes('mining_details')) && w.reads.some(text => text.includes('recipe_details')))
+})
+
+test('Run BB: a placed machine in obligations.preserve, or one the game no longer shows, does not rescue the bootstrap', async () => {
+  const placeCopperCell = ({ memory }) => {
+    memory.recordNpcPlacement(KEY, { unit_number: 27, entity_name: 'burner-mining-drill', actor_id: 18, actor_epoch: 3 })
+    memory.recordNpcPlacement(KEY, { unit_number: 31, entity_name: 'burner-mining-drill', actor_id: 18, actor_epoch: 3 })
+  }
+  // 27 is still there but preserved; 31 was placed and has since been mined (the game answers found:false).
+  const w = bootstrapWorld([ctx => { placeCopperCell(ctx); return bbDraft(ctx.agent, 'direct_feed') }, ({ agent }) => bbDraft(agent, 'manual_bootstrap'), startFuel],
+    { entities: { 27: 'burner-mining-drill' } })
+  await w.say()
+  assert.equal(bootstrapChecks(w)[0].verdict, 'infeasible')
+  assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'manual_bootstrap')
+  const statusReads = w.reads.filter(text => text.includes('get_entity_status'))
+  assert.equal(statusReads.length, 1, 'only the unpreserved placement was looked up')
+  assert.match(statusReads[0], /,31\)/)
+})
+
+for (const [label, options] of [
+  ['a held drill', { inventory: { 'burner-mining-drill': 1, 'iron-plate': 8, 'stone-furnace': 1 } }],
+  ['enough plates for the drill', { inventory: { 'iron-plate': 9, 'stone-furnace': 1 } }],
+]) {
+  test(`Run BB: ${label} is not refused`, async () => {
+    const w = bootstrapWorld([({ agent }) => bbDraft(agent, 'direct_feed'), startFuel], options)
+    await w.say()
+    assert.equal(w.calls.length, 2)
+    assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'direct_feed')
+    assert.deepEqual(bootstrapChecks(w).map(row => row.verdict), ['feasible'])
+    assert.equal(w.events.filter(row => row.event === 'role.contract_refused').length, 0)
+  })
+}
+
+for (const [label, options] of [
+  ['unreadable mining facts', { unreadable: ['getMiningDetails'] }],
+  ['unreadable inventory facts', { unreadable: ['getInventoryItems'] }],
+  ['unreadable recipe facts', { unreadable: ['getRecipeDetails'] }],
+  ['ambiguous recipe facts', { ambiguous: ['iron-gear-wheel'] }],
+]) {
+  test(`Run BB: ${label} are not a refusal`, async () => {
+    const w = bootstrapWorld([({ agent }) => bbDraft(agent, 'direct_feed'), startFuel], options)
+    await w.say()
+    assert.equal(w.calls.length, 2)
+    assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'direct_feed')
+    assert.deepEqual(bootstrapChecks(w).map(row => row.verdict), ['unknown'])
+    assert.equal(w.events.filter(row => row.event === 'role.contract_refused').length, 0)
+  })
+}
+
+test('Run BB: a placed machine outside obligations.preserve counts as available', async () => {
+  const w = bootstrapWorld([ctx => {
+    ctx.memory.recordNpcPlacement(KEY, { unit_number: 31, entity_name: 'burner-mining-drill', actor_id: 18, actor_epoch: 3 })
+    return bbDraft(ctx.agent, 'direct_feed')
+  }, startFuel], { entities: { 31: 'burner-mining-drill' } })
+  await w.say()
+  assert.equal(w.calls.length, 2)
+  assert.deepEqual(bootstrapChecks(w).map(row => row.verdict), ['feasible'])
+  assert.equal(w.plan().steps[0].execution_guidance.materialSupply.mode, 'direct_feed')
+  assert.ok(w.reads.some(text => /get_entity_status.*31/.test(text)), 'the placement was confirmed against the game, not trusted')
 })
 
 for (const mode of ['manual_bootstrap', null]) {

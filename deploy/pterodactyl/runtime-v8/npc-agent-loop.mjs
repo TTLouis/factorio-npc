@@ -12,6 +12,7 @@ import { normalizeProductionIntent } from './production-task.mjs'
 import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
+import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
@@ -14615,6 +14616,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.details = grounding.details
       throw error
     }
+    await this.validateDirectFeedBootstrap(plan)
     // A DRAFT checkpoint its own batch would undo is refused here, on the same plan_category correction path as every
     // other unusable plan, before anything is persisted or admitted. A committed plan keeps its immutable checkpoint
     // (the commit-time stock guard covers its later batches).
@@ -14624,6 +14626,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw await this.checkpointRejectionError({ accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) })
     }
     return plan
+  }
+
+  // Run BB lane B: a planner draft whose direct_feed cell cannot be built without the resource it forbids by hand is an ordinary
+  // plan_category correction, refused with the machine bill and the shortfall before anything is committed. Unreadable or
+  // ambiguous native facts never refuse (direct-feed-bootstrap.mjs).
+  async validateDirectFeedBootstrap(plan) {
+    if (!this.roleCannotAuthorOperations() || !Array.isArray(plan.plan) || plan.plan.length === 0 || plan.assessmentOnly === true
+      || !Array.isArray(plan.executionGuidance) || !plan.executionGuidance.some(brief => brief?.materialSupply?.mode === 'direct_feed')) return
+    if (FROZEN_PLAN_STATUSES.has(getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))?.status)) return
+    const refusal = await directFeedBootstrapRefusal(this, plan)
+    if (!refusal) return
+    await this.traceEvent('role.contract_refused', { request_id: this.traceRequest?.id, reason: refusal.code, role: this.agentContext.role, ...refusal.details })
+    const error = this.roleContractError(refusal.code, refusal.message)
+    error.details = refusal.details
+    throw error
   }
 
   localSearchScope() {
