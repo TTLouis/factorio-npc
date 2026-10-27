@@ -256,6 +256,7 @@ test('proposeConstructionLayout refuses malformed requests before any command is
     ['zero alternatives', { ...PROPOSAL, max_alternatives: 0 }],
     ['a coordinate out of range', request([{ ...fixed, x: 2_000_000 }, ...PROPOSAL.placements.slice(0, 2)])],
   ]
+  assert.doesNotThrow(() => proposeCommand(PROPOSAL), 'the control request is well formed')
   for (const [label, args] of bad) assert.throws(() => proposeCommand(args), undefined, label)
 })
 
