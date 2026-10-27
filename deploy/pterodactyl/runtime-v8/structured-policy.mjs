@@ -253,8 +253,41 @@ function operationArgumentFacts(operation) {
     .filter(key => Object.hasOwn(operation.args ?? {}, key)).map(key => [key, summarize(operation.args[key])]))
 }
 
+// A hard search area for getPlacementCandidates (M2): a candidate belongs to it when its snapped entity center is inside,
+// boundary inclusive. circle: radius above 0 and at most 256; box: left_top <= right_bottom, each side at most 512.
+export const PLACEMENT_REGION_MAX_RADIUS = 256
+export const PLACEMENT_REGION_MAX_SIDE = 512
+export function parsePlacementRegion(value) {
+  check(value && typeof value === 'object' && !Array.isArray(value), 'region must be an object')
+  if (value.shape === 'circle') {
+    exactKeys(value, ['shape', 'center', 'radius'])
+    check(value.center !== undefined, 'region.center is required for a circle')
+    check(typeof value.radius === 'number' && Number.isFinite(value.radius) && value.radius > 0 && value.radius <= PLACEMENT_REGION_MAX_RADIUS,
+      `region.radius must be a number above 0 and at most ${PLACEMENT_REGION_MAX_RADIUS}`)
+    return { shape: 'circle', center: position(value.center), radius: value.radius }
+  }
+  if (value.shape === 'box') {
+    exactKeys(value, ['shape', 'left_top', 'right_bottom'])
+    check(value.left_top !== undefined && value.right_bottom !== undefined, 'region.left_top and region.right_bottom are required for a box')
+    const left_top = position(value.left_top)
+    const right_bottom = position(value.right_bottom)
+    check(left_top.x <= right_bottom.x && left_top.y <= right_bottom.y, 'region.left_top must not exceed region.right_bottom on either axis')
+    check(right_bottom.x - left_top.x <= PLACEMENT_REGION_MAX_SIDE && right_bottom.y - left_top.y <= PLACEMENT_REGION_MAX_SIDE,
+      `region box sides must be at most ${PLACEMENT_REGION_MAX_SIDE}`)
+    return { shape: 'box', left_top, right_bottom }
+  }
+  throw new base.PolicyError('region.shape must be circle or box')
+}
+
+function renderPlacementRegion(region) {
+  const point = value => `{x=${value.x},y=${value.y}}`
+  return region.shape === 'circle'
+    ? `{shape='circle',center=${point(region.center)},radius=${region.radius}}`
+    : `{shape='box',left_top=${point(region.left_top)},right_bottom=${point(region.right_bottom)}}`
+}
+
 function parsePlacementCandidates(args) {
-  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'covers_position', 'connects_to', 'anchor', 'limit'])
+  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'covers_position', 'connects_to', 'anchor', 'limit', 'region'])
   const parsed = { entity_name: base.factorioName(args.entity_name) }
   if (args.center !== undefined) parsed.center = position(args.center)
   if (args.radius !== undefined) parsed.radius = optionalInteger(args.radius, 'radius', 1, 24)
@@ -263,6 +296,7 @@ function parsePlacementCandidates(args) {
   if (args.connects_to !== undefined) parsed.connects_to = parseConnectsTo(args.connects_to)
   if (args.anchor !== undefined) parsed.anchor = parseAnchor(args.anchor)
   if (args.limit !== undefined) parsed.limit = optionalInteger(args.limit, 'limit', 1, 8)
+  if (args.region !== undefined) parsed.region = parsePlacementRegion(args.region)
   return parsed
 }
 
@@ -297,6 +331,7 @@ function renderPlacementCandidates(args) {
   }
   if (parsed.anchor !== undefined) fields.push(`anchor={unit_number=${parsed.anchor.unit_number}}`)
   if (parsed.limit !== undefined) fields.push(`limit=${parsed.limit}`)
+  if (parsed.region !== undefined) fields.push(`region=${renderPlacementRegion(parsed.region)}`)
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",{${fields.join(',')}})))`
 }
 
@@ -662,6 +697,20 @@ const positionSchema = {
   properties: { x: { type: 'number', minimum: -1000000, maximum: 1000000 }, y: { type: 'number', minimum: -1000000, maximum: 1000000 } },
 }
 
+const placementRegionSchema = {
+  description: 'Hard search area. A candidate is listed only when its entity center (the candidate position) lies inside the region, boundary inclusive; positions outside it are filtered before ranking and truncation, never listed, and counted in region_rejected_count. The answer reports spatial_status and search_completeness for the region. The search covers the whole region (radius does not shrink it) up to the 24-tile search limit and says when it stopped short. A step whose entity_count requirement for this prototype has an anchor and radius supplies that circle when region is omitted, and only a region wholly inside it is accepted.',
+  oneOf: [
+    {
+      type: 'object', additionalProperties: false, required: ['shape', 'center', 'radius'],
+      properties: { shape: { type: 'string', enum: ['circle'] }, center: positionSchema, radius: { type: 'number', exclusiveMinimum: 0, maximum: 256 } },
+    },
+    {
+      type: 'object', additionalProperties: false, required: ['shape', 'left_top', 'right_bottom'],
+      properties: { shape: { type: 'string', enum: ['box'] }, left_top: positionSchema, right_bottom: positionSchema },
+    },
+  ],
+}
+
 const placementCandidatesDefinition = {
   type: 'function',
   function: {
@@ -688,6 +737,7 @@ const placementCandidatesDefinition = {
           properties: { unit_number: { type: 'integer', minimum: 1 } },
         },
         limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 },
+        region: placementRegionSchema,
       },
     },
   },

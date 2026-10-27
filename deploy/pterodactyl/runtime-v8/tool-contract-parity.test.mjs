@@ -340,3 +340,14 @@ test('execute_construction_plan keeps its harness-only native preservation witne
   assert.equal(staging.operationMetadataForName('execute_construction_plan').preflight, false)
   assert.equal(staging.renderOperationPreflight({ name: 'execute_construction_plan', args: { validation_id: 7, placement_count: 2 } }), null)
 })
+
+test('getPlacementCandidates region is part of the manifest args, the runtime schema and the ordinary-agent schema source', async () => {
+  assert.deepEqual([...contract.tools.getPlacementCandidates.args].sort(),
+    ['anchor', 'center', 'connects_to', 'covers_position', 'entity_name', 'limit', 'radius', 'region', 'target_resource'])
+  const tool = runtime.toolDefinitions.find(entry => entry.function.name === 'getPlacementCandidates')
+  assert.deepEqual(Object.keys(tool.function.parameters.properties).sort(), [...contract.tools.getPlacementCandidates.args].sort())
+  const command = runtime.toolCommand('getPlacementCandidates', { ...toolSamples.getPlacementCandidates, region: { shape: 'box', left_top: { x: 0, y: 0 }, right_bottom: { x: 4, y: 4 } } })
+  assert.match(command, /remote\.call\("autorio_tools","get_placement_candidates",\{.*region=\{shape='box'/)
+  const agentSource = await readFile(new URL('packages/agent/src/llm/tools.ts', root), 'utf8')
+  for (const key of contract.tools.getPlacementCandidates.args) assert.match(agentSource.slice(agentSource.indexOf('const placementCandidatesSchema')), new RegExp(`(^|\\s)${key}:`), `${key} missing from the agent schema`)
+})

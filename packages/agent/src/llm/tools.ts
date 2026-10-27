@@ -69,15 +69,41 @@ const prototypeDiscoverySchema = z.object({
   limit: z.number().int().min(1).max(12).default(6),
 }).strict()
 
+const placementPositionSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+}).strict()
+
+const placementUnitSchema = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)
+
+// A hard search area: a candidate is listed only when its entity center lies inside it (boundary inclusive).
+const placementRegionSchema = z.discriminatedUnion('shape', [
+  z.object({
+    shape: z.literal('circle'),
+    center: placementPositionSchema,
+    radius: z.number().finite().gt(0).max(256),
+  }).strict(),
+  z.object({
+    shape: z.literal('box'),
+    left_top: placementPositionSchema,
+    right_bottom: placementPositionSchema,
+  }).strict(),
+])
+
 const placementCandidatesSchema = z.object({
   entity_name: factorioNameSchema,
-  center: z.object({
-    x: z.number().finite(),
-    y: z.number().finite(),
-  }).strict().optional(),
+  center: placementPositionSchema.optional(),
   radius: z.number().int().min(1).max(24).default(8),
   target_resource: factorioNameSchema.optional(),
+  covers_position: placementPositionSchema.optional(),
+  connects_to: z.object({
+    unit_number: placementUnitSchema,
+    storage_index: z.number().int().min(1).max(8).optional(),
+    connection_index: z.number().int().min(1).max(8).optional(),
+  }).strict().optional(),
+  anchor: z.object({ unit_number: placementUnitSchema }).strict().optional(),
   limit: z.number().int().min(1).max(8).default(5),
+  region: placementRegionSchema.optional(),
 }).strict()
 
 async function readRemoteStatus(interfaceName: 'autorio_actor' | 'autorio_operations' | 'autorio_navigation' | 'autorio_crafting' | 'autorio_research' | 'autorio_combat' | 'autorio_follow' | 'autorio_defense' | 'autorio_equipment') {

@@ -91,3 +91,12 @@ test('construction area clearing contract stays advertised by full and compact p
     "remote.call('autorio_operations','clear_construction_area',10,-4,12,8)",
   )
 })
+
+test('placement candidates take a hard region that reaches the mod as a request field and only as the two documented shapes', () => {
+  const tool = toolDefinition('getPlacementCandidates')
+  assert.deepEqual(tool.function.parameters.properties.region.oneOf.map(branch => branch.required), [['shape', 'center', 'radius'], ['shape', 'left_top', 'right_bottom']])
+  assert.match(toolCommand('getPlacementCandidates', { entity_name: 'burner-mining-drill', region: { shape: 'circle', center: { x: 10, y: 10 }, radius: 6 } }),
+    /get_placement_candidates",\{entity_name='burner-mining-drill',region=\{shape='circle',center=\{x=10,y=10\},radius=6\}\}\)/)
+  assert.throws(() => toolCommand('getPlacementCandidates', { entity_name: 'burner-mining-drill', region: { shape: 'circle', center: { x: 10, y: 10 }, radius: 0 } }))
+  assert.equal(observationToolTier('getPlacementCandidates'), 'fact')
+})

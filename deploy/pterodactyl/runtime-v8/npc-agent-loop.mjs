@@ -19,6 +19,7 @@ import { obligationContractContext, captureObligationProof, compileObligations, 
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
+import { candidateScopeVerdict, committedPlacementRegions, compilePlacementScope, describeRegion, distanceFromAnchor } from './placement-region.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
 import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, fitTopologyBlock, deduplicateTopologySkillRefs, reclaimTopologyRoom } from './topology-context.mjs'
 
@@ -113,6 +114,7 @@ import {
   isLostAcknowledgement,
   operationSignature as batchOperationSignature,
   PENDING_STATE,
+  placedEntityName,
   reconcilePendingOperation,
   settledPrefixPatch,
   reconciliationFacts,
@@ -194,6 +196,7 @@ import {
   isPlannerControlToolName,
   parsePlan as parseRuntimePlan,
   plannerControlPayloadFromMessage,
+  parsePlacementRegion,
   plannerControlToolDefinitions,
   renderOperation,
   renderOperationPreflight,
@@ -5622,7 +5625,64 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const plan = getActivePlanningPlan(planning)
       if (!plan || args.goal_id !== planning?.goal?.goal_id || args.plan_id !== plan.plan_id) throw new AgentLoopError('Reservation must name the exact active goal and plan')
     }
+    if (name === 'getPlacementCandidates') return toolCommand(name, this.placementScopeFor(args).args)
     return toolCommand(name, args)
+  }
+
+  // M2 committed-constraint compilation. The active step's anchored entity_count requirement for a prototype fixes where a
+  // build of it counts (entity-center distance <= radius from the anchor), so a candidate search for that prototype is
+  // filtered by that circle BEFORE the native ranking and truncation. With no region the harness supplies the committed circle;
+  // a model region is admitted only when wholly inside it, and otherwise refused as a correctable argument error stating the
+  // committed region as facts. Everything else (no matching requirement, no anchor, another prototype) is unchanged.
+  // Every caller of observationToolCommand gets this, so the planner, executor and handoff reads share one rule.
+  placementScopeFor(args) {
+    if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.entity_name !== 'string') return { args }
+    const committed = committedPlacementRegions(this.committedPlacementRequirements(), args.entity_name)
+    if (committed.length === 0) return { args }
+    const scope = compilePlacementScope(args.region === undefined ? undefined : parsePlacementRegion(args.region), committed)
+    if (scope.refusal) {
+      const { committed_region: circle, requested_region: requested } = scope.refusal
+      const error = new AgentLoopError(`getPlacementCandidates region ${describeRegion(requested)} is not wholly inside the committed region for ${args.entity_name}: `
+        + `the active step's entity_count requirement for ${args.entity_name} counts only entities whose center is within ${circle.radius} of anchor (${circle.center.x}, ${circle.center.y}), `
+        + `that is ${describeRegion(circle)}. Without a region, the search uses that committed region; a region you pass must lie wholly inside it`)
+      error.code = scope.refusal.code
+      error.failureClass = 'tool_validation'
+      error.details = { entity_name: args.entity_name, committed_region: circle, requested_region: requested }
+      void this.traceEvent('observation.placement_scope_refused', { request_id: this.traceRequest?.id, reason: scope.refusal.code, ...error.details })
+      throw error
+    }
+    return scope.injected ? { args: { ...args, region: scope.region }, injected: true } : { args }
+  }
+
+  // M2 pre-admission check of a place_candidate against the same committed circle. Only the native preflight result of that very
+  // operation speaks: placement_item.entity_name names the prototype the candidate registry will place and candidate_position
+  // where; nothing the model wrote (ids included) is read for either. A result that does not name its prototype cannot be
+  // matched to a requirement and is left to the existing checks. Returns the refusal (class argument: the model can pick another
+  // candidate) or undefined.
+  committedCandidateRefusal(operation, result, index) {
+    if (operation?.name !== 'place_candidate' || result?.ok !== true) return undefined
+    const entityName = placedEntityName(operation, result)
+    if (!entityName) return undefined
+    const committed = committedPlacementRegions(this.committedPlacementRequirements(), entityName)
+    const verdict = candidateScopeVerdict(committed, result.candidate_position)
+    if (!verdict.applies || verdict.ok) return undefined
+    const position = Number.isFinite(result.candidate_position?.x) && Number.isFinite(result.candidate_position?.y) ? { x: result.candidate_position.x, y: result.candidate_position.y } : undefined
+    const regions = committed.map(circle => describeRegion(circle)).join(' or ')
+    const facts = verdict.code === 'candidate_outside_committed_region'
+      ? `the native preflight places this candidate's ${entityName} at (${position.x}, ${position.y}), ${committed.map(circle => `${Math.round(distanceFromAnchor(circle, position) * 100) / 100} from anchor (${circle.center.x}, ${circle.center.y})`).join(' / ')}, outside the committed region: the active step's entity_count requirement for ${entityName} counts only entities within ${regions}.`
+      : `the native preflight did not report this candidate's position, so it cannot be checked against the committed region: the active step's entity_count requirement for ${entityName} counts only entities within ${regions}.`
+    return {
+      ok: false,
+      operation: 'place_candidate',
+      code: verdict.code,
+      refusal_class: REFUSAL_CLASS.ARGUMENT,
+      operation_index: index,
+      entity_name: entityName,
+      committed_regions: committed,
+      ...(position ? { candidate_position: position } : {}),
+      detail: facts,
+      correction_message: `[HARNESS] Deterministic preflight rejected operation ${index + 1} (place_candidate) before Autorio admission with code ${verdict.code}; no mutation from this batch ran. ${facts} The committed step is unchanged. getPlacementCandidates for ${entityName} searches the committed region.`,
+    }
   }
 
   // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples
@@ -10224,6 +10284,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     if (result?.ok) await this.waitForRequestAdmission(this.persistState())
     return result
+  }
+
+  // The active step's committed entity_count requirements: its obligation outcome and its completion contract (a placement
+  // step can carry the anchored area in either). Both are the step's own committed checks, never model arguments.
+  committedPlacementRequirements() {
+    const plan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const step = plan?.steps?.[plan.active_step_index]
+    const fromObligations = this.currentContractObligations()?.outcome?.requirements
+    const fromContract = step?.completion_contract?.requirements
+    return { outcome: { requirements: [...(Array.isArray(fromObligations) ? fromObligations : []), ...(Array.isArray(fromContract) ? fromContract : [])] } }
   }
 
   // Extended contracts are accepted only against the current canonical typed
@@ -14833,6 +14903,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ? { ...message, tool_calls: rawCalls.slice(0, MAX_OBSERVATION_TOOL_CALLS_PER_BATCH) }
         : message
       const prepared = super.prepareToolBatch(admittedMessage)
+      for (const entry of prepared) {
+        // The command already carries the committed region (observationToolCommand). The entry's args and signature say so too, so
+        // the read cache and duplicate detection never treat a committed-region search as the same read as an unscoped one.
+        if (entry.tool?.function?.name !== 'getPlacementCandidates') continue
+        const scoped = this.placementScopeFor(entry.args)
+        if (!scoped.injected) continue
+        entry.args = scoped.args
+        entry.signature = toolSignature('getPlacementCandidates', scoped.args)
+        void this.traceEvent('observation.placement_scope_compiled', { request_id: this.traceRequest?.id, reason: 'committed_entity_count_region',
+          entity_name: scoped.args.entity_name, region: scoped.args.region })
+      }
       if (partialBatchEligible) {
         Object.defineProperty(prepared, '_sglunaObservationAdmission', {
           configurable: true,
@@ -15524,6 +15605,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           result.ok = false; result.code = 'reservation_plan_identity_mismatch'; result.refusal_class = REFUSAL_CLASS.AUTHORITY
         }
       }
+      // M2: a candidate the native preflight places outside the active step's committed region is refused before admission.
+      const outsideCommitted = this.committedCandidateRefusal(operations[index], result, index)
+      if (outsideCommitted) {
+        await this.traceEvent('operations.placement_scope_refused', { request_id: this.traceRequest?.id, operation_index: index, code: outsideCommitted.code,
+          entity_name: outsideCommitted.entity_name, candidate_position: outsideCommitted.candidate_position, committed_regions: outsideCommitted.committed_regions })
+        result = outsideCommitted
+        results[results.length - 1] = result
+      }
       if (index > 0 && result?.code === 'supply_missing' && result.transfer?.items?.length > 1) {
         // Source shortage has precedence in the mod's multi-item result. It must not conceal an independent
         // destination refusal or two item kinds competing for the same sole slot when stock is supplied later.
@@ -15596,6 +15685,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw failure
     }
     await this.settleBatchStock(operations, results, held, assertPreflightCurrent)
+    // A placement whose stock rejection was held and then settled as covered reaches here as ok; its position gets the same check.
+    for (const index of held) {
+      const outsideCommitted = this.committedCandidateRefusal(operations[index], results[index], index)
+      if (!outsideCommitted) continue
+      await this.traceEvent('operations.placement_scope_refused', { request_id: this.traceRequest?.id, operation_index: index, code: outsideCommitted.code,
+        entity_name: outsideCommitted.entity_name, candidate_position: outsideCommitted.candidate_position, committed_regions: outsideCommitted.committed_regions })
+      const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${outsideCommitted.code}`)
+      failure.preflight = outsideCommitted
+      failure.preflightResults = results.slice()
+      throw failure
+    }
     await checkFluidPreservationEligibility(this, { operations, preflight: results })
     return results
   }

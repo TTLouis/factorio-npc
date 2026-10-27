@@ -87,6 +87,17 @@ describe('canonical Factorio provider contract parity', () => {
     expect(toolContract.findConstructionSites?.surfaces.sort()).toEqual(['ordinary-agent', 'pterodactyl-runtime-v8'])
   })
 
+  it('accepts the placement-candidate region as a circle or a box and rejects any other shape', () => {
+    const tool = agentTools.find(entry => entry.name === 'getPlacementCandidates') as { schema: { safeParse: (value: unknown) => { success: boolean } } }
+    const circle = { shape: 'circle', center: { x: 10, y: 10 }, radius: 6 }
+    const box = { shape: 'box', left_top: { x: 0, y: 0 }, right_bottom: { x: 4, y: 4 } }
+    expect(tool.schema.safeParse({ entity_name: 'burner-mining-drill', region: circle }).success).toBe(true)
+    expect(tool.schema.safeParse({ entity_name: 'burner-mining-drill', region: box }).success).toBe(true)
+    for (const region of [{ ...circle, radius: 0 }, { ...circle, radius: 257 }, { shape: 'ring', center: circle.center, radius: 3 }, { shape: 'circle', radius: 3 }]) {
+      expect(tool.schema.safeParse({ entity_name: 'burner-mining-drill', region }).success, JSON.stringify(region)).toBe(false)
+    }
+  })
+
   it('keeps canonical planning remote mappings explicit', () => {
     expect(toolContract.getPlacementCandidates?.remote).toEqual(['autorio_tools', 'get_placement_candidates'])
     expect(toolContract.getProductionScope?.remote).toEqual(['autorio_planning', 'scope_context'])

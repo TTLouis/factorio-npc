@@ -685,6 +685,17 @@
       "surface_policy": "shared"
     },
     "getPlacementCandidates": {
+      "args": [
+        "entity_name",
+        "center",
+        "radius",
+        "target_resource",
+        "covers_position",
+        "connects_to",
+        "anchor",
+        "limit",
+        "region"
+      ],
       "remote": [
         "autorio_tools",
         "get_placement_candidates"
