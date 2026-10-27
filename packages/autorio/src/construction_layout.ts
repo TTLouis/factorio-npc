@@ -7,6 +7,8 @@ import { find_world_entities } from './npc_vision'
 import { item_output_position } from './placement_candidates'
 import { rotate_cardinal, vector_xy } from './placement_geometry'
 import { planned_placement_footprint } from './placement_preflight'
+import type { BatchIdentity, LayoutEndpointRef, LayoutNode, LayoutRecord, LayoutRecordConnection } from './construction_layout_record'
+import { COMPLETED_NODE_MISSING, current_execution, execution_pending, LAYOUT_EXECUTIONS_MAX, REMAINDER_UNPLACED, settle_execution } from './construction_layout_record'
 
 // Typed connections between the placements of one validated construction plan, and the layout record that tracks them while
 // the plan executes. Everything here reads engine and prototype facts (prototype `type`, the inserter vectors, the drill's
@@ -49,10 +51,7 @@ export type LayoutConnectionInput =
   | { kind: 'drill_output', drill: { slot: string }, receiver: LayoutEndpointInput }
   | { kind: 'fluid', from: LayoutEndpointInput, to: LayoutEndpointInput }
 
-export interface LayoutEndpointRef {
-  slot?: string
-  unit_number?: number
-}
+export type { BatchIdentity, LayoutEndpointRef, LayoutExecution, LayoutNode, LayoutRecord, LayoutRecordConnection } from './construction_layout_record'
 
 // The stored form of a connection: every role of its kind resolved to a slot or an existing unit_number.
 export interface LayoutConnection {
@@ -61,44 +60,10 @@ export interface LayoutConnection {
   endpoints: Record<string, LayoutEndpointRef>
 }
 
-export interface LayoutNode {
-  node_id: string
-  index: number
-  slot?: string
-  entity_name: string
-  position: Position
-  direction: number
-  execution_rank: number
-  state: 'queued' | 'placed'
-  unit_number?: number
-  placed_tick?: number
-}
-
-export interface LayoutRecordConnection {
-  index: number
-  kind: string
-  endpoints: Record<string, LayoutEndpointRef>
-  state: 'pending' | 'verified' | 'mismatch'
-  observed?: Record<string, unknown>
-}
-
-export interface LayoutRecord {
-  layout_id: number
-  plan_id: string
-  actor_id: number
-  surface_index: number
-  force_index: number
-  created_tick: number
-  state: 'running' | 'complete' | 'paused'
-  pause_reason?: string
-  nodes: LayoutNode[]
-  connections: LayoutRecordConnection[]
-  production: 'not_asserted'
-  duplicate_receipts: number
-}
-
 declare const storage: {
   sgluna_construction_layouts?: Record<number, LayoutRecord>
+  /** The task manager's open batch (cleared when it closes and at a startup reconciliation). */
+  sgluna_task_active_batch?: BatchIdentity
 }
 
 // Role names per connection kind, in the order they are read and reported.
@@ -629,6 +594,10 @@ export function create_layout_record(args: {
     connections,
     production: 'not_asserted',
     duplicate_receipts: 0,
+    // The first execution queues every node; it learns its task batch once the placements are queued.
+    executions_used: 1,
+    executions_max: LAYOUT_EXECUTIONS_MAX,
+    executions: [{ number: 1, queued_tick: game.tick, queued_nodes: args.execution_order.slice() }],
   }
   const records = layouts()
   records[args.layout_id] = record
@@ -642,11 +611,36 @@ export function discard_layout_record(layout_id: number) {
   if (records) delete records[layout_id]
 }
 
-// Read-only: the stored record of a layout, or an error.
-export function construction_layout_status(layout_id: unknown) {
+export function layout_record(layout_id: unknown): LayoutRecord | undefined {
+  return valid_integer(layout_id, 1, MAX_UNIT_NUMBER) ? storage.sgluna_construction_layouts?.[layout_id as number] : undefined
+}
+
+// The identity of a task batch as the task manager's status snapshot reports it (its id is optional there).
+export function batch_identity(batch: { batch_id?: number, batch_generation: number, batch_ref: string } | undefined): BatchIdentity | undefined {
+  if (batch === undefined || batch.batch_id === undefined) return undefined
+  return { batch_id: batch.batch_id, batch_generation: batch.batch_generation, batch_ref: batch.batch_ref }
+}
+
+// The task batch open now, from the task manager's own persisted batch record.
+export function open_task_batch(): BatchIdentity | undefined {
+  const batch = storage.sgluna_task_active_batch
+  if (batch === undefined) return undefined
+  return { batch_id: batch.batch_id, batch_generation: batch.batch_generation, batch_ref: batch.batch_ref }
+}
+
+export interface SettlementContext {
+  /** Without an actor the placed nodes' entities cannot be read, so none is declared missing. */
+  actor?: ControlledActor
+  active_batch?: BatchIdentity
+}
+
+// The stored record of a layout after settling it, or an error. Settlement is idempotent and only ever moves a record forward
+// (queued → not_placed once its execution is over, placed → missing when its entity is gone), so a read may call it.
+export function construction_layout_status(layout_id: unknown, context?: SettlementContext) {
   if (!valid_integer(layout_id, 1, MAX_UNIT_NUMBER)) return { ok: false, error: { code: 'INVALID_REQUEST', message: 'layout_id must be a positive integer' } }
   const record = storage.sgluna_construction_layouts?.[layout_id as number]
   if (!record) return { ok: false, error: { code: 'LAYOUT_UNAVAILABLE', message: `no construction layout ${layout_id} is recorded` } }
+  settle_construction_layout(record, { active_batch: open_task_batch(), ...context })
   return { ok: true, layout: record }
 }
 
@@ -654,6 +648,164 @@ function pause(record: LayoutRecord, reason: string) {
   if (record.state === 'paused') return
   record.state = 'paused'
   record.pause_reason = reason
+}
+
+// A settlement writes its own reason only where no event (a failed node, a connection that does not hold) wrote one first.
+function pause_by_settlement(record: LayoutRecord, reason: string) {
+  if (record.state !== 'paused') {
+    pause(record, reason)
+    return
+  }
+  const current = record.pause_reason
+  if (current === undefined || current === REMAINDER_UNPLACED || current.startsWith(COMPLETED_NODE_MISSING)) record.pause_reason = reason
+}
+
+// Settles a layout whose execution may be over. While its placement tasks are still the open task batch nothing changes. Once
+// they are not (finished, cancelled, the batch replaced, the game restarted), every node the execution queued but did not bind
+// was not built by it (binding is atomic with create_entity) and becomes not_placed; a placed node whose entity is gone
+// becomes missing. A layout that placed everything and verified every connection stays complete. Otherwise it is paused, with
+// the reason that stopped it: a missing node, a connection that does not hold, or the unplaced remainder.
+export function settle_construction_layout(record: LayoutRecord, context: SettlementContext) {
+  if (record.state === 'complete') return record
+  const execution = current_execution(record)
+  if (execution !== undefined && execution_pending(execution, context.active_batch)) return record
+  if (execution !== undefined) {
+    settle_execution(record, execution, game.tick)
+  }
+  else {
+    for (const node of record.nodes) {
+      if (node.state === 'queued') node.state = 'not_placed'
+    }
+  }
+  let first_missing: LayoutNode | undefined
+  let unplaced = 0
+  for (const node of record.nodes) {
+    if (node.state === 'placed' && context.actor !== undefined) {
+      const entity = live_node_entity(context.actor, node)
+      if (entity === undefined || entity.name !== node.entity_name) node.state = 'missing'
+    }
+    if (node.state === 'missing' && first_missing === undefined) first_missing = node
+    if (node.state === 'not_placed') unplaced++
+  }
+  if (first_missing !== undefined) pause_by_settlement(record, `${COMPLETED_NODE_MISSING}: ${first_missing.node_id}`)
+  else if (unplaced > 0) pause_by_settlement(record, REMAINDER_UNPLACED)
+  else settle_layout(record)
+  return record
+}
+
+// The nodes a resume would build, with their stored exact geometry, and the connections still to be proved for them. A
+// connection whose other end is an already placed node refers to that node's entity by unit_number (an existing endpoint); a
+// slot stays a slot only when its node is part of the remainder. Everything is read from the record: the model supplies none.
+export function plan_layout_remainder(record: LayoutRecord) {
+  const remainder: LayoutNode[] = []
+  const retained: LayoutNode[] = []
+  for (const node of record.nodes) {
+    if (node.state === 'not_placed') remainder.push(node)
+    else if (node.state === 'placed') retained.push(node)
+  }
+  remainder.sort((a, b) => a.execution_rank - b.execution_rank)
+  const placements: LayoutPlacement[] = []
+  const node_indices: number[] = []
+  for (const node of remainder) {
+    placements.push({ entity_name: node.entity_name, x: node.position.x, y: node.position.y, direction: node.direction, slot: node.slot })
+    node_indices.push(node.index)
+  }
+  const connections: LayoutConnection[] = []
+  for (const connection of record.connections) {
+    if (connection.state !== 'pending') continue
+    const endpoints: Record<string, LayoutEndpointRef> = {}
+    let involved = false
+    for (const role of roles_of(connection)) {
+      const endpoint = connection.endpoints[role]
+      if (endpoint.slot === undefined) {
+        endpoints[role] = { unit_number: endpoint.unit_number }
+        continue
+      }
+      const node = node_of(record, endpoint)
+      if (node === undefined) return { error: { code: 'LAYOUT_RECORD_INCONSISTENT', message: `connection ${connection.index} names slot ${endpoint.slot} that no node of layout ${record.layout_id} carries` } }
+      if (node.state === 'not_placed') {
+        involved = true
+        endpoints[role] = { slot: endpoint.slot }
+      }
+      else if (node.state === 'placed' && node.unit_number !== undefined) {
+        endpoints[role] = { unit_number: node.unit_number }
+      }
+      else {
+        return { error: { code: 'LAYOUT_RECORD_INCONSISTENT', message: `connection ${connection.index} depends on node ${node.node_id} that is ${node.state}` } }
+      }
+    }
+    if (involved) connections.push({ index: connection.index, kind: connection.kind, endpoints })
+  }
+  return { placements, node_indices, connections, retained, remainder }
+}
+
+// Why a layout cannot take another execution now, or undefined. Read-only: it expects the record to be settled already.
+export function layout_resume_problem(record: LayoutRecord, node_indices: number[] | undefined, active_batch: BatchIdentity | undefined) {
+  const execution = current_execution(record)
+  if (execution !== undefined && execution_pending(execution, active_batch)) return { code: 'LAYOUT_EXECUTION_PENDING', message: `construction layout ${record.layout_id} is still executing` }
+  if (record.state === 'complete') return { code: 'LAYOUT_COMPLETE', message: `construction layout ${record.layout_id} is complete` }
+  for (const node of record.nodes) {
+    if (node.state === 'missing') {
+      return { code: 'LAYOUT_COMPLETED_NODE_MISSING', message: `node ${node.node_id} was placed and its entity is gone; a completed node is never replayed` }
+    }
+  }
+  for (const connection of record.connections) {
+    if (connection.state === 'mismatch') {
+      return { code: 'LAYOUT_CONNECTION_MISMATCH', message: `connection ${connection.index} (${connection.kind}) does not hold on the placed entities` }
+    }
+  }
+  if ((record.executions_used ?? 1) >= (record.executions_max ?? LAYOUT_EXECUTIONS_MAX)) {
+    return { code: 'LAYOUT_ALLOWANCE_EXHAUSTED', message: `construction layout ${record.layout_id} has used its ${record.executions_max ?? LAYOUT_EXECUTIONS_MAX} executions` }
+  }
+  if (node_indices !== undefined) {
+    let unplaced = 0
+    for (const node of record.nodes) {
+      if (node.state === 'not_placed') unplaced++
+    }
+    if (unplaced !== node_indices.length) return { code: 'LAYOUT_REMAINDER_CHANGED', message: `construction layout ${record.layout_id} no longer has the validated remainder` }
+    for (const index of node_indices) {
+      if (record.nodes[index]?.state !== 'not_placed') return { code: 'LAYOUT_REMAINDER_CHANGED', message: `node ${index} of construction layout ${record.layout_id} is no longer unplaced` }
+    }
+  }
+  return undefined
+}
+
+export interface ResumeSnapshot {
+  state: LayoutRecord['state']
+  pause_reason?: string
+}
+
+// Starts the next execution of a settled, paused layout: the nodes it will build are queued again, the allowance is spent and
+// the layout runs. Returns what rollback_layout_execution needs to undo it if the placements cannot be queued.
+export function begin_layout_execution(record: LayoutRecord, node_indices: number[]): ResumeSnapshot {
+  const saved: ResumeSnapshot = { state: record.state, pause_reason: record.pause_reason }
+  record.executions_used = (record.executions_used ?? 1) + 1
+  record.executions ??= []
+  record.executions.push({ number: record.executions_used, queued_tick: game.tick, queued_nodes: node_indices.slice() })
+  for (const index of node_indices) record.nodes[index].state = 'queued'
+  record.state = 'running'
+  record.pause_reason = undefined
+  return saved
+}
+
+export function rollback_layout_execution(record: LayoutRecord, saved: ResumeSnapshot) {
+  const execution = record.executions.pop()
+  if (execution !== undefined) {
+    for (const index of execution.queued_nodes) record.nodes[index].state = 'not_placed'
+  }
+  record.executions_used = math.max(1, (record.executions_used ?? 1) - 1)
+  record.state = saved.state
+  record.pause_reason = saved.pause_reason
+}
+
+// Once an execution's placements are queued: the task batch they belong to, which is how a later read tells it is over.
+export function bind_layout_execution(layout_id: number, active_batch: BatchIdentity | undefined) {
+  const record = storage.sgluna_construction_layouts?.[layout_id]
+  const execution = record === undefined ? undefined : current_execution(record)
+  if (execution === undefined || active_batch === undefined) return
+  execution.batch_id = active_batch.batch_id
+  execution.batch_generation = active_batch.batch_generation
+  execution.batch_ref = active_batch.batch_ref
 }
 
 function record_node(record: LayoutRecord, index: number) {
@@ -831,7 +983,10 @@ export function record_layout_node_placed(actor: ControlledActor, layout_node: {
   if (!record) return
   const node = record_node(record, layout_node.index)
   if (!node) return
-  if (node.state === 'placed') {
+  // Only a node a task of the current execution is still waiting to build takes a receipt. A node already bound (placed, or
+  // missing after it was), or settled as not placed because its execution ended, never rebinds: late or repeated receipts are
+  // counted and ignored.
+  if (node.state !== 'queued') {
     record.duplicate_receipts += 1
     return
   }

@@ -2,7 +2,7 @@ import { reservation_intersection } from './area_reservations'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import type { LayoutConnection, LayoutConnectionInput } from './construction_layout'
-import { create_layout_record, discard_layout_record, normalize_connections, overlaps, plan_execution_order, prove_plan_connections, valid_slot_name } from './construction_layout'
+import { batch_identity, begin_layout_execution, bind_layout_execution, create_layout_record, discard_layout_record, layout_record, layout_resume_problem, normalize_connections, open_task_batch, overlaps, plan_execution_order, plan_layout_remainder, prove_plan_connections, rollback_layout_execution, settle_construction_layout, valid_slot_name } from './construction_layout'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
 import { execute_prepared_remote_construction_plan, is_prepared_remote_construction_plan } from './map_construction'
 import { placement_check_args } from './placement_geometry'
@@ -41,6 +41,12 @@ interface StoredConstructionPlan {
   created_tick: number
   placements: ConstructionExecutionPlacement[]
   connections?: LayoutConnection[]
+  /**
+   * Set when the token validates only the unplaced remainder of an existing layout (resume_construction_layout): that layout,
+   * and for each placement the index of the layout node it stands for. Executing it continues the same layout record.
+   */
+  resume_layout_id?: number
+  resume_node_indices?: number[]
 }
 
 declare const storage: {
@@ -366,6 +372,106 @@ export function validate_construction_execution_plan(actor: ControlledActor, req
   }
 }
 
+// Why a token that validated a layout's remainder no longer applies, or undefined (also for a token that is not a resume
+// token). Read-only: the layout must still be the one the token was made for, settled, unplaced exactly where validated, and
+// within its allowance.
+function resume_token_problem(plan: StoredConstructionPlan) {
+  if (plan.resume_layout_id === undefined) return undefined
+  const record = layout_record(plan.resume_layout_id)
+  if (!record) return { code: 'LAYOUT_UNAVAILABLE', message: `construction layout ${plan.resume_layout_id} is no longer recorded` }
+  if (record.actor_id !== plan.actor_id || record.surface_index !== plan.surface_index || record.force_index !== plan.force_index) {
+    return { code: 'LAYOUT_SCOPE_MISMATCH', message: `construction layout ${record.layout_id} belongs to another actor, surface or force` }
+  }
+  return layout_resume_problem(record, plan.resume_node_indices ?? [], open_task_batch())
+}
+
+// Validates ONLY the unplaced remainder of a recorded layout, so a layout cancelled or interrupted after some of its nodes were
+// built continues from what is proven instead of being replayed. The layout is settled first (a read of the engine and the
+// task manager, never of the model). Each remainder node keeps the exact geometry it was recorded with; a connection to an
+// already placed node refers to that node's entity as an existing endpoint. The same spatial and eligibility phases as
+// validate_construction_execution_plan decide the answer, and only an eligible remainder stores a token. Nothing is built,
+// and the layout record is not touched except by settlement.
+export function resume_construction_layout(actor: ControlledActor, layout_id: unknown) {
+  const identity = actor.status_snapshot()
+  if (identity.actor_id === undefined) {
+    return { ok: false, error: { code: 'ACTOR_UNAVAILABLE', message: 'controlled actor has no stable identity' } }
+  }
+  if (!valid_integer(layout_id as number, 1, 9007199254740991)) {
+    return { ok: false, error: { code: 'INVALID_REQUEST', message: 'layout_id must be a positive integer' } }
+  }
+  const record = layout_record(layout_id)
+  if (!record) return { ok: false, layout_id, error: { code: 'LAYOUT_UNAVAILABLE', message: `no construction layout ${layout_id} is recorded` } }
+  if (record.actor_id !== identity.actor_id || record.surface_index !== actor.surface.index || record.force_index !== actor.force.index) {
+    return { ok: false, layout_id, error: { code: 'LAYOUT_SCOPE_MISMATCH', message: `construction layout ${layout_id} belongs to actor ${record.actor_id} on surface ${record.surface_index} and force ${record.force_index}` } }
+  }
+  const active_batch = open_task_batch()
+  settle_construction_layout(record, { actor, active_batch })
+  const problem = layout_resume_problem(record, undefined, active_batch)
+  if (problem) return { ok: false, layout_id, layout_state: record.state, error: problem }
+
+  const remainder = plan_layout_remainder(record)
+  if ('error' in remainder) return { ok: false, layout_id, layout_state: record.state, error: remainder.error }
+  const placements = remainder.placements!
+  if (placements.length === 0) {
+    return { ok: false, layout_id, layout_state: record.state, error: { code: 'LAYOUT_NOTHING_TO_RESUME', message: `construction layout ${layout_id} has no unplaced node to build` } }
+  }
+  const retained: Array<Record<string, unknown>> = []
+  for (const node of remainder.retained!) retained.push({ node_id: node.node_id, entity_name: node.entity_name, unit_number: node.unit_number })
+  const remainder_ids: string[] = []
+  for (const node of remainder.remainder!) remainder_ids.push(node.node_id)
+  const evaluation = evaluate_plan(actor, placements, remainder.connections!)
+  if (!evaluation.ok) {
+    return {
+      ok: false,
+      layout_id,
+      plan_id: record.plan_id,
+      planning_status: evaluation.planning_status,
+      execution_eligible: false,
+      error: evaluation.error,
+      eligibility_blockers: evaluation.eligibility_blockers,
+      placement_geometry: evaluation.placement_geometry,
+      execution_order: evaluation.execution_order,
+      connections: evaluation.connections,
+      retained,
+      remainder: remainder_ids,
+    }
+  }
+
+  const validation_id = (storage.sgluna_next_construction_validation_id ?? 0) + 1
+  storage.sgluna_next_construction_validation_id = validation_id
+  storage.sgluna_validated_construction_plan = {
+    validation_id,
+    plan_id: record.plan_id,
+    actor_id: identity.actor_id,
+    surface_index: actor.surface.index,
+    force_index: actor.force.index,
+    created_tick: game.tick,
+    placements,
+    connections: remainder.connections!.length > 0 ? remainder.connections : undefined,
+    resume_layout_id: record.layout_id,
+    resume_node_indices: remainder.node_indices,
+  }
+  return {
+    ok: true,
+    layout_id: record.layout_id,
+    planning_status: evaluation.planning_status,
+    execution_eligible: true,
+    validation_id,
+    plan_id: record.plan_id,
+    placement_count: placements.length,
+    created_tick: game.tick,
+    expires_tick: game.tick + VALIDATION_MAX_AGE_TICKS,
+    executions_used: record.executions_used,
+    executions_max: record.executions_max,
+    retained,
+    remainder: remainder_ids,
+    placements,
+    placement_geometry: evaluation.placement_geometry,
+    execution_order: evaluation.execution_order,
+    connections: evaluation.connections,
+  }
+}
+
 // Read-only witness for the fluid-preservation admission seam: it resolves the exact stored LOCAL validated plan that
 // `execute_validated_construction_plan` would run for (validation_id, placement_count) and proves every effect that matters
 // to a protected fluid plant. It never writes storage, clears, reserves or queues anything. Execution repeats every check.
@@ -393,6 +499,8 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
     return { ok: false, code: 'construction_plan_scope_mismatch' }
   }
   if (game.tick - plan.created_tick > VALIDATION_MAX_AGE_TICKS) return { ok: false, code: 'construction_plan_expired' }
+  const resume_problem = resume_token_problem(plan)
+  if (resume_problem) return { ok: false, code: 'construction_plan_stale', evaluation_code: resume_problem.code }
   const connections = plan.connections ?? []
   const evaluation = evaluate_plan(actor, plan.placements, connections)
   if (!evaluation.ok) return { ok: false, code: 'construction_plan_stale', evaluation_code: evaluation.error?.code }
@@ -484,6 +592,19 @@ export function execute_validated_construction_plan(
     return [false, 'validated construction plan expired; validate the live world again']
   }
 
+  // A token that validated a layout's remainder continues that layout, and only while the layout is still exactly what it was
+  // validated against: settled (its last execution is over), unplaced where validated, and within its allowance. Expiry or
+  // staleness of the token never touches the layout record.
+  const resume_record = plan.resume_layout_id !== undefined ? layout_record(plan.resume_layout_id) : undefined
+  if (plan.resume_layout_id !== undefined) {
+    if (resume_record) settle_construction_layout(resume_record, { actor, active_batch: batch_identity(manager.get_status_snapshot().active_batch) })
+    const problem = resume_token_problem(plan)
+    if (problem) {
+      storage.sgluna_validated_construction_plan = undefined
+      return [false, `validated construction plan is stale: ${problem.code}: ${problem.message}`]
+    }
+  }
+
   const connections = plan.connections ?? []
   const evaluation = evaluate_plan(actor, plan.placements, connections)
   if (!evaluation.ok) {
@@ -493,9 +614,16 @@ export function execute_validated_construction_plan(
 
   // A connected layout is tracked from queueing on: its record exists before the first node can run, and each queued
   // placement carries its node so the runtime can check the connections against the actual entities (see construction_layout).
+  // A resume continues its layout's record with the next execution, each placement standing for its original node.
   const execution_order = evaluation.execution_order ?? []
-  const layout_id = connections.length > 0 ? validation_id : undefined
-  if (layout_id !== undefined) {
+  const node_indices = plan.resume_node_indices
+  const node_index = (placement_index: number) => node_indices !== undefined ? node_indices[placement_index] : placement_index
+  const layout_id = resume_record !== undefined ? resume_record.layout_id : connections.length > 0 ? validation_id : undefined
+  let resumed: ReturnType<typeof begin_layout_execution> | undefined
+  if (resume_record !== undefined) {
+    resumed = begin_layout_execution(resume_record, execution_order.map(node_index))
+  }
+  else if (layout_id !== undefined) {
     create_layout_record({
       layout_id,
       plan_id: plan.plan_id,
@@ -515,16 +643,20 @@ export function execute_validated_construction_plan(
     // Always placement-only: the task carries refuse_clearance, so nothing is mined or picked up to make room.
     if (!basic.submit_placement(placement.entity_name, placement.x, placement.y, placement.direction, undefined, undefined, undefined, {
       refuse_clearance: true,
-      layout_node: layout_id !== undefined ? { layout_id, index } : undefined,
+      layout_node: layout_id !== undefined ? { layout_id, index: node_index(index) } : undefined,
     })) {
       if (queued > 0) manager.cancel_all_tasks('construction_plan_admission_failed')
-      if (layout_id !== undefined) discard_layout_record(layout_id)
+      // A new layout was never built: its record is withdrawn. A resumed one keeps its history and goes back to paused.
+      if (resumed !== undefined && resume_record !== undefined) rollback_layout_execution(resume_record, resumed)
+      else if (layout_id !== undefined) discard_layout_record(layout_id)
       storage.sgluna_validated_construction_plan = undefined
       return [false, `unable to queue placement ${queued + 1}`]
     }
     queued += 1
   }
 
+  // The execution is identified by the task batch its placements joined, so a later read can tell when it is over.
+  if (layout_id !== undefined) bind_layout_execution(layout_id, batch_identity(manager.get_status_snapshot().active_batch))
   storage.sgluna_validated_construction_plan = undefined
   return [true, layout_id !== undefined ? `Validated construction plan started (layout_id ${layout_id})` : 'Validated construction plan started']
 }

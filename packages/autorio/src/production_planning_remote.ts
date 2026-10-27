@@ -7,7 +7,7 @@ import type { LiveProductionSolveRequest } from './production_planning_live'
 import type { ProductionScopeRequest } from './production_scope'
 import type { ThroughputCapacityRequest } from './throughput_capacity'
 import type { ThroughputMeasurementRequest } from './throughput_measurement'
-import { validate_construction_execution_plan } from './construction_execution'
+import { resume_construction_layout, validate_construction_execution_plan } from './construction_execution'
 import { construction_layout_status } from './construction_layout'
 import { local_spatial_observation, plan_placement, select_navigation_escape_point } from './construction_planning'
 import { find_construction_sites } from './construction_site_planning'
@@ -76,8 +76,17 @@ export function create_production_planning_remote_interface(
       if (!actor) return { ok: false, error: { code: 'INVALID_REQUEST', message: 'controlled actor is unavailable' } }
       return validate_construction_execution_plan(actor, request)
     },
-    // Read-only: the stored record of a connected construction layout (nodes, connections, state). No actor, no mutation.
-    construction_layout_status: (layout_id: number) => construction_layout_status(layout_id),
+    // The stored record of a connected construction layout (nodes, connections, state), settled: an execution that is over
+    // turns its unbuilt nodes into not_placed and a placed node whose entity is gone into missing. Peek lookup: a read must
+    // not create or reconcile the body.
+    construction_layout_status: (layout_id: number) => construction_layout_status(layout_id, { actor: peek_actor() }),
+    // Validates only the unplaced remainder of a recorded layout (stored geometry, placed nodes as existing endpoints) and
+    // stores a validation token for it; execute_construction_plan with that token continues the same layout.
+    resume_construction_layout: (layout_id: number) => {
+      const actor = get_actor()
+      if (!actor) return { ok: false, error: { code: 'INVALID_REQUEST', message: 'controlled actor is unavailable' } }
+      return resume_construction_layout(actor, layout_id)
+    },
     research_path: (name: string, max_nodes: number = 32) => {
       const actor = get_actor()
       if (!actor) return { ok: false, error: { code: 'INVALID_REQUEST', message: 'controlled actor is unavailable' } }
