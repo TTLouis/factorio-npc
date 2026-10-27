@@ -718,15 +718,17 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   let scanned = 0
   let rejected = 0
   let region_rejected = 0
-  // Map knowledge (M3): a footprint is considered only where every chunk it touches is visible to the NPC now. A fogged or
-  // never-seen chunk is not fresh authority for a placement, so a position there is neither probed nor returned; it is
-  // counted, and the search is then reported incomplete rather than empty. The evaluated area's bounds feed the map context.
+  // Map knowledge (M3): a position is considered only where every chunk its answer reads is visible to the NPC now: the
+  // footprint, and a drill's mining area or a pole's wire reach and supply area. A fogged or never-seen chunk is not fresh
+  // authority for a placement, so a position reading one is neither probed nor returned; it is counted, and the search is
+  // then reported incomplete rather than empty. The bounds of everything read feed the map context.
   const chunk_visible: Record<string, boolean> = {}
   let not_visible_rejected = 0
-  let evaluated_area: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } } | undefined
-  const footprint_visible = (box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) => {
-    for (let chunk_x = math.floor(box.left_top.x / 32); chunk_x <= math.floor((box.right_bottom.x - 0.001) / 32); chunk_x++) {
-      for (let chunk_y = math.floor(box.left_top.y / 32); chunk_y <= math.floor((box.right_bottom.y - 0.001) / 32); chunk_y++) {
+  let evaluated_area: CandidateBox | undefined
+  const area_visible = (box: CandidateBox) => {
+    const range = box_chunk_range(box)
+    for (let chunk_x = range.min_x; chunk_x <= range.max_x; chunk_x++) {
+      for (let chunk_y = range.min_y; chunk_y <= range.max_y; chunk_y++) {
         const key = `${chunk_x}:${chunk_y}`
         if (chunk_visible[key] === undefined) chunk_visible[key] = is_chunk_known_visible(actor.force, actor.surface, { x: chunk_x, y: chunk_y })
         if (!chunk_visible[key]) return false
@@ -749,15 +751,12 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
       region_rejected++
       return undefined
     }
-    const world_box = placement_footprint(prototype, position, direction).world_box
-    if (evaluated_area === undefined) evaluated_area = { left_top: { x: world_box.left_top.x, y: world_box.left_top.y }, right_bottom: { x: world_box.right_bottom.x, y: world_box.right_bottom.y } }
-    else {
-      evaluated_area.left_top.x = math.min(evaluated_area.left_top.x, world_box.left_top.x)
-      evaluated_area.left_top.y = math.min(evaluated_area.left_top.y, world_box.left_top.y)
-      evaluated_area.right_bottom.x = math.max(evaluated_area.right_bottom.x, world_box.right_bottom.x)
-      evaluated_area.right_bottom.y = math.max(evaluated_area.right_bottom.y, world_box.right_bottom.y)
-    }
-    if (!footprint_visible(world_box)) {
+    const footprint = placement_footprint(prototype, position, direction)
+    const world_box = footprint.world_box
+    const read_box = candidate_read_box(prototype, position, direction, footprint)
+    if (evaluated_area === undefined) evaluated_area = { left_top: { x: read_box.left_top.x, y: read_box.left_top.y }, right_bottom: { x: read_box.right_bottom.x, y: read_box.right_bottom.y } }
+    else extend_box(evaluated_area, read_box)
+    if (!area_visible(read_box)) {
       not_visible_rejected++
       return undefined
     }
@@ -977,10 +976,64 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   }
 }
 
-// The map facts a candidate answer is read against: the same surface and tick as the candidates, how much of the area whose
-// footprints were evaluated (after the region filter) is visible now, fogged or never seen, and the NPC's current visible
-// window. It is read from the NPC's own map knowledge and charts or generates nothing.
-function candidate_map_context(actor: ControlledActor, evaluated_area: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } } | undefined) {
+type CandidateBox = { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+
+// The chunks a world box touches. The right and bottom edges are exclusive, but a box of zero width or height (a modded
+// prototype with an empty collision box) still lies in the chunk containing its left-top corner: the range is never empty.
+function box_chunk_range(box: CandidateBox) {
+  const min_x = math.floor(box.left_top.x / 32)
+  const min_y = math.floor(box.left_top.y / 32)
+  return {
+    min_x,
+    min_y,
+    max_x: math.max(min_x, math.floor((box.right_bottom.x - 0.001) / 32)),
+    max_y: math.max(min_y, math.floor((box.right_bottom.y - 0.001) / 32)),
+  }
+}
+
+function extend_box(box: CandidateBox, other: CandidateBox) {
+  box.left_top.x = math.min(box.left_top.x, other.left_top.x)
+  box.left_top.y = math.min(box.left_top.y, other.left_top.y)
+  box.right_bottom.x = math.max(box.right_bottom.x, other.right_bottom.x)
+  box.right_bottom.y = math.max(box.right_bottom.y, other.right_bottom.y)
+}
+
+// Everything a candidate answer reads from the world for this position: the collision and tile footprints, a drill's
+// mining area (resource_coverage) and a pole's wire reach and supply area (pole_candidate_facts). The position itself is
+// always included, so a degenerate collision box still names the chunks its tiles stand in.
+function candidate_read_box(prototype: any, position: { x: number, y: number }, direction: number, footprint: { world_box: CandidateBox, tile_box: CandidateBox }): CandidateBox {
+  const box: CandidateBox = {
+    left_top: { x: math.min(footprint.world_box.left_top.x, position.x), y: math.min(footprint.world_box.left_top.y, position.y) },
+    right_bottom: { x: math.max(footprint.world_box.right_bottom.x, position.x), y: math.max(footprint.world_box.right_bottom.y, position.y) },
+  }
+  extend_box(box, footprint.tile_box)
+  const radius = mining_radius(prototype)
+  if (radius !== undefined) {
+    const offset = mining_offset(prototype, direction)
+    const x = position.x + offset.x
+    const y = position.y + offset.y
+    extend_box(box, { left_top: { x: x - radius, y: y - radius }, right_bottom: { x: x + radius, y: y + radius } })
+  }
+  const reach = pole_reach(prototype)
+  if (reach !== undefined) {
+    const extent = math.max(reach.max_wire_distance, reach.supply_area_distance)
+    extend_box(box, { left_top: { x: position.x - extent, y: position.y - extent }, right_bottom: { x: position.x + extent, y: position.y + extent } })
+  }
+  return box
+}
+
+// The map facts a candidate answer is read against: the same surface and tick as the candidates, how much of the area
+// whose facts were read (footprints after the region filter, plus mining and pole reach) is visible now, fogged or never
+// seen, and the NPC's current visible window. It is read from the NPC's own map knowledge and charts or generates nothing.
+function coverage_of(actor: ControlledActor, area: CandidateBox) {
+  const range = box_chunk_range(area)
+  return chunk_coverage(actor.force, actor.surface, {
+    left_top: { x: range.min_x * 32, y: range.min_y * 32 },
+    right_bottom: { x: range.max_x * 32, y: range.max_y * 32 },
+  })
+}
+
+function candidate_map_context(actor: ControlledActor, evaluated_area: CandidateBox | undefined) {
   const summary = map_knowledge_summary(actor.force)
   const window = summary.visible_center
   return {
@@ -992,10 +1045,7 @@ function candidate_map_context(actor: ControlledActor, evaluated_area: { left_to
     visible_window: window === undefined ? undefined : { surface_index: window.surface_index, chunk: { x: window.x, y: window.y }, chunk_radius: KNOWLEDGE_CHUNK_RADIUS },
     explored_chunks: summary.explored_chunks,
     evaluated_area,
-    evaluated_area_coverage: evaluated_area === undefined ? undefined : chunk_coverage(actor.force, actor.surface, {
-      left_top: evaluated_area.left_top,
-      right_bottom: { x: evaluated_area.right_bottom.x - 0.001, y: evaluated_area.right_bottom.y - 0.001 },
-    }),
+    evaluated_area_coverage: evaluated_area === undefined ? undefined : coverage_of(actor, evaluated_area),
   }
 }
 
