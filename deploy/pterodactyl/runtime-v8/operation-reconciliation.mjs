@@ -190,10 +190,80 @@ export function deliveryKeys(operation) {
     .slice(0, 8).map(item => `delivery|${direction}|${unit}|${item}`)
 }
 
+// Direction of a delivery, as far as its arguments say: the NPC's inventory into an entity ('to_entity'), out of it, or the same
+// for a player. A direction the arguments do not state as a boolean is 'unknown' and is compatible with every direction.
+function deliveryDirection(operation) {
+  const args = operation?.args ?? {}
+  if (operation?.name === 'supply_entity') return 'to_entity'
+  if (operation?.name === 'move_items_with_player') return args.to_player === true ? 'to_player' : args.to_player === false ? 'from_player' : 'unknown'
+  return args.to_entity === true ? 'to_entity' : args.to_entity === false ? 'from_entity' : 'unknown'
+}
+
+/**
+ * Item-level facts of one delivery operation, independent of the count and of which tool carried it:
+ * `{ direction, item, unit, target_name }`. `unit` is the exact target entity (null when the arguments name none) and
+ * `target_name` is the name a name-targeted transfer used (an entity prototype, or a player). Empty for any other operation and
+ * for a delivery whose item cannot be read, which the fence treats as unproven.
+ */
+export function deliveryItems(operation) {
+  const args = operation?.args
+  if (!DELIVERY_OPERATIONS.has(operation?.name) || !isRecord(args)) return []
+  const unit = Number.isSafeInteger(args.unit_number) ? args.unit_number : Number.isSafeInteger(args.target_unit_number) ? args.target_unit_number : null
+  const named = typeof args.entity_name === 'string' ? args.entity_name : typeof args.player_name === 'string' ? args.player_name : null
+  const targetName = named && named.length > 0 && named.length <= 120 ? named : null
+  const direction = deliveryDirection(operation)
+  const items = Array.isArray(args.items) ? args.items.map(item => item?.item_name) : [args.item_name]
+  return [...new Set(items.filter(item => typeof item === 'string' && item.length > 0 && item.length <= 120))]
+    .slice(0, 8).map(item => ({ direction, item, unit, target_name: targetName }))
+}
+
+/**
+ * The entity prototype a placement operation places, from facts the harness can ground: a place_entity's own `entity_name`, or
+ * (place_candidate, whose arguments hold only registry ids) the native preflight result of that very operation, whose
+ * `placement_item.entity_name` is the entity of the mod's candidate-set registry (placement_candidates.ts
+ * placement_candidate_preflight -> placement_item_preflight). Null when neither is available: the fence then cannot close on it.
+ */
+export function placedEntityName(operation, preflight) {
+  const valid = value => typeof value === 'string' && value.length > 0 && value.length <= 120 ? value : null
+  if (operation?.name === 'place_entity') return valid(operation.args?.entity_name)
+  if (operation?.name === 'place_candidate' && isRecord(preflight) && preflight.operation === 'place_candidate') return valid(preflight.placement_item?.entity_name)
+  return null
+}
+
+/**
+ * A settled slot carries what the fence needs to recognise a replay of it: its canonical identity and, for a delivery, its
+ * item-level facts. A slot that lacks either (a record from before they existed, a delivery whose item cannot be read) cannot be
+ * matched per operation.
+ */
+export function settledSlotComplete(slot) {
+  return typeof slot?.identity === 'string' && slot.identity.length > 0
+    && (!DELIVERY_OPERATIONS.has(slot.operation) || (Array.isArray(slot.delivery_items) && slot.delivery_items.length > 0))
+}
+
+/**
+ * Does proposing `operation` repeat the completed settled slot? Returns the match kind or undefined.
+ *   identical_operation                  the canonical operation (name + args) is the completed one
+ *   same_delivery_target_and_item        the same exact unit receives/gives the same item (another count or tool)
+ *   same_delivery_item_ambiguous_target  the same item in the same direction, and either side names no exact unit: a name-targeted
+ *                                        transfer cannot be told apart from the completed one, so it is fenced
+ * A delivery to a different exact unit than every completed exact-unit delivery of that item is not a replay.
+ */
+export function settledSlotMatch(slot, operation) {
+  if (slot.identity && slot.identity === operationIdentity(operation)) return 'identical_operation'
+  if (deliveryKeys(operation).some(key => (slot.delivery_keys ?? []).includes(key))) return 'same_delivery_target_and_item'
+  const compatible = (left, right) => left === right || left === 'unknown' || right === 'unknown'
+  const done = Array.isArray(slot.delivery_items) ? slot.delivery_items : []
+  const same = deliveryItems(operation).filter(want => done.some(item => want.item === item.item && compatible(want.direction, item.direction)))
+  if (same.some(want => done.some(item => want.item === item.item && compatible(want.direction, item.direction) && want.unit !== null && want.unit === item.unit))) return 'same_delivery_target_and_item'
+  if (same.some(want => want.unit === null || done.some(item => want.item === item.item && compatible(want.direction, item.direction) && item.unit === null))) return 'same_delivery_item_ambiguous_target'
+  return undefined
+}
+
 /**
  * The record fields to persist on the pending record just before the reconciler's derived settlement closes it, so the closed
- * ledger entry carries what happened: effect partial_known, the verdict, and the completed slots' identities. Null unless the
- * settlement was derived from the native receipt AND at least one earlier operation completed (an empty prefix needs no fence).
+ * ledger entry carries what happened: effect partial_known, the verdict, the completed slots' identities and item-level delivery
+ * facts, and the prototype of the refused placement (what a later completed placement must be to close the fence). Null unless
+ * the settlement was derived from the native receipt AND at least one earlier operation completed (an empty prefix needs no fence).
  */
 export function settledPrefixPatch(pending, result) {
   if (result?.verdict !== RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION || result.basis !== 'harness_receipt_derivation'
@@ -204,29 +274,44 @@ export function settledPrefixPatch(pending, result) {
     const operation = pending?.operations?.[slot - 1]
     if (!operation) return null
     completed.push({ slot, operation: text(operation.name, 80), identity: typeof operation.identity === 'string' ? operation.identity : null,
-      delivery_keys: Array.isArray(operation.delivery_keys) ? operation.delivery_keys : [] })
+      delivery_keys: Array.isArray(operation.delivery_keys) ? operation.delivery_keys : [],
+      delivery_items: Array.isArray(operation.delivery_items) ? operation.delivery_items : [] })
   }
+  const refused = pending?.operations?.[result.refused_slots[0] - 1]
   return {
     effect: EFFECT.PARTIAL_KNOWN, verdict: result.verdict, reason: result.reason, batch_id: result.receipt.batch_id ?? null,
     settlement: {
       kind: SETTLED_PREFIX_KIND, basis: result.basis, batch_ref: result.receipt.batch_ref, refused_slot: result.refused_slots[0],
       refusal_codes: (result.refusal_codes ?? []).slice(0, 4).map(code => text(code, 80)),
-      completed, identity_complete: completed.every(item => item.identity),
+      refused_placement: PLACEMENT_FENCE_CLOSING_OPERATIONS.has(refused?.name) && typeof refused.placed_entity === 'string' ? refused.placed_entity : null,
+      completed, identity_complete: completed.every(settledSlotComplete),
     },
   }
 }
 
-/** The record fields that mark a batch as completed (exact receipts) and containing a placement; closes an open settled-prefix fence. */
+/**
+ * The record fields that mark a batch as completed (exact receipts) and containing a placement; with the prototypes it placed,
+ * which is what can close a settled-prefix fence whose refused placement is of the same prototype.
+ */
 export function completedPlacementPatch(pending, result) {
   if (result?.verdict !== RECONCILE_VERDICT.ADMITTED_COMPLETED || !(pending?.operations ?? []).some(operation => PLACEMENT_FENCE_CLOSING_OPERATIONS.has(operation.name))) return null
-  return { effect: EFFECT.HAPPENED, verdict: result.verdict, reason: result.reason ?? '', batch_id: Number.isSafeInteger(result.batch_id) ? result.batch_id : null }
+  const placed = [...new Set((pending.operations ?? []).filter(operation => PLACEMENT_FENCE_CLOSING_OPERATIONS.has(operation.name)
+    && typeof operation.placed_entity === 'string').map(operation => operation.placed_entity))].slice(0, 16)
+  return { effect: EFFECT.HAPPENED, verdict: result.verdict, reason: result.reason ?? '', batch_id: Number.isSafeInteger(result.batch_id) ? result.batch_id : null,
+    placed_entities: placed }
 }
 
-/** Does this closed record's completed placement close an earlier settled-prefix fence of the same goal, plan and step? */
+/**
+ * Does this closed record's completed placement close an earlier settled-prefix fence of the same goal, plan and step? Only a
+ * completed placement of the prototype whose placement was refused does: another entity's placement says nothing about the
+ * refused one, and a fence without a known prototype stays open until its step or plan changes.
+ */
 export function closesSettledPrefix(later, fence) {
-  return Boolean(later && fence) && later.verdict === RECONCILE_VERDICT.ADMITTED_COMPLETED
+  const refused = fence?.settlement?.refused_placement
+  return Boolean(later && fence) && typeof refused === 'string' && later.verdict === RECONCILE_VERDICT.ADMITTED_COMPLETED
     && later.goal_id === fence.goal_id && later.plan_id === fence.plan_id && later.step_id === fence.step_id
     && (later.operations ?? []).some(operation => PLACEMENT_FENCE_CLOSING_OPERATIONS.has(operation.name))
+    && Array.isArray(later.placed_entities) && later.placed_entities.includes(refused)
 }
 
 export const PENDING_STATE = Object.freeze({
@@ -329,7 +414,7 @@ export function batchWatermark(rawStatus) {
 }
 
 /** The durable record written before a batch is sent. `baseline` is `batchWatermark` of the status read just before. */
-export function buildPendingOperation({ requestId, operationKey, attemptId, ordinal, protocolVersion, operations, goalId, planId, stepId, actor, baseline, now, surfaceIndex } = {}) {
+export function buildPendingOperation({ requestId, operationKey, attemptId, ordinal, protocolVersion, operations, goalId, planId, stepId, actor, baseline, now, surfaceIndex, preflight } = {}) {
   const list = (Array.isArray(operations) ? operations : []).slice(0, PENDING_OPERATION_LIMITS.operations)
   return {
     operation_key: text(operationKey ?? `${requestId ?? 'request'}/batch`, PENDING_OPERATION_LIMITS.operation_key),
@@ -352,10 +437,13 @@ export function buildPendingOperation({ requestId, operationKey, attemptId, ordi
       trace_operation_id: text(operation?.trace_operation_id ?? `${requestId ?? 'request'}/op_${index + 1}`, PENDING_OPERATION_LIMITS.ref),
       name: text(operation?.name, 80),
       ...(['gather_resource', 'mine_resource_at'].includes(operation?.name) && isRecord(operation.args) ? { args: { ...operation.args } } : {}),
-      // The operation's canonical identity (name + canonical args digest) and its item-delivery keys: all that survives of the
-      // arguments, kept so a settled completed prefix can fence a replay of these exact slots (operation-ledger.mjs).
+      // The operation's canonical identity (name + canonical args digest), its item-delivery keys and item-level delivery facts,
+      // and the prototype a placement places: all that survives of the arguments, kept so a settled completed prefix can fence
+      // a replay of these slots and a completed placement of the refused prototype can close that fence (operation-ledger.mjs).
       identity: operationIdentity(operation),
       ...(deliveryKeys(operation).length > 0 ? { delivery_keys: deliveryKeys(operation) } : {}),
+      ...(deliveryItems(operation).length > 0 ? { delivery_items: deliveryItems(operation) } : {}),
+      ...(placedEntityName(operation, Array.isArray(preflight) ? preflight[index] : undefined) ? { placed_entity: placedEntityName(operation, Array.isArray(preflight) ? preflight[index] : undefined) } : {}),
       effect_class: effectClassOf(operation?.name),
     })),
     baseline: baseline ?? null,
@@ -826,6 +914,8 @@ export function sanitizePendingOperation(raw) {
       } } : {}),
       ...(typeof operation.identity === 'string' && /^[0-9a-f]{64}$/.test(operation.identity) ? { identity: operation.identity } : {}),
       ...(Array.isArray(operation.delivery_keys) && operation.delivery_keys.length > 0 ? { delivery_keys: sanitizeDeliveryKeys(operation.delivery_keys) } : {}),
+      ...(Array.isArray(operation.delivery_items) && sanitizeDeliveryItems(operation.delivery_items).length > 0 ? { delivery_items: sanitizeDeliveryItems(operation.delivery_items) } : {}),
+      ...(typeof operation.placed_entity === 'string' && operation.placed_entity.length > 0 && operation.placed_entity.length <= 120 ? { placed_entity: operation.placed_entity } : {}),
       effect_class: ['delivery', 'craft', 'place', 'world', 'other'].includes(operation.effect_class) ? operation.effect_class : 'other',
     })),
     baseline,
@@ -835,12 +925,23 @@ export function sanitizePendingOperation(raw) {
     batch_id: Number.isSafeInteger(raw.batch_id) ? raw.batch_id : null,
     sent_at: Number.isFinite(raw.sent_at) ? raw.sent_at : 0,
     reconciled_at: Number.isFinite(raw.reconciled_at) ? raw.reconciled_at : null,
+    ...(Array.isArray(raw.placed_entities) ? { placed_entities: raw.placed_entities.filter(name => typeof name === 'string' && name.length > 0 && name.length <= 120).slice(0, 16) } : {}),
     ...(sanitizeSettlement(raw.settlement) ? { settlement: sanitizeSettlement(raw.settlement) } : {}),
   }
 }
 
 function sanitizeDeliveryKeys(keys) {
   return keys.filter(key => typeof key === 'string' && key.length > 0).slice(0, 8).map(key => text(key, 240))
+}
+
+// Item-level delivery facts of a delivery operation: direction, item, exact unit (or null) and the name a name-targeted transfer used.
+function sanitizeDeliveryItems(items) {
+  return items.filter(isRecord).slice(0, 8).map(item => ({
+    direction: ['to_entity', 'from_entity', 'to_player', 'from_player', 'unknown'].includes(item.direction) ? item.direction : 'unknown',
+    item: typeof item.item === 'string' ? text(item.item, 120) : '',
+    unit: Number.isSafeInteger(item.unit) ? item.unit : null,
+    target_name: typeof item.target_name === 'string' && item.target_name.length > 0 ? text(item.target_name, 120) : null,
+  })).filter(item => item.item.length > 0)
 }
 
 // The settled-prefix settlement carried on a closed record: strictly shaped, bounded, unknown fields dropped.
@@ -851,6 +952,7 @@ function sanitizeSettlement(raw) {
     operation: text(item.operation, 80),
     identity: typeof item.identity === 'string' && /^[0-9a-f]{64}$/.test(item.identity) ? item.identity : null,
     delivery_keys: Array.isArray(item.delivery_keys) ? sanitizeDeliveryKeys(item.delivery_keys) : [],
+    delivery_items: Array.isArray(item.delivery_items) ? sanitizeDeliveryItems(item.delivery_items) : [],
   })).filter(item => item.slot > 0 && item.operation)
   if (completed.length < 1) return undefined
   return {
@@ -859,7 +961,10 @@ function sanitizeSettlement(raw) {
     batch_ref: text(raw.batch_ref, PENDING_OPERATION_LIMITS.ref),
     refused_slot: Number.isSafeInteger(raw.refused_slot) ? raw.refused_slot : null,
     refusal_codes: Array.isArray(raw.refusal_codes) ? raw.refusal_codes.filter(code => typeof code === 'string').slice(0, 4).map(code => text(code, 80)) : [],
+    // The prototype of the refused placement: what a later completed placement must be to close the fence (null when unknown).
+    refused_placement: typeof raw.refused_placement === 'string' && raw.refused_placement.length > 0 && raw.refused_placement.length <= 120 ? raw.refused_placement : null,
     completed,
-    identity_complete: completed.every(item => item.identity),
+    // Recomputed, never trusted: every completed slot must carry its identity and (for a delivery) its item-level facts.
+    identity_complete: completed.every(settledSlotComplete),
   }
 }

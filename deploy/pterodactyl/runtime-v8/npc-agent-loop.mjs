@@ -319,7 +319,13 @@ const DUPLICATE_EFFECT_RETRY_BUDGET = 1
 function settledPrefixReplayRefusal(held) {
   const settled = held.settled ?? {}
   const completed = (settled.completed_operations ?? []).map(item => `${item.slot}. ${cleanMemoryText(item.operation, 80)}`).join(', ')
-  return `[HARNESS] Refused before admission: nothing from this batch ran. Operation ${settled.completed_slot} (${cleanMemoryText(settled.replayed_operation, 80)}) already completed in an earlier batch of this step (${cleanMemoryText(settled.batch_ref, 160)}; the exact native receipt shows these operations completed before the placement was refused: ${completed}), and only the placement remains. Do not deliver it again, with the same or a changed count or coordinates. A delivery completes once it moved a positive count, which can be less than requested, so read the target's real contents; a different delivery is a separate decision for a later step, not this recovery. Send only the corrected placement (or other operations that do not repeat a completed one). Facts: ${JSON.stringify({ operation_key: held.operation_key, batch_ref: settled.batch_ref, completed_slot: settled.completed_slot, refused_slot: settled.refused_slot, match: settled.match, only_placement_remains: true })}`
+  const facts = `Facts: ${JSON.stringify({ operation_key: held.operation_key, batch_ref: settled.batch_ref, completed_slot: settled.completed_slot, refused_slot: settled.refused_slot, match: settled.match, only_placement_remains: true })}`
+  const earlier = `an earlier batch of this step (${cleanMemoryText(settled.batch_ref, 160)}; the exact native receipt shows these operations completed before the placement was refused: ${completed})`
+  // The harness could not tell which of this batch's operations would repeat a completed one (its record predates the per-operation identities).
+  if (settled.match === 'identity_unavailable') return `[HARNESS] Refused before admission: nothing from this batch ran. ${earlier} completed, and only the placement remains. The harness cannot establish which operations of this batch would repeat them, so until the placement completes only place_entity or place_candidate operations are admitted for this step. Send only the corrected placement. ${facts}`
+  const ambiguous = settled.match === 'same_delivery_item_ambiguous_target'
+    ? ' This delivery moves the same item in the same direction and names its target by name or without an exact unit, so it cannot be told apart from the completed one.' : ''
+  return `[HARNESS] Refused before admission: nothing from this batch ran. Operation ${settled.completed_slot} (${cleanMemoryText(settled.replayed_operation, 80)}) already completed in ${earlier}, and only the placement remains.${ambiguous} Do not deliver it again, with the same or a changed count or coordinates. A delivery completes once it moved a positive count, which can be less than requested, so read the target's real contents; a different delivery is a separate decision for a later step, not this recovery. Send only the corrected placement (or other operations that do not repeat a completed one). ${facts}`
 }
 const LOST_ACK_RETRY_BUDGET = 1
 // Corrections allowed per committed active step when an executor reply names another step (executor_stale_step). Kept
@@ -10263,7 +10269,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Written BEFORE the batch is sent: what is about to be sent, for which plan step, by which actor and epoch, and where the
   // mod's batch counter stood. A lost acknowledgement or a restart then has something exact to reconcile against.
-  async recordPendingOperationBeforeSend(operations, before) {
+  async recordPendingOperationBeforeSend(operations, before, preflight) {
     this.assertModelRecoveryAllowed()
     if (!this.requestInfo || typeof this.memory.recordPendingOperation !== 'function') return undefined
     const key = this.requestInfo.memoryKey
@@ -10284,6 +10290,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       requestId: this.traceRequest?.id,
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
+      preflight,
       protocolVersion: 2,
       surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex,
       operations,
@@ -18094,7 +18101,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       let fluidAdmission
-      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
+      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before, preflight)
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {

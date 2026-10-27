@@ -1,4 +1,4 @@
-import { sanitizePendingOperation, duplicateEffectGuard, operationSignature, operationIdentity, deliveryKeys, closesSettledPrefix, SETTLED_PREFIX_KIND, EFFECT } from './operation-reconciliation.mjs'
+import { sanitizePendingOperation, duplicateEffectGuard, operationSignature, settledSlotMatch, closesSettledPrefix, PLACEMENT_FENCE_CLOSING_OPERATIONS, SETTLED_PREFIX_KIND, EFFECT } from './operation-reconciliation.mjs'
 
 export const OPERATION_LEDGER_LIMIT = 64
 // Closed records kept in the window, plus the settled-prefix fences still open that the window would otherwise push out.
@@ -79,20 +79,25 @@ export function conflictingOperation(state, proposed) {
       && record.plan_id === proposed.planId && record.step_id === proposed.stepId && record.effect === EFFECT.PARTIAL_KNOWN)
   // A completed prefix the harness settled from the native receipt is never delivered again while its refused placement is
   // still being recovered. The whole-batch signature below cannot see a replay whose placement arguments changed, so the fence
-  // is per operation: the canonical identity of the slot, or the same delivery (target, item, direction) with another count.
+  // is per operation (settledSlotMatch): the canonical identity of the slot, the same exact delivery with another count, or the
+  // same item in the same direction when either side names no exact unit (a name-targeted transfer is ambiguous).
+  // A settlement that cannot be matched per slot (identity_complete false: a record restored without the slots' identities or
+  // delivery facts) admits only placement-only batches while it is open.
   for (const fence of openSettledFences(closed, proposed.planId, proposed.stepId)) {
     const settlement = fence.settlement
+    const refusal = (hit, match) => ({ refuse: true, reason: 'settled_prefix_operation_replay', operation_key: fence.operation_key, effect: fence.effect,
+      verdict: fence.verdict, state: fence.state, batch_id: fence.batch_id,
+      settled: { batch_ref: settlement.batch_ref, replayed_operation: hit.operation, completed_slot: hit.slot,
+        completed_operations: settlement.completed.map(item => ({ slot: item.slot, operation: item.operation })),
+        refused_slot: settlement.refused_slot, refusal_codes: settlement.refusal_codes, only_placement_remains: true, match } })
     for (const operation of Array.isArray(proposed.operations) ? proposed.operations : []) {
-      const identity = operationIdentity(operation)
-      const keys = deliveryKeys(operation)
-      const hit = settlement.completed.find(item => item.identity === identity || keys.some(key => item.delivery_keys.includes(key)))
-      if (hit) {
-        return { refuse: true, reason: 'settled_prefix_operation_replay', operation_key: fence.operation_key, effect: fence.effect,
-          verdict: fence.verdict, state: fence.state, batch_id: fence.batch_id,
-          settled: { batch_ref: settlement.batch_ref, replayed_operation: hit.operation, completed_slot: hit.slot,
-            completed_operations: settlement.completed.map(item => ({ slot: item.slot, operation: item.operation })),
-            refused_slot: settlement.refused_slot, refusal_codes: settlement.refusal_codes, only_placement_remains: true,
-            match: hit.identity === identity ? 'identical_operation' : 'same_delivery_target_and_item' } }
+      if (settlement.identity_complete === false) {
+        if (!PLACEMENT_FENCE_CLOSING_OPERATIONS.has(operation?.name)) return refusal(settlement.completed[0], 'identity_unavailable')
+        continue
+      }
+      for (const item of settlement.completed) {
+        const match = settledSlotMatch(item, operation)
+        if (match) return refusal(item, match)
       }
     }
   }
