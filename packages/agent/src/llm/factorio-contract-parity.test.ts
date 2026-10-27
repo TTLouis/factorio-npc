@@ -74,6 +74,7 @@ describe('canonical Factorio provider contract parity', () => {
       'getSkillDetails',
       'measureTransportThroughput',
       'planPlacement',
+      'resumeConstructionLayout',
       'validateConstructionPlan',
       'validateConstructionReservation',
     ])

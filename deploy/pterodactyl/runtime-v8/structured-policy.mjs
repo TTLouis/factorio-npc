@@ -633,6 +633,12 @@ function renderConstructionPlan(args) {
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","validate_construction_plan",{plan_id=${base.luaString(parsed.plan_id)},placements={${placements}}${connections}})))`
 }
 
+function renderConstructionLayoutResume(args) {
+  exactKeys(args, ['layout_id'])
+  const layoutId = positiveInteger(args.layout_id, 'layout_id')
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","resume_construction_layout",${layoutId})))`
+}
+
 function parseMiningDetails(args) {
   exactKeys(args, ['resource_or_item', 'fuel_name'])
   const parsed = { resource_or_item: base.factorioName(args.resource_or_item) }
@@ -960,6 +966,22 @@ const constructionPlanValidationDefinition = {
           },
         },
         connections: { type: 'array', maxItems: 8, items: layoutConnectionSchema },
+      },
+    },
+  },
+}
+
+const constructionLayoutResumeDefinition = {
+  type: 'function',
+  function: {
+    name: 'resumeConstructionLayout',
+    description: 'Validate the unplaced remainder of a connected construction layout that execute_construction_plan started and did not finish; the layout is identified by the layout_id that execute_construction_plan reported. The harness settles the layout from the game first: a node it placed keeps the entity it built (retained, with its unit_number), a node whose execution ended without building it is a remainder node at the exact position and direction recorded for it, and a placed node whose entity is gone is missing. Only the remainder is validated, with the checks validateConstructionPlan applies, and a connection to a retained node refers to that node\'s existing entity. An eligible remainder returns validation_id, placement_count, retained, remainder (node ids), executions_used and executions_max; execute_construction_plan with exactly that validation_id and placement_count continues the same layout. A layout has a fixed total of executions_max executions: the first run and each resume spend one. The answer is an error when the layout is unknown or belongs to another actor, surface or force (LAYOUT_UNAVAILABLE, LAYOUT_SCOPE_MISMATCH), is still executing (LAYOUT_EXECUTION_PENDING), is complete (LAYOUT_COMPLETE), has a placed node that is gone (LAYOUT_COMPLETED_NODE_MISSING), has a connection that does not hold (LAYOUT_CONNECTION_MISMATCH), has no unplaced node (LAYOUT_NOTHING_TO_RESUME) or used its executions (LAYOUT_ALLOWANCE_EXHAUSTED). A remainder that is spatially valid but cannot run now returns its eligibility_blockers and no validation_id. A validation expires, and any newer validation replaces it; an expired or replaced validation leaves the layout unchanged. Placement and a connection check do not assert working production.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['layout_id'],
+      properties: {
+        layout_id: { type: 'integer', minimum: 1, maximum: 9007199254740991 },
       },
     },
   },
@@ -1304,6 +1326,7 @@ export const toolDefinitions = [
   placementPlannerDefinition,
   constructionSiteDefinition,
   constructionPlanValidationDefinition,
+  constructionLayoutResumeDefinition,
   constructionIntentDefinition,
   researchPathDefinition,
 ]
@@ -1445,6 +1468,7 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getConstructionReservations: 'construction_state',
   getReservationDesignInput: 'construction_state',
   validateConstructionPlan: 'construction_state',
+  resumeConstructionLayout: 'construction_state',
   inspectConstructionIntent: 'construction_state',
 })
 
@@ -1501,6 +1525,7 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getConstructionReservations: 'fact',
   getReservationDesignInput: 'fact',
   validateConstructionPlan: 'discovery',
+  resumeConstructionLayout: 'discovery',
   inspectConstructionIntent: 'discovery',
 
   getPlayerStatus: 'optional',
@@ -1590,6 +1615,7 @@ export function toolCommand(name, args) {
   if (name === 'planPlacement') return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","plan_placement",${luaTable(parsePlacement(args))})))`
   if (name === 'findConstructionSites') return renderConstructionSites(args)
   if (name === 'validateConstructionPlan') return renderConstructionPlan(args)
+  if (name === 'resumeConstructionLayout') return renderConstructionLayoutResume(args)
   if (name === 'inspectConstructionIntent') return renderConstructionIntent(args)
   if (name === 'getResearchPath') return renderResearchPath(args)
   return base.toolCommand(name, args)

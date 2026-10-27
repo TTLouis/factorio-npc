@@ -90,6 +90,7 @@ const toolSamples = {
   planPlacement: { entity_name: 'assembling-machine-1', position: { x: 0, y: 0 } },
   findConstructionSites: { width: 4, height: 4, position: { x: 0, y: 0 } },
   validateConstructionPlan: { plan_id: 'plan-1', placements: [{ entity_name: 'stone-furnace', x: 0, y: 0 }] },
+  resumeConstructionLayout: { layout_id: 1 },
   inspectConstructionIntent: { x: 0, y: 0, entity_name: 'stone-furnace' },
   getResearchPath: { name: 'automation' },
 }
@@ -162,6 +163,7 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     'getSkillDetails',
     'measureTransportThroughput',
     'planPlacement',
+    'resumeConstructionLayout',
     'validateConstructionPlan',
     'validateConstructionReservation',
   ])

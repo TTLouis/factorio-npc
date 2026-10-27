@@ -166,3 +166,33 @@ test('completed execute_construction_plan receipt proves exactly the validated n
     reason: 'receipt_operation_mismatch',
   })
 })
+
+// Milestone 4 L4/L5: resuming only the unplaced remainder of a recorded layout.
+const resumeCommand = args => toolCommand('resumeConstructionLayout', args)
+
+test('resumeConstructionLayout emits one command for the recorded layout and nothing the model chooses', () => {
+  assert.equal(
+    resumeCommand({ layout_id: 17 }),
+    '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","resume_construction_layout",17)))',
+  )
+  const bad = [{}, { layout_id: 0 }, { layout_id: -1 }, { layout_id: 1.5 }, { layout_id: '7' }, { layout_id: null },
+    { layout_id: 9007199254740992 }, { layout_id: 1, placements: [] }, { layout_id: 1, x: 0 }, { layout_id: 1, connections: [] }]
+  for (const args of bad) assert.throws(() => resumeCommand(args), undefined, JSON.stringify(args))
+  assert.throws(() => resumeCommand(), undefined, 'no arguments')
+})
+
+test('resumeConstructionLayout is a closed one-field read tool whose description states what the harness returns', () => {
+  const { function: definition } = toolDefinitions.find(tool => tool?.function?.name === 'resumeConstructionLayout')
+  assert.deepEqual(definition.parameters.required, ['layout_id'])
+  assert.equal(definition.parameters.additionalProperties, false)
+  assert.deepEqual(Object.keys(definition.parameters.properties), ['layout_id'])
+  assert.equal(definition.parameters.properties.layout_id.type, 'integer')
+  for (const field of ['validation_id', 'placement_count', 'retained', 'remainder', 'executions_max', 'eligibility_blockers']) {
+    assert.ok(definition.description.includes(field), `the description states ${field}`)
+  }
+  for (const code of ['LAYOUT_UNAVAILABLE', 'LAYOUT_SCOPE_MISMATCH', 'LAYOUT_EXECUTION_PENDING', 'LAYOUT_COMPLETE', 'LAYOUT_COMPLETED_NODE_MISSING', 'LAYOUT_CONNECTION_MISMATCH', 'LAYOUT_NOTHING_TO_RESUME', 'LAYOUT_ALLOWANCE_EXHAUSTED']) {
+    assert.ok(definition.description.includes(code), `the description names ${code}`)
+  }
+  // The description reports facts about the interface; it carries no instruction about what to do next.
+  assert.doesNotMatch(definition.description, /\b(you should|you must|always|never|prefer|avoid)\b/i)
+})

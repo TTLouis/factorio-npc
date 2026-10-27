@@ -1019,6 +1019,20 @@
       ],
       "surface_policy": "runtime-v8-only"
     },
+    "resumeConstructionLayout": {
+      "args": [
+        "layout_id"
+      ],
+      "remote": [
+        "autorio_planning",
+        "resume_construction_layout"
+      ],
+      "category": "construction",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only"
+    },
     "inspectConstructionIntent": {
       "remote": [
         "autorio_map_construction",
