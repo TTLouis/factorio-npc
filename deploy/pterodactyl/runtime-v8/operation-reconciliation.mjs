@@ -709,9 +709,8 @@ function terminalConstructionLayoutPartial(admission, status, pending) {
     receipt = sealed
   }
   const retired = receipt.state === 'uncertain' && receipt.reason === 'save_load_unfinished' && receipt.batch_generation < status.batch_generation
-  const cancelled = receipt.state === 'cancelled' && receipt.batch_generation === status.batch_generation
   const counted = value => value === undefined || Number.isSafeInteger(value) && value >= 0
-  if ((!cancelled && !retired) || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
+  if ((receipt.state !== 'cancelled' && !retired) || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
     || receipt.batch_ref !== ref.batch_ref || receipt.task_count !== slot.queued_tasks || !Array.isArray(receipt.task_types)
     || receipt.task_types.length !== receipt.task_count || !receipt.task_types.every(type => type === 'placing')
     || (receipt.state === 'cancelled' && (!Number.isSafeInteger(receipt.tasks_started) || receipt.tasks_started < 1 || receipt.tasks_started > receipt.task_count
@@ -731,6 +730,23 @@ function terminalConstructionLayoutPartial(admission, status, pending) {
   return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'layout',
     layout_id: admission.layout_id, placed_node_ids: placed, not_placed_node_ids: notPlaced, missing_node_ids: missing,
     receipt_source: matches.length === 1 ? 'journal' : 'sealed_row' }
+}
+
+// A normal boot binds the NPC again before the pending operation is reconciled (supervisor bindNpc: the guard's configure cancels
+// the queue and bumps the deployment epoch, then startup reconciliation advances the batch generation). The pending operation
+// therefore carries the epoch it ran under, which is older than the current one. This is the one place an epoch change does not
+// make the operation stale, and only for a layout execution the mod sealed as an exact partial: the same actor in the pending
+// lineage, the sealed row and the live actor (whose status is the live standalone NPC); the pending epoch is exactly the row's
+// epoch; the current epoch is newer; and the row's batch generation is older than the current one. The caller holds the live
+// actor from an authorized deployment status (captureEpoch requires `allowed`). Everything else with a changed epoch stays stale.
+function layoutReboundProven(staleActor, admission, lineage, actor, status) {
+  return staleActor?.reason === 'actor_epoch_changed'
+    && Number.isSafeInteger(lineage.actor_id) && lineage.actor_id === actor.actor_id && admission.actor_id === actor.actor_id
+    && Number.isSafeInteger(lineage.epoch) && lineage.epoch === admission.epoch
+    && Number.isSafeInteger(actor.epoch) && actor.epoch > admission.epoch
+    && Number.isSafeInteger(admission.generation) && Number.isSafeInteger(status?.batch_generation) && admission.generation < status.batch_generation
+    && isRecord(status.actor) && status.actor.valid === true && status.actor.has_character === true
+    && status.actor.kind === 'standalone_character' && status.actor.actor_id === actor.actor_id
 }
 
 // An uncertain native admission is still blocking unless the host retained its
@@ -778,8 +794,9 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     if (!Number.isSafeInteger(admission.generation) || !Number.isSafeInteger(status?.batch_generation)
       || admission.generation !== status.batch_generation) {
       // A layout execution the mod sealed after a restart retired its batch: the sealed row and the batch's receipt identity
-      // prove which nodes stand, for the actor that ran it. The remainder is then validated afresh, never replayed.
-      const historical = staleActor ? null : terminalConstructionLayoutPartial(admission, status, pending)
+      // prove which nodes stand, for the actor that ran it, also across the boot's rebind (layoutReboundProven). The remainder is
+      // then validated afresh, never replayed.
+      const historical = !staleActor || layoutReboundProven(staleActor, admission, lineage, actor, status) ? terminalConstructionLayoutPartial(admission, status, pending) : null
       if (historical) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN, reason: 'exact_construction_layout_partial', ...historical }
       return staleActor ?? { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
     }
