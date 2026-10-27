@@ -148,8 +148,8 @@ test('six large cached details cannot select a skill omitted by the wider planne
 
 test('the active brief persists through restart, isolates selected skills and cannot be rewritten by an executor', async () => {
   const w = world([({ agent }) => {
-    agent.loadedSkillContext.set('selected', { id: 'selected', marker: 'SELECTED-DETAILS' })
-    agent.loadedSkillContext.set('other', { id: 'other', marker: 'UNRELATED-ALTERNATIVE' })
+    agent.loadedSkillContext.set('selected', { id: 'selected', summary: 'SELECTED-DETAILS' })
+    agent.loadedSkillContext.set('other', { id: 'other', summary: 'UNRELATED-ALTERNATIVE' })
     return draft({ executionGuidance: [brief(['selected'])] })
   }, ctx => {
     const context = ctx.agent.skillContext()
@@ -676,8 +676,8 @@ test('provider sends planning-only contract on ordinary, closed and compact prot
 
 test('a deterministic step close refreshes both the focused brief and the selected skill details', async () => {
   const w = world([({ agent }) => {
-    agent.loadedSkillContext.set('copper', { id: 'copper', marker: 'COPPER-STRATEGY' })
-    agent.loadedSkillContext.set('iron', { id: 'iron', marker: 'IRON-STRATEGY' })
+    agent.loadedSkillContext.set('copper', { id: 'copper', summary: 'COPPER-STRATEGY' })
+    agent.loadedSkillContext.set('iron', { id: 'iron', summary: 'IRON-STRATEGY' })
     return draft({ plan: ['Gather ten copper ore', 'Gather ten iron ore'],
       goal: { scope: 'finite', summary: 'Gather copper and iron.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }] },
       stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('copper-ore', 10) }, { kind: 'deterministic', checkpoint: inventoryCheckpoint('iron-ore', 10) }],

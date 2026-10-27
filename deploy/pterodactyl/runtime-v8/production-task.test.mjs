@@ -9,7 +9,7 @@ import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './productio
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
-import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { pinLegacyFixtureSkillContext, FakeFactorio } from './task-loop-fixtures.mjs'
 import { recoverySession } from './recovery-loop-fixtures.mjs'
 import { plannerControlPayloadFromMessage, executionOnlyControlToolDefinitions } from './structured-policy.mjs'
 
@@ -62,6 +62,7 @@ test('unconfigured assemblers cannot receive production materials and a running 
 function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, fuelFacts = false, lostAck, provider } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(iron ? an.iron_memory : an.memory))
+  pinLegacyFixtureSkillContext(memory)
   const held = () => getActivePlan(memory.planningState(an.key))
   const game = new FakeFactorio({ inventory: { wood: 1, 'copper-plate': 1, coal: 10, lab: 1, 'offshore-pump': 1, boiler: 1, 'steam-engine': 1, pipe: 10 } })
   Object.assign(game.status, { actor_id: 18, epoch: 1, connected_players: 0, surface_index: 1 })

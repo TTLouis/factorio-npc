@@ -226,7 +226,7 @@ import {
 } from './goal-requirements.mjs'
 import { StepReadLedger, stepReadKey, UNCHANGED_FACT_TOOLS, UnchangedFactReads, unchangedFactScope } from './unchanged-fact-reads.mjs'
 import { POST_BATCH_COVERAGE_REASON, POST_BATCH_FACT_CHARS, POST_BATCH_FACTS_MARKER, POST_BATCH_PLACED_ENTITY_REASON, POST_BATCH_ROUTES, postBatchFactsContext, postBatchFamilyReads, postBatchPlacedEntityRead, postBatchReadAnswers, postBatchStepKey, StepFactWorkingSet, withoutSupersededPostBatchFact } from './post-batch-facts.mjs'
-import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, EXECUTOR_SKILL_CONTEXT_MAX_CHARS, skillDiscoveryPolicy, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
+import { abortSkillChoice, ensureSkillOffers, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, EXECUTOR_SKILL_CONTEXT_MAX_CHARS, compactLoadedSkill, capturePlannerSkillHandoff, selectedPlannerSkillDetails, skillHandoffError, skillDiscoveryPolicy, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -2332,64 +2332,7 @@ const POST_STEP_ROUTES = new Set([
 // older tool exchanges until the context is under this share of the ceiling.
 const COMPACTION_LOW_WATERMARK = 0.75
 
-function boundedSkillValue(value, depth = 0) {
-  if (depth > 4) return undefined
-  if (typeof value === 'string') return cleanMemoryText(value, 600)
-  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
-  if (Array.isArray(value)) {
-    return value.slice(0, 12)
-      .map(item => boundedSkillValue(item, depth + 1))
-      .filter(item => item !== undefined)
-  }
-  if (!value || typeof value !== 'object') return undefined
-  const entries = Object.entries(value).slice(0, 24)
-    .map(([key, child]) => [key, boundedSkillValue(child, depth + 1)])
-    .filter(([, child]) => child !== undefined)
-  return Object.fromEntries(entries)
-}
 
-function compactLoadedSkill(raw, expectedId) {
-  let skill
-  try { skill = typeof raw === 'string' ? JSON.parse(raw) : raw }
-  catch { return undefined }
-  if (!skill || typeof skill !== 'object' || Array.isArray(skill)) return undefined
-  const id = typeof skill.id === 'string' ? cleanMemoryText(skill.id, 80) : ''
-  if (!id || (expectedId && id !== expectedId)) return undefined
-
-  const keys = [
-    'schema_version', 'revision', 'id', 'name', 'kind', 'stage', 'status', 'summary',
-    'preconditions', 'inputs', 'outputs', 'topology', 'constraints', 'parameters',
-    'verification', 'known_failure_modes', 'confidence', 'examples',
-  ]
-  const compact = {}
-  for (const key of keys) {
-    if (skill[key] === undefined) continue
-    const value = boundedSkillValue(skill[key])
-    if (value !== undefined) compact[key] = value
-  }
-  let serialized = JSON.stringify(compact)
-  if (serialized.length <= 7000) return compact
-
-  delete compact.examples
-  delete compact.known_failure_modes
-  serialized = JSON.stringify(compact)
-  if (serialized.length <= 7000) return compact
-
-  return {
-    id,
-    revision: Number.isSafeInteger(skill.revision) ? skill.revision : undefined,
-    name: typeof skill.name === 'string' ? cleanMemoryText(skill.name, 160) : undefined,
-    kind: typeof skill.kind === 'string' ? cleanMemoryText(skill.kind, 80) : undefined,
-    stage: typeof skill.stage === 'string' ? cleanMemoryText(skill.stage, 80) : undefined,
-    status: typeof skill.status === 'string' ? cleanMemoryText(skill.status, 80) : undefined,
-    summary: typeof skill.summary === 'string' ? cleanMemoryText(skill.summary, 1200) : undefined,
-    preconditions: Array.isArray(skill.preconditions) ? boundedSkillValue(skill.preconditions.slice(0, 6)) : undefined,
-    topology: boundedSkillValue(skill.topology),
-    constraints: Array.isArray(skill.constraints) ? boundedSkillValue(skill.constraints.slice(0, 8)) : undefined,
-    parameters: Array.isArray(skill.parameters) ? boundedSkillValue(skill.parameters.slice(0, 8)) : undefined,
-    verification: boundedSkillValue(skill.verification),
-  }
-}
 
 function postStepDecisionQuestions() {
   return {
@@ -5205,6 +5148,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // against (see dropIfStale); a nested turn keeps it.
       const scope = this.currentTurnScope()
       return await this.turnScope.run(scope, async () => {
+        this.restorePlannerSelectedSkills()
         const interruptedRefresh = await recoverInterruptedEntityRefresh(this)
         if (interruptedRefresh !== undefined) return interruptedRefresh
         const gather = await recoverGatherFailure(this)
@@ -5343,7 +5287,39 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return skill
   }
 
+  restorePlannerSelectedSkills() {
+    if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE) return
+    const key = this.activePlanKey()
+    let handoff
+    try { handoff = selectedPlannerSkillDetails(key, this.memory.planningState?.(key), this.memory.plannerSkillHandoffs?.get(key)) }
+    catch (cause) {
+      void this.traceEvent('skill.handoff_refused', { request_id: this.traceRequest?.id, reason: cause.message, source: 'durable_planner_snapshot' })
+      const error = new AgentLoopError(cause.message)
+      error.code = error.failure_code = 'planner_skill_handoff_unavailable'
+      error.failureClass = 'harness_state'
+      error.pause_class = PAUSE_CLASS.GUARD
+      throw error
+    }
+    const restored = []
+    for (const skill of handoff.details) {
+      if (JSON.stringify(this.loadedSkillContext.get(skill.id)) === JSON.stringify(skill)) {
+        // Protect every already-correct selected detail from eviction while
+        // a later selected detail is restored into the bounded cache.
+        const current = this.loadedSkillContext.get(skill.id)
+        this.loadedSkillContext.delete(skill.id)
+        this.loadedSkillContext.set(skill.id, current)
+        continue
+      }
+      this.recordLoadedSkillToolResult('getSkillDetails', { id: skill.id }, skill)
+      restored.push(skill.id)
+    }
+    if (restored.length > 0) void this.traceEvent('skill.handoff_restored', { request_id: this.traceRequest?.id,
+      goal_id: handoff.scope.goal_id, plan_id: handoff.scope.plan_id, plan_version: handoff.scope.plan_version,
+      skill_ids: restored, snapshot_sha256: handoff.sha256, source: 'durable_planner_snapshot', model_calls: 0, native_reads: 0 })
+  }
+
   skillContext() {
+    this.restorePlannerSelectedSkills?.()
     if (!(this.loadedSkillContext instanceof Map) || this.loadedSkillContext.size === 0) return ''
     const separatedExecution = this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE
     const held = separatedExecution ? getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey())) : undefined
@@ -13606,6 +13582,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     providerMessagesOverride,
     closedCorrection = false,
   }) {
+    this.restorePlannerSelectedSkills()
     this.assertModelRecoveryAllowed()
     const recoveryOwner = this.captureModelRecoveryOwner()
     const omissionRepair = this.actionOmissionRepairActive && recoveryKind !== 'output_budget_exhaustion'
@@ -13738,6 +13715,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && (triggerSource === 'new_goal' || ['deep', 'strategic'].includes(this.reasoningBudgetOverride))) {
       providerMessages = [...providerMessages, { role: 'user', content: this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
         ? '[PLANNING_LOD] Decide approach, dependencies, build order, quantities, completion conditions and the per-step executionGuidance. Consider relevant loaded skills and setup cost/time savings. Defer exact operation arguments and mutable placement geometry to the executor; operations must be [].' : PLANNING_LOD_GUIDANCE }]
+    }
+    if (this.completionProtocolVersion >= 3 && this.agentContext.role === EXECUTOR_ROLE) {
+      // Closed/correction message overrides must carry the same pinned details
+      // as ordinary assembly. Never let an override quietly omit a reference.
+      const context = this.skillContext()
+      const blocks = providerMessages.filter(row => typeof row?.content === 'string' && row.content.startsWith('[SKILL_CONTEXT]'))
+      if (blocks.length !== (context ? 1 : 0) || (context && blocks[0]?.content !== context)) {
+        providerMessages = providerMessages.filter(row => !blocks.includes(row))
+        if (context) {
+          const firstTurn = providerMessages.findIndex(row => row?.role === 'assistant' || row?.role === 'tool')
+          providerMessages.splice(firstTurn < 0 ? providerMessages.length : firstTurn, 0, { role: 'user', content: context })
+        }
+      }
     }
     // An assembly invariant, not a repair: a split tool exchange is a harness
     // bug, and sending it only turns that bug into a provider 400.
@@ -17570,7 +17560,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!committed || committed.plan_id !== draft.plan_id || committed.status !== PLAN_STATUS.COMMITTED) {
         throw new AgentLoopError('planner_only_commit_refused: reducer did not commit the declared draft')
       }
-      await this.persistState()
+      const skillHandoff = capturePlannerSkillHandoff(key, committedState, this.loadedSkillContext, this.memory.plannerSkillHandoffs)
+      this.memory.plannerSkillHandoffs ??= new Map()
+      if (skillHandoff) this.memory.plannerSkillHandoffs.set(key, skillHandoff)
+      else this.memory.plannerSkillHandoffs.delete(key)
+      // Do not execute a selected procedure until its exact commit-time copy
+      // is durable. A failed write cannot silently discard restart safety.
+      try { await this.persistState({ strict: Boolean(skillHandoff) }) }
+      catch (cause) {
+        if (skillHandoff) {
+          // A copy that failed its required write is not restart-safe authority
+          // on a later same-process resume either. Preserve a durable fault.
+          this.memory.plannerSkillHandoffs.set(key, { invalid: true, reason: 'durable_write_failed' })
+          throw skillHandoffError(`durable_write_failed:${cause?.code ?? 'io_error'}`, cause)
+        }
+        throw cause
+      }
+      if (skillHandoff) await this.traceEvent('skill.handoff_pinned', { request_id: this.traceRequest?.id,
+        goal_id: skillHandoff.scope.goal_id, plan_id: committed.plan_id, plan_version: committed.plan_version,
+        skill_ids: skillHandoff.skills.map(skill => skill.id), snapshot_sha256: skillHandoff.sha256 })
       await this.traceEvent('plan.delegation_committed', {
         request_id: this.traceRequest?.id,
         plan_id: committed.plan_id, step_id: committed.steps[0].step_id,

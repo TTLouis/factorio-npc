@@ -27,8 +27,11 @@
 import { luaString, toolCommand } from '../staging/structured-policy.mjs'
 import { getActivePlan, nearestShelfRefinementTarget, PLAN_STATUS } from './planning-state.mjs'
 import { PLANNER_ROLE } from './agent-roles.mjs'
+import { createHash } from 'node:crypto'
+import { cleanMemoryText } from './durable-text.mjs'
 
 export const SKILL_OFFERS_PREFIX = '[SKILL_OFFERS]'
+const SKILL_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 export const SKILL_OFFER_LIMIT = 5
 export const SKILL_AUTOLOAD_LIMIT = 3
 export const PLANNER_SKILL_OFFER_LIMIT = 10
@@ -47,6 +50,149 @@ export function skillDiscoveryPolicy(loop) {
     chars: planner ? 32000 : EXECUTOR_SKILL_CONTEXT_MAX_CHARS,
   }
 }
+function boundedSkillValue(value, depth = 0) {
+  if (depth > 4) return undefined
+  if (typeof value === 'string') return cleanMemoryText(value, 600)
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
+  if (Array.isArray(value)) {
+    return value.slice(0, 12)
+      .map(item => boundedSkillValue(item, depth + 1))
+      .filter(item => item !== undefined)
+  }
+  if (!value || typeof value !== 'object') return undefined
+  const entries = Object.entries(value).slice(0, 24)
+    .map(([key, child]) => [key, boundedSkillValue(child, depth + 1)])
+    .filter(([, child]) => child !== undefined)
+  return Object.fromEntries(entries)
+}
+
+export function compactLoadedSkill(raw, expectedId) {
+  let skill
+  try { skill = typeof raw === 'string' ? JSON.parse(raw) : raw }
+  catch { return undefined }
+  if (!skill || typeof skill !== 'object' || Array.isArray(skill)) return undefined
+  const id = typeof skill.id === 'string' ? cleanMemoryText(skill.id, 80) : ''
+  if (!id || (expectedId && id !== expectedId)) return undefined
+
+  const keys = [
+    'schema_version', 'revision', 'id', 'name', 'kind', 'stage', 'status', 'summary',
+    'preconditions', 'inputs', 'outputs', 'topology', 'constraints', 'parameters',
+    'verification', 'known_failure_modes', 'confidence', 'examples',
+  ]
+  const compact = {}
+  for (const key of keys) {
+    if (skill[key] === undefined) continue
+    const value = boundedSkillValue(skill[key])
+    if (value !== undefined) compact[key] = value
+  }
+  let serialized = JSON.stringify(compact)
+  if (serialized.length <= 7000) return compact
+
+  delete compact.examples
+  delete compact.known_failure_modes
+  serialized = JSON.stringify(compact)
+  if (serialized.length <= 7000) return compact
+
+  return {
+    id,
+    revision: Number.isSafeInteger(skill.revision) ? skill.revision : undefined,
+    name: typeof skill.name === 'string' ? cleanMemoryText(skill.name, 160) : undefined,
+    kind: typeof skill.kind === 'string' ? cleanMemoryText(skill.kind, 80) : undefined,
+    stage: typeof skill.stage === 'string' ? cleanMemoryText(skill.stage, 80) : undefined,
+    status: typeof skill.status === 'string' ? cleanMemoryText(skill.status, 80) : undefined,
+    summary: typeof skill.summary === 'string' ? cleanMemoryText(skill.summary, 1200) : undefined,
+    preconditions: Array.isArray(skill.preconditions) ? boundedSkillValue(skill.preconditions.slice(0, 6)) : undefined,
+    topology: boundedSkillValue(skill.topology),
+    constraints: Array.isArray(skill.constraints) ? boundedSkillValue(skill.constraints.slice(0, 8)) : undefined,
+    parameters: Array.isArray(skill.parameters) ? boundedSkillValue(skill.parameters.slice(0, 8)) : undefined,
+    verification: boundedSkillValue(skill.verification),
+  }
+}
+
+const SKILL_HANDOFF_MAX_CHARS = 64000
+const skillHandoffHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+export function skillHandoffError(reason, cause) {
+  const error = new Error(`planner_skill_handoff_unavailable: ${reason}`, { cause })
+  error.code = error.failure_code = 'planner_skill_handoff_unavailable'
+  error.failureClass = 'harness_state'
+  error.pause_class = 'guard'
+  return error
+}
+
+function skillHandoffScope(key, planning) {
+  const plan = getActivePlan(planning)
+  if (!plan) return undefined
+  return {
+    memory_key: key, goal_id: planning.goal?.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
+    steps: plan.steps.map(step => ({ step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? null,
+      skill_ids: [...(step.execution_guidance?.skillIds ?? [])] })),
+  }
+}
+
+function handoffIds(scope) {
+  return [...new Set(scope.steps.flatMap(step => step.skill_ids))]
+}
+
+// Capture at commit, not at restart: a later library edit must never silently
+// replace the procedure the planner actually selected. These are static guides,
+// not live inventory, actor, geometry, placement or completion authority.
+export function capturePlannerSkillHandoff(key, planning, loaded, records) {
+  const scope = skillHandoffScope(key, planning)
+  if (!scope) return undefined
+  const ids = handoffIds(scope)
+  if (ids.length === 0) return undefined
+  if (records && !records.has(key) && records.size >= 128) throw skillHandoffError('snapshot_capacity')
+  if (scope.steps.length > 30 || ids.length > PLANNER_SKILL_DETAIL_LIMIT) throw skillHandoffError('capture_bounds')
+  const skills = ids.map(id => {
+    const skill = compactLoadedSkill(loaded?.get(id), id)
+    if (!skill || !SKILL_ID_PATTERN.test(id)) throw skillHandoffError('capture_missing')
+    return skill
+  })
+  const payload = { schema: 1, scope, skills }
+  if (JSON.stringify(payload).length > SKILL_HANDOFF_MAX_CHARS) throw skillHandoffError('capture_bounds')
+  return { ...payload, sha256: skillHandoffHash(payload) }
+}
+
+// Canonical memory retains a bounded copy. Invalid records remain a small
+// fault marker so another save cannot turn corrupted provenance into "absent".
+export function restorePlannerSkillHandoffs(raw) {
+  const records = new Map()
+  if (!Array.isArray(raw)) return records
+  for (const entry of raw.slice(0, 128)) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || entry[0].length === 0 || entry[0].length > 200) continue
+    const [key, record] = entry
+    records.set(key, record && typeof record === 'object' && JSON.stringify(record).length <= SKILL_HANDOFF_MAX_CHARS + 100
+      ? JSON.parse(JSON.stringify(record)) : { invalid: true })
+  }
+  return records
+}
+
+export function selectedPlannerSkillDetails(key, planning, record) {
+  const scope = skillHandoffScope(key, planning)
+  const plan = getActivePlan(planning)
+  const selected = plan?.steps?.[plan.active_step_index]?.execution_guidance?.skillIds ?? []
+  if (selected.length === 0) return { details: [], selected_ids: [] }
+  const fail = reason => { throw skillHandoffError(reason) }
+  if (!record || record.schema !== 1 || !Array.isArray(record.skills)) fail('missing_snapshot')
+  if (Object.keys(record).some(name => !['schema', 'scope', 'skills', 'sha256'].includes(name))) fail('snapshot_schema')
+  if (JSON.stringify(record.scope) !== JSON.stringify(scope)) fail('scope_mismatch')
+  const payload = { schema: record.schema, scope: record.scope, skills: record.skills }
+  if (JSON.stringify(payload).length > SKILL_HANDOFF_MAX_CHARS || record.sha256 !== skillHandoffHash(payload)) fail('snapshot_integrity')
+  const ids = handoffIds(scope)
+  if (ids.length > PLANNER_SKILL_DETAIL_LIMIT || record.skills.length !== ids.length) fail('snapshot_bounds')
+  const details = new Map()
+  for (const raw of record.skills) {
+    const skill = compactLoadedSkill(raw, raw?.id)
+    if (!skill || !ids.includes(skill.id) || details.has(skill.id)
+      || JSON.stringify(skill) !== JSON.stringify(raw)) fail('invalid_detail')
+    details.set(skill.id, skill)
+  }
+  if (selected.some(id => !details.has(id))) fail('missing_selected_detail')
+  const active = selected.map(id => details.get(id))
+  if (selected.length > 3 || JSON.stringify(active).length > EXECUTOR_SKILL_CONTEXT_MAX_CHARS) fail('executor_context_bounds')
+  return { details: active, selected_ids: [...selected], sha256: record.sha256, scope }
+}
+
 export const SKILL_AUTOLOAD_TIMEOUT_MS = 3000
 export const SKILL_CARD_MAX_CHARS = 600
 // The mod measures the goal in UTF-8 bytes (Lua strings are bytes).
@@ -58,7 +204,6 @@ export const SKILL_CHOICE_CONTRACT = 'skill_choice'
 export const SKILL_CHOICE_MODES = Object.freeze({ SHADOW: 'shadow', ADVISORY: 'advisory' })
 export const SKILL_CHOICE_MODE = SKILL_CHOICE_MODES.SHADOW
 export const SKILL_NEED_STATES = Object.freeze(['have', 'can_craft', 'locked', 'unknown'])
-const SKILL_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/
 const STATUSES = new Set(['observed', 'candidate', 'verified', 'deprecated'])
 

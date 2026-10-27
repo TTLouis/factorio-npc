@@ -25,10 +25,10 @@ executor prefix, at most three and 16,000 JSON characters. The executor does not
 search or reopen the skill table: protocol 3 omits `findSkills` and
 `getSkillDetails` from both its ordinary tools and targeted-read enum, and the
 runtime rejects injected calls before any part of that tool batch is sent. A
-caller-supplied prepared batch cannot bypass this check. If a necessary
-procedure is missing, the executor is instructed to request planner review
-rather than invent it. That fallback depends on the executor requesting review;
-there is no host-enforced missing-detail check or automatic review transition.
+caller-supplied prepared batch cannot bypass this check. The harness now saves
+and automatically restores the exact selected instruction copies, as described
+below. It checks them before executor turns and inference;
+restoration does not depend on the executor asking for review.
 
 The larger shared cache survives role changes;
 it does not send unrelated planner strategies to the executor. A planner cannot
@@ -45,12 +45,48 @@ The planner's explicit `findSkills` tool accepts one to ten results, default thr
 consistently in the advertised schema, serializer, native implementation and
 [contract manifest](../contracts/factorio-tool-contract.json). It remains a
 discovery tool: results do not establish that details were loaded. Protocol 1/2
-callers retain their existing discovery surfaces. This change does not add a
-new disk-persisted, revision-pinned skill snapshot; after process restart a
-missing selected procedure needs model-requested planner review. Referenced
-detail delivery after a process restart is not guaranteed by this change.
-In-process role changes and context restages retain the logical-task cache as
-before.
+callers retain their existing discovery surfaces.
+
+## Automatic restart restoration
+
+At a selected-skill plan commit, the harness captures the compact instruction
+records that were actually loaded for the planner. It binds them to the NPC
+memory key, goal, plan/version and complete ordered step/reference selection,
+and hashes that scope and content with SHA-256. Known skill revisions are
+preserved. The canonical memory snapshot includes `planner_skill_handoffs`;
+its state-file write must succeed before the first executor handoff.
+
+The record contains at most six selected skills and 64,000 JSON characters.
+There is one current record per memory key, at most 128 keys; capacity refuses
+a new capture rather than silently dropping it from persistence. Each active
+step still receives at most three details within its existing 16k limit.
+Snapshots are static candidate instructions, never fresh world facts or native
+execution/completion authority. Goal, plan and all recovery spending stay intact.
+
+Before an executor turn or model request, and whenever its context is rendered,
+the harness verifies the persisted scope, content hash, detail shape and active
+selection. It automatically refills missing or altered transient cache entries
+from the saved copies. Actual final message assembly also supplies the pinned
+block on closed/correction prompt overrides, so an alternate prompt path cannot
+omit or substitute it. A later library edit cannot change a committed procedure.
+No library lookup, model/Jev request, gameplay operation, or recovery allowance
+is needed for restoration. Repeated restarts use the same saved record.
+
+Missing, corrupt, oversized or scope-mismatched records fail closed with
+`planner_skill_handoff_unavailable`, classified as a harness guard. A failed
+durable write likewise stops before executor handoff. Old saved plans that
+reference skills but predate these records cannot recover their original
+instructions from an unversioned current library and therefore stop safely;
+the harness does not invent a matching snapshot. Plans without selected skills
+need no such record. The two planned cold trials must use the new writer.
+
+Trace events distinguish `skill.handoff_pinned`, `skill.handoff_restored`,
+`skill.handoff_refused` and actual `skill.context_presented`. Historical replay
+tests that predate this metadata explicitly inject synthetic test-only skill
+records in memory. Their original captured JSON and plan semantics remain
+unchanged; those replays do not prove the original instruction content or
+production benefit. The new disk-restart regression uses actual commit-time
+capture and state-file load, not that fixture helper.
 
 The live supervisor no longer wires `skillDecisionProvider`, so native ranking
 and planner choice require no Jev skill-ranking request, including shadow calls.

@@ -5,7 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { startContractPrediction } from './contract-prediction.mjs'
 import { recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
-import { FakeFactorio, planReply } from './task-loop-fixtures.mjs'
+import { pinLegacyFixtureSkillContext, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
 
 export const ao = JSON.parse(fs.readFileSync(new URL('./fixtures/run-ao-controller.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
 
@@ -26,6 +26,7 @@ export function preserveAoRepair(name, w) {
 export async function aoWorld({ traceHook, readHook, providerHook } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(ao.memory))
+  pinLegacyFixtureSkillContext(memory)
   const game = new FakeFactorio({ inventory: { 'iron-plate': 16, 'copper-plate': 11, lab: 1, 'transport-belt': 4 } })
   Object.assign(game.status, { actor_id: 19, epoch: 1, connected_players: 0 })
   game.nearby = { actor_position: { x: -21, y: 1 }, entities: [{ name: 'stone-furnace', type: 'furnace',

@@ -8,7 +8,7 @@ import { operationSignature, reconcilePendingOperation, duplicateEffectGuard } f
 import { gatherDeficit } from './gather-recovery.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
-import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { pinLegacyFixtureSkillContext, FakeFactorio } from './task-loop-fixtures.mjs'
 import { recoverySession, settle } from './recovery-loop-fixtures.mjs'
 
 const ar = JSON.parse(fs.readFileSync(new URL('./fixtures/run-ar-mining.json', import.meta.url)))
@@ -25,6 +25,7 @@ test('original executor submitPlan and closed reply retain the exact AR resource
 function world({ readHook, traceHook, inventory, memory: snapshot, preflight } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(snapshot ?? ar.memory))
+  pinLegacyFixtureSkillContext(memory)
   const game = new FakeFactorio({ inventory: inventory ?? ar.inventory, preflight })
   Object.assign(game.status, { actor_id: 25, epoch: 1, connected_players: 0, surface_index: 1 })
   game.batchId = 1
