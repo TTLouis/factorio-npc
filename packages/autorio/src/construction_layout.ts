@@ -3,6 +3,7 @@ import type { ControlledActor } from './actors/types'
 import type { PlacementPoint, PlacementWorldBox } from './placement_geometry'
 import { has_electric_energy_source, pole_reach, protected_read } from './electric_facts'
 import { resolve_entity_reference } from './entity_reference'
+import { find_world_entities } from './npc_vision'
 import { item_output_position } from './placement_candidates'
 import { rotate_cardinal, vector_xy } from './placement_geometry'
 import { planned_placement_footprint } from './placement_preflight'
@@ -661,12 +662,32 @@ function target_unit(entity: LuaEntity, field: string) {
   return protected_read(() => (entity as any)[field]?.unit_number as number | undefined)
 }
 
-// The native check of one connection whose roles are all built: the entities' own target and network fields. Records what
-// was observed; a connection holds only when the observation equals the expected endpoint.
+// The entity an inserter or drill acts on: its native target field once the engine has set it, else the one entity (other
+// than itself and characters) standing on its native pickup/drop point. On 2.0.77 a burner inserter's pickup_target and
+// drop_target are still nil on the tick it is built, while its pickup_position/drop_position are native at once.
+function acting_unit(entity: LuaEntity, target_field: string, point_field: string) {
+  const target = target_unit(entity, target_field)
+  if (target !== undefined) return { unit_number: target, source: 'target_field' }
+  const point = read_point(entity, point_field)
+  if (point === undefined) return { source: 'point_unreadable' }
+  const found = protected_read(() => find_world_entities(entity.surface, { position: point })) ?? []
+  const units: number[] = []
+  for (const other of found) {
+    if (other.valid && other.unit_number !== undefined && other.unit_number !== entity.unit_number && other.type !== 'character') units.push(other.unit_number)
+  }
+  if (units.length === 1) return { unit_number: units[0], source: 'entity_at_point', point }
+  return { source: units.length === 0 ? 'nothing_at_point' : 'several_at_point', point }
+}
+
+// The native check of one connection whose roles are all built: the entities' own target and network fields (an inserter's or
+// drill's point when its target field is not set yet). Records what was observed; a connection holds only when the
+// observation equals the expected endpoint.
 function verify_native(connection: LayoutRecordConnection, entities: Record<string, LuaEntity>) {
   if (connection.kind === 'inserter') {
     const inserter = entities.inserter
-    const observed = { pickup_unit_number: target_unit(inserter, 'pickup_target'), drop_unit_number: target_unit(inserter, 'drop_target') }
+    const pickup = acting_unit(inserter, 'pickup_target', 'pickup_position')
+    const drop = acting_unit(inserter, 'drop_target', 'drop_position')
+    const observed = { pickup_unit_number: pickup.unit_number, pickup_source: pickup.source, drop_unit_number: drop.unit_number, drop_source: drop.source }
     const holds = observed.pickup_unit_number !== undefined && observed.pickup_unit_number === entities.pickup.unit_number
       && observed.drop_unit_number !== undefined && observed.drop_unit_number === entities.drop.unit_number
     return { holds, observed }
@@ -678,7 +699,8 @@ function verify_native(connection: LayoutRecordConnection, entities: Record<stri
     return { holds: typeof pole_network === 'number' && pole_network === consumer_network, observed }
   }
   if (connection.kind === 'drill_output') {
-    const observed = { drop_unit_number: target_unit(entities.drill, 'drop_target') }
+    const drop = acting_unit(entities.drill, 'drop_target', 'drop_position')
+    const observed = { drop_unit_number: drop.unit_number, drop_source: drop.source }
     return { holds: observed.drop_unit_number !== undefined && observed.drop_unit_number === entities.receiver.unit_number, observed }
   }
   return { holds: false, observed: {} }

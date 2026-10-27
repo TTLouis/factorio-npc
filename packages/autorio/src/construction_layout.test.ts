@@ -479,6 +479,50 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       expect(layout(layout_id).pause_reason).toBeUndefined()
     })
 
+    it('verifies an inserter whose native target fields are not set yet by the one entity on each native point', () => {
+      const f = build()
+      const pickupPoint = { x: 0.5, y: -0.5 }
+      const dropPoint = { x: 0.5, y: 1.7 }
+      const at = (filter: any, point: { x: number, y: number }) => filter?.position?.x === point.x && filter.position.y === point.y
+      const character = { valid: true, unit_number: 1, type: 'character' }
+      f.hooks.on_create = (entity) => {
+        if (entity.name === 'test-inserter') {
+          entity.pickup_position = pickupPoint
+          entity.drop_position = dropPoint
+        }
+      }
+      f.surface.find_entities_filtered.mockImplementation((filter: any) => {
+        if (at(filter, pickupPoint)) return [character, f.created.find(other => other.name === 'test-chest')]
+        if (at(filter, dropPoint)) return [f.boiler, f.created.find(other => other.name === 'test-inserter')]
+        return []
+      })
+      const { layout_id } = start(f, [INS, SRC], [FEED])
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({
+        state: 'complete',
+        connections: [{ state: 'verified', observed: { pickup_unit_number: 901, pickup_source: 'entity_at_point', drop_unit_number: BOILER_UNIT, drop_source: 'entity_at_point' } }],
+      })
+    })
+
+    it('does not verify an inserter by its point when two entities stand on it', () => {
+      const f = build()
+      const dropPoint = { x: 0.5, y: 1.7 }
+      f.hooks.on_create = (entity) => {
+        if (entity.name === 'test-inserter') {
+          entity.pickup_target = f.created.find(other => other.name === 'test-chest')
+          entity.drop_position = dropPoint
+        }
+      }
+      f.surface.find_entities_filtered.mockImplementation((filter: any) => filter?.position?.x === dropPoint.x && filter.position.y === dropPoint.y
+        ? [f.boiler, { valid: true, unit_number: 4242, type: 'container' }]
+        : [])
+      const { layout_id } = start(f, [INS, SRC], [FEED])
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(place_next(f)?.[0]).toBe(true)
+      expect(layout(layout_id)).toMatchObject({ state: 'paused', connections: [{ state: 'mismatch', observed: { drop_source: 'several_at_point' } }] })
+    })
+
     it('ignores a second receipt for a placed node, counts it and never rebinds', () => {
       const f = build()
       const { layout_id } = start(f, [INS, SRC], [FEED])
