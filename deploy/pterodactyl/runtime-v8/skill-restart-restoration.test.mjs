@@ -38,10 +38,15 @@ async function stateFile(t) {
   return path.join(directory, 'npc-state.json')
 }
 
-async function firstProcess(t, { file, selected = IDS, observed } = {}) {
-  file ??= await stateFile(t)
+async function firstProcess(t, { file, selected = IDS, observed, noSnapshot = false, omitHandoff = false } = {}) {
+  if (file === undefined) file = await stateFile(t)
   const game = new LibraryGame()
   const memory = new CanonicalTaskBoardMemory()
+  if (noSnapshot) memory.snapshot = undefined
+  if (omitHandoff) {
+    const snapshot = memory.snapshot.bind(memory)
+    memory.snapshot = () => { const saved = snapshot(); delete saved.planner_skill_handoffs; return saved }
+  }
   const calls = []
   if (observed) Object.assign(observed, { calls, game })
   const provider = answersStepContract(async (messages, context) => {
@@ -111,14 +116,21 @@ test('disk restart restores exact planner-selected guides before executor infere
 
 test('a residual cache loss inside the same turn restores both selected details and leaves recovery spending intact', async t => {
   const first = await firstProcess(t)
+  const held = getActivePlan(first.memory.planningState(KEY))
+  first.memory.pausePlan(KEY, 'fixture_spent_resume', { pause_class: 'model_recoverable' })
+  assert.equal(first.memory.recordAutoResumeStarted(KEY, { plan_id: held.plan_id, plan_version: held.plan_version, step_id: held.steps[0].step_id }).recorded, true)
+  assert.equal(first.memory.resumePausedPlan(KEY, { pauseClasses: ['model_recoverable'] }).resumed, true)
+  assert.equal(first.memory.claimFreshContextRecovery(KEY), true)
+  await first.agent.persistState({ strict: true })
   const restarted = await restartedProcess(first.file, first.game)
-  const goal = structuredClone(restarted.memory.planningState(KEY).goal)
+  assert.equal(restarted.memory.autoResumeAllowance(KEY).goal_attempts, 1)
+  assert.equal(restarted.memory.planningState(KEY).goal.fresh_context_recovery_used, true)
   restarted.agent.reserve = async () => { restarted.agent.loadedSkillContext.clear(); return {} }
   await restarted.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart' })
   await restarted.agent.runTurn()
   assert.deepEqual(restarted.calls, ['executor'])
-  assert.equal(restarted.memory.planningState(KEY).goal.fresh_context_recovery_used, goal.fresh_context_recovery_used)
-  assert.equal(restarted.memory.planningState(KEY).goal.auto_resume_goal_used, goal.auto_resume_goal_used)
+  assert.equal(restarted.memory.planningState(KEY).goal.fresh_context_recovery_used, true)
+  assert.equal(restarted.memory.autoResumeAllowance(KEY).goal_attempts, 1)
 })
 
 test('closed-round prompt overrides cannot omit or substitute the pinned executor instructions', async t => {
@@ -191,4 +203,19 @@ test('a selected-skill snapshot must be written successfully before first execut
   assert.equal(observed.agent.memory.plannerSkillHandoffs.get(KEY).invalid, true)
   observed.agent.agentContext.role = 'executor'
   assert.throws(() => observed.agent.skillContext(), error => error.code === 'planner_skill_handoff_unavailable')
+})
+
+for (const unavailable of ['state_file', 'snapshot_method', 'snapshot_payload']) {
+  test(`selected skills refuse unavailable ${unavailable} persistence before executor handoff`, async t => {
+    const observed = {}
+    await assert.rejects(firstProcess(t, { observed, ...(unavailable === 'state_file' ? { file: null } : unavailable === 'snapshot_method' ? { noSnapshot: true } : { omitHandoff: true }) }),
+      error => error.code === 'planner_skill_handoff_unavailable' && /persistence_unavailable|snapshot_missing_pinned_skills/.test(error.message))
+    assert.deepEqual(observed.calls, ['planner'])
+    assert.equal(observed.game.mutations.length, 0)
+  })
+}
+
+test('the live supervisor never enables the explicit in-memory fixture exemption', async () => {
+  const source = await fs.readFile(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /allowEphemeralSkillHandoff\s*:/)
 })

@@ -3111,6 +3111,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.lastRecoveryDecisionKey = ''
     this.lastRecoveryDecision = null
     this.loadedSkillContext = new Map()
+    this.allowEphemeralSkillHandoff = options.allowEphemeralSkillHandoff === true // explicit offline fixture exemption; never wired by Session
     this.reasoningTriggerSource = null
     this.reasoningBudgetOverride = null
     this.observationBudgetOverride = null
@@ -5242,11 +5243,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async persistState({ strict = false } = {}) {
+  async persistState({ strict = false, requiredSkillHandoff } = {}) {
     this.assertRequestAdmission()
-    if (!this.stateFile || typeof this.memory.snapshot !== 'function') return
+    if (!this.stateFile || typeof this.memory.snapshot !== 'function') {
+      if (requiredSkillHandoff && !this.allowEphemeralSkillHandoff) throw skillHandoffError('persistence_unavailable')
+      return
+    }
     const filename = this.stateFile
     const snapshot = this.memory.snapshot()
+    if (requiredSkillHandoff) {
+      const records = Array.isArray(snapshot?.planner_skill_handoffs) ? snapshot.planner_skill_handoffs : []
+      const stored = records.find(entry => entry?.[0] === requiredSkillHandoff.scope.memory_key)?.[1]
+      if (JSON.stringify(stored) !== JSON.stringify(requiredSkillHandoff)) throw skillHandoffError('snapshot_missing_pinned_skills')
+    }
     const write = this.persistQueue.then(async () => {
       this.assertRequestAdmission()
       await fsp.mkdir(path.dirname(filename), { recursive: true })
@@ -17566,19 +17575,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       else this.memory.plannerSkillHandoffs.delete(key)
       // Do not execute a selected procedure until its exact commit-time copy
       // is durable. A failed write cannot silently discard restart safety.
-      try { await this.persistState({ strict: Boolean(skillHandoff) }) }
+      try { await this.persistState({ strict: Boolean(skillHandoff), requiredSkillHandoff: skillHandoff }) }
       catch (cause) {
         if (skillHandoff) {
           // A copy that failed its required write is not restart-safe authority
           // on a later same-process resume either. Preserve a durable fault.
           this.memory.plannerSkillHandoffs.set(key, { invalid: true, reason: 'durable_write_failed' })
+          if (cause?.code === 'planner_skill_handoff_unavailable') throw cause
           throw skillHandoffError(`durable_write_failed:${cause?.code ?? 'io_error'}`, cause)
         }
         throw cause
       }
       if (skillHandoff) await this.traceEvent('skill.handoff_pinned', { request_id: this.traceRequest?.id,
         goal_id: skillHandoff.scope.goal_id, plan_id: committed.plan_id, plan_version: committed.plan_version,
-        skill_ids: skillHandoff.skills.map(skill => skill.id), snapshot_sha256: skillHandoff.sha256 })
+        skill_ids: skillHandoff.skills.map(skill => skill.id), snapshot_sha256: skillHandoff.sha256,
+        persistence: this.stateFile && typeof this.memory.snapshot === 'function' ? 'state_file' : 'explicit_in_memory_fixture' })
       await this.traceEvent('plan.delegation_committed', {
         request_id: this.traceRequest?.id,
         plan_id: committed.plan_id, step_id: committed.steps[0].step_id,
@@ -19064,7 +19075,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return await this.commitRecoveryRouteDraft(generation, message, roundBase, recoveryOwner, routed.route)
       }
       catch (error) {
-        if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
+        if (error?.code === 'planner_skill_handoff_unavailable' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
         throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
       finally {

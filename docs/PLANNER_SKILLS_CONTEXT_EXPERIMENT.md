@@ -55,6 +55,13 @@ memory key, goal, plan/version and complete ordered step/reference selection,
 and hashes that scope and content with SHA-256. Known skill revisions are
 preserved. The canonical memory snapshot includes `planner_skill_handoffs`;
 its state-file write must succeed before the first executor handoff.
+A selected-skill commit requires both a configured state file and a memory
+snapshot implementation. Unavailable storage is refused rather than treating a
+no-op persistence call as success. The actual snapshot payload must include the
+exact selected record before it is written; a snapshot implementation that
+omits it is refused too. Scripted in-memory fixtures explicitly opt
+into `allowEphemeralSkillHandoff`; the live supervisor never enables that
+constructor option, and pin traces label that fixture mode separately.
 
 The record contains at most six selected skills and 64,000 JSON characters.
 There is one current record per memory key, at most 128 keys; capacity refuses

@@ -32,7 +32,7 @@ class LibraryGame extends FakeFactorio {
 
 test('separated planner loads six of ten ranked matches, executor and legacy policies stay focused', async () => {
   const game = new LibraryGame()
-  const agent = new NpcAgentLoop({ rcon: game, provider: async () => { throw new Error('No inference') }, completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, provider: async () => { throw new Error('No inference') }, completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
   assert.equal(agent.agentContext.role, 'planner')
   agent.epoch = { actor_id: 18, epoch: 3 }
   await ensureSkillOffers(agent, { memoryKey: agent.activePlanKey(), intent: 'new_goal', text: 'Build a factory' })
@@ -68,7 +68,7 @@ test('real request hands only selected details to executor and traces the actual
     const plan = getActivePlan(memory.planningState('npc:sgluna'))
     return planReply({ stepId: plan.steps[0].step_id, operations: [{ name: 'wait', args: { ticks: 1 } }] })
   }, { contracts: { [description]: checkpoint } })
-  const agent = new NpcAgentLoop({ rcon: game, memory, provider, npcId: 'sgluna', completionProtocolVersion: 3,
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, provider, npcId: 'sgluna', completionProtocolVersion: 3,
     stateFile: null, traceFile: null, decisionTraceFile: null,
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     onActivity: (event, data) => events.push({ event, data }) })
@@ -87,7 +87,7 @@ test('real request hands only selected details to executor and traces the actual
 })
 
 test('all factory procedures survive real compaction and fit together inside the wider planner prefix', () => {
-  const agent = new NpcAgentLoop({ rcon: { command: async () => '{}' }, provider: async () => {}, completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: { command: async () => '{}' }, provider: async () => {}, completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
   assert.equal(pack.default_enabled, false)
   for (const skill of pack.skills) {
     const loaded = agent.recordLoadedSkillToolResult('getSkillDetails', { id: skill.id }, JSON.stringify(skill))
@@ -119,7 +119,7 @@ test('protocol 3 executor schemas offer neither skill search nor detail lookup, 
 })
 
 test('planner cannot select more detailed instructions than the focused executor can actually receive', () => {
-  const agent = new NpcAgentLoop({ rcon: { command: async () => '{}' }, provider: async () => {},
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: { command: async () => '{}' }, provider: async () => {},
     completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
   const ids = ['large-a', 'large-b', 'large-c']
   for (const id of ids) agent.recordLoadedSkillToolResult('getSkillDetails', { id }, {
@@ -134,7 +134,7 @@ test('planner cannot select more detailed instructions than the focused executor
 
 test('executor role refuses injected library calls before a mixed or caller-prepared batch can reach native tools', async () => {
   let nativeCalls = 0
-  const agent = new NpcAgentLoop({ rcon: { command: async () => { nativeCalls++; return '{}' } }, provider: async () => {},
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: { command: async () => { nativeCalls++; return '{}' } }, provider: async () => {},
     completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
   const tool = (name, args = {}) => ({ id: `probe-${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })
   for (const forbidden of [tool('findSkills', { query: 'science' }), tool('getSkillDetails', { id: 'factory-playbook-red-science' })]) {

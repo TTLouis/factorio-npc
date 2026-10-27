@@ -47,7 +47,7 @@ function world({ readHook, traceHook, inventory, memory: snapshot, preflight } =
     }
     return native(text)
   }
-  agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
+  agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
     stateFile: null, traceFile: null, decisionTraceFile: null,
     provider: async (_messages, context) => {
       if (context.triggerSource === 'step_contract') throw new Error('Fixture stops at the next unbound native-identity checkpoint')

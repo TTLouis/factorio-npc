@@ -37,7 +37,7 @@ function world({ readHook, traceHook, snapshot, collectionCount = 6 } = {}) {
     if (text.includes('"get_entity_status"')) return JSON.stringify(game.detailOverride ?? detail(text.includes('unit_number') ? 15 : /,15\)/.test(text) ? 15 : 16))
     return native(text)
   }
-  agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null,
+  agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null,
     provider: async () => {
       providers.push(agent.liveObservedExactTarget(15))
       if (providers.length === 1) return exact('tap_25')

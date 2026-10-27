@@ -150,7 +150,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
       entity: iron && text.includes(',43)') ? drill : machine, observation_mode: 'full' })
     return native(text)
   }
-  agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
+  agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
     stateFile: null, traceFile: null, decisionTraceFile: null,
     provider: async (messages, context) => { providers.push(context); if (provider) return provider(messages, context); throw new Error(`No model repair permitted in AN production replay: ${JSON.stringify({ inventory: game.inventory, events: events.slice(-10).map(row => ({ event: row.event, data: row.data })) })}`) } })
   Object.assign(agent, { active: true, epoch: { ...game.status }, lastMemoryKey: an.key,

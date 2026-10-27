@@ -65,6 +65,7 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   steeringDecisionProvider: f('construction', false, V8, 'Jev decision provider wrapped by recordedDecisionProvider, set once'),
   operationProjectionDecisionProvider: f('construction', false, V8, 'Jev decision provider wrapped by recordedDecisionProvider, set once'),
   skillDecisionProvider: f('construction', false, V8, 'Jev decision provider wrapped by recordedDecisionProvider, set once'),
+  allowEphemeralSkillHandoff: f('construction', false, V8, 'explicit offline test-only handoff exemption; defaults false and is never configured by the live supervisor'),
   goalDefinitionPolicy: f('construction', true, V8, 'required/optional goal definition policy from options'),
   goalSampling: f('construction', false, V8, 'goal check sampling option'),
   onActivity: f('construction', false, V8, 'activity callback option'),

@@ -48,7 +48,7 @@ function recordedWorld({ count = 2, receipt = 'verified', onCount, firstAction =
     return native(text)
   }
   const held = () => getActivePlan(memory.planningState(am.key))
-  agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
+  agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
     systemPrompt: 'Recorded AM autonomous reconciliation fixture', stateFile: null, traceFile: null, decisionTraceFile: null,
     provider: async (_messages, context) => {
       if (context.triggerSource === 'step_contract') return { content: invalidNextContract ? '{}' : JSON.stringify({ stepId: held().steps[held().active_step_index].step_id,

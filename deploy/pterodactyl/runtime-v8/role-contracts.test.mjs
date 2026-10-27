@@ -32,7 +32,7 @@ function world(script, options = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const calls = []
   const events = []
-  const agent = new NpcAgentLoop({ rcon: game, memory, completionProtocolVersion: 3, replacementWake: true,
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, completionProtocolVersion: 3, replacementWake: true,
     provider: answersStepContract(async (messages, context) => {
       calls.push({ messages, context })
       const next = script[calls.length - 1]
