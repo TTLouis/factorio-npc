@@ -88,16 +88,39 @@ const FAULTS = {
   surface: { reply: names => { const w = witness(names); w.preservation_nonfluid_output.surface_index = 2; return w } },
   force: { reply: names => { const w = witness(names); w.preservation_nonfluid_output.force_index = 2; return w } },
 }
+// The fixture step anchors a boiler. A witness that does not list this exact validation's placements cannot be checked against
+// that committed area either, so the preflight refuses it first (M2 review R2-1) with placement_region_unproven; the
+// preservation verdict on the same witness is asserted directly, since that gate is no longer reached for it.
+const PLAN_OPERATION = { name: 'execute_construction_plan', args: { validation_id: 7, placement_count: 2 } }
+const PRESERVED_SCOPE = { actor_id: 10, preserved: [{ surface_index: 1, force_index: 1 }] }
+// The scope refusal is a correctable preflight refusal: the executor is told and the goal goes on, so start() need not reject.
+// What must hold is the same: nothing reached native transport, nothing is pending and the step did not advance.
+const scopeRefused = async w => {
+  await w.start().catch(() => undefined)
+  const refusals = w.rows.filter(row => row.event === 'operations.placement_scope_refused')
+  assert.ok(refusals.length >= 1 && refusals.every(row => row.data.code === 'placement_region_unproven' && row.data.operation === 'execute_construction_plan'),
+    JSON.stringify(w.rows.filter(row => /failed|paused|refused/.test(row.event)).slice(-4)))
+  assert.equal(w.game.mutations.length, 0, 'a refused composite never reaches native transport')
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
+  assert.equal(getActivePlan(w.memory.planningState(KEY)).active_step_index, 0)
+}
+const listsPlacements = (w, operation) => w?.ok === true && w.validation_id === operation.args.validation_id && w.placement_count === operation.args.placement_count
+  && Array.isArray(w.construction_placements) && w.construction_placements.length === operation.args.placement_count
 for (const [fault, { reply }] of Object.entries(FAULTS)) {
   test(`unproven composite stays refused before native transport: ${fault}`, async () => {
     const names = SHAPES.lab_pole
-    await refused(await planWorld(names, { reply: () => reply(names) }))
+    const read = reply(names)
+    assert.equal(nonfluidConstructionWitness(typeof read === 'string' ? undefined : read, PLAN_OPERATION, PRESERVED_SCOPE), false, 'the preservation gate refuses this witness')
+    const w = await planWorld(names, { reply: () => reply(names) })
+    await (listsPlacements(read, PLAN_OPERATION) ? refused(w) : scopeRefused(w))
   })
 }
 
 test('submitting an id the witness does not describe stays refused', async () => {
   // The scripted native reply describes validation 7; the executor submitted 9 (a stale or invented id).
-  await refused(await planWorld(SHAPES.lab_pole, { id: 9, reply: () => witness(SHAPES.lab_pole) }))
+  const operation = { name: 'execute_construction_plan', args: { validation_id: 9, placement_count: 2 } }
+  assert.equal(nonfluidConstructionWitness(witness(SHAPES.lab_pole), operation, PRESERVED_SCOPE), false)
+  await scopeRefused(await planWorld(SHAPES.lab_pole, { id: 9, reply: () => witness(SHAPES.lab_pole) }))
 })
 
 for (const extra of [

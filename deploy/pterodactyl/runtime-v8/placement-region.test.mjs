@@ -308,9 +308,24 @@ test('R1-1: a construction plan is refused when one validated placement of the c
   assert.equal(outside.error.preflight.entity_name, DRILL)
   const unproven = await preflightOf(COMMITTED, witness({ x: 12, y: 10 }), [plan])
   assert.equal(unproven.error.preflight.code, 'placement_region_unproven', 'raw coordinates are not the resolved position')
-  // An unusable witness is left to the existing checks (the preservation gate, native re-validation), not refused as out of area.
-  const unreadable = await preflightOf(COMMITTED, () => ({ ok: false, code: 'construction_plan_unavailable' }), [plan])
-  assert.notEqual(unreadable.error?.preflight?.code?.startsWith('placement_'), true)
+  // Review R2-1: no later gate checks the committed area (preservation needs a version-2 proof; native re-validation knows no
+  // area), so a witness that does not list this exact validation's placements leaves them unproven and the plan is refused.
+  for (const [shape, reply] of Object.entries({
+    unreadable: () => 'not json',
+    stale: () => ({ ok: false, code: 'construction_plan_stale' }),
+    remote: () => ({ ok: false, code: 'construction_plan_remote_unsupported' }),
+    other_id: () => ({ ok: true, validation_id: 8, placement_count: 2, construction_placements: [{}, {}] }),
+    short_list: () => ({ ok: true, validation_id: 7, placement_count: 2, construction_placements: [{}] }),
+  })) {
+    const { error, game } = await preflightOf(COMMITTED, reply, [plan])
+    assert.equal(error?.preflight?.code, 'placement_region_unproven', shape)
+    assert.equal(error.preflight.refusal_class, 'argument', shape)
+    assert.deepEqual(error.preflight.committed_regions, [CIRCLE], shape)
+    assert.match(error.preflight.correction_message, /cannot be checked against the committed region/, shape)
+    assert.equal(game.mutations.length, 0, shape)
+  }
+  const remote = await preflightOf(COMMITTED, () => ({ ok: false, code: 'construction_plan_remote_unsupported' }), [plan])
+  assert.equal(remote.error.preflight.witness_code, 'construction_plan_remote_unsupported')
   const unrelated = await preflightOf(obligationsFor(drillCount({ anchor: undefined })), () => { throw new Error('no witness read without an anchored requirement') }, [plan])
   assert.equal(unrelated.error, undefined)
   const inside = await preflightOf(COMMITTED, witness({ x: 12, y: 10, snapped: { x: 12, y: 10 } }), [plan])

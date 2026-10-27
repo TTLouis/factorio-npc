@@ -5718,21 +5718,41 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // prototype only inside an anchored area, the exact stored validation is read natively and each placement's snapped position is
   // checked like any other placement. The placement list of a validation id never changes, so this read is independent of the
   // fluid-preservation gate's own admission-time witness read, which alone decides preservation. A witness that cannot be read or
-  // does not describe this exact validation is left to the existing checks (that gate, and native execution, which re-validates
-  // the stored plan before placing).
+  // does not describe this exact validation (including a remote-prepared plan, whose placements this read does not list) leaves
+  // the placements unproven, so the batch is refused here: no later gate checks the committed area.
   async constructionPlanScopeRefusal(operation, index, assertPreflightCurrent) {
     if (operation?.name !== 'execute_construction_plan') return undefined
     const requirements = this.committedPlacementRequirements({ admission: true })
-    if (!requirements.outcome.requirements.some(row => row?.kind === 'entity_count' && committedPlacementRegions(requirements, row.prototype).length > 0)) return undefined
+    const anchored = [...new Set(requirements.outcome.requirements.filter(row => row?.kind === 'entity_count' && typeof row.prototype === 'string')
+      .map(row => row.prototype))].filter(name => committedPlacementRegions(requirements, name).length > 0)
+    if (anchored.length === 0) return undefined
     const command = constructionPlanWitnessCommand(operation)
-    if (!command) return undefined
     let witness
-    try { witness = JSON.parse(String(await this.rcon.command(command)).trim()) }
-    catch { witness = undefined }
-    await assertPreflightCurrent()
-    if (witness?.ok !== true || witness.validation_id !== operation.args.validation_id || witness.placement_count !== operation.args.placement_count
-      || !Array.isArray(witness.construction_placements) || witness.construction_placements.length !== operation.args.placement_count) return undefined
-    return this.committedPlacementRefusal(operation, witness, index)
+    if (command) {
+      try { witness = JSON.parse(String(await this.rcon.command(command)).trim()) }
+      catch { witness = undefined }
+      await assertPreflightCurrent()
+    }
+    if (witness?.ok === true && witness.validation_id === operation.args.validation_id && witness.placement_count === operation.args.placement_count
+      && Array.isArray(witness.construction_placements) && witness.construction_placements.length === operation.args.placement_count) {
+      return this.committedPlacementRefusal(operation, witness, index)
+    }
+    const committed = anchored.flatMap(name => committedPlacementRegions(requirements, name))
+    const read = witness === undefined ? 'could not be read' : witness?.ok !== true ? `returned ${typeof witness?.code === 'string' ? witness.code : 'no placement list'}`
+      : `describes validation ${witness.validation_id} with ${Array.isArray(witness.construction_placements) ? witness.construction_placements.length : 'no'} placements, not validation ${operation.args.validation_id} with ${operation.args.placement_count}`
+    const facts = `the native read of construction plan ${operation.args?.validation_id} ${read}, so its placements cannot be checked against the committed region: the active step's entity_count requirement for ${anchored.join(', ')} counts only entities within ${committed.map(circle => describeRegion(circle)).join(' or ')}.`
+    return {
+      ok: false,
+      operation: operation.name,
+      code: 'placement_region_unproven',
+      refusal_class: REFUSAL_CLASS.ARGUMENT,
+      operation_index: index,
+      entity_name: anchored[0],
+      committed_regions: committed,
+      ...(typeof witness?.code === 'string' ? { witness_code: witness.code } : {}),
+      detail: facts,
+      correction_message: `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${operation.name}) before Autorio admission with code placement_region_unproven; no mutation from this batch ran. ${facts} The committed step is unchanged. A locally validated construction plan, or getPlacementCandidates for ${anchored[0]}, can be checked against that region.`,
+    }
   }
 
   // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples

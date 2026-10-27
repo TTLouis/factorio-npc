@@ -23,7 +23,7 @@ const INSIDE = { candidate: 'candidate-1', position: { x: 12, y: 11 } }
 
 const OBLIGATIONS = { outcome: { mode: 'all', requirements: [{ kind: 'entity_count', prototype: DRILL, minimum: 2, anchor: ANCHOR, radius: 6 }] }, preserve: [] }
 
-function world({ obligations = OBLIGATIONS, contractOnly = false, secondPick, nativePosition = id => ({ 'candidate-1': INSIDE.position, 'candidate-2': OUTSIDE.position })[id] } = {}) {
+function world({ obligations = OBLIGATIONS, contractOnly = false, secondPick, constructionWitness, nativePosition = id => ({ 'candidate-1': INSIDE.position, 'candidate-2': OUTSIDE.position })[id] } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const game = new FakeFactorio({ inventory: { [DRILL]: 2 } })
   game.status.actor_id = 10
@@ -46,6 +46,7 @@ function world({ obligations = OBLIGATIONS, contractOnly = false, secondPick, na
       return JSON.stringify({ ok: true, operation: 'place_entity', placement_item: { entity_name: DRILL, item_name: DRILL, count: 1, held_count: 2 },
         ...(Number.isFinite(x) && Number.isFinite(y) ? { planned_footprint: { entity_name: DRILL, position: { x, y }, direction: 0 } } : {}) })
     }
+    if (constructionWitness && text.includes('"autorio_preflight"') && text.includes('"execute_construction_plan"')) return constructionWitness(text)
     if (text.includes("'autorio_preflight'") && text.includes("'place_candidate'")) {
       const id = /candidate_id='(candidate-\d+)'/.exec(text)?.[1]
       const position = nativePosition(id)
@@ -178,4 +179,24 @@ test('review R1-1: a place_entity with explicit coordinates outside the committe
   assert.equal(w.game.mutations.length, 1)
   assert.ok(w.game.mutations[0].includes("'place_candidate'") && w.game.mutations[0].includes('candidate-1'))
   assert.equal(w.rows.some(row => row.event === 'goal.paused'), false)
+})
+
+test('review R2-1: with no preservation proof, a construction plan whose placement read fails is refused before admission, not executed natively', async () => {
+  const witnessReads = []
+  const w = world({ secondPick: { name: 'execute_construction_plan', args: { validation_id: 7, placement_count: 1 } },
+    constructionWitness: text => { witnessReads.push(text); return JSON.stringify({ ok: false, code: 'construction_plan_stale', operation: 'execute_construction_plan' }) } })
+  await w.start()
+  const step = getActivePlan(w.memory.planningState(KEY))?.steps?.[0]
+  assert.notEqual(step?.obligation_proof?.version, 2, 'the fixture has no fluid-preservation proof to fall back on')
+  assert.equal(witnessReads.length, 1)
+  const refused = w.rows.find(row => row.event === 'operations.placement_scope_refused')
+  assert.equal(refused?.data.code, 'placement_region_unproven')
+  assert.equal(refused.data.operation, 'execute_construction_plan')
+  assert.equal(w.rows.find(row => row.event === 'operations.preflight_recoverable')?.data.failure_class, 'model_correctable_placement_region_unproven')
+  assert.equal(w.mutationsAt.at(-1), 0, 'nothing had been admitted when the executor was asked to correct')
+  assert.match(w.calls.at(-1).messages.map(message => String(message.content ?? '')).join('\n'), /construction plan 7 returned construction_plan_stale/)
+  // FakeFactorio would have accepted the plan; the only native work is the corrected inside candidate.
+  assert.equal(w.game.mutations.some(text => text.includes('execute_construction_plan')), false)
+  assert.equal(w.game.mutations.length, 1)
+  assert.ok(w.game.mutations[0].includes("'place_candidate'") && w.game.mutations[0].includes('candidate-1'))
 })
