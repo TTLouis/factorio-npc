@@ -296,7 +296,13 @@ function stateHasUnverifiedTransferIntent(state, evidence) {
   return state.last_mutation_verified !== true
 }
 
-const PLACEMENT_OPERATION_NAMES = new Set(['place_entity', 'place_candidate'])
+// A coordinate-free place_entity is the only operation `no_position` can come from (the native ring search runs only for a
+// placement without a position), so it is the only failed operation a settlement is accepted for.
+function coordinateFreePlacement(operation) {
+  const args = operation?.args
+  return operation?.name === 'place_entity' && args && typeof args === 'object' && !Array.isArray(args)
+    && args.x === undefined && args.y === undefined && args.position === undefined
+}
 const SETTLEMENT_BASES = new Set(['harness_receipt_derivation', 'native_admission_journal'])
 
 // A coordinate-free placement the engine could not position (`no_position`: the native search covers only the tile ring
@@ -343,7 +349,7 @@ function settledPlacementFailure(evidence, state, activePlan) {
     }
     else if (row.disposition !== 'not_started') return undefined
   }
-  if (failed < 0 || !PLACEMENT_OPERATION_NAMES.has(operations[failed].name)) return undefined
+  if (failed < 0 || !coordinateFreePlacement(operations[failed])) return undefined
   const wanted = operations[failed].args?.entity_name
   if (typeof wanted === 'string' && typeof basic.entity_name === 'string' && wanted !== basic.entity_name) return undefined
   if (JSON.stringify(settlement.applied_slots) !== JSON.stringify(Array.from({ length: failed }, (_, index) => index + 1))
@@ -2255,6 +2261,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         signature: pending?.signature,
         plan_id: plan?.plan_id,
         step_id: step?.step_id,
+        ...(guard.settled ? { settled: guard.settled } : {}),
       }, requestId)
     }
     return guard

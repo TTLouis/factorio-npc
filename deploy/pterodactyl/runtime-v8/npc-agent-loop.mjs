@@ -108,11 +108,13 @@ import {
   batchWatermark,
   buildPendingOperation,
   completedOperationReceipt,
+  completedPlacementPatch,
   EFFECT,
   isLostAcknowledgement,
   operationSignature as batchOperationSignature,
   PENDING_STATE,
   reconcilePendingOperation,
+  settledPrefixPatch,
   reconciliationFacts,
   reconciliationGuidance,
   RECONCILE_VERDICT,
@@ -310,6 +312,15 @@ const PREFLIGHT_TRANSPORT_ERROR_CODE = 'preflight_transport_error'
 // MW2b: an identical batch refused because an earlier one's effect is not proven absent, and a batch proven not to have reached the game.
 const DUPLICATE_EFFECT_CODE = 'duplicate_effect_suppressed'
 const DUPLICATE_EFFECT_RETRY_BUDGET = 1
+
+// The correctable refusal for a batch that repeats an operation of a completed prefix the harness settled from the native
+// receipt while that batch's refused placement is still open. It names what completed and that only the placement remains;
+// it offers no way around the fence (a verified top-up needs the actual contents read and a decision in a later step).
+function settledPrefixReplayRefusal(held) {
+  const settled = held.settled ?? {}
+  const completed = (settled.completed_operations ?? []).map(item => `${item.slot}. ${cleanMemoryText(item.operation, 80)}`).join(', ')
+  return `[HARNESS] Refused before admission: nothing from this batch ran. Operation ${settled.completed_slot} (${cleanMemoryText(settled.replayed_operation, 80)}) already completed in an earlier batch of this step (${cleanMemoryText(settled.batch_ref, 160)}; the exact native receipt shows these operations completed before the placement was refused: ${completed}), and only the placement remains. Do not deliver it again, with the same or a changed count or coordinates. A delivery completes once it moved a positive count, which can be less than requested, so read the target's real contents; a different delivery is a separate decision for a later step, not this recovery. Send only the corrected placement (or other operations that do not repeat a completed one). Facts: ${JSON.stringify({ operation_key: held.operation_key, batch_ref: settled.batch_ref, completed_slot: settled.completed_slot, refused_slot: settled.refused_slot, match: settled.match, only_placement_remains: true })}`
+}
 const LOST_ACK_RETRY_BUDGET = 1
 // Corrections allowed per committed active step when an executor reply names another step (executor_stale_step). Kept
 // apart from the shared plan_category corrections so neither spends the other's allowance.
@@ -10520,6 +10531,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }, { requestId: requestId ?? this.traceRequest?.id })
         this.assertCheckpointOwnerIdentity(receiptOwner)
       }
+      // What the closed ledger record keeps (durable, with the persisted state): a settled completed prefix carries its slots'
+      // canonical identities and fences their replay while the refused placement is open; a completed batch containing a
+      // placement carries its verdict, which is what closes that fence (operation-ledger.mjs openSettledFences).
+      if (provable) {
+        const closure = settledPrefixPatch(pending, result) ?? completedPlacementPatch(pending, result)
+        if (closure) this.memory.updatePendingOperation?.(key, closure, pending.operation_key)
+      }
       const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
       // A cancellation the game proved happened after a completed prefix: the failure turn states which operations ran.
       if (settled && result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION && (result.applied_slots ?? []).length > 0) {
@@ -17929,7 +17947,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           this.duplicateEffectHold = { operation_key: held.operation_key }
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Refused before admission: this batch conflicts with unresolved work whose effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not bypass this hold by changing quantities, arguments, steps or plans. Reobserve the affected targets and materials within the recovery limits, then surface the blocker if uncertainty remains. Independently authorized work may continue only with disjoint targets and materials. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
+            content: held.reason === 'settled_prefix_operation_replay' ? settledPrefixReplayRefusal(held) : `[HARNESS] Refused before admission: this batch conflicts with unresolved work whose effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not bypass this hold by changing quantities, arguments, steps or plans. Reobserve the affected targets and materials within the recovery limits, then surface the blocker if uncertainty remains. Independently authorized work may continue only with disjoint targets and materials. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
           })
           return this.runTurn()
         }

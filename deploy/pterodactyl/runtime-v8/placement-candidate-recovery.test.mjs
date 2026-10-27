@@ -17,15 +17,18 @@ import { batchSettlementEvidence, NpcAgentLoop, receiptEvidence } from './npc-ag
 import {
   buildPendingOperation,
   cancelledBatchPrefix,
+  completedPlacementPatch,
   EFFECT,
   operationSignature,
   reconcilePendingOperation,
   reconciliationFacts,
   reconciliationGuidance,
   RECONCILE_VERDICT,
+  settledPrefixPatch,
   unresolvedNativeAdmissions,
 } from './operation-reconciliation.mjs'
-import { getActivePlan } from './planning-state.mjs'
+import { conflictingOperation, openSettledFences, operationLedger, OPERATION_LEDGER_LIMIT, recordOperation, settleOperation } from './operation-ledger.mjs'
+import { applyPlanningEvent, createEmptyPlanningState, getActivePlan, PLANNING_EVENT, restorePlanningState, serializePlanningState } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
 import { FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
@@ -187,11 +190,11 @@ test('BC B fences: another actor, epoch, signature or attempt never settles thro
   assert.equal(reconcilePendingOperation(otherAttempt, { status, actor: ACTOR }).verdict, RECONCILE_VERDICT.UNKNOWN)
 })
 
-test('BC B: the settled row is terminal for native-liveness consumers; an unsettled one still blocks them', () => {
+test('BC B: the settled row is terminal for native-liveness consumers only with its exact retained host record; an unsettled one still blocks them', () => {
   const pending = pendingFor(BC_OPS)
-  assert.deepEqual(unresolvedNativeAdmissions(nativeStatus(pending), [], ACTOR), [])
+  assert.deepEqual(unresolvedNativeAdmissions(nativeStatus(pending), [pending], ACTOR), [])
   const ambiguous = nativeStatus(pending, { receipt: { failed_task_index: undefined } })
-  assert.equal(unresolvedNativeAdmissions(ambiguous, [], ACTOR).length, 1)
+  assert.equal(unresolvedNativeAdmissions(ambiguous, [pending], ACTOR).length, 1)
 })
 
 // ---------------------------------------------------------------------------------------------------------------------------
@@ -620,7 +623,7 @@ test('placement-first: later operations that never started are not_started and n
   assert.equal(result.effect, EFFECT.NOT_HAPPENED)
   assert.deepEqual(result.settlement_operations.map(row => row.disposition), ['no_effect', 'not_started'])
   assert.equal(result.unrun_slots, 1)
-  assert.deepEqual(unresolvedNativeAdmissions(firstStatus(pending), [], ACTOR), [])
+  assert.deepEqual(unresolvedNativeAdmissions(firstStatus(pending), [pending], ACTOR), [])
 })
 
 const FIRST_AMBIGUOUS = [
@@ -745,4 +748,313 @@ test('placement-first loop exhaustion: three coordinate-free refusals block as p
   assert.equal(world.memory.currentPlan(KEY).blocker, 'placement_failed:no_position')
   assert.equal(world.plan().plan_id, committed.plan_id)
   assert.equal(world.game.mutations.length, 3)
+})
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// Repair iteration 2, SELF-1: native data alone never clears an uncertain admission row, and the derivation is scoped to
+// `placing:no_position` from a coordinate-free place_entity
+// ---------------------------------------------------------------------------------------------------------------------------
+
+const GUARD_REFUSED = { receipt: { reason: 'placing:placement_candidate_unavailable' } }
+const CANDIDATE = { name: 'place_candidate', args: { entity_name: 'boiler', x: 1.5, y: 2.5, direction: 0 } }
+
+test('SELF-1: a preservation guard-refused place_candidate row stays unresolved, with or without a host record (native lane entity-observation)', () => {
+  for (const [label, operations, options] of [
+    ['prefix then candidate', [SUPPLY, CANDIDATE], { failedIndex: 1 }],
+    ['candidate alone', [CANDIDATE], { failedIndex: 0, queued: [1], taskTypes: ['placing'], receipt: { started_count: 1, tasks_started: 1 } }],
+  ]) {
+    const pending = pendingFor(operations)
+    const status = nativeStatus(pending, { ...options, receipt: { ...options.receipt, ...GUARD_REFUSED.receipt } })
+    assert.equal(cancelledBatchPrefix(status.admission_journal[0], status, pending.operations), null, label)
+    assert.notEqual(reconcilePendingOperation(pending, { status, actor: ACTOR }).verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, label)
+    assert.equal(unresolvedNativeAdmissions(status, [], ACTOR).length, 1, `${label}: no record`)
+    assert.equal(unresolvedNativeAdmissions(status, [pending], ACTOR).length, 1, `${label}: exact pending record`)
+  }
+})
+
+test('SELF-1: the derivation is scoped to no_position of a coordinate-free place_entity, not any placing: reason or a place_candidate', () => {
+  for (const reason of ['placing:not_placeable', 'placing:placement_candidate_unavailable', 'placing:placement_candidate_required', 'placing:create_failed', 'placing:', 'placing:no_position_extra']) {
+    const pending = pendingFor(BC_OPS)
+    const status = nativeStatus(pending, { receipt: { reason } })
+    assert.equal(cancelledBatchPrefix(status.admission_journal[0], status, pending.operations), null, reason)
+    assert.equal(unresolvedNativeAdmissions(status, [pending], ACTOR).length, 1, reason)
+  }
+  const candidate = pendingFor([SUPPLY, CANDIDATE])
+  const status = nativeStatus(candidate, { receipt: { reason: 'placing:no_position' } })
+  assert.equal(cancelledBatchPrefix(status.admission_journal[0], status, candidate.operations), null, 'place_candidate never settles through the derivation')
+  assert.equal(unresolvedNativeAdmissions(status, [candidate], ACTOR).length, 1)
+})
+
+test('SELF-1: a no_position row with no retained host record stays unresolved; a record for another operation does not help', () => {
+  const pending = pendingFor(BC_OPS)
+  const status = nativeStatus(pending)
+  assert.equal(unresolvedNativeAdmissions(status, [], ACTOR).length, 1)
+  assert.equal(unresolvedNativeAdmissions(status, [{ ...pending, operation_key: 'req_other/batch_9' }], ACTOR).length, 1)
+})
+
+test('SELF-1: with the exact retained host record and lineage the row is terminal, whether the record is pending or already closed', () => {
+  const pending = pendingFor(BC_OPS)
+  const status = nativeStatus(pending)
+  const result = reconcilePendingOperation(pending, { status, actor: ACTOR })
+  assert.deepEqual(unresolvedNativeAdmissions(status, [pending], ACTOR), [])
+  const closed = { ...pending, ...settledPrefixPatch(pending, result) }
+  assert.equal(closed.effect, EFFECT.PARTIAL_KNOWN)
+  assert.deepEqual(unresolvedNativeAdmissions(status, [closed], ACTOR), [], 'the archived settlement record still proves the row terminal')
+  // The rest of the journal is judged independently.
+  const other = { ...status.admission_journal[0], operation_key: 'req_x/batch_141', ordinal: 141 }
+  assert.equal(unresolvedNativeAdmissions({ ...status, admission_journal: [status.admission_journal[0], other] }, [pending], ACTOR).length, 1)
+})
+
+test('SELF-1: a mismatched signature, attempt, epoch, actor, operation list or a busy queue leaves the row unresolved', () => {
+  const pending = pendingFor(BC_OPS)
+  const status = nativeStatus(pending)
+  const variants = [
+    ['signature', [{ ...pending, signature: operationSignature([SUPPLY]) }], ACTOR],
+    ['attempt', [{ ...pending, attempt_id: 'req_other/batch_140' }], ACTOR],
+    ['record epoch differs from the row', [{ ...pending, actor: { actor_id: 8, epoch: 2 } }], { actor_id: 8, epoch: 2 }],
+    ['record actor differs from the row', [{ ...pending, actor: { actor_id: 9, epoch: 1 } }], { actor_id: 9, epoch: 1 }],
+    ['live epoch differs from the record', [pending], { actor_id: 8, epoch: 2 }],
+    ['live actor differs from the record', [pending], { actor_id: 9, epoch: 1 }],
+    ['no live actor lineage', [pending], undefined],
+    ['record operation list differs', [{ ...pending, operations: pending.operations.slice(0, 1) }], ACTOR],
+    ['ordinal differs', [{ ...pending, ordinal: 141 }], ACTOR],
+  ]
+  for (const [label, records, actor] of variants) assert.equal(unresolvedNativeAdmissions(status, records, actor).length, 1, label)
+  const busy = nativeStatus(pending, { status: { task_state: 'placing', queue_empty: false, queue_length: 1 } })
+  assert.equal(unresolvedNativeAdmissions(busy, [pending], ACTOR).length, 1, 'a busy native queue')
+})
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// Repair iteration 2, R1-1: a settled completed prefix is fenced against replay while its placement recovery is open
+// ---------------------------------------------------------------------------------------------------------------------------
+
+const PLAN = 'plan_1'
+const STEP = 'step_3'
+const CORRECTED = { name: 'place_entity', args: { entity_name: 'lab', x: 45.5, y: 17.5 } }
+
+const ledgerEvent = (state, event) => applyPlanningEvent(state, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, source: 'runtime', goal_id: 'goal_1', now: 2, ...event })
+const acceptGoal = () => applyPlanningEvent(createEmptyPlanningState(), { type: PLANNING_EVENT.GOAL_ACCEPTED, goal_id: 'goal_1', owner: 'Louis', objective: 'power the lab', now: 1 })
+// The runtime's close sequence (settleOutstandingOperation): patch the pending record with its closure, then clear it.
+function closeBatch(state, pending, patch) {
+  let next = ledgerEvent(state, { operation: pending })
+  if (patch) next = ledgerEvent(next, { operation: { ...pending, ...patch } })
+  return ledgerEvent(next, { operation: null, operation_key: pending.operation_key })
+}
+function settledState({ id = 140, planId = PLAN, stepId = STEP, base = acceptGoal() } = {}) {
+  const pending = pendingFor(BC_OPS, { id, planId, stepId })
+  const result = reconcilePendingOperation(pending, { status: nativeStatus(pending), actor: ACTOR })
+  const patch = settledPrefixPatch(pending, result)
+  return { state: closeBatch(base, pending, patch), pending, result, patch }
+}
+const verdict = (state, operations, ids = {}) => conflictingOperation(state, { operations, planId: PLAN, stepId: STEP, ...ids })
+const COMPLETED = { verdict: RECONCILE_VERDICT.ADMITTED_COMPLETED, reason: 'exact_receipts_completed' }
+function completeBatch(state, operations, { id, stepId = STEP, planId = PLAN } = {}) {
+  const pending = pendingFor(operations, { id, planId, stepId })
+  return closeBatch(state, pending, completedPlacementPatch(pending, { ...COMPLETED, batch_id: id }))
+}
+
+test('R1-1: the derived settlement is persisted on the closed ledger record: partial_known, plan and step, per-slot canonical identities', () => {
+  const { state, pending, patch } = settledState()
+  assert.equal(state.operation_ledger.records.length, 0)
+  const [closed] = state.operation_ledger.closed
+  assert.equal(closed.operation_key, pending.operation_key)
+  assert.equal(closed.effect, EFFECT.PARTIAL_KNOWN)
+  assert.equal(closed.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+  assert.equal(closed.plan_id, PLAN)
+  assert.equal(closed.step_id, STEP)
+  assert.equal(closed.signature, operationSignature(BC_OPS))
+  assert.equal(closed.settlement.kind, 'completed_prefix_placement_refused')
+  assert.equal(closed.settlement.refused_slot, 2)
+  assert.deepEqual(closed.settlement.refusal_codes, ['placing:no_position'])
+  assert.deepEqual(closed.settlement.completed, [{ slot: 1, operation: 'supply_entity', identity: operationSignature([SUPPLY]), delivery_keys: ['delivery|to_entity|25|coal'] }])
+  assert.equal(closed.settlement.identity_complete, true)
+  assert.deepEqual(patch.settlement.completed, closed.settlement.completed)
+  // An empty prefix (placement first) has nothing to fence and no settlement.
+  const first = pendingFor([PLACE_LAB, SUPPLY], { planId: PLAN, stepId: STEP })
+  const firstResult = reconcilePendingOperation(first, { status: firstStatus(first), actor: ACTOR })
+  assert.equal(firstResult.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+  assert.equal(settledPrefixPatch(first, firstResult), null)
+})
+
+test('R1-1: a repeated prefix with changed placement coordinates is refused, the identical full batch is refused, a placement-only reply is admitted', () => {
+  const { state } = settledState()
+  const repeated = verdict(state, [SUPPLY, CORRECTED])
+  assert.equal(repeated.refuse, true)
+  assert.equal(repeated.reason, 'settled_prefix_operation_replay')
+  assert.equal(repeated.settled.completed_slot, 1)
+  assert.equal(repeated.settled.replayed_operation, 'supply_entity')
+  assert.equal(repeated.settled.match, 'identical_operation')
+  assert.equal(repeated.settled.batch_ref, 'batch-g1-140')
+  assert.equal(repeated.settled.only_placement_remains, true)
+  assert.notEqual(operationSignature([SUPPLY, CORRECTED]), operationSignature(BC_OPS), 'the changed-coordinates batch has another whole-batch signature (the old fence cannot see it)')
+  assert.equal(verdict(state, BC_OPS).refuse, true)
+  assert.equal(verdict(state, BC_OPS).reason, 'settled_prefix_operation_replay')
+  assert.equal(verdict(state, [CORRECTED, SUPPLY]).refuse, true, 'order does not matter')
+  assert.equal(verdict(state, [CORRECTED]).refuse, false)
+  assert.equal(verdict(state, [PLACE_LAB]).refuse, false)
+  assert.equal(verdict(state, [{ name: 'place_candidate', args: { entity_name: 'lab', x: 1.5, y: 2.5, direction: 0 } }]).refuse, false)
+})
+
+test('R1-1: a partial delivery still fences the same delivery with another count; a different unit, item or direction is not blocked', () => {
+  const { state } = settledState()
+  const moreCoal = { name: 'supply_entity', args: { unit_number: 25, items: [{ item_name: 'coal', count: 5 }] } }
+  assert.equal(verdict(state, [moreCoal]).refuse, true)
+  assert.equal(verdict(state, [moreCoal]).settled.match, 'same_delivery_target_and_item')
+  const multi = { name: 'supply_entity', args: { unit_number: 25, items: [{ item_name: 'iron-plate', count: 5 }, { item_name: 'coal', count: 3 }] } }
+  assert.equal(verdict(state, [multi]).refuse, true)
+  assert.equal(verdict(state, [{ name: 'move_items_exact', args: { unit_number: 25, item_name: 'coal', max_count: 4, to_entity: true } }]).refuse, true, 'another tool, same delivery')
+  assert.equal(verdict(state, [{ name: 'supply_entity', args: { unit_number: 26, items: [{ item_name: 'coal', count: 20 }] } }]).refuse, false, 'another unit')
+  assert.equal(verdict(state, [{ name: 'supply_entity', args: { unit_number: 25, items: [{ item_name: 'iron-plate', count: 20 }] } }]).refuse, false, 'another item')
+  assert.equal(verdict(state, [{ name: 'move_items_exact', args: { unit_number: 25, item_name: 'coal', max_count: 4, to_entity: false } }]).refuse, false, 'taking coal out is another effect')
+  assert.equal(verdict(state, [{ name: 'craft_item', args: { item_name: 'coal', count: 1 } }]).refuse, false)
+})
+
+test('R1-1: the fence closes when a later batch of the same step containing the placement completes, and only then', () => {
+  const { state } = settledState()
+  // A refused corrected placement, a completed batch without a placement, and a completed placement in another step do not close it.
+  const refusedAgain = closeBatch(state, pendingFor([CORRECTED], { id: 141, planId: PLAN, stepId: STEP }), null)
+  assert.equal(verdict(refusedAgain, [SUPPLY]).refuse, true)
+  const gear = { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 2 } }
+  assert.equal(completedPlacementPatch(pendingFor([gear], { id: 142, planId: PLAN, stepId: STEP }), COMPLETED), null)
+  assert.equal(verdict(completeBatch(refusedAgain, [gear], { id: 142 }), [SUPPLY]).refuse, true)
+  assert.equal(verdict(completeBatch(refusedAgain, [CORRECTED], { id: 143, stepId: 'step_4' }), [SUPPLY]).refuse, true, 'another step')
+  assert.equal(verdict(completeBatch(refusedAgain, [CORRECTED], { id: 144, planId: 'plan_2' }), [SUPPLY]).refuse, true, 'another plan')
+  assert.equal(completedPlacementPatch(pendingFor([CORRECTED], { id: 145 }), { verdict: RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION }), null)
+  // The corrected placement (with another delivery in the same batch) completes: the fence is closed, ordinary operations resume.
+  const done = completeBatch(refusedAgain, [CORRECTED, { name: 'supply_entity', args: { unit_number: 26, items: [{ item_name: 'coal', count: 3 }] } }], { id: 146 })
+  assert.equal(openSettledFences(operationLedger(done.operation_ledger).closed, PLAN, STEP).length, 0)
+  assert.equal(verdict(done, [SUPPLY]).refuse, false)
+  assert.equal(verdict(done, [SUPPLY, CORRECTED]).refuse, false)
+  // A completed placement that PRECEDES the settlement (an older batch) cannot pre-close it.
+  const older = completeBatch(acceptGoal(), [CORRECTED], { id: 130 })
+  const { state: later } = settledState({ id: 140, base: older })
+  assert.equal(verdict(later, [SUPPLY]).refuse, true)
+})
+
+test('R1-1: a step or plan change lifts the fence; the same step keeps it however the placement changes', () => {
+  const { state } = settledState()
+  assert.equal(verdict(state, [SUPPLY], { stepId: 'step_4' }).refuse, false)
+  assert.equal(verdict(state, [SUPPLY], { planId: 'plan_2' }).refuse, false)
+  assert.equal(verdict(state, [SUPPLY], { planId: undefined, stepId: undefined }).refuse, false)
+  for (const placement of [CORRECTED, { name: 'place_entity', args: { entity_name: 'lab', x: 1.5, y: 1.5 } }, { name: 'place_entity', args: { entity_name: 'steam-engine', x: 9.5, y: 9.5 } },
+    { name: 'place_candidate', args: { entity_name: 'lab', x: 3.5, y: 3.5, direction: 4 } }]) {
+    assert.equal(verdict(state, [SUPPLY, placement]).refuse, true)
+  }
+})
+
+test('R1-1: the fence survives persistence (snapshot and restore) before and after it closes', () => {
+  const { state } = settledState()
+  const restored = restorePlanningState(serializePlanningState(state))
+  assert.equal(restored.operation_ledger.closed[0].settlement.completed[0].identity, operationSignature([SUPPLY]))
+  assert.equal(verdict(restored, [SUPPLY, CORRECTED]).refuse, true)
+  assert.equal(verdict(restored, [CORRECTED]).refuse, false)
+  assert.equal(verdict(restored, [SUPPLY], { stepId: 'step_4' }).refuse, false)
+  const done = restorePlanningState(serializePlanningState(completeBatch(restored, [CORRECTED], { id: 141 })))
+  assert.equal(verdict(done, [SUPPLY]).refuse, false)
+  assert.equal(done.operation_ledger.closed.length, 2)
+})
+
+test('R1-1: an open fence is never pushed out of the closed window by later unrelated closes; a closed one is', () => {
+  const { state } = settledState()
+  const gear = index => ({ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: index + 1 } })
+  let ledger = operationLedger(state.operation_ledger)
+  for (let index = 0; index < 80; index++) {
+    const other = pendingFor([gear(index)], { id: 200 + index, planId: PLAN, stepId: 'step_9' })
+    ledger = settleOperation(recordOperation(ledger, other), other.operation_key)
+  }
+  assert.ok(ledger.closed.length <= 64 + 8)
+  assert.equal(ledger.closed.filter(record => record.settlement).length, 1)
+  assert.equal(verdict({ ...state, operation_ledger: ledger }, [SUPPLY]).refuse, true)
+  // Once the placement completed, the window may drop both.
+  let closedLedger = operationLedger(completeBatch(state, [CORRECTED], { id: 141 }).operation_ledger)
+  for (let index = 0; index < 80; index++) {
+    const other = pendingFor([gear(index)], { id: 300 + index, planId: PLAN, stepId: 'step_9' })
+    closedLedger = settleOperation(recordOperation(closedLedger, other), other.operation_key)
+  }
+  assert.equal(closedLedger.closed.length, 64)
+  assert.equal(verdict({ ...state, operation_ledger: closedLedger }, [SUPPLY]).refuse, false)
+  assert.ok(OPERATION_LEDGER_LIMIT >= 64)
+})
+
+test('R1-1: a pending record built before the identities existed cannot fence per slot (the whole-batch signature fence remains)', () => {
+  const pending = pendingFor(BC_OPS, { planId: PLAN, stepId: STEP })
+  const legacy = { ...pending, operations: pending.operations.map(({ identity, delivery_keys, ...rest }) => rest) }
+  const result = reconcilePendingOperation(legacy, { status: nativeStatus(pending), actor: ACTOR })
+  const patch = settledPrefixPatch(legacy, result)
+  assert.equal(patch.settlement.identity_complete, false)
+  const state = closeBatch(acceptGoal(), legacy, patch)
+  assert.equal(verdict(state, BC_OPS).refuse, true, 'identical full batch still refused by the signature fence')
+  assert.equal(verdict(state, [SUPPLY, CORRECTED]).refuse, false)
+})
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// R1-1 through the real agent loop: the scripted model reply repeats the completed prefix with corrected placement coordinates
+// ---------------------------------------------------------------------------------------------------------------------------
+
+const REPEATED_PREFIX = [SUPPLY_OP, { name: 'place_entity', args: { entity_name: 'lab', x: 45.5, y: 17.5 } }]
+
+async function settleAndFail(world) {
+  await world.agent.request('fuel the boiler and place a lab', { sender: 'Louis' })
+  const reason = world.game.failLastBatch({ type: 'placing', code: 'no_position', entity_name: 'lab' }, undefined, { failedTaskIndex: 1 })
+  world.markUncertain()
+  await world.agent.failed(reason)
+}
+const planAndStep = world => {
+  const plan = world.plan()
+  return { planId: plan.plan_id, stepId: plan.steps[plan.active_step_index].step_id }
+}
+
+test('R1-1 loop: a reply that repeats the settled supply with corrected coordinates is refused before admission; only the placement is sent, and the fence closes when it completes', async () => {
+  const world = loopWorld({ operationsFor: call => (call === 1 ? [SUPPLY_OP, PLACE_LAB] : call === 2 ? REPEATED_PREFIX : [RETRY_PLACE]) })
+  await settleAndFail(world)
+
+  // The settled supply is in the durable closed record with its canonical identity, for this plan and step.
+  const ids = planAndStep(world)
+  const planning = world.memory.planningState(KEY)
+  const fences = openSettledFences(planning.operation_ledger.closed, ids.planId, ids.stepId)
+  assert.equal(fences.length, 1)
+  assert.equal(fences[0].effect, EFFECT.PARTIAL_KNOWN)
+  assert.equal(fences[0].settlement.completed[0].identity, operationSignature([SUPPLY_OP]))
+
+  // The model repeated [supply, place(x, y)] (a different whole-batch signature): the harness refused it, with facts,
+  // and the supply was NOT sent a second time. Only the later placement-only reply reached the game.
+  assert.equal(world.prompts.length, 4)
+  assert.equal(world.game.mutations.length, 2, 'the original batch and the placement-only retry; nothing in between')
+  assert.doesNotMatch(world.game.mutations[1], /supply_entity/)
+  assert.deepEqual(world.game.lastTaskTypes, ['placing'])
+  const refusal = world.prompts.at(-1)
+  assert.match(refusal, /Refused before admission: nothing from this batch ran/)
+  assert.match(refusal, /Operation 1 \(supply_entity\) already completed in an earlier batch of this step \(batch-g1-1;/)
+  assert.match(refusal, /1\. supply_entity/)
+  assert.match(refusal, /only the placement remains/)
+  assert.match(refusal, /"only_placement_remains":true/)
+  const recoverable = world.trace.filter(record => record.event === 'operations.preflight_recoverable' && record.data.failure_class === 'duplicate_effect_suppressed')
+  assert.equal(recoverable.length, 1, 'counted once under the existing bounded duplicate-effect budget')
+  assert.equal(recoverable[0].data.preflight.reason, 'settled_prefix_operation_replay')
+  assert.equal(recoverable[0].data.retry_budget, 1)
+  assert.equal(world.memory.currentPlan(KEY).status, 'active')
+
+  // While the placement recovery is open, even the identical delivery is fenced; once the corrected placement's receipt is
+  // settled as completed the fence is closed and ordinary operations resume.
+  assert.equal(conflictingOperation(world.memory.planningState(KEY), { operations: [SUPPLY_OP], ...ids }).refuse, true)
+  await world.agent.settleOutstandingOperation(await world.agent.readTaskStatusRaw())
+  assert.equal(world.memory.pendingOperations(KEY).length, 0)
+  const after = world.memory.planningState(KEY)
+  assert.equal(openSettledFences(after.operation_ledger.closed, ids.planId, ids.stepId).length, 0)
+  assert.equal(conflictingOperation(after, { operations: [SUPPLY_OP], ...ids }).refuse, false)
+  assert.equal(conflictingOperation(after, { operations: [SUPPLY_OP], ...ids, stepId: 'other_step' }).refuse, false)
+})
+
+test('R1-1 loop: the refusal is bounded; a model that keeps repeating the prefix ends in the existing classified stop, with no second supply sent', async () => {
+  const world = loopWorld({ operationsFor: call => (call === 1 ? [SUPPLY_OP, PLACE_LAB] : REPEATED_PREFIX) })
+  await settleAndFail(world)
+  assert.equal(world.game.mutations.length, 1, 'the repeated supply never reached the game')
+  assert.equal(world.trace.filter(record => record.event === 'operations.preflight_recoverable' && record.data.failure_class === 'duplicate_effect_suppressed').length, 1)
+  // The second identical refusal is not retried again: one extra model call, then the existing classified, visible stop.
+  assert.equal(world.prompts.length, 4, 'observe, plan, the repeated prefix, the repeated prefix again')
+  const state = world.memory.currentPlan(KEY)
+  assert.equal(state.status, 'blocked')
+  assert.equal(state.blocker, 'operation_preflight_failed:duplicate_effect_suppressed')
+  assert.ok(world.trace.some(record => record.event === 'operations.blocked_end_classified'))
+  assert.ok(world.trace.some(record => record.event === 'goal.paused'))
 })

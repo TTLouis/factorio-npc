@@ -51,8 +51,14 @@ function effectScopes(operation) {
   return scopes
 }
 
-// Operations whose single placing task can be the one a cancelled batch failed on (no coordinates, or a validated candidate).
-const PLACEMENT_OPERATIONS = new Set(['place_entity', 'place_candidate'])
+// The one refusal and operation the receipt derivation covers: a coordinate-free place_entity. The mod emits `no_position`
+// only from its own ring search for a placement that carried no position (basic_operation_runtime.ts `!task.position`), so the
+// code itself proves the coordinate-free shape. Every other placing refusal (a preservation guard's
+// placement_candidate_unavailable, not_placeable, a place_candidate) keeps the mod's own, conservative admission verdict.
+const DERIVED_SETTLEMENT_REASON = 'placing:no_position'
+const DERIVED_SETTLEMENT_OPERATION = 'place_entity'
+// Operations whose completed receipt proves the corrected placement of a settled prefix recovery landed.
+export const PLACEMENT_FENCE_CLOSING_OPERATIONS = new Set(['place_entity', 'place_candidate'])
 
 // The receipt task types an operation queued, for the operations whose every task has strict runtime completion semantics
 // (step-completion.mjs STRICT_TASKS_BY_OPERATION). Operations that queue a variable number of identical tasks are sized by
@@ -85,9 +91,9 @@ function strictQueuedTaskTypes(name, queued) {
  * A completed earlier task means the engine finished it, not that a requested quantity moved in full: a supply_entity task
  * completes when a positive count was inserted, possibly fewer than requested. The settlement says "completed", never "exact".
  */
-export function cancelledBatchPrefix(admission, status, pendingOperations, { requireIdle = true } = {}) {
+export function cancelledBatchPrefix(admission, status, pendingOperations) {
   if (!isRecord(admission) || !['admitted', 'uncertain'].includes(admission.state) || !isRecord(status) || status.status_error || status.error) return null
-  if (requireIdle && (status.task_state !== 'idle' || status.queue_length !== 0 || status.active_batch)) return null
+  if (status.task_state !== 'idle' || status.queue_length !== 0 || status.active_batch) return null
   const slots = admission.slots
   if (!Array.isArray(slots) || slots.length < 1 || slots.length !== admission.operation_count || admission.generation !== status.batch_generation) return null
   if (Array.isArray(pendingOperations) && (pendingOperations.length !== slots.length
@@ -119,9 +125,9 @@ export function cancelledBatchPrefix(admission, status, pendingOperations, { req
     || !Number.isSafeInteger(failed) || failed < 0 || failed >= queued || receipt.tasks_started !== failed + 1
     || !Number.isSafeInteger(receipt.started_count) || receipt.started_count < receipt.tasks_started
     || !Number.isSafeInteger(receipt.tick) || !Number.isSafeInteger(admission.tick) || receipt.tick < admission.tick
-    || receipt.task_types[failed] !== 'placing' || typeof receipt.reason !== 'string' || !receipt.reason.startsWith('placing:')) return null
+    || receipt.task_types[failed] !== 'placing' || receipt.reason !== DERIVED_SETTLEMENT_REASON) return null
   const position = starts.indexOf(failed)
-  if (position < 0 || !PLACEMENT_OPERATIONS.has(slots[position].operation) || slots[position].queued_tasks !== 1) return null
+  if (position < 0 || slots[position].operation !== DERIVED_SETTLEMENT_OPERATION || slots[position].queued_tasks !== 1) return null
   for (let index = 0; index < position; index++) {
     const expected = strictQueuedTaskTypes(slots[index].operation, slots[index].queued_tasks)
     if (!expected || expected.some((type, offset) => receipt.task_types[starts[index] + offset] !== type)) return null
@@ -152,6 +158,75 @@ export function settlementRows(operations, refusal) {
     operation: text(operation?.name ?? operation?.operation, 80),
     disposition: applied.has(index + 1) ? 'completed' : refused.has(index + 1) ? 'no_effect' : 'not_started',
   }))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// Settled-prefix replay fence (Run BC B, iteration 2)
+//
+// A completed prefix that the harness settled from the native receipt must not be delivered again while the refused placement
+// is still being recovered: the pending record is archived as a closed ledger record that carries the per-slot canonical
+// operation identities, and operation-ledger.mjs refuses any batch in the same plan/step that repeats one of them.
+// ---------------------------------------------------------------------------------------------------------------------------
+export const SETTLED_PREFIX_KIND = 'completed_prefix_placement_refused'
+
+/** Canonical identity of ONE operation: the same name + canonical-args digest the batch signature is built from. */
+export function operationIdentity(operation) {
+  return operationSignature([{ name: operation?.name, args: operation?.args ?? {} }])
+}
+
+/**
+ * Item-delivery keys of one operation, independent of the count and of which tool carried it. A partial delivery (fewer items
+ * moved than requested) is still a completed delivery, so the fence has to cover "the same transfer with another count".
+ * Only transfers with an exact entity target have a grounded identity; anything else yields no keys (identity still applies).
+ */
+export function deliveryKeys(operation) {
+  const args = operation?.args
+  if (!DELIVERY_OPERATIONS.has(operation?.name) || !isRecord(args)) return []
+  const unit = Number.isSafeInteger(args.unit_number) ? args.unit_number : Number.isSafeInteger(args.target_unit_number) ? args.target_unit_number : undefined
+  if (unit === undefined) return []
+  const direction = operation.name === 'supply_entity' || args.to_entity !== false ? 'to_entity' : 'from_entity'
+  const items = Array.isArray(args.items) ? args.items.map(item => item?.item_name) : [args.item_name]
+  return [...new Set(items.filter(item => typeof item === 'string' && item.length > 0 && item.length <= 120))]
+    .slice(0, 8).map(item => `delivery|${direction}|${unit}|${item}`)
+}
+
+/**
+ * The record fields to persist on the pending record just before the reconciler's derived settlement closes it, so the closed
+ * ledger entry carries what happened: effect partial_known, the verdict, and the completed slots' identities. Null unless the
+ * settlement was derived from the native receipt AND at least one earlier operation completed (an empty prefix needs no fence).
+ */
+export function settledPrefixPatch(pending, result) {
+  if (result?.verdict !== RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION || result.basis !== 'harness_receipt_derivation'
+    || result.reason !== 'exact_cancelled_prefix_before_mutation' || !Array.isArray(result.applied_slots) || result.applied_slots.length < 1
+    || typeof result.receipt?.batch_ref !== 'string' || result.refused_slots?.length !== 1) return null
+  const completed = []
+  for (const slot of result.applied_slots) {
+    const operation = pending?.operations?.[slot - 1]
+    if (!operation) return null
+    completed.push({ slot, operation: text(operation.name, 80), identity: typeof operation.identity === 'string' ? operation.identity : null,
+      delivery_keys: Array.isArray(operation.delivery_keys) ? operation.delivery_keys : [] })
+  }
+  return {
+    effect: EFFECT.PARTIAL_KNOWN, verdict: result.verdict, reason: result.reason, batch_id: result.receipt.batch_id ?? null,
+    settlement: {
+      kind: SETTLED_PREFIX_KIND, basis: result.basis, batch_ref: result.receipt.batch_ref, refused_slot: result.refused_slots[0],
+      refusal_codes: (result.refusal_codes ?? []).slice(0, 4).map(code => text(code, 80)),
+      completed, identity_complete: completed.every(item => item.identity),
+    },
+  }
+}
+
+/** The record fields that mark a batch as completed (exact receipts) and containing a placement; closes an open settled-prefix fence. */
+export function completedPlacementPatch(pending, result) {
+  if (result?.verdict !== RECONCILE_VERDICT.ADMITTED_COMPLETED || !(pending?.operations ?? []).some(operation => PLACEMENT_FENCE_CLOSING_OPERATIONS.has(operation.name))) return null
+  return { effect: EFFECT.HAPPENED, verdict: result.verdict, reason: result.reason ?? '', batch_id: Number.isSafeInteger(result.batch_id) ? result.batch_id : null }
+}
+
+/** Does this closed record's completed placement close an earlier settled-prefix fence of the same goal, plan and step? */
+export function closesSettledPrefix(later, fence) {
+  return Boolean(later && fence) && later.verdict === RECONCILE_VERDICT.ADMITTED_COMPLETED
+    && later.goal_id === fence.goal_id && later.plan_id === fence.plan_id && later.step_id === fence.step_id
+    && (later.operations ?? []).some(operation => PLACEMENT_FENCE_CLOSING_OPERATIONS.has(operation.name))
 }
 
 export const PENDING_STATE = Object.freeze({
@@ -277,6 +352,10 @@ export function buildPendingOperation({ requestId, operationKey, attemptId, ordi
       trace_operation_id: text(operation?.trace_operation_id ?? `${requestId ?? 'request'}/op_${index + 1}`, PENDING_OPERATION_LIMITS.ref),
       name: text(operation?.name, 80),
       ...(['gather_resource', 'mine_resource_at'].includes(operation?.name) && isRecord(operation.args) ? { args: { ...operation.args } } : {}),
+      // The operation's canonical identity (name + canonical args digest) and its item-delivery keys: all that survives of the
+      // arguments, kept so a settled completed prefix can fence a replay of these exact slots (operation-ledger.mjs).
+      identity: operationIdentity(operation),
+      ...(deliveryKeys(operation).length > 0 ? { delivery_keys: deliveryKeys(operation) } : {}),
       effect_class: effectClassOf(operation?.name),
     })),
     baseline: baseline ?? null,
@@ -490,15 +569,16 @@ function terminalNavigationCancellation(admission, status, pending) {
 
 // An uncertain native admission is still blocking unless the host retained its
 // exact identity and the same terminal rule can be re-proven from fresh journals.
+// Native data alone never clears a row: the retained record (pending or closed, same operation key and signature) must
+// reconcile against the live actor to one of the exact terminal verdicts below. reconcilePendingOperation re-checks attempt,
+// signature and actor/epoch lineage against the row and requires an idle queue, so a mismatched or busy state stays unresolved.
+const EXACT_TERMINAL_ADMISSION_REASONS = new Set(['exact_terminal_navigation_cancelled', 'exact_cancelled_prefix_before_mutation'])
 export function unresolvedNativeAdmissions(status, records = [], actor) {
   const journal = status?.admission_journal?.records ?? status?.admission_journal
   if (!nativeAdmissionJournal(journal).known) return [{ reason: 'native_admission_journal_unreadable' }]
   return Array.isArray(journal) ? journal.filter(row => ['uncertain', 'admitting', 'admitted'].includes(row.state)
-    // A cancelled batch whose exact receipt settles every operation (a completed prefix, then a placement that changed nothing)
-    // is terminal even though the mod left its row 'uncertain'; the receipt stays pinned for as long as the row does.
-    && !cancelledBatchPrefix(row, status, undefined, { requireIdle: false })
-    && !records.some(record => record.operation_key === row.operation_key
-      && reconcilePendingOperation(record, { status, actor }).reason === 'exact_terminal_navigation_cancelled')) : []
+    && !records.some(record => record.operation_key === row.operation_key && record.signature === row.signature
+      && EXACT_TERMINAL_ADMISSION_REASONS.has(reconcilePendingOperation(record, { status, actor }).reason))) : []
 }
 
 export function reconcilePendingOperation(pending, { status, actor } = {}) {
@@ -744,6 +824,8 @@ export function sanitizePendingOperation(raw) {
         resource_name: text(operation.args.resource_name, 200), count: operation.args.count,
         ...(operation.name === 'gather_resource' ? { search_radius: operation.args.search_radius } : { x: operation.args.x, y: operation.args.y }),
       } } : {}),
+      ...(typeof operation.identity === 'string' && /^[0-9a-f]{64}$/.test(operation.identity) ? { identity: operation.identity } : {}),
+      ...(Array.isArray(operation.delivery_keys) && operation.delivery_keys.length > 0 ? { delivery_keys: sanitizeDeliveryKeys(operation.delivery_keys) } : {}),
       effect_class: ['delivery', 'craft', 'place', 'world', 'other'].includes(operation.effect_class) ? operation.effect_class : 'other',
     })),
     baseline,
@@ -753,5 +835,31 @@ export function sanitizePendingOperation(raw) {
     batch_id: Number.isSafeInteger(raw.batch_id) ? raw.batch_id : null,
     sent_at: Number.isFinite(raw.sent_at) ? raw.sent_at : 0,
     reconciled_at: Number.isFinite(raw.reconciled_at) ? raw.reconciled_at : null,
+    ...(sanitizeSettlement(raw.settlement) ? { settlement: sanitizeSettlement(raw.settlement) } : {}),
+  }
+}
+
+function sanitizeDeliveryKeys(keys) {
+  return keys.filter(key => typeof key === 'string' && key.length > 0).slice(0, 8).map(key => text(key, 240))
+}
+
+// The settled-prefix settlement carried on a closed record: strictly shaped, bounded, unknown fields dropped.
+function sanitizeSettlement(raw) {
+  if (!isRecord(raw) || raw.kind !== SETTLED_PREFIX_KIND || !Array.isArray(raw.completed) || raw.completed.length < 1) return undefined
+  const completed = raw.completed.slice(0, PENDING_OPERATION_LIMITS.operations).filter(isRecord).map(item => ({
+    slot: Number.isSafeInteger(item.slot) && item.slot > 0 ? item.slot : 0,
+    operation: text(item.operation, 80),
+    identity: typeof item.identity === 'string' && /^[0-9a-f]{64}$/.test(item.identity) ? item.identity : null,
+    delivery_keys: Array.isArray(item.delivery_keys) ? sanitizeDeliveryKeys(item.delivery_keys) : [],
+  })).filter(item => item.slot > 0 && item.operation)
+  if (completed.length < 1) return undefined
+  return {
+    kind: SETTLED_PREFIX_KIND,
+    basis: text(raw.basis, 80),
+    batch_ref: text(raw.batch_ref, PENDING_OPERATION_LIMITS.ref),
+    refused_slot: Number.isSafeInteger(raw.refused_slot) ? raw.refused_slot : null,
+    refusal_codes: Array.isArray(raw.refusal_codes) ? raw.refusal_codes.filter(code => typeof code === 'string').slice(0, 4).map(code => text(code, 80)) : [],
+    completed,
+    identity_complete: completed.every(item => item.identity),
   }
 }
