@@ -559,6 +559,44 @@ try {
       assert.deepEqual(quiet(after).inventory, quiet(before).inventory, 'validation spends nothing')
       assert.equal(after.status.queue_length, 0)
     }
+    // Native automation flags are directional: 2.0.77's cargo-landing-pad has an inventory but forbids automated insertion.
+    // An inserter may never be planned to drop into it; picking up from the same pad, with the same cells, is spatially valid.
+    {
+      const spot = await lua(`local s=a.surface; local px=math.floor(a.position.x); local py=math.floor(a.position.y); local found
+        local proto=prototypes.entity["cargo-landing-pad"]; assert(proto, "no cargo-landing-pad prototype")
+        for dx=-6,6 do for dy=-2,8 do local x=px+dx; local y=py+dy
+          if not found and (math.abs(a.position.x-(x+1))>5 or a.position.y<y-9 or a.position.y>y+1) and s.can_place_entity{name="cargo-landing-pad",position={x+1,y-4},force=a.force}
+            and s.can_place_entity{name="wooden-chest",position={x+0.5,y+0.5},force=a.force} and s.can_place_entity{name="wooden-chest",position={x+0.5,y+1.5},force=a.force} then found={x=x,y=y} end end end
+        local function invs(e) local c=0; for k=1,e.get_max_inventory_index() do if e.get_inventory(k) then c=c+1 end end; return c end; assert(found, "no free pad site")
+        local pad=s.create_entity{name="cargo-landing-pad",position={found.x+1,found.y-4},force=a.force}; assert(pad and pad.unit_number, "pad not created")
+        rcon.print(helpers.table_to_json({x=found.x,y=found.y,pad=pad.unit_number,pad_inventories=invs(pad),no_insertion=proto.flags["no-automated-item-insertion"]==true,no_removal=proto.flags["no-automated-item-removal"]==true}))`)
+      const seePad = await tool('getNearbyEntities', { name: 'cargo-landing-pad', radius: 16, limit: 4 })
+      const before = await worldFacts()
+      const into = await validate('native-l3-inserter-into-pad',
+        [{ entity_name: 'wooden-chest', x: spot.x + 0.5, y: spot.y + 1.5, slot: 'chest' }, { entity_name: 'burner-inserter', x: spot.x + 0.5, y: spot.y + 0.5, direction: 8, slot: 'inserter' }],
+        [{ kind: 'inserter', inserter: { slot: 'inserter' }, pickup: { slot: 'chest' }, drop: { unit_number: spot.pad } }])
+      const from = await validate('native-l3-inserter-from-pad',
+        [{ entity_name: 'burner-inserter', x: spot.x + 0.5, y: spot.y + 0.5, direction: 0, slot: 'inserter' }, { entity_name: 'wooden-chest', x: spot.x + 0.5, y: spot.y + 1.5, slot: 'chest' }],
+        [{ kind: 'inserter', inserter: { slot: 'inserter' }, pickup: { unit_number: spot.pad }, drop: { slot: 'chest' } }])
+      await lua(`for _,e in pairs(a.surface.find_entities_filtered{name="cargo-landing-pad"}) do if e.unit_number==${spot.pad} then e.destroy() end end; rcon.print("{}")`)
+      const after = await worldFacts()
+      const gone = await lua(`local n=0; for _,e in pairs(a.surface.find_entities_filtered{name="cargo-landing-pad"}) do if e.unit_number==${spot.pad} then n=n+1 end end; rcon.print(helpers.table_to_json({pads=n}))`)
+      evidence.l3_inserter_pad = { spot, see_pad: seePad, into, from, gone }
+      assert.equal(spot.no_insertion, true, JSON.stringify(spot))
+      assert.equal(spot.no_removal, false, JSON.stringify(spot))
+      assert.ok(spot.pad_inventories > 0, JSON.stringify(spot))
+      assert.equal(into.ok, false, JSON.stringify(into))
+      assert.equal(into.planning_status, 'spatially_invalid', JSON.stringify(into))
+      assert.equal(into.error?.code, 'CONNECTION_ENDPOINT_INCOMPATIBLE', JSON.stringify(into))
+      assert.equal(into.error?.endpoint_role, 'drop', JSON.stringify(into))
+      assert.match(into.error?.message ?? '', /no-automated-item-insertion/, JSON.stringify(into))
+      assert.equal(into.validation_id, undefined)
+      assert.equal(from.planning_status, 'spatially_valid', JSON.stringify(from))
+      assert.ok(!(from.eligibility_blockers ?? []).some(blocker => /^CONNECTION_/.test(blocker.code)), JSON.stringify(from))
+      assert.deepEqual(quiet(after).inventory, quiet(before).inventory, 'validation spends nothing')
+      assert.equal(after.status.queue_length, 0)
+      assert.equal(gone.pads, 0)
+    }
   }
   // Fault scheduling occurs after the actual correlated candidate was queued,
   // inside the same native callback, before its first execution tick. No wait
