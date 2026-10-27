@@ -39,8 +39,10 @@ async function worldFacts() {
   const fluids = raw.entities.filter(row => ['offshore-pump', 'boiler', 'steam-engine', 'pipe'].includes(row.name)).sort((a, b) => a.id - b.id)
   const protectedGeometry = []
   for (const row of fluids) protectedGeometry.push(preservationGeometry(await geometry(row.id), row.id))
+  // The actor's own vision proxy follows the actor on its own schedule; it is compared by identity, not by its lagging position.
+  const entities = raw.entities.map(row => row.name === 'sgluna-npc-vision' ? { id: row.id, name: row.name, type: row.type } : row)
   return { tick: raw.tick, status, world: { actor: raw.actor, position: raw.position,
-    entities: raw.entities.sort((a, b) => a.id - b.id || a.name.localeCompare(b.name) || a.x - b.x || a.y - b.y),
+    entities: entities.sort((a, b) => a.id - b.id || a.name.localeCompare(b.name) || a.x - b.x || a.y - b.y),
     inventory: raw.inventory.sort((a, b) => a.name.localeCompare(b.name)), protectedGeometry } }
 }
 async function omittedProofRefusal(name, args, label) {
