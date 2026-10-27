@@ -370,8 +370,10 @@ describe('construction plan preflight (fluid-preservation witness)', () => {
       preservation_clears_count: 0,
       execution_clearance: 'refused',
       construction_placements: [
-        { entity_name: 'stone-furnace', x: -2, y: 0, direction: 0, position: { x: -2, y: 0 }, fluidbox_count: 0 },
-        { entity_name: 'burner-mining-drill', x: 2, y: 0, direction: 4, position: { x: 2, y: 0 }, fluidbox_count: 0 },
+        { entity_name: 'stone-furnace', x: -2, y: 0, direction: 0, position: { x: -2, y: 0 }, fluidbox_count: 0,
+          planned_footprint: expect.objectContaining({ entity_name: 'stone-furnace', position: { x: -2, y: 0 }, direction: 0 }) },
+        { entity_name: 'burner-mining-drill', x: 2, y: 0, direction: 4, position: { x: 2, y: 0 }, fluidbox_count: 0,
+          planned_footprint: expect.objectContaining({ entity_name: 'burner-mining-drill', position: { x: 2, y: 0 }, direction: 4 }) },
       ],
       preservation_nonfluid_output: {
         version: 1,
@@ -498,5 +500,86 @@ describe('construction plan preflight (fluid-preservation witness)', () => {
     expect(construction_plan_preflight(f.actor, 9, 1)).toEqual({ ok: false, code: 'construction_plan_remote_unsupported' })
     expect(snapshot()).toBe(before)
     expect((globalThis as any).storage.sgluna_validated_remote_construction_plan.validation_id).toBe(9)
+  })
+})
+
+// Milestone 4, acceptance L1: placements that are each legal alone but collide with each other are refused before anything is
+// built, by comparing the footprints execution will build (grid-snapped centres, collision boxes and layers), not only by
+// asking the world about each placement on its own.
+describe('joint layout proof (milestone 4 L1)', () => {
+  // Fixture furnaces are 2x2 with a +-0.7 collision box: a 2x2 entity is built at the nearest whole-tile centre. Requested
+  // at x 0.6 and 2.4 their boxes are [-0.1, 1.3] and [1.7, 3.1], apart; built at x 1 and 2 they are [0.3, 1.7] and
+  // [1.3, 2.7], overlapping.
+  const snapped_overlap = [
+    { entity_name: 'stone-furnace', x: 0.6, y: 0, direction: 0 },
+    { entity_name: 'stone-furnace', x: 2.4, y: 0, direction: 0 },
+  ]
+
+  it('refuses placements that collide only at the centres execution snaps them to, and stores no validation', () => {
+    const f = fixture_with_controller()
+    const result: any = validate_construction_execution_plan(f.actor, { plan_id: 'snapped-overlap', placements: snapped_overlap })
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'PLANNED_COLLISION',
+        indices: [0, 1],
+        placements: [
+          expect.objectContaining({ position: { x: 0.6, y: 0 }, planned_position: { x: 1, y: 0 } }),
+          expect.objectContaining({ position: { x: 2.4, y: 0 }, planned_position: { x: 2, y: 0 } }),
+        ],
+      },
+    })
+    expect(result.error.overlap_box.left_top.x).toBeCloseTo(1.3)
+    expect(result.error.overlap_box.right_bottom.x).toBeCloseTo(1.7)
+    // Each placement was legal on its own: the world was asked about both.
+    expect(f.surface.can_place_entity).toHaveBeenCalledTimes(2)
+    expect((globalThis as any).storage.sgluna_validated_construction_plan).toBeUndefined()
+    expect(f.manager.get_status_snapshot().task_state).toBe(TaskStates.IDLE)
+
+    const apart: any = validate_construction_execution_plan(f.actor, { plan_id: 'snapped-apart', placements: [snapped_overlap[0], { ...snapped_overlap[1], x: 3.4 }] })
+    expect(apart.ok).toBe(true)
+    expect(apart.placement_geometry.map((row: any) => row.planned_position)).toEqual([{ x: 1, y: 0 }, { x: 3, y: 0 }])
+  })
+
+  it('repeats the joint proof at the witness and at execution, so a stored plan that collides is never started', () => {
+    const f = fixture_with_controller()
+    ;(globalThis as any).storage.sgluna_validated_construction_plan = {
+      validation_id: 7, plan_id: 'forged', actor_id: 42, surface_index: 1, force_index: 1, created_tick: 100, placements: snapped_overlap,
+    }
+    expect(construction_plan_preflight(f.actor, 7, 2)).toEqual({ ok: false, code: 'construction_plan_stale', evaluation_code: 'PLANNED_COLLISION' })
+    expect(execute_validated_construction_plan(f.actor, 7, 2, f.basic, f.manager)).toEqual([false, 'validated construction plan became stale: PLANNED_COLLISION'])
+    expect(f.manager.get_status_snapshot().task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.get_status_snapshot().queue_length).toBe(0)
+  })
+
+  it('compares collision layers like the batch check: disjoint layers share space, unreadable layers are assumed to collide', () => {
+    const f = fixture_with_controller({ 'stone-furnace': 1, 'test-floor-plate': 1 })
+    ;(globalThis as any).prototypes.item['test-floor-plate'] = {}
+    ;(globalThis as any).prototypes.entity['test-floor-plate'] = {
+      items_to_place_this: [{ name: 'test-floor-plate', count: 1 }],
+      type: 'simple-entity-with-owner',
+      tile_width: 2,
+      tile_height: 2,
+      collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
+      collision_mask: { layers: { floor: true } },
+    }
+    const stacked = [{ entity_name: 'stone-furnace', x: 1, y: 1 }, { entity_name: 'test-floor-plate', x: 1, y: 1 }]
+    // The furnace's layers cannot be read in this fixture: assumed to collide.
+    expect(validate_construction_execution_plan(f.actor, { plan_id: 'unknown-layers', placements: stacked })).toMatchObject({ ok: false, error: { code: 'PLANNED_COLLISION' } })
+    ;(globalThis as any).prototypes.entity['stone-furnace'].collision_mask = { layers: { object: true, item: true } }
+    expect(validate_construction_execution_plan(f.actor, { plan_id: 'disjoint-layers', placements: stacked }).ok).toBe(true)
+    ;(globalThis as any).prototypes.entity['test-floor-plate'].collision_mask = { layers: { floor: true, item: true } }
+    expect(validate_construction_execution_plan(f.actor, { plan_id: 'shared-layer', placements: stacked })).toMatchObject({ ok: false, error: { code: 'PLANNED_COLLISION' } })
+  })
+
+  it('refuses a direction the footprint geometry cannot rotate, and gives the witness the snapped footprint of every placement', () => {
+    const f = fixture_with_controller()
+    expect(validate_construction_execution_plan(f.actor, { plan_id: 'diagonal', placements: [{ entity_name: 'stone-furnace', x: 1, y: 1, direction: 2 }] }))
+      .toMatchObject({ ok: false, error: { code: 'INVALID_PLACEMENT', index: 0 } })
+    const validation: any = validate_construction_execution_plan(f.actor, { plan_id: 'apart', placements: [snapped_overlap[0], { ...snapped_overlap[1], x: 3.4 }] })
+    const rows = (construction_plan_preflight(f.actor, validation.validation_id, 2) as any).construction_placements
+    expect(rows.map((row: any) => row.position)).toEqual([{ x: 1, y: 0 }, { x: 3, y: 0 }])
+    expect(rows.map((row: any) => row.planned_footprint.position)).toEqual([{ x: 1, y: 0 }, { x: 3, y: 0 }])
+    expect(rows[1].planned_footprint.world_box.left_top.x).toBeCloseTo(2.3)
   })
 })

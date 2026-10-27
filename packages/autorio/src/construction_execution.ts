@@ -3,8 +3,8 @@ import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
 import { execute_prepared_remote_construction_plan, is_prepared_remote_construction_plan } from './map_construction'
-import { placement_check_args, snap_placement_center } from './placement_geometry'
-import { prototype_fluidbox_count } from './placement_preflight'
+import { placement_check_args } from './placement_geometry'
+import { planned_placement_footprint, prototype_fluidbox_count } from './placement_preflight'
 import { resolve_entity_placement_item } from './placement_item'
 import type { new_task_manager } from './task_manager'
 
@@ -48,46 +48,11 @@ const MAX_LOCAL_DISTANCE = 10
 const VALIDATION_MAX_AGE_TICKS = 60 * 60
 const OVERLAP_EPSILON = 0.001
 
-// Factorio direction is a discrete 0..15 value. Keep the collision geometry
-// deterministic and portable instead of depending on host math.cos/math.sin
-// implementations in the Node test harness.
-const DIRECTION_COS = [
-  1,
-  0.9238795325112867,
-  0.7071067811865476,
-  0.38268343236508984,
-  0,
-  -0.3826834323650897,
-  -0.7071067811865475,
-  -0.9238795325112867,
-  -1,
-  -0.9238795325112868,
-  -0.7071067811865477,
-  -0.38268343236509034,
-  0,
-  0.38268343236509,
-  0.7071067811865474,
-  0.9238795325112865,
-]
+// Execution builds every placement at its grid-snapped centre (basic_operation_runtime snaps the task position), and the
+// footprint geometry rotates cardinally, so a plan accepts only the four cardinal directions.
+const CARDINAL_DIRECTIONS = [0, 4, 8, 12]
 
-const DIRECTION_SIN = [
-  0,
-  0.3826834323650898,
-  0.7071067811865475,
-  0.9238795325112867,
-  1,
-  0.9238795325112867,
-  0.7071067811865476,
-  0.3826834323650899,
-  0,
-  -0.38268343236508967,
-  -0.7071067811865475,
-  -0.9238795325112865,
-  -1,
-  -0.9238795325112866,
-  -0.7071067811865477,
-  -0.3826834323650904,
-]
+type PlannedFootprint = NonNullable<ReturnType<typeof planned_placement_footprint>>
 
 function valid_integer(value: number, min: number, max: number) {
   return typeof value === 'number' && value === math.floor(value) && value >= min && value <= max
@@ -99,38 +64,6 @@ function valid_coordinate(value: number) {
 
 function squared_distance(a: Position, b: Position) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
-}
-
-function rotated_world_box(entity_name: string, position: Position, direction: number | undefined): WorldBox | undefined {
-  const prototype = prototypes.entity[entity_name]
-  const box = prototype?.collision_box
-  if (!box) return undefined
-
-  const direction_index = direction ?? 0
-  const cosine = DIRECTION_COS[direction_index]
-  const sine = DIRECTION_SIN[direction_index]
-  const corners = [
-    { x: box.left_top.x, y: box.left_top.y },
-    { x: box.left_top.x, y: box.right_bottom.y },
-    { x: box.right_bottom.x, y: box.left_top.y },
-    { x: box.right_bottom.x, y: box.right_bottom.y },
-  ]
-  let min_x = math.huge
-  let min_y = math.huge
-  let max_x = -math.huge
-  let max_y = -math.huge
-  for (const corner of corners) {
-    const x = corner.x * cosine - corner.y * sine + position.x
-    const y = corner.x * sine + corner.y * cosine + position.y
-    min_x = math.min(min_x, x)
-    min_y = math.min(min_y, y)
-    max_x = math.max(max_x, x)
-    max_y = math.max(max_y, y)
-  }
-  return {
-    left_top: { x: min_x, y: min_y },
-    right_bottom: { x: max_x, y: max_y },
-  }
 }
 
 function overlaps(a: WorldBox, b: WorldBox) {
@@ -153,15 +86,25 @@ function overlap_box(a: WorldBox, b: WorldBox): WorldBox {
   }
 }
 
-function placement_geometry(placement: ConstructionExecutionPlacement, index: number) {
-  const position = { x: placement.x, y: placement.y }
+// Whether two planned footprints may not share space: the rule batch-footprint.mjs applies to one batch's placements.
+// Unreadable collision layers count as colliding, so a joint proof never rests on what could not be read.
+function footprints_collide(a: PlannedFootprint, b: PlannedFootprint) {
+  if (a.colliding_with_tiles_only === true || b.colliding_with_tiles_only === true) return false
+  if (a.entity_name === b.entity_name && a.not_colliding_with_itself === true) return false
+  if (a.collision_unknown === true || b.collision_unknown === true) return true
+  return a.collision_layers.some(layer => b.collision_layers.includes(layer))
+}
+
+function placement_geometry(placement: ConstructionExecutionPlacement, index: number, footprint: PlannedFootprint | undefined) {
   return {
     index,
     entity_name: placement.entity_name,
-    position,
+    position: { x: placement.x, y: placement.y },
+    // The centre execution builds at, and the collision box there.
+    planned_position: footprint?.position,
     direction: placement.direction,
     prototype: prototype_spatial_geometry(placement.entity_name),
-    world_collision_box: rotated_world_box(placement.entity_name, position, placement.direction),
+    world_collision_box: footprint?.world_box,
   }
 }
 
@@ -192,8 +135,8 @@ function normalize_request(request: ConstructionExecutionValidationRequest) {
     if (!valid_coordinate(placement.x) || !valid_coordinate(placement.y)) {
       return { error: { code: 'INVALID_PLACEMENT', message: `placement ${index} has invalid coordinates`, index } }
     }
-    if (placement.direction !== undefined && !valid_integer(placement.direction, 0, 15)) {
-      return { error: { code: 'INVALID_PLACEMENT', message: `placement ${index} has invalid direction`, index } }
+    if (placement.direction !== undefined && (!valid_integer(placement.direction, 0, 15) || !CARDINAL_DIRECTIONS.includes(placement.direction))) {
+      return { error: { code: 'INVALID_PLACEMENT', message: `placement ${index} has invalid direction (a construction plan takes 0, 4, 8 or 12)`, index } }
     }
     placements.push({
       entity_name: placement.entity_name,
@@ -210,7 +153,7 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
   if (!counts) return { ok: false, error: { code: 'NO_INVENTORY', message: 'controlled actor inventory is unavailable' } }
 
   const required: Record<string, number> = {}
-  const boxes: Array<WorldBox | undefined> = []
+  const footprints: PlannedFootprint[] = []
   for (let index = 0; index < placements.length; index++) {
     const placement = placements[index]
     if (prototypes.entity[placement.entity_name]?.type === 'offshore-pump') return { ok: false, error: {
@@ -234,8 +177,9 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
     if (squared_distance(actor.position, position) > MAX_LOCAL_DISTANCE ** 2) {
       return { ok: false, error: { code: 'OUTSIDE_LOCAL_BUILD_REACH', message: `placement ${index} is farther than ${MAX_LOCAL_DISTANCE} tiles from the actor`, index } }
     }
-    const reserved_box = rotated_world_box(placement.entity_name, position, placement.direction)
-    if (reserved_box && reservation_intersection(actor.surface, reserved_box)) return { ok: false, error: { code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index } }
+    const footprint = planned_placement_footprint(placement.entity_name, placement.x, placement.y, placement.direction)
+    if (!footprint) return { ok: false, error: { code: 'PLANNED_FOOTPRINT_UNKNOWN', message: `placement ${index} has no footprint to check against the rest of the plan`, index } }
+    if (reservation_intersection(actor.surface, footprint.world_box)) return { ok: false, error: { code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index } }
     if (!actor.surface.can_place_entity({
       name: placement.entity_name,
       position,
@@ -249,7 +193,7 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
           code: 'WORLD_COLLISION',
           message: `placement ${index} is not placeable in the current world`,
           index,
-          placement: placement_geometry(placement, index),
+          placement: placement_geometry(placement, index, footprint),
           spatial_context: local_spatial_observation(actor, {
             position,
             half_size: 4,
@@ -260,29 +204,30 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
     }
     const requirement = placement_item.requirement
     required[requirement.item_name] = (required[requirement.item_name] ?? 0) + requirement.count
-    boxes.push(rotated_world_box(placement.entity_name, position, placement.direction))
+    footprints.push(footprint)
   }
 
-  for (let left = 0; left < boxes.length; left++) {
-    const left_box = boxes[left]
-    if (!left_box) continue
-    for (let right = left + 1; right < boxes.length; right++) {
-      const right_box = boxes[right]
-      if (!right_box) continue
-      if (overlaps(left_box, right_box)) {
-        return {
-          ok: false,
-          error: {
-            code: 'PLANNED_COLLISION',
-            message: `placements ${left} and ${right} overlap before construction begins`,
-            indices: [left, right],
-            placements: [
-              placement_geometry(placements[left], left),
-              placement_geometry(placements[right], right),
-            ],
-            overlap_box: overlap_box(left_box, right_box),
-          },
-        }
+  // The joint proof: each placement above was checked alone against the world as it is now, which says nothing about the
+  // plan's other placements. Compare the footprints execution will build (grid-snapped centres, collision boxes and
+  // layers from the prototypes), so a plan whose placements are each legal but collide with each other is refused here,
+  // before anything is built.
+  for (let left = 0; left < footprints.length; left++) {
+    const left_footprint = footprints[left]
+    for (let right = left + 1; right < footprints.length; right++) {
+      const right_footprint = footprints[right]
+      if (!footprints_collide(left_footprint, right_footprint) || !overlaps(left_footprint.world_box, right_footprint.world_box)) continue
+      return {
+        ok: false,
+        error: {
+          code: 'PLANNED_COLLISION',
+          message: `placements ${left} and ${right} overlap before construction begins`,
+          indices: [left, right],
+          placements: [
+            placement_geometry(placements[left], left, left_footprint),
+            placement_geometry(placements[right], right, right_footprint),
+          ],
+          overlap_box: overlap_box(left_footprint.world_box, right_footprint.world_box),
+        },
       }
     }
   }
@@ -305,7 +250,8 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
 
   return {
     ok: true,
-    placement_geometry: placements.map((placement, index) => placement_geometry(placement, index)),
+    placement_geometry: placements.map((placement, index) => placement_geometry(placement, index, footprints[index])),
+    planned_footprints: footprints,
   }
 }
 
@@ -375,11 +321,17 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
   if (!evaluation.ok) return { ok: false, code: 'construction_plan_stale', evaluation_code: evaluation.error?.code }
 
   // `position` is the entity centre the engine uses (the grid snap a coordinate place_entity's planned_footprint uses), so the
-  // runtime tests committed areas against resolved geometry rather than the requested coordinates.
-  const construction_placements: Array<{ entity_name: string, x: number, y: number, direction: number, position: { x: number, y: number }, fluidbox_count: number }> = []
+  // runtime tests committed areas against resolved geometry rather than the requested coordinates. `planned_footprint` is
+  // the same record a coordinate place_entity's preflight carries, so the runtime compares the plan's placements with the
+  // rest of the batch.
+  const construction_placements: Array<{ entity_name: string, x: number, y: number, direction: number, position: { x: number, y: number }, planned_footprint: PlannedFootprint, fluidbox_count: number }> = []
   const entity_names: string[] = []
   let fluidbox_total = 0
-  for (const placement of plan.placements) {
+  const planned_footprints = evaluation.planned_footprints ?? []
+  for (let index = 0; index < plan.placements.length; index++) {
+    const placement = plan.placements[index]
+    const footprint = planned_footprints[index]
+    if (!footprint) return { ok: false, code: 'construction_plan_stale', evaluation_code: 'PLANNED_FOOTPRINT_UNKNOWN' }
     const fluidbox_count = prototype_fluidbox_count(placement.entity_name)
     fluidbox_total += fluidbox_count
     entity_names.push(placement.entity_name)
@@ -388,7 +340,8 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
       x: placement.x,
       y: placement.y,
       direction: placement.direction ?? 0,
-      position: snap_placement_center(prototypes.entity[placement.entity_name], { x: placement.x, y: placement.y }, placement.direction ?? 0),
+      position: footprint.position,
+      planned_footprint: footprint,
       fluidbox_count,
     })
   }
