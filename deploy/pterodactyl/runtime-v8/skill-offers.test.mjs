@@ -232,8 +232,8 @@ test('a new goal offers the top cards in the planner context before the first mo
   const [ranked] = events('skill.ranked')
   assert.equal(ranked.request_id, offered.request_id)
   assert.equal(ranked.data.source, 'deterministic')
-  assert.equal(ranked.data.reason, 'jev_unavailable')
-  assert.equal(ranked.data.mode, 'shadow')
+  assert.equal(ranked.data.reason, 'deterministic_library_ranking')
+  assert.equal(ranked.data.mode, 'deterministic')
   assert.deepEqual(ranked.data.deterministic_order, ['steam-power-bootstrap', 'starter-mining-belt-output'])
 })
 

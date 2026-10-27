@@ -3,6 +3,7 @@ import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_
 import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
+import { restorePlannerSkillHandoffs } from './skill-offers.mjs'
 import { obligationContractContext, obligationProofOrigin, compileObligations, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { restoreObservationRates } from './observation-rate.mjs'
@@ -687,6 +688,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   constructor(options = {}) {
     super(options)
     this.planningByNpc = new Map()
+    this.plannerSkillHandoffs = new Map()
     // The pending intake retry (at most one: a new request or control cancels it). Durable.
     this.intakeRetryRecord = undefined
     // Board progress the reducer could not be brought up to on restore.
@@ -3101,6 +3103,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const snapshot = super.snapshot()
     return {
       ...snapshot,
+      ...(this.plannerSkillHandoffs?.size ? { planner_skill_handoffs: [...this.plannerSkillHandoffs.entries()].slice(0, 128) } : {}),
       production_tasks: [...(this.productionTasks ?? new Map()).entries()],
       gather_recoveries: [...(this.gatherRecoveries ?? new Map()).entries()],
       ...(this.gatherRecoveryFault ? { gather_recovery_fault: true } : {}),
@@ -3257,6 +3260,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         : [],
     )
     super.restore(snapshot)
+    this.plannerSkillHandoffs = restorePlannerSkillHandoffs(snapshot?.planner_skill_handoffs)
     const controller = restoreControllerRecoveries(snapshot?.controller_recoveries)
     this.controllerRecoveries = controller.records
     this.controllerRecoveryFault = controller.fault || snapshot?.controller_recovery_fault === true

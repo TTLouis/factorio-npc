@@ -5,6 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { FurnaceFactorio, recoverySession, settle } from './recovery-loop-fixtures.mjs'
+import { pinLegacyFixtureSkillContext } from './task-loop-fixtures.mjs'
 
 const captured = JSON.parse(fs.readFileSync(new URL('./fixtures/run-au-recovery.json', import.meta.url)))
 const KEY = 'npc:npc-1'
@@ -14,6 +15,7 @@ const call = (id, unit) => ({ id, type: 'function', function: { name: 'getEntity
 function world({ readHook, traceHook, snapshot, collectionCount = 6 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(snapshot ?? captured.memory))
+  pinLegacyFixtureSkillContext(memory)
   const game = new FurnaceFactorio({ inventory: { coal: 18, 'iron-plate': 8 },
     furnace: { unit_number: 16, position: { x: -95, y: 37 }, output: { 'copper-plate': 6 } } })
   Object.assign(game.status, { actor_id: 6, epoch: 1, surface_index: 1, connected_players: 0 })
@@ -35,7 +37,7 @@ function world({ readHook, traceHook, snapshot, collectionCount = 6 } = {}) {
     if (text.includes('"get_entity_status"')) return JSON.stringify(game.detailOverride ?? detail(text.includes('unit_number') ? 15 : /,15\)/.test(text) ? 15 : 16))
     return native(text)
   }
-  agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null,
+  agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null,
     provider: async () => {
       providers.push(agent.liveObservedExactTarget(15))
       if (providers.length === 1) return exact('tap_25')

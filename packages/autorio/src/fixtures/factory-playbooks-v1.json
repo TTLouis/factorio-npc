@@ -1,0 +1,1067 @@
+{
+  "schema": 1,
+  "profile": "factory-playbooks-v1",
+  "default_enabled": false,
+  "description": "Treatment-only additions to the unchanged native library. Not Codex skills or executable factory blueprints.",
+  "skills": [
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "factory-playbook-fuel",
+      "name": "Build a sustainable burner fuel supply",
+      "kind": "production",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Build coal extraction with startup fuel, proven delivery and a surplus outlet; keep the miners themselves fueled before supplying the factory.",
+      "goal_tags": [
+        "coal",
+        "fuel",
+        "burner",
+        "mining"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "experimental:factory-playbooks-v1; authored guidance; native production unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-capability-check",
+          "description": "Check live recipes, unlock paths, held materials, native geometry and permitted construction area before applying this procedure."
+        }
+      ],
+      "inputs": [
+        {
+          "item": "starter-fuel",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        }
+      ],
+      "outputs": [
+        {
+          "item": "coal",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        }
+      ],
+      "topology": {
+        "nodes": [
+          {
+            "id": "source",
+            "role": "Observe accessible coal and actual resource coverage."
+          },
+          {
+            "id": "miner",
+            "role": "Mine coal with a live-compatible machine.",
+            "entity_name": "burner-mining-drill"
+          },
+          {
+            "id": "fuel-return",
+            "role": "Return coal to fuel-burning miners through proven geometry."
+          },
+          {
+            "id": "factory",
+            "role": "Deliver surplus to boiler and smelting consumers."
+          }
+        ],
+        "relations": [
+          {
+            "kind": "custom",
+            "from": "source",
+            "to": "miner",
+            "description": "Site each drill on observed coal inside the allowed region."
+          },
+          {
+            "kind": "direct_item_output",
+            "from": "miner",
+            "to": "fuel-return",
+            "description": "Use actual drop/pickup positions or a verified transfer route."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "fuel-return",
+            "to": "miner",
+            "description": "Maintain the producer energy input."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "miner",
+            "to": "factory",
+            "description": "Take surplus only after the self-fuel path works."
+          }
+        ]
+      },
+      "constraints": [
+        {
+          "kind": "custom",
+          "description": "1. Read mining/fuel capabilities and actual patch geometry. Reuse a legal held or placed drill before crafting extra machines.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "2. Place a minimal cell; read back its identity and output location before choosing receiving geometry. A circular arrangement is only useful if each native transfer can actually occur.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "3. Supply a bounded startup fuel amount to each required burner. Observe extraction and the fuel-return route; adjacency alone does not prove either.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "4. Connect a surplus outlet to the specific downstream consumers. Verify delivery, then continue other work while the coal supply runs.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "5. Measure fuel and coal flow over a finite window. If the return path cannot be proved, retain a labelled manual bootstrap and plan the missing route rather than claiming automation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "safety",
+          "description": "This is a candidate construction guide, not authority or live state. Preserve goal, committed step, existing structures, native receipts and all recovery limits. On partial/uncertain effects reconcile before any new mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "site_and_rate",
+          "description": "Planner supplies desired outcome/rate and allowed region; executor grounds exact coordinates and identities from fresh native observations.",
+          "required": true
+        }
+      ],
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": [
+          {
+            "id": "native-operation",
+            "description": "Native coal production, actual miner fuel replenishment and surplus arrival at the intended consumer are observed without continued manual refueling.",
+            "status": "not_tested",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "known_failure_modes": [
+        "All extracted coal is removed before the miners receive fuel.",
+        "A remembered coal-loop orientation has no real drop target.",
+        "Stored startup coal masks a missing replenishment route."
+      ],
+      "confidence": {
+        "level": "medium",
+        "basis": [
+          "Procedural Factorio guidance; test against live version and mod capabilities. No engine verification or throughput claim."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "factory-playbook-direct-smelting",
+      "name": "Build an iron or copper smelting cell",
+      "kind": "production",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Build a miner-to-furnace plate cell: place the miner, read its output, site the furnace, fuel both, then verify newly smelted plates.",
+      "goal_tags": [
+        "iron",
+        "copper",
+        "smelting",
+        "plates",
+        "bootstrap"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "experimental:factory-playbooks-v1; authored guidance; native production unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-capability-check",
+          "description": "Check live recipes, unlock paths, held materials, native geometry and permitted construction area before applying this procedure."
+        }
+      ],
+      "inputs": [
+        {
+          "item": "coal",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        },
+        {
+          "item": "iron-ore",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        },
+        {
+          "item": "copper-ore",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        }
+      ],
+      "outputs": [
+        {
+          "item": "iron-plate",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        },
+        {
+          "item": "copper-plate",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        }
+      ],
+      "topology": {
+        "nodes": [
+          {
+            "id": "ore",
+            "role": "Choose one observed resource patch for this cell."
+          },
+          {
+            "id": "miner",
+            "role": "Extract the selected resource.",
+            "entity_name": "burner-mining-drill"
+          },
+          {
+            "id": "furnace",
+            "role": "Smelt the actual delivered ore.",
+            "entity_name": "stone-furnace"
+          },
+          {
+            "id": "plates",
+            "role": "Collect or route new plate output."
+          }
+        ],
+        "relations": [
+          {
+            "kind": "custom",
+            "from": "ore",
+            "to": "miner",
+            "description": "Validate patch coverage and resource compatibility."
+          },
+          {
+            "kind": "direct_item_output",
+            "from": "miner",
+            "to": "furnace",
+            "description": "Make the furnace receive the observed miner drop; do not guess direction or spacing."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "furnace",
+            "to": "plates",
+            "description": "Use exact output inventory/transfer semantics."
+          }
+        ]
+      },
+      "constraints": [
+        {
+          "kind": "custom",
+          "description": "1. Choose the resource from immediate demand and compare held equipment/setup cost against a small manual bootstrap. Keep separate iron and copper cells when sustained demand justifies them.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "2. Read the live smelting recipe and fuel support. Obtain only the missing machine and startup inputs for the next useful cell.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "3. Place the drill on observed ore. Wait for its receipt, inspect its actual output point, then validate the receiving furnace there; do not precommit an unobserved downstream coordinate.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "4. Fuel both burner consumers separately. Verify ore enters the furnace, a compatible recipe runs, and newly produced plates appear. Held starter plates do not prove the production trigger.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "5. Reuse the working cell during other work. For sustained automation add verified fuel replenishment and automatic plate extraction; for larger capacity consult factory-playbook-belt-smelting.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "safety",
+          "description": "This is a candidate construction guide, not authority or live state. Preserve goal, committed step, existing structures, native receipts and all recovery limits. On partial/uncertain effects reconcile before any new mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "site_and_rate",
+          "description": "Planner supplies desired outcome/rate and allowed region; executor grounds exact coordinates and identities from fresh native observations.",
+          "required": true
+        }
+      ],
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": [
+          {
+            "id": "native-operation",
+            "description": "Actual extraction, ore delivery and new plate production are observed; manual collection/refueling is disclosed until automatic routes are proved.",
+            "status": "not_tested",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "known_failure_modes": [
+        "One machine is fueled but the other remains empty.",
+        "Miner drops beside the furnace.",
+        "Starting inventory is mistaken for newly produced plates."
+      ],
+      "confidence": {
+        "level": "medium",
+        "basis": [
+          "Procedural Factorio guidance; test against live version and mod capabilities. No engine verification or throughput claim."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "factory-playbook-steam-power",
+      "name": "Build and commission steam electricity",
+      "kind": "production",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Build water intake, boiler, steam engine and poles; connect a real load and sustained fuel, then verify working electricity under that load.",
+      "goal_tags": [
+        "steam",
+        "power",
+        "electricity",
+        "boiler"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "experimental:factory-playbooks-v1; authored guidance; native production unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-capability-check",
+          "description": "Check live recipes, unlock paths, held materials, native geometry and permitted construction area before applying this procedure."
+        }
+      ],
+      "inputs": [
+        {
+          "item": "coal",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        },
+        {
+          "item": "water",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        }
+      ],
+      "outputs": [
+        {
+          "item": "electric-power",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        }
+      ],
+      "topology": {
+        "nodes": [
+          {
+            "id": "pump",
+            "role": "Supply water from an observed legal shoreline.",
+            "entity_name": "offshore-pump"
+          },
+          {
+            "id": "boiler",
+            "role": "Accept water and fuel; output steam.",
+            "entity_name": "boiler"
+          },
+          {
+            "id": "engine",
+            "role": "Accept steam and provide electricity.",
+            "entity_name": "steam-engine"
+          },
+          {
+            "id": "poles",
+            "role": "Connect generation to intended loads.",
+            "entity_name": "small-electric-pole"
+          },
+          {
+            "id": "load",
+            "role": "A powered lab, assembler or inserter draws actual electricity."
+          }
+        ],
+        "relations": [
+          {
+            "kind": "fluid_connection",
+            "from": "pump",
+            "to": "boiler",
+            "description": "Match fresh water port geometry and direction; add pipes only when native geometry requires them."
+          },
+          {
+            "kind": "fluid_connection",
+            "from": "boiler",
+            "to": "engine",
+            "description": "Match the observed steam outlet to the correct engine inlet."
+          },
+          {
+            "kind": "custom",
+            "from": "engine",
+            "to": "poles",
+            "description": "Verify copper-wire electrical connectivity rather than visual proximity."
+          },
+          {
+            "kind": "custom",
+            "from": "poles",
+            "to": "load",
+            "description": "Check actual coverage and powered consumer state."
+          }
+        ]
+      },
+      "constraints": [
+        {
+          "kind": "custom",
+          "description": "1. Resolve the live steam-power unlock and kit recipes. Gather the kit and startup fuel; reserve space for fluid ports, poles, fuel delivery and actor access.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "2. Place the pump at a validated shoreline candidate. Observe its identity and live water outlet before placing the boiler.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "3. Validate the boiler against that water outlet. After its receipt inspect water and steam connections; select the engine position from the real steam outlet, using only proven necessary pipes.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "4. Connect poles and a real electrical load. Supply startup fuel; inspect water/steam, fuel state, electrical connectivity and the consumer under load. Idle generation with no demand is not proof of failure or sufficient proof of success.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "5. Build a replenishing fuel route to the boiler, such as a coal source through verified chest/inserter geometry. An electric inserter needs its own startup power; initial fuel must bridge that dependency.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "6. Verify repeated generation under load and actual fuel arrivals. Preserve existing working components; a skill does not allow bypassing a refused construction operation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "safety",
+          "description": "This is a candidate construction guide, not authority or live state. Preserve goal, committed step, existing structures, native receipts and all recovery limits. On partial/uncertain effects reconcile before any new mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "site_and_rate",
+          "description": "Planner supplies desired outcome/rate and allowed region; executor grounds exact coordinates and identities from fresh native observations.",
+          "required": true
+        }
+      ],
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": [
+          {
+            "id": "native-operation",
+            "description": "Fresh native fluid connections, boiler fuel, generator/load states and fuel replenishment demonstrate working sustained power.",
+            "status": "not_tested",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "known_failure_modes": [
+        "Water and steam ports are guessed from a screenshot.",
+        "An unfueled boiler cannot power its own electric fuel inserter.",
+        "Placed poles do not connect the load."
+      ],
+      "confidence": {
+        "level": "medium",
+        "basis": [
+          "Procedural Factorio guidance; test against live version and mod capabilities. No engine verification or throughput claim."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "factory-playbook-ingredients",
+      "name": "Build ingredient supply inside a production line",
+      "kind": "production",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Build only the intermediate ingredient cells the target recipe needs; verify live recipes, connect plate inputs, and route outputs to the consumer.",
+      "goal_tags": [
+        "ingredients",
+        "gears",
+        "circuits",
+        "assembly"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "experimental:factory-playbooks-v1; authored guidance; native production unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-capability-check",
+          "description": "Check live recipes, unlock paths, held materials, native geometry and permitted construction area before applying this procedure."
+        }
+      ],
+      "inputs": [
+        {
+          "item": "iron-plate",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        },
+        {
+          "item": "copper-plate",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        }
+      ],
+      "outputs": [
+        {
+          "item": "iron-gear-wheel",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        },
+        {
+          "item": "electronic-circuit",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        }
+      ],
+      "topology": {
+        "nodes": [
+          {
+            "id": "plates",
+            "role": "Ground plate delivery from the smelting section."
+          },
+          {
+            "id": "producer",
+            "role": "Use a compatible live assembler and recipe.",
+            "entity_name": "assembling-machine-1"
+          },
+          {
+            "id": "transfer",
+            "role": "Move the intermediate by verified direct insertion or belts.",
+            "entity_name": "inserter"
+          },
+          {
+            "id": "consumer",
+            "role": "Target recipe consumes the delivered intermediate."
+          }
+        ],
+        "relations": [
+          {
+            "kind": "item_transfer",
+            "from": "plates",
+            "to": "producer",
+            "description": "Route each actual recipe ingredient to the appropriate input."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "producer",
+            "to": "transfer",
+            "description": "Extract only the intended intermediate."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "transfer",
+            "to": "consumer",
+            "description": "Check pickup/drop positions, reach, power and receiving inventory."
+          }
+        ]
+      },
+      "constraints": [
+        {
+          "kind": "custom",
+          "description": "1. Read the final recipe and its dependency tree. Build only the intermediate cells needed by that live recipe; do not make an independent gear/circuit factory as an unrelated milestone.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "2. Resolve assembler technology, supported crafting categories and ingredient bills. Hand-craft a finite unlock/bootstrap quantity only when live craftability permits it.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "3. Place and configure the minimum useful producers. Reserve transport and power space; ground their exact positions in valid native candidates.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "4. Route plate inputs and intermediate output. Prefer direct insertion when geometry and measured capacity support it; otherwise build the necessary belt/inserter path.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "5. Verify the consumer receives new ingredients and runs. Size further cells from measured demand and transport capacity rather than a memorized ratio.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "safety",
+          "description": "This is a candidate construction guide, not authority or live state. Preserve goal, committed step, existing structures, native receipts and all recovery limits. On partial/uncertain effects reconcile before any new mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "site_and_rate",
+          "description": "Planner supplies desired outcome/rate and allowed region; executor grounds exact coordinates and identities from fresh native observations.",
+          "required": true
+        }
+      ],
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": [
+          {
+            "id": "native-operation",
+            "description": "The intended live recipes run and newly produced intermediates reach the target consumer through automatic routes.",
+            "status": "not_tested",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "known_failure_modes": [
+        "Assembler cannot use the chosen recipe category.",
+        "Ingredients reach the wrong belt lane or inventory.",
+        "Intermediate stock is counted as a complete final-output line."
+      ],
+      "confidence": {
+        "level": "medium",
+        "basis": [
+          "Procedural Factorio guidance; test against live version and mod capabilities. No engine verification or throughput claim."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "factory-playbook-red-science",
+      "name": "Build sustainable automated red science",
+      "kind": "production",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Bootstrap red packs for Automation research, then build automatic plate-to-gear-to-red-science production with power, fuel and output removal.",
+      "goal_tags": [
+        "automation-science-pack",
+        "red",
+        "science",
+        "factory",
+        "automation"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "experimental:factory-playbooks-v1; authored guidance; native production unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-capability-check",
+          "description": "Check live recipes, unlock paths, held materials, native geometry and permitted construction area before applying this procedure."
+        }
+      ],
+      "inputs": [
+        {
+          "item": "iron-plate",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        },
+        {
+          "item": "copper-plate",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        }
+      ],
+      "outputs": [
+        {
+          "item": "automation-science-pack",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        }
+      ],
+      "topology": {
+        "nodes": [
+          {
+            "id": "unlocks",
+            "role": "Read current technology dependencies and native triggers."
+          },
+          {
+            "id": "bootstrap",
+            "role": "Hand-craft only the live research requirement when hand-craftable."
+          },
+          {
+            "id": "lab",
+            "role": "Complete the required powered research.",
+            "entity_name": "lab"
+          },
+          {
+            "id": "plates",
+            "role": "Receive natural-resource plate production with replenishing fuel."
+          },
+          {
+            "id": "gears",
+            "role": "Make the live recipe intermediate inside the science section.",
+            "entity_name": "assembling-machine-1"
+          },
+          {
+            "id": "science",
+            "role": "Produce science in a compatible configured assembler.",
+            "entity_name": "assembling-machine-1"
+          },
+          {
+            "id": "output",
+            "role": "Remove science automatically to the declared destination."
+          }
+        ],
+        "relations": [
+          {
+            "kind": "custom",
+            "from": "unlocks",
+            "to": "bootstrap",
+            "description": "Satisfy native production triggers before crafting a locked science recipe."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "bootstrap",
+            "to": "lab",
+            "description": "Keep research/bootstrap packs distinct from later automated output."
+          },
+          {
+            "kind": "custom",
+            "from": "lab",
+            "to": "gears",
+            "description": "Verify Automation completed before crafting a locked assembling machine."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "plates",
+            "to": "gears",
+            "description": "Automatically supply the live intermediate recipe."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "gears",
+            "to": "science",
+            "description": "Route the needed intermediate and remaining live ingredients automatically."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "science",
+            "to": "output",
+            "description": "Preserve an unblocked, uncapped science output route."
+          }
+        ]
+      },
+      "constraints": [
+        {
+          "kind": "custom",
+          "description": "1. Read the live research path and recipe unlocks. In the tested version iron/copper production and crafting a lab triggered early unlocks; verify current trigger requirements instead of assuming lab research handles every technology.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "2. Once the red-pack recipe is unlocked, read the actual Automation research cost and hand-craft that finite bootstrap quantity if the live recipe supports it. Supply a powered lab and verify research completion before using a locked assembler.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "3. Prepare connected sections: natural mining and smelting for required plates; sustained fuel and electricity; then a science section accepting plates and producing packs. Use factory-playbook-direct-smelting, factory-playbook-fuel and factory-playbook-steam-power as needed.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "4. Read live recipes and machine capabilities. Include required intermediate production, commonly gears, inside the science section. Size the smallest chain meeting the requested rate; reserve input/output and actor-access corridors.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "5. Validate machine placement and intended transfer relationships, configure recipes, connect ingredient routes and output removal, then connect power. Exact coordinates and entity identities come from fresh native tools.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "6. Commission from upstream to downstream. Confirm new ore, plates, intermediates and assembler science output, plus actual fuel replenishment and powered operation. Hand insertion or stocked plates alone cannot establish sustained automation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "7. Keep hand-crafted bootstrap packs outside automated-output accounting. Use a clean production-counter measurement interval and native upstream/topology checks. Do not cap continuous science with a building-stock buffer rule.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "safety",
+          "description": "This is a candidate construction guide, not authority or live state. Preserve goal, committed step, existing structures, native receipts and all recovery limits. On partial/uncertain effects reconcile before any new mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "site_and_rate",
+          "description": "Planner supplies desired outcome/rate and allowed region; executor grounds exact coordinates and identities from fresh native observations.",
+          "required": true
+        }
+      ],
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": [
+          {
+            "id": "native-operation",
+            "description": "Native assembler science output meets the requested sustained rate with automatic natural-resource inputs, fuel replenishment and output removal; bootstrap packs are excluded.",
+            "status": "not_tested",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "known_failure_modes": [
+        "Trying to craft a locked assembler before researching Automation.",
+        "A placed science assembler has no gear supply.",
+        "Hand-crafted packs contaminate the automation measurement.",
+        "A stocked boiler/furnace hides a missing fuel route."
+      ],
+      "confidence": {
+        "level": "medium",
+        "basis": [
+          "Procedural Factorio guidance; test against live version and mod capabilities. No engine verification or throughput claim."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "factory-playbook-belt-smelting",
+      "name": "Build an expandable smelting row",
+      "kind": "production",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Build a small smelting row with ore and fuel inputs, working furnace cells and automatic plate output; expand only after verifying the first cell.",
+      "goal_tags": [
+        "smelting",
+        "furnaces",
+        "row",
+        "belt",
+        "scale"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "experimental:factory-playbooks-v1; authored guidance; native production unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-capability-check",
+          "description": "Check live recipes, unlock paths, held materials, native geometry and permitted construction area before applying this procedure."
+        }
+      ],
+      "inputs": [
+        {
+          "item": "iron-ore",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        },
+        {
+          "item": "copper-ore",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        },
+        {
+          "item": "coal",
+          "role": "Grounded input; derive amount and route from the live recipe and requested rate."
+        }
+      ],
+      "outputs": [
+        {
+          "item": "iron-plate",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        },
+        {
+          "item": "copper-plate",
+          "role": "Verify new native output; placement or held starter items do not prove production."
+        }
+      ],
+      "topology": {
+        "nodes": [
+          {
+            "id": "input",
+            "role": "Deliver ore and fuel to defined section connection points."
+          },
+          {
+            "id": "furnaces",
+            "role": "Repeat a proven smelting cell.",
+            "entity_name": "stone-furnace"
+          },
+          {
+            "id": "feed",
+            "role": "Supply each furnace through actual pickup/drop geometry.",
+            "entity_name": "inserter"
+          },
+          {
+            "id": "output",
+            "role": "Extract plates to the section output.",
+            "entity_name": "transport-belt"
+          }
+        ],
+        "relations": [
+          {
+            "kind": "belt_input",
+            "from": "input",
+            "to": "feed",
+            "description": "If sharing a belt, keep intended ore/fuel lanes accessible; validate lane occupancy."
+          },
+          {
+            "kind": "item_transfer",
+            "from": "feed",
+            "to": "furnaces",
+            "description": "Observe both ore and fuel reaching each intended machine."
+          },
+          {
+            "kind": "belt_output",
+            "from": "furnaces",
+            "to": "output",
+            "description": "Provide powered output inserters and a clear plate route."
+          }
+        ]
+      },
+      "constraints": [
+        {
+          "kind": "custom",
+          "description": "1. Specify ore/fuel input connections, plate output connection and permitted build region. Calculate the smallest useful row from live demand, recipe time and transport tools.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "2. Validate a repeatable cell with furnace, input transfer, output transfer, power and actor access. Keep ore/fuel lanes and belt directions explicit.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "3. Build and run one cell. Verify inputs actually arrive and new plates leave without manual insertion; resolve bottlenecks before copying the pattern.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "4. Extend within the authorized region only after checking upstream supply, belt/inserter capacity, fuel and power. Revalidate each new placement against current occupancy.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "custom",
+          "description": "5. Measure new plate flow at the section output and verify replenishment. Keep small finite manual bootstraps labelled separately from automatic production.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        },
+        {
+          "kind": "safety",
+          "description": "This is a candidate construction guide, not authority or live state. Preserve goal, committed step, existing structures, native receipts and all recovery limits. On partial/uncertain effects reconcile before any new mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "site_and_rate",
+          "description": "Planner supplies desired outcome/rate and allowed region; executor grounds exact coordinates and identities from fresh native observations.",
+          "required": true
+        }
+      ],
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": [
+          {
+            "id": "native-operation",
+            "description": "Every active furnace receives replenished inputs and new plates leave through the declared automatic output route at the requested measured rate.",
+            "status": "not_tested",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "known_failure_modes": [
+        "Copying a nonworking first cell multiplies its failure.",
+        "Belt lanes prevent fuel pickup.",
+        "Furnace count increases while ore supply or output transport remains the bottleneck."
+      ],
+      "confidence": {
+        "level": "medium",
+        "basis": [
+          "Procedural Factorio guidance; test against live version and mod capabilities. No engine verification or throughput claim."
+        ]
+      },
+      "examples": []
+    }
+  ]
+}

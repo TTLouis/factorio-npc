@@ -1,7 +1,7 @@
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
-import { PLANNER_REVIEW_RATIONALE_MAX_CHARS } from './role-contracts.mjs'
+import { PLANNER_REVIEW_RATIONALE_MAX_CHARS, PLANNER_SKILL_LOOKUP_TOOLS } from './role-contracts.mjs'
 import { PRODUCTION_TASK_SCHEMA, normalizeProductionIntent } from './production-task.mjs'
 import { HARNESS_DEFAULTS_SCHEMA } from './production-repair.mjs'
 
@@ -1522,7 +1522,14 @@ executionOnlyControlToolDefinitions[0].function.parameters.properties.plannerRev
     rationale: { type: 'string', minLength: 1, maxLength: PLANNER_REVIEW_RATIONALE_MAX_CHARS },
   },
 }
-export const executionOnlyProviderToolDefinitions = [...toolDefinitions, ...executionOnlyControlToolDefinitions]
+// Planner-selected skill references already resolve to the harness-supplied
+// context; protocol 3 executors have no independent skill discovery surface.
+executionOnlyControlToolDefinitions[0].function.parameters.properties.observationRequest.properties.tool.enum =
+  executionOnlyControlToolDefinitions[0].function.parameters.properties.observationRequest.properties.tool.enum.filter(name => !PLANNER_SKILL_LOOKUP_TOOLS.includes(name))
+export const executionOnlyProviderToolDefinitions = [
+  ...toolDefinitions.filter(tool => !PLANNER_SKILL_LOOKUP_TOOLS.includes(tool.function.name)),
+  ...executionOnlyControlToolDefinitions,
+]
 
 const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getActorStatus: 'runtime_status',

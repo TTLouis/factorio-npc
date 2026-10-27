@@ -44,7 +44,7 @@ function baWorld(row, replies) {
   }
   const calls = []
   // The production loop options (supervisor.mjs) that decide which drafts are refused.
-  const agent = new NpcAgentLoop({ memory, rcon: game, completionProtocolVersion: 3, executorObservationRate: true,
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, memory, rcon: game, completionProtocolVersion: 3, executorObservationRate: true,
     requireTypedObligations: true, replacementWake: true,
     provider: async (...args) => {
       calls.push(args)
@@ -153,6 +153,17 @@ test('BA lane A route draft is corrected once inside the route instead of guard-
     [['plan_category', 'missing_step_obligations', 1, false]])
 })
 
+test('selected-skill persistence faults stay harness guards through the recovery-route wrapper', async () => {
+  const row = lane('a')
+  const w = baWorld(row, [row.wire.submit.message, row.wire.route.message, correctedLaneA(row)])
+  w.agent.allowEphemeralSkillHandoff = false
+  startAuthoring(w)
+  await assert.rejects(w.agent.runGuarded(), error => error.code === 'planner_skill_handoff_unavailable'
+    && error.pause_class === 'guard' && !error.message.startsWith('provider_jev_recovery_route_failed'))
+  assert.equal(w.calls.length, 3)
+  assert.equal(w.game.mutations.length, 0)
+})
+
 test('an injected non-outcome route checkpoint mismatch is still refused with its facts, then corrected through the route', async () => {
   const row = lane('b')
   const wrong = routeDraft(row)
@@ -248,7 +259,7 @@ for (const form of ['declaration', 'root', 'omitted']) {
 
 test('repeated invalid route drafts exhaust the plan_category allowance and keep the visible guard pause', async () => {
   const row = lane('a')
-  const w = baWorld(row, [row.wire.submit.message, ...Array(4).fill(row.wire.route.message)])
+  const w = baWorld(row, [row.wire.submit.message, ...Array.from({ length: 4 }, () => row.wire.route.message)])
   const before = structuredClone(w.memory.planningState(w.key).plans)
   startAuthoring(w)
   await assert.rejects(w.agent.runGuarded(), /provider_jev_recovery_route_failed: typed_step_obligations_required/)

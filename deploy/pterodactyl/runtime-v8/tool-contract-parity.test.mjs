@@ -8,6 +8,26 @@ import * as staging from '../staging/structured-policy.mjs'
 const root = new URL('../../../', import.meta.url)
 const contract = JSON.parse(await readFile(new URL('contracts/factorio-tool-contract.json', root), 'utf8'))
 
+test('skill discovery maximum agrees across manifest, advertised schema, serializer and native boundary', async () => {
+  const bounds = contract.tools.findSkills.argument_bounds.limit
+  assert.deepEqual(bounds, { minimum: 1, maximum: 10, default: 3 })
+  const schema = staging.toolDefinitions.find(tool => tool.function.name === 'findSkills').function.parameters.properties.limit
+  assert.equal(schema.maximum, bounds.maximum)
+  assert.equal(schema.default, bounds.default)
+  for (const policy of [staging, runtime]) {
+    assert.match(policy.toolCommand('findSkills', { query: 'science', limit: 10 }), /,'science',10\)/)
+    assert.throws(() => policy.toolCommand('findSkills', { query: 'science', limit: 11 }))
+  }
+  const native = await readFile(new URL('packages/autorio/src/skills.ts', root), 'utf8')
+  assert.match(native, /MAX_SKILL_CARDS = 10/)
+  assert.match(native, /bounded_limit > MAX_SKILL_CARDS/)
+  for (const name of ['findSkills', 'getSkillDetails']) {
+    assert.equal(contract.tools[name].protocol3_role, 'planner-only')
+    assert.equal(runtime.executionOnlyProviderToolDefinitions.some(tool => tool.function.name === name), false)
+    assert.ok(runtime.planningOnlyProviderToolDefinitions.some(tool => tool.function.name === name))
+  }
+})
+
 test('fluid preservation projection and admission metadata remain native and versioned', async () => {
   const projection = contract.tools.getEntityGeometry.fluid_preservation_projection
   assert.equal(projection.version, 3)

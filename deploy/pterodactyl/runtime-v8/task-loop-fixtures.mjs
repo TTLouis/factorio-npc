@@ -9,6 +9,23 @@
 import assert from 'node:assert/strict'
 import { after } from 'node:test'
 import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
+import { capturePlannerSkillHandoff } from './skill-offers.mjs'
+import { getActivePlan } from './planning-state.mjs'
+
+// Old controller/production replays predate durable skill handoffs and do not
+// contain the original skill detail payloads. Supply explicitly synthetic,
+// native-shaped test metadata without changing their recorded plan semantics.
+// This is test setup only, never a production migration or an engine claim.
+export function pinLegacyFixtureSkillContext(memory) {
+  for (const [key, planning] of memory.planningByNpc ?? []) {
+    if (memory.plannerSkillHandoffs.has(key)) continue
+    const ids = [...new Set(getActivePlan(planning)?.steps.flatMap(step => step.execution_guidance?.skillIds ?? []) ?? [])]
+    if (ids.length === 0) continue
+    const details = new Map(ids.map(id => [id, { id, revision: 1, stage: 'pattern', status: 'candidate',
+      summary: 'Synthetic replay guide: this isolated harness test does not evaluate the original skill instructions.' }]))
+    memory.plannerSkillHandoffs.set(key, capturePlannerSkillHandoff(key, planning, details))
+  }
+}
 
 // Fake decision providers bypass the real TypeSafe adapter, so a request the
 // live adapter would reject still "works" in unit tests. That is how every live

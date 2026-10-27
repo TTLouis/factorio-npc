@@ -32,7 +32,7 @@ function world(script, options = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const calls = []
   const events = []
-  const agent = new NpcAgentLoop({ rcon: game, memory, completionProtocolVersion: 3, replacementWake: true,
+  const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, completionProtocolVersion: 3, replacementWake: true,
     provider: answersStepContract(async (messages, context) => {
       calls.push({ messages, context })
       const next = script[calls.length - 1]
@@ -112,20 +112,18 @@ test('selecting an unloaded strategy skill is corrected instead of claiming its 
   assert.equal(w.events.find(row => row.event === 'role.contract_refused').data.reason, 'invalid_execution_guidance')
 })
 
-test('three large cached details cannot select a skill omitted by the planner context ceiling', async () => {
-  const ids = ['large-a', 'large-b', 'large-c']
-  const visible = ids.slice(1)
+test('six large cached details cannot select a skill omitted by the wider planner context ceiling', async () => {
+  const ids = ['large-a', 'large-b', 'large-c', 'large-d', 'large-e', 'large-f']
+  const visible = ids.slice(0, 2).reverse()
   const w = world([
-    { tool_calls: ids.map((id, index) => ({ id: `large-skill-${index}`, type: 'function',
-      function: { name: 'getSkillDetails', arguments: JSON.stringify({ id }) } })) },
     ({ agent, game, messages }) => {
-      assert.equal(agent.loadedSkillContext.size, 3, 'all three reads succeeded')
+      assert.equal(agent.loadedSkillContext.size, 6, 'all six reads succeeded')
       const context = messages.find(row => String(row.content).startsWith('[SKILL_CONTEXT]')).content
       const details = JSON.parse(context.slice(context.indexOf('\n') + 1))
-      assert.deepEqual(details.map(skill => skill.id), visible)
-      assert.ok(context.length < 16500)
+      assert.deepEqual(details.map(skill => skill.id), ids.slice(0, -1).reverse())
+      assert.ok(context.length < 32500)
       assert.equal(game.mutations.length, 0)
-      return draft({ executionGuidance: [brief(ids)] })
+      return draft({ executionGuidance: [brief([ids.at(-1)])] })
     },
     draft({ executionGuidance: [brief(visible)] }),
     ctx => {
@@ -137,8 +135,12 @@ test('three large cached details cannot select a skill omitted by the planner co
   ])
   for (const id of ids) w.game.skills[id] = { id, summary: `Strategy ${id}`,
     constraints: Array.from({ length: 10 }, () => ({ description: 'x'.repeat(580) })) }
+  const command = w.game.command.bind(w.game)
+  w.game.command = async text => text.includes('remote.call("autorio_skills","offer"')
+    ? JSON.stringify({ ok: true, cards: ids.map(id => ({ id, name: id, summary: 'Large strategy', produces: [], needs: [], matched: [], score: 1 })) })
+    : command(text)
   await w.say()
-  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'planner', 'planner', 'executor'])
+  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'planner', 'executor'])
   assert.deepEqual(w.plan().steps[0].execution_guidance.skillIds, visible)
   assert.equal(w.game.mutations.length, 1)
   assert.equal(w.events.filter(row => row.event === 'role.contract_refused' && row.data.reason === 'invalid_execution_guidance').length, 1)
@@ -146,8 +148,8 @@ test('three large cached details cannot select a skill omitted by the planner co
 
 test('the active brief persists through restart, isolates selected skills and cannot be rewritten by an executor', async () => {
   const w = world([({ agent }) => {
-    agent.loadedSkillContext.set('selected', { id: 'selected', marker: 'SELECTED-DETAILS' })
-    agent.loadedSkillContext.set('other', { id: 'other', marker: 'UNRELATED-ALTERNATIVE' })
+    agent.loadedSkillContext.set('selected', { id: 'selected', summary: 'SELECTED-DETAILS' })
+    agent.loadedSkillContext.set('other', { id: 'other', summary: 'UNRELATED-ALTERNATIVE' })
     return draft({ executionGuidance: [brief(['selected'])] })
   }, ctx => {
     const context = ctx.agent.skillContext()
@@ -674,8 +676,8 @@ test('provider sends planning-only contract on ordinary, closed and compact prot
 
 test('a deterministic step close refreshes both the focused brief and the selected skill details', async () => {
   const w = world([({ agent }) => {
-    agent.loadedSkillContext.set('copper', { id: 'copper', marker: 'COPPER-STRATEGY' })
-    agent.loadedSkillContext.set('iron', { id: 'iron', marker: 'IRON-STRATEGY' })
+    agent.loadedSkillContext.set('copper', { id: 'copper', summary: 'COPPER-STRATEGY' })
+    agent.loadedSkillContext.set('iron', { id: 'iron', summary: 'IRON-STRATEGY' })
     return draft({ plan: ['Gather ten copper ore', 'Gather ten iron ore'],
       goal: { scope: 'finite', summary: 'Gather copper and iron.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }] },
       stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('copper-ore', 10) }, { kind: 'deterministic', checkpoint: inventoryCheckpoint('iron-ore', 10) }],

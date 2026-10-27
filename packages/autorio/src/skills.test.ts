@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   assert_safe_skill_id,
@@ -15,6 +16,7 @@ import {
   list_skill_definitions,
   MAX_DYNAMIC_SKILL_DEFINITIONS,
   put_skill_definition,
+  put_untrusted_skill_definition,
   RETIRED_BASIC_SKILL_IDS,
   serialize_skill_json,
   skill_cards_for_goal,
@@ -24,6 +26,45 @@ import {
 } from './skills'
 import type { SkillNeedCheck, SkillWorldView } from './skills'
 import { edited_skill_revision, skill_detail_rows } from './skills_window'
+
+const experimental_playbooks = JSON.parse(readFileSync(new URL('./fixtures/factory-playbooks-v1.json', import.meta.url), 'utf8'))
+
+describe('wider discovery and treatment-only factory playbooks', () => {
+  it('accepts all six candidate guides without changing any baseline definition and surfaces red-science guidance', () => {
+    ensure_basic_skill_definitions()
+    const before = list_skill_definitions().map(skill => JSON.stringify(skill))
+    const ids = new Set(list_skill_definitions().map(skill => skill.id))
+    expect(experimental_playbooks.default_enabled).toBe(false)
+    for (const raw of experimental_playbooks.skills) {
+      expect(ids.has(raw.id)).toBe(false)
+      const skill = put_untrusted_skill_definition(raw)
+      expect(skill.status).toBe('candidate')
+      expect(skill.stage).toBe('pattern')
+      expect(skill.verification.production_output).toBe('not_tested')
+      expect(skill.constraints.map(c => c.description)).toEqual(raw.constraints.map((c: any) => c.description))
+    }
+    const after = new Map(list_skill_definitions().map(skill => [skill.id, JSON.stringify(skill)]))
+    for (const original of before) expect(after.get(JSON.parse(original).id)).toBe(original)
+    const cards = skill_cards_for_goal('Build a new automated factory that continuously produces at least one automation-science-pack per game minute from natural resources.', 10)
+    expect(cards.slice(0, 6).map(card => card.id)).toContain('factory-playbook-red-science')
+    expect(find_skill_definitions('science', 10).length).toBeGreaterThan(0)
+    expect(() => find_skill_definitions('science', 11)).toThrow(/at most 10/)
+    const red = get_skill_definition('factory-playbook-red-science')!
+    expect(red.constraints.map(c => c.description).join(' ')).toMatch(/hand-craft that finite bootstrap quantity/)
+  })
+
+  it('returns matches beyond the former five-result ceiling with unchanged deterministic ordering', () => {
+    for (let index = 0; index < 12; index++) put_untrusted_skill_definition({
+      schema_version: 1, id: `discovery-probe-${index}`, name: `Discovery ${String(index).padStart(2, '0')}`,
+      kind: 'production', status: 'candidate', stage: 'pattern', summary: 'Build a discovery-probe factory.', goal_tags: ['discovery-probe'],
+    })
+    const ten = skill_cards_for_goal('discovery-probe', 10)
+    expect(ten).toHaveLength(10)
+    expect(find_skill_definitions('discovery-probe', 10)).toHaveLength(10)
+    expect(skill_cards_for_goal('discovery-probe', 5)).toEqual(ten.slice(0, 5))
+    expect(() => skill_cards_for_goal('discovery-probe', 11)).toThrow(/at most 10/)
+  })
+})
 
 const writes: Array<{ filename: string, data: string, append: boolean }> = []
 
@@ -119,7 +160,7 @@ describe('curated basic skill library', () => {
 
     const merging = find_skill_definitions('并线', 3).map(result => result.id)
     expect(merging).toContain('belt-side-load-merge')
-    expect(() => find_skill_definitions('coal', 6)).toThrow(/at most 5/i)
+    expect(() => find_skill_definitions('coal', 11)).toThrow(/at most 10/i)
   })
 
   it('never overwrites an existing same-id save skill while seeding builtins', () => {
@@ -469,7 +510,7 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
     })
     expect(JSON.stringify(card).length).toBeLessThan(900)
     expect(skill_cards_for_goal('coal', 5).length).toBeLessThanOrEqual(5)
-    expect(() => skill_cards_for_goal('coal', 6)).toThrow(/at most 5/)
+    expect(() => skill_cards_for_goal('coal', 11)).toThrow(/at most 10/)
     expect(skill_cards_for_goal('zzzz unrelated words', 5)).toEqual([])
   })
 

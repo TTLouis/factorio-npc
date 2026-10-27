@@ -1068,6 +1068,11 @@
       "surface_policy": "runtime-v8-only"
     },
     "findSkills": {
+      "protocol3_role": "planner-only",
+      "executor_delivery": "planner-selected references with harness-supplied skill context",
+      "argument_bounds": {
+        "limit": { "minimum": 1, "maximum": 10, "default": 3 }
+      },
       "remote": [
         "autorio_skills",
         "find"
@@ -1079,6 +1084,8 @@
       "surface_policy": "runtime-v8-only"
     },
     "getSkillDetails": {
+      "protocol3_role": "planner-only",
+      "executor_delivery": "planner-selected references with harness-supplied skill context",
       "remote": [
         "autorio_skills",
         "get"

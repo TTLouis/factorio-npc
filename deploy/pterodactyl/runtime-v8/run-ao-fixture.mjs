@@ -5,7 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { startContractPrediction } from './contract-prediction.mjs'
 import { recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
-import { FakeFactorio, planReply } from './task-loop-fixtures.mjs'
+import { pinLegacyFixtureSkillContext, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
 
 export const ao = JSON.parse(fs.readFileSync(new URL('./fixtures/run-ao-controller.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
 
@@ -26,6 +26,7 @@ export function preserveAoRepair(name, w) {
 export async function aoWorld({ traceHook, readHook, providerHook } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(ao.memory))
+  pinLegacyFixtureSkillContext(memory)
   const game = new FakeFactorio({ inventory: { 'iron-plate': 16, 'copper-plate': 11, lab: 1, 'transport-belt': 4 } })
   Object.assign(game.status, { actor_id: 19, epoch: 1, connected_players: 0 })
   game.nearby = { actor_position: { x: -21, y: 1 }, entities: [{ name: 'stone-furnace', type: 'furnace',
@@ -55,7 +56,7 @@ export async function aoWorld({ traceHook, readHook, providerHook } = {}) {
   session.syncTaskBoardUi = async () => true
   session.printChat = async line => { chats.push(line) }
   const held = () => getActivePlan(memory.planningState(ao.key))
-  agent = new NpcAgentLoop({ rcon: game, memory, npcId: ao.key.slice(4), completionProtocolVersion: 3,
+  agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, npcId: ao.key.slice(4), completionProtocolVersion: 3,
     stateFile: null, traceFile: null, decisionTraceFile: null, systemPrompt: 'Exact recorded Run AO controller fixture.',
     reserve: async () => {}, provider: async (messages, context) => {
       if (context.triggerSource === 'step_contract') {

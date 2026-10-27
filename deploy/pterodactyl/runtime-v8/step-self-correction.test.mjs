@@ -5,7 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { activeStepVerifiedOperationNames, getActivePlan } from './planning-state.mjs'
 import { normalizePlannerReview, repairPlannerReview } from './role-contracts.mjs'
-import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { pinLegacyFixtureSkillContext, FakeFactorio } from './task-loop-fixtures.mjs'
 
 const am = JSON.parse(await fs.readFile(new URL('./fixtures/run-am-receipt-liveness.json', import.meta.url), 'utf8'))
 const review = am.refused_decision.plannerReview
@@ -28,6 +28,7 @@ function recordedWorld({ count = 2, receipt = 'verified', onCount, firstAction =
   }
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(snapshot)
+  pinLegacyFixtureSkillContext(memory)
   const game = new FakeFactorio()
   Object.assign(game.status, { actor_id: 8, epoch: 1, connected_players: 0 })
   const native = game.command.bind(game)
@@ -47,7 +48,7 @@ function recordedWorld({ count = 2, receipt = 'verified', onCount, firstAction =
     return native(text)
   }
   const held = () => getActivePlan(memory.planningState(am.key))
-  agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
+  agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, npcId: 'npc-1', completionProtocolVersion: 3,
     systemPrompt: 'Recorded AM autonomous reconciliation fixture', stateFile: null, traceFile: null, decisionTraceFile: null,
     provider: async (_messages, context) => {
       if (context.triggerSource === 'step_contract') return { content: invalidNextContract ? '{}' : JSON.stringify({ stepId: held().steps[held().active_step_index].step_id,
