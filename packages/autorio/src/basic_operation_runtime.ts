@@ -564,6 +564,22 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       ...placement_check_args(task.entity_name),
     })
     let can_place = placeable()
+    // A validated construction placement is placement-only (its fluid-preservation witness says so): when the footprint is
+    // no longer placeable (a tree, rock or ground item that appeared after validation, or anything else) it fails here,
+    // before any pickup, mining or destruction, and so keeps the no-mutation proof.
+    if (!can_place && task.refuse_clearance === true) {
+      const blockers = placement_blocker_summaries(actor, footprint.world_box)
+      controller.fail(actor, task, 'construction_plan_blocked_no_clear', {
+        placement_footprint: {
+          tile_width: footprint.tile_width,
+          tile_height: footprint.tile_height,
+          tile_box: footprint.tile_box,
+          world_box: footprint.world_box,
+        },
+        placement_blockers: blockers,
+      })
+      return [false, `Validated construction placement of ${task.entity_name} at (${position.x}, ${position.y}) is blocked and clearing is refused for construction plans`]
+    }
     // Like a player's build, what placement_clearance says a footprint may lose
     // is cleared rather than blocking it: ground items are picked up and
     // natural or idle own entities are mined into the actor inventory, then the

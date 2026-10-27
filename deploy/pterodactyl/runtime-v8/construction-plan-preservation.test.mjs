@@ -17,10 +17,10 @@ const SHAPES = {
 function witness(names, overrides = {}) {
   const id = overrides.validation_id ?? 7; const count = names.length
   return { ok: true, operation: 'execute_construction_plan', validation_id: id, plan_id: 'plan-bc', placement_count: count,
-    created_tick: 100, expires_tick: 3700, preservation_clears_count: 0,
+    created_tick: 100, expires_tick: 3700, preservation_clears_count: 0, execution_clearance: 'refused',
     construction_placements: names.map((entity_name, i) => ({ entity_name, x: 10 + 3 * i, y: 8, direction: 0, fluidbox_count: 0 })),
     preservation_nonfluid_output: { version: 1, actor_id: 10, surface_index: 1, force_index: 1, validation_id: id,
-      placement_count: count, entity_names: [...names], fluid_port_count: 0 },
+      placement_count: count, entity_names: [...names], execution_clearance: 'refused', fluid_port_count: 0 },
     ...overrides }
 }
 
@@ -73,6 +73,11 @@ const FAULTS = {
   fluid_bearing: { reply: names => { const w = witness(names); delete w.preservation_nonfluid_output; w.construction_placements[0].fluidbox_count = 2; return w } },
   fluid_port_count: { reply: names => { const w = witness(names); w.preservation_nonfluid_output.fluid_port_count = 1; return w } },
   clears: { reply: names => witness(names, { preservation_clears_count: 1 }) },
+  clearance_absent: { reply: names => { const w = witness(names); delete w.execution_clearance; delete w.preservation_nonfluid_output.execution_clearance; return w } },
+  clearance_top_level_absent: { reply: names => { const w = witness(names); delete w.execution_clearance; return w } },
+  clearance_output_absent: { reply: names => { const w = witness(names); delete w.preservation_nonfluid_output.execution_clearance; return w } },
+  clearance_allowed: { reply: names => witness(names, { execution_clearance: 'allowed' }) },
+  clearance_output_allowed: { reply: names => { const w = witness(names); w.preservation_nonfluid_output.execution_clearance = 'allowed'; return w } },
   validation_id: { reply: names => witness(names, { validation_id: 8 }) },
   output_validation_id: { reply: names => { const w = witness(names); w.preservation_nonfluid_output.validation_id = 8; return w } },
   placement_count: { reply: names => { const w = witness(names); w.placement_count = 9; return w } },
@@ -137,4 +142,9 @@ test('witness verifier binds the exact operation and the fresh preservation scop
   assert.equal(nonfluidConstructionWitness(witness(names, { operation: 'place_entity' }), operation, fresh), false)
   const renamed = witness(names); renamed.preservation_nonfluid_output.entity_names[1] = 'pipe'
   assert.equal(nonfluidConstructionWitness(renamed, operation, fresh), false, 'output and per-placement names must agree')
+  for (const mutate of [w => { delete w.execution_clearance }, w => { delete w.preservation_nonfluid_output.execution_clearance },
+    w => { w.execution_clearance = 'allowed' }, w => { w.preservation_nonfluid_output.execution_clearance = 'allowed' }, w => { w.execution_clearance = true }]) {
+    const w = witness(names); mutate(w)
+    assert.equal(nonfluidConstructionWitness(w, operation, fresh), false, 'a witness that does not state execution_clearance:refused is not accepted')
+  }
 })

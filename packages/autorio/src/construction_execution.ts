@@ -397,6 +397,9 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
     created_tick: plan.created_tick,
     expires_tick: plan.created_tick + VALIDATION_MAX_AGE_TICKS,
     preservation_clears_count: 0,
+    // True at execution, not only now: execute_validated_construction_plan queues every placement with refuse_clearance, so a
+    // blocker or ground item that appears later fails the placing task before any mutation.
+    execution_clearance: 'refused',
     construction_placements,
     ...(fluidbox_total === 0
       ? {
@@ -408,6 +411,7 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
             validation_id: id,
             placement_count: count,
             entity_names,
+            execution_clearance: 'refused',
             fluid_port_count: 0,
           },
         }
@@ -449,7 +453,8 @@ export function execute_validated_construction_plan(
 
   let queued = 0
   for (const placement of plan.placements) {
-    if (!basic.submit_placement(placement.entity_name, placement.x, placement.y, placement.direction)) {
+    // Always placement-only: the task carries refuse_clearance, so nothing is mined or picked up to make room.
+    if (!basic.submit_placement(placement.entity_name, placement.x, placement.y, placement.direction, undefined, undefined, undefined, { refuse_clearance: true })) {
       if (queued > 0) manager.cancel_all_tasks('construction_plan_admission_failed')
       storage.sgluna_validated_construction_plan = undefined
       return [false, `unable to queue placement ${queued + 1}`]

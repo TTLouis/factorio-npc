@@ -368,6 +368,7 @@ describe('construction plan preflight (fluid-preservation witness)', () => {
       created_tick: 100,
       expires_tick: 3700,
       preservation_clears_count: 0,
+      execution_clearance: 'refused',
       construction_placements: [
         { entity_name: 'stone-furnace', x: -2, y: 0, direction: 0, fluidbox_count: 0 },
         { entity_name: 'burner-mining-drill', x: 2, y: 0, direction: 4, fluidbox_count: 0 },
@@ -380,6 +381,7 @@ describe('construction plan preflight (fluid-preservation witness)', () => {
         validation_id: id,
         placement_count: 2,
         entity_names: ['stone-furnace', 'burner-mining-drill'],
+        execution_clearance: 'refused',
         fluid_port_count: 0,
       },
     })

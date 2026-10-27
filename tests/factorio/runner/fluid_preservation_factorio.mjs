@@ -197,13 +197,46 @@ try {
     const witnessOf = async (id, count) => JSON.parse(await rcon.command(constructionPlanWitnessCommand({ name: 'execute_construction_plan', args: { validation_id: id, placement_count: count } })))
     const quiet = facts => ({ entities: facts.world.entities, inventory: facts.world.inventory, protectedGeometry: facts.world.protectedGeometry, position: facts.world.position })
     const here = (await worldFacts()).world.position
-    let validated
-    for (const [dx, dy] of [[3.5, -6.5], [-1.5, -6.5], [3.5, 6.5], [-1.5, 6.5], [6.5, -3.5], [6.5, 3.5]]) {
-      const x = Math.floor(here.x + dx) + 0.5; const y = Math.floor(here.y + dy) + 0.5
-      const placements = [{ entity_name: 'lab', x, y, direction: 0 }, { entity_name: 'small-electric-pole', x: x + 3, y, direction: 0 }]
-      const result = await tool('validateConstructionPlan', { plan_id: 'native-lab-pole-beside-plant', placements })
-      if (result.ok === true) { validated = result; break }
+    const validateSite = async () => {
+      for (const [dx, dy] of [[3.5, -6.5], [-1.5, -6.5], [3.5, 6.5], [-1.5, 6.5], [6.5, -3.5], [6.5, 3.5]]) {
+        const x = Math.floor(here.x + dx) + 0.5; const y = Math.floor(here.y + dy) + 0.5
+        const placements = [{ entity_name: 'lab', x, y, direction: 0 }, { entity_name: 'small-electric-pole', x: x + 3, y, direction: 0 }]
+        const result = await tool('validateConstructionPlan', { plan_id: 'native-lab-pole-beside-plant', placements })
+        if (result.ok === true) return { validated: result, x, y }
+      }
+      return {}
     }
+    // R1-2: the witness promises a placement-only effect at EXECUTION time. A natural blocker that appears after the batch was
+    // queued (injected inside the same native callback, before the first placing tick) must be refused before any mutation:
+    // the tree stays, nothing is mined or built, the stock is unchanged, and the protected plant is untouched.
+    {
+      const site = await validateSite()
+      assert.ok(site.validated, 'a deterministic free lab+pole site within build reach of the plant')
+      const lateId = site.validated.validation_id; const lateCount = site.validated.placement_count
+      const lateWitness = await witnessOf(lateId, lateCount)
+      assert.equal(lateWitness.execution_clearance, 'refused', JSON.stringify(lateWitness))
+      assert.equal(lateWitness.preservation_nonfluid_output.execution_clearance, 'refused')
+      const surfaceIndex = lateWitness.preservation_nonfluid_output.surface_index
+      const lateBefore = await worldFacts()
+      rcon.queueFault = `local e=game.surfaces[${surfaceIndex}].create_entity{name="tree-01",position={${site.x},${site.y}},force="neutral"}; assert(e); storage.fluid_preservation_late_construction_tree=e;`
+      await assert.rejects(operation('execute_construction_plan', { validation_id: lateId, placement_count: lateCount }), /construction_plan_blocked_no_clear/)
+      assert.equal(rcon.queueFault, undefined, 'the late-blocker fault must have run inside the admission callback')
+      const lateAfter = await worldFacts()
+      const lateResult = lateAfter.status.basic_operation?.last_result
+      evidence.construction_late_blocker = { site: { x: site.x, y: site.y }, result: lateResult, before: lateBefore, after: lateAfter }
+      assert.equal(lateResult.code, 'construction_plan_blocked_no_clear', JSON.stringify(lateResult))
+      assert.equal(lateResult.completed, false)
+      assert.equal(lateResult.entities_cleared, undefined); assert.equal(lateResult.ground_items_picked_up, undefined)
+      assert.equal(lateAfter.status.queue_length, 0); assert.equal(lateAfter.status.task_state, 'idle')
+      const tree = await lua('local t=storage.fluid_preservation_late_construction_tree; rcon.print(helpers.table_to_json({valid=t.valid}))')
+      assert.equal(tree.valid, true, 'the late tree must still stand: nothing may be mined to make room')
+      const notTree = rows => rows.filter(row => row.name !== 'tree-01')
+      assert.deepEqual(notTree(lateAfter.world.entities), notTree(lateBefore.world.entities), 'no lab or pole created, nothing else changed')
+      assert.deepEqual(lateAfter.world.inventory, lateBefore.world.inventory, 'actor inventory unchanged (no wood gained, no lab consumed)')
+      assert.deepEqual(lateAfter.world.protectedGeometry, lateBefore.world.protectedGeometry, 'protected topology unchanged')
+      await lua('local t=storage.fluid_preservation_late_construction_tree; assert(t.valid); t.destroy(); rcon.print("{}")')
+    }
+    const { validated } = await validateSite()
     assert.ok(validated, 'a deterministic free lab+pole site within build reach of the plant')
     const id = validated.validation_id; const count = validated.placement_count
     assert.equal(count, 2)
@@ -212,6 +245,8 @@ try {
     evidence.construction_witness = witness
     assert.equal(witness.ok, true, JSON.stringify(witness))
     assert.equal(witness.preservation_clears_count, 0)
+    assert.equal(witness.execution_clearance, 'refused')
+    assert.equal(witness.preservation_nonfluid_output.execution_clearance, 'refused')
     assert.equal(witness.preservation_nonfluid_output.fluid_port_count, 0)
     assert.deepEqual(witness.preservation_nonfluid_output.entity_names, ['lab', 'small-electric-pole'])
     assert.equal(nonfluidConstructionWitness(witness, { name: 'execute_construction_plan', args: { validation_id: id, placement_count: count } },

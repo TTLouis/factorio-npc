@@ -290,13 +290,16 @@ export function constructionPlanWitnessCommand(operation) {
 }
 
 // True only when the native reply resolved THIS operation's exact stored local validation and proved all of: the same
-// validation_id and placement_count, same actor/surface/force as the fresh preservation proof, zero clears, and every
+// validation_id and placement_count, same actor/surface/force as the fresh preservation proof, zero clears, an execution mode
+// that refuses all clearance and ground-item pickup at run time (execution_clearance:'refused', fixed on every queued
+// placement by the native executor, so a later blocker fails before mutation instead of being cleared), and every
 // placement prototype nonfluid. Missing, ok:false (remote plan, expired, stale, mismatched), fluid-bearing or malformed
 // replies are all false, and the composite then stays refused.
 export function nonfluidConstructionWitness(checked, operation, fresh) {
   const id = operation?.args?.validation_id; const count = operation?.args?.placement_count
   const output = checked?.preservation_nonfluid_output; const placements = checked?.construction_placements
   return operation?.name === 'execute_construction_plan' && checked?.ok === true && checked.operation === 'execute_construction_plan'
+    && checked.execution_clearance === 'refused' && output?.execution_clearance === 'refused'
     && Number.isSafeInteger(id) && id >= 1 && Number.isSafeInteger(count) && count >= 1 && count <= 16
     && checked.validation_id === id && checked.placement_count === count && checked.preservation_clears_count === 0
     && output?.version === 1 && output.fluid_port_count === 0 && output.validation_id === id && output.placement_count === count

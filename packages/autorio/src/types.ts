@@ -174,6 +174,12 @@ export interface PlayerParametersPlaceEntity {
   /** The NPC's own entities this placement may mine: set only by place_candidate, from the candidate's recorded clears. */
   allowed_own_clears?: number[]
   /**
+   * Placement-only execution mode, fixed at queue time and carried in the queued task (so it survives save/load): a blocked
+   * footprint fails the task before any mutation. Nothing is mined, picked up or destroyed to make room. Set by the validated
+   * local construction executor, whose fluid-preservation witness promises exactly this.
+   */
+  refuse_clearance?: boolean
+  /**
    * Entities this placement has mined out of its footprint, as measured by the
    * inventory. Any entry means the task changed the world, like a ground-item
    * pickup.

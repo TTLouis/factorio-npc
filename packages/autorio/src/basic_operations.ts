@@ -22,7 +22,7 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
-  | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable'
+  | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable' | 'construction_plan_blocked_no_clear'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
@@ -340,7 +340,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue(task, actor)
   }
 
-  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[]) {
+  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[], options?: { refuse_clearance?: boolean }) {
     const has_x = x !== undefined
     const has_y = y !== undefined
     if (has_x !== has_y || (has_x && (!valid_coordinate(x!) || !valid_coordinate(y!)))) {
@@ -368,6 +368,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       placement_candidate,
       protected_unit_numbers: protected_unit_numbers !== undefined && protected_unit_numbers.length > 0 ? protected_unit_numbers : undefined,
       allowed_own_clears: allowed_own_clears !== undefined && allowed_own_clears.length > 0 ? allowed_own_clears : undefined,
+      refuse_clearance: options?.refuse_clearance === true ? true : undefined,
       entity_name,
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,
