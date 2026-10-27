@@ -535,14 +535,17 @@ try {
       const plan = drop => validate('native-l3-inserter-wall',
         [{ entity_name: 'wooden-chest', x: spot.x + 0.5, y: spot.y + 1.5, slot: 'chest' }, { entity_name: 'burner-inserter', x: spot.x + 0.5, y: spot.y + 0.5, direction: 8, slot: 'inserter' }],
         [{ kind: 'inserter', inserter: { slot: 'inserter' }, pickup: { slot: 'chest' }, drop: { unit_number: drop } }])
+      // An exact reference to an entity the harness did not build needs fresh nearby discovery first, as for the model.
+      const seeWall = await tool('getNearbyEntities', { name: 'stone-wall', radius: 16, limit: 8 })
       const before = await worldFacts()
       const wall = await plan(spot.wall)
       const swap = await lua(`local s=a.surface; for _,e in pairs(s.find_entities_filtered{name="stone-wall",position={${spot.x + 0.5},${spot.y - 0.5}}}) do if e.unit_number==${spot.wall} then e.destroy() end end
         local c=s.create_entity{name="wooden-chest",position={${spot.x + 0.5},${spot.y - 0.5}},force=a.force}; assert(c and c.unit_number); rcon.print(helpers.table_to_json({chest=c.unit_number}))`)
+      const seeChest = await tool('getNearbyEntities', { name: 'wooden-chest', radius: 16, limit: 16 })
       const chest = await plan(swap.chest)
       await lua(`for _,e in pairs(a.surface.find_entities_filtered{name="wooden-chest",position={${spot.x + 0.5},${spot.y - 0.5}}}) do if e.unit_number==${swap.chest} then e.destroy() end end; rcon.print("{}")`)
       const after = await worldFacts()
-      evidence.l3_inserter_wall = { spot, wall, chest }
+      evidence.l3_inserter_wall = { spot, see_wall: seeWall, wall, see_chest: seeChest, chest }
       assert.equal(wall.ok, false, JSON.stringify(wall))
       assert.equal(wall.planning_status, 'spatially_invalid', JSON.stringify(wall))
       assert.equal(wall.error?.code, 'CONNECTION_ENDPOINT_INCOMPATIBLE', JSON.stringify(wall))
