@@ -9,6 +9,7 @@ import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
 import { toolCommand, parseOperation, renderOperation, renderOperationPreflight, luaString } from '../pterodactyl/runtime-v8/structured-policy.mjs'
 import { preservationGeometry, preservedProofMatches } from '../pterodactyl/runtime-v8/contract-obligations.mjs'
 import { constructionPlanWitnessCommand, nonfluidConstructionWitness } from '../pterodactyl/runtime-v8/contract-obligation-runtime.mjs'
+import { BATCH_FOOTPRINT_OVERLAP_CODE, batchFootprintOverlap } from '../pterodactyl/runtime-v8/batch-footprint.mjs'
 import { buildPendingOperation, batchWatermark } from '../pterodactyl/runtime-v8/operation-reconciliation.mjs'
 import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
 import { NEXT_SLICE_OWNERSHIP_COMMAND, readNextSliceOwnership } from '../pterodactyl/runtime-v8/supervisor-adapter.mjs'
@@ -252,6 +253,35 @@ try {
       // Fixture teardown so the positive case below starts from the same stock and free site.
       await lua(`local t=storage.fluid_preservation_late_construction_tree; assert(t.valid); t.destroy(); local l=a.surface.find_entity("lab",{${site.x},${site.y}}); assert(l); l.destroy(); a.insert{name="lab",count=1}; rcon.print("{}")`)
     }
+    // Milestone 4 L1: a lab at (x, y) and a small pole requested at (x + 1.4, y). Asked about alone, the engine accepts each;
+    // execution builds the pole at its grid-snapped centre x + 1, inside the lab. The plan must be refused at validation,
+    // before anything is built. The engine is asked about the pair with a scratch lab that is destroyed again.
+    {
+      const site = await validateSite()
+      assert.ok(site.validated, 'a deterministic free lab+pole site within build reach of the plant')
+      const poleX = site.x + 1.4
+      const engine = await lua(`local s=a.surface; local lab={${site.x},${site.y}}
+        local alone_lab=s.can_place_entity{name="lab",position=lab,force=a.force}
+        local alone_pole=s.can_place_entity{name="small-electric-pole",position={${poleX},${site.y}},force=a.force}
+        local l=s.create_entity{name="lab",position=lab,force=a.force}; assert(l)
+        local joint_requested=s.can_place_entity{name="small-electric-pole",position={${poleX},${site.y}},force=a.force}
+        local joint_snapped=s.can_place_entity{name="small-electric-pole",position={${site.x + 1},${site.y}},force=a.force}
+        l.destroy()
+        rcon.print(helpers.table_to_json({alone_lab=alone_lab,alone_pole=alone_pole,joint_requested=joint_requested,joint_snapped=joint_snapped}))`)
+      const jointBefore = await worldFacts()
+      const refused = await tool('validateConstructionPlan', { plan_id: 'native-l1-snapped-overlap',
+        placements: [{ entity_name: 'lab', x: site.x, y: site.y, direction: 0 }, { entity_name: 'small-electric-pole', x: poleX, y: site.y, direction: 0 }] })
+      const jointAfter = await worldFacts()
+      evidence.l1_joint_layout = { site: { x: site.x, y: site.y }, engine, refused }
+      assert.equal(engine.alone_lab, true, JSON.stringify(engine)); assert.equal(engine.alone_pole, true, JSON.stringify(engine))
+      assert.equal(engine.joint_snapped, false, `the engine must refuse the pole at its built centre beside the lab: ${JSON.stringify(engine)}`)
+      assert.equal(refused.ok, false, JSON.stringify(refused))
+      assert.equal(refused.error.code, 'PLANNED_COLLISION', JSON.stringify(refused))
+      assert.deepEqual(refused.error.indices, [0, 1])
+      assert.deepEqual(refused.error.placements[1].planned_position, { x: site.x + 1, y: site.y }, JSON.stringify(refused))
+      assert.deepEqual(quiet(jointAfter), quiet(jointBefore), 'a refused plan builds, consumes and moves nothing')
+      assert.equal(jointAfter.status.queue_length, 0); assert.equal(jointAfter.status.task_state, 'idle')
+    }
     const { validated } = await validateSite()
     assert.ok(validated, 'a deterministic free lab+pole site within build reach of the plant')
     const id = validated.validation_id; const count = validated.placement_count
@@ -265,6 +295,22 @@ try {
     assert.equal(witness.preservation_nonfluid_output.execution_clearance, 'refused')
     assert.equal(witness.preservation_nonfluid_output.fluid_port_count, 0)
     assert.deepEqual(witness.preservation_nonfluid_output.entity_names, ['lab', 'small-electric-pole'])
+    // Milestone 4 L1: the witness carries each placement's native footprint, so a batch that adds a placement on the plan's
+    // tiles is refused before admission. The second placement is the engine's own preflight answer.
+    for (const row of witness.construction_placements) {
+      assert.ok(row.planned_footprint?.collision_layers?.length > 0, JSON.stringify(row))
+      assert.deepEqual(row.planned_footprint.position, row.position)
+    }
+    const [labRow] = witness.construction_placements
+    const onTheLab = { name: 'place_entity', args: { entity_name: 'small-electric-pole', x: labRow.position.x, y: labRow.position.y, direction: 0 } }
+    const onTheLabPreflight = JSON.parse(await rcon.command(renderOperationPreflight(onTheLab)))
+    assert.equal(onTheLabPreflight.ok, true, JSON.stringify(onTheLabPreflight))
+    const planOperation = { name: 'execute_construction_plan', args: { validation_id: id, placement_count: count } }
+    const batchRefusal = batchFootprintOverlap([planOperation, onTheLab], [witness, onTheLabPreflight])
+    evidence.l1_batch_footprint = { preflight: onTheLabPreflight, refusal: batchRefusal }
+    assert.equal(batchRefusal?.code, BATCH_FOOTPRINT_OVERLAP_CODE, JSON.stringify(evidence.l1_batch_footprint))
+    assert.equal(batchRefusal.batch_footprint.overlaps.construction_placement_index, 0)
+    assert.equal(batchRefusal.batch_footprint.overlaps.entity_name, 'lab')
     assert.equal(nonfluidConstructionWitness(witness, { name: 'execute_construction_plan', args: { validation_id: id, placement_count: count } },
       { actor_id: atomicActor.actor_id, preserved: before.world.protectedGeometry.map(row => ({ surface_index: row.surface_index, force_index: row.force_index })) }), true,
     JSON.stringify(witness))
