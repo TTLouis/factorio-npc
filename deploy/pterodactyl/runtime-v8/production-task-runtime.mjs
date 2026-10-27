@@ -160,12 +160,15 @@ async function admissionJson(agent, s, tool, args) {
 }
 // A burner machine the task keeps running can only be refuelled from the
 // intent's fuel allowance. Unreadable identities are left to the runtime's
-// exact identity checks instead of being guessed here.
-async function burnerBindings(agent, s, intent) {
+// exact identity checks instead of being guessed here. A repair needs the
+// complete set (`complete`): one unreadable bound machine leaves it undefined.
+async function burnerBindings(agent, s, intent, { complete = false } = {}) {
   const burners = []
   for (const unit_number of new Set([...intent.producers, ...intent.feeders].map(row => row.unit_number))) {
     const detail = await admissionJson(agent, s, 'getEntityStatus', { unit_number })
-    if (detail?.found === true && detail.entity?.unit_number === unit_number && detail.entity.energy_source === 'burner') burners.push({ unit_number, name: detail.entity.name })
+    const read = detail?.found === true && detail.entity?.unit_number === unit_number && typeof detail.entity.energy_source === 'string'
+    if (!read && complete) return undefined
+    if (read && detail.entity.energy_source === 'burner') burners.push({ unit_number, name: detail.entity.name })
   }
   return burners
 }
@@ -217,8 +220,8 @@ const PRODUCTION_REPAIRS = {
     return repaired && { intent: { ...intent, targets: repaired.targets }, rule: repaired.rule, note: repaired.note }
   },
   production_fuel_allowance_missing: async (agent, s, intent, defaults) => {
-    const burners = await burnerBindings(agent, s, intent)
-    const facts = burners.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
+    const burners = await burnerBindings(agent, s, intent, { complete: true })
+    const facts = burners?.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
     const inventory = facts && parseInventoryCounts(await admissionRead(agent, s, 'getInventoryItems', {}))
     if (!inventory) return undefined
     const held = Object.fromEntries(inventory)
@@ -238,8 +241,8 @@ const PRODUCTION_REPAIRS = {
   // Run BB lane A: an explicit allowance above held stock with no way to fetch more. The binding is added only for a
   // fuel the bound burners accept and the game names a natural source for; targets and cap stay the executor's.
   production_fuel_source_unbound: async (agent, s, intent) => {
-    const burners = await burnerBindings(agent, s, intent)
-    const facts = burners.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
+    const burners = await burnerBindings(agent, s, intent, { complete: true })
+    const facts = burners?.length ? await burnerFuelFacts(agent, s, intent, burners) : undefined
     const fuel = facts?.fuels.find(row => row.name === intent.fuel?.item_name)
     const bind = fuel && fuelSourceBinding(s, intent, fuel)
     return bind && { intent: { ...intent, resources: [...intent.resources, bind] }, rule: 'the native source of the allowance fuel',
@@ -333,8 +336,8 @@ export async function startProductionTask(agent, plan, { collectionOnly = false 
 // The fuel source for a residual unbound-fuel halt, from the same native burner and fuel facts admission uses.
 // Undefined when any fact is unreadable or the fuel has no source the task may bind.
 async function residualFuelSource(agent, s, task) {
-  const burners = await burnerBindings(agent, s, task.intent)
-  const facts = burners.length ? await burnerFuelFacts(agent, s, task.intent, burners) : undefined
+  const burners = await burnerBindings(agent, s, task.intent, { complete: true })
+  const facts = burners?.length ? await burnerFuelFacts(agent, s, task.intent, burners) : undefined
   const fuel = facts?.fuels.find(row => row.name === task.intent.fuel.item_name)
   return fuel && fuelSourceBinding(s, task.intent, fuel)
 }

@@ -761,3 +761,42 @@ test('a residual fuel source is bounded by the recovery limit, set once, and onl
   assert.equal(exhausted.reason, 'production_recovery_exhausted')
   assert.deepEqual(w.ops, [])
 })
+
+// A-R1-1: compatibility is proven only for the complete bound set. Machine `unit` reads as absent from its
+// `from`-th getEntityStatus read on (1 = every read, 2 = only the repair's reads after the controller's own).
+const hideMachine = (w, unit, from) => {
+  let reads = 0
+  const command = w.game.command
+  w.game.command = async text => {
+    if (text.includes('"get_entity_status"') && text.includes(`,${unit})`) && ++reads >= from) return JSON.stringify({ found: false })
+    return command(text)
+  }
+}
+
+test('A-R1-1: an unreadable bound producer or feeder blocks the admission fuel-source repair, leaving the executor correction', async () => {
+  for (const unit of [43, 44]) {
+    let script
+    const w = scripted({ iron: true, fuelFacts: true }, w => script ??= [productionReply(w, overCap(w, 40)), productionReply(w, overCap(w, 40))])
+    hideMachine(w, unit, 1)
+    await w.agent.runTurn().catch(error => assert.match(error.message, /script exhausted/)) // the executor keeps sending the unrepairable cap
+    assert.deepEqual(repaired(w), [], `unit ${unit}`)
+    assert.ok(w.events.some(row => row.event === 'recovery.classified' && row.data.reason_code === 'production_fuel_source_unbound'), `unit ${unit}`)
+    assert.equal(w.memory.productionTasks?.size ?? 0, 0)
+    assert.deepEqual(w.ops, [])
+  }
+})
+
+test('A-R1-1: an unreadable bound producer or feeder during residual recovery sends nothing, spends no recovery and traces unproven', async () => {
+  for (const unit of [43, 44]) {
+    const w = world({ iron: true, fuelFacts: true })
+    w.game.inventory.coal = 0
+    hideMachine(w, unit, 2)
+    const result = await fuelRecord(w, overCap(w, 3))()
+    assert.equal(result.reason, 'production_resource_unbound:coal', `unit ${unit}`)
+    assert.equal(w.events.find(row => row.event === 'production.recovery' && row.data.mechanism === 'fuel_source_binding')?.data.outcome, 'unproven')
+    const record = [...w.memory.productionTasks.values()][0]
+    assert.deepEqual([record.fuel_source, record.recoveries], [undefined, 0])
+    assert.equal(w.memory.pauseRecord(an.key).pause_class, 'guard')
+    assert.deepEqual(w.ops, [])
+  }
+})
