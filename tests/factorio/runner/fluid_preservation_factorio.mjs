@@ -624,7 +624,7 @@ try {
       assert.equal(first.placement_count, 3)
       const layoutId = first.validation_id
       const executeOp = validation => ({ name: 'execute_construction_plan', args: { validation_id: validation.validation_id, placement_count: validation.placement_count } })
-      const session = await deploymentStatus(rcon, { requireAllowed: true })
+      let session = await deploymentStatus(rcon, { requireAllowed: true })
       const ordinal = (await lua('rcon.print(helpers.table_to_json(remote.call("autorio_operation_admission","status")))')).high_water + 1
       const pending = buildPendingOperation({ requestId: 'native-l4', operationKey: `native-l4/${ordinal}`, attemptId: `native-l4/${ordinal}`, ordinal, protocolVersion: 2,
         operations: [executeOp(first)], goalId: 'goal_layout_native', planId: 'goal_layout_native_p1', stepId: 'native_l4_step', actor: session,
@@ -641,6 +641,8 @@ try {
         assert.equal(now.tick, start + ticks); assert.equal(now.paused, true)
       }
       let interruption
+      let bootToken
+      let early
       await lua('game.tick_paused=true; rcon.print("{}")')
       try {
         const paused = await clock()
@@ -658,7 +660,13 @@ try {
         assert.ok(seen, 'the first node of the layout was built within 24 ticks')
         assert.equal(seen.nodes.filter(node => node.state === 'placed').length, 1, JSON.stringify(seen))
         assert.equal(seen.state, 'running', JSON.stringify(seen))
-        await lua('remote.call("autorio_operations","cancel_all_tasks"); rcon.print("{}")')
+        // The shipped boot order, step by step: the guard's configure cancels the queue (the interrupted batch closes as a
+        // cancelled receipt of this generation) and bumps the deployment epoch; startup reconciliation follows below.
+        bootToken = `native-l4-boot-${Date.now()}-session-token`
+        await lua(`assert(remote.call("sgluna_deployment","configure","npc",${luaString(bootToken)})==${luaString(bootToken)}); rcon.print("{}")`)
+        // A remainder validated in the middle of the boot is not the boot's remainder.
+        early = await tool('resumeConstructionLayout', { layout_id: layoutId })
+        assert.equal(early.ok, true, JSON.stringify(early))
         interruption = { paused, seen }
       }
       finally {
@@ -670,6 +678,23 @@ try {
         if (status.task_state === 'idle' && status.queue_length === 0 && !status.active_batch) break
         assert.ok(Date.now() < idleDeadline, 'native queue did not drain after the cancellation'); await delay(50)
       }
+      // Then startup reconciliation, as supervisor.mjs reconcileNpcAfterLoad runs it with the boot's session: the batch generation
+      // advances and the actor is reconciled. (No server save/restart: the runner has no supported path for one.)
+      const priorSession = session
+      const generationBefore = (await tool('getTaskStatus', {})).batch_generation
+      const startup = JSON.parse(await rcon.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","reconcile_startup",${luaString(bootToken)})))`))
+      assert.equal(startup.ok, true, JSON.stringify(startup)); assert.equal(startup.reconciled, true, JSON.stringify(startup))
+      assert.equal(startup.batch_generation, generationBefore + 1)
+      await rcon.command('/silent-command remote.call("autorio_actor","reconcile_after_load")')
+      session = await deploymentStatus(rcon, { requireAllowed: true })
+      assert.equal(session.session, bootToken); assert.equal(session.epoch, priorSession.epoch + 1); assert.equal(session.actor_id, priorSession.actor_id)
+      const authorizes = await lua(`rcon.print(helpers.table_to_json({old=remote.call("sgluna_deployment","authorize",${priorSession.epoch}),current=remote.call("sgluna_deployment","authorize",${session.epoch})}))`)
+      assert.deepEqual(authorizes, { old: false, current: true })
+      const refuse = (validation, pattern) => assert.rejects(
+        executeAuthorizedBatch(rcon, session.epoch, [renderOperation(parseOperation(executeOp(validation)))]), error => pattern.test(String(error?.message ?? error)))
+      // The remainder validated before the boot ended predates the rebind and the restart: refused before admission.
+      await refuse(early, /LAYOUT_TOKEN_PREDATES_REBIND/)
+      assert.equal((await tool('getTaskStatus', {})).queue_length, 0)
 
       // L4 settle: the placed node is retained under its unit, the rest were never built, and the layout reads as paused.
       const settled = await layoutStatus(layoutId)
@@ -695,7 +720,13 @@ try {
       assert.equal(sealed.state, 'partial', JSON.stringify(sealed)); assert.equal(sealed.error, 'exact_construction_layout_partial', JSON.stringify(sealed))
       assert.equal(sealed.layout_id, layoutId); assert.deepEqual(sealed.placed_node_ids, [src.node_id])
       assert.equal(sealed.not_placed_node_ids.length, 2)
+      // Sealed by the guard's own cancellation: a cancelled receipt of the old generation, under the previous epoch, before
+      // startup reconciliation advanced the generation. The runtime settles it across the epoch change.
+      assert.equal(sealed.epoch, priorSession.epoch); assert.equal(sealed.generation, generationBefore)
+      assert.equal(sealed.layout_receipt.state, 'cancelled'); assert.equal(sealed.layout_receipt.batch_generation, generationBefore)
       const nativeStatus = await tool('getTaskStatus', {})
+      assert.equal(nativeStatus.batch_generation, generationBefore + 1)
+      assert.equal(pending.actor.epoch, priorSession.epoch); assert.notEqual(pending.actor.epoch, session.epoch)
       const verdict = reconcilePendingOperation(pending, { status: nativeStatus, actor: { actor_id: session.actor_id, epoch: session.epoch } })
       assert.equal(verdict.verdict, 'admitted_partial', JSON.stringify(verdict)); assert.equal(verdict.reason, 'exact_construction_layout_partial', JSON.stringify(verdict))
       assert.equal(verdict.effect, 'partial_known')
@@ -713,8 +744,6 @@ try {
       const resume2 = await tool('resumeConstructionLayout', { layout_id: layoutId })
       assert.equal(resume2.ok, true, JSON.stringify(resume2)); assert.ok(resume2.validation_id > resume1.validation_id)
       const quietBefore = quiet(await worldFacts())
-      const refuse = (validation, pattern) => assert.rejects(
-        executeAuthorizedBatch(rcon, session.epoch, [renderOperation(parseOperation(executeOp(validation)))]), error => pattern.test(String(error?.message ?? error)))
       await refuse(resume1, /superseded/)
       assert.deepEqual(await layoutStatus(layoutId), settled, 'a superseded token does not touch the layout')
       assert.deepEqual(quiet(await worldFacts()), quietBefore, 'a refused token builds and spends nothing')
