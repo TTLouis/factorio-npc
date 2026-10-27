@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
+import { stripTypeScriptTypes } from 'node:module'
 import test from 'node:test'
+import vm from 'node:vm'
 import { operationSignature, reconcilePendingOperation, reconciliationFacts, reconciliationGuidance, unresolvedNativeAdmissions } from './operation-reconciliation.mjs'
 import { conflictingOperation } from './operation-ledger.mjs'
+import { Session } from './supervisor.mjs'
 
 // Milestone 4 L4: a connected construction layout whose placement batch was cancelled after some of its nodes were built is
 // settled by the mod as exact_construction_layout_partial. The runtime re-proves that from the retained admission row and the
@@ -86,7 +90,6 @@ test('an empty node list is the empty object Factorio encodes, and nothing else'
 for (const [name, mutate] of [
   ['actor', (s, p, a) => { a.actor_id++ }],
   ['epoch', (s, p, a) => { a.epoch++ }],
-  ['generation', s => { s.batch_generation++ }],
   ['signature', (s, p) => { p.signature = 'wrong' }],
   ['attempt', (s, p) => { p.attempt_id = 'wrong' }],
   ['ordinal', (s, p) => { p.ordinal++ }],
@@ -232,7 +235,6 @@ test('a placed node that is gone after the restart is reported as missing, and t
 
 for (const [name, mutate] of [
   ['a changed actor', f => { f.actor.actor_id++ }],
-  ['a changed epoch', f => { f.actor.epoch++ }],
   ['a generation that is not older', f => { f.native.batch_generation = 1 }],
   ['an admission from a newer generation', f => { f.native.admission_journal[0].generation = 3; f.native.admission_journal[0].slots[0].batch_refs[0].batch_generation = 3 }],
   ['a receipt that is only uncertain for another reason', f => { f.native.receipt_journal[0].reason = 'other'; f.native.admission_journal[0].layout_receipt.reason = 'other' }],
@@ -250,3 +252,179 @@ for (const [name, mutate] of [
     assert.notEqual(result.verdict, 'admitted_partial')
   })
 }
+
+// A normal boot binds the NPC again before the pending operation is reconciled (supervisor.mjs bindNpc): the guard's configure
+// cancels the queue (closing the interrupted batch as `cancelled` at the generation it ran under) and bumps the deployment
+// epoch, then startup reconciliation advances the batch generation. The pending operation keeps the OLD epoch. The row below has
+// the shape the mod's boot-order test asserts (REBOUND_ROW in packages/autorio/src/construction_layout.test.ts).
+function rebound() {
+  const f = fixture()
+  f.native.batch_generation = 2
+  f.actor.epoch = f.pending.actor.epoch + 1
+  return f
+}
+
+test('across the boot rebind (newer epoch, newer generation) the sealed cancelled layout batch settles as terminal partial, from the journal or the sealed copy', () => {
+  const f = rebound()
+  assert.equal(f.native.admission_journal[0].epoch, f.pending.actor.epoch)
+  const result = reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor })
+  assert.equal(result.verdict, 'admitted_partial')
+  assert.equal(result.effect, 'partial_known')
+  assert.equal(result.reason, 'exact_construction_layout_partial')
+  assert.equal(result.receipt_source, 'journal')
+  assert.deepEqual(result.placed_node_ids, [`layout-${LAYOUT_ID}:n0`])
+  assert.deepEqual(unresolvedNativeAdmissions(f.native, [f.pending], f.actor), [])
+  f.native.receipt_journal = []
+  assert.equal(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).receipt_source, 'sealed_row')
+  // The partial is not replay authority: the ledger fences the same batch for the same step.
+  assert.equal(conflictingOperation({ operation_ledger: { closed: [{ ...f.pending, ...result }] } }, {
+    planId: f.pending.plan_id, stepId: f.pending.step_id, operations: [{ name: 'execute_construction_plan', args: { validation_id: 41, placement_count: 3 } }],
+  }).refuse, true)
+})
+
+test('a cancelled layout batch of an older generation settles with the same epoch as well', () => {
+  const f = fixture()
+  f.native.batch_generation = 2
+  const result = reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor })
+  assert.equal(result.reason, 'exact_construction_layout_partial')
+  assert.equal(result.verdict, 'admitted_partial')
+})
+
+for (const [name, mutate] of [
+  ['another actor at the same newer epoch', f => { f.actor.actor_id++ }],
+  ['a current epoch older than the row', f => { f.actor.epoch = f.pending.actor.epoch - 1 }],
+  ['the same generation', f => { f.native.batch_generation = 1 }],
+  ['a generation older than the row', f => { f.native.admission_journal[0].generation = 3; f.native.admission_journal[0].slots[0].batch_refs[0].batch_generation = 3 }],
+  ['a pending epoch that is not the row\'s', f => { f.pending.actor.epoch = 0 }],
+  ['a row of another actor', f => { f.native.admission_journal[0].actor_id++ }],
+  ['an unsealed row', f => { Object.assign(f.native.admission_journal[0], { state: 'uncertain', error: 'batch_reconciliation_required', ok: true }) }],
+  ['a busy queue', f => { f.native.queue_length = 1; f.native.queue_empty = false }],
+  ['a busy task state', f => { f.native.task_state = 'placing' }],
+  ['an open batch', f => { f.native.active_batch = { batch_id: 3, batch_generation: 2, batch_ref: 'batch-g2-3' } }],
+  ['a live actor status of another actor', f => { f.native.actor.actor_id++ }],
+  ['an invalid live actor', f => { f.native.actor.valid = false }],
+  ['a live actor that is not the standalone NPC', f => { f.native.actor.kind = 'connected_player' }],
+  ['a missing live actor status', f => { delete f.native.actor }],
+  ['a changed node list', f => { f.native.admission_journal[0].placed_node_ids = [`layout-${LAYOUT_ID}:n0`, `layout-${LAYOUT_ID}:n1`] }],
+  ['a node of another layout', f => { f.native.admission_journal[0].not_placed_node_ids = [`layout-7:n2`, `layout-${LAYOUT_ID}:n1`] }],
+  ['a changed journal receipt', f => { f.native.receipt_journal[0].tick += 1 }],
+  ['a changed sealed receipt copy', f => { f.native.admission_journal[0].layout_receipt.task_count = 2 }],
+  ['a journal receipt that is not a cancellation', f => { f.native.receipt_journal[0].state = 'completed'; f.native.admission_journal[0].layout_receipt.state = 'completed' }],
+  ['a bare reason string', f => { for (const key of ['layout_receipt', 'layout_id', 'placed_node_ids', 'not_placed_node_ids']) delete f.native.admission_journal[0][key]; f.native.receipt_journal = [] }],
+]) {
+  test(`across the boot rebind, ${name} stays stale or unknown`, () => {
+    const f = rebound()
+    mutate(f)
+    const result = reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor })
+    assert.notEqual(result.reason, 'exact_construction_layout_partial')
+    assert.notEqual(result.verdict, 'admitted_partial')
+  })
+}
+
+test('any other operation of the previous epoch is still stale after the rebind', () => {
+  const f = rebound()
+  f.native.admission_journal[0].slots[0].operation = 'place_entity'
+  f.pending.operations[0].name = 'place_entity'
+  assert.equal(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).verdict, 'stale_actor')
+})
+
+// The real sequence: the guard (guard.ts, run as shipped) configures and bumps its epoch, supervisor.mjs bindNpc runs
+// configureNpcSession and reconcileNpcAfterLoad over the fake game connection, and the pending operation is reconciled with the
+// OLD lineage epoch against the NEW current epoch. The game side of the batch (cancel, seal, generation) is the fake native
+// state; the mod's own sealing is covered by the mod's boot-order test.
+async function loadGuard() {
+  const source = await fsp.readFile(new URL('../staging/guard.ts', import.meta.url), 'utf8')
+  const storage = {}
+  let actorStatus = { mode: 'npc', connected_players: 0, surface_index: 1, force_index: 1,
+    actor: { actor_id: 13, kind: 'standalone_character', valid: true, has_character: true, name: 'Kite-1', npc_id: 'npc-1' } }
+  const native = { onCancel: () => {}, idle: { task_state: 'idle', queue_empty: true, queue_length: 0 } }
+  const interfaces = { autorio_actor: {}, autorio_operations: {}, autorio_tools: {} }
+  const calls = {}
+  const remote = {
+    interfaces,
+    add_interface(name, handlers) { interfaces[name] = handlers; calls[name] = handlers },
+    call(name, method, ...args) {
+      if (name === 'autorio_actor' && method === 'status') return actorStatus
+      if (name === 'autorio_actor' && method === 'set_mode') { actorStatus = { ...actorStatus, mode: args[0] }; return [true, actorStatus.actor] }
+      if (name === 'autorio_operations' && method === 'status') return native.idle
+      if (name === 'autorio_operations' && method === 'cancel_all_tasks') { native.onCancel(); return true }
+      throw new Error(`unexpected remote call: ${name}.${method}`)
+    },
+  }
+  const context = { storage, remote, log: () => {}, helpers: { table_to_json: value => JSON.stringify(value) } }
+  vm.createContext(context)
+  vm.runInContext(stripTypeScriptTypes(source, { mode: 'strip' }).replaceAll('export function', 'function').replaceAll('export class', 'class'), context)
+  return { calls, native, storage }
+}
+
+test('the real boot order (guard configure, then startup reconciliation) leaves a pending layout batch settled across the epoch change', async () => {
+  const guard = await loadGuard()
+  assert.equal(guard.calls.sgluna_deployment.configure('npc', 'previous-boot-session-token'), 'previous-boot-session-token')
+  const before = guard.calls.sgluna_deployment.status()
+  assert.equal(before.epoch, 1)
+  const f = fixture()
+  // Before the boot: the layout batch is running and its admission is not yet sealed.
+  const sealed = structuredClone(f.native.admission_journal[0])
+  const cancelled = structuredClone(f.native.receipt_journal[0])
+  const state = f.native
+  const row = state.admission_journal[0]
+  for (const key of ['layout_receipt', 'layout_id', 'placed_node_ids', 'not_placed_node_ids']) delete row[key]
+  Object.assign(row, { state: 'admitted', ok: true, error: undefined })
+  state.receipt_journal = []
+  Object.assign(state, { task_state: 'placing', queue_empty: false, queue_length: 2, active_batch: { batch_id: 101, batch_generation: 1, batch_ref: 'batch-g1-101' } })
+  assert.equal(f.pending.actor.epoch, before.epoch, 'the pending operation ran under the previous boot\'s epoch')
+  assert.notEqual(reconcilePendingOperation(f.pending, { status: state, actor: { actor_id: 13, epoch: before.epoch } }).verdict, 'admitted_partial')
+
+  // The guard's cancel_tasks() closes the interrupted batch as a cancelled receipt of generation 1 and the mod seals the row.
+  guard.native.onCancel = () => {
+    Object.assign(state, { task_state: 'idle', queue_empty: true, queue_length: 0 })
+    delete state.active_batch
+    state.receipt_journal = [cancelled]
+    Object.assign(row, sealed)
+  }
+  const token = 'next-boot-session-token-0001'
+  const commands = []
+  const session = Object.create(Session.prototype)
+  Object.assign(session, {
+    session: token,
+    rcon: { command: async text => {
+      commands.push(text)
+      if (text.includes('"configure","npc"')) {
+        const marker = text.match(/SGLUNA_CONFIG_[a-f0-9]{24}:/)?.[0]
+        assert.ok(marker)
+        return marker + JSON.stringify({ ok: true, result: guard.calls.sgluna_deployment.configure('npc', token) })
+      }
+      if (text.includes('"sgluna_deployment","status"')) return JSON.stringify(guard.calls.sgluna_deployment.status())
+      if (text.includes('"reconcile_startup"')) { state.batch_generation += 1; return JSON.stringify({ ok: true, changed: true }) }
+      if (text.includes('"reconcile_after_load"')) return ''
+      throw new Error(`Unexpected command: ${text}`)
+    } },
+    updateNpcIdentity: () => {},
+    log: () => {},
+  })
+  const bound = await session.bindNpc()
+  assert.equal(bound.epoch, 2)
+  assert.equal(state.batch_generation, 2)
+  assert.deepEqual(commands.map(text => ['"configure","npc"', '"sgluna_deployment","status"', '"reconcile_startup"', '"reconcile_after_load"'].find(part => text.includes(part))),
+    ['"configure","npc"', '"sgluna_deployment","status"', '"reconcile_startup"', '"reconcile_after_load"'])
+  // The old epoch no longer authorizes anything; the pending operation is the old one.
+  assert.equal(guard.calls.sgluna_deployment.authorize(before.epoch), false)
+  assert.equal(guard.calls.sgluna_deployment.authorize(bound.epoch), true)
+  const current = { actor_id: bound.actor_id, epoch: bound.epoch }
+  const result = reconcilePendingOperation(f.pending, { status: state, actor: current })
+  assert.equal(result.verdict, 'admitted_partial')
+  assert.equal(result.effect, 'partial_known')
+  assert.equal(result.reason, 'exact_construction_layout_partial')
+  assert.deepEqual(result.placed_node_ids, [`layout-${LAYOUT_ID}:n0`])
+  assert.deepEqual(result.not_placed_node_ids, [`layout-${LAYOUT_ID}:n2`, `layout-${LAYOUT_ID}:n1`])
+  // The same sequence for a different actor is not settled.
+  assert.equal(reconcilePendingOperation(f.pending, { status: state, actor: { actor_id: current.actor_id + 1, epoch: current.epoch } }).verdict, 'stale_actor')
+})
+
+test('the restart-retired shape (a boot path that skips configure) settles across a newer epoch only under the same rebind fences', () => {
+  const f = restarted()
+  f.actor.epoch = f.pending.actor.epoch + 1
+  assert.equal(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).reason, 'exact_construction_layout_partial')
+  f.actor.epoch = f.pending.actor.epoch - 1
+  assert.equal(reconcilePendingOperation(f.pending, { status: f.native, actor: f.actor }).verdict, 'stale_actor')
+})
