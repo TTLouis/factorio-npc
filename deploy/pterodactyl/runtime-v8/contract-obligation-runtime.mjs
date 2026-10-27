@@ -190,7 +190,19 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   const effective = effectivePreservationProof(plan, step, { plans: agent.memory.planningState(agent.activePlanKey()).plans })
   if (!effective || !preservedProofMatches(effective, fresh)) fail('preservation_baseline_changed')
   const protectedEntities = fluidPreservationEntities(planning, plan, step, effective)
-  if (fluidPreservationMutationUnsafe(effective, operations, protectedEntities)) fail('preservation_protected_mutation_refused')
+  // A validated local construction batch is a composite. It is never admitted by name: the native read resolves the exact
+  // stored validation record and must prove every placement nonfluid with no clears. Any unreadable or unproven witness
+  // leaves the composite unsafe below, as before.
+  const composites = new Map(); const nonfluidComposites = new Set()
+  for (const operation of operations ?? []) {
+    if (operation.name !== 'execute_construction_plan') continue
+    const command = constructionPlanWitnessCommand(operation)
+    let checked
+    if (command) { try { checked = JSON.parse(String(await agent.rcon.command(command))) } catch { checked = undefined } await fence() }
+    composites.set(operation, checked)
+    if (nonfluidConstructionWitness(checked, operation, fresh)) nonfluidComposites.add(operation)
+  }
+  if (fluidPreservationMutationUnsafe(effective, operations, protectedEntities, { nonfluidComposites })) fail('preservation_protected_mutation_refused')
   const placements = operations?.filter(row => ['place_candidate', 'place_entity', 'execute_construction_plan'].includes(row.name)) ?? []
   if (!placements.length) return undefined
   // Nonfluid placement cannot add a fluid edge. This is fresh native prototype
@@ -199,6 +211,12 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   const eligibility = []
   for (const operation of placements) {
     let checked
+    if (operation.name === 'execute_construction_plan') {
+      // Already read and verified above against this exact operation; no second, differently-timed read.
+      eligibility.push(composites.get(operation))
+      if (!nonfluidComposites.has(operation)) allNonfluid = false
+      continue
+    }
     try { checked = JSON.parse(String(await agent.rcon.command(renderOperationPreflight({ name: operation.name, args: operation.args })))) }
     catch { await fence(); fail('preservation_candidate_read_unavailable') }
     await fence()
@@ -262,15 +280,48 @@ export async function prepareFluidPreservationAdmission(agent, { operations, pen
   return envelope
 }
 
+// Harness-only native read of the stored validation record behind one execute_construction_plan operation. The general
+// operation metadata deliberately has no preflight for it; only this preservation seam asks.
+export function constructionPlanWitnessCommand(operation) {
+  const id = operation?.args?.validation_id; const count = operation?.args?.placement_count
+  if (operation?.name !== 'execute_construction_plan' || !Number.isSafeInteger(id) || id < 1
+    || !Number.isSafeInteger(count) || count < 1 || count > 16) return undefined
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation","execute_construction_plan",{validation_id=${id},placement_count=${count}})))`
+}
+
+// True only when the native reply resolved THIS operation's exact stored local validation and proved all of: the same
+// validation_id and placement_count, same actor/surface/force as the fresh preservation proof, zero clears, an execution mode
+// that refuses all clearance and ground-item pickup at run time (execution_clearance:'refused', fixed on every queued
+// placement by the native executor, so a later blocker fails before mutation instead of being cleared), and every
+// placement prototype nonfluid. Missing, ok:false (remote plan, expired, stale, mismatched), fluid-bearing or malformed
+// replies are all false, and the composite then stays refused.
+export function nonfluidConstructionWitness(checked, operation, fresh) {
+  const id = operation?.args?.validation_id; const count = operation?.args?.placement_count
+  const output = checked?.preservation_nonfluid_output; const placements = checked?.construction_placements
+  return operation?.name === 'execute_construction_plan' && checked?.ok === true && checked.operation === 'execute_construction_plan'
+    && checked.execution_clearance === 'refused' && output?.execution_clearance === 'refused'
+    && Number.isSafeInteger(id) && id >= 1 && Number.isSafeInteger(count) && count >= 1 && count <= 16
+    && checked.validation_id === id && checked.placement_count === count && checked.preservation_clears_count === 0
+    && output?.version === 1 && output.fluid_port_count === 0 && output.validation_id === id && output.placement_count === count
+    && output.actor_id === fresh?.actor_id && Number.isSafeInteger(output.surface_index) && Number.isSafeInteger(output.force_index)
+    && Array.isArray(fresh?.preserved) && fresh.preserved.every(row => row.surface_index === output.surface_index && row.force_index === output.force_index)
+    && Array.isArray(placements) && placements.length === count && Array.isArray(output.entity_names) && output.entity_names.length === count
+    && placements.every((row, index) => typeof row?.entity_name === 'string' && row.entity_name === output.entity_names[index] && row.fluidbox_count === 0)
+}
+
 // The frozen edge endpoint is protected even when it is not separately named
 // in preserve. Bulk cut/clear/opaque composites carry no complete affected-ID
 // witness in this protocol, so they cannot prove preservation before transport.
-export function fluidPreservationMutationUnsafe(proof, operations, extraEntities = []) {
+// The one exception is a validated LOCAL construction batch: a caller that holds
+// the native witness for that exact operation (nonfluidConstructionWitness) passes
+// the operation object in `nonfluidComposites`. Without it the name stays unsafe.
+export function fluidPreservationMutationUnsafe(proof, operations, extraEntities = [], { nonfluidComposites } = {}) {
   const entities = (proof?.preserved ?? []).flatMap(row => [row.entity,
     ...(row.fluid?.storages ?? []).flatMap(storage => storage.ports.flatMap(port => port.target ? [port.target.entity] : []))])
   entities.push(...extraEntities)
   return (operations ?? []).some(operation =>
-    ['clear_construction_area', 'reserve_construction_area', 'prepare_pump_site', 'execute_construction_plan'].includes(operation.name)
+    ['clear_construction_area', 'reserve_construction_area', 'prepare_pump_site'].includes(operation.name)
+    || operation.name === 'execute_construction_plan' && !nonfluidComposites?.has(operation)
     || ['rotate_entity', 'mine_entity_exact'].includes(operation.name) && entities.some(entity => entity.unit_number === operation.args?.unit_number)
     || operation.name === 'mine_entity' && entities.some(entity => entity.name === operation.args?.entity_name))
 }

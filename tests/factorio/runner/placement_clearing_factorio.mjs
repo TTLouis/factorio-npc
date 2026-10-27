@@ -16,6 +16,11 @@
 //   FULL        when the inventory cannot take the yield the refusal is clearing_inventory_full,
 //               before any mutation, with the tree still standing
 //   ANCHOR      an anchor entity is accepted by the production tool and ranks candidates nearest it
+//   REGION      a hard circle region (run BC C) is applied before ranking and truncation, reports its status
+//               dimensions and incomplete search, and a candidate placed through place_candidate stands inside it
+//   MAP         with zero humans the answer carries map_context from the NPC's own knowledge (same surface and
+//               tick, visible window, coverage); a search in chunks the NPC does not see now returns no candidate,
+//               says search_incomplete (area_not_fully_visible), and charts or generates nothing
 //
 // Every operation goes through the production renderer and the protocol-2 authorized batch
 // wrapper. No provider, no inference.
@@ -258,6 +263,106 @@ async function main() {
   assert.equal(placed.result?.code, 'completed', JSON.stringify(placed.result))
   evidence.anchor = { ordering: anchored.ordering, distances, placed: placed.result }
   console.log('PASS: ANCHOR - candidates ranked nearest the anchor entity, and an anchored candidate places through place_candidate')
+
+  // ---- REGION ---------------------------------------------------------------
+  // Run BC C: a hard committed area. The request's own centre sits outside it, so the old nearest-the-centre
+  // ranking fills the whole answer with sites outside the area; the region must be applied before ranking and
+  // truncation. The mod's remote interface is called directly: this lane proves the mod half on the real map.
+  const regionCandidates = args => lua(`rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",helpers.json_to_table('${JSON.stringify(args)}'))))`)
+  const regionCenter = { x: fixture.ox - 9, y: fixture.oy + 9 }
+  const region = { shape: 'circle', center: regionCenter, radius: 3 }
+  const outsideCenter = { x: fixture.ox - 4.5, y: fixture.oy + 9 }
+  const insideRegion = position => Math.hypot(position.x - regionCenter.x, position.y - regionCenter.y) <= region.radius + 1e-6
+  await lua('inv.clear(); inv.insert{name="stone-furnace",count=3}; rcon.print("{}")')
+
+  const unconstrained = await regionCandidates({ entity_name: 'stone-furnace', center: outsideCenter, radius: 8, limit: 5 })
+  assert.equal(unconstrained.ok, true, JSON.stringify(unconstrained).slice(0, 600))
+  assert.ok(unconstrained.candidates.length > 0, 'the unconstrained read finds sites')
+  assert.ok(!insideRegion(unconstrained.candidates[0].position), `without a region the nearest-the-centre ranking leads outside the area: ${JSON.stringify(unconstrained.candidates.map(candidate => candidate.position))}`)
+  assert.equal(unconstrained.region, undefined)
+
+  const constrained = await regionCandidates({ entity_name: 'stone-furnace', center: outsideCenter, radius: 2, limit: 5, region })
+  assert.equal(constrained.ok, true, JSON.stringify(constrained).slice(0, 600))
+  assert.deepEqual(constrained.region, region, 'the normalized region is echoed')
+  assert.equal(constrained.region_semantics, 'entity_center')
+  assert.ok(constrained.legal_candidate_count >= 1 && constrained.candidates.length >= 1, `a legal site stands inside the area: ${JSON.stringify(constrained).slice(0, 800)}`)
+  for (const candidate of constrained.candidates) {
+    assert.equal(candidate.in_region, true)
+    assert.ok(insideRegion(candidate.position), `every candidate centre lies in the region: ${JSON.stringify(candidate.position)}`)
+  }
+  assert.equal(constrained.spatial_status, 'candidates_found')
+  const completeness = constrained.search_completeness
+  assert.equal(completeness.complete, true, JSON.stringify(completeness))
+  assert.equal(completeness.search_shape, 'square_rings')
+  assert.equal(completeness.legal_candidate_count, constrained.legal_candidate_count)
+  assert.equal(completeness.returned_count, constrained.candidates.length)
+  assert.ok(completeness.region_rejected_count > 0, 'positions outside the area were counted, not ranked')
+  assert.ok(completeness.search_radius >= 4 && completeness.search_radius <= 24, 'the search radius covers the region, not the requested radius')
+  assert.deepEqual(constrained.material_status, { status: 'held', item_name: 'stone-furnace', held_count: 3, required_count: 1 })
+  assert.equal(constrained.execution_eligibility, 'eligible')
+
+  // Without the placement item the sites stay listed but are marked as not executable.
+  await lua('inv.clear(); rcon.print("{}")')
+  const short = await regionCandidates({ entity_name: 'stone-furnace', center: regionCenter, limit: 2, region })
+  assert.ok(short.candidates.length > 0)
+  assert.equal(short.material_status.status, 'stock_shortfall')
+  assert.equal(short.execution_eligibility, 'stock_shortfall')
+  await lua('inv.insert{name="stone-furnace",count=3}; rcon.print("{}")')
+
+  // A region the ring search cannot cover says so instead of looking exhaustive.
+  const oversize = await regionCandidates({ entity_name: 'stone-furnace', center: regionCenter, limit: 3, region: { shape: 'circle', center: regionCenter, radius: 40 } })
+  assert.equal(oversize.ok, true, JSON.stringify(oversize).slice(0, 600))
+  assert.equal(oversize.search_completeness.complete, false)
+  assert.equal(oversize.search_completeness.reason, 'region_exceeds_search_limit')
+  assert.equal(oversize.search_completeness.search_radius, 24)
+  assert.notEqual(oversize.spatial_status, 'none_in_verified_scope')
+  for (const candidate of oversize.candidates) assert.ok(Math.hypot(candidate.position.x - regionCenter.x, candidate.position.y - regionCenter.y) <= 40 + 1e-6)
+
+  // A malformed region is refused before any scan.
+  const malformed = await regionCandidates({ entity_name: 'stone-furnace', region: { shape: 'circle', center: regionCenter, radius: 0 } })
+  assert.equal(malformed.ok, false)
+  assert.equal(malformed.code, 'invalid_region')
+
+  // Execution: place the in-region candidate through the shipped place_candidate entry and read the native entity.
+  const regionPick = constrained.candidates[0]
+  const regionPlaced = await admitted('region-candidate', { name: 'place_candidate', args: { candidate_set_id: constrained.candidate_set_id, candidate_id: regionPick.id } })
+  assert.equal(regionPlaced.result?.code, 'completed', JSON.stringify(regionPlaced.result))
+  const nativeEntity = await lua(`local f=s.find_entities_filtered{name="stone-furnace",area=${box(furnaceBox(regionPick.position))}}; `
+    + 'local out={}; for _,e in pairs(f) do out[#out+1]={x=e.position.x,y=e.position.y} end; rcon.print(helpers.table_to_json({placed=out}))')
+  const standingAtPick = nativeEntity.placed.filter(entry => entry.x === regionPick.position.x && entry.y === regionPick.position.y)
+  assert.equal(standingAtPick.length, 1, `the furnace stands at the candidate position: ${JSON.stringify(nativeEntity)}`)
+  assert.ok(insideRegion(standingAtPick[0]), 'the native placed entity centre lies inside the region')
+  evidence.region = { region, unconstrained_first: unconstrained.candidates[0].position, constrained: constrained.candidates.map(candidate => candidate.position),
+    search_completeness: completeness, oversize: oversize.search_completeness, placed: standingAtPick[0], result: regionPlaced.result }
+  console.log('PASS: REGION - candidates all lie inside the circle although the unconstrained ranking leads outside; stock and oversize status reported; the in-region candidate places natively inside it')
+
+  // ---- MAP ------------------------------------------------------------------
+  // The constrained answer above was read in the actor's own visible window: its map context says so.
+  const mapContext = constrained.map_context
+  assert.equal(mapContext?.source, 'npc_map_knowledge', JSON.stringify(mapContext))
+  assert.equal(mapContext.candidate_authority, 'currently_visible_chunks_only')
+  assert.equal(mapContext.observed_tick, constrained.generated_tick, 'the map facts carry the candidate set tick')
+  assert.equal(typeof mapContext.surface_index, 'number')
+  assert.equal(mapContext.visible_window?.chunk_radius, 2)
+  assert.equal(mapContext.evaluated_area_coverage.visible_chunks, mapContext.evaluated_area_coverage.total_chunks, JSON.stringify(mapContext))
+  assert.equal(constrained.search_completeness.not_visible_rejected_count, 0)
+  // Far outside the 5x5 visible window: a chunk the NPC has not seen. Nothing there is a candidate, the answer is incomplete
+  // rather than empty-and-complete, and the read leaves the chart and generated chunks as they were.
+  const far = { x: fixture.ox + 32 * 12 + 4, y: fixture.oy + 4 }
+  const mapBefore = await lua(`local c={x=math.floor(${far.x}/32),y=math.floor(${far.y}/32)}; rcon.print(helpers.table_to_json({charted=a.force.is_chunk_charted(s,c),generated=s.is_chunk_generated(c)}))`)
+  const unseen = await regionCandidates({ entity_name: 'stone-furnace', center: far, radius: 3, limit: 3 })
+  assert.equal(unseen.ok, true, JSON.stringify(unseen))
+  // Factorio serializes an empty Lua table as {}, so the empty list arrives as either shape.
+  const unseenText = JSON.stringify(unseen)
+  assert.equal(Object.keys(unseen.candidates ?? {}).length, 0, `no candidate in a chunk the NPC does not see now: ${unseenText}`)
+  assert.equal(unseen.spatial_status, 'search_incomplete', unseenText)
+  assert.equal(unseen.search_completeness.reason, 'area_not_fully_visible', unseenText)
+  assert.ok(unseen.search_completeness.not_visible_rejected_count > 0, unseenText)
+  assert.equal(unseen.map_context.evaluated_area_coverage.visible_chunks, 0, JSON.stringify(unseen.map_context))
+  const mapAfter = await lua(`local c={x=math.floor(${far.x}/32),y=math.floor(${far.y}/32)}; rcon.print(helpers.table_to_json({charted=a.force.is_chunk_charted(s,c),generated=s.is_chunk_generated(c)}))`)
+  assert.deepEqual(mapAfter, mapBefore, 'the candidate read charted and generated nothing')
+  evidence.map = { constrained_map_context: mapContext, unseen: { center: far, spatial_status: unseen.spatial_status, search_completeness: unseen.search_completeness, map_context: unseen.map_context }, chunk_before: mapBefore, chunk_after: mapAfter }
+  console.log('PASS: MAP - zero-human map context matches the candidate set; an unseen chunk yields no candidate, an incomplete status, and no chart or generation')
 
   const closing = await lua('rcon.print(helpers.table_to_json({humans=#game.connected_players,speed=game.speed}))')
   assert.equal(closing.humans, 0)

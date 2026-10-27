@@ -316,6 +316,8 @@
       "pterodactyl_layer": "staging-base"
     },
     "execute_construction_plan": {
+      "native_preservation_preflight_fields": ["preservation_nonfluid_output", "preservation_clears_count", "construction_placements"],
+      "native_preservation_witness": { "version": 1, "harness_only_preflight": ["autorio_preflight", "operation", "execute_construction_plan"], "binds": ["validation_id", "placement_count", "actor_id", "surface_index", "force_index"], "local_plans_only": true, "read_only": true, "refusal_codes": ["construction_plan_unavailable", "construction_plan_count_mismatch", "construction_plan_remote_unsupported", "construction_plan_scope_mismatch", "construction_plan_expired", "construction_plan_stale"] },
       "args": [
         "validation_id",
         "placement_count"
@@ -683,6 +685,17 @@
       "surface_policy": "shared"
     },
     "getPlacementCandidates": {
+      "args": [
+        "entity_name",
+        "center",
+        "radius",
+        "target_resource",
+        "covers_position",
+        "connects_to",
+        "anchor",
+        "limit",
+        "region"
+      ],
       "remote": [
         "autorio_tools",
         "get_placement_candidates"
@@ -999,6 +1012,31 @@
       "remote": [
         "autorio_planning",
         "validate_construction_plan"
+      ],
+      "category": "construction",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only"
+    },
+    "resumeConstructionLayout": {
+      "args": [
+        "layout_id"
+      ],
+      "remote": [
+        "autorio_planning",
+        "resume_construction_layout"
+      ],
+      "category": "construction",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only"
+    },
+    "proposeConstructionLayout": {
+      "remote": [
+        "autorio_planning",
+        "propose_construction_layout"
       ],
       "category": "construction",
       "surfaces": [

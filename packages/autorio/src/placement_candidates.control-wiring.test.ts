@@ -62,7 +62,7 @@ describe('place_candidate through the shipped remote entry', () => {
       character: { valid: true },
       position: { x: -33, y: -33 },
       surface,
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       walking_state: { walking: false },
       mining_state: { mining: false },
       crafting_queue: [],
@@ -87,7 +87,7 @@ describe('place_candidate through the shipped remote entry', () => {
       count_entities_filtered: vi.fn(() => 0),
       can_place_entity: vi.fn(() => true),
     }
-    ;(globalThis as any).game.connected_players = [{ valid: true, index: 1, name: 'SGLuna', connected: true, character: { valid: true }, position: { x: -33, y: -33 }, surface, force: { index: 1 },
+    ;(globalThis as any).game.connected_players = [{ valid: true, index: 1, name: 'SGLuna', connected: true, character: { valid: true }, position: { x: -33, y: -33 }, surface, force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       walking_state: { walking: false }, mining_state: { mining: false }, crafting_queue: [] }]
     const actor = get_controlled_actor()!
     const generated = create_placement_candidate_set(actor, { entity_name: 'stone-furnace', center: { x: -33, y: -33 }, radius: 3, limit: 1 }) as any

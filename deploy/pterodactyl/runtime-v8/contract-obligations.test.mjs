@@ -34,7 +34,14 @@ function world({ required = false, onRead, onTrace, firstIntent = typed, legacy 
   const initialDescription = bootstrapFuel ? 'Fuel the existing iron drill with one coal while preserving its cell.' : description
   if (bootstrapFuel) firstIntent = normalizeObligations({ outcome: { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: 'supply_entity' }] }, preserve: [21, 22] })
   const memory = new CanonicalTaskBoardMemory()
-  const game = new FakeFactorio({ inventory: { 'stone-furnace': 1, 'copper-plate': 10, 'iron-plate': 58, ...(bootstrapFuel ? { coal: 1 } : {}) } })
+  // Scripted native preflight: a coordinate place_entity reports its planned footprint centre, as the mod does (the fixture's
+  // coordinates are already on the grid, so the snapped centre is the requested one).
+  const preflight = text => {
+    const x = Number(/\['x'\]=(-?[\d.]+)/.exec(text)?.[1]); const y = Number(/\['y'\]=(-?[\d.]+)/.exec(text)?.[1])
+    const name = /\['entity_name'\]='([^']+)'/.exec(text)?.[1]
+    return /["']place_entity["']/.test(text) && name && Number.isFinite(x) && Number.isFinite(y) ? { ok: true, planned_footprint: { entity_name: name, position: { x, y }, direction: 0 } } : { ok: true }
+  }
+  const game = new FakeFactorio({ inventory: { 'stone-furnace': 1, 'copper-plate': 10, 'iron-plate': 58, ...(bootstrapFuel ? { coal: 1 } : {}) }, preflight })
   game.status.connected_players = 0
   const native = game.command.bind(game)
   const rows = []

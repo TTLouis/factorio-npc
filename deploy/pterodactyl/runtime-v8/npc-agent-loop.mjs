@@ -16,9 +16,10 @@ import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
-import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent } from './contract-obligation-runtime.mjs'
+import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent, constructionPlanWitnessCommand } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
+import { candidateScopeVerdict, committedPlacementRegions, compilePlacementScope, describeRegion, distanceFromAnchor, resolvedPlacements } from './placement-region.mjs'
 import { HANDOFF_PACKET_MAX_CHARS, handoffPacketChars, plannerReviewNotesRecord, PLANNER_REVIEW_NOTES_LABEL } from './handoff-format.mjs'
 import { TOPOLOGY_PREFIX, TOPOLOGY_LIMITS, topologyJson, topologyEntities, topologyCapacity, topologyObstruction, topologyText, topologyReserve, fitTopologyBlock, deduplicateTopologySkillRefs, reclaimTopologyRoom } from './topology-context.mjs'
 
@@ -85,7 +86,7 @@ import {
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION, authorizationOf, checkGrant } from './authorization.mjs'
 import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, isProviderFailurePause, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, reviewPauseEvidence, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
-import { batchFootprintOverlap } from './batch-footprint.mjs'
+import { batchFootprintOverlap, batchFootprintUnproven, constructionPlanFootprintsKnown, constructionPlanNeedsFootprints } from './batch-footprint.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
   blockerFacts,
@@ -108,11 +109,14 @@ import {
   batchWatermark,
   buildPendingOperation,
   completedOperationReceipt,
+  completedPlacementPatch,
   EFFECT,
   isLostAcknowledgement,
   operationSignature as batchOperationSignature,
   PENDING_STATE,
+  placedEntityName,
   reconcilePendingOperation,
+  settledPrefixPatch,
   reconciliationFacts,
   reconciliationGuidance,
   RECONCILE_VERDICT,
@@ -192,6 +196,7 @@ import {
   isPlannerControlToolName,
   parsePlan as parseRuntimePlan,
   plannerControlPayloadFromMessage,
+  parsePlacementRegion,
   plannerControlToolDefinitions,
   renderOperation,
   renderOperationPreflight,
@@ -310,6 +315,21 @@ const PREFLIGHT_TRANSPORT_ERROR_CODE = 'preflight_transport_error'
 // MW2b: an identical batch refused because an earlier one's effect is not proven absent, and a batch proven not to have reached the game.
 const DUPLICATE_EFFECT_CODE = 'duplicate_effect_suppressed'
 const DUPLICATE_EFFECT_RETRY_BUDGET = 1
+
+// The correctable refusal for a batch that repeats an operation of a completed prefix the harness settled from the native
+// receipt while that batch's refused placement is still open. It names what completed and that only the placement remains;
+// it offers no way around the fence (a verified top-up needs the actual contents read and a decision in a later step).
+function settledPrefixReplayRefusal(held) {
+  const settled = held.settled ?? {}
+  const completed = (settled.completed_operations ?? []).map(item => `${item.slot}. ${cleanMemoryText(item.operation, 80)}`).join(', ')
+  const facts = `Facts: ${JSON.stringify({ operation_key: held.operation_key, batch_ref: settled.batch_ref, completed_slot: settled.completed_slot, refused_slot: settled.refused_slot, match: settled.match, only_placement_remains: true })}`
+  const earlier = `an earlier batch of this step (${cleanMemoryText(settled.batch_ref, 160)}; the exact native receipt shows these operations completed before the placement was refused: ${completed})`
+  // The harness could not tell which of this batch's operations would repeat a completed one (its record predates the per-operation identities).
+  if (settled.match === 'identity_unavailable') return `[HARNESS] Refused before admission: nothing from this batch ran. ${earlier} completed, and only the placement remains. The harness cannot establish which operations of this batch would repeat them, so until the placement completes only place_entity or place_candidate operations are admitted for this step. Send only the corrected placement. ${facts}`
+  const ambiguous = settled.match === 'same_delivery_item_ambiguous_target'
+    ? ' This delivery moves the same item in the same direction and names its target by name or without an exact unit, so it cannot be told apart from the completed one.' : ''
+  return `[HARNESS] Refused before admission: nothing from this batch ran. Operation ${settled.completed_slot} (${cleanMemoryText(settled.replayed_operation, 80)}) already completed in ${earlier}, and only the placement remains.${ambiguous} Do not deliver it again, with the same or a changed count or coordinates. A delivery completes once it moved a positive count, which can be less than requested, so read the target's real contents; a different delivery is a separate decision for a later step, not this recovery. Send only the corrected placement (or other operations that do not repeat a completed one). ${facts}`
+}
 const LOST_ACK_RETRY_BUDGET = 1
 // Corrections allowed per committed active step when an executor reply names another step (executor_stale_step). Kept
 // apart from the shared plan_category corrections so neither spends the other's allowance.
@@ -1195,6 +1215,8 @@ export function receiptEvidence(raw, outcome, context = {}) {
           actor_epoch: context.actor_epoch,
         },
         admitted_batch: context.admitted_batch,
+        // The harness's per-operation settlement of THIS batch (see batchSettlementEvidence), when one was proven.
+        settlement: outcome === 'failed' ? context.settlement : undefined,
       }),
     }
   }
@@ -1204,6 +1226,36 @@ export function receiptEvidence(raw, outcome, context = {}) {
       ref: '',
       summary: cleanMemoryText(raw, 1200),
     }
+  }
+}
+
+// The settlement the harness proved for the batch whose failure receipt is being recorded: which operations completed, which
+// one the engine refused, which never started, bound to the exact pending record (operation key, signature, goal, plan, step,
+// actor, epoch) and the native batch it settled. The board reducer re-validates every binding before it routes on it.
+export function batchSettlementEvidence(settled) {
+  const { result, pending } = settled ?? {}
+  const receipt = result?.receipt
+  if (result?.verdict !== RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION || !pending || !Array.isArray(result.settlement_operations)
+    || typeof receipt?.batch_ref !== 'string' || receipt.batch_ref.length === 0) return undefined
+  return {
+    verdict: result.verdict,
+    reason: result.reason,
+    basis: result.basis,
+    operation_key: pending.operation_key,
+    signature: pending.signature,
+    goal_id: pending.goal_id,
+    plan_id: pending.plan_id,
+    step_id: pending.step_id,
+    actor_id: pending.actor?.actor_id,
+    actor_epoch: pending.actor?.epoch,
+    batch_id: receipt.batch_id,
+    batch_generation: receipt.batch_generation,
+    batch_ref: receipt.batch_ref,
+    ...(Number.isSafeInteger(receipt.failed_task_index) ? { failed_task_index: receipt.failed_task_index, tasks_started: receipt.tasks_started, task_count: receipt.task_count } : {}),
+    applied_slots: result.applied_slots ?? [],
+    refused_slots: result.refused_slots ?? [],
+    unrun_slots: result.unrun_slots ?? 0,
+    operations: result.settlement_operations,
   }
 }
 
@@ -2609,6 +2661,12 @@ function latestRecoverableOperationFailure(state) {
       entity_name: typeof parsed.entity_name === 'string' ? parsed.entity_name : undefined,
       attempt: Number.isSafeInteger(parsed.attempt) ? parsed.attempt : undefined,
       retry_budget: Number.isSafeInteger(parsed.retry_budget) ? parsed.retry_budget : undefined,
+      // A batch settled from its exact native receipt: which operations completed before the refused placement.
+      settled_batch_ref: typeof parsed.settled_batch_ref === 'string' ? cleanMemoryText(parsed.settled_batch_ref, 160) : undefined,
+      completed_operations: Array.isArray(parsed.completed_operations)
+        ? parsed.completed_operations.filter(name => typeof name === 'string').slice(0, 16).map(name => cleanMemoryText(name, 80))
+        : undefined,
+      settlement_basis: typeof parsed.settlement_basis === 'string' ? cleanMemoryText(parsed.settlement_basis, 80) : undefined,
     }
   }
   catch { return undefined }
@@ -5567,7 +5625,141 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const plan = getActivePlanningPlan(planning)
       if (!plan || args.goal_id !== planning?.goal?.goal_id || args.plan_id !== plan.plan_id) throw new AgentLoopError('Reservation must name the exact active goal and plan')
     }
+    if (name === 'getPlacementCandidates') return toolCommand(name, this.placementScopeFor(args).args)
+    if (name === 'planPlacement') this.assertPlanPlacementUnscoped(args)
     return toolCommand(name, args)
+  }
+
+  // planPlacement searches a local square around a position or anchor entity and truncates to a few candidates, with no notion of
+  // a committed area, so for a prototype the committed step counts only inside an area it could again return only sites outside
+  // it. For such a prototype the read is refused (tool_validation, correctable) with the committed area as facts; the
+  // getPlacementCandidates search for it is filtered by that area before ranking.
+  assertPlanPlacementUnscoped(args) {
+    if (!args || typeof args !== 'object' || typeof args.entity_name !== 'string') return
+    const committed = committedPlacementRegions(this.committedPlacementRequirements(), args.entity_name)
+    if (committed.length === 0) return
+    const error = new AgentLoopError(`planPlacement does not filter by the committed area for ${args.entity_name}: the active step's entity_count requirement for ${args.entity_name} `
+      + `counts only entities whose center is within ${committed.map(circle => describeRegion(circle)).join(' or ')}. getPlacementCandidates for ${args.entity_name} is filtered by that area before ranking`)
+    error.code = 'placement_search_unscoped'
+    error.failureClass = 'tool_validation'
+    error.details = { entity_name: args.entity_name, committed_regions: committed }
+    void this.traceEvent('observation.placement_scope_refused', { request_id: this.traceRequest?.id, tool: 'planPlacement', reason: error.code, ...error.details })
+    throw error
+  }
+
+  // M2 committed-constraint compilation. The active step's anchored entity_count requirement for a prototype fixes where a
+  // build of it counts (entity-center distance <= radius from the anchor), so a candidate search for that prototype is
+  // filtered by that circle BEFORE the native ranking and truncation. With no region the harness supplies the committed circle;
+  // a model region is admitted only when wholly inside it, and otherwise refused as a correctable argument error stating the
+  // committed region as facts. Everything else (no matching requirement, no anchor, another prototype) is unchanged.
+  // Every caller of observationToolCommand gets this, so the planner, executor and handoff reads share one rule.
+  placementScopeFor(args) {
+    if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.entity_name !== 'string') return { args }
+    const committed = committedPlacementRegions(this.committedPlacementRequirements(), args.entity_name)
+    if (committed.length === 0) return { args }
+    const scope = compilePlacementScope(args.region === undefined ? undefined : parsePlacementRegion(args.region), committed)
+    if (scope.refusal) {
+      const { committed_regions: circles, requested_region: requested } = scope.refusal
+      const areas = circles.map(circle => `within ${circle.radius} of anchor (${circle.center.x}, ${circle.center.y}), that is ${describeRegion(circle)}`).join('; or ')
+      const error = new AgentLoopError(scope.refusal.code === 'region_choice_required'
+        ? `getPlacementCandidates for ${args.entity_name} needs a region: the active step has ${circles.length} entity_count requirements for ${args.entity_name}, each counting only entities whose center is ${areas}. `
+          + `No single area can be supplied for the search, and a region you pass must lie wholly inside one of them`
+        : `getPlacementCandidates region ${describeRegion(requested)} is not wholly inside the committed region for ${args.entity_name}: `
+          + `the active step's entity_count requirement for ${args.entity_name} counts only entities whose center is ${areas}. `
+          + `${circles.length === 1 ? 'Without a region, the search uses that committed region; a' : 'A'} region you pass must lie wholly inside ${circles.length === 1 ? 'it' : 'one of them'}`)
+      error.code = scope.refusal.code
+      error.failureClass = 'tool_validation'
+      error.details = { entity_name: args.entity_name, committed_regions: circles, ...(requested ? { requested_region: requested } : {}) }
+      void this.traceEvent('observation.placement_scope_refused', { request_id: this.traceRequest?.id, reason: scope.refusal.code, ...error.details })
+      throw error
+    }
+    return scope.injected ? { args: { ...args, region: scope.region }, injected: true } : { args }
+  }
+
+  // M2 pre-admission check of every placing operation against the same committed circles: place_candidate, place_entity (with
+  // or without coordinates) and execute_construction_plan. Only the native preflight result of that very operation speaks: the
+  // prototype (a place_candidate's from the candidate registry, never its ids) and the resolved, grid-snapped position
+  // (resolvedPlacements). A placement whose position the native result does not state cannot be proven inside and is refused;
+  // one whose prototype it cannot name is left to the existing checks. The draft whose first batch this preflight gates counts:
+  // that batch commits it. Returns the first refusal (class argument: the model can choose another site) or undefined.
+  committedPlacementRefusal(operation, result, index) {
+    const requirements = this.committedPlacementRequirements({ admission: true })
+    for (const placement of resolvedPlacements(operation, result, placedEntityName)) {
+      const committed = committedPlacementRegions(requirements, placement.entity_name)
+      const candidate = operation.name === 'place_candidate'
+      const verdict = candidateScopeVerdict(committed, placement.position, { candidate })
+      if (!verdict.applies || verdict.ok) continue
+      const entityName = placement.entity_name
+      const position = Number.isFinite(placement.position?.x) && Number.isFinite(placement.position?.y) ? { x: placement.position.x, y: placement.position.y } : undefined
+      const regions = committed.map(circle => describeRegion(circle)).join(' or ')
+      const subject = candidate ? `this candidate's ${entityName}` : operation.name === 'place_entity' ? `this place_entity's ${entityName}` : `this construction plan's ${entityName}`
+      const facts = position
+        ? `the native preflight places ${subject} at (${position.x}, ${position.y}), ${committed.map(circle => `${Math.round(distanceFromAnchor(circle, position) * 100) / 100} from anchor (${circle.center.x}, ${circle.center.y})`).join(' / ')}, outside the committed region: the active step's entity_count requirement for ${entityName} counts only entities within ${regions}.`
+        : operation.name === 'place_entity'
+          ? `this place_entity has no coordinates, so the runtime would choose where ${entityName} goes and it cannot be checked against the committed region: the active step's entity_count requirement for ${entityName} counts only entities within ${regions}.`
+          : `the native preflight did not report where ${subject} goes, so it cannot be checked against the committed region: the active step's entity_count requirement for ${entityName} counts only entities within ${regions}.`
+      return {
+        ok: false,
+        operation: operation.name,
+        code: verdict.code,
+        refusal_class: REFUSAL_CLASS.ARGUMENT,
+        operation_index: index,
+        entity_name: entityName,
+        committed_regions: committed,
+        ...(position ? { [candidate ? 'candidate_position' : 'placement_position']: position } : {}),
+        detail: facts,
+        correction_message: `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${operation.name}) before Autorio admission with code ${verdict.code}; no mutation from this batch ran. ${facts} The committed step is unchanged. getPlacementCandidates for ${entityName} searches the committed region.`,
+      }
+    }
+    return undefined
+  }
+
+  // execute_construction_plan has no generic preflight. When the active step (or the draft this batch would commit) counts any
+  // prototype only inside an anchored area, the exact stored validation is read natively and each placement's snapped position is
+  // checked like any other placement. The placement list of a validation id never changes, so this read is independent of the
+  // fluid-preservation gate's own admission-time witness read, which alone decides preservation. A witness that cannot be read or
+  // does not describe this exact validation (including a remote-prepared plan, whose placements this read does not list) leaves
+  // the placements unproven, so the batch is refused here: no later gate checks the committed area.
+  async constructionPlanScopeRefusal(operation, index, readWitness) {
+    if (operation?.name !== 'execute_construction_plan') return undefined
+    const requirements = this.committedPlacementRequirements({ admission: true })
+    const anchored = [...new Set(requirements.outcome.requirements.filter(row => row?.kind === 'entity_count' && typeof row.prototype === 'string')
+      .map(row => row.prototype))].filter(name => committedPlacementRegions(requirements, name).length > 0)
+    if (anchored.length === 0) return undefined
+    const witness = await readWitness()
+    if (witness?.ok === true && witness.validation_id === operation.args.validation_id && witness.placement_count === operation.args.placement_count
+      && Array.isArray(witness.construction_placements) && witness.construction_placements.length === operation.args.placement_count) {
+      return this.committedPlacementRefusal(operation, witness, index)
+    }
+    const committed = anchored.flatMap(name => committedPlacementRegions(requirements, name))
+    const read = witness === undefined ? 'could not be read' : witness?.ok !== true ? `returned ${typeof witness?.code === 'string' ? witness.code : 'no placement list'}`
+      : `describes validation ${witness.validation_id} with ${Array.isArray(witness.construction_placements) ? witness.construction_placements.length : 'no'} placements, not validation ${operation.args.validation_id} with ${operation.args.placement_count}`
+    const facts = `the native read of construction plan ${operation.args?.validation_id} ${read}, so its placements cannot be checked against the committed region: the active step's entity_count requirement for ${anchored.join(', ')} counts only entities within ${committed.map(circle => describeRegion(circle)).join(' or ')}.`
+    return {
+      ok: false,
+      operation: operation.name,
+      code: 'placement_region_unproven',
+      refusal_class: REFUSAL_CLASS.ARGUMENT,
+      operation_index: index,
+      entity_name: anchored[0],
+      committed_regions: committed,
+      ...(typeof witness?.code === 'string' ? { witness_code: witness.code } : {}),
+      detail: facts,
+      correction_message: `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${operation.name}) before Autorio admission with code placement_region_unproven; no mutation from this batch ran. ${facts} The committed step is unchanged. A locally validated construction plan, or getPlacementCandidates for ${anchored[0]}, can be checked against that region.`,
+    }
+  }
+
+  // The read-only native witness of the exact stored validation an execute_construction_plan operation names (undefined when
+  // it cannot be read). Preflight reads it at most once per operation: for the committed-area check and for the batch
+  // footprint comparison.
+  async readConstructionPlanWitness(operation, assertPreflightCurrent) {
+    const command = constructionPlanWitnessCommand(operation)
+    if (!command) return undefined
+    let witness
+    try { witness = JSON.parse(String(await this.rcon.command(command)).trim()) }
+    catch { witness = undefined }
+    await assertPreflightCurrent()
+    return witness
   }
 
   // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples
@@ -10171,6 +10363,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return result
   }
 
+  // The active step's entity_count requirements: its obligation outcome and its completion contract (a placement step can carry
+  // the anchored area in either). Both are the step's own checks, never model arguments. They scope searches only once the plan
+  // is committed (a draft's proposed areas must not steer the planner's exploration); admission (`admission: true`) also reads a
+  // draft's, because the preflight of a draft's first batch is the gate that commits that very contract.
+  committedPlacementRequirements({ admission = false } = {}) {
+    const plan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    if (!admission && !FROZEN_PLAN_STATUSES.has(plan?.status)) return { outcome: { requirements: [] } }
+    const step = plan?.steps?.[plan.active_step_index]
+    const fromObligations = this.currentContractObligations()?.outcome?.requirements
+    const fromContract = step?.completion_contract?.requirements
+    return { outcome: { requirements: [...(Array.isArray(fromObligations) ? fromObligations : []), ...(Array.isArray(fromContract) ? fromContract : [])] } }
+  }
+
   // Extended contracts are accepted only against the current canonical typed
   // program and its original proof. Board/model fields cannot mint this context.
   currentContractObligations(step) {
@@ -10214,7 +10419,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Written BEFORE the batch is sent: what is about to be sent, for which plan step, by which actor and epoch, and where the
   // mod's batch counter stood. A lost acknowledgement or a restart then has something exact to reconcile against.
-  async recordPendingOperationBeforeSend(operations, before) {
+  async recordPendingOperationBeforeSend(operations, before, preflight) {
     this.assertModelRecoveryAllowed()
     if (!this.requestInfo || typeof this.memory.recordPendingOperation !== 'function') return undefined
     const key = this.requestInfo.memoryKey
@@ -10235,6 +10440,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       requestId: this.traceRequest?.id,
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
+      preflight,
       protocolVersion: 2,
       surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex,
       operations,
@@ -10482,11 +10688,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }, { requestId: requestId ?? this.traceRequest?.id })
         this.assertCheckpointOwnerIdentity(receiptOwner)
       }
+      // What the closed ledger record keeps (durable, with the persisted state): a settled completed prefix carries its slots'
+      // canonical identities and fences their replay while the refused placement is open; a completed batch containing a
+      // placement carries its verdict, which is what closes that fence (operation-ledger.mjs openSettledFences).
+      if (provable) {
+        const closure = settledPrefixPatch(pending, result) ?? completedPlacementPatch(pending, result)
+        if (closure) this.memory.updatePendingOperation?.(key, closure, pending.operation_key)
+      }
       const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
       // A cancellation the game proved happened after a completed prefix: the failure turn states which operations ran.
       if (settled && result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION && (result.applied_slots ?? []).length > 0) {
         this.receiptPrefixSettlement = { result, pending }
       }
+      // Every settled refusal rides on the failure receipt this settlement was proven from, so the board can tell a
+      // settled placement failure (nothing of the batch is unresolved) from one whose batch effect is still unknown.
+      if (settled && result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) this.receiptBatchSettlement = { result, pending }
       const rid = requestId ?? this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
@@ -12119,6 +12335,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const owner = this.captureCheckpointOwner()
     this.noteWorldMutation() // D2: a batch receipt is being read; whatever was observed before it is history
     this.receiptPrefixSettlement = undefined
+    this.receiptBatchSettlement = undefined
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
     try {
@@ -12173,6 +12390,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           batch_id: cancelled.batch_id, batch_generation: cancelled.batch_generation,
           terminal_partial: reconcilePendingOperation(admitted, { status, actor: currentActor }).verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL,
         } : undefined,
+        settlement: batchSettlementEvidence(this.receiptBatchSettlement),
       }
       // The plan and step this batch was admitted under, when the memory
       // recorded one: lets the receipt ledger refuse a receipt whose plan has
@@ -12812,10 +13030,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
       const recoverable = latestRecoverableOperationFailure(this.memory.currentPlan?.(this.activePlanKey()))
       if (recoverable) {
+        const recoverableState = this.memory.currentPlan?.(this.activePlanKey())
         await this.traceEvent('operations.execution_recoverable', {
           failure_class: recoverable.failure_class,
           attempt: recoverable.attempt,
           retry_budget: recoverable.retry_budget,
+          code: recoverable.code,
+          goal_id: recoverableState?.goal_id,
+          step_id: recoverableState?.task_board?.active_step_id,
+          ...(recoverable.settled_batch_ref ? {
+            settled_batch_ref: recoverable.settled_batch_ref,
+            settlement_basis: recoverable.settlement_basis,
+            completed_operations: recoverable.completed_operations,
+            reason: 'settled_batch_placement_refused_before_mutation',
+          } : {}),
         })
       }
       const supplyState = this.memory.currentPlan?.(this.activePlanKey())
@@ -12880,8 +13108,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : supplyRecovery
         ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget}; once these are spent the failure is recorded as the step blocker (the plan and step contract stay unchanged).`
         : ''
-      const recoverableGuidance = recoverable
-        ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
+      const completedBefore = recoverable?.completed_operations?.length > 0
+        ? ` The exact native batch receipt shows these operations completed before the placement was refused, so do not repeat them: ${recoverable.completed_operations.map((name, index) => `${index + 1}. ${name}`).join(', ')} (a delivery completes once it moved a positive count, which can be less than requested; read the target's real contents before topping it up).`
+        : recoverable?.settled_batch_ref
+          ? ' The exact native batch receipt shows the refused placement was the first task of the batch, so nothing in the batch took effect and no later operation started.'
+          : ''
+      const recoverableGuidance = recoverable?.code === 'no_position'
+        ? ` [HARNESS] The engine found no free ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} position: a place_entity without coordinates only searches the tile ring right around where the NPC stands (find_non_colliding_position, radius 1), so this is a local search miss, not proof that the world prevents the step. The committed step and plan are unchanged.${completedBefore} ${recoverable.completed_operations?.length > 0 ? 'Only the placement remains: request' : 'To correct it, request'} placement candidates (getPlacementCandidates, or planPlacement for an anchor) near where the entity is needed and place a returned candidate, or submit a concrete valid position, inside this same step. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked as placement_failed:no_position.`
+        : recoverable
+        ? ` [HARNESS] The engine refused the${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
         : ''
       const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
       // A failed batch's receipt has no completed placement of its own (its last completed batch is an older one).
@@ -14748,6 +14983,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ? { ...message, tool_calls: rawCalls.slice(0, MAX_OBSERVATION_TOOL_CALLS_PER_BATCH) }
         : message
       const prepared = super.prepareToolBatch(admittedMessage)
+      for (const entry of prepared) {
+        // The command already carries the committed region (observationToolCommand). The entry's args and signature say so too, so
+        // the read cache and duplicate detection never treat a committed-region search as the same read as an unscoped one.
+        if (entry.tool?.function?.name !== 'getPlacementCandidates') continue
+        const scoped = this.placementScopeFor(entry.args)
+        if (!scoped.injected) continue
+        entry.args = scoped.args
+        entry.signature = toolSignature('getPlacementCandidates', scoped.args)
+        void this.traceEvent('observation.placement_scope_compiled', { request_id: this.traceRequest?.id, reason: 'committed_entity_count_region',
+          entity_name: scoped.args.entity_name, region: scoped.args.region })
+      }
       if (partialBatchEligible) {
         Object.defineProperty(prepared, '_sglunaObservationAdmission', {
           configurable: true,
@@ -15415,8 +15661,35 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     for (let index = 0; index < operations.length; index++) {
       const command = renderOperationPreflight(operations[index])
       if (!command) {
-        results.push({ ok: true, operation: operations[index].name, validation: 'not_required' })
-        continue
+        let witnessRead
+        const readWitness = () => (witnessRead ??= this.readConstructionPlanWitness(operations[index], assertPreflightCurrent))
+        const outsideCommitted = await this.constructionPlanScopeRefusal(operations[index], index, readWitness)
+        if (!outsideCommitted) {
+          // Milestone 4 L1: a construction plan's placements are compared with the batch's other placements
+          // (batchFootprintOverlap below), from the footprints its native witness gives. Without them the batch is refused.
+          if (constructionPlanNeedsFootprints(operations, index)) {
+            const witness = await readWitness()
+            if (!constructionPlanFootprintsKnown(witness, operations[index])) {
+              const unproven = batchFootprintUnproven(operations[index], index, witness)
+              results.push(unproven)
+              const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${unproven.code}`)
+              failure.preflight = unproven
+              failure.preflightResults = results.slice()
+              throw failure
+            }
+            results.push({ ok: true, operation: operations[index].name, validation: 'not_required', construction_placements: witness.construction_placements })
+            continue
+          }
+          results.push({ ok: true, operation: operations[index].name, validation: 'not_required' })
+          continue
+        }
+        await this.traceEvent('operations.placement_scope_refused', { request_id: this.traceRequest?.id, operation_index: index, operation: outsideCommitted.operation, code: outsideCommitted.code,
+          entity_name: outsideCommitted.entity_name, placement_position: outsideCommitted.placement_position, committed_regions: outsideCommitted.committed_regions })
+        results.push(outsideCommitted)
+        const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${outsideCommitted.code}`)
+        failure.preflight = outsideCommitted
+        failure.preflightResults = results.slice()
+        throw failure
       }
       await assertPreflightCurrent()
       let result
@@ -15438,6 +15711,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (result?.ok === true && (result.reservation?.goal_id !== planning?.goal?.goal_id || result.reservation?.plan_id !== activePlan?.plan_id)) {
           result.ok = false; result.code = 'reservation_plan_identity_mismatch'; result.refusal_class = REFUSAL_CLASS.AUTHORITY
         }
+      }
+      // M2: a placement the native preflight resolves outside the active step's committed region is refused before admission.
+      const outsideCommitted = this.committedPlacementRefusal(operations[index], result, index)
+      if (outsideCommitted) {
+        await this.traceEvent('operations.placement_scope_refused', { request_id: this.traceRequest?.id, operation_index: index, operation: outsideCommitted.operation, code: outsideCommitted.code,
+          entity_name: outsideCommitted.entity_name, candidate_position: outsideCommitted.candidate_position, placement_position: outsideCommitted.placement_position, committed_regions: outsideCommitted.committed_regions })
+        result = outsideCommitted
+        results[results.length - 1] = result
       }
       if (index > 0 && result?.code === 'supply_missing' && result.transfer?.items?.length > 1) {
         // Source shortage has precedence in the mod's multi-item result. It must not conceal an independent
@@ -15511,6 +15792,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw failure
     }
     await this.settleBatchStock(operations, results, held, assertPreflightCurrent)
+    // A placement whose stock rejection was held and then settled as covered reaches here as ok; its position gets the same check.
+    for (const index of held) {
+      const outsideCommitted = this.committedPlacementRefusal(operations[index], results[index], index)
+      if (!outsideCommitted) continue
+      await this.traceEvent('operations.placement_scope_refused', { request_id: this.traceRequest?.id, operation_index: index, operation: outsideCommitted.operation, code: outsideCommitted.code,
+        entity_name: outsideCommitted.entity_name, candidate_position: outsideCommitted.candidate_position, placement_position: outsideCommitted.placement_position, committed_regions: outsideCommitted.committed_regions })
+      const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${outsideCommitted.code}`)
+      failure.preflight = outsideCommitted
+      failure.preflightResults = results.slice()
+      throw failure
+    }
     await checkFluidPreservationEligibility(this, { operations, preflight: results })
     return results
   }
@@ -17869,7 +18161,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           this.duplicateEffectHold = { operation_key: held.operation_key }
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Refused before admission: this batch conflicts with unresolved work whose effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not bypass this hold by changing quantities, arguments, steps or plans. Reobserve the affected targets and materials within the recovery limits, then surface the blocker if uncertainty remains. Independently authorized work may continue only with disjoint targets and materials. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
+            content: held.reason === 'settled_prefix_operation_replay' ? settledPrefixReplayRefusal(held) : `[HARNESS] Refused before admission: this batch conflicts with unresolved work whose effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not bypass this hold by changing quantities, arguments, steps or plans. Reobserve the affected targets and materials within the recovery limits, then surface the blocker if uncertainty remains. Independently authorized work may continue only with disjoint targets and materials. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
           })
           return this.runTurn()
         }
@@ -18016,7 +18308,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       let fluidAdmission
-      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
+      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before, preflight)
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {

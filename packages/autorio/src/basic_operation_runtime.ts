@@ -2,6 +2,7 @@ import { reservation_intersection } from './area_reservations'
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
+import { layout_node_precheck, record_layout_node_placed } from './construction_layout'
 import { entity_last_user } from './entity_provenance'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import { record_hand_insert } from './hand_work'
@@ -564,6 +565,22 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       ...placement_check_args(task.entity_name),
     })
     let can_place = placeable()
+    // A validated construction placement is placement-only (its fluid-preservation witness says so): when the footprint is
+    // no longer placeable (a tree, rock or ground item that appeared after validation, or anything else) it fails here,
+    // before any pickup, mining or destruction, and so keeps the no-mutation proof.
+    if (!can_place && task.refuse_clearance === true) {
+      const blockers = placement_blocker_summaries(actor, footprint.world_box)
+      controller.fail(actor, task, 'construction_plan_blocked_no_clear', {
+        placement_footprint: {
+          tile_width: footprint.tile_width,
+          tile_height: footprint.tile_height,
+          tile_box: footprint.tile_box,
+          world_box: footprint.world_box,
+        },
+        placement_blockers: blockers,
+      })
+      return [false, `Validated construction placement of ${task.entity_name} at (${position.x}, ${position.y}) is blocked and clearing is refused for construction plans`]
+    }
     // Like a player's build, what placement_clearance says a footprint may lose
     // is cleared rather than blocking it: ground items are picked up and
     // natural or idle own entities are mined into the actor inventory, then the
@@ -620,6 +637,13 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       controller.fail(actor, task, 'placement_candidate_unavailable')
       return [false, 'Queued placement preservation guard changed before native create']
     }
+    // A node of a connected construction layout: its connections to the entities already built must still hold against the
+    // actual entities. Refused here, before the native create, so a failed proof keeps the no-mutation receipt.
+    const layout_refusal = layout_node_precheck(actor, task.layout_node, task.entity_name, position, task.direction)
+    if (layout_refusal !== undefined) {
+      controller.fail(actor, task, 'layout_connection_unproven', { layout_node: task.layout_node, layout_refusal })
+      return [false, layout_refusal]
+    }
     const create_entity_args: SurfaceCreateEntity = {
       name: task.entity_name,
       position,
@@ -640,6 +664,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     // operation on a freshly placed entity failed with target_gone unless an
     // unrelated observation happened to scan it first.
     remember_entity_reference(entity)
+    // The same tick, before the task completes: bind the entity to its layout node and verify the layout's connections.
+    record_layout_node_placed(actor, task.layout_node, entity)
 
     const removed = inventory.remove({ name: requirement.item_name, count: requirement.count })
     if (removed !== requirement.count) {

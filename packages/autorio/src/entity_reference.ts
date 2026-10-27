@@ -86,6 +86,19 @@ export function resolve_entity_reference(actor: ControlledActor, unit_number: nu
   return identity_at(surface, hint, unit_number)
 }
 
+// The entity a record bound to this unit_number on this surface and force, read without an actor (a ledger settling an
+// operation long after it ran): the engine's own lookup, else the observation hint for the same identity.
+export function resolve_recorded_entity(unit_number: number, surface_index: number, force_index: number) {
+  const direct = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  if (direct && direct.valid && is_npc_vision_entity(direct)) return undefined
+  if (direct && direct.valid) return direct.surface.index === surface_index && direct.force.index === force_index ? direct : undefined
+  const hint = hints()[unit_number]
+  if (!hint || hint.surface_index !== surface_index || hint.force_index !== force_index) return undefined
+  const surface = game.get_surface(surface_index as LuaSurface['index'])
+  if (!surface || !surface.valid) return undefined
+  return identity_at(surface, hint, unit_number)
+}
+
 export function resolve_exact_entity(actor: ControlledActor, unit_number: number) {
   return resolve_entity_reference(actor, unit_number, 'actor_body')
 }

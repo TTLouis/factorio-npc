@@ -57,9 +57,12 @@ test('footprints that only touch, or never share a collision layer, are not an o
   assert.ok(batchFootprintOverlap([BATCH_21[0], BATCH_21[0]], [ok(BOILER), ok(BOILER)]), 'the same entity twice on one spot collides with itself')
 })
 
-test('no footprint means no claim: placements without coordinates or with unknown collision are left to execution', () => {
+test('no footprint means no claim: placements without coordinates are left to execution; unknown collision layers collide', () => {
   assert.equal(batchFootprintOverlap(BATCH_21.slice(0, 2), [ok(BOILER), { ok: true, operation: 'place_entity' }]), null)
-  assert.equal(batchFootprintOverlap(BATCH_21.slice(0, 2), [ok(BOILER), ok({ ...ENGINE, collision_unknown: true })]), null)
+  // Milestone 4 L1: a joint proof never rests on what could not be read.
+  assert.equal(batchFootprintOverlap(BATCH_21.slice(0, 2), [ok(BOILER), ok({ ...ENGINE, collision_unknown: true })]).operation_index, 1)
+  assert.equal(batchFootprintOverlap(BATCH_21.slice(0, 2), [ok(BOILER), ok({ ...ENGINE, collision_layers: undefined })]).operation_index, 1)
+  assert.equal(batchFootprintOverlap(BATCH_21.slice(0, 2), [ok(BOILER), ok({ ...ENGINE, collision_layers: undefined, colliding_with_tiles_only: true })]), null)
   assert.equal(batchFootprintOverlap(BATCH_21.slice(0, 2), [ok(BOILER), ok({ ...ENGINE, world_box: { left_top: { x: 1, y: 1 }, right_bottom: { x: 1, y: 2 } } })]), null)
   assert.equal(batchFootprintOverlap(undefined, undefined), null)
 })
@@ -73,6 +76,33 @@ test('an operation between two placements that can remove or turn an entity ends
   const candidate = { name: 'place_candidate', args: { candidate_set_id: 'set_1', candidate_id: 'c1' } }
   assert.equal(batchFootprintOverlap([candidate, BATCH_21[1]], [{ ok: true, operation: 'place_candidate', planned_footprint: BOILER }, ok(ENGINE)]).batch_footprint.overlaps.operation, 'place_candidate',
     'a candidate placement carries its registry footprint and is compared like any other')
+})
+
+test('milestone 4 L1: a validated construction plan in a batch is compared placement by placement with the batch\'s other placements', () => {
+  const plan = { name: 'execute_construction_plan', args: { validation_id: 5, placement_count: 2 } }
+  const row = footprint => ({ entity_name: footprint.entity_name, position: footprint.position, planned_footprint: footprint })
+  const farPole = planned('small-electric-pole', { x: 30.5, y: -40.5 }, 0, [30.35, -40.65, 30.65, -40.35])
+  const witness = { ok: true, operation: 'execute_construction_plan', construction_placements: [row(farPole), row(BOILER)] }
+  assert.equal(batchFootprintOverlap([plan], [witness]), null)
+  // The mod compared a plan's own rows when it validated the plan; they are not compared with each other again.
+  assert.equal(batchFootprintOverlap([plan], [{ ...witness, construction_placements: [row(BOILER), row(POLE)] }]), null)
+
+  const after = batchFootprintOverlap([plan, BATCH_21[1]], [witness, ok(ENGINE)])
+  assert.equal(after.code, BATCH_FOOTPRINT_OVERLAP_CODE)
+  assert.equal(after.operation_index, 1)
+  assert.equal(after.batch_footprint.entity_name, 'steam-engine')
+  assert.equal(after.batch_footprint.overlaps.operation, 'execute_construction_plan')
+  assert.equal(after.batch_footprint.overlaps.construction_placement_index, 1, 'the plan\'s boiler, the first of its rows the engine overlaps')
+  assert.equal(after.batch_footprint.overlaps.entity_name, 'boiler')
+
+  const before = batchFootprintOverlap([BATCH_21[1], plan], [ok(ENGINE), witness])
+  assert.equal(before.operation_index, 1)
+  assert.equal(before.operation, 'execute_construction_plan')
+  assert.equal(before.batch_footprint.construction_placement_index, 1)
+  assert.equal(before.batch_footprint.overlaps.entity_name, 'steam-engine')
+
+  // A plan witness without footprints (an older mod) makes no claim, as a placement without coordinates does.
+  assert.equal(batchFootprintOverlap([plan, BATCH_21[1]], [{ ok: true, construction_placements: [{ entity_name: 'boiler' }] }, ok(ENGINE)]), null)
 })
 
 // --- the real agent loop ------------------------------------------------------------------------------------------------------

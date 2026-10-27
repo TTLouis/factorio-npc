@@ -95,7 +95,7 @@ function live_entity(unit_number: number, name: string, storages: Array<{ filter
     name,
     position: { x: 0, y: 0 },
     surface: { index: 1 },
-    force: { index: 1 },
+    force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
     fluidbox: {
       length: storages.length,
       get_pipe_connections: (index: number) => storages[index - 1].ports.map(port => ({
@@ -137,7 +137,7 @@ describe('placement candidates that join a live fluid port', () => {
   function actor_at(x: number, y: number) {
     return observe_water({
       position: { x, y },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         index: 1,
         can_place_entity: (args: any) => { place_calls.push(args); return true },
@@ -549,7 +549,7 @@ describe('shoreline placement ordering', () => {
     const shore = [5.5, 12.5, 20.5]
     const actor = {
       position: { x: 0.5, y: 0.5 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: {
         index: 1,
         // Only west-facing spots on the shoreline column are legal, as under the manual build check.
@@ -571,7 +571,7 @@ describe('shoreline placement ordering', () => {
   it('keeps the coverage-then-centre ordering for entities without tile rules and labels it', () => {
     const actor = {
       position: { x: 0.5, y: 0.5 },
-      force: { index: 1 },
+      force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
       surface: { index: 1, can_place_entity: () => true, find_entities_filtered: () => [] },
     } as any
     const result = placement_candidates_for_actor(actor, { entity_name: 'plain-box', radius: 2, limit: 3 }) as any

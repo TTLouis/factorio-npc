@@ -203,7 +203,7 @@ case "$LANE" in
     run_node ground_item_pickup_factorio.mjs
     ;;
   placement-clearing)
-    printf '[npc-test][placement-clearing] Running tree, rock and idle-chest clearing, blocked footprints and the anchor ranking against the real engine...\n'
+    printf '[npc-test][placement-clearing] Running tree, rock and idle-chest clearing, blocked footprints, the anchor ranking and region-constrained candidates against the real engine...\n'
     run_node placement_clearing_factorio.mjs
     ;;
   local-transfer-target)

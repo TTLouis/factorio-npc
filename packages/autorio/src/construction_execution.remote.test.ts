@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('./map_construction', () => ({
   execute_prepared_remote_construction_plan: mocks.remote,
+  is_prepared_remote_construction_plan: () => false,
 }))
 
 import { execute_validated_construction_plan } from './construction_execution'

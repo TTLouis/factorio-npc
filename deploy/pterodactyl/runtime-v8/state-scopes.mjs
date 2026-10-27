@@ -214,6 +214,7 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   stepContractAborts: f('decision', false, V8, 'abort controllers of in-flight step contract calls (abortStepContractCalls in reset())'),
   stepContractsInFlight: f('decision', false, V8, 'in-flight step contract promises, deleted when they settle'),
   receiptPrefixSettlement: f('decision', true, V8, 'prefix settlement guidance for the next failure message; taken once in failed()'),
+  receiptBatchSettlement: f('decision', false, V8, 'the settled refusal proven for the failure receipt being recorded; attached to that receipt as board evidence, cleared at the start of the next taskStatusReceipt'),
 
   // --- step ------------------------------------------------------------------------------------------------------
   providerBudgetGeneration: f('step', false, V8, 'output budget generation, rolled at each verified step close (rollProviderBudgetAtStepClose)'),

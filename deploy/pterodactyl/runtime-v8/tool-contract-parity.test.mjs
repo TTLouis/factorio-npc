@@ -90,6 +90,8 @@ const toolSamples = {
   planPlacement: { entity_name: 'assembling-machine-1', position: { x: 0, y: 0 } },
   findConstructionSites: { width: 4, height: 4, position: { x: 0, y: 0 } },
   validateConstructionPlan: { plan_id: 'plan-1', placements: [{ entity_name: 'stone-furnace', x: 0, y: 0 }] },
+  resumeConstructionLayout: { layout_id: 1 },
+  proposeConstructionLayout: { placements: [{ entity_name: 'wooden-chest', slot: 'src', zone: { center: { x: 0.5, y: 0.5 }, radius: 2 } }, { entity_name: 'burner-inserter', slot: 'ins', x: 1.5, y: 0.5 }], connections: [{ kind: 'inserter', inserter: { slot: 'ins' }, pickup: { slot: 'src' }, drop: { unit_number: 7 } }] },
   inspectConstructionIntent: { x: 0, y: 0, entity_name: 'stone-furnace' },
   getResearchPath: { name: 'automation' },
 }
@@ -162,6 +164,8 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     'getSkillDetails',
     'measureTransportThroughput',
     'planPlacement',
+    'proposeConstructionLayout',
+    'resumeConstructionLayout',
     'validateConstructionPlan',
     'validateConstructionReservation',
   ])
@@ -323,4 +327,31 @@ test('submitPlan rejects mixed observation/control batches and malformed argumen
     content: '',
     tool_calls: [{ id: 'control-1', type: 'function', function: { name: 'submitPlan', arguments: '{bad json' } }],
   }), /valid JSON/i)
+})
+test('execute_construction_plan keeps its harness-only native preservation witness in the contract and the mod', async () => {
+  const operation = contract.operations.execute_construction_plan
+  const witness = operation.native_preservation_witness
+  assert.equal(witness.version, 1); assert.equal(witness.read_only, true); assert.equal(witness.local_plans_only, true)
+  assert.deepEqual(witness.harness_only_preflight, ['autorio_preflight', 'operation', 'execute_construction_plan'])
+  const execution = await readFile(new URL('packages/autorio/src/construction_execution.ts', root), 'utf8')
+  for (const field of operation.native_preservation_preflight_fields.concat(witness.binds.filter(name => name !== 'actor_id' && name !== 'surface_index' && name !== 'force_index'))) {
+    assert.match(execution, new RegExp(`\\b${field}[:,]`))
+  }
+  for (const code of witness.refusal_codes) assert.match(execution, new RegExp(`'${code}'`))
+  const refusals = await readFile(new URL('packages/autorio/src/refusal_classes.ts', root), 'utf8')
+  for (const code of witness.refusal_codes) assert.match(refusals, new RegExp(`\\b${code}:`))
+  // The general operation metadata stays preflight-free: only the preservation seam asks for the witness.
+  assert.equal(staging.operationMetadataForName('execute_construction_plan').preflight, false)
+  assert.equal(staging.renderOperationPreflight({ name: 'execute_construction_plan', args: { validation_id: 7, placement_count: 2 } }), null)
+})
+
+test('getPlacementCandidates region is part of the manifest args, the runtime schema and the ordinary-agent schema source', async () => {
+  assert.deepEqual([...contract.tools.getPlacementCandidates.args].sort(),
+    ['anchor', 'center', 'connects_to', 'covers_position', 'entity_name', 'limit', 'radius', 'region', 'target_resource'])
+  const tool = runtime.toolDefinitions.find(entry => entry.function.name === 'getPlacementCandidates')
+  assert.deepEqual(Object.keys(tool.function.parameters.properties).sort(), [...contract.tools.getPlacementCandidates.args].sort())
+  const command = runtime.toolCommand('getPlacementCandidates', { ...toolSamples.getPlacementCandidates, region: { shape: 'box', left_top: { x: 0, y: 0 }, right_bottom: { x: 4, y: 4 } } })
+  assert.match(command, /remote\.call\("autorio_tools","get_placement_candidates",\{.*region=\{shape='box'/)
+  const agentSource = await readFile(new URL('packages/agent/src/llm/tools.ts', root), 'utf8')
+  for (const key of contract.tools.getPlacementCandidates.args) assert.match(agentSource.slice(agentSource.indexOf('const placementCandidatesSchema')), new RegExp(`(^|\\s)${key}:`), `${key} missing from the agent schema`)
 })

@@ -4,7 +4,8 @@
 // overlap each other both pass, and the second one fails at execution with the first one's effect already in the
 // world. The mod returns the tiles every coordinate placement will occupy (`planned_footprint`, computed with the
 // same grid snap and collision box execution uses) and the collision layers that decide what it may share them
-// with. This compares them in batch order, before anything is sent. Pure: no I/O.
+// with; a validated construction plan's preflight carries one per placement. This compares them in batch order,
+// before anything is sent. Pure: no I/O.
 
 import { effectClassOf } from './operation-reconciliation.mjs'
 import { REFUSAL_CLASS } from './refusal-class.mjs'
@@ -21,12 +22,27 @@ function box(value) {
   return { left_top: { x: lt.x, y: lt.y }, right_bottom: { x: rb.x, y: rb.y } }
 }
 
-function footprintOf(result) {
-  const planned = result?.planned_footprint
+// Unreadable collision layers are kept as unknown, and unknown collides with everything: the comparison never rests on
+// what could not be read.
+function footprintOf(planned) {
   const world = box(planned?.world_box)
-  if (!world || planned.collision_unknown === true || planned.colliding_with_tiles_only === true) return undefined
-  if (!Array.isArray(planned.collision_layers) || !planned.collision_layers.every(layer => typeof layer === 'string')) return undefined
-  return { ...planned, world_box: world }
+  if (!world || planned.colliding_with_tiles_only === true) return undefined
+  const layers = Array.isArray(planned.collision_layers) && planned.collision_layers.every(layer => typeof layer === 'string')
+    ? planned.collision_layers : undefined
+  return { ...planned, world_box: world, collision_layers: layers ?? [], collision_unknown: layers === undefined || planned.collision_unknown === true }
+}
+
+// The footprints one operation builds: a coordinate placement's one, or each placement of a validated construction plan.
+function footprintsOf(operation, result) {
+  if (operation?.name === 'execute_construction_plan') {
+    const rows = Array.isArray(result?.construction_placements) ? result.construction_placements : []
+    return rows.flatMap((row, construction_placement_index) => {
+      const footprint = footprintOf(row?.planned_footprint)
+      return footprint ? [{ ...footprint, construction_placement_index }] : []
+    })
+  }
+  const footprint = footprintOf(result?.planned_footprint)
+  return footprint ? [footprint] : []
 }
 
 function overlapArea(a, b) {
@@ -37,7 +53,20 @@ function overlapArea(a, b) {
 
 function collides(a, b) {
   if (a.entity_name === b.entity_name && a.not_colliding_with_itself === true) return false
+  if (a.collision_unknown || b.collision_unknown) return true
   return a.collision_layers.some(layer => b.collision_layers.includes(layer))
+}
+
+function footprintFacts(operations, index, footprint) {
+  return {
+    operation_index: index,
+    operation: operations[index].name,
+    ...(footprint.construction_placement_index === undefined ? {} : { construction_placement_index: footprint.construction_placement_index }),
+    entity_name: footprint.entity_name,
+    position: footprint.position,
+    direction: footprint.direction,
+    world_box: boxFacts(footprint.world_box),
+  }
 }
 
 function round(value) {
@@ -63,27 +92,16 @@ export function batchFootprintOverlap(operations, preflight) {
       placed.length = 0
       continue
     }
-    const footprint = footprintOf(preflight?.[index])
-    if (!footprint) continue
-    for (const earlier of placed) {
+    // A plan's own placements were compared with each other by the mod when it was validated; they are compared here with
+    // the batch's other operations.
+    const footprints = footprintsOf(list[index], preflight?.[index])
+    for (const footprint of footprints) for (const earlier of placed) {
       if (!collides(earlier.footprint, footprint)) continue
       const area = overlapArea(earlier.footprint.world_box, footprint.world_box)
       if (area === 0) continue
       const facts = {
-        operation_index: index,
-        operation: list[index].name,
-        entity_name: footprint.entity_name,
-        position: footprint.position,
-        direction: footprint.direction,
-        world_box: boxFacts(footprint.world_box),
-        overlaps: {
-          operation_index: earlier.index,
-          operation: list[earlier.index].name,
-          entity_name: earlier.footprint.entity_name,
-          position: earlier.footprint.position,
-          direction: earlier.footprint.direction,
-          world_box: boxFacts(earlier.footprint.world_box),
-        },
+        ...footprintFacts(list, index, footprint),
+        overlaps: footprintFacts(list, earlier.index, earlier.footprint),
         overlap_area: round(area),
       }
       return {
@@ -98,7 +116,51 @@ export function batchFootprintOverlap(operations, preflight) {
         correction_message: `[HARNESS] Refused before admission: no operation from this batch ran. Operation ${index + 1} would place ${footprint.entity_name} on tiles that operation ${earlier.index + 1} of the same batch places ${earlier.footprint.entity_name} on (collision boxes from the game's prototypes, overlapping by ${round(area)} tiles). Each placement's own preflight does not compare it with the rest of the batch; these two cannot both be built. The plan, the step and the requested result are unchanged. Facts: ${JSON.stringify(facts)}`,
       }
     }
-    placed.push({ index, footprint })
+    for (const footprint of footprints) placed.push({ index, footprint })
   }
   return null
+}
+
+export const BATCH_FOOTPRINT_UNPROVEN_CODE = 'batch_footprint_unproven'
+
+const PLACEMENT_OPERATIONS = new Set(['place_entity', 'place_candidate', 'execute_construction_plan'])
+
+/**
+ * Whether a construction plan's placements must be read before the batch is compared: execute_construction_plan has no
+ * generic preflight, so its footprints come from the native witness, and the batch has another operation that places
+ * something.
+ */
+export function constructionPlanNeedsFootprints(operations, index) {
+  const list = Array.isArray(operations) ? operations : []
+  return list[index]?.name === 'execute_construction_plan'
+    && list.some((operation, other) => other !== index && PLACEMENT_OPERATIONS.has(operation?.name))
+}
+
+/** The witness describes exactly this validation and gives every one of its placements a footprint. */
+export function constructionPlanFootprintsKnown(witness, operation) {
+  const rows = witness?.construction_placements
+  return witness?.ok === true && witness.validation_id === operation?.args?.validation_id
+    && witness.placement_count === operation?.args?.placement_count && Array.isArray(rows) && rows.length === operation.args.placement_count
+    && rows.every(row => box(row?.planned_footprint?.world_box) !== undefined)
+}
+
+/**
+ * The refusal when a construction plan shares its batch with other placements and the native witness does not give the
+ * plan's footprints: the plan cannot be compared with them, so nothing from the batch is sent.
+ */
+export function batchFootprintUnproven(operation, index, witness) {
+  const read = witness === undefined ? 'could not be read'
+    : witness?.ok !== true ? `returned ${typeof witness?.code === 'string' ? witness.code : 'no placement list'}`
+      : `does not give a footprint for each of the ${operation?.args?.placement_count} placements of validation ${operation?.args?.validation_id}`
+  const facts = `the native read of construction plan ${operation?.args?.validation_id} ${read}, so its placements cannot be compared with the other placements of this batch`
+  return {
+    ok: false,
+    code: BATCH_FOOTPRINT_UNPROVEN_CODE,
+    refusal_class: REFUSAL_CLASS.ARGUMENT,
+    operation: operation?.name,
+    operation_index: index,
+    ...(typeof witness?.code === 'string' ? { witness_code: witness.code } : {}),
+    detail: facts,
+    correction_message: `[HARNESS] Refused before admission: no operation from this batch ran. Operation ${index + 1} (${operation?.name}): ${facts}. The plan, the step and the requested result are unchanged.`,
+  }
 }

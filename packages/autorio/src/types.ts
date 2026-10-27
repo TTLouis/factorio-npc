@@ -174,6 +174,18 @@ export interface PlayerParametersPlaceEntity {
   /** The NPC's own entities this placement may mine: set only by place_candidate, from the candidate's recorded clears. */
   allowed_own_clears?: number[]
   /**
+   * Placement-only execution mode, fixed at queue time and carried in the queued task (so it survives save/load): a blocked
+   * footprint fails the task before any mutation. Nothing is mined, picked up or destroyed to make room. Set by the validated
+   * local construction executor, whose fluid-preservation witness promises exactly this.
+   */
+  refuse_clearance?: boolean
+  /**
+   * The node of a connected construction layout this placement builds (storage.sgluna_construction_layouts[layout_id].nodes
+   * [index]). Set only by the validated local construction executor: the runtime checks the layout's connections against the
+   * actual entities just before create_entity and binds the placed unit_number to the node right after it.
+   */
+  layout_node?: { layout_id: number, index: number }
+  /**
    * Entities this placement has mined out of its footprint, as measured by the
    * inventory. Any entry means the task changed the world, like a ground-item
    * pickup.

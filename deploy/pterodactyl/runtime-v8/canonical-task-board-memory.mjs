@@ -261,13 +261,108 @@ function taskTypesMatch(actual, expected) {
   return expected.every((taskType, index) => actual[index] === taskType)
 }
 
-function stateHasUnverifiedTransferIntent(state) {
+// The transfer in the last batch is settled, not unverified, when the harness proved that batch's per-operation settlement
+// from its exact native receipt (a completed prefix, then the refused placement) and the board kept that settlement with
+// the recovery it routed. Bound to the exact batch ref and the signature of the stored operations, so it settles only the
+// batch it was proven for: a later batch (even an identical one) has another ref and is unverified until proven itself.
+function settledRecoveryFor(state, ref) {
+  if (!ref || typeof ref !== 'string') return undefined
+  const stepId = state?.task_board?.active_step_id
+  for (const item of [...(state?.task_board?.evidence ?? [])].reverse()) {
+    if (item?.kind !== OPERATION_FAILURE_RECOVERABLE_KIND || item.ref !== ref || item.step_id !== stepId) continue
+    try {
+      const parsed = JSON.parse(item.summary)
+      if (parsed?.prefix_settled === true && parsed.settled_batch_ref === ref) return parsed
+    }
+    catch {}
+  }
+  return undefined
+}
+
+function transferIntentSettled(state, ref) {
+  const settled = settledRecoveryFor(state, ref)
+  if (!settled) return false
+  const stored = Array.isArray(state?.last_operations) ? state.last_operations.slice(-16).map(parseStoredOperation) : []
+  return stored.length > 0 && stored.every(Boolean) && operationSignature(stored) === settled.settled_signature
+}
+
+function stateHasUnverifiedTransferIntent(state, evidence) {
   if (!state) return false
   const stored = Array.isArray(state.last_operations) ? state.last_operations.slice(-16) : []
   const hasTransfer = stored.map(parseStoredOperation).some(operation => operation && TRANSFER_OPERATION_NAMES.has(operation.name))
   if (!hasTransfer) return false
+  if (transferIntentSettled(state, evidence?.ref)) return false
   if (state.admission_status === 'admission_failed') return true
   return state.last_mutation_verified !== true
+}
+
+// A coordinate-free place_entity is the only operation `no_position` can come from (the native ring search runs only for a
+// placement without a position), so it is the only failed operation a settlement is accepted for.
+function coordinateFreePlacement(operation) {
+  const args = operation?.args
+  return operation?.name === 'place_entity' && args && typeof args === 'object' && !Array.isArray(args)
+    && args.x === undefined && args.y === undefined && args.position === undefined
+}
+const SETTLEMENT_BASES = new Set(['harness_receipt_derivation', 'native_admission_journal'])
+
+// A coordinate-free placement the engine could not position (`no_position`: the native search covers only the tile ring
+// around the actor) is a local search miss, not proof that the world prevents the step -- but only once the failing batch
+// is settled per operation. In a batch that also delivered items, the delivery's effect stays unresolved until then, and a
+// blind replay of it is exactly what the unresolved-effect hold exists to prevent.
+//
+// The runtime attaches its settlement of the failing batch to the failure receipt (batchSettlementEvidence). This accepts it
+// only when EVERY binding matches this state: the native batch the receipt reports, the goal, the plan and step the receipt
+// was stamped with (and that the reducer still holds), the actor and epoch, the signature of the operations the state
+// recorded, and a disposition list that is completed operations, one refused placement, then operations that never started.
+// A receipt for another plan, step, epoch or batch settles nothing here.
+function settledPlacementFailure(evidence, state, activePlan) {
+  if (evidence?.kind !== 'operation_error_receipt' || !state) return undefined
+  const receipt = parseReceiptSummary(evidence)
+  const settlement = receipt?.settlement
+  const basic = receipt?.basic_operation
+  if (!settlement || typeof settlement !== 'object' || Array.isArray(settlement)) return undefined
+  if (basic?.type !== 'placing' || basic.code !== 'no_position' || basic.completed === true) return undefined
+  if (typeof receipt.reason === 'string' && !receipt.reason.startsWith('placing:no_position')) return undefined
+  if (settlement.verdict !== 'refused_before_mutation' || !SETTLEMENT_BASES.has(settlement.basis)) return undefined
+  if (typeof receipt.batch_ref !== 'string' || settlement.batch_ref !== receipt.batch_ref
+    || settlement.batch_id !== receipt.batch_id || settlement.batch_generation !== receipt.batch_generation) return undefined
+  if (typeof state.goal_id !== 'string' || settlement.goal_id !== state.goal_id) return undefined
+  const correlation = receipt.correlation
+  if (!Number.isSafeInteger(correlation?.actor_id) || !Number.isSafeInteger(correlation.actor_epoch)
+    || correlation.actor_id !== settlement.actor_id || correlation.actor_epoch !== settlement.actor_epoch) return undefined
+  if (correlation.goal_id && correlation.goal_id !== state.goal_id) return undefined
+  if (correlation.step_id && correlation.step_id !== state.task_board?.active_step_id) return undefined
+  if ((evidence.plan_id ?? null) !== (settlement.plan_id ?? null) || (evidence.step_id ?? null) !== (settlement.step_id ?? null)) return undefined
+  if (evidence.plan_id && (!activePlan || evidence.plan_id !== activePlan.plan_id
+    || evidence.step_id !== activePlan.steps?.[activePlan.active_step_index]?.step_id)) return undefined
+  const operations = (Array.isArray(state.last_operations) ? state.last_operations.slice(-16) : []).map(parseStoredOperation)
+  if (operations.length < 1 || !operations.every(Boolean) || operationSignature(operations) !== settlement.signature) return undefined
+  const rows = settlement.operations
+  if (!Array.isArray(rows) || rows.length !== operations.length) return undefined
+  let failed = -1
+  for (const [index, row] of rows.entries()) {
+    if (row?.slot !== index + 1 || row.operation !== operations[index].name) return undefined
+    if (failed < 0) {
+      if (row.disposition === 'completed') continue
+      if (row.disposition !== 'no_effect') return undefined
+      failed = index
+    }
+    else if (row.disposition !== 'not_started') return undefined
+  }
+  if (failed < 0 || !coordinateFreePlacement(operations[failed])) return undefined
+  const wanted = operations[failed].args?.entity_name
+  if (typeof wanted === 'string' && typeof basic.entity_name === 'string' && wanted !== basic.entity_name) return undefined
+  if (JSON.stringify(settlement.applied_slots) !== JSON.stringify(Array.from({ length: failed }, (_, index) => index + 1))
+    || JSON.stringify(settlement.refused_slots) !== JSON.stringify([failed + 1])) return undefined
+  return {
+    prefix_settled: true,
+    settled_batch_ref: receipt.batch_ref,
+    settled_signature: settlement.signature,
+    settlement_basis: settlement.basis,
+    completed_operations: operations.slice(0, failed).map(operation => operation.name),
+    failed_operation: operations[failed].name,
+    unrun_operations: operations.length - failed - 1,
+  }
 }
 
 // A placement the engine refused at a planner-chosen coordinate is a planning
@@ -281,18 +376,20 @@ export const CORRECTABLE_PLACEMENT_RETRY_BUDGET = 2
 // that the actor has no room to take into its inventory.
 const CORRECTABLE_PLACEMENT_CODES = new Set(['not_placeable', 'ground_items_inventory_full', 'clearing_inventory_full'])
 
-function correctablePlacementRefusal(evidence) {
+function correctablePlacementRefusal(evidence, settled) {
   if (evidence?.kind !== 'operation_error_receipt') return undefined
   const receipt = parseReceiptSummary(evidence)
   const basic = receipt?.basic_operation
   // basic_operation only survives the runtime receipt when it correlates with
   // this batch (task type, tick, actor), so it names the operation that failed.
   if (basic?.type !== 'placing' || basic.completed === true) return undefined
-  if (!CORRECTABLE_PLACEMENT_CODES.has(basic.code)) return undefined
+  // no_position is correctable only for a batch the harness settled per operation (settledPlacementFailure).
+  if (!CORRECTABLE_PLACEMENT_CODES.has(basic.code) && !(basic.code === 'no_position' && settled)) return undefined
   const nearest = basic.placement_grid?.nearest_valid_center
   return {
     task_type: 'placing',
     code: basic.code,
+    ...(basic.code === 'no_position' && settled ? { placement_search: 'actor_local', ...settled } : {}),
     entity_name: typeof basic.entity_name === 'string' ? basic.entity_name : undefined,
     nearest_valid_center: nearest && Number.isFinite(nearest.x) && Number.isFinite(nearest.y)
       ? { x: nearest.x, y: nearest.y }
@@ -387,16 +484,18 @@ function correctableTransferTarget(evidence, state, plan) {
 function consecutiveRecoverableFailures(board) {
   const stepId = board?.active_step_id
   const refs = new Set()
+  const items = []
   let count = 0
   for (const item of [...(board?.evidence ?? [])].reverse()) {
     if (item?.step_id !== stepId) continue
     if (item.kind === OPERATION_FAILURE_RECOVERABLE_KIND) {
       count++
+      items.push(item)
       if (item.ref) refs.add(item.ref)
     }
     else if (item.kind === 'operation_receipt' || item.kind === 'deterministic_verification') break
   }
-  return { count, refs }
+  return { count, refs, items }
 }
 
 // The blocker names the operation that failed, not the batch's transfer
@@ -2162,6 +2261,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         signature: pending?.signature,
         plan_id: plan?.plan_id,
         step_id: step?.step_id,
+        ...(guard.settled ? { settled: guard.settled } : {}),
       }, requestId)
     }
     return guard
@@ -3403,19 +3503,31 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // Before the transfer check: in a placing + dependent transfer batch the
     // transfer was cancelled because the placement was refused, so the
     // failure is the placement's, not the transfer's (live 2026-09-25 16:15).
-    const refusal = state.status === 'active' ? correctablePlacementRefusal(evidence) : undefined
+    //
+    // A no_position refusal is correctable only for a batch the harness settled per
+    // operation (settledPlacementFailure); the same receipt re-read after that batch
+    // was settled and routed carries no settlement (its pending record is already
+    // cleared) but is the same recovery, not a new failure to block on.
+    const activePlanForSettlement = getActivePlan(this.planningByNpc.get(key))
+    const settled = state.status === 'active' ? settledPlacementFailure(evidence, state, activePlanForSettlement) : undefined
+    if (state.status === 'active' && !settled && evidence?.kind === 'operation_error_receipt'
+      && parseReceiptSummary(evidence)?.basic_operation?.code === 'no_position' && settledRecoveryFor(state, evidence.ref)) {
+      return boardAfterReceipt
+    }
+    const refusal = state.status === 'active' ? correctablePlacementRefusal(evidence, settled) : undefined
     if (refusal) {
       const streak = consecutiveRecoverableFailures(boardAfterReceipt)
       if (evidence.ref && streak.refs.has(evidence.ref)) return boardAfterReceipt
       const previousRefusals = streak.count
       if (previousRefusals >= CORRECTABLE_PLACEMENT_RETRY_BUDGET) {
         const reason = `placement_failed:${refusal.code}`
+        // The earlier recoveries of this step ride along as evidence, so the blocker links to every attempt (their batch refs).
         return this.applyOutcomeAuthority(key, {
           kind: 'world_blocked',
           source: 'autorio',
           reason_code: reason,
           candidate_blocker: reason,
-          evidence: [evidence],
+          evidence: [evidence, ...streak.items.slice().reverse()],
         }).state?.task_board ?? boardAfterReceipt
       }
       return super.recordBoardEvidence(key, {
@@ -3453,7 +3565,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }
     }
 
-    if (evidence?.kind === 'operation_error_receipt' && stateHasUnverifiedTransferIntent(state)) {
+    if (evidence?.kind === 'operation_error_receipt' && stateHasUnverifiedTransferIntent(state, evidence)) {
       const reasonCode = operationFailureReasonCode(evidence)
       return this.applyOutcomeAuthority(key, {
         kind: 'world_blocked',

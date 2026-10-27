@@ -87,15 +87,24 @@ function own_allowed(entity: LuaEntity, allow_own: AllowOwn) {
   return allow_own === true || allow_own.includes(entity.unit_number)
 }
 
+type Box = { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+
 /**
  * Per-request memory of each entity's clearance, so an entity that touches many
  * footprints is evaluated once. Valid only within one tick (one request).
+ *
+ * `readable` (candidate reads) says whether an area may be read now. A chain check whose neighbour or supply scan would
+ * read an area it refuses keeps the blocker (fail closed) and is remembered as `not_visible`; `saw_not_visible` is set
+ * each time such a blocker is met, so the caller can report the footprint as unseen rather than blocked.
  */
 export interface ClearanceMemo {
-  reasons: Record<string, ClearReason | 'blocked'>
+  reasons: Record<string, ClearReason | 'blocked' | 'not_visible'>
+  readable?: (area: Box) => boolean
+  saw_not_visible?: boolean
 }
 
-type Box = { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+// The chain reason when a scan that decides whether an entity is idle would read an area the caller may not read.
+const SCAN_AREA_NOT_VISIBLE = 'scan_area_not_visible'
 
 // A link is anything a reader can see attached: a single entity, or a non-empty
 // list or record of them (poles list their wire neighbours by colour, belts their
@@ -132,8 +141,10 @@ function holds_items(entity: LuaEntity) {
 // this one, so it counts as a link (fail closed).
 // Only entities of the actor force are searched: a neutral tree, rock or ore tile cannot feed or power an NPC machine, and
 // counting them would fill the bound on every ore patch and in every forest.
-function neighbour_link(entity: LuaEntity, actor: ControlledActor) {
-  const nearby = protected_read(() => find_world_entities(actor.surface, { area: area_around(entity, MAX_CHAIN_NEIGHBOUR_SEARCH), force: actor.force, limit: MAX_CHAIN_SCAN })) ?? []
+function neighbour_link(entity: LuaEntity, actor: ControlledActor, readable?: (area: Box) => boolean) {
+  const area = area_around(entity, MAX_CHAIN_NEIGHBOUR_SEARCH)
+  if (readable !== undefined && !readable(area)) return SCAN_AREA_NOT_VISIBLE
+  const nearby = protected_read(() => find_world_entities(actor.surface, { area, force: actor.force, limit: MAX_CHAIN_SCAN })) ?? []
   if (nearby.length >= MAX_CHAIN_SCAN) return 'neighbour_scan_truncated'
   for (const other of nearby) {
     if (!other.valid || other === entity) continue
@@ -146,10 +157,11 @@ function neighbour_link(entity: LuaEntity, actor: ControlledActor) {
 // electric network id is covered by a pole (an unconnected entity has none). A
 // lone pole nothing stands under, and an electric entity no pole covers, are
 // not part of a chain.
-function electric_link(entity: LuaEntity, actor: ControlledActor) {
+function electric_link(entity: LuaEntity, actor: ControlledActor, readable?: (area: Box) => boolean) {
   const reach = pole_reach(protected_read(() => entity.prototype))
   if (reach === undefined) return protected_read(() => entity.electric_network_id) !== undefined ? 'electric_network_member' : undefined
   const supply = area_around(entity, reach.supply_area_distance)
+  if (readable !== undefined && !readable(supply)) return SCAN_AREA_NOT_VISIBLE
   const nearby = protected_read(() => find_world_entities(actor.surface, { area: supply, force: actor.force, limit: MAX_CHAIN_SCAN })) ?? []
   if (nearby.length >= MAX_CHAIN_SCAN) return 'neighbour_scan_truncated'
   for (const other of nearby) {
@@ -165,9 +177,10 @@ function electric_link(entity: LuaEntity, actor: ControlledActor) {
  * holds anything (items, fuel, ingredients, fluid), is linked to another entity
  * (fluid connection, a drop or pickup target of its own, a wire or belt
  * neighbour), is covered by or supplies electric power, or another entity drops
- * into it or picks from it.
+ * into it or picks from it. With `readable`, a neighbour or supply scan over an area it refuses is not read: the entity
+ * counts as linked (`scan_area_not_visible`), never as idle.
  */
-export function running_chain_reason(entity: LuaEntity, actor: ControlledActor): string | undefined {
+export function running_chain_reason(entity: LuaEntity, actor: ControlledActor, readable?: (area: Box) => boolean): string | undefined {
   const status = protected_read(() => entity.status)
   if (status !== undefined && status === defines.entity_status.working) return 'working'
   if (holds_items(entity)) return 'holds_items'
@@ -182,14 +195,14 @@ export function running_chain_reason(entity: LuaEntity, actor: ControlledActor):
   if (protected_read(() => entity.pickup_target) !== undefined) return 'picks_from_entity'
   if (has_links(protected_read(() => entity.neighbours))) return 'neighbour_linked'
   if (has_links(protected_read(() => entity.belt_neighbours))) return 'belt_linked'
-  return electric_link(entity, actor) ?? neighbour_link(entity, actor)
+  return electric_link(entity, actor, readable) ?? neighbour_link(entity, actor, readable)
 }
 
 function memo_key(entity: LuaEntity) {
   return entity.unit_number !== undefined ? `u${entity.unit_number}` : `${entity.name}@${entity.position.x},${entity.position.y}`
 }
 
-function evaluate_blocker(actor: ControlledActor, entity: LuaEntity): ClearReason | undefined {
+function evaluate_blocker(actor: ControlledActor, entity: LuaEntity, readable?: (area: Box) => boolean): ClearReason | 'not_visible' | undefined {
   const force = protected_read(() => entity.force)
   if (!force) return undefined
   if (force.name === 'neutral') {
@@ -200,7 +213,9 @@ function evaluate_blocker(actor: ControlledActor, entity: LuaEntity): ClearReaso
   if (!is_placed_building_entity(entity) || entity.minable !== true) return undefined
   if (protected_read(() => entity.prototype.mineable_properties.minable) !== true) return undefined
   if (!entity_has_no_last_user(entity)) return undefined
-  if (running_chain_reason(entity, actor) !== undefined) return undefined
+  const chain = running_chain_reason(entity, actor, readable)
+  if (chain === SCAN_AREA_NOT_VISIBLE) return 'not_visible'
+  if (chain !== undefined) return undefined
   return 'own_idle_entity'
 }
 
@@ -209,15 +224,19 @@ export function blocker_clearance(actor: ControlledActor, entity: LuaEntity, pro
   if (!entity.valid) return undefined
   if (entity.unit_number !== undefined && protect.includes(entity.unit_number)) return undefined
   let reason: ClearReason | undefined
-  if (memo === undefined) reason = evaluate_blocker(actor, entity)
+  if (memo === undefined) {
+    const evaluated = evaluate_blocker(actor, entity)
+    reason = evaluated === 'not_visible' ? undefined : evaluated
+  }
   else {
     const key = memo_key(entity)
-    const known = memo.reasons[key]
-    if (known !== undefined) reason = known === 'blocked' ? undefined : known
-    else {
-      reason = evaluate_blocker(actor, entity)
-      memo.reasons[key] = reason ?? 'blocked'
+    let known = memo.reasons[key]
+    if (known === undefined) {
+      known = evaluate_blocker(actor, entity, memo.readable) ?? 'blocked'
+      memo.reasons[key] = known
     }
+    if (known === 'not_visible') memo.saw_not_visible = true
+    reason = known === 'blocked' || known === 'not_visible' ? undefined : known
   }
   if (reason === 'own_idle_entity' && !own_allowed(entity, allow_own)) return undefined
   return reason

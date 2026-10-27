@@ -1,5 +1,8 @@
 import type { ControlledActor } from './actors/types'
+import type { LayoutRecord } from './construction_layout_record'
 import type { TaskBatchIdentity, TaskBatchReceipt } from './task_manager'
+import { node_ids, settle_execution } from './construction_layout_record'
+import { resolve_recorded_entity } from './entity_reference'
 
 export const ADMISSION_LIMITS = { unresolved: 64, history: 64, slots: 16, refs: 16 }
 export interface FluidPreservationOwner {
@@ -71,6 +74,31 @@ export interface OperationAdmission extends OperationCorrelation {
    * ran to completion before the refusing task of the next slot.
    */
   applied_slot_count?: number
+  /**
+   * With state partial and error exact_construction_layout_partial: the construction layout whose execution this admission
+   * queued, and which of that execution's nodes were placed and which were not when its batch closed unfinished.
+   */
+  layout_id?: number
+  placed_node_ids?: string[]
+  not_placed_node_ids?: string[]
+  /** Nodes of that execution that were bound to an entity which can no longer be read. */
+  missing_node_ids?: string[]
+  /**
+   * The exact receipt evidence the layout settlement rests on, kept with the sealed record: the journal evicts receipts once
+   * the record stops pinning them, and a restart retires an unfinished batch as an uncertain receipt.
+   */
+  layout_receipt?: {
+    batch_ref: string
+    batch_id: number
+    batch_generation: number
+    state?: string
+    reason?: string
+    tick: number
+    task_count: number
+    tasks_started?: number
+    started_count?: number
+    task_types: string[]
+  }
 }
 // Operations whose submission validates, then either queues a task or returns a
 // refusal without touching the world. A refusal from any other operation
@@ -85,7 +113,8 @@ export const PURE_SUBMIT_OPERATIONS = [
 // to PURE_SUBMIT_OPERATIONS or the pre-mutation-refusal proof above.
 const DELIVERY_OPERATIONS = ['move_items', 'move_items_exact', 'supply_entity']
 declare const storage: { sgluna_operation_admissions?: OperationAdmission[], sgluna_operation_admission_high_water?: number,
-  sgluna_task_receipt_journal?: TaskBatchReceipt[], sgluna_task_batch_generation?: number }
+  sgluna_task_receipt_journal?: TaskBatchReceipt[], sgluna_task_batch_generation?: number,
+  sgluna_construction_layouts?: Record<number, LayoutRecord> }
 
 export function admission_unresolved(record: OperationAdmission) {
   return record.state === 'admitting' || record.state === 'admitted' || record.state === 'uncertain'
@@ -202,7 +231,7 @@ export function pinned_operation_batch_refs() {
     const record = reconcile_record(stored, status)
     // Unpinning permits receipt eviction. Preserve this terminal decision before
     // releasing its only witness, even when no later admission refresh occurs.
-    if (record.state === 'partial' && record.error === 'exact_terminal_navigation_cancelled') Object.assign(stored, record)
+    if (record.state === 'partial' && (record.error === 'exact_terminal_navigation_cancelled' || record.error === 'exact_construction_layout_partial')) Object.assign(stored, record)
     if (!admission_unresolved(record)) continue
     for (const slot of record.slots) for (const ref of slot.batch_refs) refs.push(ref.batch_ref)
   }
@@ -293,6 +322,11 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.ok = false
     record.error = 'exact_terminal_navigation_cancelled'
   }
+  else if (admission_unresolved(record) && apply_construction_layout_settlement(record, status)) {
+    record.state = 'partial'
+    record.ok = false
+    record.error = 'exact_construction_layout_partial'
+  }
   else if (admission_unresolved(record) && (record.generation !== status.batch_generation || refs.some(ref => {
     const receipt = receipt_for(ref)
     return receipt !== undefined && receipt.state !== 'completed'
@@ -351,6 +385,81 @@ export function terminal_gather_cancellation(record: OperationAdmission, status:
     && receipt.task_types.every((type, index) => type === types[index]) && receipt.tick >= record.tick
     && (receipt.reason === 'mining:mining_rejected' || receipt.reason === 'mining:no_target')
     && receipt.outcome === undefined && !receipt.refused_count && !(receipt.refusals?.length)
+}
+// A single execute_construction_plan admission whose placement batch ended unfinished, matched to the construction layout that
+// execution built by the exact batch identity it was queued under. The layout's execution is settled from its durable node
+// evidence (a node bound to an entity that can still be read is placed; one still queued was never built; a bound node whose
+// entity is gone is missing) and the admission reports which nodes were which: a partial layout, never completion and never
+// replay authority. The batch ended unfinished when its receipt is cancelled (at its own generation or, once a boot's startup
+// reconciliation has advanced it, an earlier one: the deployment configuration cancels before startup, and a cancelled queue of
+// an older generation cannot run), or, after a restart, when the retained receipt of
+// a batch of an earlier generation says the save was loaded with it unfinished (startup retires the whole queue, so nothing of
+// that batch can still run). Undefined unless every link is exact: generation, actor, one slot with one batch reference, one
+// receipt for it with only placement tasks (as many as the slot queued and the execution recorded), no refusals, and exactly
+// one layout whose execution carries that batch identity under the same actor and surface. `receipt` is the exact evidence
+// the settlement rests on; the sealed admission keeps a copy so it outlives the journal's receipt.
+export function terminal_construction_layout_settlement(record: OperationAdmission, status: { receipt_journal: TaskBatchReceipt[], batch_generation: number }) {
+  if (!integer(record.generation) || !integer(status.batch_generation) || record.generation > status.batch_generation
+    || !integer(record.actor_id) || !integer(record.epoch) || record.operation_count !== 1 || record.slots.length !== 1) return undefined
+  const slot = record.slots[0]
+  if (!slot.ok || slot.index !== 1 || slot.operation !== 'execute_construction_plan' || !integer(slot.queued_tasks)
+    || slot.batch_refs.length !== 1) return undefined
+  const ref = slot.batch_refs[0]
+  if (!integer(ref.batch_id) || ref.batch_generation !== record.generation || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return undefined
+  if (!Array.isArray(status.receipt_journal)) return undefined
+  const matches = status.receipt_journal.filter(row => row.batch_ref === ref.batch_ref
+    || row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation)
+  if (matches.length !== 1) return undefined
+  const receipt = matches[0]
+  const retired = receipt.state === 'uncertain' && receipt.reason === 'save_load_unfinished' && receipt.batch_generation < status.batch_generation
+  if (receipt.batch_ref !== ref.batch_ref || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
+    || (receipt.state !== 'cancelled' && !retired) || receipt.task_count !== slot.queued_tasks
+    || !Array.isArray(receipt.task_types) || receipt.task_types.length !== receipt.task_count
+    || !receipt.task_types.every(type => type === 'placing')
+    || (receipt.state === 'cancelled' && (!integer(receipt.tasks_started) || receipt.tasks_started > receipt.task_count
+      || !integer(receipt.started_count) || receipt.started_count < receipt.tasks_started))
+    || typeof receipt.tick !== 'number' || receipt.tick < record.tick
+    || receipt.outcome !== undefined || receipt.refused_count || (receipt.refusals?.length ?? 0) > 0) return undefined
+  let layout: LayoutRecord | undefined
+  for (const key in storage.sgluna_construction_layouts ?? {}) {
+    const candidate = storage.sgluna_construction_layouts![key as unknown as number]
+    const execution = candidate.executions?.[candidate.executions.length - 1]
+    if (execution?.batch_ref !== ref.batch_ref || execution.batch_id !== ref.batch_id || execution.batch_generation !== ref.batch_generation) continue
+    if (layout !== undefined) return undefined
+    layout = candidate
+  }
+  if (layout === undefined || layout.actor_id !== record.actor_id
+    || (record.surface_index !== undefined && layout.surface_index !== record.surface_index)) return undefined
+  const execution = layout.executions[layout.executions.length - 1]
+  if (execution.queued_nodes.length !== slot.queued_tasks) return undefined
+  const surface_index = layout.surface_index
+  const force_index = layout.force_index
+  const settled = settle_execution(layout, execution, receipt.tick, (node) => {
+    const entity = node.unit_number === undefined ? undefined : resolve_recorded_entity(node.unit_number, surface_index, force_index)
+    return entity === undefined ? undefined : { name: entity.name, position: { x: entity.position.x, y: entity.position.y }, direction: entity.direction }
+  })
+  return {
+    layout_id: layout.layout_id,
+    placed_node_ids: node_ids(layout, settled.placed),
+    not_placed_node_ids: node_ids(layout, settled.not_placed),
+    missing_node_ids: node_ids(layout, settled.missing ?? []),
+    layout_receipt: {
+      batch_ref: receipt.batch_ref, batch_id: receipt.batch_id, batch_generation: receipt.batch_generation, state: receipt.state,
+      reason: typeof receipt.reason === 'string' ? receipt.reason.slice(0, 128) : undefined, tick: receipt.tick,
+      task_count: receipt.task_count, tasks_started: receipt.tasks_started, started_count: receipt.started_count, task_types: receipt.task_types.slice(0, 64),
+    },
+  }
+}
+
+function apply_construction_layout_settlement(record: OperationAdmission, status: { receipt_journal: TaskBatchReceipt[], batch_generation: number }) {
+  const settlement = terminal_construction_layout_settlement(record, status)
+  if (settlement === undefined) return false
+  record.layout_id = settlement.layout_id
+  record.placed_node_ids = settlement.placed_node_ids
+  record.not_placed_node_ids = settlement.not_placed_node_ids
+  record.missing_node_ids = settlement.missing_node_ids.length > 0 ? settlement.missing_node_ids : undefined
+  record.layout_receipt = settlement.layout_receipt
+  return true
 }
 function trim_history() {
   const records = journal()

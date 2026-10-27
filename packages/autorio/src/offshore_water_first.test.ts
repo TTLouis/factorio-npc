@@ -23,7 +23,7 @@ function fixture() {
       prototype: { fluid: { name: 'water' } }, surface: { index: 1 } }]),
   }
   const inventory = { get_item_count: () => 1, remove: vi.fn() }
-  const actor = { is_valid: true, character: { valid: true }, force: { index: 1 }, position: { x: 15, y: -88 }, surface,
+  const actor = { is_valid: true, character: { valid: true }, force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true }, position: { x: 15, y: -88 }, surface,
     status_snapshot: () => ({ actor_id: actorId, kind: 'standalone_character' }),
     set_walking_state: vi.fn(), set_mining_state: vi.fn(), set_shooting_state: vi.fn(),
     get_main_inventory: () => inventory,
