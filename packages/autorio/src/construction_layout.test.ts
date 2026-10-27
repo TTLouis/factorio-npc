@@ -1405,6 +1405,80 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
         expect(admission.status().records.map(row => row.state)).toEqual(['partial', 'completed'])
       })
 
+      // The shipped boot order (supervisor.mjs bindNpc): the guard's configure cancels the queue and then bumps the deployment epoch
+      // (deploy/pterodactyl/staging/guard.ts: cancel_tasks(), set_mode, sgluna_deployment_epoch += 1), and only then does startup
+      // reconciliation advance the batch generation (autorio_operations.reconcile_startup). So the interrupted batch is a
+      // `cancelled` receipt of the OLD generation and the row's epoch is the OLD epoch. Same shape as the runtime test's row.
+      const REBOUND_ROW = {
+        state: 'partial',
+        ok: false,
+        error: 'exact_construction_layout_partial',
+        epoch: 3,
+        generation: 1,
+        layout_id: 1,
+        placed_node_ids: ['layout-1:n0'],
+        not_placed_node_ids: ['layout-1:n2', 'layout-1:n1'],
+        layout_receipt: { batch_ref: 'batch-g1-1', batch_id: 1, batch_generation: 1, state: 'cancelled', reason: 'cancelled', tick: 100, task_count: 3, tasks_started: expect.any(Number), started_count: expect.any(Number), task_types: ['placing', 'placing', 'placing'] },
+      }
+      const THIRD = { ...SECOND, epoch: 4 }
+
+      it('settles an admission across the real boot order: configure cancels at the old generation and bumps the epoch, then startup advances the generation', () => {
+        const f = build()
+        ;(globalThis as any).storage.sgluna_deployment_epoch = 3
+        const { admission, layout_id } = admitted(f)
+        expect(place_next(f)?.[0]).toBe(true)
+        // configure(): cancel_tasks(), then the epoch bump.
+        f.manager.cancel_all_tasks()
+        // The row is sealed as soon as the closing receipt is retained, at the generation it ran under.
+        expect((globalThis as any).storage.sgluna_operation_admissions[0]).toMatchObject(REBOUND_ROW)
+        // A remainder validated between the cancellation and the end of the boot is not the boot's remainder.
+        const early = resume(f, layout_id)
+        expect(early.ok).toBe(true)
+        ;(globalThis as any).storage.sgluna_deployment_epoch = 4
+        ;(globalThis as any).remote.call = vi.fn((_name: string, _method: string, epoch: number) => epoch === 4)
+        // reconcile_startup(session): the generation advances.
+        expect(f.manager.reconcile_startup('boot-2')).toMatchObject({ ok: true, reconciled: true, batch_generation: 2 })
+
+        const row = admission.status().records[0]
+        expect(row).toMatchObject(REBOUND_ROW)
+        expect(row.layout_receipt).toEqual(REBOUND_ROW.layout_receipt)
+        // The old admission cannot be continued under the new epoch.
+        expect(admission.slot(KEY, 1, { ok: true, operation: 'execute_construction_plan', batch_refs: [] })).toEqual({ ok: false, error: 'stale_actor_epoch' })
+        // The old remainder token is refused, and refusing it changes nothing in the layout.
+        const before = stored()
+        expect(construction_plan_preflight(f.actor, early.validation_id, early.placement_count)).toMatchObject({ ok: false, code: 'construction_plan_stale', evaluation_code: 'LAYOUT_TOKEN_PREDATES_REBIND' })
+        expect(execute(f, early)).toEqual([false, expect.stringContaining('LAYOUT_TOKEN_PREDATES_REBIND')])
+        expect(stored()).toBe(before)
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+
+        // Only a remainder validated after the rebind runs, under a new admission of the new epoch.
+        expect(admission.begin(THIRD).ok).toBe(true)
+        const validation = resume(f, layout_id)
+        expect(validation).toMatchObject({ ok: true, placement_count: 2, retained: [{ unit_number: 901 }] })
+        expect(execute(f, validation)[0]).toBe(true)
+        const active: any = f.manager.get_status_snapshot().active_batch
+        expect(admission.slot(THIRD.operation_key, 1, { ok: true, operation: 'execute_construction_plan', batch_refs: [{ batch_id: active.batch_id, batch_generation: 2, batch_ref: active.batch_ref }] }).ok).toBe(true)
+        expect(admission.finish(THIRD.operation_key, { ok: true }).record?.state).toBe('admitted')
+        expect(place_next(f)?.[0]).toBe(true)
+        expect(place_next(f)?.[0]).toBe(true)
+        expect(layout(layout_id)).toMatchObject({ state: 'complete', executions_used: 2, nodes: [{ state: 'placed', unit_number: 901 }, { state: 'placed' }, { state: 'placed' }] })
+        expect(f.created.filter(entity => entity.name === 'test-chest' && entity.position.y === -0.5)).toHaveLength(1)
+        expect(f.surface.create_entity).toHaveBeenCalledTimes(3)
+        expect(admission.status().records.map(r => r.state)).toEqual(['partial', 'completed'])
+      })
+
+      it('seals a cancelled receipt of an older generation that nothing sealed before the generation advanced', () => {
+        const f = build()
+        const { admission, layout_id } = admitted(f)
+        expect(place_next(f)?.[0]).toBe(true)
+        f.manager.cancel_all_tasks()
+        const row = (globalThis as any).storage.sgluna_operation_admissions[0]
+        Object.assign(row, { state: 'admitted', ok: true, error: undefined, layout_id: undefined, placed_node_ids: undefined, not_placed_node_ids: undefined, layout_receipt: undefined })
+        layout(layout_id).executions[0].settled = undefined
+        expect(f.manager.reconcile_startup('boot-2')).toMatchObject({ reconciled: true, batch_generation: 2 })
+        expect(admission.status().records[0]).toMatchObject({ state: 'partial', generation: 1, layout_id, placed_node_ids: [`layout-${layout_id}:n0`], layout_receipt: { state: 'cancelled', batch_generation: 1 } })
+      })
+
       it('keeps the restart evidence in the sealed row after the journal evicts the retired receipt', () => {
         const f = build()
         const { admission } = admitted(f)
@@ -1465,7 +1539,6 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
         ['a refused task', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].refused_count = 1 }],
         ['a receipt of another batch', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].batch_ref = 'batch-g1-99' }],
         ['a receipt older than the admission', () => { (globalThis as any).storage.sgluna_task_receipt_journal[0].tick = 1 }],
-        ['a cancelled receipt of an earlier generation', () => { (globalThis as any).storage.sgluna_task_batch_generation = 2 }],
         ['a layout of another batch', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].executions[0].batch_ref = 'batch-g1-99' }],
         ['a layout of another actor', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].actor_id = 7 }],
         ['an execution that queued another number of nodes', () => { Object.values<any>((globalThis as any).storage.sgluna_construction_layouts)[0].executions[0].queued_nodes.pop() }],
