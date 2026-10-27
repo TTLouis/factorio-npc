@@ -180,6 +180,12 @@ export interface PlayerParametersPlaceEntity {
    */
   refuse_clearance?: boolean
   /**
+   * The node of a connected construction layout this placement builds (storage.sgluna_construction_layouts[layout_id].nodes
+   * [index]). Set only by the validated local construction executor: the runtime checks the layout's connections against the
+   * actual entities just before create_entity and binds the placed unit_number to the node right after it.
+   */
+  layout_node?: { layout_id: number, index: number }
+  /**
    * Entities this placement has mined out of its footprint, as measured by the
    * inventory. Any entry means the task changed the world, like a ground-item
    * pickup.

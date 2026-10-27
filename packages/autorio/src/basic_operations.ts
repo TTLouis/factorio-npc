@@ -16,13 +16,14 @@ import { placement_candidate_matches, placement_preservation_queue_binding } fro
 import type { ClearableEntity, ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
+import { layout_node_failed } from './construction_layout'
 
 type BasicTask = PlayerParametersMineEntity | PlayerParametersPreparePumpSite | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
 type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
-  | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable' | 'construction_plan_blocked_no_clear'
+  | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable' | 'construction_plan_blocked_no_clear' | 'layout_connection_unproven'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
@@ -69,6 +70,9 @@ export interface BasicOperationResult {
   }
   placement_grid?: { x_offset: number, y_offset: number, nearest_valid_center?: { x: number, y: number } }
   placement_blockers?: Array<{ name: string, type: string, unit_number?: number, position: { x: number, y: number } }>
+  /** A placement of a connected construction layout: the node it builds, and why a refusal found its connections unproven. */
+  layout_node?: { layout_id: number, index: number }
+  layout_refusal?: string
   // Ground items a placement picked up from its footprint, and one that did not fit.
   ground_items_picked_up?: GroundItem[]
   ground_item_left?: GroundItem
@@ -340,7 +344,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue(task, actor)
   }
 
-  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[], options?: { refuse_clearance?: boolean }) {
+  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[], options?: { refuse_clearance?: boolean, layout_node?: { layout_id: number, index: number } }) {
     const has_x = x !== undefined
     const has_y = y !== undefined
     if (has_x !== has_y || (has_x && (!valid_coordinate(x!) || !valid_coordinate(y!)))) {
@@ -369,6 +373,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       protected_unit_numbers: protected_unit_numbers !== undefined && protected_unit_numbers.length > 0 ? protected_unit_numbers : undefined,
       allowed_own_clears: allowed_own_clears !== undefined && allowed_own_clears.length > 0 ? allowed_own_clears : undefined,
       refuse_clearance: options?.refuse_clearance === true ? true : undefined,
+      layout_node: options?.layout_node,
       entity_name,
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,
@@ -575,6 +580,8 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
   function fail(actor: ControlledActor | undefined, task: BasicTask, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
     refusal_results = {}
     suppress_cancel_receipt = true
+    // A failed node leaves its layout unable to continue by itself; the layout record says so (first reason kept).
+    if (task.type === TaskStates.PLACING) layout_node_failed(task.layout_node, code)
     // A placement is only created after every check passes, so a placing
     // failure (including create_failed, which creates nothing) changed nothing
     // in the world unless the task picked up ground items from its footprint

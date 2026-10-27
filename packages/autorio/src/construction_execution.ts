@@ -1,6 +1,8 @@
 import { reservation_intersection } from './area_reservations'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
+import type { LayoutConnection, LayoutConnectionInput } from './construction_layout'
+import { create_layout_record, discard_layout_record, normalize_connections, overlaps, plan_execution_order, prove_plan_connections, valid_slot_name } from './construction_layout'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
 import { execute_prepared_remote_construction_plan, is_prepared_remote_construction_plan } from './map_construction'
 import { placement_check_args } from './placement_geometry'
@@ -19,11 +21,15 @@ export interface ConstructionExecutionPlacement {
   x: number
   y: number
   direction?: number
+  /** Names this placement inside the plan so a connection can refer to it (1..40 chars of a-z, 0-9, _ and -; unique). */
+  slot?: string
 }
 
 export interface ConstructionExecutionValidationRequest {
   plan_id: string
   placements: ConstructionExecutionPlacement[]
+  /** Typed links between the plan's placements (and existing entities): at most 8, and then at most 6 placements. */
+  connections?: LayoutConnectionInput[]
 }
 
 interface StoredConstructionPlan {
@@ -34,6 +40,7 @@ interface StoredConstructionPlan {
   force_index: number
   created_tick: number
   placements: ConstructionExecutionPlacement[]
+  connections?: LayoutConnection[]
 }
 
 declare const storage: {
@@ -46,7 +53,6 @@ const MAX_PLAN_ID = 200
 const MAX_COORDINATE = 1000000
 const MAX_LOCAL_DISTANCE = 10
 const VALIDATION_MAX_AGE_TICKS = 60 * 60
-const OVERLAP_EPSILON = 0.001
 
 // Execution builds every placement at its grid-snapped centre (basic_operation_runtime snaps the task position), and the
 // footprint geometry rotates cardinally, so a plan accepts only the four cardinal directions.
@@ -64,13 +70,6 @@ function valid_coordinate(value: number) {
 
 function squared_distance(a: Position, b: Position) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
-}
-
-function overlaps(a: WorldBox, b: WorldBox) {
-  return a.left_top.x < b.right_bottom.x - OVERLAP_EPSILON
-    && a.right_bottom.x > b.left_top.x + OVERLAP_EPSILON
-    && a.left_top.y < b.right_bottom.y - OVERLAP_EPSILON
-    && a.right_bottom.y > b.left_top.y + OVERLAP_EPSILON
 }
 
 function overlap_box(a: WorldBox, b: WorldBox): WorldBox {
@@ -98,6 +97,7 @@ function footprints_collide(a: PlannedFootprint, b: PlannedFootprint) {
 function placement_geometry(placement: ConstructionExecutionPlacement, index: number, footprint: PlannedFootprint | undefined) {
   return {
     index,
+    slot: placement.slot,
     entity_name: placement.entity_name,
     position: { x: placement.x, y: placement.y },
     // The centre execution builds at, and the collision box there.
@@ -127,6 +127,7 @@ function normalize_request(request: ConstructionExecutionValidationRequest) {
   }
 
   const placements: ConstructionExecutionPlacement[] = []
+  const slots: Record<string, boolean> = {}
   for (let index = 0; index < request.placements.length; index++) {
     const placement = request.placements[index]
     if (!placement || typeof placement.entity_name !== 'string' || placement.entity_name.length < 1 || placement.entity_name.length > 200) {
@@ -138,48 +139,70 @@ function normalize_request(request: ConstructionExecutionValidationRequest) {
     if (placement.direction !== undefined && (!valid_integer(placement.direction, 0, 15) || !CARDINAL_DIRECTIONS.includes(placement.direction))) {
       return { error: { code: 'INVALID_PLACEMENT', message: `placement ${index} has invalid direction (a construction plan takes 0, 4, 8 or 12)`, index } }
     }
+    if (placement.slot !== undefined) {
+      if (!valid_slot_name(placement.slot)) {
+        return { error: { code: 'INVALID_PLACEMENT', message: `placement ${index} has an invalid slot (1..40 characters of a-z, 0-9, _ and -)`, index } }
+      }
+      if (slots[placement.slot]) {
+        return { error: { code: 'INVALID_CONNECTION', message: `placement ${index} repeats slot ${placement.slot}`, slot: placement.slot, placement_index: index } }
+      }
+      slots[placement.slot] = true
+    }
     placements.push({
       entity_name: placement.entity_name,
       x: placement.x,
       y: placement.y,
       direction: placement.direction,
+      slot: placement.slot,
     })
   }
-  return { placements }
+  const normalized = normalize_connections(request.connections, placements)
+  if ('error' in normalized) return { error: normalized.error }
+  return { placements, connections: normalized.connections! }
 }
 
-function evaluate_plan(actor: ControlledActor, placements: ConstructionExecutionPlacement[]) {
-  const counts = inventory_counts(actor)
-  if (!counts) return { ok: false, error: { code: 'NO_INVENTORY', message: 'controlled actor inventory is unavailable' } }
+// Two phases. The spatial (planning) phase answers whether the layout fits the world and its connections are geometrically
+// consistent: a failure there is `spatially_invalid` with the first error. Only a spatially valid layout is then asked
+// whether it can run now (the eligibility phase): stock, local reach, and connections that cannot be proved before their
+// entities stand. Every eligibility blocker is collected, `error` is the first, and no token is ever stored for them.
+interface PlanEvaluation {
+  ok: boolean
+  planning_status: 'spatially_invalid' | 'spatially_valid'
+  execution_eligible: boolean
+  /** The spatial failure, or the first eligibility blocker. */
+  error?: Record<string, unknown>
+  eligibility_blockers?: Array<Record<string, unknown>>
+  placement_geometry?: Array<Record<string, unknown>>
+  planned_footprints?: PlannedFootprint[]
+  execution_order?: number[]
+  connections?: Array<Record<string, unknown>>
+}
+
+function evaluate_plan(actor: ControlledActor, placements: ConstructionExecutionPlacement[], connections: LayoutConnection[]): PlanEvaluation {
+  const spatial_failure = (error: Record<string, unknown>): PlanEvaluation => ({ ok: false, planning_status: 'spatially_invalid', execution_eligible: false, error })
 
   const required: Record<string, number> = {}
   const footprints: PlannedFootprint[] = []
   for (let index = 0; index < placements.length; index++) {
     const placement = placements[index]
-    if (prototypes.entity[placement.entity_name]?.type === 'offshore-pump') return { ok: false, error: {
+    if (prototypes.entity[placement.entity_name]?.type === 'offshore-pump') return spatial_failure({
       code: 'PLACEMENT_CANDIDATE_REQUIRED', message: 'Offshore pumps require water-first discovery and place_candidate with live native registry ids', index,
-    } }
+    })
     const placement_item = resolve_entity_placement_item(placement.entity_name)
     if (!placement_item.ok) {
-      return {
-        ok: false,
-        error: {
-          code: 'PLACEMENT_ITEM_UNSUPPORTED',
-          message: `cannot resolve placement item for entity ${placement.entity_name}: ${placement_item.code}`,
-          index,
-          entity_name: placement.entity_name,
-          placement_item_error: placement_item.code,
-          item_name: placement_item.item_name,
-        },
-      }
+      return spatial_failure({
+        code: 'PLACEMENT_ITEM_UNSUPPORTED',
+        message: `cannot resolve placement item for entity ${placement.entity_name}: ${placement_item.code}`,
+        index,
+        entity_name: placement.entity_name,
+        placement_item_error: placement_item.code,
+        item_name: placement_item.item_name,
+      })
     }
     const position = { x: placement.x, y: placement.y }
-    if (squared_distance(actor.position, position) > MAX_LOCAL_DISTANCE ** 2) {
-      return { ok: false, error: { code: 'OUTSIDE_LOCAL_BUILD_REACH', message: `placement ${index} is farther than ${MAX_LOCAL_DISTANCE} tiles from the actor`, index } }
-    }
     const footprint = planned_placement_footprint(placement.entity_name, placement.x, placement.y, placement.direction)
-    if (!footprint) return { ok: false, error: { code: 'PLANNED_FOOTPRINT_UNKNOWN', message: `placement ${index} has no footprint to check against the rest of the plan`, index } }
-    if (reservation_intersection(actor.surface, footprint.world_box)) return { ok: false, error: { code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index } }
+    if (!footprint) return spatial_failure({ code: 'PLANNED_FOOTPRINT_UNKNOWN', message: `placement ${index} has no footprint to check against the rest of the plan`, index })
+    if (reservation_intersection(actor.surface, footprint.world_box)) return spatial_failure({ code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index })
     if (!actor.surface.can_place_entity({
       name: placement.entity_name,
       position,
@@ -187,20 +210,17 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
       force: actor.force,
       ...placement_check_args(placement.entity_name),
     })) {
-      return {
-        ok: false,
-        error: {
-          code: 'WORLD_COLLISION',
-          message: `placement ${index} is not placeable in the current world`,
-          index,
-          placement: placement_geometry(placement, index, footprint),
-          spatial_context: local_spatial_observation(actor, {
-            position,
-            half_size: 4,
-            requested_entity_name: placement.entity_name,
-          }),
-        },
-      }
+      return spatial_failure({
+        code: 'WORLD_COLLISION',
+        message: `placement ${index} is not placeable in the current world`,
+        index,
+        placement: placement_geometry(placement, index, footprint),
+        spatial_context: local_spatial_observation(actor, {
+          position,
+          half_size: 4,
+          requested_entity_name: placement.entity_name,
+        }),
+      })
     }
     const requirement = placement_item.requirement
     required[requirement.item_name] = (required[requirement.item_name] ?? 0) + requirement.count
@@ -216,43 +236,80 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
     for (let right = left + 1; right < footprints.length; right++) {
       const right_footprint = footprints[right]
       if (!footprints_collide(left_footprint, right_footprint) || !overlaps(left_footprint.world_box, right_footprint.world_box)) continue
-      return {
-        ok: false,
-        error: {
-          code: 'PLANNED_COLLISION',
-          message: `placements ${left} and ${right} overlap before construction begins`,
-          indices: [left, right],
-          placements: [
-            placement_geometry(placements[left], left, left_footprint),
-            placement_geometry(placements[right], right, right_footprint),
-          ],
-          overlap_box: overlap_box(left_footprint.world_box, right_footprint.world_box),
-        },
-      }
+      return spatial_failure({
+        code: 'PLANNED_COLLISION',
+        message: `placements ${left} and ${right} overlap before construction begins`,
+        indices: [left, right],
+        placements: [
+          placement_geometry(placements[left], left, left_footprint),
+          placement_geometry(placements[right], right, right_footprint),
+        ],
+        overlap_box: overlap_box(left_footprint.world_box, right_footprint.world_box),
+      })
     }
   }
 
-  for (const item_name in required) {
-    const needed = required[item_name] ?? 0
-    if ((counts[item_name] ?? 0) < needed) {
-      return {
-        ok: false,
-        error: {
+  // The virtual proof of the typed connections, still before anything is built: planned footprints and the live boxes of
+  // existing endpoints. A connection that cannot hold is a spatial failure; one that cannot be predicted is an eligibility
+  // matter below.
+  const proved = prove_plan_connections(actor, placements, footprints, connections)
+  if ('error' in proved) return spatial_failure(proved.error!)
+  const ordering = plan_execution_order(placements, connections)
+  if (ordering.cycle !== undefined) {
+    return spatial_failure({
+      code: 'LAYOUT_DEPENDENCY_CYCLE',
+      message: `placements ${ordering.cycle.join(', ')} depend on each other through the layout connections`,
+      indices: ordering.cycle,
+    })
+  }
+
+  const blockers: Array<Record<string, unknown>> = []
+  const counts = inventory_counts(actor)
+  if (!counts) {
+    blockers.push({ code: 'NO_INVENTORY', message: 'controlled actor inventory is unavailable' })
+  }
+  else {
+    const item_names: string[] = []
+    for (const item_name in required) item_names.push(item_name)
+    item_names.sort()
+    for (const item_name of item_names) {
+      const needed = required[item_name] ?? 0
+      if ((counts[item_name] ?? 0) < needed) {
+        blockers.push({
           code: 'ITEMS_MISSING',
           message: `construction plan requires ${needed} ${item_name} but only ${counts[item_name] ?? 0} are available`,
           item_name,
           required_count: needed,
           available_count: counts[item_name] ?? 0,
-        },
+        })
       }
     }
   }
+  for (let index = 0; index < placements.length; index++) {
+    const distance = math.sqrt(squared_distance(actor.position, { x: placements[index].x, y: placements[index].y }))
+    if (distance > MAX_LOCAL_DISTANCE) {
+      blockers.push({
+        code: 'OUTSIDE_LOCAL_BUILD_REACH',
+        message: `placement ${index} is farther than ${MAX_LOCAL_DISTANCE} tiles from the actor`,
+        index,
+        distance: math.floor(distance * 100 + 0.5) / 100,
+        route: 'unproven',
+      })
+    }
+  }
+  for (const unproven of proved.unproven) blockers.push(unproven)
 
-  return {
+  const planned: PlanEvaluation = {
     ok: true,
+    planning_status: 'spatially_valid',
+    execution_eligible: true,
     placement_geometry: placements.map((placement, index) => placement_geometry(placement, index, footprints[index])),
     planned_footprints: footprints,
+    execution_order: ordering.order,
+    connections: proved.proofs,
   }
+  if (blockers.length > 0) return { ...planned, ok: false, execution_eligible: false, eligibility_blockers: blockers, error: blockers[0] }
+  return planned
 }
 
 export function validate_construction_execution_plan(actor: ControlledActor, request: ConstructionExecutionValidationRequest) {
@@ -263,8 +320,22 @@ export function validate_construction_execution_plan(actor: ControlledActor, req
   const normalized = normalize_request(request)
   if ('error' in normalized) return { ok: false, error: normalized.error }
   const placements = normalized.placements!
-  const evaluation = evaluate_plan(actor, placements)
-  if (!evaluation.ok) return evaluation
+  const connections = normalized.connections!
+  const evaluation = evaluate_plan(actor, placements, connections)
+  if (!evaluation.ok) {
+    // The planning status is separate from execution eligibility: a spatially valid layout that cannot run yet still
+    // carries its geometry, order and connection proofs, and no token.
+    return {
+      ok: false,
+      planning_status: evaluation.planning_status,
+      execution_eligible: false,
+      error: evaluation.error,
+      eligibility_blockers: evaluation.eligibility_blockers,
+      placement_geometry: evaluation.placement_geometry,
+      execution_order: evaluation.execution_order,
+      connections: evaluation.connections,
+    }
+  }
 
   const validation_id = (storage.sgluna_next_construction_validation_id ?? 0) + 1
   storage.sgluna_next_construction_validation_id = validation_id
@@ -276,10 +347,13 @@ export function validate_construction_execution_plan(actor: ControlledActor, req
     force_index: actor.force.index,
     created_tick: game.tick,
     placements,
+    connections: connections.length > 0 ? connections : undefined,
   }
 
   return {
     ok: true,
+    planning_status: evaluation.planning_status,
+    execution_eligible: true,
     validation_id,
     plan_id: request.plan_id,
     placement_count: placements.length,
@@ -287,6 +361,8 @@ export function validate_construction_execution_plan(actor: ControlledActor, req
     expires_tick: game.tick + VALIDATION_MAX_AGE_TICKS,
     placements,
     placement_geometry: evaluation.placement_geometry,
+    execution_order: evaluation.execution_order,
+    connections: connections.length > 0 ? evaluation.connections : undefined,
   }
 }
 
@@ -317,14 +393,20 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
     return { ok: false, code: 'construction_plan_scope_mismatch' }
   }
   if (game.tick - plan.created_tick > VALIDATION_MAX_AGE_TICKS) return { ok: false, code: 'construction_plan_expired' }
-  const evaluation = evaluate_plan(actor, plan.placements)
+  const connections = plan.connections ?? []
+  const evaluation = evaluate_plan(actor, plan.placements, connections)
   if (!evaluation.ok) return { ok: false, code: 'construction_plan_stale', evaluation_code: evaluation.error?.code }
 
   // `position` is the entity centre the engine uses (the grid snap a coordinate place_entity's planned_footprint uses), so the
   // runtime tests committed areas against resolved geometry rather than the requested coordinates. `planned_footprint` is
   // the same record a coordinate place_entity's preflight carries, so the runtime compares the plan's placements with the
-  // rest of the batch.
-  const construction_placements: Array<{ entity_name: string, x: number, y: number, direction: number, position: { x: number, y: number }, planned_footprint: PlannedFootprint, fluidbox_count: number }> = []
+  // rest of the batch. The rows stay in plan index order (the runtime compares them by index); a connected layout also
+  // carries each row's `execution_rank`, the position at which execution builds it.
+  const construction_placements: Array<{ entity_name: string, x: number, y: number, direction: number, position: { x: number, y: number }, planned_footprint: PlannedFootprint, fluidbox_count: number, execution_rank?: number }> = []
+  const execution_ranks: number[] = []
+  for (let index = 0; index < plan.placements.length; index++) execution_ranks.push(0)
+  const execution_order = evaluation.execution_order ?? []
+  for (let rank = 0; rank < execution_order.length; rank++) execution_ranks[execution_order[rank]] = rank
   const entity_names: string[] = []
   let fluidbox_total = 0
   const planned_footprints = evaluation.planned_footprints ?? []
@@ -343,6 +425,7 @@ export function construction_plan_preflight(actor: ControlledActor | undefined, 
       position: footprint.position,
       planned_footprint: footprint,
       fluidbox_count,
+      ...(connections.length > 0 ? { execution_rank: execution_ranks[index] } : {}),
     })
   }
   return {
@@ -401,17 +484,41 @@ export function execute_validated_construction_plan(
     return [false, 'validated construction plan expired; validate the live world again']
   }
 
-  const evaluation = evaluate_plan(actor, plan.placements)
+  const connections = plan.connections ?? []
+  const evaluation = evaluate_plan(actor, plan.placements, connections)
   if (!evaluation.ok) {
     storage.sgluna_validated_construction_plan = undefined
     return [false, `validated construction plan became stale: ${evaluation.error?.code ?? 'UNKNOWN'}`]
   }
 
+  // A connected layout is tracked from queueing on: its record exists before the first node can run, and each queued
+  // placement carries its node so the runtime can check the connections against the actual entities (see construction_layout).
+  const execution_order = evaluation.execution_order ?? []
+  const layout_id = connections.length > 0 ? validation_id : undefined
+  if (layout_id !== undefined) {
+    create_layout_record({
+      layout_id,
+      plan_id: plan.plan_id,
+      actor_id: plan.actor_id,
+      surface_index: plan.surface_index,
+      force_index: plan.force_index,
+      placements: plan.placements,
+      footprints: evaluation.planned_footprints ?? [],
+      execution_order,
+      connections,
+    })
+  }
+
   let queued = 0
-  for (const placement of plan.placements) {
+  for (const index of execution_order) {
+    const placement = plan.placements[index]
     // Always placement-only: the task carries refuse_clearance, so nothing is mined or picked up to make room.
-    if (!basic.submit_placement(placement.entity_name, placement.x, placement.y, placement.direction, undefined, undefined, undefined, { refuse_clearance: true })) {
+    if (!basic.submit_placement(placement.entity_name, placement.x, placement.y, placement.direction, undefined, undefined, undefined, {
+      refuse_clearance: true,
+      layout_node: layout_id !== undefined ? { layout_id, index } : undefined,
+    })) {
       if (queued > 0) manager.cancel_all_tasks('construction_plan_admission_failed')
+      if (layout_id !== undefined) discard_layout_record(layout_id)
       storage.sgluna_validated_construction_plan = undefined
       return [false, `unable to queue placement ${queued + 1}`]
     }
@@ -419,5 +526,5 @@ export function execute_validated_construction_plan(
   }
 
   storage.sgluna_validated_construction_plan = undefined
-  return [true, 'Validated construction plan started']
+  return [true, layout_id !== undefined ? `Validated construction plan started (layout_id ${layout_id})` : 'Validated construction plan started']
 }

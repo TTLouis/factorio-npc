@@ -2,6 +2,7 @@ import { reservation_intersection } from './area_reservations'
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
+import { layout_node_precheck, record_layout_node_placed } from './construction_layout'
 import { entity_last_user } from './entity_provenance'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import { record_hand_insert } from './hand_work'
@@ -636,6 +637,13 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       controller.fail(actor, task, 'placement_candidate_unavailable')
       return [false, 'Queued placement preservation guard changed before native create']
     }
+    // A node of a connected construction layout: its connections to the entities already built must still hold against the
+    // actual entities. Refused here, before the native create, so a failed proof keeps the no-mutation receipt.
+    const layout_refusal = layout_node_precheck(actor, task.layout_node, task.entity_name, position, task.direction)
+    if (layout_refusal !== undefined) {
+      controller.fail(actor, task, 'layout_connection_unproven', { layout_node: task.layout_node, layout_refusal })
+      return [false, layout_refusal]
+    }
     const create_entity_args: SurfaceCreateEntity = {
       name: task.entity_name,
       position,
@@ -656,6 +664,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     // operation on a freshly placed entity failed with target_gone unless an
     // unrelated observation happened to scan it first.
     remember_entity_reference(entity)
+    // The same tick, before the task completes: bind the entity to its layout node and verify the layout's connections.
+    record_layout_node_placed(actor, task.layout_node, entity)
 
     const removed = inventory.remove({ name: requirement.item_name, count: requirement.count })
     if (removed !== requirement.count) {
