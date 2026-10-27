@@ -31,7 +31,8 @@ function dimension(value: unknown) {
   return typeof value === 'number' && finite(value) && value > 0 ? value : 1
 }
 
-function vector_xy(raw: any): PlacementPoint | undefined {
+// Factorio 2.0 returns prototype vectors in array form ({-0.5, -1.3}); older data and tests use {x, y}. Accept both.
+export function vector_xy(raw: any): PlacementPoint | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const values = raw as number[]
   const x = typeof raw.x === 'number' ? raw.x : values[0]
@@ -40,7 +41,8 @@ function vector_xy(raw: any): PlacementPoint | undefined {
   return { x, y }
 }
 
-function rotated_cardinal(vector: PlacementPoint, direction: number) {
+// Rotate a prototype vector (given for direction north) by one of the four cardinal directions.
+export function rotate_cardinal(vector: PlacementPoint, direction: number) {
   if (direction === 4) return { x: -vector.y, y: vector.x }
   if (direction === 8) return { x: -vector.x, y: -vector.y }
   if (direction === 12) return { x: vector.y, y: -vector.x }
@@ -141,7 +143,7 @@ function local_collision_box(prototype: any, direction: number | undefined): Pla
   let max_x = -math.huge
   let max_y = -math.huge
   for (const corner of corners) {
-    const rotated = rotated_cardinal(corner, direction ?? 0)
+    const rotated = rotate_cardinal(corner, direction ?? 0)
     min_x = math.min(min_x, rotated.x)
     min_y = math.min(min_y, rotated.y)
     max_x = math.max(max_x, rotated.x)

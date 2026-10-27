@@ -1,6 +1,7 @@
 import type { LuaEntity } from 'factorio:runtime'
 import { find_world_entities } from './npc_vision'
 import { electric_prototype_facts, protected_read } from './electric_facts'
+import { rotate_cardinal, vector_xy } from './placement_geometry'
 
 const MAX_FLUID_STORAGES = 8
 const MAX_PIPE_CONNECTIONS_PER_STORAGE = 8
@@ -18,13 +19,6 @@ function entity_identity(entity: LuaEntity | undefined) {
 
 function finite(value: number) {
   return value === value && value !== math.huge && value !== -math.huge
-}
-
-function rotate_cardinal(vector: { x: number, y: number }, direction: number) {
-  if (direction === 4) return { x: -vector.y, y: vector.x }
-  if (direction === 8) return { x: -vector.x, y: -vector.y }
-  if (direction === 12) return { x: vector.y, y: -vector.x }
-  return { x: vector.x, y: vector.y }
 }
 
 function compact_fluidbox_prototype(value: any) {
@@ -120,17 +114,6 @@ function mining_radius(prototype: any) {
   // quality argument ("Invalid QualityID" on 2.0.77).
   const radius = prototype?.mining_drill_radius
   return typeof radius === 'number' && radius > 0 && finite(radius) ? radius : undefined
-}
-
-// Factorio 2.0 returns prototype vectors in array form ({-0.5, -1.3}); older
-// data and tests use {x, y}. Accept both.
-function vector_xy(raw: any): { x: number, y: number } | undefined {
-  if (!raw || typeof raw !== 'object') return undefined
-  const values = raw as number[]
-  const x = typeof raw.x === 'number' ? raw.x : values[0]
-  const y = typeof raw.y === 'number' ? raw.y : values[1]
-  if (typeof x !== 'number' || typeof y !== 'number' || !finite(x) || !finite(y)) return undefined
-  return { x, y }
 }
 
 function mining_offset(prototype: any, direction: number) {

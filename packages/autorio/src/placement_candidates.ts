@@ -3,7 +3,7 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports, complete_live_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
-import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, placement_tile_size, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, placement_tile_size, rotate_cardinal, snap_placement_center, vector_xy, type PlacementFootprint } from './placement_geometry'
 import { resolve_entity_placement_item } from './placement_item'
 import { resolve_exact_entity } from './entity_reference'
 import { pole_candidate_facts, pole_reach, protected_read } from './electric_facts'
@@ -280,13 +280,6 @@ function material_status(actor: ControlledActor, entity_name: string) {
   return { status: held_count >= required_count ? 'held' as const : 'stock_shortfall' as const, item_name, held_count, required_count }
 }
 
-function rotate_cardinal(vector: { x: number, y: number }, direction: number) {
-  if (direction === 4) return { x: -vector.y, y: vector.x }
-  if (direction === 8) return { x: -vector.x, y: -vector.y }
-  if (direction === 12) return { x: vector.y, y: -vector.x }
-  return { x: vector.x, y: vector.y }
-}
-
 function sorted_resource_coverages(values: Record<string, ResourceCoverage>) {
   const result: ResourceCoverage[] = []
   for (const name in values) result.push(values[name])
@@ -317,17 +310,6 @@ function mining_radius(prototype: any) {
   // quality argument ("Invalid QualityID" on 2.0.77).
   const radius = prototype?.mining_drill_radius
   return typeof radius === 'number' && radius > 0 && finite(radius) ? radius : undefined
-}
-
-// Factorio 2.0 returns prototype vectors in array form ({-0.5, -1.3}); older
-// data and tests use {x, y}. Accept both.
-function vector_xy(raw: any): { x: number, y: number } | undefined {
-  if (!raw || typeof raw !== 'object') return undefined
-  const values = raw as number[]
-  const x = typeof raw.x === 'number' ? raw.x : values[0]
-  const y = typeof raw.y === 'number' ? raw.y : values[1]
-  if (typeof x !== 'number' || typeof y !== 'number' || !finite(x) || !finite(y)) return undefined
-  return { x, y }
 }
 
 function mining_offset(prototype: any, direction: number) {
@@ -451,7 +433,7 @@ function directions_for(prototype: any) {
   return CARDINAL_DIRECTIONS
 }
 
-function item_output_position(prototype: any, position: { x: number, y: number }, direction: number) {
+export function item_output_position(prototype: any, position: { x: number, y: number }, direction: number) {
   const vector = vector_xy(prototype?.vector_to_place_result)
   if (!vector || (vector.x === 0 && vector.y === 0)) return undefined
   const rotated = rotate_cardinal(vector, direction)
