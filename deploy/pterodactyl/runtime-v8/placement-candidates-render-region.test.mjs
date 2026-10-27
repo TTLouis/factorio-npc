@@ -87,3 +87,34 @@ test('protection and hard-constraint facts the mod sent are kept, and the trimme
   assert.equal(headline.spatial_status, 'candidates_found')
   assert.deepEqual(headline.region, REGION)
 })
+
+// M3: the map facts the mod read the candidates against, as the native answer carries them.
+const MAP_CONTEXT = { source: 'npc_map_knowledge', observed_tick: 4321, surface_index: 1, surface_name: 'nauvis', candidate_authority: 'currently_visible_chunks_only',
+  visible_window: { surface_index: 1, chunk: { x: 0, y: 0 }, chunk_radius: 2 }, explored_chunks: 26,
+  evaluated_area: { left_top: { x: 2, y: 2 }, right_bottom: { x: 40, y: 19 } },
+  evaluated_area_coverage: { charted_chunks: 2, uncharted_chunks: 0, visible_chunks: 1, fogged_chunks: 1, total_chunks: 2, partial: false, visibility_partial: true } }
+
+test('M3: map context leads beside the completeness facts, and positions in unseen chunks are counted as not candidates', () => {
+  const rendered = renderOf(answer({ map_context: MAP_CONTEXT,
+    search_completeness: completeness({ complete: false, reason: 'area_not_fully_visible', legal_candidate_count: 2, returned_count: 2, not_visible_rejected_count: 64 }) }))
+  const keys = Object.keys(rendered)
+  assert.equal(keys.indexOf('map_context'), keys.indexOf('search_completeness') + 1)
+  assert.ok(keys.indexOf('map_context') < keys.indexOf('candidates'))
+  assert.deepEqual(rendered.map_context, MAP_CONTEXT, 'carried as the mod sent it')
+  assert.match(rendered.scope_report, /^candidates found in the region .*; search incomplete: area_not_fully_visible/)
+  assert.match(rendered.scope_report, /64 in map chunks the NPC does not see now, not candidates until observed/)
+  // An empty answer over unseen chunks is incomplete, never "none".
+  const unseen = renderOf(answer({ spatial_status: 'search_incomplete', ...empty, map_context: MAP_CONTEXT,
+    search_completeness: completeness({ complete: false, reason: 'area_not_fully_visible', not_visible_rejected_count: 289 }) }))
+  assert.match(unseen.scope_report, /absence of a candidate is not established/)
+  assert.doesNotMatch(JSON.stringify(unseen), /impossible|infeasible|no room/i)
+})
+
+test('M3: the map context is small, and the trimmed headline still carries it with the surface and tick', () => {
+  assert.ok(JSON.stringify(MAP_CONTEXT).length < 700, String(JSON.stringify(MAP_CONTEXT).length))
+  const typical = renderPlacementCandidatesResult(JSON.stringify(answer({ map_context: MAP_CONTEXT, candidates: CANDIDATES, returned_candidate_count: 8, legal_candidate_count: 8 })), LIMIT)
+  assert.ok(typical.length < 8000, `a typical eight-candidate answer with map context is ${typical.length} characters`)
+  const headline = JSON.parse(renderPlacementCandidatesResult(JSON.stringify(answer({ map_context: MAP_CONTEXT, connects_to: { note: 'y'.repeat(20000) } })), 4000))
+  assert.equal(headline.truncated_for_size, true)
+  assert.deepEqual(headline.map_context, MAP_CONTEXT)
+})

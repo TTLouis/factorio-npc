@@ -7,12 +7,15 @@
 // search_completeness) and whether the candidates can be executed now (material_status, execution_eligibility). Two short
 // sentences state what those fields establish: an empty or truncated answer says what was verified, never that the placement
 // cannot exist, and candidates the NPC lacks the item for are marked as planning options. Everything the mod sent is kept.
+//
+// M3 adds map_context: the surface, tick and chunk coverage (visible now, fogged, never seen) of the area the search
+// evaluated. It leads beside search_completeness, so the model reads the candidates against the map they came from.
 
 import { describeRegion } from './placement-region.mjs'
 
 export const REJECTED_FOOTPRINTS_LABEL = 'rejected_footprint_samples_not_candidates'
 
-const LEADING_KEYS = ['ok', 'code', 'error', 'entity_name', 'region', 'region_semantics', 'spatial_status', 'scope_report', 'execution_eligibility', 'material_status', 'execution_report', 'search_completeness', 'ordering', 'legal_candidate_count', 'returned_candidate_count', 'candidates', 'candidates_may_be_incomplete', 'candidates_incomplete_reason']
+const LEADING_KEYS = ['ok', 'code', 'error', 'entity_name', 'region', 'region_semantics', 'spatial_status', 'scope_report', 'execution_eligibility', 'material_status', 'execution_report', 'search_completeness', 'map_context', 'ordering', 'legal_candidate_count', 'returned_candidate_count', 'candidates', 'candidates_may_be_incomplete', 'candidates_incomplete_reason']
 const MAX_PARSED_CHARS = 200_000
 
 function plainObject(value) {
@@ -31,11 +34,13 @@ function scopeReport(result) {
   const evaluated = count(completeness.evaluated_positions)
   const outside = count(completeness.region_rejected_count)
   const legal = count(completeness.legal_candidate_count)
+  const unseen = count(completeness.not_visible_rejected_count)
   const reason = short(completeness.reason) ?? 'reason not reported'
   const tally = [
     evaluated === undefined ? undefined : `${evaluated} positions evaluated`,
     outside === undefined ? undefined : `${outside} outside the region`,
     legal === undefined ? undefined : `${legal} legal in the region`,
+    unseen ? `${unseen} in map chunks the NPC does not see now, not candidates until observed` : undefined,
   ].filter(Boolean).join(', ')
   if (status === 'none_in_verified_scope') return `none in the verified region${where}: the search was complete${tally ? ` (${tally})` : ''}. Only that region was verified.`
   if (status === 'search_incomplete') return `search incomplete: ${reason}${tally ? ` (${tally})` : ''}. The region${where} was not fully verified, so the absence of a candidate is not established.`
