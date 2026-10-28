@@ -240,8 +240,10 @@ async function prepare() {
   stale.local_anchor = await tool('getLocalSpatialObservation', { anchor_unit_number: fixture.anchor, half_size: 6 })
   assert.ok(refusedFor(stale.local_anchor, 'does not see now'), JSON.stringify(stale.local_anchor))
   // The world changes in the fog: the anchor and the ore are gone. Nothing the NPC reads may notice.
-  await lua(`local e=game.get_entity_by_unit_number(${fixture.anchor}); if e then e.destroy() end; `
-    + 'for _,r in pairs(s.find_entities_filtered{area={{-82,-9},{-78,-5}},name="iron-ore"}) do r.destroy() end; rcon.print("{}")')
+  // Chests are not indexed by unit number in the engine: the fixture finds the anchor by its exact identity at its position.
+  const removed = await lua(`local gone=0; for _,e in pairs(s.find_entities_filtered{name="wooden-chest",position={${fixture.anchor_position.x},${fixture.anchor_position.y}},radius=0.5}) do if e.unit_number==${fixture.anchor} then e.destroy(); gone=gone+1 end end; `
+    + 'local ore=0; for _,r in pairs(s.find_entities_filtered{area={{-82,-9},{-78,-5}},name="iron-ore"}) do r.destroy(); ore=ore+1 end; rcon.print(helpers.table_to_json({anchor=gone,ore=ore}))')
+  assert.deepEqual(removed, { anchor: 1, ore: 16 }, 'the fixture removed the anchor and the ore in the fog')
   stale.anchor_destroyed = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: fixture.anchor }, radius: 4, limit: 2 })
   stale.sites_destroyed = await tool('findConstructionSites', { width: 2, height: 2, anchor_unit_number: fixture.anchor })
   assert.equal(stale.anchor_destroyed.code ?? stale.anchor_destroyed.error?.code, stale.anchor.code ?? stale.anchor.error?.code, 'a destroyed anchor in the fog reads exactly like a standing one')
