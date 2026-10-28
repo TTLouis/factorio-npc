@@ -815,7 +815,7 @@
     },
     {
       "schema_version": 1,
-      "revision": 1,
+      "revision": 2,
       "id": "skill-deliberate-belt-routing",
       "name": "Deliberate Belt Routing",
       "content_type": "skill",
