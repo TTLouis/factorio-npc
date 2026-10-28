@@ -202,6 +202,7 @@ describe('exact entity status observation', () => {
       return {
         valid: true, name: 'stone-furnace', type: 'furnace', unit_number,
         position: { x, y: 0 }, surface, force: actor_force, status: 1,
+        bounding_box: { left_top: { x: x - 1, y: -1 }, right_bottom: { x: x + 1, y: 1 } },
         get_max_inventory_index: () => 1,
         get_inventory: () => ({ get_contents: () => [{ name: 'iron-plate', count, quality: 'normal' }] }),
         get_recipe: () => [{ name: 'iron-plate' }, undefined],

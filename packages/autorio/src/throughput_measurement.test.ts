@@ -26,6 +26,7 @@ function fixture() {
     surface: { index: 1 },
     force,
     position: { x: 0, y: 0 },
+    bounding_box: { left_top: { x: -0.4, y: -0.4 }, right_bottom: { x: 0.4, y: 0.4 } },
     direction: 0,
     active: true,
     held_stack: held,
@@ -52,6 +53,7 @@ function fixture() {
     force,
     direction: 4,
     position: { x: 0, y: 0 },
+    bounding_box: { left_top: { x: -0.4, y: -0.4 }, right_bottom: { x: 0.4, y: 0.4 } },
     get_max_transport_line_index: () => 2,
     get_transport_line: () => line,
   }

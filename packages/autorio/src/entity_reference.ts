@@ -119,14 +119,31 @@ function entity_known_visible(actor: ControlledActor, entity: LuaEntity) {
   return area_known_visible(actor.force, entity.surface, box ?? { left_top: entity.position, right_bottom: entity.position })
 }
 
-// A unit number the model names (an anchor, a connection target, a layout endpoint), resolved only where the NPC sees it now.
-// An entity in a chunk the NPC does not see is `not_visible` whether it still stands there or not: nothing there is scanned
-// and its hint is not refreshed, so an old observation never comes back as a fresh fact or as execution authority. Another
-// surface is `wrong_surface`; with actor_body scope another force is `not_found`, as resolve_entity_reference treats it.
-export function resolve_visible_entity_reference(actor: ControlledActor, unit_number: number, scope: EntityReferenceScope): VisibleEntityReference {
+// Where a hinted lookup scans before it finds anything: the observed bounds, or for a hint recorded before bounds were kept,
+// the prototype's collision box turned any way around the position. A name no prototype carries any more cannot stand there.
+function hint_lookup_area(hint: EntityReferenceHint) {
+  if (hint.box) return hint.box
+  const prototype = prototypes.entity[hint.name]
+  if (!prototype) return undefined
+  const box = prototype.collision_box
+  const reach = math.max(math.abs(box.left_top.x), math.abs(box.left_top.y), math.abs(box.right_bottom.x), math.abs(box.right_bottom.y))
+  return {
+    left_top: { x: hint.position.x - reach, y: hint.position.y - reach },
+    right_bottom: { x: hint.position.x + reach, y: hint.position.y + reach },
+  }
+}
+
+// The actor's own surface, or another surface that still exists.
+export function hint_surface(actor: ControlledActor, hint: { surface_index: LuaSurface['index'] }) {
+  if (hint.surface_index === actor.surface.index) return actor.surface
+  const surface = game.get_surface(hint.surface_index)
+  return surface && surface.valid ? surface : undefined
+}
+
+function resolve_visible(actor: ControlledActor, unit_number: number, scope: EntityReferenceScope, any_surface: boolean): VisibleEntityReference {
   const direct = game.get_entity_by_unit_number(unit_number as UnitNumber)
   if (direct && direct.valid && !is_npc_vision_entity(direct)) {
-    if (direct.surface.index !== actor.surface.index) return { code: 'wrong_surface' }
+    if (!any_surface && direct.surface.index !== actor.surface.index) return { code: 'wrong_surface' }
     if (scope === 'actor_body' && direct.force.index !== actor.force.index) return { code: 'not_found' }
     if (!entity_known_visible(actor, direct)) return { code: 'not_visible' }
     remember_entity_reference(direct)
@@ -136,14 +153,31 @@ export function resolve_visible_entity_reference(actor: ControlledActor, unit_nu
 
   const hint = hints()[unit_number]
   if (!hint) return { code: 'not_found' }
-  if (hint.surface_index !== actor.surface.index) return { code: 'wrong_surface' }
+  if (!any_surface && hint.surface_index !== actor.surface.index) return { code: 'wrong_surface' }
   if (scope === 'actor_body' && hint.force_index !== actor.force.index) return { code: 'not_found' }
-  // The observed bounds (or, for a hint recorded before they were kept, the position) must be seen before anything is
-  // scanned; the hint is refreshed only once the entity found there is wholly seen.
-  if (!area_known_visible(actor.force, actor.surface, hint.box ?? { left_top: hint.position, right_bottom: hint.position })) return { code: 'not_visible' }
-  const entity = identity_at(actor.surface, hint, unit_number, scope === 'actor_body' ? actor.force : undefined, false)
+  const surface = hint_surface(actor, hint)
+  if (!surface) return { code: 'not_found' }
+  // Everything the lookup scans must be seen on the hint's own surface before anything is scanned; the hint is refreshed
+  // only once the entity found there is wholly seen.
+  const area = hint_lookup_area(hint)
+  if (!area) return { code: 'not_found' }
+  if (!area_known_visible(actor.force, surface, area)) return { code: 'not_visible' }
+  const entity = identity_at(surface, hint, unit_number, scope === 'actor_body' ? actor.force : undefined, false)
   if (!entity) return { code: 'not_found' }
   if (!entity_known_visible(actor, entity)) return { code: 'not_visible' }
   remember_entity_reference(entity)
   return { entity, code: 'ok' }
+}
+
+// A unit number the model names (an anchor, a connection target, a layout endpoint), resolved only where the NPC sees it now.
+// An entity in a chunk the NPC does not see is `not_visible` whether it still stands there or not: nothing there is scanned
+// and its hint is not refreshed, so an old observation never comes back as a fresh fact or as execution authority. Another
+// surface is `wrong_surface`; with actor_body scope another force is `not_found`, as resolve_entity_reference treats it.
+export function resolve_visible_entity_reference(actor: ControlledActor, unit_number: number, scope: EntityReferenceScope): VisibleEntityReference {
+  return resolve_visible(actor, unit_number, scope, false)
+}
+
+// Map inspection names an entity on any surface: the same rule, with visibility checked on the entity's own surface.
+export function resolve_visible_entity_on_any_surface(actor: ControlledActor, unit_number: number): VisibleEntityReference {
+  return resolve_visible(actor, unit_number, 'map_visible', true)
 }
