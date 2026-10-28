@@ -1169,8 +1169,12 @@ function resolve_placement_candidate(
     const changed = join_change(target, prototype, candidate)
     if (changed !== undefined) return { ok: false as const, code: 'connects_to_port_changed', error: `connects_to_port_changed: ${changed}` }
   }
-  // The candidate may take only the own entities it listed when it was read, not whatever stands there now.
-  if (!placeable_or_clearable(actor, prototype, set.entity_name, candidate.position, candidate.direction, set.protected_unit_numbers, own_clear_unit_numbers(candidate) ?? [])) {
+  // The candidate may take only the own entities it listed when it was read, not whatever stands there now. Deciding whether
+  // such a blocker is idle scans around it (neighbours, the area its pole powers); a scan reaching a chunk the NPC does not see
+  // now is not read, and the candidate is stale rather than blocked or cleared on unseen machinery.
+  const clearance_memo: ClearanceMemo = { reasons: {}, readable: area => area_known_visible(actor.force, actor.surface, area) }
+  if (!placeable_or_clearable(actor, prototype, set.entity_name, candidate.position, candidate.direction, set.protected_unit_numbers, own_clear_unit_numbers(candidate) ?? [], clearance_memo)) {
+    if (clearance_memo.saw_not_visible) return { ok: false as const, code: 'placement_candidate_not_visible', error: 'placement_candidate_not_visible: a blocker the candidate would clear is next to a chunk the NPC does not see now; observe it again from nearby and read fresh candidates' }
     return { ok: false as const, error: 'placement candidate is no longer placeable' }
   }
 

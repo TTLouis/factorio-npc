@@ -2,8 +2,9 @@ import type { ControlledActor } from './actors/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
-import { create_placement_candidate_set, execute_placement_candidate, sort_candidates } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, sort_candidates } from './placement_candidates'
 import { placement_footprint } from './placement_geometry'
+import { with_refusal_class } from './refusal_classes'
 import { new_task_manager } from './task_manager'
 
 // Run 19af: getPlacementCandidates returned legal drill candidates, but its rejected-footprint
@@ -859,6 +860,71 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       expect(fed.spatial_status).toBe('none_in_verified_scope')
       expect(fed.search_completeness.complete).toBe(true)
       expect(fed.search_completeness.not_visible_rejected_count).toBe(0)
+    })
+  })
+  // M3C-R1-2: a stored candidate that clears an own blocker re-decides at preflight and execution whether that blocker is idle,
+  // which scans around it. The footprint can stay visible while that scan reaches a chunk the NPC no longer sees: the candidate
+  // is then stale (placement_candidate_not_visible) and nothing in the unseen chunk is read, whatever stands there. Pre-change
+  // (10d746a8) the revalidation scanned the unseen chunk: an idle blocker passed (ok:true, the candidate executed) and a feeding
+  // machine in the fog made it "no longer placeable".
+  describe('selection to execution re-reads a blocker only in chunks the NPC sees now (M3)', () => {
+    const BLOCKER_AT = { x: 1.5, y: 1.5 }
+
+    function stored_candidate(extra: any[] = []) {
+      const own = chest(BLOCKER_AT)
+      const blockers = [own, ...extra]
+      register(...blockers)
+      const surface = world(blockers)
+      const actor: any = npc(surface, inventory_with(10), { x: 2, y: 4 })
+      let fogged = false
+      // Chunk x = -1 holds the blocker's neighbour scan edge (tiles -1.5..0); the footprints cover tiles 0..3 in chunk 0.
+      actor.force.is_chunk_visible = (_surface: unknown, chunk: Pos) => !fogged || (chunk.x >= 0 && chunk.y >= 0)
+      const generated = create_placement_candidate_set(actor, request({ covers_position: BLOCKER_AT, center: { x: 1.5, y: 1.5 }, radius: 3, limit: 2 })) as any
+      expect(generated.returned_candidate_count).toBeGreaterThan(0)
+      expect(generated.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', unit_number: own.unit_number, reason: 'own_idle_entity' }])
+      for (const candidate of generated.candidates) expect(candidate.position.x - 1).toBeGreaterThanOrEqual(0)
+      return { actor, surface, generated, fog: () => { fogged = true }, clear: () => { fogged = false } }
+    }
+
+    function scanned_unseen(surface: any) {
+      return surface.find_entities_filtered.mock.calls.some(([filters]: any[]) => filters.area !== undefined && (filters.area.left_top.x < 0 || filters.area.left_top.y < 0))
+    }
+
+    it('refuses at preflight and execution, without scanning the unseen chunk, while the footprint stays visible', () => {
+      const { actor, surface, generated, fog, clear } = stored_candidate()
+      const id = generated.candidates[0].id
+      // Control: everything visible, the stored candidate still holds.
+      expect(placement_candidate_preflight(actor, generated.candidate_set_id, id)).toMatchObject({ ok: true })
+
+      fog()
+      surface.find_entities_filtered.mockClear()
+      const result = placement_candidate_preflight(actor, generated.candidate_set_id, id) as any
+      expect(result).toMatchObject({ ok: false, code: 'placement_candidate_unavailable' })
+      expect(result.error.startsWith('placement_candidate_not_visible')).toBe(true)
+      expect(with_refusal_class(result).refusal_class).toBe('argument')
+      expect(scanned_unseen(surface)).toBe(false)
+
+      const submitted = vi.fn(() => true)
+      const executed = execute_placement_candidate(actor, generated.candidate_set_id, id, submitted)
+      expect(executed[0]).toBe(false)
+      expect(executed[1]).toContain('placement_candidate_not_visible')
+      expect(submitted).not.toHaveBeenCalled()
+      expect(scanned_unseen(surface)).toBe(false)
+
+      // Seen again, the same stored candidate holds again: the freshness is checked, not remembered.
+      clear()
+      expect(placement_candidate_preflight(actor, generated.candidate_set_id, id)).toMatchObject({ ok: true })
+    })
+
+    it('gives the same answer whether the unseen chunk is empty or holds a machine that feeds the blocker', () => {
+      const feeder = chest({ x: -0.5, y: 1.5 }, { name: 'burner-inserter', type: 'inserter' })
+      const { actor, generated, fog } = stored_candidate([feeder])
+      const id = generated.candidates[0].id
+      // Idle when the candidate was read; once its chunk is fogged it starts feeding the blocker.
+      fog()
+      feeder.drop_target = by_unit[generated.candidates[0].clears[0].unit_number]
+      const result = placement_candidate_preflight(actor, generated.candidate_set_id, id) as any
+      expect(result.error.startsWith('placement_candidate_not_visible')).toBe(true)
     })
   })
 })
