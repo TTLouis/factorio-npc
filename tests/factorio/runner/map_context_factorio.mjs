@@ -72,10 +72,16 @@ async function untilIdle(label, timeoutMs = 120000) {
 }
 
 // One operation through the production renderer and the authorized batch wrapper. A refusal at submission (the
-// authoritative preflight) is returned, not thrown; an admitted operation is waited for and its last result returned.
+// authoritative preflight; the wrapper raises it as "autorio rejected operation 1: ...") is returned, not thrown; an admitted
+// operation is waited for and its last result returned.
 async function attempt(label, operation) {
   const deployment = await deploymentStatus(rcon(), { requireAllowed: true })
-  const batch = await executeAuthorizedBatch(rcon(), deployment.epoch, [renderOperation(parseOperation(operation))])
+  let batch
+  try { batch = await executeAuthorizedBatch(rcon(), deployment.epoch, [renderOperation(parseOperation(operation))]) }
+  catch (error) {
+    if (!String(error?.message).includes('autorio rejected operation 1:')) throw error
+    return { label, refused_at_submission: true, submitted: error.message }
+  }
   const submitted = batch.results[0]
   if (submitted?.[0] === false) return { label, refused_at_submission: true, submitted }
   const status = await untilIdle(label)
@@ -219,6 +225,7 @@ async function prepare() {
   stale.place_candidate = await attempt('stale-candidate', { name: 'place_candidate', args: { candidate_set_id: anchored.candidate_set_id, candidate_id: chestPick.id } })
   stale.place_drill = await attempt('stale-drill', { name: 'place_candidate', args: { candidate_set_id: drills.candidate_set_id, candidate_id: drillPick.id } })
   stale.execute_plan = await attempt('stale-plan', { name: 'execute_construction_plan', args: { validation_id: plan.validation_id, placement_count: 1 } })
+  for (const key of ['place_candidate', 'place_drill', 'execute_plan']) assert.equal(stale[key].refused_at_submission, true, `${key} is refused at the authoritative preflight: ${JSON.stringify(stale[key])}`)
   for (const key of ['place_candidate', 'place_drill']) assert.ok(refusedFor(stale[key], 'placement_candidate_not_visible'), `${key}: ${JSON.stringify(stale[key])}`)
   assert.ok(refusedFor(stale.execute_plan, 'NOT_VISIBLE'), `execute_plan: ${JSON.stringify(stale.execute_plan)}`)
   stale.anchor = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: fixture.anchor }, radius: 4, limit: 2 })
