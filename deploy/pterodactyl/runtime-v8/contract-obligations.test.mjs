@@ -655,3 +655,160 @@ for (const change of ['pending', 'batch']) {
     assert.equal(w.rows.some(row => row.event === 'step.verified'), false)
   })
 }
+
+// Explicit BD substitution: the historical internal refusal payload was not
+// retained. Inject the current native entity_not_visible shape after real commit.
+function losePreservationVisibility(w, { persistently = false } = {}) {
+  let invisible = true
+  const native = w.game.command.bind(w.game)
+  const mutate = w.game.onMutation
+  w.game.onMutation = text => {
+    mutate?.(text)
+    if (text.includes("'walk_to_position'")) {
+      invisible = persistently
+      w.game.lastTaskTypes = ['walking'] // native arrival is not deterministic gameplay verification
+    }
+  }
+  w.game.command = async text => {
+    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 18, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
+    if (invisible && text.includes('entity_geometry')) return JSON.stringify({ found: false, code: 'entity_not_visible', unit_number: 21 })
+    return native(text)
+  }
+}
+
+test('BD residual invisible proof returns through native admission then ordinary receipt closes once without replay', async () => {
+  const w = world({ required: true })
+  await w.start()
+  const before = structuredClone(w.held().steps)
+  losePreservationVisibility(w)
+  const first = await w.agent.completed()
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 1, JSON.stringify(w.rows.slice(-10)))
+  assert.equal(w.held().active_step_index, 0)
+  await w.agent.completed()
+  assert.equal(w.held().active_step_index, 1)
+  assert.deepEqual(w.held().steps[0], before[0])
+  assert.deepEqual(w.held().steps.map(s => [s.description, s.obligations]), before.map(s => [s.description, s.obligations]))
+  assert.equal(w.game.mutations.filter(text => text.includes("'place_entity'")).length, 1)
+  assert.ok(w.rows.some(r => r.event === 'contract.preservation_recovery_admitted'))
+  assert.ok(first)
+})
+
+test('BD unchanged visibility failure exhausts one durable semantic-step claim after restore', async () => {
+  const w = world({ required: true })
+  await w.start()
+  losePreservationVisibility(w, { persistently: true })
+  await w.agent.completed()
+  const snapshot = w.memory.snapshot()
+  w.memory.restore(snapshot)
+  await w.agent.completed()
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 1)
+  assert.ok(w.rows.some(r => r.event === 'contract.preservation_recovery_exhausted' && r.data.reason === 'preservation_recovery_semantic_step_exhausted'))
+  assert.equal(w.memory.currentPlan(KEY).status, 'paused')
+})
+
+for (const variant of ['missing_grant', 'malformed_ledger', 'wrong_body_force', 'persist_failure', 'replace_during_trace']) {
+  test(`BD preservation recovery safely refuses ${variant} before navigation`, async () => {
+    const w = world({ required: true })
+    await w.start()
+    losePreservationVisibility(w)
+    if (variant === 'missing_grant') w.memory.currentGoalGrant = () => undefined
+    if (variant === 'malformed_ledger') {
+      const snapshot = w.memory.snapshot()
+      snapshot.preservation_recoveries = [['invalid', { state: 'admitted', claimed_at: 0 }]]
+      w.memory.restore(snapshot)
+    }
+    if (variant === 'wrong_body_force') {
+      const read = w.game.command.bind(w.game)
+      w.game.command = text => text.includes('remote.call("autorio_actor","status")')
+        ? JSON.stringify({ actor: { actor_id: 18, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 2 }) : read(text)
+    }
+    if (variant === 'persist_failure') w.agent.persistState = async () => { throw new Error('injected durable write failure') }
+    if (variant === 'replace_during_trace') {
+      const trace = w.agent.behaviorTrace.emit
+      w.agent.behaviorTrace.emit = async row => {
+        await trace(row)
+        if (row.event === 'contract.preservation_recovery_claimed') w.agent.generation++
+      }
+    }
+    try { await w.agent.completed() } catch (error) {
+      assert.match(error.message, /scope_changed|durable write failure|cancelled|superseded|stale|owner/i)
+    }
+    assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 0)
+    assert.equal(w.held().active_step_index, 0)
+  })
+}
+
+for (const fault of ['native_busy', 'uncertain_journal', 'body_force']) test(`BD final admission fences ${fault} injected during recovery trace`, async () => {
+  const w = world({ required: true })
+  await w.start()
+  losePreservationVisibility(w)
+  const trace = w.agent.behaviorTrace.emit
+  w.agent.behaviorTrace.emit = async row => {
+    await trace(row)
+    if (row.event !== 'contract.preservation_recovery_claimed') return
+    if (fault === 'native_busy') { w.game.taskState = 'working'; w.game.queueLength = 1 }
+    else {
+      const read = w.game.command.bind(w.game)
+      w.game.command = async text => {
+        const raw = await read(text)
+        if (fault === 'body_force' && text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 18, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 2 })
+        if (fault === 'uncertain_journal' && text.includes('remote.call("autorio_operations","status")')) return JSON.stringify({ ...JSON.parse(raw), admission_journal: null })
+        return raw
+      }
+    }
+  }
+  try { await w.agent.completed() } catch (error) { assert.match(error.message, /busy|idle|unsettled|scope_changed|guard|pending|checkpoint/i) }
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 0)
+})
+
+test('BD recovery grant revoked during claim trace remains a guard with no navigation', async () => {
+  const w = world({ required: true })
+  await w.start()
+  losePreservationVisibility(w)
+  const trace = w.agent.behaviorTrace.emit
+  w.agent.behaviorTrace.emit = async row => {
+    await trace(row)
+    if (row.event === 'contract.preservation_recovery_claimed') w.memory.currentGoalGrant = () => undefined
+  }
+  await assert.rejects(w.agent.completed(), error => error.pause_class === 'guard' && error.code === 'preservation_recovery_authority_changed')
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 0)
+  assert.equal(w.memory.preservationRecoveries.size, 1)
+})
+
+test('BD missed ordinary receipt settlement recovers through native_completion and closes on the next fresh read', async () => {
+  const w = world({ required: true })
+  await w.start()
+  losePreservationVisibility(w)
+  const route = w.agent.routeStepCompletionDecision.bind(w.agent)
+  let bypassed = false
+  w.agent.routeStepCompletionDecision = receipt => {
+    if (!bypassed) { bypassed = true; return { verified: false, state: w.memory.currentPlan(KEY), reason: 'injected_missed_receipt_settlement' } }
+    return route(receipt)
+  }
+  await w.agent.completed()
+  assert.ok(w.rows.some(r => r.event === 'contract.preservation_recovery_claimed' && r.data.trigger === 'native_completion'))
+  await w.agent.completed()
+  assert.equal(w.held().active_step_index, 1)
+  assert.equal(w.game.mutations.filter(text => text.includes("'place_entity'")).length, 1)
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 1)
+})
+
+test('BD second proof read losing visibility propagates terminal exhaustion without another model action', async () => {
+  const w = world({ required: true })
+  await w.start()
+  losePreservationVisibility(w)
+  const trace = w.agent.behaviorTrace.emit
+  w.agent.behaviorTrace.emit = async row => {
+    await trace(row)
+    if (row.event === 'contract.preservation_recovery_completed') {
+      const read = w.game.command.bind(w.game)
+      w.game.command = text => text.includes('entity_geometry') ? JSON.stringify({ found: false, code: 'entity_not_visible' }) : read(text)
+    }
+  }
+  await w.agent.completed()
+  const calls = w.calls.length
+  const stopped = await w.agent.completed()
+  assert.equal(stopped.goalStatus, 'paused')
+  assert.equal(w.calls.length, calls)
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 1)
+})

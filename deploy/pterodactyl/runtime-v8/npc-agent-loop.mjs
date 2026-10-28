@@ -16,6 +16,7 @@ import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
+import { preservationObservationAdmission, preservationReobservationVerified } from './preservation-recovery.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent, constructionPlanWitnessCommand } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
@@ -8458,8 +8459,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!obligationContractMatches(normalized, step.obligations)) return { accepted: false, reason: 'contract_obligation_mismatch' }
       if (!obligationProofOrigin(this.memory.planningState?.(this.activePlanKey()), step)) return { accepted: false, reason: 'obligation_provenance_wrong_owner' }
       const owner = this.captureCheckpointOwner()
-      const fresh = await captureObligationProof(this, step.obligations, () => this.assertCheckpointOwnerCurrent(owner))
-      if (!await reconcilePreservationProof(this, step, fresh, () => this.assertCheckpointOwnerCurrent(owner))) return { accepted: false, reason: 'preservation_baseline_changed' }
+      const fresh = preservationObservationAdmission(this, operations) ? undefined : await captureObligationProof(this, step.obligations, () => this.assertCheckpointOwnerCurrent(owner))
+      if (fresh && !await reconcilePreservationProof(this, step, fresh, () => this.assertCheckpointOwnerCurrent(owner))) return { accepted: false, reason: 'preservation_baseline_changed' }
     }
     // A draft whose own batch would undo its checkpoint can never close: reject it so the planner redrafts.
     const contradiction = draft ? checkpointBatchContradiction(normalized, operations, context) : undefined
@@ -8809,6 +8810,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requestId = this.traceRequest?.id
     const closeOwner = this.captureCheckpointOwner()
     const preservation = await verifyPreservationBeforeClose(this)
+    if (preservation.recovery !== undefined) return { closed: false, completionDeferred: preservation.recovery }
     await this.assertCheckpointOwnerCurrent(closeOwner)
     // No await between this last same-owner safety check and synchronous
     // completion authority. A staged amendment need not change owner identity.
@@ -9213,6 +9215,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the active step's durable verified ledger. Prose-only and controller-state contracts never close here. The step it closes is always the one active right now, so a
   // second call (or the ordinary close after it) finds the next step and cannot close this one twice.
   async closeActiveStepOnFreshRead({ previousState, trigger, operations = [] }) {
+    if (preservationObservationAdmission(this, operations)) return { closed: false }
     const key = this.requestInfo?.memoryKey
     const board = previousState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
@@ -12847,6 +12850,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!pendingAmendment && !stepCompletion?.verified) {
       const corrected = await recoverContractObligations(this, { trigger: 'native_completion' })
       if (corrected !== undefined) return corrected
+      // A return walk proves arrival only. The original completed effects stay
+      // in the durable receipt ledger; ordinary fresh settlement must re-evaluate
+      // every unchanged checkpoint predicate before granting progress.
+      if (preservationReobservationVerified(this)) {
+        const recoveryOwner = this.captureCheckpointOwner()
+        const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(this.activePlanKey()), trigger: 'preservation_reobserved' })
+        if (fresh.completionDeferred) return fresh.completionDeferred
+        if (fresh.contractRecovery) return fresh.contractRecovery
+        if (fresh.contractPause) {
+          if (fresh.terminalOwner && !this.checkpointOwnerCurrent(fresh.terminalOwner)) {
+            const error = new AgentLoopError('Model turn was cancelled or superseded during checkpoint settlement')
+            error.code = STALE_REPLY_ERROR_CODE
+            throw error
+          }
+          return fresh.contractPause
+        }
+        await this.assertCheckpointOwnerCurrent(recoveryOwner, { advanced: fresh.closed === true })
+        if (fresh.reason === 'settlement_identity_changed') {
+          const error = new AgentLoopError('Model turn was cancelled or superseded during checkpoint settlement')
+          error.code = STALE_REPLY_ERROR_CODE
+          throw error
+        }
+        if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+        if (fresh.closed) return this.continueAfterFreshStepClose(fresh,
+          { chatMessage: '', plan: [], currentStep: 0, operations: [] }, await this.assertCurrent())
+      }
     }
     if (!pendingAmendment && !stepCompletion?.verified) {
       const production = await continueProductionTask(this)

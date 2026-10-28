@@ -11,6 +11,7 @@ import { restoreProductionRecords } from './production-task-runtime.mjs'
 import { restoreHarnessDefaults } from './production-repair.mjs'
 import { restoreControllerRecoveries } from './controller-liveness.mjs'
 import { restoreEntityRefreshClaims } from './entity-refresh.mjs'
+import { restorePreservationRecoveries } from './preservation-recovery.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -3108,6 +3109,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       gather_recoveries: [...(this.gatherRecoveries ?? new Map()).entries()],
       ...(this.gatherRecoveryFault ? { gather_recovery_fault: true } : {}),
       controller_recoveries: [...(this.controllerRecoveries ?? new Map()).entries()],
+      preservation_recoveries: [...(this.preservationRecoveries ?? new Map()).entries()],
+      ...(this.preservationRecoveryFault ? { preservation_recovery_fault: true } : {}),
       entity_refresh_claims: [...(this.entityRefreshClaims ?? new Map()).entries()],
       ...(this.entityRefreshFault ? { entity_refresh_fault: true } : {}),
       ...(this.controllerRecoveryFault ? { controller_recovery_fault: true } : {}),
@@ -3261,6 +3264,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     super.restore(snapshot)
     this.plannerSkillHandoffs = restorePlannerSkillHandoffs(snapshot?.planner_skill_handoffs)
+    const preservation = restorePreservationRecoveries(snapshot?.preservation_recoveries)
+    this.preservationRecoveries = preservation.records
+    this.preservationRecoveryFault = preservation.fault || snapshot?.preservation_recovery_fault === true
     const controller = restoreControllerRecoveries(snapshot?.controller_recoveries)
     this.controllerRecoveries = controller.records
     this.controllerRecoveryFault = controller.fault || snapshot?.controller_recovery_fault === true

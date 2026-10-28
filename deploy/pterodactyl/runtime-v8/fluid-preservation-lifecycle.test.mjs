@@ -362,3 +362,26 @@ for (const [shape, craftingQueue] of [
     assert.equal(w.memory.pauseRecord(KEY).pause_class, 'guard')
   })
 }
+
+test('BD fluid-version2 invisible proof admits only owned observation walk and then certifies the actual prior placement', async () => {
+  const w = world()
+  await w.start()
+  let invisible = true
+  const native = w.game.command.bind(w.game)
+  const mutate = w.game.onMutation
+  w.game.onMutation = text => {
+    mutate?.(text)
+    if (text.includes("'walk_to_position'")) invisible = false
+  }
+  w.game.command = async text => {
+    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 10, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
+    if (invisible && text.includes('entity_geometry')) return JSON.stringify({ found: false, code: 'entity_not_visible' })
+    return native(text)
+  }
+  await w.agent.completed()
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 1, JSON.stringify(w.rows.slice(-12)))
+  await w.agent.completed()
+  assert.equal(w.held().active_step_index, 1, JSON.stringify(w.rows.slice(-12)))
+  assert.equal(w.game.mutations.filter(text => text.includes("'place_candidate'")).length, 1)
+  assert.equal(w.held().execution.preservation_certificates.length, 1)
+})

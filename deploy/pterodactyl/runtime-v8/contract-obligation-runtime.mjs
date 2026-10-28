@@ -1,3 +1,4 @@
+import { recoverPreservationVisibility, finishPreservationReobservation, assertPreservationObservationAdmission } from './preservation-recovery.mjs'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { getActivePlan, isStepContractPending, PLAN_STATUS } from './planning-state.mjs'
 import { evaluateCompletionContract } from './step-completion.mjs'
@@ -61,9 +62,15 @@ export async function reconcilePreservationProof(agent, step, fresh, fence) {
   // made its old open port look unchanged. Omitted/corrupt execution facts may
   // not forget an already-created protected connection after restore.
   const fluid = await reconcileFluidAddition(agent, plan, step, fresh, fence)
-  if (fluid !== undefined) return fluid
+  if (fluid !== undefined) {
+    if (fluid) await finishPreservationReobservation(agent, step, fence)
+    return fluid
+  }
   if (!preservedProofMatches(effective, fresh)) return false
-  if (JSON.stringify(effective.preserved) === JSON.stringify(fresh.preserved)) return true
+  if (JSON.stringify(effective.preserved) === JSON.stringify(fresh.preserved)) {
+    await finishPreservationReobservation(agent, step, fence)
+    return true
+  }
   // Predictions may check facts for a future step but cannot append execution
   // facts for it. Activation repeats this read and persists before binding.
   if (plan.steps[plan.active_step_index]?.step_id !== step.step_id) return true
@@ -75,6 +82,7 @@ export async function reconcilePreservationProof(agent, step, fresh, fence) {
     step_id: step.step_id, request_id: agent.traceRequest?.id, reason: 'native_target_resolved_to_preserved_identity',
     disposition: 'durable_advisory_fact_not_connection_completion' })
   await fence()
+  await finishPreservationReobservation(agent, step, fence)
   return true
 }
 
@@ -170,6 +178,7 @@ export async function confirmFluidCandidateArgumentUnsent(agent, error) {
 }
 
 export async function prepareFluidPreservationAdmission(agent, { operations, pending } = {}) {
+  if (await assertPreservationObservationAdmission(agent, operations)) return undefined
   const key = agent.activePlanKey()
   const planning = agent.memory.planningState?.(key)
   const plan = getActivePlan(planning)
@@ -422,6 +431,8 @@ export async function verifyPreservationBeforeClose(agent) {
   } catch (error) {
     await agent.assertCheckpointOwnerCurrent(owner)
     if (stepCloseSettlementUnsafe(agent)) return { ok: false, reason: 'preservation_settlement_not_safe' }
+    const recovery = await recoverPreservationVisibility(agent, error, { trigger: 'step_close' })
+    if (recovery !== undefined) return { ok: false, recovery }
     return { ok: false, reason: `preservation_unreadable:${error.message}` }
   }
 }
@@ -448,7 +459,7 @@ export async function recoverContractObligations(agent, { trigger = 'settlement'
     await agent.traceEvent(/limit_exhausted|interrupted_claim/.test(reason) ? 'contract.defect_exhausted' : 'contract.defect_refused',
       { ...base, reason, disposition: 'classified_guard_pause' })
     await agent.assertCheckpointOwnerCurrent(owner)
-    const result = await agent.pauseForStepContract({ reason: `${CONTRACT_DEFECT_REASON}:${reason}`, owner })
+    const result = await agent.pauseForStepContract({ reason: mismatched ? `${CONTRACT_DEFECT_REASON}:${reason}` : reason, owner })
     return result
   }
   try {
@@ -464,7 +475,12 @@ export async function recoverContractObligations(agent, { trigger = 'settlement'
   if (!mismatched) {
     let fresh
     try { fresh = await captureObligationProof(agent, step.obligations, fence) }
-    catch (error) { await fence(); return pause(`preservation_proof_unreadable:${error.message}`) }
+    catch (error) {
+      await fence()
+      const recovery = await recoverPreservationVisibility(agent, error, { trigger })
+      if (recovery !== undefined) return recovery
+      return pause(`preservation_proof_unreadable:${error.message}`)
+    }
     return await reconcilePreservationProof(agent, step, fresh, fence) ? undefined : pause('preservation_baseline_changed')
   }
   if (planning.goal?.contract_defect_claims?.includes(base.semantic_step_id)) return pause('semantic_step_limit_exhausted')
