@@ -13,7 +13,8 @@
 //               site search all succeed; another force's entity and another surface's entity are refused as anchors
 //   MOVEMENT    a real walk takes the fixtures out of view: the stored candidates and the validated plan are refused at
 //               the authoritative boundary as not visible, before any walk or mutation; the anchor, site search and
-//               local observation are refused as not visible; destroying the anchor and the ore in the fog changes
+//               local observation, and the live status, geometry and topology reads of the anchor, are refused as not
+//               visible; destroying the anchor and the ore in the fog changes
 //               none of those answers, and no read charts, generates or reserves anything
 //   RELOAD      after game.server_save() and a real process restart: the knowledge record, revision and crop persist and
 //               the stale candidate and plan are still refused
@@ -132,6 +133,12 @@ function assertCropShape(crop, label) {
   assert.ok(Number.isSafeInteger(crop.explored_record.outside_crop), label)
 }
 const refusedFor = (outcome, code) => JSON.stringify(outcome).includes(code)
+// The model-facing live reads of one named entity (M3C-R1-1): status, geometry and the topology scan around it.
+const entityReads = async unit => ({
+  status: await tool('getEntityStatus', { unit_number: unit }),
+  geometry: await tool('getEntityGeometry', { unit_number: unit }),
+  topology: await tool('getLogisticsTopology', { unit_number: unit, radius: 4 }),
+})
 
 async function prepare() {
   await configureNpcSession(rcon(), 'map-context-engine-20261027')
@@ -173,6 +180,10 @@ async function prepare() {
   // model's own reads do. A unit number the NPC never observed is simply not found.
   const seen = await tool('getNearbyEntities', { name: 'wooden-chest', radius: 32, limit: 8 })
   assert.ok(JSON.stringify(seen).includes(String(fixture.anchor)), `the observation names the anchor chest: ${JSON.stringify(seen).slice(0, 600)}`)
+  const seenReads = await entityReads(fixture.anchor)
+  assert.equal(seenReads.status.found, true, JSON.stringify(seenReads.status).slice(0, 600))
+  assert.equal(seenReads.geometry.found, true, JSON.stringify(seenReads.geometry).slice(0, 600))
+  assert.notEqual(seenReads.topology.found, false, JSON.stringify(seenReads.topology).slice(0, 600))
   const anchored = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: fixture.anchor }, radius: 4, limit: 4 })
   assert.equal(anchored.ok, true, JSON.stringify(anchored).slice(0, 2000))
   assert.ok(anchored.candidates.length > 0)
@@ -243,6 +254,11 @@ async function prepare() {
   assert.ok(refusedFor(stale.local_area, 'area_not_visible'), JSON.stringify(stale.local_area))
   stale.local_anchor = await tool('getLocalSpatialObservation', { anchor_unit_number: fixture.anchor, half_size: 6 })
   assert.ok(refusedFor(stale.local_anchor, 'does not see now'), JSON.stringify(stale.local_anchor))
+  // The anchor chest is found only through its observation hint: its live status, geometry and topology are not read.
+  stale.reads = await entityReads(fixture.anchor)
+  assert.equal(stale.reads.status.error, 'entity_not_visible', JSON.stringify(stale.reads.status))
+  assert.equal(stale.reads.geometry.code, 'entity_not_visible', JSON.stringify(stale.reads.geometry))
+  assert.equal(stale.reads.topology.code, 'entity_not_visible', JSON.stringify(stale.reads.topology))
   // The world changes in the fog: the anchor and the ore are gone. Nothing the NPC reads may notice.
   // Chests are not indexed by unit number in the engine: the fixture finds the anchor by its exact identity at its position.
   const removed = await lua(`local gone=0; for _,e in pairs(s.find_entities_filtered{name="wooden-chest",position={${fixture.anchor_position.x},${fixture.anchor_position.y}},radius=0.5}) do if e.unit_number==${fixture.anchor} then e.destroy(); gone=gone+1 end end; `
@@ -252,6 +268,8 @@ async function prepare() {
   stale.sites_destroyed = await tool('findConstructionSites', { width: 2, height: 2, anchor_unit_number: fixture.anchor })
   assert.equal(stale.anchor_destroyed.code ?? stale.anchor_destroyed.error?.code, stale.anchor.code ?? stale.anchor.error?.code, 'a destroyed anchor in the fog reads exactly like a standing one')
   assert.equal(stale.sites_destroyed.error.code, 'ANCHOR_NOT_VISIBLE')
+  stale.reads_destroyed = await entityReads(fixture.anchor)
+  assert.deepEqual(stale.reads_destroyed, stale.reads, 'the live reads of a destroyed anchor in the fog answer exactly like a standing one')
   const after = await sideEffects()
   const afterActor = await actorFacts()
   assert.ok(Math.hypot(afterActor.x - here.x, afterActor.y - here.y) < 0.5, 'no stale refusal walked the NPC')
@@ -316,6 +334,11 @@ async function verify() {
   const returned = {}
   returned.anchor = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: saved.fixture.anchor }, radius: 4, limit: 2 })
   assert.ok(refusedFor(returned.anchor, 'anchor_entity_not_found'), `seen again, the destroyed anchor is not found: ${JSON.stringify(returned.anchor)}`)
+  returned.reads = await entityReads(saved.fixture.anchor)
+  for (const [key, read] of Object.entries(returned.reads)) {
+    assert.equal(read.found, false, `${key}: ${JSON.stringify(read)}`)
+    assert.ok(!refusedFor(read, 'not_visible'), `seen again, the destroyed anchor ${key} is not found rather than not visible: ${JSON.stringify(read)}`)
+  }
   returned.sites = await tool('findConstructionSites', { width: 2, height: 2, anchor_unit_number: saved.fixture.anchor })
   assert.equal(returned.sites.error.code, 'INVALID_ANCHOR')
   returned.foreign = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: saved.fixture.foreign }, radius: 4, limit: 2 })
