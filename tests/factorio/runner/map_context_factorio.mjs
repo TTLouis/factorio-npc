@@ -156,8 +156,8 @@ async function createReachFixtures() {
 }
 
 async function reachReads(fixture) {
-  // Local observation records hints for non-indexed pipes without probing either hidden endpoint.
-  const observed = await tool('getLocalSpatialObservation', { position: { x: 16.5, y: -45.5 }, half_size: 8 })
+  // The native map query records hints for non-indexed pipes without probing either hidden endpoint.
+  const observed = await lua('rcon.print(helpers.table_to_json(remote.call("autorio_map","query_area",s.index,16.5,-45.5,8,32)))')
   assert.equal(observed.ok, true, JSON.stringify(observed))
   return {
     pipe: await tool('getEntityGeometry', { unit_number: fixture.pipe }),
