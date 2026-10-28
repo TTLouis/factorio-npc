@@ -1,3 +1,4 @@
+import { EXPLICIT_RESUME_LIMIT, restoreExplicitResume } from './explicit-resume-state.mjs'
 import { completedSliceAnchor, nextSliceTransition, restoreNextSlice, stepProgressMark } from './next-slice-state.mjs'
 // Durable planning state: Goal / Roadmap Shelf / Active Plan.
 //
@@ -403,6 +404,7 @@ export const PLANNING_EVENT = Object.freeze({
   RUN_PAUSED: 'RUN_PAUSED',
   RUN_MODEL_RECOVERY_STOPPED: 'RUN_MODEL_RECOVERY_STOPPED',
   RUN_RESUMED: 'RUN_RESUMED',
+  EXPLICIT_RESUME_CLAIMED: 'EXPLICIT_RESUME_CLAIMED',
   // A model_recoverable pause is being resumed automatically (pause-class.mjs). The reducer counts the attempt per step identity
   // and per goal, durably, and refuses an attempt whose goal, plan, plan version or step is no longer the live one.
   RUN_AUTO_RESUME_STARTED: 'RUN_AUTO_RESUME_STARTED',
@@ -797,6 +799,8 @@ export function createEmptyRunState() {
     pause_subkind: '',
     // Durable, bounded count of automatic model_recoverable resumes (see autoResumeAllowance). Survives resume and restart.
     auto_resume: null,
+    explicit_resume: null,
+    explicit_resume_fault: false,
     next_slice: null,
     next_slice_fault: false,
     paused_at: null,
@@ -3576,6 +3580,26 @@ Object.assign(HANDLERS, {
     }
   },
 
+  [PLANNING_EVENT.EXPLICIT_RESUME_CLAIMED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const plan = getActivePlan(state)
+    const run = state.run
+    if (!run?.paused || !plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)
+      || event.plan_id !== plan.plan_id || event.plan_version !== plan.plan_version
+      || event.step_id !== plan.steps[plan.active_step_index]?.step_id
+      || event.paused_at !== run.paused_at || event.pause_count !== run.pause_count
+      || event.pause_class !== run.pause_class || event.pause_reason !== run.pause_reason || run.pending_operation || run.condition_wait) return state
+    const prior = run.explicit_resume
+    const same = prior?.goal_id === event.goal_id && prior.plan_id === event.plan_id && prior.step_id === event.step_id
+      && prior.paused_at === event.paused_at && prior.pause_count === event.pause_count
+    const attempts = same ? prior.attempts : 0
+    if (run.explicit_resume_fault || attempts >= EXPLICIT_RESUME_LIMIT || event.attempts !== attempts + 1) return state
+    return { ...state, run: { ...run, explicit_resume: { goal_id: event.goal_id, plan_id: event.plan_id,
+      plan_version: event.plan_version, step_id: event.step_id, paused_at: event.paused_at,
+      pause_count: event.pause_count, attempts: event.attempts, request_id: text(event.request_id, 200),
+      stage: text(event.stage, 60), at: now }, updated_at: now }, updated_at: now }
+  },
+
   [PLANNING_EVENT.RUN_RESUMED](state, event, now) {
     if (state.run?.model_recovery_stop_fault || state.run?.model_recovery_stop?.goal_id === state.goal?.goal_id) return state
     if (!runEventAllowed(state, event)) return state
@@ -4555,6 +4579,8 @@ function restoreRun(raw, state) {
     pause_code: paused ? (text(raw.pause_code, RUN_STATE_LIMITS.pauseCode) || pauseCodeOf(reason)) : '',
     ...(paused ? pauseClassFields(raw) : { pause_class: '', pause_subkind: '' }),
     auto_resume: restoreAutoResume(raw.auto_resume),
+    explicit_resume: restoreExplicitResume(raw.explicit_resume),
+    explicit_resume_fault: raw.explicit_resume_fault === true || (raw.explicit_resume != null && !restoreExplicitResume(raw.explicit_resume)),
     next_slice: restoreNextSlice(raw.next_slice, state),
     next_slice_fault: raw.next_slice_fault === true || (raw.next_slice != null && !restoreNextSlice(raw.next_slice, state)),
     paused_at: finiteNumber(raw.paused_at) ?? null,

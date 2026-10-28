@@ -229,6 +229,11 @@ case "$LANE" in
     start_factorio
     run_node local_transfer_target_factorio.mjs --mode destroyed
     ;;
+  resume-water)
+    run_node resume_water_factorio.mjs --mode prepare
+    restart_factorio
+    run_node resume_water_factorio.mjs --mode verify
+    ;;
   targeted-water)
     run_node targeted_water_factorio.mjs
     ;;

@@ -147,6 +147,7 @@ lane_offset() {
     production-task) printf '32' ;;
     entity-refresh) printf '34' ;;
     map-context) printf '35' ;;
+    resume-water) printf '36' ;;
     tick-sprint) printf '33' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
