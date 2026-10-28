@@ -24,6 +24,31 @@ describe('native fluid-bearing tile observation', () => {
       status_snapshot: () => ({ actor_id: 41 }), get_main_inventory: vi.fn() } as any
     return { actor, surface: surface_with_find }
   }
+  it('searches all directions before choosing from a capped prefix and finds nearer west water', () => {
+    const { actor, surface } = fixture()
+    const far = Array.from({ length: 300 }, (_, i) => ({ x: 180 + i % 10, y: -100 + Math.floor(i / 10) }))
+    const native = [...far, { x: -40, y: 0 }, { x: -41, y: 0 }]
+    surface.find_tiles_filtered.mockImplementation((args: any) => args.has_hidden_tile ? [] : native
+      .filter(p => (p.x - args.position.x) ** 2 + (p.y - args.position.y) ** 2 <= args.radius ** 2)
+      .slice(0, args.limit).map(position => ({ name: 'alien-liquid-tile', position,
+        prototype: { fluid: { name: 'modded-fluid' } }, surface: { index: 7 } })) as any)
+    const result = fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 256 }) as any
+    expect(result.samples[0].position).toEqual({ x: -40, y: 0 })
+    expect(result).toMatchObject({ nearest_samples_proven: true, scan_truncated: true, ordering: 'nearest_first', nearest_query_count: 2 })
+    expect(surface.find_tiles_filtered.mock.calls.every(([args]: any) => args.has_hidden_tile
+      || args.position.x === actor.position.x && args.position.y === actor.position.y)).toBe(true)
+  })
+  it('bisects an empty inner circle until a complete positive circle proves the closest shore', () => {
+    const { actor, surface } = fixture()
+    const native = [...Array.from({ length: 300 }, (_, i) => ({ x: 180 + i % 10, y: -100 + Math.floor(i / 10) })), { x: -150, y: 0 }]
+    surface.find_tiles_filtered.mockImplementation((args: any) => args.has_hidden_tile ? [] : native
+      .filter(p => p.x ** 2 + p.y ** 2 <= args.radius ** 2).slice(0, args.limit)
+      .map(position => ({ name: 'alien-liquid-tile', position, prototype: { fluid: { name: 'modded-fluid' } }, surface: { index: 7 } })) as any)
+    const result = fluid_source_observation(actor, { fluid_name: 'modded-fluid', search_radius: 256 }) as any
+    expect(result.samples[0].position).toEqual({ x: -150, y: 0 })
+    expect(result.nearest_query_count).toBeGreaterThan(2)
+    expect(result.nearest_query_count).toBeLessThanOrEqual(19)
+  })
   it('derives modded source names and bounds every native query, without reading inventory or granting geometry', () => {
     const { actor, surface } = fixture(9)
     const result = fluid_source_observation(actor, { fluid_name: 'modded-fluid' })
@@ -86,7 +111,7 @@ describe('native fluid-bearing tile observation', () => {
     surface.is_chunk_generated.mockImplementation(({ x, y }: any) => (x + y) % 2 === 0)
     const result = fluid_source_observation(actor, { fluid_name: 'modded-fluid', limit: 2 }) as any
     expect(result).toMatchObject({ ok: true, coverage_complete: false, scan_truncated: true, scanned_tile_limit: 256, empty_result_is_conclusive: false, truncated: true,
-      ordering: 'nearest_first_among_scanned_tiles', returned_count: 2 })
+      ordering: 'no_proven_nearest_samples', returned_count: 0, nearest_search_exhausted: true, nearest_query_count: 19 })
     expect(result.ungenerated_chunks).toHaveLength(8)
     expect(result.ungenerated_chunks_truncated).toBe(true)
     const distances = result.ungenerated_chunks.map((chunk: any) => (chunk.center.x - 0) ** 2 + (chunk.center.y - 0) ** 2)

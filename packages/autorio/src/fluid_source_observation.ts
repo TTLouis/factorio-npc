@@ -1,3 +1,4 @@
+import type { LuaSurface, LuaTile } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 
 export interface FluidSourceRequest {
@@ -189,6 +190,27 @@ function squared_distance(a: { x: number, y: number }, b: { x: number, y: number
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
 
+// A capped native result is not distance ordered. Narrow concentric circles using only
+// empty/complete/capped facts; never choose a destination from the arbitrary capped prefix.
+// A nonempty complete inner circle contains the nearest visible tiles in the requested circle.
+// Empty/capped ties that cannot be separated within the fixed budget remain inconclusive.
+const MAX_NEAREST_QUERIES = 19
+function nearest_visible_tiles(surface: LuaSurface, names: string[], position: { x: number, y: number }, radius: number) {
+  const query = (r: number) => surface.find_tiles_filtered({ name: names, position, radius: r, limit: MAX_SCANNED_TILES + 1 })
+  let tiles = query(radius)
+  if (tiles.length <= MAX_SCANNED_TILES) return { tiles, outer_truncated: false, nearest_proven: true, query_count: 1, sample_radius: radius }
+  let lower = 0
+  let upper = radius
+  for (let query_count = 2; query_count <= MAX_NEAREST_QUERIES; query_count++) {
+    const middle = (lower + upper) / 2
+    tiles = query(middle)
+    if (tiles.length > MAX_SCANNED_TILES) upper = middle
+    else if (tiles.length === 0) lower = middle
+    else return { tiles, outer_truncated: true, nearest_proven: true, query_count, sample_radius: middle }
+  }
+  return { tiles: [] as LuaTile[], outer_truncated: true, nearest_proven: false, query_count: MAX_NEAREST_QUERIES, sample_radius: upper }
+}
+
 /** Read-only fluid-bearing terrain samples. No generation, navigation or placement authority. */
 export function fluid_source_observation(actor: ControlledActor | undefined, request: FluidSourceRequest) {
   if (!actor || !actor.is_valid) return { ok: false, code: 'no_actor' }
@@ -254,8 +276,10 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
       surface_index: surface.index, search_radius: radius, coverage: 'none', coverage_complete: false, ...chunk_report }
   }
 
-  const tiles = names.length > 0 ? surface.find_tiles_filtered({ name: names, position, radius, limit: MAX_SCANNED_TILES + 1 }) : []
-  const scan_truncated = tiles.length > MAX_SCANNED_TILES
+  const search = names.length > 0 ? nearest_visible_tiles(surface, names, position, radius)
+    : { tiles: [] as LuaTile[], outer_truncated: false, nearest_proven: true, query_count: 0, sample_radius: radius }
+  const tiles = search.tiles
+  const scan_truncated = search.outer_truncated
   const found: Array<{ name: string, position: { x: number, y: number }, distance_squared: number }> = []
   for (let index = 0; index < math.min(tiles.length, MAX_SCANNED_TILES); index++) {
     const tile = tiles[index]
@@ -313,7 +337,10 @@ export function fluid_source_observation(actor: ControlledActor | undefined, req
     // Present when the samples could be given an approach: how far from each tile the engine was asked to look for standing room.
     ...(actor.character?.valid ? { approach_search_radius: STANDING_SEARCH_RADIUS } : {}),
     scanned_tile_limit: MAX_SCANNED_TILES, scan_truncated,
-    ordering: scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first',
+    ordering: search.nearest_proven ? 'nearest_first' : 'no_proven_nearest_samples',
+    nearest_samples_proven: search.nearest_proven, nearest_scope: 'generated_terrain_in_actor_circle', nearest_query_count: search.query_count,
+    nearest_query_limit: MAX_NEAREST_QUERIES, sample_search_radius: search.sample_radius,
+    nearest_search_exhausted: !search.nearest_proven,
     covered_fluid_hints, covered_returned_count: covered_fluid_hints.length,
     covered_scan_truncated, covered_scanned_tile_limit: MAX_SCANNED_TILES,
     covered_truncated: covered_found.length > covered_fluid_hints.length || covered_scan_truncated,

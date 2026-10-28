@@ -1,3 +1,4 @@
+import { explicitResumeIdentity, resumeExplicitContinuation, settleExplicitResumeFailure } from './explicit-resume.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 import { nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice, settleNextSliceExit } from './next-slice-liveness.mjs'
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
@@ -1888,7 +1889,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
   // authority, guard, system or unclassified pause never is; `identity` ({ goal_id, plan_id, plan_version, step_id }), when given,
   // must still name the live goal, plan, plan version and step. The automatic-resume allowance is not touched (it lives in the run's
   // auto_resume record, which RUN_RESUMED keeps). Returns { resumed, reason, pause_class, pause_reason, step_id, state }.
-  resumePausedPlan(key, { reason = 'auto_resume', pauseClasses = [], identity, lifecycle = false } = {}) {
+  resumePausedPlan(key, { reason = 'auto_resume', pauseClasses = [], identity, lifecycle = false, explicit = false } = {}) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state) return { resumed: false, reason: 'no_plan' }
     if (state.status !== 'paused') return { resumed: false, reason: 'not_paused' }
@@ -1899,7 +1900,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     // `lifecycle` additionally lets a runtime-lifecycle pause (class system, reason server_stop_* / actor replacement) be resumed by
     // the recovery that exists for it. No other system pause is.
     const lifecyclePause = lifecycle === true && declared.pause_class === PAUSE_CLASS.SYSTEM && isLifecycleRecoveryReason(record.pause_reason ?? state.pause_reason)
-    if (!declared.classified || !(lifecyclePause || (isAutoResumable(declared.pause_class) && pauseClasses.includes(declared.pause_class)))) {
+    if (!declared.classified || !(lifecyclePause || ((isAutoResumable(declared.pause_class) || explicit === true && [PAUSE_CLASS.OPERATOR, PAUSE_CLASS.GUARD].includes(declared.pause_class)) && pauseClasses.includes(declared.pause_class)))) {
       return { resumed: false, reason: 'pause_class_not_resumable', pause_class: pauseClass }
     }
     const board = this.ensureTaskBoard(state)
@@ -3402,6 +3403,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // `foldKept` is the fold of a planner review handback into the step-close restage (foldReviewHandback): no packet and no
   // reducer event, the executor conversation kept through the round resumes whole. It is a restage entry like any other: the
   // same lifecycle table, guard and resets.
+  async ensureExplicitContinuationResumed(stage) {
+    const owner = requestAdmissionScope.getStore()
+    if (!owner?.resumeAuthority) return
+    return resumeExplicitContinuation(this, owner.resumeAuthority, {
+      stage, readActor: () => super.captureEpoch(), current: () => {
+        if (this.requestAdmissionOwner !== owner || owner.generation !== this.generation || owner.npcId !== this.npcId) {
+          throw new AgentLoopError('Request admission cancelled or superseded')
+        }
+        this.assertRequestAdmission()
+      },
+    })
+  }
+
   async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint, parkPlanner, foldKept } = {}) {
     const key = this.activePlanKey()
     const folding = foldKept === true
@@ -3419,6 +3433,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet?.handoff_id ?? this.agentContext.parkedExecutor?.handoffId, reason: why }, { requestId })
       return { restaged: false, reason: why }
     }
+    if (prepared.role === EXECUTOR_ROLE) await this.ensureExplicitContinuationResumed('executor_restage')
     const lifecycle = this.lifecycleEnter('restage', { role: prepared.role, checkpoint, ...(folding ? { folded_from: 'C3' } : {}) }, { requestId })
     if (lifecycle) return refuse(lifecycle.reason)
     const guard = this.restageGuardRefusal(safePoint)
@@ -10811,6 +10826,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return requestAdmissionScope.run(owner, async () => {
       try { return await this.requestAdmitted(text, options) }
       catch (error) {
+        await settleExplicitResumeFailure(this, owner, error, () => super.captureEpoch())
         if (this.requestAdmissionOwner !== owner || /admission cancelled or superseded/.test(error?.message ?? '')) {
           // Emit directly: a stale refusal must not score judgments, accrue timing,
           // increment the replacement trace, or inherit its request/actor identity.
@@ -11012,6 +11028,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!options.intakeRetryIntent) await this.waitForRequestAdmission(this.recordInterruptedTask(memoryKey, { sender, text, epoch: routed.epoch }))
       this.memory.clearTaskContext?.(memoryKey)
       await this.waitForRequestAdmission(this.persistState())
+    }
+
+    if (this.completionProtocolVersion >= 3 && intent === 'continue_current' && isBareContinuation(text) && !redriveGoal) {
+      const identity = explicitResumeIdentity(this.memory, memoryKey)
+      if (identity) {
+        const pausedBefore = structuredClone(planBefore)
+        const owner = requestAdmissionScope.getStore()
+        owner.resumeAuthority = { ...identity, pause_reason: planBefore?.pause_reason,
+          actor: { ...owner.nativeActor }, request_id: owner.id }
+        await this.ensureExplicitContinuationResumed('intake')
+        planBefore = pausedBefore // keep the original pause cause for C5/start tracing;canonical state is now active
+      }
     }
 
     if (redriveGoal) {
