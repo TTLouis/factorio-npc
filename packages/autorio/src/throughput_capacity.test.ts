@@ -7,7 +7,7 @@ const originalPrototypes = (globalThis as any).prototypes
 const originalGame = (globalThis as any).game
 
 function actor(force: Record<string, unknown> = {}, surfaceIndex = 1) {
-  return { is_valid: true, force, surface: { index: surfaceIndex } } as unknown as ControlledActor
+  return { is_valid: true, force: { index: 1, is_chunk_visible: () => true, is_chunk_charted: () => true, ...force }, surface: { index: surfaceIndex } } as unknown as ControlledActor
 }
 
 afterEach(() => {

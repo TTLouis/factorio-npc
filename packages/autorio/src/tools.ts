@@ -2,7 +2,7 @@ import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import type { ControlledActor } from './actors/types'
 import { crafted_item_count, craft_trigger_statistics_count } from './crafted_items'
-import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { remember_entity_reference, resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
 import { entity_has_power, evaluate_world_condition, status_name, WORLD_CONDITION_KINDS } from './goal_world_conditions'
 import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
@@ -443,7 +443,19 @@ export function create_tools_remote_interface() {
       const bounded_radius = exact ? undefined : math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
       let entity: LuaEntity | undefined
       if (exact) {
-        entity = resolve_exact_entity(actor, unit_number)
+        // A read of a model-named entity covers only chunks the NPC sees now (M3): in fog the answer is the same
+        // whether it still stands, and nothing there is scanned or refreshed.
+        const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+        if (resolved.code === 'not_visible') {
+          return {
+            found: false,
+            actor_position: actor.position,
+            unit_number,
+            error: 'entity_not_visible',
+            message: 'entity is in a chunk the NPC does not see now; observe it again from nearby',
+          }
+        }
+        entity = resolved.entity
         // The resolver's direct engine-index path can return entities outside
         // the body's scope. Enforce the read contract on every lookup path.
         if (entity && (!entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index)) entity = undefined

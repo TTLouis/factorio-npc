@@ -12,6 +12,8 @@ function fixture() {
   let beltItems: any[] = []
   const force: any = {
     index: 1,
+    is_chunk_visible: () => true,
+    is_chunk_charted: () => true,
     inserter_stack_size_bonus: 3,
     bulk_inserter_capacity_bonus: 0,
     belt_stack_size_bonus: 2,

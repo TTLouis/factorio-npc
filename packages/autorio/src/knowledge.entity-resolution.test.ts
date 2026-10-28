@@ -31,7 +31,7 @@ describe('knowledge exact entity resolution', () => {
     const actor = {
       is_valid: true,
       position: { x: 61, y: 88 },
-      force: { index: 1, name: 'player' },
+      force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
       surface: drill.surface,
     } as any
 
@@ -77,7 +77,7 @@ describe('knowledge exact entity resolution', () => {
     const actor = {
       is_valid: true,
       position: { x: 61, y: 88 },
-      force: { index: 1, name: 'player' },
+      force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
       surface,
     } as any
 

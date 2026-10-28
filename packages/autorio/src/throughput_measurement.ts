@@ -1,6 +1,6 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import { resolve_exact_entity } from './entity_reference'
+import { resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
 import { throughput_capacity } from './throughput_capacity'
 
 export type ThroughputMeasurementRequest
@@ -174,11 +174,20 @@ function request_window(request: ThroughputMeasurementRequest) {
   return { ok: true as const, warmup, window, utilization }
 }
 
-function resolve_entity(actor: ControlledActor, unit_number: number) {
+// fresh: a model-named entity at measurement start must be in a chunk the NPC sees now (M3). Sampling and finalising an
+// already-started measurement keep the plain lookup.
+function resolve_entity(actor: ControlledActor, unit_number: number, fresh = false) {
   if (!valid_integer(unit_number, 1, 9007199254740991)) return fail('unit_number must be a positive safe integer')
   // Factorio only indexes prototypes flagged get-by-unit-number, which belts
   // and inserters are not; resolve through the observation hint instead.
-  const entity = resolve_exact_entity(actor, unit_number)
+  let entity: LuaEntity | undefined
+  if (fresh) {
+    const visible = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+    if (visible.code === 'not_visible') return fail(`entity_not_visible: entity ${unit_number} is in a chunk the NPC does not see now; observe it again from nearby`, 'ENTITY_NOT_VISIBLE')
+    if (visible.code === 'wrong_surface') return fail('entity is on another surface')
+    entity = visible.entity
+  }
+  else entity = resolve_exact_entity(actor, unit_number)
   if (!entity || !entity.valid) return fail(`entity not found: ${unit_number}`)
   if (entity.surface.index !== actor.surface.index) return fail('entity is on another surface')
   if (entity.force?.index !== undefined && entity.force.index !== actor.force.index) return fail('entity belongs to another force')
@@ -507,7 +516,7 @@ export function new_throughput_measurement_controller(get_actor: () => Controlle
     if (!actor || !actor.is_valid) return fail('controlled actor is unavailable')
     const identity = actor.status_snapshot()
     if (identity.actor_id === undefined) return fail('controlled actor identity is unavailable')
-    const resolved = resolve_entity(actor, request.unit_number)
+    const resolved = resolve_entity(actor, request.unit_number, true)
     if (resolved.ok === false) return resolved
     const entity = resolved.entity
     if (request.kind === 'inserter_instance' && entity.type !== 'inserter') return fail(`entity is not an inserter: ${request.unit_number}`)

@@ -1,6 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import type { LuaEntityPrototype } from 'factorio:runtime'
-import { resolve_exact_entity } from './entity_reference'
+import { resolve_visible_entity_reference } from './entity_reference'
 
 export type ThroughputCapacityRequest
   = | {
@@ -62,9 +62,12 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
 
   if (request.kind === 'inserter_instance') {
     if (!valid_unit_number(request.unit_number)) return fail('unit_number must be a positive integer')
-    const entity = resolve_exact_entity(actor, request.unit_number)
+    // Live facts about a model-named entity cover only chunks the NPC sees now (M3).
+    const resolved = resolve_visible_entity_reference(actor, request.unit_number, 'actor_body')
+    if (resolved.code === 'not_visible') return fail(`entity_not_visible: entity ${request.unit_number} is in a chunk the NPC does not see now; observe it again from nearby`)
+    if (resolved.code === 'wrong_surface') return fail('entity is on another surface')
+    const entity = resolved.entity
     if (!entity || !entity.valid) return fail(`entity not found: ${request.unit_number}`)
-    if (entity.surface.index !== actor.surface.index) return fail('entity is on another surface')
     if (entity.type !== 'inserter') return fail(`entity is not an inserter: ${request.unit_number}`)
 
     const held = entity.held_stack

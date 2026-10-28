@@ -1,7 +1,8 @@
 import type { LuaEntity, LuaEntityPrototype, SurfaceCondition } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { recipe_bootstrap_for_actor } from './bootstrap_planning'
-import { resolve_exact_entity } from './entity_reference'
+import { resolve_visible_entity_reference } from './entity_reference'
+import { area_known_visible } from './map_knowledge'
 import * as estimate from './production_estimate_live'
 import * as rates from './production_rates'
 import { recipe_categories } from './recipe_categories'
@@ -14,6 +15,10 @@ const MAX_FLUID_STORAGES = 16
 const MAX_PIPE_CONNECTIONS = 16
 const MAX_TOPOLOGY_RADIUS = 16
 const MAX_TOPOLOGY_INSERTERS = 64
+// Pipe-to-ground neighbours are read up to 10 tiles away, past the requested scan radius.
+const TOPOLOGY_MIN_REACH = 12
+const NOT_VISIBLE_ERROR = 'entity is in a chunk the NPC does not see now; observe it again from nearby'
+const NOT_VISIBLE_AREA_ERROR = 'the area around the entity reaches chunks the NPC does not see now; observe it again from nearby'
 const MAX_TOPOLOGY_RELATIONS = 64
 
 interface RecipeCandidate {
@@ -572,19 +577,24 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     }
   }
 
-  const entity = resolve_exact_entity(actor, unit_number)
+  // Facts about a model-named entity cover only chunks the NPC sees now (M3).
+  const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') {
+    return { found: false, unit_number, error: NOT_VISIBLE_ERROR, code: 'entity_not_visible' }
+  }
+  if (resolved.code === 'wrong_surface') {
+    return {
+      found: false,
+      unit_number,
+      error: 'entity is on another surface',
+    }
+  }
+  const entity = resolved.entity
   if (!entity || !entity.valid) {
     return {
       found: false,
       unit_number,
       error: 'entity not found',
-    }
-  }
-  if (entity.surface.index !== actor.surface.index) {
-    return {
-      found: false,
-      unit_number,
-      error: 'entity is on another surface',
     }
   }
 
@@ -670,9 +680,22 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     return { found: false, unit_number, radius, error: `radius must be an integer from 1 to ${MAX_TOPOLOGY_RADIUS}` }
   }
 
-  const center = resolve_exact_entity(actor, unit_number)
+  const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') return { found: false, unit_number, error: NOT_VISIBLE_ERROR, code: 'entity_not_visible' }
+  if (resolved.code === 'wrong_surface') return { found: false, unit_number, error: 'entity is on another surface' }
+  const center = resolved.entity
   if (!center || !center.valid) return { found: false, unit_number, error: 'entity not found' }
-  if (center.surface.index !== actor.surface.index) return { found: false, unit_number, error: 'entity is on another surface' }
+  // The scan and the neighbours it reads (belt, inserter and pipe ends, pipe-to-ground up to 10 tiles) reach past the
+  // entity's own chunks: refuse before any scan unless the whole area is seen now.
+  const reach = math.max(radius, TOPOLOGY_MIN_REACH)
+  const box = center.bounding_box ?? { left_top: center.position, right_bottom: center.position }
+  const scan_area = {
+    left_top: { x: box.left_top.x - reach, y: box.left_top.y - reach },
+    right_bottom: { x: box.right_bottom.x + reach, y: box.right_bottom.y + reach },
+  }
+  if (!area_known_visible(actor.force, center.surface, scan_area)) {
+    return { found: false, unit_number, radius, error: NOT_VISIBLE_AREA_ERROR, code: 'area_not_visible' }
+  }
 
   const relations: Array<Record<string, unknown>> = []
 

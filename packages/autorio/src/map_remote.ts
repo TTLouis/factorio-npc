@@ -1,6 +1,6 @@
 import type { LuaEntity, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import { remember_entity_reference, resolve_entity_reference } from './entity_reference'
+import { entity_reference_hint, remember_entity_reference, resolve_entity_reference, resolve_visible_entity_reference } from './entity_reference'
 import { chunk_coverage, is_chunk_known_charted, is_chunk_known_visible, MAP_CROP_DEFAULT_RADIUS, MAP_CROP_MAX_RADIUS, map_crop, map_knowledge_summary } from './map_knowledge'
 import { crafting_categories_support_recipe } from './recipe_categories'
 import { find_world_entities } from './npc_vision'
@@ -203,7 +203,19 @@ function resolve_visible_entity(actor: ControlledActor, unit_number: number) {
   if (!valid_integer(unit_number, 1, 9007199254740991)) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
-  const entity = resolve_entity_reference(actor, unit_number, 'map_visible')
+  // Resolve only where the NPC sees now (M3): an entity in fog answers the same whether it still stands, and nothing there
+  // is scanned or refreshed. Its stored hint position only says whether the chunk was ever charted.
+  const visible = resolve_visible_entity_reference(actor, unit_number, 'map_visible')
+  if (visible.code === 'not_visible') {
+    const hint = entity_reference_hint(unit_number)
+    const uncharted = hint !== undefined && !is_position_charted(actor, actor.surface, hint.position)
+    return { code: (uncharted ? 'area_uncharted' : 'area_not_visible') as MapObservationCode, entity: undefined }
+  }
+  if (visible.code === 'not_found') {
+    return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
+  }
+  // Another surface: the plain lookup, checked below against the entity's own surface as before.
+  const entity = visible.code === 'wrong_surface' ? resolve_entity_reference(actor, unit_number, 'map_visible') : visible.entity
   if (!entity || !entity.valid) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
