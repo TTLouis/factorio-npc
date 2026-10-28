@@ -77,7 +77,7 @@ function world(targetType: 'unit' | 'unit-spawner' = 'unit') {
     character,
     position: { x: 0, y: 0 },
     surface,
-    force: { index: 1, name: 'player' },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
     status_snapshot: () => identity,
     set_walking_state: vi.fn(),
     set_shooting_state: vi.fn(),

@@ -35,7 +35,7 @@ function fixture(options: { water?: boolean, obstacle?: boolean } = {}) {
     position: { x: 0.5, y: 0.5 },
     character,
     surface,
-    force: { index: 1, name: 'player' },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
   } as unknown as ControlledActor
   return { actor, surface, character, rock }
 }
@@ -63,7 +63,7 @@ describe('bounded construction site planning', () => {
       center: { x: 0, y: 0 },
       transient_character_count: 1,
     })
-    expect(result.rejection_summary).toEqual({ occupied_entity: 0, blocking_terrain: 0 })
+    expect(result.rejection_summary).toEqual({ occupied_entity: 0, blocking_terrain: 0, not_visible: 0 })
     expect(result.semantics.validation).toContain('not a machine layout')
   })
 

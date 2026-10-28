@@ -39,7 +39,7 @@ function fixture(
     character: actorCharacter,
     position: actorPosition,
     surface,
-    force: { index: 1, name: 'player' },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
     get_main_inventory: vi.fn(() => inventory),
     status_snapshot: vi.fn(() => ({
       actor_id: 42,

@@ -2,7 +2,7 @@ import type { LuaEntity, LuaEntityPrototype } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { PlacementPoint, PlacementWorldBox } from './placement_geometry'
 import { has_electric_energy_source, pole_reach, protected_read } from './electric_facts'
-import { resolve_entity_reference } from './entity_reference'
+import { resolve_entity_reference, resolve_visible_entity_reference } from './entity_reference'
 import { find_world_entities } from './npc_vision'
 import { item_output_position } from './placement_candidates'
 import { rotate_cardinal, vector_xy } from './placement_geometry'
@@ -493,6 +493,18 @@ export function resolve_existing_view(actor: ControlledActor, unit_number: numbe
   return entity_view(entity)
 }
 
+// A model-named existing endpoint read for a new plan or proposal (M3): only an entity the NPC sees now grants it. One in a
+// chunk the NPC does not see is `not_visible` whether it still stands or not, and nothing there is scanned. Record, status and
+// re-verification paths keep resolve_existing_view: they settle entities this layout already bound, not a fresh model claim.
+export function resolve_visible_existing_view(actor: ControlledActor, unit_number: number): { view: EndpointView, code: 'ok' } | { view?: undefined, code: 'not_found' | 'not_visible' } {
+  const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') return { code: 'not_visible' }
+  const entity = resolved.entity
+  if (!entity || !entity.valid || entity.force.index !== actor.force.index) return { code: 'not_found' }
+  const view = entity_view(entity)
+  return view ? { view, code: 'ok' } : { code: 'not_found' }
+}
+
 // The virtual (pre-placement) proof of every connection of a plan whose placements are spatially valid. `footprints` are the
 // planned footprints in plan order. A resolvable endpoint that does not satisfy its connection is a spatial failure; one whose
 // geometry cannot be predicted is returned as unproven (an eligibility matter, with the staging it needs).
@@ -509,7 +521,11 @@ export function prove_plan_connections(actor: ControlledActor, placements: Layou
         views[role] = planned_view(placements[node].entity_name, footprints[node])
         continue
       }
-      const view = resolve_existing_view(actor, endpoint.unit_number!)
+      const resolved = resolve_visible_existing_view(actor, endpoint.unit_number!)
+      if (resolved.code === 'not_visible') {
+        return { error: { code: 'CONNECTION_ENDPOINT_NOT_VISIBLE', message: `connection ${connection.index}: ${role} ${endpoint.unit_number} is in a chunk the NPC does not see now; observe it again from nearby`, index: connection.index, kind: connection.kind, role, unit_number: endpoint.unit_number } }
+      }
+      const view = resolved.view
       if (view === undefined) {
         return { error: { code: 'CONNECTION_ENDPOINT_UNAVAILABLE', message: `connection ${connection.index}: ${role} ${endpoint.unit_number} is not an existing entity of this surface and force`, index: connection.index, kind: connection.kind, role, unit_number: endpoint.unit_number } }
       }

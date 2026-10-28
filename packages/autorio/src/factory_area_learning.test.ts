@@ -91,7 +91,7 @@ function fixture(extra: any[] = []) {
     is_valid: true,
     position: { x: 6, y: 4 },
     surface,
-    force: { name: 'player' },
+    force: { name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
     character: undefined,
   }
   return { actor, surface }

@@ -1,5 +1,6 @@
 import type { ControlledActor } from './actors/types'
-import { resolve_entity_reference } from './entity_reference'
+import { resolve_visible_entity_reference } from './entity_reference'
+import { area_known_visible, knowledge_revision } from './map_knowledge'
 import { find_world_entities } from './npc_vision'
 
 type Position = { x: number, y: number }
@@ -36,9 +37,11 @@ function valid_position(value: unknown): value is Position {
 function resolve_anchor(actor: ControlledActor, request: ConstructionSiteRequest) {
   if (request.anchor_unit_number !== undefined) {
     if (!valid_integer(request.anchor_unit_number, 1, 9007199254740991)) return { error: 'invalid anchor_unit_number' }
-    const entity = resolve_entity_reference(actor, request.anchor_unit_number, 'map_visible')
+    const resolved = resolve_visible_entity_reference(actor, request.anchor_unit_number, 'map_visible')
+    if (resolved.code === 'not_visible') return { error: 'anchor entity is in a chunk the NPC does not see now; observe it again from nearby', not_visible: true }
+    if (resolved.code === 'wrong_surface') return { error: 'anchor entity is on another surface' }
+    const entity = resolved.entity
     if (!entity || !entity.valid) return { error: 'anchor entity not found' }
-    if (entity.surface.index !== actor.surface.index) return { error: 'anchor entity is on another surface' }
     return { position: entity.position, unit_number: entity.unit_number, entity_name: entity.name }
   }
   if (request.position !== undefined) {
@@ -134,14 +137,16 @@ export function find_construction_sites(actor: ControlledActor, request: Constru
   }
 
   const anchor = resolve_anchor(actor, request)
-  if ('error' in anchor) return { ok: false, error: { code: 'INVALID_ANCHOR', message: anchor.error } }
+  if ('error' in anchor) return { ok: false, error: { code: 'not_visible' in anchor ? 'ANCHOR_NOT_VISIBLE' : 'INVALID_ANCHOR', message: anchor.error } }
 
   const base_center = { x: math.floor(anchor.position.x) + 0.5, y: math.floor(anchor.position.y) + 0.5 }
   const step = math.max(1, math.floor(math.min(request.width, request.height) / 2))
   const ring_limit = math.max(1, math.ceil(search_radius / step))
   const seen: Record<string, boolean> = {}
   const candidates: Array<Record<string, any>> = []
-  const rejection_summary = { occupied_entity: 0, blocking_terrain: 0 }
+  // not_visible: a site reaching a chunk the NPC does not see now is neither read nor offered (M3); the search is then
+  // incomplete rather than empty.
+  const rejection_summary = { occupied_entity: 0, blocking_terrain: 0, not_visible: 0 }
   let evaluated_count = 0
   let evaluation_limit_reached = false
 
@@ -160,6 +165,10 @@ export function find_construction_sites(actor: ControlledActor, request: Constru
         if (seen[key]) continue
         seen[key] = true
         evaluated_count++
+        if (!area_known_visible(actor.force, actor.surface, bounds)) {
+          rejection_summary.not_visible++
+          continue
+        }
         const inspection = inspect_area(actor, bounds)
         if (!inspection.ok) {
           if (inspection.reason === 'occupied_entity') rejection_summary.occupied_entity++
@@ -192,11 +201,17 @@ export function find_construction_sites(actor: ControlledActor, request: Constru
     evaluated_count,
     evaluation_limit_reached,
     rejection_summary,
+    search_complete: rejection_summary.not_visible === 0 && !evaluation_limit_reached,
+    map_context: { source: 'npc_map_knowledge', observed_tick: game.tick, revision: knowledge_revision(actor.force), site_authority: 'currently_visible_chunks_only' },
     candidates: selected,
     semantics: {
       occupancy: 'strict empty-envelope search: non-character entities and blocking water/out-of-map terrain reject a site; characters are transient and reported but do not reject the long-term site',
       validation: 'a site candidate is only a free rectangular envelope, not a machine layout or construction validation; choose exact placements and pass them to validateConstructionPlan before execution',
     },
-    error: selected.length === 0 ? { code: 'NO_CLEAR_SITE', message: 'no clear construction site found within the bounded search' } : undefined,
+    error: selected.length === 0
+      ? rejection_summary.not_visible > 0
+        ? { code: 'SEARCH_INCOMPLETE_NOT_VISIBLE', message: `no clear site among the visible ones; ${rejection_summary.not_visible} sites reach chunks the NPC does not see now and were not read` }
+        : { code: 'NO_CLEAR_SITE', message: 'no clear construction site found within the bounded search' }
+      : undefined,
   }
 }

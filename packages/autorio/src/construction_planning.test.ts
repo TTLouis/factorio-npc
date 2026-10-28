@@ -33,7 +33,7 @@ function fixture() {
     character: actorCharacter,
     position: actorCharacter.position,
     surface,
-    force: { index: 1, name: 'player' },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
   } as unknown as ControlledActor
   return { actor, surface, actorCharacter, cliff }
 }
