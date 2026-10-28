@@ -200,12 +200,30 @@ function plain_object(value: any) {
   return value !== undefined && value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+// TSTL's StringTrim uses a Lua byte character class containing UTF-8 NBSP/BOM
+// bytes. That can remove a trailing byte from ordinary non-ASCII text. Match
+// complete ECMAScript whitespace strings instead; lengths/slices stay aligned
+// in both JavaScript (code units) and Lua (UTF-8 bytes).
+const SKILL_WHITESPACE = [' ', '\t', '\n', '\r', '\v', '\f', '\u00A0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200A', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000', '\uFEFF']
+export function trim_skill_text(value: string) {
+  let result = value
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const whitespace of SKILL_WHITESPACE) {
+      if (result.startsWith(whitespace)) { result = result.slice(whitespace.length); changed = true }
+      if (result.endsWith(whitespace)) { result = result.slice(0, result.length - whitespace.length); changed = true }
+    }
+  }
+  return result
+}
+
 function clean_text(value: unknown, label: string, max = MAX_TEXT, required = true) {
   if (typeof value !== 'string') {
     if (!required && (value === undefined || value === null)) return ''
     throw new Error(`${label} must be a string`)
   }
-  let result = value.split('\r').join(' ').split('\n').join(' ').split('\t').join(' ').trim()
+  let result = trim_skill_text(value.split('\r').join(' ').split('\n').join(' ').split('\t').join(' '))
   while (result.includes('  ')) result = result.split('  ').join(' ')
   if (required && result.length === 0) throw new Error(`${label} must not be empty`)
   if (result.length > max) throw new Error(`${label} exceeds ${max} characters`)
@@ -465,7 +483,7 @@ export const MAX_GOAL_TAGS = 16
 // underscores become hyphens. Non-ASCII tags (player shorthand such as 煤蛇)
 // are kept as written.
 export function normalize_skill_tag(value: string) {
-  let tag = value.toLowerCase().trim()
+  let tag = trim_skill_text(value.toLowerCase())
   for (const separator of [' ', '_', '\t']) tag = tag.split(separator).join('-')
   while (tag.includes('--')) tag = tag.split('--').join('-')
   if (tag.startsWith('-')) tag = tag.slice(1)
@@ -770,7 +788,7 @@ export function goal_search_terms(text: string): GoalTerms {
   let normalized = text.toLowerCase()
   for (const separator of GOAL_SEPARATORS) normalized = normalized.split(separator).join(' ')
   while (normalized.includes('  ')) normalized = normalized.split('  ').join(' ')
-  normalized = normalized.trim()
+  normalized = trim_skill_text(normalized)
   const terms: string[] = []
   const add = (term: string) => {
     if (term.length >= 2 && !terms.includes(term)) terms.push(term)

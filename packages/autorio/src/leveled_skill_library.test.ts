@@ -5,13 +5,41 @@ import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
 import {
   canonicalize_skill_definition, curated_library_profile, ensure_basic_skill_definitions,
   find_skill_definitions, generate_skill_markdown, get_skill_definition, list_skill_definitions,
-  put_untrusted_skill_definition, select_curated_library, skill_cards_for_goal,
+  put_untrusted_skill_definition, select_curated_library, skill_cards_for_goal, trim_skill_text, normalize_skill_tag, goal_search_terms,
 } from './skills'
 import { filtered_library_entries, skill_detail_rows } from './skills_window'
 
 beforeEach(() => { (globalThis as any).storage = {} })
 
 describe('leveled knowledge and skills as a selectable, honest method library', () => {
+  it('trims complete whitespace characters without deleting Unicode content or corrupting tags and queries', () => {
+    for (const text of ['并线', '煤蛇', '¿', '»', 'ÿ', 'A\u00A0B', 'A\uFEFFB']) {
+      expect(trim_skill_text(`\uFEFF \t\u00A0${text}\u3000\u2009 \uFEFF`)).toBe(text)
+      expect(normalize_skill_tag(`\u00A0${text}\uFEFF`)).toBe(text.toLowerCase())
+      expect(canonicalize_skill_definition({ id: 'unicode-probe', name: text, summary: text }).name).toBe(text)
+    }
+    expect(trim_skill_text('\u00A0\uFEFF \t')).toBe('')
+    expect(goal_search_terms(' 并线 ').normalized).toBe('并线')
+  })
+
+  it('upgrades untouched malformed curated tags but preserves personal edits across existing save state', () => {
+    ensure_basic_skill_definitions()
+    const registry = (globalThis as any).storage.sgluna_skill_definitions
+    registry['belt-side-load-merge'].revision = 2
+    registry['belt-side-load-merge'].goal_tags = ['并�']
+    expect(ensure_basic_skill_definitions().upgraded).toBe(1)
+    expect(get_skill_definition('belt-side-load-merge')!.goal_tags).toContain('并线')
+    select_curated_library('leveled')
+    registry['skill-deliberate-belt-routing'].revision = 1
+    registry['skill-deliberate-belt-routing'].goal_tags = ['并�']
+    expect(ensure_basic_skill_definitions().upgraded).toBe(1)
+    expect(get_skill_definition('skill-deliberate-belt-routing')!.goal_tags).toContain('并线')
+    const personal = registry['skill-deliberate-belt-routing']
+    personal.revision = 1; personal.goal_tags = ['owner-choice']; personal.source.evidence_refs.push('player-edit:owner')
+    expect(ensure_basic_skill_definitions().upgraded).toBe(0)
+    expect(get_skill_definition(personal.id)!.goal_tags).toEqual(['owner-choice'])
+  })
+
   it('keeps the legacy default unchanged and installs the complete classified profile without duplicate basic curation', () => {
     expect(curated_library_profile()).toBe('basic')
     ensure_basic_skill_definitions()

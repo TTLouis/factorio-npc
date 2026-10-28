@@ -6,6 +6,7 @@ interface Entry {
   id: string
   name: string
   level: number
+  revision?: number
   type?: 'knowledge' | 'skill'
   tags: string[]
   use: string
@@ -102,7 +103,7 @@ const ENTRIES: Entry[] = [
     failures: ['Reachable machines still have incompatible inventory endpoints.', 'A nominal inserter rating is treated as measured throughput in this geometry.'], related: ['knowledge-connection-geometry', 'skill-complete-operating-cell'],
   },
   {
-    id: 'skill-deliberate-belt-routing', name: 'Deliberate Belt Routing', level: 1,
+    id: 'skill-deliberate-belt-routing', name: 'Deliberate Belt Routing', level: 1, revision: 2,
     tags: ['belt', 'lane', 'merge', 'side-load', 'routing', '并线'],
     use: 'Connecting multiple item streams, merging paths or crossing an existing route.', skip: 'Existing transport already delivers the required flow without interference.',
     checks: ['Current lane occupancy, belt directions and pickup/drop positions.', 'Live transport capacity and permitted routing geometry.'],
@@ -475,7 +476,7 @@ const ENTRIES: Entry[] = [
 
 export const LEVELED_SKILL_DEFINITIONS = ENTRIES.map(entry => ({
   schema_version: 1,
-  revision: 1,
+  revision: entry.revision ?? 1,
   id: entry.id,
   name: entry.name,
   content_type: entry.type ?? 'skill',
