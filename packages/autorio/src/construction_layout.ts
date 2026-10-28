@@ -495,7 +495,8 @@ export function resolve_existing_view(actor: ControlledActor, unit_number: numbe
 
 // A model-named existing endpoint read for a new plan or proposal (M3): only an entity the NPC sees now grants it. One in a
 // chunk the NPC does not see is `not_visible` whether it still stands or not, and nothing there is scanned. Record, status and
-// re-verification paths keep resolve_existing_view: they settle entities this layout already bound, not a fresh model claim.
+// re-verification paths keep resolve_existing_view: they settle entities this layout already bound, not a fresh model claim;
+// the precheck before a node is created (layout_node_precheck) uses this one.
 export function resolve_visible_existing_view(actor: ControlledActor, unit_number: number): { view: EndpointView, code: 'ok' } | { view?: undefined, code: 'not_found' | 'not_visible' } {
   const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
   if (resolved.code === 'not_visible') return { code: 'not_visible' }
@@ -979,9 +980,12 @@ export function layout_node_precheck(actor: ControlledActor, layout_node: { layo
         }
         continue
       }
-      const view = resolve_existing_view(actor, endpoint.unit_number!)
-      if (view === undefined) return `connection ${connection.index}: ${role} ${endpoint.unit_number} is no longer an existing entity of this surface and force`
-      views[role] = view
+      // A pending connection to an existing entity is fresh authority for the placement about to be created (M3): the endpoint
+      // must still be seen now, not only when the plan was validated.
+      const resolved = resolve_visible_existing_view(actor, endpoint.unit_number!)
+      if (resolved.code === 'not_visible') return `connection ${connection.index}: ${role} ${endpoint.unit_number} is in a chunk the NPC does not see now; observe it again from nearby`
+      if (resolved.view === undefined) return `connection ${connection.index}: ${role} ${endpoint.unit_number} is no longer an existing entity of this surface and force`
+      views[role] = resolved.view
     }
     const proof = prove_connection(connection, views)
     if (proof.status === 'mismatch') {

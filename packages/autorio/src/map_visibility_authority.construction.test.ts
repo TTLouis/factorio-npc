@@ -2,6 +2,7 @@ import type { ControlledActor } from './actors/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { new_basic_operation_controller } from './basic_operations'
 import { check_single_placement, construction_plan_preflight, execute_validated_construction_plan, validate_construction_execution_plan } from './construction_execution'
+import { layout_node_precheck } from './construction_layout'
 import { propose_construction_layout } from './construction_proposal'
 import { find_construction_sites } from './construction_site_planning'
 import { local_spatial_observation } from './construction_planning'
@@ -360,6 +361,47 @@ describe('construction visibility authority (M3)', () => {
         ok: false,
         error: { code: 'CONNECTION_ENDPOINT_UNAVAILABLE', unit_number: 999 },
       })
+    })
+  })
+
+  // M3C-R1-4: the precheck the placing runtime runs just before create_entity derives fresh connection authority from the
+  // pending existing endpoints. Validation saw the boiler; if its chunk is fogged before the inserter is created, the precheck
+  // refuses without reading it, whether it still stands or not, and a destroyed one seen again is no longer an entity.
+  // Pre-change (10d746a8) the precheck resolved the endpoint without a visibility check and returned undefined (proceed).
+  describe('layout node precheck before creation', () => {
+    function queued_layout(f: World) {
+      const validation = validate(f, [SRC, INS], [FEED])
+      expect(validation).toMatchObject({ ok: true, execution_eligible: true })
+      const started = execute_validated_construction_plan(f.actor, validation.validation_id, 2, f.basic, f.manager)
+      expect(started[0]).toBe(true)
+      const layout_id = Number(/layout_id (\d+)/.exec(started[1])![1])
+      const record = G.storage.sgluna_construction_layouts[layout_id]
+      const node = record.nodes.find((value: any) => value.entity_name === 'test-inserter')
+      expect(node.state).toBe('queued')
+      return { record, node, check: () => layout_node_precheck(f.actor, { layout_id: record.layout_id, index: node.index }, 'test-inserter', node.position, node.direction) }
+    }
+
+    it('control: with the endpoint still seen the precheck lets the inserter be created', () => {
+      const f = build()
+      const { check } = queued_layout(f)
+      expect(check()).toBeUndefined()
+    })
+
+    it('refuses before creation once the endpoint is fogged, standing or destroyed, without reading it or pausing the layout', () => {
+      const f = build()
+      const { record, check } = queued_layout(f)
+      remember_entity_reference(f.boiler)
+      f.state.visible = ONLY_ROW_ZERO
+      const lookup = vi.fn((unit: number) => f.by_unit.get(unit))
+      G.game.get_entity_by_unit_number = lookup
+      const standing = check()
+      expect(standing).toBe(`connection 0: drop ${BOILER_UNIT} is in a chunk the NPC does not see now; observe it again from nearby`)
+      f.by_unit.delete(BOILER_UNIT)
+      expect(check()).toBe(standing)
+      expect(record.state).not.toBe('paused')
+      // Seen again, the destroyed boiler is simply gone.
+      f.state.visible = ALL_VISIBLE
+      expect(check()).toBe(`connection 0: drop ${BOILER_UNIT} is no longer an existing entity of this surface and force`)
     })
   })
 
