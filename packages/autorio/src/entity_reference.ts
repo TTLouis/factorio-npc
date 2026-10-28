@@ -9,6 +9,8 @@ export interface EntityReferenceHint {
   surface_index: LuaSurface['index']
   force_index: number
   position: MapPositionStruct
+  // The bounds observed with the position (M3): a hinted lookup is refused before any scan when they reach an unseen chunk.
+  box?: { left_top: MapPositionStruct, right_bottom: MapPositionStruct }
   observed_tick: number
 }
 
@@ -23,11 +25,15 @@ function hints() {
 
 export function remember_entity_reference(entity: LuaEntity | undefined) {
   if (!entity || !entity.valid || entity.unit_number === undefined) return
+  const box = entity.bounding_box
   hints()[entity.unit_number] = {
     name: entity.name,
     surface_index: entity.surface.index,
     force_index: entity.force.index,
     position: { x: entity.position.x, y: entity.position.y },
+    box: box !== undefined
+      ? { left_top: { x: box.left_top.x, y: box.left_top.y }, right_bottom: { x: box.right_bottom.x, y: box.right_bottom.y } }
+      : undefined,
     observed_tick: game.tick,
   }
 }
@@ -47,7 +53,7 @@ export function entity_reference_hint(unit_number: number) {
 // targets, construction anchors).
 export type EntityReferenceScope = 'actor_body' | 'map_visible'
 
-function identity_at(surface: LuaSurface, hint: EntityReferenceHint, unit_number: number, force?: ControlledActor['force']) {
+function identity_at(surface: LuaSurface, hint: EntityReferenceHint, unit_number: number, force?: ControlledActor['force'], remember = true) {
   const filters: Record<string, unknown> = {
     position: hint.position,
     radius: 0.25,
@@ -57,7 +63,7 @@ function identity_at(surface: LuaSurface, hint: EntityReferenceHint, unit_number
   const candidates = find_world_entities(surface, filters as any)
   for (const candidate of candidates) {
     if (!candidate.valid || candidate.unit_number !== unit_number) continue
-    remember_entity_reference(candidate)
+    if (remember) remember_entity_reference(candidate)
     return candidate
   }
   return undefined
@@ -132,9 +138,12 @@ export function resolve_visible_entity_reference(actor: ControlledActor, unit_nu
   if (!hint) return { code: 'not_found' }
   if (hint.surface_index !== actor.surface.index) return { code: 'wrong_surface' }
   if (scope === 'actor_body' && hint.force_index !== actor.force.index) return { code: 'not_found' }
-  if (!area_known_visible(actor.force, actor.surface, { left_top: hint.position, right_bottom: hint.position })) return { code: 'not_visible' }
-  const entity = identity_at(actor.surface, hint, unit_number, scope === 'actor_body' ? actor.force : undefined)
+  // The observed bounds (or, for a hint recorded before they were kept, the position) must be seen before anything is
+  // scanned; the hint is refreshed only once the entity found there is wholly seen.
+  if (!area_known_visible(actor.force, actor.surface, hint.box ?? { left_top: hint.position, right_bottom: hint.position })) return { code: 'not_visible' }
+  const entity = identity_at(actor.surface, hint, unit_number, scope === 'actor_body' ? actor.force : undefined, false)
   if (!entity) return { code: 'not_found' }
   if (!entity_known_visible(actor, entity)) return { code: 'not_visible' }
+  remember_entity_reference(entity)
   return { entity, code: 'ok' }
 }

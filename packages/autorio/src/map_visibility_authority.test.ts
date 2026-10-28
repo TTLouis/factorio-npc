@@ -113,6 +113,28 @@ describe('resolve_visible_entity_reference (M3)', () => {
     expect(resolve_visible_entity_reference(actor, 108, 'actor_body')).toMatchObject({ code: 'ok' })
   })
 
+  // M3C-R1-3: a building the engine does not index by unit number is found only through its observation hint. A centre that is
+  // seen does not make the building seen: the hint keeps the observed bounds, and a box reaching an unseen chunk is refused
+  // before any scan, standing or destroyed, with the hint untouched. Pre-change (10d746a8) only the hint position was checked:
+  // the scan ran, refreshed the hint, and a destroyed building answered not_found instead of not_visible.
+  it('a hinted building whose centre is seen but whose box reaches an unseen chunk is not_visible without a scan, standing or destroyed', () => {
+    const furnace = world_entity(119, 95, 10, { bounding_box: { left_top: { x: 94, y: 9 }, right_bottom: { x: 96.5, y: 11 } } })
+    remember_entity_reference(furnace)
+    expect(entity_reference_hint(119)).toMatchObject({ observed_tick: 500, box: { left_top: { x: 94, y: 9 }, right_bottom: { x: 96.5, y: 11 } } })
+    G.game.tick = 800
+    find.mockReturnValue([furnace])
+    expect(resolve_visible_entity_reference(actor, 119, 'actor_body')).toEqual({ code: 'not_visible' })
+    find.mockReturnValue([])
+    expect(resolve_visible_entity_reference(actor, 119, 'actor_body')).toEqual({ code: 'not_visible' })
+    expect(find).not.toHaveBeenCalled()
+    expect(entity_reference_hint(119)).toMatchObject({ observed_tick: 500 })
+    // Once the whole box is seen the scan runs and a found building refreshes its hint.
+    set_window(1, 0)
+    find.mockReturnValue([furnace])
+    expect(resolve_visible_entity_reference(actor, 119, 'actor_body')).toEqual({ entity: furnace, code: 'ok' })
+    expect(entity_reference_hint(119)).toMatchObject({ observed_tick: 800 })
+  })
+
   it('an entity on another surface is wrong_surface, directly and through its hint', () => {
     lookup[110] = world_entity(110, 200.5, 200.5, { surface: { index: 2 } })
     expect(resolve_visible_entity_reference(actor, 110, 'actor_body')).toEqual({ code: 'wrong_surface' })
