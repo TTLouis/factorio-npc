@@ -7,6 +7,7 @@ import { entity_has_power, evaluate_world_condition, status_name, WORLD_CONDITIO
 import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
 import { compact_spatial_summary } from './spatial_semantics'
+import { seen_now } from './visible_reads'
 import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { count_world_entities, find_world_entities } from './npc_vision'
@@ -406,7 +407,7 @@ export function create_tools_remote_interface() {
           status_name: status_name(entity.status),
           working: status_name(entity.status) === 'working',
         }
-        const spatial = compact_spatial_summary(entity)
+        const spatial = compact_spatial_summary(entity, seen_now(actor.force, actor.surface))
         if (spatial !== undefined) summary.spatial = spatial
         entities.push(summary)
       }
@@ -562,14 +563,15 @@ export function create_tools_remote_interface() {
         const network = entity.electric_network_id
         if (typeof network === 'number' && positive_integer(network) && network <= 9007199254740991) entity_summary.electric_network_id = network
         // An entity short of power names the nearest known pole and how far its supply area is, from live positions.
-        if (status_shows_no_power(entity_summary.status_name as string | undefined)) entity_summary.power_gap = nearest_pole_for_unpowered(entity)
+        if (status_shows_no_power(entity_summary.status_name as string | undefined)) entity_summary.power_gap = nearest_pole_for_unpowered(entity, seen_now(actor.force, entity.surface))
       }
       if (entity.type === 'rocket-silo') {
         entity_summary.rocket_parts = entity.rocket_parts
         entity_summary.rocket_parts_required = entity.prototype.rocket_parts_required
         entity_summary.rocket_ready = entity.rocket_silo_status === defines.rocket_silo_status.rocket_ready
       }
-      const spatial = compact_spatial_summary(entity)
+      // Neighbours, the mining area and the pole search behind this entity are read only where the NPC sees now (M3).
+      const spatial = compact_spatial_summary(entity, seen_now(actor.force, entity.surface))
       if (spatial !== undefined) entity_summary.spatial = spatial
 
       return {

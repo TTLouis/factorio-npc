@@ -1,6 +1,8 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { find_world_entities } from './npc_vision'
+import type { SeenArea } from './visible_reads'
+import { area_around } from './visible_reads'
 
 // Electric-network facts read straight from live prototypes and live entity
 // positions. Nothing here knows an entity name: a pole is whatever prototype has
@@ -16,6 +18,8 @@ const MAX_POLE_LINKS = 4
 const MAX_COVERED_ENTITIES = 6
 // How far an unpowered entity looks for the nearest pole (tiles).
 export const MAX_POLE_SEARCH_RADIUS = 64
+// Smaller pole searches tried, largest first, when the full radius reaches a chunk the NPC does not see now.
+const POLE_SEARCH_RADII = [MAX_POLE_SEARCH_RADIUS, 32, 16, 8]
 const TICKS_PER_SECOND = 60
 const REACH_EPSILON = 0.000001
 
@@ -281,10 +285,24 @@ export function status_shows_no_power(status_name: string | undefined) {
  * Nearest known pole to an entity that shows no power, with the distance and the
  * gap between the pole supply area and the entity bounding box (0 when the
  * area already covers the entity). Searches a bounded radius.
+ *
+ * With `seen` (a model-facing read, M3) the radius shrinks to what the NPC sees now around the entity, and the answer says
+ * so; when not even the smallest radius is seen, nothing is searched and the nearest pole is unknown.
  */
-export function nearest_pole_for_unpowered(entity: LuaEntity) {
+export function nearest_pole_for_unpowered(entity: LuaEntity, seen?: SeenArea) {
   const position = { x: entity.position.x, y: entity.position.y }
-  const poles = find_world_entities(entity.surface, { position, radius: MAX_POLE_SEARCH_RADIUS, type: 'electric-pole', force: entity.force } as any)
+  let radius: number | undefined = MAX_POLE_SEARCH_RADIUS
+  if (seen !== undefined) {
+    radius = undefined
+    for (const candidate of POLE_SEARCH_RADII) {
+      if (seen(area_around(position, candidate))) {
+        radius = candidate
+        break
+      }
+    }
+    if (radius === undefined) return { search_radius: 0, search_area_not_visible: true }
+  }
+  const poles = find_world_entities(entity.surface, { position, radius, type: 'electric-pole', force: entity.force } as any)
   let nearest: LuaEntity | undefined
   let nearest_squared = math.huge
   let found = 0
@@ -298,7 +316,8 @@ export function nearest_pole_for_unpowered(entity: LuaEntity) {
     }
   }
 
-  const result: Record<string, unknown> = { search_radius: MAX_POLE_SEARCH_RADIUS, poles_found: found }
+  const result: Record<string, unknown> = { search_radius: radius, poles_found: found }
+  if (radius < MAX_POLE_SEARCH_RADIUS) result.search_radius_limited_by_visibility = true
   if (nearest === undefined) return result
 
   const summary = pole_summary(nearest, math.sqrt(nearest_squared))

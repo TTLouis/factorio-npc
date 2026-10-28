@@ -19,8 +19,19 @@ vi.mock('./actors/actor_controller', () => ({
   get_controlled_actor: () => actor_state.actor,
 }))
 
+// The summaries read behind the entity are spied here; map_visibility_neighbours.test.ts runs them for real.
+const behind = vi.hoisted(() => ({
+  spatial: vi.fn((_entity: unknown, _seen?: unknown): unknown => undefined),
+  pole: vi.fn((_entity: unknown, _seen?: unknown): unknown => ({ search_radius: 64, poles_found: 0 })),
+}))
+
 vi.mock('./spatial_semantics', () => ({
-  compact_spatial_summary: () => undefined,
+  compact_spatial_summary: behind.spatial,
+}))
+
+vi.mock('./electric_facts', async importOriginal => ({
+  ...(await importOriginal<typeof import('./electric_facts')>()),
+  nearest_pole_for_unpowered: behind.pole,
 }))
 
 const G: any = globalThis
@@ -280,6 +291,30 @@ describe('fresh reads of a model-named entity cover only what the NPC sees now (
     expect(destroyed).toEqual(standing)
     expect(find).not.toHaveBeenCalled()
     expect(entity_reference_hint(UNIT)).toMatchObject({ observed_tick: 500 })
+  })
+
+  it('an exact status read passes what the NPC sees now to the summaries behind the entity', () => {
+    behind.spatial.mockClear()
+    behind.pole.mockClear()
+    G.defines.entity_status = { working: 1, no_power: 2 }
+    const entity = {
+      ...make_entity({ surface, force }, 'furnace', UNIT, NEAR),
+      status: 2,
+      prototype: { electric_energy_source_prototype: {} },
+      energy: 0,
+      electric_network_id: 3,
+    }
+    lookup[UNIT] = entity
+    state.entity = entity
+    const result = tools.get_entity_status(undefined, undefined, UNIT)
+    expect(result).toMatchObject({ found: true, entity: { unit_number: UNIT, power_gap: { search_radius: 64 } } })
+    for (const spy of [behind.spatial, behind.pole]) {
+      expect(spy).toHaveBeenCalledWith(entity, expect.any(Function))
+      const seen = spy.mock.calls[spy.mock.calls.length - 1][1] as (area: any) => boolean
+      // Window (0, 0) sees tiles -64..95: chunk 2 is seen, chunk 3 is not.
+      expect(seen({ left_top: { x: 90, y: 10 }, right_bottom: { x: 95, y: 11 } })).toBe(true)
+      expect(seen({ left_top: { x: 90, y: 10 }, right_bottom: { x: 97, y: 11 } })).toBe(false)
+    }
   })
 
   describe('logistics topology scan area', () => {

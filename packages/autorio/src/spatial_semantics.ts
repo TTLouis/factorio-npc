@@ -2,6 +2,8 @@ import type { LuaEntity } from 'factorio:runtime'
 import { find_world_entities } from './npc_vision'
 import { electric_prototype_facts, protected_read } from './electric_facts'
 import { rotate_cardinal, vector_xy } from './placement_geometry'
+import type { SeenArea } from './visible_reads'
+import { area_around, pipe_link_area, point_area, seen_link } from './visible_reads'
 
 const MAX_FLUID_STORAGES = 8
 const MAX_PIPE_CONNECTIONS_PER_STORAGE = 8
@@ -15,6 +17,14 @@ function entity_identity(entity: LuaEntity | undefined) {
     unit_number: entity.unit_number,
     position: entity.position,
   }
+}
+
+// A linked neighbour in a chunk the NPC does not see now: unknown, not absent.
+const NOT_VISIBLE_TARGET = { not_visible: true }
+
+function linked_identity(seen: SeenArea | undefined, position: { x: number, y: number } | undefined, read: () => LuaEntity | undefined) {
+  const link = seen_link(seen, position ? point_area(position) : undefined, read)
+  return link.seen ? entity_identity(link.entity) : NOT_VISIBLE_TARGET
 }
 
 function finite(value: number) {
@@ -38,7 +48,7 @@ function compact_fluidbox_prototype(value: any) {
   return result
 }
 
-function compact_fluid_ports(entity: LuaEntity) {
+function compact_fluid_ports(entity: LuaEntity, seen?: SeenArea) {
   const fluidbox = entity.fluidbox
   const count = math.min(fluidbox.length, MAX_FLUID_STORAGES)
   if (count <= 0) return undefined
@@ -59,7 +69,13 @@ function compact_fluid_ports(entity: LuaEntity) {
       if (connection.flow_direction !== undefined) summary.flow_direction = connection.flow_direction
       if (connection.connection_type !== undefined) summary.connection_type = connection.connection_type
       if (connection.target_position !== undefined) summary.target_position = connection.target_position
-      const target = entity_identity(connection.target?.owner)
+      const link = seen_link(seen, pipe_link_area(entity, connection), () => connection.target?.owner)
+      if (!link.seen) {
+        summary.target_not_visible = true
+        connections.push(summary)
+        continue
+      }
+      const target = entity_identity(link.entity)
       if (target !== undefined) summary.target = target
       if (target !== undefined && connection.target_fluidbox_index !== undefined) {
         const reverse = protected_read(() => connection.target!.owner.fluidbox.get_pipe_connections(connection.target_fluidbox_index!))
@@ -88,20 +104,20 @@ function compact_fluid_ports(entity: LuaEntity) {
   }
 }
 
-function compact_item_io(entity: LuaEntity) {
+function compact_item_io(entity: LuaEntity, seen?: SeenArea) {
   if (entity.type === 'inserter') {
     return {
       pickup_position: entity.pickup_position,
       drop_position: entity.drop_position,
-      pickup_target: entity_identity(entity.pickup_target),
-      drop_target: entity_identity(entity.drop_target),
+      pickup_target: linked_identity(seen, entity.pickup_position, () => entity.pickup_target),
+      drop_target: linked_identity(seen, entity.drop_position, () => entity.drop_target),
     }
   }
 
   if (entity.type === 'mining-drill') {
     return {
       drop_position: entity.drop_position,
-      drop_target: entity_identity(entity.drop_target),
+      drop_target: linked_identity(seen, entity.drop_position, () => entity.drop_target),
     }
   }
 
@@ -129,19 +145,19 @@ function mining_categories(prototype: any) {
   return result
 }
 
-function compact_mining_coverage(entity: LuaEntity) {
+function compact_mining_coverage(entity: LuaEntity, seen?: SeenArea) {
   if (entity.type !== 'mining-drill') return undefined
   const prototype: any = entity.prototype
   const radius = mining_radius(prototype)
   if (radius === undefined) return undefined
   const offset = mining_offset(prototype, entity.direction)
   const center = { x: entity.position.x + offset.x, y: entity.position.y + offset.y }
+  const area = area_around(center, radius)
+  // The mining area must be seen now before it is scanned; otherwise its resources are unknown.
+  if (seen !== undefined && !seen(area)) return { radius, search_center: center, not_visible: true }
   const categories = mining_categories(prototype)
   const resources = find_world_entities(entity.surface, {
-    area: [
-      { x: center.x - radius, y: center.y - radius },
-      { x: center.x + radius, y: center.y + radius },
-    ],
+    area: [area.left_top, area.right_bottom],
     type: 'resource',
   })
 
@@ -182,11 +198,14 @@ function compact_mining_coverage(entity: LuaEntity) {
  * This intentionally does not encode vanilla prototype names or remembered
  * orientation rules. Geometry is read from the current LuaEntity/LuaFluidBox
  * and mining coverage is calculated from the live surface/prototype.
+ *
+ * With `seen` (a model-facing read, M3), linked neighbours and the mining area are read only where the NPC sees now;
+ * the rest is marked not visible rather than absent.
  */
-export function compact_spatial_summary(entity: LuaEntity) {
-  const item_io = compact_item_io(entity)
-  const fluid = compact_fluid_ports(entity)
-  const mining = compact_mining_coverage(entity)
+export function compact_spatial_summary(entity: LuaEntity, seen?: SeenArea) {
+  const item_io = compact_item_io(entity, seen)
+  const fluid = compact_fluid_ports(entity, seen)
+  const mining = compact_mining_coverage(entity, seen)
   const prototype = electric_prototype_facts(entity.prototype)
   const has_power = prototype.power !== undefined || prototype.thermal !== undefined || prototype.electric_pole !== undefined
   if (item_io === undefined && fluid === undefined && mining === undefined && !has_power) return undefined

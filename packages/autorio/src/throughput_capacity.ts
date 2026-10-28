@@ -1,6 +1,8 @@
 import type { ControlledActor } from './actors/types'
 import type { LuaEntityPrototype } from 'factorio:runtime'
 import { resolve_visible_entity_reference } from './entity_reference'
+import type { SeenArea } from './visible_reads'
+import { point_area, seen_link, seen_now } from './visible_reads'
 
 export type ThroughputCapacityRequest
   = | {
@@ -49,6 +51,12 @@ function entity_summary(entity: any) {
   }
 }
 
+// A pickup or drop target in a chunk the NPC does not see now (M3) is unknown, not absent.
+function linked_summary(seen: SeenArea, position: { x: number, y: number } | undefined, read: () => unknown) {
+  const link = seen_link(seen, position ? point_area(position) : undefined, read as () => any)
+  return link.seen ? entity_summary(link.entity) : { not_visible: true }
+}
+
 function inserter_transfer_rate_unvalidated() {
   return {
     validated: false as const,
@@ -70,6 +78,7 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
     if (!entity || !entity.valid) return fail(`entity not found: ${request.unit_number}`)
     if (entity.type !== 'inserter') return fail(`entity is not an inserter: ${request.unit_number}`)
 
+    const seen = seen_now(actor.force, entity.surface)
     const held = entity.held_stack
     return {
       ok: true as const,
@@ -83,8 +92,8 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
       pickup_from_right_lane: entity.pickup_from_right_lane,
       pickup_position: entity.pickup_position,
       drop_position: entity.drop_position,
-      pickup_target: entity_summary(entity.pickup_target),
-      drop_target: entity_summary(entity.drop_target),
+      pickup_target: linked_summary(seen, entity.pickup_position, () => entity.pickup_target),
+      drop_target: linked_summary(seen, entity.drop_position, () => entity.drop_target),
       held_stack: held?.valid_for_read
         ? { name: held.name, count: held.count }
         : undefined,
