@@ -1,5 +1,6 @@
 import type { LuaForce, LuaGuiElement, LuaPlayer } from 'factorio:runtime'
 import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
+import { LEVELED_SKILL_DEFINITIONS } from './leveled_skill_library'
 import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
 import {
   analyze_factory_area,
@@ -23,6 +24,18 @@ export type SkillKind = 'production' | 'logistics' | 'construction' | 'utility' 
 export type SkillStatus = 'observed' | 'candidate' | 'verified' | 'deprecated'
 export type SkillStage = 'example' | 'pattern' | 'executable_candidate' | 'verified_skill'
 export type SkillVerificationState = 'passed' | 'failed' | 'not_tested' | 'unvalidated'
+export type LibraryContentType = 'knowledge' | 'skill'
+export type CuratedLibraryProfile = 'basic' | 'leveled'
+
+export interface LibraryGuidance {
+  when_to_use: string
+  when_to_skip: string
+  live_checks: string[]
+  steps: string[]
+  completion: string[]
+  required_capabilities: string[]
+  related_ids: string[]
+}
 
 export interface SkillFlow {
   item: string
@@ -136,6 +149,10 @@ export interface SkillDefinition {
   // smelting, science. Kept short; omitted when empty so older records keep
   // their canonical JSON.
   goal_tags?: string[]
+  // Optional so canonical legacy definitions and pinned snapshots stay byte-stable.
+  content_type?: LibraryContentType
+  level?: number
+  guidance?: LibraryGuidance
 }
 
 export interface SkillUiSummary {
@@ -163,6 +180,7 @@ interface SkillExportRecord {
 declare const storage: {
   sgluna_skill_definitions?: Record<string, SkillDefinition>
   sgluna_skill_exports?: Record<string, SkillExportRecord>
+  sgluna_curated_library_profile?: CuratedLibraryProfile
 }
 
 const MAX_TEXT = 1000
@@ -517,6 +535,28 @@ export function canonicalize_skill_definition(value: any): SkillDefinition {
   }
   const goal_tags = canonical_goal_tags(value.goal_tags)
   if (goal_tags.length > 0) skill.goal_tags = goal_tags
+  if (value.content_type !== undefined) skill.content_type = enum_value(value.content_type, ['knowledge', 'skill'] as const, 'content_type', 'skill')
+  if (value.level !== undefined) {
+    skill.level = non_negative_integer(value.level, 'level')
+    if (skill.level > 7) throw new Error('level must be between 0 and 7')
+  }
+  if (value.guidance !== undefined) {
+    if (!plain_object(value.guidance)) throw new Error('guidance must be an object')
+    const raw = value.guidance
+    const steps = string_list(raw.steps, 'guidance.steps')
+    const completion = string_list(raw.completion, 'guidance.completion')
+    if (steps.length === 0 || completion.length === 0) throw new Error('guidance requires steps and completion evidence')
+    skill.guidance = {
+      when_to_use: clean_text(raw.when_to_use, 'guidance.when_to_use'),
+      when_to_skip: clean_text(raw.when_to_skip, 'guidance.when_to_skip'),
+      live_checks: string_list(raw.live_checks, 'guidance.live_checks'),
+      steps,
+      completion,
+      required_capabilities: string_list(raw.required_capabilities, 'guidance.required_capabilities'),
+      related_ids: string_list(raw.related_ids, 'guidance.related_ids').map(assert_safe_skill_id),
+    }
+  }
+  if (skill.content_type === 'knowledge' && skill.status === 'verified') throw new Error('knowledge is not verified by the physical skill verifier')
   assert_verified_evidence(skill)
   return skill
 }
@@ -535,6 +575,7 @@ function ensure_definitions() {
 
 function is_basic_skill_id(id: string) {
   for (const raw of BASIC_SKILL_DEFINITIONS) if (raw.id === id) return true
+  for (const raw of LEVELED_SKILL_DEFINITIONS) if (raw.id === id) return true
   return false
 }
 
@@ -576,8 +617,24 @@ function is_unedited_curated_copy(stored: SkillDefinition) {
 // hid that the science-pack recipe itself is locked behind a technology.
 export const RETIRED_BASIC_SKILL_IDS: string[] = ['automation-science-bootstrap']
 
+export function curated_library_profile(): CuratedLibraryProfile {
+  return storage.sgluna_curated_library_profile === 'leveled' ? 'leveled' : 'basic'
+}
+
+// User/RCON selection only; never a model operation. Validate before changing
+// synchronized storage. Personal edits and dynamic learned entries are retained.
+export function select_curated_library(profile: unknown) {
+  if (profile !== 'basic' && profile !== 'leveled') throw new Error('unknown curated library profile')
+  const source = profile === 'leveled' ? LEVELED_SKILL_DEFINITIONS : BASIC_SKILL_DEFINITIONS
+  for (const raw of source) canonicalize_skill_definition(raw)
+  storage.sgluna_curated_library_profile = profile
+  return { profile, ...ensure_basic_skill_definitions() }
+}
+
 export function ensure_basic_skill_definitions() {
   const registry = ensure_definitions()
+  const source = curated_library_profile() === 'leveled' ? LEVELED_SKILL_DEFINITIONS : BASIC_SKILL_DEFINITIONS
+  const inactive = curated_library_profile() === 'leveled' ? BASIC_SKILL_DEFINITIONS : LEVELED_SKILL_DEFINITIONS
   let added = 0
   let upgraded = 0
   let removed = 0
@@ -588,7 +645,11 @@ export function ensure_basic_skill_definitions() {
       removed++
     }
   }
-  for (const raw of BASIC_SKILL_DEFINITIONS) {
+  for (const raw of inactive) {
+    const stored = registry[raw.id]
+    if (stored !== undefined && is_unedited_curated_copy(stored)) { delete registry[raw.id]; removed++ }
+  }
+  for (const raw of source) {
     const skill = canonicalize_skill_definition(raw)
     const stored = registry[skill.id]
     if (stored === undefined) {
@@ -600,7 +661,7 @@ export function ensure_basic_skill_definitions() {
       upgraded++
     }
   }
-  return { added, upgraded, removed, total: BASIC_SKILL_DEFINITIONS.length }
+  return { added, upgraded, removed, total: source.length }
 }
 
 function skill_search_text(skill: SkillDefinition) {
@@ -621,6 +682,8 @@ function skill_search_text(skill: SkillDefinition) {
     ...skill.known_failure_modes,
     ...skill.examples.map(value => `${value.summary} ${value.notes ?? ''}`),
     ...(skill.goal_tags ?? []),
+    ...(skill.guidance?.live_checks ?? []),
+    ...(skill.guidance?.steps ?? []),
   ]
   return values.join(' ').toLowerCase()
 }
@@ -932,6 +995,8 @@ export interface SkillCard {
   needs: SkillCardNeed[]
   matched: string[]
   score: number
+  content_type?: LibraryContentType
+  level?: number
 }
 
 // The needs shown on a card or search result, at most CARD_LIST_MAX. When there
@@ -953,6 +1018,8 @@ function visible_needs(needs: SkillCardNeed[]): SkillCardNeed[] {
 
 export function skill_card(match: SkillGoalMatch): SkillCard {
   return {
+    ...(match.skill.content_type !== undefined ? { content_type: match.skill.content_type } : {}),
+    ...(match.skill.level !== undefined ? { level: match.skill.level } : {}),
     id: match.skill.id,
     name: match.skill.name,
     status: match.skill.status,
@@ -981,6 +1048,8 @@ export function find_skill_definitions(query: unknown, limit: unknown = 3, world
   const bounded_limit = positive_integer(limit, 'skill search limit')
   if (bounded_limit > MAX_SKILL_CARDS) throw new Error(`skill search limit must be at most ${MAX_SKILL_CARDS}`)
   return rank_skills_for_goal(normalized, world, true).slice(0, bounded_limit).map(match => ({
+    ...(match.skill.content_type !== undefined ? { content_type: match.skill.content_type } : {}),
+    ...(match.skill.level !== undefined ? { level: match.skill.level } : {}),
     score: match.score,
     id: match.skill.id,
     name: match.skill.name,
@@ -1216,6 +1285,16 @@ export function generate_skill_markdown(skill: SkillDefinition) {
   lines.push(`- Lifecycle status: ${skill.status}`)
   lines.push(`- Artifact stage: ${skill.stage}`)
   lines.push(`- Kind: ${skill.kind}`, '')
+  if (skill.content_type !== undefined) lines.push(`- Content type: ${skill.content_type}`)
+  if (skill.level !== undefined) lines.push(`- Complexity level: L${skill.level} (not verification or availability)`)
+  if (skill.guidance !== undefined) {
+    lines.push('', '## Use this entry', '', skill.guidance.when_to_use, '', '## Skip this entry', '', skill.guidance.when_to_skip)
+    for (const [heading, values] of [
+      ['Live checks', skill.guidance.live_checks], ['Steps', skill.guidance.steps],
+      ['Completion evidence', skill.guidance.completion], ['Required capabilities', skill.guidance.required_capabilities],
+      ['Related entries', skill.guidance.related_ids],
+    ] as Array<[string, string[]]>) { lines.push('', `## ${heading}`, ''); md_list(lines, values, 'None recorded.') }
+  }
 
   lines.push('## Preconditions', '')
   md_list(lines, skill.preconditions.map(condition => `${condition.kind}: ${condition.subject} — ${condition.description}${condition.minimum !== undefined ? ` (minimum ${condition.minimum})` : ''}`), 'None recorded.')
@@ -1349,6 +1428,11 @@ export function create_skill_remote_interface() {
       catch (error) { return { ok: false, error: error_message(error), cards: [] } }
     },
     list: () => list_skill_definitions(),
+    curated_profile: () => curated_library_profile(),
+    select_curated_library: (profile: unknown) => {
+      try { return { ok: true, ...select_curated_library(profile) } }
+      catch (error) { return { ok: false, error: error_message(error) } }
+    },
     analyze_area: (request: unknown = {}) => {
       const actor = get_controlled_actor()
       if (!actor || !actor.is_valid) return { ok: false, error: 'controlled actor is unavailable' }

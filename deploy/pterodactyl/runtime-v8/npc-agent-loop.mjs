@@ -5418,8 +5418,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     while (skills.length > 1 && JSON.stringify(skills).length > policy.chars) skills.shift()
     const payload = JSON.stringify(skills)
     if (payload.length > policy.chars) return ''
-    if (separatedExecution) return `[SKILL_CONTEXT] Planner-selected skill instructions supplied by the harness for the active execution_guidance.skillIds references. Use these details without searching or reopening the library. Revalidate mutable world facts before acting.\n${payload}`
-    return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
+    const libraryNote = skills.some(skill => skill.content_type !== undefined)
+      ? ' Knowledge entries guide interpretation; skill entries describe methods. Levels indicate complexity, not verified ability or availability. Required capabilities must be available through current admitted tools. Read recipes and sizing from the live game; these entries grant no execution or completion authority.' : ''
+    if (separatedExecution) return `[SKILL_CONTEXT] Planner-selected skill instructions supplied by the harness for the active execution_guidance.skillIds references. Use these details without searching or reopening the library. Revalidate mutable world facts before acting.${libraryNote}\n${payload}`
+    return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.${libraryNote}\n${payload}`
   }
 
   // Two defects lived in the inherited compaction:

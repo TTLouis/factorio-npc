@@ -763,6 +763,41 @@ describe('console refresh leaves unchanged sections alone', () => {
     finally { ui.restore() }
   })
 
+  it('library profile and type/level selectors show actionable knowledge separately and idle refresh preserves the pane', () => {
+    const ui = open_console()
+    try {
+      ensure_basic_skill_definitions()
+      ui.click(BUTTON_NAME); ui.click(SKILLS_BUTTON_NAME); ui.board.set_snapshot(snapshot())
+      const root = ui.player.gui.screen[SKILLS_ROOT_NAME]
+      const profile = find(root, SKILLS_WINDOW.library)
+      profile.selected_index = 2
+      get_handler((globalThis as any).defines.events.on_gui_selection_state_changed)({ player_index: 1, element: profile })
+      expect(find(root, SKILLS_WINDOW.list).tags.ids).toHaveLength(48)
+      const types = find(root, SKILLS_WINDOW.type_filter)
+      types.selected_index = 2
+      get_handler((globalThis as any).defines.events.on_gui_selection_state_changed)({ player_index: 1, element: types })
+      const list = find(root, SKILLS_WINDOW.list)
+      expect(list.tags.ids).toHaveLength(6)
+      expect(list.items.every((caption: string) => caption.startsWith('K L0'))).toBe(true)
+      expect(find(root, SKILLS_WINDOW.list_count).caption).toBe('6 knowledge · 0 skills')
+      ui.reset(); ui.tick()
+      expect(ui.counter.log.filter(line => line.startsWith('clear'))).toEqual([])
+      expect(root.valid).toBe(true)
+      expect(types.selected_index).toBe(2)
+      const levels = find(root, SKILLS_WINDOW.level_filter)
+      levels.selected_index = 5 // L3; there is no knowledge entry at this level.
+      get_handler((globalThis as any).defines.events.on_gui_selection_state_changed)({ player_index: 1, element: levels })
+      expect(find(root, SKILLS_WINDOW.list).tags.ids).toEqual([])
+      ui.click(SKILLS_WINDOW.edit)
+      expect(find(root, SKILLS_WINDOW.edit_name)).toBeUndefined()
+      types.selected_index = 3
+      get_handler((globalThis as any).defines.events.on_gui_selection_state_changed)({ player_index: 1, element: types })
+      expect(find(root, SKILLS_WINDOW.list).tags.ids).toHaveLength(6)
+      expect(find(root, SKILLS_WINDOW.list).items.every((caption: string) => caption.startsWith('S L3'))).toBe(true)
+    }
+    finally { ui.restore() }
+  })
+
   it('history panes scroll to the newest line only while follow (LIVE) is on and lines are appended, never on a refresh that adds nothing', () => {
     const ui = open_console()
     try {

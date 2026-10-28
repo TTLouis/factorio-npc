@@ -78,6 +78,7 @@ export function compactLoadedSkill(raw, expectedId) {
     'schema_version', 'revision', 'id', 'name', 'kind', 'stage', 'status', 'summary',
     'preconditions', 'inputs', 'outputs', 'topology', 'constraints', 'parameters',
     'verification', 'known_failure_modes', 'confidence', 'examples',
+    'content_type', 'level', 'guidance',
   ]
   const compact = {}
   for (const key of keys) {
@@ -106,6 +107,9 @@ export function compactLoadedSkill(raw, expectedId) {
     constraints: Array.isArray(skill.constraints) ? boundedSkillValue(skill.constraints.slice(0, 8)) : undefined,
     parameters: Array.isArray(skill.parameters) ? boundedSkillValue(skill.parameters.slice(0, 8)) : undefined,
     verification: boundedSkillValue(skill.verification),
+    ...(skill.content_type !== undefined ? { content_type: boundedSkillValue(skill.content_type) } : {}),
+    ...(skill.level !== undefined ? { level: boundedSkillValue(skill.level) } : {}),
+    ...(skill.guidance !== undefined ? { guidance: boundedSkillValue(skill.guidance) } : {}),
   }
 }
 
@@ -265,6 +269,8 @@ export function sanitizeSkillCard(raw) {
   const id = typeof raw.id === 'string' ? raw.id : ''
   if (!SKILL_ID_PATTERN.test(id) || id.length > 80 || id === 'none') return undefined
   return {
+    ...(['knowledge', 'skill'].includes(raw.content_type) ? { content_type: raw.content_type } : {}),
+    ...(Number.isInteger(raw.level) && raw.level >= 0 && raw.level <= 7 ? { level: raw.level } : {}),
     id,
     name: text(raw.name, 80) || id,
     status: STATUSES.has(raw.status) ? raw.status : 'candidate',
@@ -310,7 +316,7 @@ function renderNeed(need) {
 // The one card format, shared by the planner block and Jev's criteria.
 export function renderSkillCard(card) {
   const parts = [
-    `${card.id} "${card.name}" [${card.status}]: ${card.summary}`,
+    `${card.id} "${card.name}" [${card.status}${card.content_type ? `; ${card.content_type}` : ''}${card.level !== undefined ? `; L${card.level}` : ''}]: ${card.summary}`,
     `Produces: ${card.produces.join(', ') || 'none recorded'}.`,
     `Needs: ${card.needs.map(renderNeed).join(', ') || 'none recorded'}.`,
     `Matched: ${card.matched.join(', ') || 'text'}.`,
