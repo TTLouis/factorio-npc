@@ -308,7 +308,8 @@ async function verify() {
   console.log(`PASS: RELOAD - after a real restart the crop and revision ${crop.revision} persist; the stale candidate and plan are still refused`)
 
   // ---- RETURN -----------------------------------------------------------------------------------
-  await walk('walk-back', START)
+  // Back to where the NPC actually stood at the start (the teleport took the nearest free spot to START).
+  await walk('walk-back', saved.fixture.start)
   const back = (await tool('getMapContext', FRAME)).crop
   assert.equal(letter(back, FIXTURE_CHUNK), 'V'); assert.ok(back.revision > crop.revision)
   const before = await sideEffects()
