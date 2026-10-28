@@ -2,7 +2,7 @@ import type { ControlledActor } from './actors/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nearest_pole_for_unpowered } from './electric_facts'
 import { entity_reference_hint, resolve_visible_entity_reference } from './entity_reference'
-import { entity_geometry_for_actor, preservation_geometry_for_actor } from './knowledge'
+import { entity_geometry_for_actor, logistics_topology_for_actor, preservation_geometry_for_actor } from './knowledge'
 import { inspect_charted_entity } from './map_remote'
 import { compact_spatial_summary } from './spatial_semantics'
 import { throughput_capacity } from './throughput_capacity'
@@ -184,7 +184,7 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
 
   describe('pipe links', () => {
     // A pipe whose single connection links east to `target_position`, to a neighbour that answers its reciprocal link.
-    function pipe_at(x: number, connection_type: 'normal' | 'underground', target_x: number) {
+    function pipe_at(x: number, connection_type: 'normal' | 'underground' | 'linked', target_x: number, reach = 10) {
       const entity: any = {
         ...base('pipe', 'pipe', UNIT, { x, y: 10.5 }),
         fluids_count: 1,
@@ -195,7 +195,7 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
       entity.fluidbox = {
         length: 1,
         get_capacity: () => 100,
-        get_prototype: () => undefined,
+        get_prototype: () => ({ production_type: 'input-output', pipe_connections: [{ connection_type, max_underground_distance: reach }] }),
         get_pipe_connections: () => {
           const standing = neighbour.standing
           return [{
@@ -249,6 +249,111 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
       expect(connection.target_not_visible).toBeUndefined()
       const linked: any = entity_geometry_for_actor(actor, UNIT)
       expect(linked.fluid_storages[0].pipe_connections[0]).toMatchObject({ connected: true, target_valid: true, target: { unit_number: NEIGHBOUR } })
+    })
+
+    it('bounds long underground links from native definitions before summary, geometry or topology target reads', () => {
+      const pipe = pipe_at(80.5, 'underground', 110.5, 30)
+      const summary: any = compact_spatial_summary(pipe, seen())
+      const geometry = entity_geometry_for_actor(actor, UNIT)
+      const topology = logistics_topology_for_actor(actor, UNIT)
+      expect(summary.fluid.storages[0].connections[0].target_not_visible).toBe(true)
+      expect((geometry as any).fluid_storages[0].pipe_connections[0].target_not_visible).toBe(true)
+      expect(topology).toMatchObject({ found: false, code: 'area_not_visible' })
+      neighbour.standing = false
+      expect(compact_spatial_summary(pipe, seen())).toEqual(summary)
+      expect(entity_geometry_for_actor(actor, UNIT)).toEqual(geometry)
+      expect(logistics_topology_for_actor(actor, UNIT)).toEqual(topology)
+      expect(neighbour.reads).toBe(0)
+      set_window(1)
+      neighbour.standing = true
+      expect((compact_spatial_summary(pipe, seen()) as any).fluid.storages[0].connections[0].target.unit_number).toBe(NEIGHBOUR)
+      expect((logistics_topology_for_actor(actor, UNIT) as any).relations[0].neighbour.unit_number).toBe(NEIGHBOUR)
+      neighbour.standing = false
+      expect((logistics_topology_for_actor(actor, UNIT) as any).relations).toEqual([])
+    })
+
+    it('includes all merged fluidbox definitions, including runtime-shaped connection collections', () => {
+      const pipe = pipe_at(80.5, 'underground', 110.5)
+      pipe.fluidbox.get_prototype = () => [
+        { production_type: 'input-output', pipe_connections: { 1: { connection_type: 'underground', max_underground_distance: 10 } } },
+        { production_type: 'input-output', pipe_connections: { 1: { connection_type: 'underground', max_underground_distance: 30 } } },
+      ]
+      expect((entity_geometry_for_actor(actor, UNIT) as any).fluid_storages[0].pipe_connections[0].target_not_visible).toBe(true)
+      expect(neighbour.reads).toBe(0)
+    })
+
+    it.each([undefined, -1, Number.NaN, Number.POSITIVE_INFINITY, 4097])('refuses unknown or invalid native underground reach %s before a target read', reach => {
+      const pipe = pipe_at(40.5, 'underground', 45.5)
+      pipe.fluidbox.get_prototype = () => ({ production_type: 'input-output', pipe_connections: [{ connection_type: 'underground', max_underground_distance: reach }] })
+      expect((compact_spatial_summary(pipe, seen()) as any).fluid.storages[0].connections[0].target_not_visible).toBe(true)
+      expect(logistics_topology_for_actor(actor, UNIT)).toMatchObject({ found: false, code: 'area_not_visible' })
+      expect(neighbour.reads).toBe(0)
+    })
+
+    it('refuses script-linked pipes even when the local area is visible, but retains unrestricted reconciliation', () => {
+      const pipe = pipe_at(40.5, 'linked', 110.5)
+      const result = compact_spatial_summary(pipe, seen())
+      neighbour.standing = false
+      expect(compact_spatial_summary(pipe, seen())).toEqual(result)
+      expect(neighbour.reads).toBe(0)
+      neighbour.standing = true
+      expect((compact_spatial_summary(pipe) as any).fluid.storages[0].connections[0].target.unit_number).toBe(NEIGHBOUR)
+    })
+  })
+
+  describe('topology endpoint visibility', () => {
+    function custom_inserter() {
+      const entity = inserter_at(80.5)
+      entity.prototype = { allow_custom_vectors: true }
+      entity.drop_position = { x: 110.5, y: 10.5 }
+      Object.defineProperty(entity, 'drop_target', { get: linked_chest(entity.drop_position), configurable: true })
+      return entity
+    }
+
+    it('checks custom pickup/drop positions before reading an inserter route, with a visible control', () => {
+      const entity = custom_inserter()
+      const result = logistics_topology_for_actor(actor, UNIT)
+      expect(result).toMatchObject({ found: false, code: 'area_not_visible' })
+      neighbour.standing = false
+      expect(logistics_topology_for_actor(actor, UNIT)).toEqual(result)
+      expect(neighbour.reads).toBe(0)
+      set_window(1)
+      neighbour.standing = true
+      expect((logistics_topology_for_actor(actor, UNIT) as any).relations[0].to.unit_number).toBe(NEIGHBOUR)
+      expect((compact_spatial_summary(entity, seen()) as any).item_io.drop_target.unit_number).toBe(NEIGHBOUR)
+    })
+
+    it('checks a nearby inserter route before testing whether it touches the center', () => {
+      const inserter = custom_inserter()
+      const center = { ...base('wooden-chest', 'container', 410, { x: 78.5, y: 10.5 }) }
+      lookup[410] = center
+      find.mockReturnValue([inserter] as never)
+      const result = logistics_topology_for_actor(actor, 410)
+      neighbour.standing = false
+      expect(logistics_topology_for_actor(actor, 410)).toEqual(result)
+      expect(result).toMatchObject({ found: false, code: 'area_not_visible' })
+      expect(neighbour.reads).toBe(0)
+      set_window(1)
+      inserter.pickup_target = center
+      neighbour.standing = true
+      expect((logistics_topology_for_actor(actor, 410) as any).relations[0].to.unit_number).toBe(NEIGHBOUR)
+    })
+
+    it('checks every belt neighbour box before serializing it', () => {
+      const belt = { ...base('transport-belt', 'transport-belt', UNIT, { x: 80.5, y: 10.5 }),
+        belt_neighbours: { inputs: [], outputs: [base('wide-belt', 'transport-belt', NEIGHBOUR, { x: 82.5, y: 10.5 }, 14)] } }
+      lookup[UNIT] = belt
+      expect(logistics_topology_for_actor(actor, UNIT)).toMatchObject({ found: false, code: 'area_not_visible' })
+      set_window(1)
+      expect((logistics_topology_for_actor(actor, UNIT) as any).relations[0].to.unit_number).toBe(NEIGHBOUR)
+    })
+
+    it('never reads unbounded script-linked belt neighbours', () => {
+      const belt = { ...base('linked-belt', 'linked-belt', UNIT, { x: 80.5, y: 10.5 }),
+        get belt_neighbours() { neighbour.reads++; return { inputs: [], outputs: [] } } }
+      lookup[UNIT] = belt
+      expect(logistics_topology_for_actor(actor, UNIT)).toMatchObject({ found: false, code: 'area_not_visible' })
+      expect(neighbour.reads).toBe(0)
     })
   })
 

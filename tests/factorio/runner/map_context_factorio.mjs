@@ -140,6 +140,57 @@ const entityReads = async unit => ({
   topology: await tool('getLogisticsTopology', { unit_number: unit, radius: 4 }),
 })
 
+// Test-only modded prototypes: at START the window ends at x=32. Both sources and their old +/-12 envelopes are visible,
+// while their actual endpoints at x=46.5 are not. At ONE_OVER both endpoints and the full native reach become visible.
+async function createReachFixtures() {
+  return lua('local tiles={}; for x=13,49 do for y=-53,-37 do tiles[#tiles+1]={name="grass-1",position={x,y}} end end; s.set_tiles(tiles,true,false,true); '
+    + 'for _,e in pairs(s.find_entities_filtered{area={{13,-53},{50,-36}}}) do if e.type~="character" then e.destroy() end end; '
+    + 'local p=s.create_entity{name="npc-test-long-underground-pipe",position={16.5,-40.5},direction=defines.direction.west,force=a.force}; '
+    + 'local q=s.create_entity{name="npc-test-long-underground-pipe",position={46.5,-40.5},direction=defines.direction.east,force=a.force}; assert(p and q); '
+    + 'local function linked() for _,c in pairs(p.fluidbox.get_pipe_connections(1)) do if c.connection_type=="underground" and c.target and c.target.owner==q then return true end end return false end; '
+    + 'if not linked() then p.direction=defines.direction.east; q.direction=defines.direction.west end; assert(linked(),"long underground native link must exist"); '
+    + 'local i=s.create_entity{name="npc-test-custom-vector-inserter",position={16.5,-50.5},force=a.force}; assert(i); '
+    + 'i.pickup_position={15.5,-50.5}; i.drop_position={46.5,-50.5}; '
+    + 'local c=s.create_entity{name="wooden-chest",position={46.5,-50.5},force=a.force}; assert(c); '
+    + 'rcon.print(helpers.table_to_json({pipe=p.unit_number,inserter=i.unit_number,pipe_direction=p.direction,target_direction=q.direction}))')
+}
+
+async function reachReads(fixture) {
+  // Local observation records hints for non-indexed pipes without probing either hidden endpoint.
+  const observed = await tool('getLocalSpatialObservation', { position: { x: 16.5, y: -45.5 }, half_size: 8 })
+  assert.equal(observed.ok, true, JSON.stringify(observed))
+  return {
+    pipe: await tool('getEntityGeometry', { unit_number: fixture.pipe }),
+    pipe_topology: await tool('getLogisticsTopology', { unit_number: fixture.pipe, radius: 4 }),
+    inserter: await tool('getEntityGeometry', { unit_number: fixture.inserter }),
+    inserter_topology: await tool('getLogisticsTopology', { unit_number: fixture.inserter, radius: 4 }),
+  }
+}
+
+async function hiddenReachProof() {
+  const fixture = await createReachFixtures()
+  await waitTicks(10)
+  await lua('local i=s.find_entities_filtered{name="npc-test-custom-vector-inserter",position={16.5,-50.5},radius=0.1}[1]; assert(i.drop_target and i.drop_target.position.x==46.5,"native custom drop target"); rcon.print("{}")')
+  const before = await sideEffects()
+  const standing = await reachReads(fixture)
+  assert.equal(standing.pipe.found, true, JSON.stringify(standing.pipe))
+  assert.ok(standing.pipe.fluid_storages[0].pipe_connections.some(port => port.connection_type === 'underground' && port.target_not_visible === true))
+  assert.equal(standing.pipe_topology.code, 'area_not_visible')
+  assert.equal(standing.inserter.item_io.drop_target.not_visible, true)
+  assert.equal(standing.inserter_topology.code, 'area_not_visible')
+  const removed = await lua('local count=0; for _,e in pairs(s.find_entities_filtered{area={{46,-52},{47,-39}}}) do if e.name=="npc-test-long-underground-pipe" or e.name=="wooden-chest" then e.destroy(); count=count+1 end end; rcon.print(helpers.table_to_json({count=count}))')
+  assert.equal(removed.count, 2)
+  await waitTicks(10)
+  const destroyed = await reachReads(fixture)
+  assert.deepEqual(destroyed, standing, 'hidden native neighbours standing and destroyed give identical geometry and topology')
+  const after = await sideEffects()
+  assert.deepEqual(after, before, 'these reads and fixture changes outside the historical fixture chunk do not chart, explore or reserve')
+  await lua(`assert(s.create_entity{name="npc-test-long-underground-pipe",position={46.5,-40.5},direction=${fixture.target_direction},force=a.force}); assert(s.create_entity{name="wooden-chest",position={46.5,-50.5},force=a.force}); rcon.print("{}")`)
+  evidence.hidden_reach = { fixture, standing, destroyed, before, after }
+  console.log('PASS: HIDDEN REACH - native 30-tile underground link and custom inserter endpoint in fog, standing equals destroyed')
+  return fixture
+}
+
 async function prepare() {
   await configureNpcSession(rcon(), 'map-context-engine-20261027')
   actorId = (await deploymentStatus(rcon(), { requireAllowed: true })).actor_id
@@ -165,6 +216,7 @@ async function prepare() {
   await waitTicks(120)
   const startFacts = await sideEffects()
   assert.deepEqual(startFacts.window, { surface_index: 1, x: -2, y: -1 }, `the NPC window is around its own chunk: ${JSON.stringify(startFacts)}`)
+  const reachFixture = await hiddenReachProof()
 
   // ---- CROP -----------------------------------------------------------------------------------
   const crop0 = (await tool('getMapContext', FRAME)).crop
@@ -223,6 +275,13 @@ async function prepare() {
   assert.equal(stillAnchored.ok, true, 'a fact still in view stays usable across the boundary')
   evidence.crop_one_boundary = crop1
   console.log(`PASS: BOUNDARY - one chunk east: window (-1,-1), revision ${crop0.revision}->${crop1.revision}, column x=-4 fogged, fixture chunk still visible`)
+  const visibleReach = await reachReads(reachFixture)
+  assert.ok(visibleReach.pipe.fluid_storages[0].pipe_connections.some(port => port.connection_type === 'underground' && port.target?.position.x === 46.5 && port.connected === true))
+  assert.equal(visibleReach.pipe_topology.found, true, JSON.stringify(visibleReach.pipe_topology))
+  assert.equal(visibleReach.inserter.item_io.drop_target.position.x, 46.5)
+  assert.equal(visibleReach.inserter_topology.found, true, JSON.stringify(visibleReach.inserter_topology))
+  evidence.visible_reach = visibleReach
+  console.log('PASS: VISIBLE REACH - native long pipe and custom inserter endpoints become readable after ordinary movement')
 
   // ---- MOVEMENT -------------------------------------------------------------------------------
   await walk('walk-out-of-view', FAR)

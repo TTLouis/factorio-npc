@@ -69,7 +69,7 @@ function compact_fluid_ports(entity: LuaEntity, seen?: SeenArea) {
       if (connection.flow_direction !== undefined) summary.flow_direction = connection.flow_direction
       if (connection.connection_type !== undefined) summary.connection_type = connection.connection_type
       if (connection.target_position !== undefined) summary.target_position = connection.target_position
-      const link = seen_link(seen, pipe_link_area(entity, connection), () => connection.target?.owner)
+      const link = seen_link(seen, seen ? pipe_link_area(entity, connection, index) : undefined, () => connection.target?.owner)
       if (!link.seen) {
         summary.target_not_visible = true
         connections.push(summary)
