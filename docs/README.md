@@ -26,6 +26,7 @@ contracts; the status page and dated evidence establish what has been verified.
 | Task interruption, authority and campaign allowance | [Macro execution design](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md) |
 | Production capability and engine proof | [Production validation ladder](NPC_PRODUCTION_VALIDATION_ROADMAP.md) |
 | Spatial placement | [Placement architecture](NPC_SPATIAL_PLACEMENT_ARCHITECTURE.md) |
+| Knowledge/skill content, levels and library GUI | [Leveled library](LEVELED_KNOWLEDGE_LIBRARY.md), [planner context](PLANNER_SKILLS_CONTEXT_EXPERIMENT.md) |
 | Repairing an E2E failure | [Repair requirements](E2E_REPAIR_REQUIREMENTS.md) |
 | Running an authorized provider trial | [Live E2E procedure](LIVE_E2E.md) |
 | Accelerated trial profiles | [Tick-sprint contract and adoption gates](E2E_TICK_SPRINT.md) |

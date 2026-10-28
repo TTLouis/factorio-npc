@@ -83,7 +83,7 @@ export const SKILLS_ROOT_NAME = 'sgluna_task_board_skills_panel'
 export const SKILLS_BODY_NAME = 'sgluna_task_board_skills_body'
 export const SKILLS_BUTTON_NAME = 'sgluna_task_board_skills'
 export const SKILLS_CLOSE_BUTTON_NAME = 'sgluna_task_board_skills_close'
-export const SKILLS_POPOUT_TITLE = 'Skills & Area Learning'
+export const SKILLS_POPOUT_TITLE = 'Knowledge, Skills & Area Learning'
 // Only the fallback the button is created with. What it wears is the avatar of
 // whichever provider SGLuna is currently talking to, which task_board_provider
 // resolves from the reported model identifier on every render.

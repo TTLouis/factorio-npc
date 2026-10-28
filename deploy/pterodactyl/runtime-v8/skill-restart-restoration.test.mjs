@@ -12,6 +12,10 @@ import { classifyRequestFailure } from './pause-class.mjs'
 const KEY = 'npc:sgluna'
 const IDS = ['restart-guide-a', 'restart-guide-b']
 const skills = IDS.map((id, index) => ({ schema_version: 1, id, revision: 7, name: id, status: 'candidate', stage: 'pattern',
+  content_type: index === 0 ? 'knowledge' : 'skill', level: index,
+  guidance: { when_to_use: 'When the current request needs this method.', when_to_skip: 'When evidence already answers it.',
+    live_checks: ['Read the current native state.'], steps: ['Inspect the live interface before choosing a supported action.'],
+    completion: ['The intended native outcome is observed.'], required_capabilities: [], related_ids: [] },
   summary: `PINNED-PROCEDURE-${index}: verify the actual resource route before acting.`,
   constraints: [{ description: 'Revalidate live facts; these instructions grant no world authority.' }] }))
 const checkpoint = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] }
@@ -78,6 +82,12 @@ async function restartedProcess(file, game, { check = true } = {}) {
       assert.equal(context.role, 'executor', 'restoration does not need a planner or lookup turn')
       assert.deepEqual(selectedDetails(messages).map(skill => skill.id).sort(), IDS, 'planner-selected guides missing after restart')
       assert.ok(selectedDetails(messages).every(skill => skill.revision === 7 && skill.summary.startsWith('PINNED-PROCEDURE-')))
+      for (const entry of selectedDetails(messages)) {
+        const original = skills.find(skill => skill.id === entry.id)
+        assert.equal(entry.content_type, original.content_type)
+        assert.equal(entry.level, original.level)
+        assert.deepEqual(entry.guidance, original.guidance, 'the actual pinned method survives disk restart, without a library reread')
+      }
     }
     const plan = getActivePlan(memory.planningState(KEY))
     return planReply({ stepId: plan.steps[plan.active_step_index].step_id, operations: [{ name: 'wait', args: { ticks: 1 } }] })

@@ -1,5 +1,10 @@
 # Planner discovery and factory-guide comparison
 
+For the owner-requested leveled knowledge/skill catalog and its optional profile,
+GUI filters and live-fact-only authoring policy, see
+[Leveled knowledge and skill methods](LEVELED_KNOWLEDGE_LIBRARY.md). The original
+comparison preparation below is historical and does not freeze a new treatment.
+
 Owner: Codex chat 01a179b0. Requested October 27, 2026. Task branch
 `feat/planner-skill-discovery`, based on reviewed local Jev integration
 `aedca8193d1c4944b4cc46a194438918a425d05b`.
