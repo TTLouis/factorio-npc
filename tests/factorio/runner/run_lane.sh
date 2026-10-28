@@ -146,6 +146,14 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  map-context)
+    # M3: map crop, fog and selection-to-execution freshness with zero humans, then a real save/restart.
+    printf '[npc-test][map-context] Running map crop, boundary, movement and stale-selection gates...\n'
+    run_node map_context_factorio.mjs --phase prepare --save "$SAVE"
+    restart_factorio
+    printf '[npc-test][map-context] Verifying knowledge, crop and stale refusals after a real Factorio restart...\n'
+    run_node map_context_factorio.mjs --phase verify
+    ;;
   tick-sprint)
     run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"
     stop_factorio
