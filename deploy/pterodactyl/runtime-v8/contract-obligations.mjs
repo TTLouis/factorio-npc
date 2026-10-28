@@ -253,9 +253,33 @@ export async function captureObligationProof(agent, obligations, fence) {
   for (const id of typed.preserve) {
     let raw
     try { raw = JSON.parse(String(await agent.rcon.command(agent.observationToolCommand('getEntityGeometry', { unit_number: id })))) }
-    catch { await fence(); unproven('preservation_native_read_unavailable') }
+    catch {
+      await fence()
+      throw new PreservationProofError('preservation_native_read_unavailable', { category: 'transport_or_malformed_response', detail: { unit_number: id, entity_index: preserved.length } })
+    }
     await fence()
-    preserved.push(preservationGeometry(raw, id))
+    if (raw?.found === false && raw.code === 'entity_not_visible'
+      || raw?.item_io?.drop_target?.not_visible === true || raw?.item_io?.pickup_target?.not_visible === true
+      || Array.isArray(raw?.fluid_storages) && raw.fluid_storages.slice(0, 16).some(storage => Array.isArray(storage?.pipe_connections)
+        && storage.pipe_connections.slice(0, 16).some(port => port?.target_not_visible === true))) {
+      const error = new PreservationProofError('preservation_entity_not_visible', { category: 'temporarily_not_visible',
+        detail: { unit_number: id, entity_index: preserved.length, native_code: raw.code ?? 'endpoint_not_visible', found: raw.found === true } })
+      await agent.traceEvent?.('contract.preservation_read_unavailable', { request_id: agent.traceRequest?.id,
+        actor_id: actor.actor_id, actor_epoch: actor.epoch, ...error.detail, reason: error.code })
+      await fence()
+      throw error
+    }
+    try { preserved.push(preservationGeometry(raw, id)) }
+    catch (error) {
+      if (error instanceof PreservationProofError) {
+        error.detail = { unit_number: id, entity_index: preserved.length, found: raw?.found === true,
+          ...(typeof raw?.code === 'string' ? { native_code: raw.code.slice(0, 100) } : {}) }
+        await agent.traceEvent?.('contract.preservation_read_unavailable', { request_id: agent.traceRequest?.id,
+          actor_id: actor.actor_id, actor_epoch: actor.epoch, ...error.detail, reason: error.code })
+        await fence()
+      }
+      throw error
+    }
     if (raw.actor_id !== actor.actor_id || preserved.some(row => row.surface_index !== preserved[0].surface_index || row.force_index !== preserved[0].force_index)) unproven('preservation_native_scope_changed')
     // The exact identity was authoritatively refreshed, not copied from the
     // request's historical observation cache.

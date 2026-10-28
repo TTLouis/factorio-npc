@@ -9,8 +9,14 @@ import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
 import { toolCommand, parseOperation, renderOperation } from '../pterodactyl/runtime-v8/structured-policy.mjs'
-import { preservationGeometry, preservedProofMatches } from '../pterodactyl/runtime-v8/contract-obligations.mjs'
+import { preservationGeometry, preservedProofMatches, compileObligations } from '../pterodactyl/runtime-v8/contract-obligations.mjs'
 import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
+import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
+import { getActivePlan } from '../pterodactyl/runtime-v8/planning-state.mjs'
+import { answersStepContract, planReply } from '../pterodactyl/runtime-v8/task-loop-fixtures.mjs'
+
+globalThis.fetch = async () => { throw new Error('live inference forbidden in preservation geometry fixture') }
 
 const arg = name => process.argv[process.argv.indexOf(`--${name}`) + 1]
 const results = path.resolve(arg('results'))
@@ -23,6 +29,20 @@ const rcon = { command: async command => {
 } }
 const lua = async body => JSON.parse(await rcon.command(`/silent-command local a; for _,s in pairs(game.surfaces) do local chars=s.find_entities_filtered{name="character"}; if #chars>0 then a=chars[1]; break end end; assert(a); ${body}`))
 const geometry = async id => JSON.parse(await rcon.command(toolCommand('getEntityGeometry', { unit_number: id })))
+async function operation(label, op) {
+  const actor = await deploymentStatus(rcon, { requireAllowed: true })
+  const admission = await executeAuthorizedBatch(rcon, actor.epoch, [renderOperation(parseOperation(op))])
+  const until = Date.now() + 120000
+  for (;;) {
+    const status = JSON.parse(await rcon.command(toolCommand('getTaskStatus', {})))
+    if (status.task_state === 'idle' && status.queue_length === 0) {
+      assert.equal(status.basic_operation?.last_result?.completed, true, `${label}: native operation completed`)
+      return { admission, status }
+    }
+    assert.ok(Date.now() < until, `${label}: native operation timed out`)
+    await delay(100)
+  }
+}
 try {
   connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') })
   await connection.connect()
@@ -78,6 +98,87 @@ try {
   assert.ok(produced > initialOutput, 'additional normal native production must occur between geometry samples')
   assert.deepEqual(preservationGeometry(await geometry(fixture.drill), fixture.drill), before, 'normal native production preserves geometry')
   evidence.production = { iron_plates: produced, geometry: before }
+  // BD's missing composition: ordinary native work can leave an otherwise
+  // unchanged preservation set outside visible chunks. Travel is an operation,
+  // never fixture teleportation; the only supplied stock above was the fuel.
+  const travel = await lua(`local v=storage.contract_obligation_fixture; local x=v.f.position.x>=0 and -105 or 105; local y=105;
+    local tiles={}; for tx=math.floor(math.min(v.x,x))-4,math.ceil(math.max(v.x,x))+4 do for ty=math.floor(math.min(v.y,y))-4,math.ceil(math.max(v.y,y))+4 do tiles[#tiles+1]={name="landfill",position={tx,ty}} end end; v.s.set_tiles(tiles,true,false,true);
+    for _,e in pairs(v.s.find_entities_filtered{area={{math.min(v.x,x)-4,math.min(v.y,y)-4},{math.max(v.x,x)+4,math.max(v.y,y)+4}}}) do if e~=v.f and e~=v.d and e.type~="character" and e.name~="iron-ore" then e.destroy() end end;
+    assert(v.s.create_entity{name="copper-ore",position={x+0.5,y+0.5},amount=100});
+    rcon.print(helpers.table_to_json({home={x=v.x,y=v.y},remote={x=x,y=y},copper_before=a.get_item_count("copper-ore")}))`)
+  assert.equal(travel.copper_before, 0)
+  const outward = await operation('leave protected cell', { name: 'walk_to_position', args: { ...travel.remote, reach_distance: 2 } })
+  await delay(250)
+  const hidden = await geometry(fixture.drill)
+  assert.equal(hidden.found, false)
+  assert.equal(hidden.code, 'entity_not_visible', 'public geometry refuses the old protected cell in fog')
+  assert.throws(() => preservationGeometry(hidden, fixture.drill), /preservation_/)
+  const gathered = await operation('remote copper gathering', { name: 'gather_resource', args: { resource_name: 'copper-ore', count: 2, search_radius: 8 } })
+  const copper = await lua('rcon.print(a.get_item_count("copper-ore"))')
+  assert.equal(copper, 2, 'native gathering actually produced the requested ore')
+  const homeward = await operation('return for fresh preservation proof', { name: 'walk_to_position', args: { ...travel.home, reach_distance: 2 } })
+  await delay(250)
+  const reacquired = { ...producing, preserved: [preservationGeometry(await geometry(fixture.furnace), fixture.furnace), preservationGeometry(await geometry(fixture.drill), fixture.drill)] }
+  assert.equal(preservedProofMatches(producing, reacquired), true, 'fresh same-identity geometry matches after native return')
+  assert.equal(await lua('rcon.print(a.get_item_count("copper-ore"))'), copper, 'return/reobservation never replays completed gathering')
+  evidence.visibility_reacquisition = { travel, outward, hidden, gathered, copper, homeward, reacquired,
+    scope: 'native mechanics and contract projection; runtime automatic recovery is tested separately' }
+  // Actual loop, scripted model replies, native receipts and the same committed
+  // preservation baseline. There is no operator-directed return in this case.
+  const memory = new CanonicalTaskBoardMemory()
+  const rows = []
+  const key = 'npc:preservation-native'
+  const obligations = { outcome: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 4 }] }, preserve: [fixture.drill, fixture.furnace].sort((a, b) => a - b) }
+  let plannerCalls = 0
+  let executorCalls = 0
+  const agent = new NpcAgentLoop({ rcon, memory, npcId: 'preservation-native', completionProtocolVersion: 3,
+    replacementWake: true, requireTypedObligations: true, stateFile: path.join(results, 'preservation-native-state.json'),
+    traceFile: null, decisionTraceFile: null, systemPrompt: 'Deterministic preservation recovery fixture, no live inference.',
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    provider: answersStepContract(async (_messages, context) => {
+      if (context.role === 'planner') {
+        assert.equal(++plannerCalls, 1, 'recovery does not ask the planner to repair preservation')
+        return planReply({ plan: ['Gather two more copper ore while preserving the existing iron cell.'], currentStep: 0, operations: [],
+          goal: { scope: 'finite', summary: 'Hold four copper ore while preserving the iron cell.', doneWhen: obligations.outcome.requirements },
+          stepCompletions: [{ kind: 'deterministic', checkpoint: compileObligations(obligations), obligations }],
+          executionGuidance: [{ approach: 'Gather two copper ore from the remote fixture patch.', rationale: 'Native travel and gathering under unchanged preservation.', constraints: [], skillIds: [], materialSupply: { mode: 'manual_bootstrap', resource: 'copper-ore' } }] })
+      }
+      assert.equal(++executorCalls, 1, 'completed gathering must not be proposed again')
+      const plan = getActivePlan(memory.planningState(key))
+      return planReply({ stepId: plan.steps[plan.active_step_index].step_id,
+        operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 2, search_radius: 256 } }] })
+    }) })
+  agent.behaviorTrace = { emit: async row => { rows.push(row) } }
+  evidence.composed_recovery = { status: 'started', events: rows }
+  try {
+    const requested = await agent.request('Hold four copper ore while preserving the existing iron cell.', { sender: 'Louis' })
+    const originalPlan = structuredClone(getActivePlan(memory.planningState(key)))
+    assert.ok(originalPlan, JSON.stringify(requested))
+    const until = Date.now() + 180000
+    let result = requested
+    while (Date.now() < until) {
+      const status = JSON.parse(await rcon.command(toolCommand('getTaskStatus', {})))
+      if (status.task_state !== 'idle' || status.queue_length !== 0) { await delay(100); continue }
+      result = await agent.completed()
+      if (memory.planningState(key)?.goal?.status === 'completed' || result?.goalStatus === 'completed') break
+      assert.notEqual(result?.goalStatus, 'paused', JSON.stringify({ result, rows: rows.slice(-8) }))
+      await delay(100)
+    }
+    assert.equal(memory.planningState(key)?.goal?.status, 'completed', JSON.stringify({ result, rows: rows.slice(-8) }))
+    assert.equal(await lua('rcon.print(a.get_item_count("copper-ore"))'), 4)
+    assert.ok(rows.some(row => row.event === 'contract.preservation_recovery_admitted'), 'real loop admitted native return navigation')
+    assert.ok(rows.some(row => row.event === 'contract.preservation_recovery_completed'), 'fresh native geometry completed preservation recovery')
+    assert.equal(rows.some(row => row.event === 'contract.preservation_recovery_exhausted' || row.event === 'request.failed'), false)
+    const finalPlan = memory.planningState(key).plans.find(plan => plan.plan_id === originalPlan.plan_id)
+    assert.deepEqual(finalPlan.steps.map(step => step.obligation_proof), originalPlan.steps.map(step => step.obligation_proof), 'recovery never replaces the immutable baseline')
+    evidence.composed_recovery = { requested, result, originalPlan, plannerCalls, executorCalls, events: rows,
+      planning: memory.planningState(key), scope: 'real NpcAgentLoop, scripted replies, native gather/navigation/receipts; zero providers' }
+    console.log('PASS native preservation recovery: remote gathering, automatic native return, immutable proof, exact-once inventory and goal completion')
+  } finally {
+    evidence.composed_recovery.events = rows
+    evidence.composed_recovery.planning = memory.planningState(key)
+    agent.cancel('fixture_cleanup')
+  }
   const actor = await deploymentStatus(rcon, { requireAllowed: true })
   await executeAuthorizedBatch(rcon, actor.epoch, [renderOperation(parseOperation({ name: 'rotate_entity', args: { unit_number: fixture.drill } }))])
   for (let n = 0; n < 100; n++) {
