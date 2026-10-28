@@ -1,3 +1,4 @@
+import { PROGRESS_AUDIT_TRANSITION } from './executor-progress-audit.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { parseInventoryCounts } from './inventory-facts.mjs'
 import { operationSignature, reconcilePendingOperation, RECONCILE_VERDICT } from './operation-reconciliation.mjs'
@@ -13,7 +14,7 @@ export function restoreGatherRecoveries(raw) {
     if (typeof key !== 'string' || key.length > 600 || records.has(key) || !Array.isArray(value)
       || value.length > GATHER_RECOVERY_LIMITS.perGoal || !value.every(v => v && typeof v.step === 'string'
         && v.step.length <= 600 && typeof v.operation_key === 'string' && v.operation_key.length <= 192
-        && ['claimed', 'admitted', 'satisfied'].includes(v.state))) { fault = true; continue }
+        && ['claimed', 'admitted', 'satisfied', 'audited'].includes(v.state))) { fault = true; continue }
     records.set(key, value.map(v => ({ step: v.step, operation_key: v.operation_key, state: v.state })))
   }
   return { records, fault }
@@ -179,6 +180,13 @@ export async function recoverGatherFailure(agent, { failureBoundary = false } = 
       if (!error.gatherNotAdmitted) throw error
       return pause(`gather_recovery_${error.gatherDisposition ?? 'preflight'}_${String(error.preflight.code).slice(0, 100)}`)
     } finally { if (agent.gatherAdmission === owner) agent.gatherAdmission = previousAdmission }
+    if (result?.[PROGRESS_AUDIT_TRANSITION]) {
+      // The auditor already performed the guarded planner/pause transition.
+      // This spent recovery cannot reclaim ownership or replay its deficit.
+      claim.state = 'audited'
+      await agent.persistState({ strict: true })
+      return result
+    }
     await current()
     claim.state = 'admitted'
     await checked(agent.persistState({ strict: true }))

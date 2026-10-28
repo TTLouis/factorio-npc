@@ -30,7 +30,7 @@ function geometry(id) {
   return { found: true, entity, actor_id: 18, actor_surface_index: 1, actor_force_index: 1, surface_index: 1, force_index: 1, fluid_box_count: 0, fluid_storages_truncated: false,
     ...(id === 21 ? { item_io: { drop_position: { x: 46.5, y: 14.703125 }, drop_target: geometry(22).entity } } : {}) }
 }
-function world({ required = false, onRead, onTrace, firstIntent = typed, legacy = false, bootstrapFuel = false } = {}) {
+function world({ required = false, progressAudit = false, onRead, onTrace, firstIntent = typed, legacy = false, bootstrapFuel = false } = {}) {
   const initialDescription = bootstrapFuel ? 'Fuel the existing iron drill with one coal while preserving its cell.' : description
   if (bootstrapFuel) firstIntent = normalizeObligations({ outcome: { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: 'supply_entity' }] }, preserve: [21, 22] })
   const memory = new CanonicalTaskBoardMemory()
@@ -91,6 +91,7 @@ function world({ required = false, onRead, onTrace, firstIntent = typed, legacy 
     }
   }
   agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'obligation-fixture', completionProtocolVersion: 3,
+    executorProgressAudit: progressAudit, allowEphemeralProgressAudit: progressAudit,
     replacementWake: true, requireTypedObligations: required, stateFile: null, traceFile: null, decisionTraceFile: null,
     systemPrompt: 'Run AV typed obligation lifecycle fixture; scripted providers only.',
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
@@ -811,4 +812,35 @@ test('BD second proof read losing visibility propagates terminal exhaustion with
   assert.equal(stopped.goalStatus, 'paused')
   assert.equal(w.calls.length, calls)
   assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 1)
+})
+
+
+test('progress auditor prevents implicit offsite placement before transport and unchanged planner handback', async () => {
+  const w = world({ required: true, progressAudit: true })
+  // Inject an incompatible destination in the actual executor submission, before
+  // the shared commit/admission path. Baseline lacks this prevention.
+  const commit = w.agent.commitPlan.bind(w.agent)
+  w.agent.commitPlan = plan => commit({ ...plan, operations: plan.operations.map(op => op.name === 'place_entity'
+    ? { ...op, args: { ...op.args, x: 46, y: 6 } } : op) })
+  await w.start()
+  assert.equal(w.game.mutations.length, 0)
+  assert.ok(w.rows.some(row => row.event === 'executor.progress_audit' && row.data.reason === 'preservation_travel_incompatible'), JSON.stringify(w.rows.slice(-8)))
+  assert.equal(w.memory.currentPlan(KEY).status, 'paused')
+})
+
+test('progress auditor residual visibility miss uses bounded return and audits original work, not the return', async () => {
+  const w = world({ required: true, progressAudit: true })
+  await w.start()
+  assert.equal(w.game.mutations.length, 1)
+  losePreservationVisibility(w)
+  await w.agent.completed()
+  assert.equal(w.game.mutations.filter(text => text.includes("'walk_to_position'")).length, 1)
+  await w.agent.completed()
+  assert.equal(w.held().active_step_index, 1)
+  const episode = [...w.memory.progressAudits.values()][0]
+  assert.equal(episode.attempts, 1, 'harness reobservation is not another executor attempt')
+  assert.equal(episode.history.length, 1)
+  assert.equal(episode.history[0].complete, true)
+  assert.equal(episode.history[0].operations[0].name, 'place_entity')
+  assert.deepEqual(episode.history[0].operations[0].args, { entity_name: 'stone-furnace', x: 46, y: 12 })
 })
