@@ -2,7 +2,7 @@ import type { ControlledActor } from './actors/types'
 import type { PlannedFootprint } from './construction_execution'
 import type { EndpointView, LayoutConnection, LayoutConnectionInput } from './construction_layout'
 import { check_single_placement, evaluate_plan, footprints_collide } from './construction_execution'
-import { inserter_partial_mismatch, MAX_LAYOUT_PLACEMENTS, normalize_connections, overlaps, planned_view, prove_connection, resolve_existing_view, roles_of, valid_slot_name } from './construction_layout'
+import { inserter_partial_mismatch, MAX_LAYOUT_PLACEMENTS, normalize_connections, overlaps, planned_view, prove_connection, resolve_visible_existing_view, roles_of, valid_slot_name } from './construction_layout'
 import { planned_placement_footprint } from './placement_preflight'
 
 // Milestone 4, acceptance L6: a read-only proposal of small connected layouts. The planner fixes some placements exactly and
@@ -324,7 +324,11 @@ export function propose_construction_layout(actor: ControlledActor, request: Lay
     for (const role of roles_of(connection)) {
       const endpoint = connection.endpoints[role]
       if (endpoint.unit_number === undefined) continue
-      const view = resolve_existing_view(actor, endpoint.unit_number)
+      const resolved = resolve_visible_existing_view(actor, endpoint.unit_number)
+      if (resolved.code === 'not_visible') {
+        return refusal('CONNECTION_ENDPOINT_NOT_VISIBLE', `connection ${connection.index}: ${role} ${endpoint.unit_number} is in a chunk the NPC does not see now; observe it again from nearby`, { index: connection.index, kind: connection.kind, role, unit_number: endpoint.unit_number })
+      }
+      const view = resolved.view
       if (view === undefined) {
         return refusal('CONNECTION_ENDPOINT_UNAVAILABLE', `connection ${connection.index}: ${role} ${endpoint.unit_number} is not an existing entity of this surface and force`, { index: connection.index, kind: connection.kind, role, unit_number: endpoint.unit_number })
       }

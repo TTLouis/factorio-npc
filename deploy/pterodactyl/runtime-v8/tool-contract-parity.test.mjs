@@ -114,6 +114,7 @@ const toolSamples = {
   proposeConstructionLayout: { placements: [{ entity_name: 'wooden-chest', slot: 'src', zone: { center: { x: 0.5, y: 0.5 }, radius: 2 } }, { entity_name: 'burner-inserter', slot: 'ins', x: 1.5, y: 0.5 }], connections: [{ kind: 'inserter', inserter: { slot: 'ins' }, pickup: { slot: 'src' }, drop: { unit_number: 7 } }] },
   inspectConstructionIntent: { x: 0, y: 0, entity_name: 'stone-furnace' },
   getResearchPath: { name: 'automation' },
+  getMapContext: { radius: 2, position: { x: 10, y: -5 } },
 }
 
 test('staging owns exactly the operations declared as the shared Pterodactyl base', () => {
@@ -176,6 +177,7 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     'getConstructionReservations',
     'getFluidSourceTiles',
     'getLocalSpatialObservation',
+    'getMapContext',
     'getMiningDetails',
     'getPumpSitePreparation',
     'getResearchPath',

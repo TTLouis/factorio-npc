@@ -37,7 +37,7 @@ function make_context() {
     character,
     position,
     surface,
-    force: { index: 1 },
+    force: { index: 1, is_chunk_visible: () => true, is_chunk_charted: () => true },
     status_snapshot: vi.fn(() => ({
       actor_id: 1,
       kind: 'standalone_character',

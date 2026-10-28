@@ -754,6 +754,23 @@ function renderProductionEstimate(args) {
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","production_estimate",{target=${base.luaString(parsed.target)},count=${parsed.count},steps={${steps.join(',')}}})))`
 }
 
+export const MAP_CROP_MAX_RADIUS = 4
+
+function parseMapContext(args) {
+  exactKeys(args, ['radius', 'position'])
+  const parsed = {}
+  if (args.radius !== undefined) parsed.radius = optionalInteger(args.radius, 'radius', 1, MAP_CROP_MAX_RADIUS)
+  if (args.position !== undefined) parsed.position = position(args.position)
+  return parsed
+}
+
+function renderMapContext(args) {
+  const parsed = parseMapContext(args)
+  const radius = parsed.radius === undefined ? 'nil' : String(parsed.radius)
+  const at = parsed.position === undefined ? '' : `,${parsed.position.x},${parsed.position.y}`
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_map","crop",${radius}${at})))`
+}
+
 function renderResearchPath(args) {
   const parsed = parseResearchPath(args)
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","research_path",${base.luaString(parsed.name)},${parsed.max_nodes})))`
@@ -1402,6 +1419,22 @@ const productionEstimateDefinition = {
   },
 }
 
+const mapContextDefinition = {
+  type: 'function',
+  function: {
+    name: 'getMapContext',
+    description: 'Read a bounded crop of what the NPC knows of the map on its own surface, one letter per 32-tile chunk: V visible now (facts there are current), F explored but fogged (an old observation, not a current fact), U never explored. Centred on the chunk of position (default: where the NPC stands), radius 1 to 4 chunks (default 3). It returns surface_index and surface_name, origin (the north-west chunk and its tile), observed_tick, revision (the knowledge record counter; a different revision means the visible window or the explored set changed), rows north to south and west to east, counts per letter, the current visible_window, and explored_record (explored chunks on this surface and how many lie outside the crop). It names no entities and charts, explores, generates or reserves nothing. Anchors, connection targets, candidates and construction sites are accepted only in chunks visible now; one in an F or U chunk is refused as not visible until the NPC observes it again from nearby.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        radius: { type: 'integer', minimum: 1, maximum: 4, default: 3 },
+        position: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number', minimum: -1000000, maximum: 1000000 }, y: { type: 'number', minimum: -1000000, maximum: 1000000 } } },
+      },
+    },
+  },
+}
+
 const researchPathDefinition = {
   type: 'function',
   function: {
@@ -1438,6 +1471,7 @@ export const toolDefinitions = [
   constructionLayoutProposalDefinition,
   constructionIntentDefinition,
   researchPathDefinition,
+  mapContextDefinition,
 ]
 
 // Open typed requests may name any ordinary observation. This schema is shared
@@ -1577,6 +1611,7 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getPlacementCandidates: 'placement_candidates',
   getPumpSitePreparation: 'placement_candidates',
   getFluidSourceTiles: 'nearby_world',
+  getMapContext: 'nearby_world',
   planPlacement: 'placement_candidates',
 
   findConstructionSites: 'construction_state',
@@ -1636,6 +1671,7 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getPlacementCandidates: 'fact',
   getPumpSitePreparation: 'fact',
   getFluidSourceTiles: 'discovery',
+  getMapContext: 'fact',
   planPlacement: 'fact',
   findConstructionSites: 'discovery',
   validateConstructionReservation: 'discovery',
@@ -1723,6 +1759,7 @@ export function toolCommand(name, args) {
   }
   if (name === 'getPumpSitePreparation') return renderPumpSitePreparation(args)
   if (name === 'getFluidSourceTiles') return renderFluidSourceTiles(args)
+  if (name === 'getMapContext') return renderMapContext(args)
   if (name === 'getPlacementCandidates') return renderPlacementCandidates(args)
   if (name === 'getProductionScope') return renderProductionScope(args)
   if (name === 'solveProduction') return renderSolveProduction(args)

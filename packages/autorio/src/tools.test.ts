@@ -192,7 +192,7 @@ describe('exact entity status observation', () => {
     ;(globalThis as any).storage = {}
     ;(globalThis as any).game.tick = 12
     ;(globalThis as any).defines.entity_status = { working: 1 }
-    const actor_force = { index: 1, name: 'player' }
+    const actor_force = { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true }
     const find = vi.fn(() => [] as any[])
     const surface = { index: 1, find_entities_filtered: find }
     actor_state.actor = { position: { x: 0, y: 0 }, surface, force: actor_force }
@@ -202,6 +202,7 @@ describe('exact entity status observation', () => {
       return {
         valid: true, name: 'stone-furnace', type: 'furnace', unit_number,
         position: { x, y: 0 }, surface, force: actor_force, status: 1,
+        bounding_box: { left_top: { x: x - 1, y: -1 }, right_bottom: { x: x + 1, y: 1 } },
         get_max_inventory_index: () => 1,
         get_inventory: () => ({ get_contents: () => [{ name: 'iron-plate', count, quality: 'normal' }] }),
         get_recipe: () => [{ name: 'iron-plate' }, undefined],

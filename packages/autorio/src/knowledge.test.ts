@@ -520,7 +520,7 @@ describe('entity geometry knowledge', () => {
     is_valid: true,
     position: { x: 0, y: 0 },
     surface: { index: 1 },
-    force: { index: 1, name: 'player' },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
     status_snapshot: () => ({ actor_id: 18 }),
   } as any
 

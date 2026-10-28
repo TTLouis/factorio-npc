@@ -5,7 +5,7 @@ function baseEntity(overrides: Record<string, unknown>) {
   return {
     valid: true,
     direction: 0,
-    force: { name: 'player' },
+    force: { name: 'player', index: 1 },
     fluids_count: 0,
     fluidbox: { length: 0 },
     ...overrides,
@@ -18,6 +18,7 @@ describe('logistics topology knowledge', () => {
     is_valid: true,
     position: { x: 0, y: 0 },
     surface: { index: 1 },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
   } as any
 
   afterEach(() => {

@@ -2,11 +2,12 @@ import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import type { ControlledActor } from './actors/types'
 import { crafted_item_count, craft_trigger_statistics_count } from './crafted_items'
-import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { remember_entity_reference, resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
 import { entity_has_power, evaluate_world_condition, status_name, WORLD_CONDITION_KINDS } from './goal_world_conditions'
 import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
 import { compact_spatial_summary } from './spatial_semantics'
+import { seen_now } from './visible_reads'
 import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { count_world_entities, find_world_entities } from './npc_vision'
@@ -406,7 +407,7 @@ export function create_tools_remote_interface() {
           status_name: status_name(entity.status),
           working: status_name(entity.status) === 'working',
         }
-        const spatial = compact_spatial_summary(entity)
+        const spatial = compact_spatial_summary(entity, seen_now(actor.force, actor.surface))
         if (spatial !== undefined) summary.spatial = spatial
         entities.push(summary)
       }
@@ -443,7 +444,19 @@ export function create_tools_remote_interface() {
       const bounded_radius = exact ? undefined : math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
       let entity: LuaEntity | undefined
       if (exact) {
-        entity = resolve_exact_entity(actor, unit_number)
+        // A read of a model-named entity covers only chunks the NPC sees now (M3): in fog the answer is the same
+        // whether it still stands, and nothing there is scanned or refreshed.
+        const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+        if (resolved.code === 'not_visible') {
+          return {
+            found: false,
+            actor_position: actor.position,
+            unit_number,
+            error: 'entity_not_visible',
+            message: 'entity is in a chunk the NPC does not see now; observe it again from nearby',
+          }
+        }
+        entity = resolved.entity
         // The resolver's direct engine-index path can return entities outside
         // the body's scope. Enforce the read contract on every lookup path.
         if (entity && (!entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index)) entity = undefined
@@ -550,14 +563,15 @@ export function create_tools_remote_interface() {
         const network = entity.electric_network_id
         if (typeof network === 'number' && positive_integer(network) && network <= 9007199254740991) entity_summary.electric_network_id = network
         // An entity short of power names the nearest known pole and how far its supply area is, from live positions.
-        if (status_shows_no_power(entity_summary.status_name as string | undefined)) entity_summary.power_gap = nearest_pole_for_unpowered(entity)
+        if (status_shows_no_power(entity_summary.status_name as string | undefined)) entity_summary.power_gap = nearest_pole_for_unpowered(entity, seen_now(actor.force, entity.surface))
       }
       if (entity.type === 'rocket-silo') {
         entity_summary.rocket_parts = entity.rocket_parts
         entity_summary.rocket_parts_required = entity.prototype.rocket_parts_required
         entity_summary.rocket_ready = entity.rocket_silo_status === defines.rocket_silo_status.rocket_ready
       }
-      const spatial = compact_spatial_summary(entity)
+      // Neighbours, the mining area and the pole search behind this entity are read only where the NPC sees now (M3).
+      const spatial = compact_spatial_summary(entity, seen_now(actor.force, entity.surface))
       if (spatial !== undefined) entity_summary.spatial = spatial
 
       return {

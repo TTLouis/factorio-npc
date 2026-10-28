@@ -5,6 +5,7 @@ import type { LayoutConnection, LayoutConnectionInput } from './construction_lay
 import { batch_identity, begin_layout_execution, bind_layout_execution, create_layout_record, discard_layout_record, layout_record, layout_resume_problem, normalize_connections, open_task_batch, overlaps, plan_execution_order, plan_layout_remainder, prove_plan_connections, rollback_layout_execution, settle_construction_layout, valid_slot_name } from './construction_layout'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
 import { execute_prepared_remote_construction_plan, is_prepared_remote_construction_plan } from './map_construction'
+import { area_known_visible } from './map_knowledge'
 import { placement_check_args } from './placement_geometry'
 import { planned_placement_footprint, prototype_fluidbox_count } from './placement_preflight'
 import { resolve_entity_placement_item } from './placement_item'
@@ -214,6 +215,11 @@ export function check_single_placement(actor: ControlledActor, placement: Constr
   const position = { x: placement.x, y: placement.y }
   const footprint = planned_placement_footprint(placement.entity_name, placement.x, placement.y, placement.direction)
   if (!footprint) return { ok: false, error: { code: 'PLANNED_FOOTPRINT_UNKNOWN', message: `placement ${index} has no footprint to check against the rest of the plan`, index } }
+  // Validation grants execution authority and execution re-runs this check before queueing, so a footprint in a chunk the
+  // NPC does not see now is neither probed nor accepted (M3): it is NOT_VISIBLE, at validation and again at execution.
+  if (!area_known_visible(actor.force, actor.surface, footprint.world_box)) {
+    return { ok: false, error: { code: 'NOT_VISIBLE', message: `placement ${index} is in a chunk the NPC does not see now; observe the site again from nearby`, index } }
+  }
   if (reservation_intersection(actor.surface, footprint.world_box)) return { ok: false, error: { code: 'NPC_AREA_RESERVED', message: 'placement overlaps an NPC reserved site', index } }
   if (!actor.surface.can_place_entity({
     name: placement.entity_name,

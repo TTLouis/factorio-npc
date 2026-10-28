@@ -1,12 +1,15 @@
-import type { LuaEntity, LuaEntityPrototype, SurfaceCondition } from 'factorio:runtime'
+import type { LuaEntity, LuaEntityPrototype, LuaFluidBox, SurfaceCondition } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { recipe_bootstrap_for_actor } from './bootstrap_planning'
-import { resolve_exact_entity } from './entity_reference'
+import { resolve_visible_entity_reference } from './entity_reference'
+import { area_known_visible } from './map_knowledge'
 import * as estimate from './production_estimate_live'
 import * as rates from './production_rates'
 import { recipe_categories } from './recipe_categories'
 import { find_world_entities } from './npc_vision'
 import { natural_harvest_source_names } from './prototype_knowledge'
+import type { SeenArea } from './visible_reads'
+import { belt_link_area, entity_area, pipe_link_area, point_area, seen_link, seen_now } from './visible_reads'
 
 const MAX_RECIPE_MATCHES = 8
 const MAX_MACHINE_MATCHES = 8
@@ -14,6 +17,10 @@ const MAX_FLUID_STORAGES = 16
 const MAX_PIPE_CONNECTIONS = 16
 const MAX_TOPOLOGY_RADIUS = 16
 const MAX_TOPOLOGY_INSERTERS = 64
+// Retain the local scan margin; each linked route is separately bounded before reading its endpoints.
+const TOPOLOGY_MIN_REACH = 12
+const NOT_VISIBLE_ERROR = 'entity is in a chunk the NPC does not see now; observe it again from nearby'
+const NOT_VISIBLE_AREA_ERROR = 'the area around the entity reaches chunks the NPC does not see now; observe it again from nearby'
 const MAX_TOPOLOGY_RELATIONS = 64
 
 interface RecipeCandidate {
@@ -257,7 +264,15 @@ function fluidbox_prototype_summary(value: any) {
   return result
 }
 
-function fluid_storage_summary(entity: LuaEntity, index: number) {
+// A linked neighbour in a chunk the NPC does not see now (M3): unknown, not absent.
+const NOT_VISIBLE_TARGET = { not_visible: true }
+
+function linked_summary(seen: SeenArea, position: { x: number, y: number } | undefined, read: () => LuaEntity | undefined) {
+  const link = seen_link(seen, position ? point_area(position) : undefined, read)
+  return link.seen ? entity_summary(link.entity) : NOT_VISIBLE_TARGET
+}
+
+function fluid_storage_summary(entity: LuaEntity, index: number, seen: SeenArea) {
   const fluidbox = entity.fluidbox
   const prototypes_for_storage = fluidbox_prototype_summary(fluidbox.get_prototype(index))
   const connections = fluidbox.get_pipe_connections(index) ?? []
@@ -277,20 +292,37 @@ function fluid_storage_summary(entity: LuaEntity, index: number) {
     prototypes: prototypes_for_storage.slice(0, MAX_FLUID_STORAGES),
     prototypes_truncated: prototypes_for_storage.length > MAX_FLUID_STORAGES,
     pipe_connections_truncated: connections.length > MAX_PIPE_CONNECTIONS,
-    pipe_connections: connections.slice(0, MAX_PIPE_CONNECTIONS).map((connection, connection_index) => ({
+    pipe_connections: connections.slice(0, MAX_PIPE_CONNECTIONS).map((connection, connection_index) => pipe_connection_summary(entity, connection, connection_index, index, seen)),
+  }
+}
+
+type PipeConnection = ReturnType<LuaFluidBox['get_pipe_connections']>[number]
+
+function pipe_connection_summary(entity: LuaEntity, connection: PipeConnection, connection_index: number, fluidbox_index: number, seen: SeenArea) {
+  // Whether and to what it connects would be read from a chunk the NPC does not see now: unknown, not disconnected.
+  if (!seen_link(seen, pipe_link_area(entity, connection, fluidbox_index), () => connection.target?.owner).seen) {
+    return {
       connection_index: connection_index + 1,
-      connected: connection.target !== undefined,
-      target_valid: connection.target === undefined || connection.target.owner?.valid === true,
+      target_not_visible: true,
       flow_direction: connection.flow_direction,
       connection_type: connection.connection_type,
       position: connection.position,
       target_position: connection.target_position,
-      target: entity_summary(connection.target?.owner),
-      target_surface_index: connection.target?.owner?.valid ? connection.target.owner.surface.index : undefined,
-      target_force_index: connection.target?.owner?.valid ? connection.target.owner.force.index : undefined,
-      target_fluidbox_index: connection.target_fluidbox_index,
-      target_pipe_connection_index: connection.target_pipe_connection_index,
-    })),
+    }
+  }
+  return {
+    connection_index: connection_index + 1,
+    connected: connection.target !== undefined,
+    target_valid: connection.target === undefined || connection.target.owner?.valid === true,
+    flow_direction: connection.flow_direction,
+    connection_type: connection.connection_type,
+    position: connection.position,
+    target_position: connection.target_position,
+    target: entity_summary(connection.target?.owner),
+    target_surface_index: connection.target?.owner?.valid ? connection.target.owner.surface.index : undefined,
+    target_force_index: connection.target?.owner?.valid ? connection.target.owner.force.index : undefined,
+    target_fluidbox_index: connection.target_fluidbox_index,
+    target_pipe_connection_index: connection.target_pipe_connection_index,
   }
 }
 
@@ -327,15 +359,21 @@ function push_relation(relations: Array<Record<string, unknown>>, relation: Reco
   if (relations.length < MAX_TOPOLOGY_RELATIONS) relations.push(relation)
 }
 
-function add_inserter_route(relations: Array<Record<string, unknown>>, inserter: LuaEntity) {
+function add_inserter_route(relations: Array<Record<string, unknown>>, inserter: LuaEntity, seen: SeenArea, center?: LuaEntity) {
+  if (!seen(entity_area(inserter))) return false
+  const pickup = seen_link(seen, inserter.pickup_position !== undefined ? point_area(inserter.pickup_position) : undefined, () => inserter.pickup_target)
+  const drop = seen_link(seen, inserter.drop_position !== undefined ? point_area(inserter.drop_position) : undefined, () => inserter.drop_target)
+  if (!pickup.seen || !drop.seen) return false
+  if (center && !same_entity(pickup.entity, center) && !same_entity(drop.entity, center)) return true
   push_relation(relations, {
     kind: 'item_transfer',
-    from: entity_summary(inserter.pickup_target),
+    from: entity_summary(pickup.entity),
     via: entity_summary(inserter),
-    to: entity_summary(inserter.drop_target),
+    to: entity_summary(drop.entity),
     pickup_position: inserter.pickup_position,
     drop_position: inserter.drop_position,
   })
+  return true
 }
 
 interface ResourceCandidate {
@@ -572,19 +610,24 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     }
   }
 
-  const entity = resolve_exact_entity(actor, unit_number)
+  // Facts about a model-named entity cover only chunks the NPC sees now (M3).
+  const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') {
+    return { found: false, unit_number, error: NOT_VISIBLE_ERROR, code: 'entity_not_visible' }
+  }
+  if (resolved.code === 'wrong_surface') {
+    return {
+      found: false,
+      unit_number,
+      error: 'entity is on another surface',
+    }
+  }
+  const entity = resolved.entity
   if (!entity || !entity.valid) {
     return {
       found: false,
       unit_number,
       error: 'entity not found',
-    }
-  }
-  if (entity.surface.index !== actor.surface.index) {
-    return {
-      found: false,
-      unit_number,
-      error: 'entity is on another surface',
     }
   }
 
@@ -593,8 +636,10 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
   const fluid_box_count = entity.fluidbox.length
   const returned_fluid_storages = math.min(fluid_box_count, MAX_FLUID_STORAGES)
   const fluid_storages: Array<Record<string, unknown>> = []
+  // Neighbours linked to this entity are read only where the NPC sees now.
+  const seen = seen_now(actor.force, entity.surface)
   for (let index = 1; index <= returned_fluid_storages; index++) {
-    fluid_storages.push(fluid_storage_summary(entity, index))
+    fluid_storages.push(fluid_storage_summary(entity, index, seen))
   }
 
   const inserter = entity.type === 'inserter'
@@ -613,13 +658,13 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
       ? {
           pickup_position: entity.pickup_position,
           drop_position: entity.drop_position,
-          pickup_target: entity_summary(entity.pickup_target),
-          drop_target: entity_summary(entity.drop_target),
+          pickup_target: linked_summary(seen, entity.pickup_position, () => entity.pickup_target),
+          drop_target: linked_summary(seen, entity.drop_position, () => entity.drop_target),
         }
       : mining_drill
         ? {
             drop_position: entity.drop_position,
-            drop_target: entity_summary(entity.drop_target),
+            drop_target: linked_summary(seen, entity.drop_position, () => entity.drop_target),
           }
         : undefined,
     fluid_storage_count: entity.fluids_count,
@@ -652,6 +697,8 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
       }
     }
   } else if (!['furnace', 'mining-drill', 'inserter'].includes(raw.entity.type)) return undefined
+  // A route end in a chunk the NPC does not see now cannot prove preservation.
+  if (raw.item_io?.pickup_target?.not_visible === true || raw.item_io?.drop_target?.not_visible === true) return undefined
   const storages: any[] = raw.fluid_storages ?? []
   return { found: raw.found, entity: raw.entity, surface_index: raw.surface_index, force_index: raw.force_index,
     actor_id: raw.actor_id, actor_surface_index: raw.actor_surface_index, actor_force_index: raw.actor_force_index,
@@ -670,29 +717,50 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     return { found: false, unit_number, radius, error: `radius must be an integer from 1 to ${MAX_TOPOLOGY_RADIUS}` }
   }
 
-  const center = resolve_exact_entity(actor, unit_number)
+  const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') return { found: false, unit_number, error: NOT_VISIBLE_ERROR, code: 'entity_not_visible' }
+  if (resolved.code === 'wrong_surface') return { found: false, unit_number, error: 'entity is on another surface' }
+  const center = resolved.entity
   if (!center || !center.valid) return { found: false, unit_number, error: 'entity not found' }
-  if (center.surface.index !== actor.surface.index) return { found: false, unit_number, error: 'entity is on another surface' }
+  // Refuse before the local scan unless its whole area is seen. Linked endpoints have their own native bounds below;
+  // this margin alone cannot bound modded underground pipes or custom inserter vectors.
+  const reach = math.max(radius, TOPOLOGY_MIN_REACH)
+  const box = center.bounding_box ?? { left_top: center.position, right_bottom: center.position }
+  const scan_area = {
+    left_top: { x: box.left_top.x - reach, y: box.left_top.y - reach },
+    right_bottom: { x: box.right_bottom.x + reach, y: box.right_bottom.y + reach },
+  }
+  if (!area_known_visible(actor.force, center.surface, scan_area)) {
+    return { found: false, unit_number, radius, error: NOT_VISIBLE_AREA_ERROR, code: 'area_not_visible' }
+  }
 
   const relations: Array<Record<string, unknown>> = []
+  const seen = seen_now(actor.force, center.surface)
+  const unreadable = () => ({ found: false as const, unit_number, radius, error: NOT_VISIBLE_AREA_ERROR, code: 'area_not_visible' as const })
 
   if (belt_connectable(center)) {
+    const area = belt_link_area(center)
+    if (!area || !seen(area)) return unreadable()
     const neighbours = center.belt_neighbours
     for (const input of neighbours.inputs) {
+      if (!seen(entity_area(input))) return unreadable()
       push_relation(relations, { kind: 'belt_input', from: entity_summary(input), to: entity_summary(center) })
     }
     for (const output of neighbours.outputs) {
+      if (!seen(entity_area(output))) return unreadable()
       push_relation(relations, { kind: 'belt_output', from: entity_summary(center), to: entity_summary(output) })
     }
   }
 
-  if (center.type === 'inserter') add_inserter_route(relations, center)
+  if (center.type === 'inserter' && !add_inserter_route(relations, center, seen)) return unreadable()
 
-  if (center.type === 'mining-drill' && center.drop_target?.valid) {
-    push_relation(relations, {
+  if (center.type === 'mining-drill') {
+    const drop = seen_link(seen, center.drop_position !== undefined ? point_area(center.drop_position) : undefined, () => center.drop_target)
+    if (!drop.seen) return unreadable()
+    if (drop.entity?.valid) push_relation(relations, {
       kind: 'direct_item_output',
       from: entity_summary(center),
-      to: entity_summary(center.drop_target),
+      to: entity_summary(drop.entity),
       drop_position: center.drop_position,
     })
   }
@@ -705,10 +773,9 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     limit: MAX_TOPOLOGY_INSERTERS,
   })
   for (const inserter of nearby_inserters) {
+    if (!seen(entity_area(inserter))) return unreadable()
     if (same_entity(inserter, center)) continue
-    if (same_entity(inserter.pickup_target, center) || same_entity(inserter.drop_target, center)) {
-      add_inserter_route(relations, inserter)
-    }
+    if (!add_inserter_route(relations, inserter, seen, center)) return unreadable()
   }
 
   const fluid_box_count = math.min(center.fluidbox.length, MAX_FLUID_STORAGES)
@@ -716,11 +783,13 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     const prototypes_for_storage = fluidbox_prototype_summary(center.fluidbox.get_prototype(index))
     const connections = center.fluidbox.get_pipe_connections(index) ?? []
     for (const connection of connections.slice(0, MAX_PIPE_CONNECTIONS)) {
-      if (connection.target?.owner?.valid) {
+      const link = seen_link(seen, pipe_link_area(center, connection, index), () => connection.target?.owner)
+      if (!link.seen) return unreadable()
+      if (link.entity?.valid) {
         push_relation(relations, {
           kind: 'fluid_connection',
           center: entity_summary(center),
-          neighbour: entity_summary(connection.target.owner),
+          neighbour: entity_summary(link.entity),
           fluidbox_index: index,
           production_types: prototypes_for_storage.map(prototype => prototype.production_type),
           flow_direction: connection.flow_direction,

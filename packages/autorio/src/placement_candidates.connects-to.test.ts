@@ -94,6 +94,7 @@ function live_entity(unit_number: number, name: string, storages: Array<{ filter
     unit_number,
     name,
     position: { x: 0, y: 0 },
+    bounding_box: { left_top: { x: -1, y: -1 }, right_bottom: { x: 1, y: 1 } },
     surface: { index: 1 },
     force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
     fluidbox: {

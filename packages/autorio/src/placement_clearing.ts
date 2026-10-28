@@ -286,9 +286,9 @@ export function placement_clearance(actor: ControlledActor, prototype: any, enti
 }
 
 /** True when the native check accepts the footprint, or would once its clearable blockers are cleared. */
-export function placeable_or_clearable(actor: ControlledActor, prototype: any, entity_name: string, position: { x: number, y: number }, direction: number | undefined, protect: number[] = [], allow_own: AllowOwn = []) {
+export function placeable_or_clearable(actor: ControlledActor, prototype: any, entity_name: string, position: { x: number, y: number }, direction: number | undefined, protect: number[] = [], allow_own: AllowOwn = [], memo?: ClearanceMemo) {
   if (actor.surface.can_place_entity({ name: entity_name, position, direction, force: actor.force, ...placement_check_args(entity_name) })) return true
-  return placement_clearance(actor, prototype, entity_name, position, direction, protect, undefined, allow_own) !== undefined
+  return placement_clearance(actor, prototype, entity_name, position, direction, protect, memo, allow_own) !== undefined
 }
 
 /**

@@ -5,7 +5,7 @@ import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_feat
 import { candidate_fluid_ports, complete_live_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
 import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, placement_tile_size, rotate_cardinal, snap_placement_center, vector_xy, type PlacementFootprint } from './placement_geometry'
 import { resolve_entity_placement_item } from './placement_item'
-import { resolve_exact_entity } from './entity_reference'
+import { resolve_visible_entity_reference } from './entity_reference'
 import { pole_candidate_facts, pole_reach, protected_read } from './electric_facts'
 import { find_world_entities } from './npc_vision'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
@@ -15,7 +15,7 @@ import { fluid_io_names } from './prototype_knowledge'
 import { type ClearableEntity, type ClearanceMemo, placeable_or_clearable, placement_clearance } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { preservation_geometry_for_actor } from './knowledge'
-import { chunk_coverage, is_chunk_known_visible, KNOWLEDGE_CHUNK_RADIUS, map_knowledge_summary } from './map_knowledge'
+import { area_known_visible, box_chunk_range, chunk_coverage, is_chunk_known_visible, KNOWLEDGE_CHUNK_RADIUS, map_crop, map_knowledge_summary } from './map_knowledge'
 import { current_fluid_owner, current_fluid_admission, queued_fluid_admission, same_fluid_owner, valid_fluid_owner, type FluidPreservationOwner, type FluidQueuedBinding } from './operation_admission'
 
 const MAX_RADIUS = 24
@@ -554,7 +554,11 @@ function resolve_join_target(actor: ControlledActor, request: PlacementConnectsT
   if (request.connection_index !== undefined && !bounded_index(request.connection_index, 8)) {
     return join_failure('invalid_connects_to', 'connects_to.connection_index must be an integer from 1 to 8', request.unit_number)
   }
-  const entity = resolve_exact_entity(actor, request.unit_number)
+  const resolved = resolve_visible_entity_reference(actor, request.unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') {
+    return join_failure('connects_to_not_visible', 'connects_to entity is in a chunk the NPC does not see now; observe it again from nearby', request.unit_number)
+  }
+  const entity = resolved.entity
   if (!entity || !entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index) {
     return join_failure('connects_to_entity_not_found', 'connects_to entity is not on this surface and force', request.unit_number)
   }
@@ -577,7 +581,11 @@ function resolve_anchor(actor: ControlledActor, request: PlacementAnchor) {
   if (typeof request !== 'object' || !bounded_index(request.unit_number, 9007199254740991)) {
     return join_failure('invalid_anchor', 'anchor.unit_number must be a positive integer')
   }
-  const entity = resolve_exact_entity(actor, request.unit_number)
+  const resolved = resolve_visible_entity_reference(actor, request.unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') {
+    return join_failure('anchor_not_visible', 'anchor entity is in a chunk the NPC does not see now; observe it again from nearby', request.unit_number)
+  }
+  const entity = resolved.entity
   if (!entity || !entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index) {
     return join_failure('anchor_entity_not_found', 'anchor entity is not on this surface and force', request.unit_number)
   }
@@ -975,19 +983,6 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
 
 type CandidateBox = { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
 
-// The chunks a world box touches. The right and bottom edges are exclusive, but a box of zero width or height (a modded
-// prototype with an empty collision box) still lies in the chunk containing its left-top corner: the range is never empty.
-function box_chunk_range(box: CandidateBox) {
-  const min_x = math.floor(box.left_top.x / 32)
-  const min_y = math.floor(box.left_top.y / 32)
-  return {
-    min_x,
-    min_y,
-    max_x: math.max(min_x, math.floor((box.right_bottom.x - 0.001) / 32)),
-    max_y: math.max(min_y, math.floor((box.right_bottom.y - 0.001) / 32)),
-  }
-}
-
 function extend_box(box: CandidateBox, other: CandidateBox) {
   box.left_top.x = math.min(box.left_top.x, other.left_top.x)
   box.left_top.y = math.min(box.left_top.y, other.left_top.y)
@@ -1030,12 +1025,23 @@ function coverage_of(actor: ControlledActor, area: CandidateBox) {
   })
 }
 
+// The crop shipped with candidates: a 5x5-chunk picture centred on the searched area (on the NPC when nothing was read), with
+// the same surface, tick and knowledge revision as the candidates, so a reader can place every candidate on it.
+const CANDIDATE_CROP_RADIUS = 2
+
 function candidate_map_context(actor: ControlledActor, evaluated_area: CandidateBox | undefined) {
   const summary = map_knowledge_summary(actor.force)
   const window = summary.visible_center
+  const center = evaluated_area === undefined
+    ? { x: math.floor(actor.position.x / 32), y: math.floor(actor.position.y / 32) }
+    : {
+        x: math.floor((evaluated_area.left_top.x + evaluated_area.right_bottom.x) / 64),
+        y: math.floor((evaluated_area.left_top.y + evaluated_area.right_bottom.y) / 64),
+      }
   return {
     source: 'npc_map_knowledge',
     observed_tick: game.tick,
+    revision: summary.revision,
     surface_index: actor.surface.index,
     surface_name: actor.surface.name,
     candidate_authority: 'currently_visible_chunks_only',
@@ -1043,6 +1049,7 @@ function candidate_map_context(actor: ControlledActor, evaluated_area: Candidate
     explored_chunks: summary.explored_chunks,
     evaluated_area,
     evaluated_area_coverage: evaluated_area === undefined ? undefined : coverage_of(actor, evaluated_area),
+    crop: map_crop(actor.force, actor.surface, center, CANDIDATE_CROP_RADIUS),
   }
 }
 
@@ -1146,17 +1153,28 @@ function resolve_placement_candidate(
   if (prototype.type === 'offshore-pump' && (set.actor_id === undefined || actor.status_snapshot?.().actor_id !== set.actor_id)) {
     return { ok: false as const, error: 'placement candidate belongs to another actor' }
   }
+  // Selection to execution (M3): a stored candidate was read while its chunks were visible; it grants nothing once they are
+  // not. Its whole read area (footprint, mining area, pole reach) must be visible now, before any live probe below, else it is
+  // stale: the NPC observes the site again from nearby and reads fresh candidates.
+  const footprint = placement_footprint(prototype, candidate.position, candidate.direction)
+  if (!area_known_visible(actor.force, actor.surface, candidate_read_box(prototype, candidate.position, candidate.direction, footprint))) {
+    return { ok: false as const, code: 'placement_candidate_not_visible', error: 'placement_candidate_not_visible: the candidate site is in a chunk the NPC does not see now; observe it again from nearby and read fresh candidates' }
+  }
   if (candidate.connects_to !== undefined) {
-    // A connection candidate is only meaningful next to the entity it was solved for.
-    const target = resolve_exact_entity(actor, candidate.connects_to.unit_number)
+    // A connection candidate is only meaningful next to the entity it was solved for, seen now.
+    const target = resolve_visible_entity_reference(actor, candidate.connects_to.unit_number, 'actor_body').entity
     if (!target || !target.valid || target.surface.index !== set.surface_index || target.force.index !== set.force_index) {
       return { ok: false as const, error: 'placement candidate connection target is no longer available' }
     }
     const changed = join_change(target, prototype, candidate)
     if (changed !== undefined) return { ok: false as const, code: 'connects_to_port_changed', error: `connects_to_port_changed: ${changed}` }
   }
-  // The candidate may take only the own entities it listed when it was read, not whatever stands there now.
-  if (!placeable_or_clearable(actor, prototype, set.entity_name, candidate.position, candidate.direction, set.protected_unit_numbers, own_clear_unit_numbers(candidate) ?? [])) {
+  // The candidate may take only the own entities it listed when it was read, not whatever stands there now. Deciding whether
+  // such a blocker is idle scans around it (neighbours, the area its pole powers); a scan reaching a chunk the NPC does not see
+  // now is not read, and the candidate is stale rather than blocked or cleared on unseen machinery.
+  const clearance_memo: ClearanceMemo = { reasons: {}, readable: area => area_known_visible(actor.force, actor.surface, area) }
+  if (!placeable_or_clearable(actor, prototype, set.entity_name, candidate.position, candidate.direction, set.protected_unit_numbers, own_clear_unit_numbers(candidate) ?? [], clearance_memo)) {
+    if (clearance_memo.saw_not_visible) return { ok: false as const, code: 'placement_candidate_not_visible', error: 'placement_candidate_not_visible: a blocker the candidate would clear is next to a chunk the NPC does not see now; observe it again from nearby and read fresh candidates' }
     return { ok: false as const, error: 'placement candidate is no longer placeable' }
   }
 

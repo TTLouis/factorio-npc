@@ -7,7 +7,7 @@ const originalPrototypes = (globalThis as any).prototypes
 const originalGame = (globalThis as any).game
 
 function actor(force: Record<string, unknown> = {}, surfaceIndex = 1) {
-  return { is_valid: true, force, surface: { index: surfaceIndex } } as unknown as ControlledActor
+  return { is_valid: true, force: { index: 1, is_chunk_visible: () => true, is_chunk_charted: () => true, ...force }, surface: { index: surfaceIndex } } as unknown as ControlledActor
 }
 
 afterEach(() => {
@@ -88,6 +88,7 @@ describe('deterministic throughput capacity facts', () => {
       surface: { index: 1 },
       force: { index: 1 },
       position: { x: 1, y: 0 },
+      bounding_box: { left_top: { x: 0.6, y: -0.4 }, right_bottom: { x: 1.4, y: 0.4 } },
       active: true,
       inserter_target_pickup_count: 4,
       inserter_stack_size_override: 3,

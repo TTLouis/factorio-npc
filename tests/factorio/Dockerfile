@@ -41,6 +41,7 @@ RUN mkdir -p /opt/factorio/mods /test/results /test/saves
 COPY --from=build /usr/local/bin/node /usr/local/bin/node
 RUN node --version
 COPY --from=build /src/packages/autorio/dist /opt/factorio/mods/autorio_0.1.0
+COPY tests/factorio/fixtures/visibility-link-prototypes.lua /opt/factorio/mods/autorio_0.1.0/data-final-fixes.lua
 COPY --from=build /src/deploy/pterodactyl/staging /test/pterodactyl/staging
 COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/pterodactyl/runtime-v8
 COPY tests/factorio/runner /test/runner

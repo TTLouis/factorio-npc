@@ -1,6 +1,7 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import { resolve_entity_reference } from './entity_reference'
+import { resolve_visible_entity_reference } from './entity_reference'
+import { area_known_visible, chunk_coverage } from './map_knowledge'
 import { placement_check_args, placement_footprint, placement_tile_size, snap_placement_center, type PlacementWorldBox } from './placement_geometry'
 import { find_world_entities } from './npc_vision'
 
@@ -67,9 +68,11 @@ function resolve_anchor(actor: ControlledActor, request: ConstructionObservation
     if (request.anchor_unit_number < 1 || math.floor(request.anchor_unit_number) !== request.anchor_unit_number) {
       return { error: 'invalid anchor_unit_number' }
     }
-    const entity = resolve_entity_reference(actor, request.anchor_unit_number, 'map_visible')
+    const resolved = resolve_visible_entity_reference(actor, request.anchor_unit_number, 'map_visible')
+    if (resolved.code === 'not_visible') return { error: 'anchor entity is in a chunk the NPC does not see now; observe it again from nearby' }
+    if (resolved.code === 'wrong_surface') return { error: 'anchor entity is on another surface' }
+    const entity = resolved.entity
     if (!entity || !entity.valid) return { error: 'anchor entity not found' }
-    if (entity.surface.index !== actor.surface.index) return { error: 'anchor entity is on another surface' }
     return { position: entity.position, entity }
   }
   if (request.position !== undefined) {
@@ -257,6 +260,10 @@ export function local_spatial_observation(actor: ControlledActor, request: Const
   const area = {
     left_top: { x: anchor.position.x - half_size, y: anchor.position.y - half_size },
     right_bottom: { x: anchor.position.x + half_size, y: anchor.position.y + half_size },
+  }
+  // Only an area the NPC sees now is read: a fogged or unknown chunk would leak live entities and tiles as fresh facts.
+  if (!area_known_visible(actor.force, actor.surface, area)) {
+    return { ok: false, error: 'area_not_visible: the observed area reaches chunks the NPC does not see now', tick: game.tick, bounds: area, coverage: chunk_coverage(actor.force, actor.surface, area) }
   }
   const matches = find_world_entities(actor.surface, { area })
   sort_entities(matches)

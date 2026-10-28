@@ -85,7 +85,7 @@ function build(held: Record<string, number> = { 'test-chest': 3, 'test-inserter'
     character: { valid: true, name: 'character', type: 'character', position, build_distance: 20, resource_reach_distance: 20 },
     position,
     surface,
-    force: { index: 1, name: 'player' },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
     get_main_inventory: () => inventory,
     status_snapshot: () => ({ actor_id: 42, kind: 'standalone_character', valid: true, has_character: true, position }),
   } as unknown as ControlledActor

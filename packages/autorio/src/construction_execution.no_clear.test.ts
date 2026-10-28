@@ -107,7 +107,7 @@ function build() {
     character: { valid: true, name: 'character', type: 'character', position, prototype: { mining_speed: 0.5 }, character_mining_speed_modifier: 0, resource_reach_distance: 20, build_distance: 20 },
     position,
     surface,
-    force: { index: 1, name: 'player', manual_mining_speed_modifier: 0 },
+    force: { index: 1, name: 'player', manual_mining_speed_modifier: 0, is_chunk_visible: () => true, is_chunk_charted: () => true },
     get_main_inventory: () => inventory,
     entity_build_args: () => ({ force: { index: 1 } }),
     status_snapshot: () => ({ actor_id: 42, kind: 'standalone_character', valid: true, has_character: true, position }),

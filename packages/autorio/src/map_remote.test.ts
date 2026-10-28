@@ -53,6 +53,9 @@ function make_entity(surface: LuaSurface, overrides: Partial<LuaEntity> = {}) {
     get_inventory: vi.fn(() => empty_inventory()),
     ...overrides,
   }
+  // A live entity carries its bounds, and an observation hint keeps them (M3).
+  const at = entity.position as { x: number, y: number }
+  ;(entity as any).bounding_box ??= { left_top: { x: at.x - 1.5, y: at.y - 1.5 }, right_bottom: { x: at.x + 1.5, y: at.y + 1.5 } }
   return entity as unknown as LuaEntity
 }
 

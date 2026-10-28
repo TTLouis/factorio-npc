@@ -1,7 +1,7 @@
 import type { LuaEntity, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import { remember_entity_reference, resolve_entity_reference } from './entity_reference'
-import { chunk_coverage, is_chunk_known_charted, is_chunk_known_visible, map_knowledge_summary } from './map_knowledge'
+import { entity_reference_hint, hint_surface, remember_entity_reference, resolve_visible_entity_on_any_surface } from './entity_reference'
+import { chunk_coverage, is_chunk_known_charted, is_chunk_known_visible, MAP_CROP_DEFAULT_RADIUS, MAP_CROP_MAX_RADIUS, map_crop, map_knowledge_summary } from './map_knowledge'
 import { crafting_categories_support_recipe } from './recipe_categories'
 import { find_world_entities } from './npc_vision'
 
@@ -203,7 +203,17 @@ function resolve_visible_entity(actor: ControlledActor, unit_number: number) {
   if (!valid_integer(unit_number, 1, 9007199254740991)) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
-  const entity = resolve_entity_reference(actor, unit_number, 'map_visible')
+  // Resolve only where the NPC sees now (M3), on whichever surface the entity is: an entity in fog answers the same whether
+  // it still stands, and nothing there is scanned or refreshed. Its stored hint position only says whether the chunk was
+  // ever charted.
+  const visible = resolve_visible_entity_on_any_surface(actor, unit_number)
+  if (visible.code === 'not_visible') {
+    const hint = entity_reference_hint(unit_number)
+    const surface = hint === undefined ? undefined : hint_surface(actor, hint)
+    const uncharted = hint !== undefined && surface !== undefined && !is_position_charted(actor, surface, hint.position)
+    return { code: (uncharted ? 'area_uncharted' : 'area_not_visible') as MapObservationCode, entity: undefined }
+  }
+  const entity = visible.entity
   if (!entity || !entity.valid) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
@@ -334,6 +344,18 @@ export function set_charted_machine_recipe(actor: ControlledActor, unit_number: 
   return mutation_result(true, true, 'completed', details)
 }
 
+// A bounded crop of what the NPC knows of the map around a tile position on its own surface (default: where it stands): one
+// letter per chunk (V visible now, F explored but fogged, U never explored) with its surface, origin, tick and revision, and
+// how much of the explored record lies outside it. It reads only the knowledge record and the engine's chart/visibility flags:
+// it names no entities, charts, generates or reserves nothing, and grants no execution authority (M3).
+export function map_crop_around(actor: ControlledActor, radius: number = MAP_CROP_DEFAULT_RADIUS, x?: number, y?: number) {
+  if (!valid_integer(radius, 1, MAP_CROP_MAX_RADIUS)) return { ok: false, code: 'invalid_radius' as MapObservationCode, max_radius: MAP_CROP_MAX_RADIUS }
+  if ((x === undefined) !== (y === undefined)) return { ok: false, code: 'invalid_position' as MapObservationCode }
+  if (x !== undefined && (!valid_number(x) || !valid_number(y!))) return { ok: false, code: 'invalid_position' as MapObservationCode }
+  const center = chunk_position(x === undefined ? actor.position : { x, y: y! })
+  return { ok: true, code: 'ok' as MapObservationCode, crop: map_crop(actor.force, actor.surface, center, radius) }
+}
+
 export function create_map_remote_interface(get_actor: () => ControlledActor | undefined) {
   remote.add_interface('autorio_map', {
     context: () => {
@@ -357,6 +379,13 @@ export function create_map_remote_interface(get_actor: () => ControlledActor | u
         },
         map_knowledge: map_knowledge_summary(actor.force),
       }
+    },
+    crop: (radius?: number, x?: number, y?: number) => {
+      const actor = get_actor()
+      if (!actor || !actor.is_valid) {
+        return { ok: false, code: 'no_actor' as MapObservationCode }
+      }
+      return map_crop_around(actor, radius, x, y)
     },
     query_area: (surface_index: number, x: number, y: number, radius: number = 32, limit: number = 32, name?: string) => {
       const actor = get_actor()
