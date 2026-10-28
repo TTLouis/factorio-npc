@@ -11,6 +11,7 @@ import { restoreProductionRecords } from './production-task-runtime.mjs'
 import { restoreHarnessDefaults } from './production-repair.mjs'
 import { restoreControllerRecoveries } from './controller-liveness.mjs'
 import { restoreEntityRefreshClaims } from './entity-refresh.mjs'
+import { restoreProgressAudits } from './executor-progress-audit.mjs'
 import { restorePreservationRecoveries } from './preservation-recovery.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
@@ -3109,6 +3110,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       gather_recoveries: [...(this.gatherRecoveries ?? new Map()).entries()],
       ...(this.gatherRecoveryFault ? { gather_recovery_fault: true } : {}),
       controller_recoveries: [...(this.controllerRecoveries ?? new Map()).entries()],
+      executor_progress_audits: [...(this.progressAudits ?? new Map()).entries()],
+      ...(this.progressAuditFault ? { executor_progress_audit_fault: true } : {}),
       preservation_recoveries: [...(this.preservationRecoveries ?? new Map()).entries()],
       ...(this.preservationRecoveryFault ? { preservation_recovery_fault: true } : {}),
       entity_refresh_claims: [...(this.entityRefreshClaims ?? new Map()).entries()],
@@ -3264,6 +3267,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     super.restore(snapshot)
     this.plannerSkillHandoffs = restorePlannerSkillHandoffs(snapshot?.planner_skill_handoffs)
+    const progressAudits = restoreProgressAudits(snapshot?.executor_progress_audits)
+    this.progressAudits = progressAudits.records
+    this.progressAuditFault = progressAudits.fault || snapshot?.executor_progress_audit_fault === true
     const preservation = restorePreservationRecoveries(snapshot?.preservation_recoveries)
     this.preservationRecoveries = preservation.records
     this.preservationRecoveryFault = preservation.fault || snapshot?.preservation_recovery_fault === true

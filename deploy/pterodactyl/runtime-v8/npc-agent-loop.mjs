@@ -16,6 +16,7 @@ import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
+import { prepareProgressAttempt, bindProgressAttempt, auditExecutorProgress, completeProgressReview } from './executor-progress-audit.mjs'
 import { preservationObservationAdmission, preservationReobservationVerified } from './preservation-recovery.mjs'
 import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent, constructionPlanWitnessCommand } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
@@ -3282,6 +3283,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Production requires typed intent on every new deterministic draft. Saved
     // pre-provenance plans remain readable; they cannot mint repair certificates.
     this.requireTypedObligations = options.requireTypedObligations === true
+    this.executorProgressAudit = options.executorProgressAudit === true
+    this.allowEphemeralProgressAudit = options.allowEphemeralProgressAudit === true
     this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default is prefix-aware (restageSoftLimitTokens)
     this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
     this.providerCallsByGeneration = new Map() // the same count per loop generation: restageContext refuses only while a round of the CURRENT generation is in flight
@@ -3707,7 +3710,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId,
       ...(kept ? { keepExecutor: { meta: kept, reply: JSON.stringify(plan) } } : {}) })
     await assertReviewCurrent()
-    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review })}`
+    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review, ...(harnessRaised && plan.progressAuditEvidence ? { harness_progress_audit: plan.progressAuditEvidence } : {}) })}`
     try {
       if (continuing && returned.returned) {
         this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true }
@@ -9520,6 +9523,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const observation = normalizedConditionObservation(raw)
           facts[requirement.id] = {
             kind: requirement.kind,
+            authoritative: raw?.ok === true,
             ...(Number.isSafeInteger(requirement.unit_number) ? { unit_number: requirement.unit_number } : {}),
             ...(typeof requirement.item_name === 'string' ? { item_name: requirement.item_name } : {}),
             ...(Number.isFinite(raw?.current) ? { current: raw.current } : {}),
@@ -12840,6 +12844,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     this.lastHandledRuntimeReceipt.completion = receiptKey
 
+    if (!pendingAmendment) {
+      const audited = await auditExecutorProgress(this)
+      if (audited !== undefined) return audited
+    }
     const stepCompletion = pendingAmendment
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
@@ -13025,6 +13033,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (gather !== undefined) return gather
     const production = await recoverProductionFailure(this)
     if (production !== undefined) return production
+    const audited = await auditExecutorProgress(this)
+    if (audited !== undefined) return audited
 
     const routed = await this.routePostStepDecision(receipt, {
       boundary: 'failure',
@@ -17348,6 +17358,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Durable before the handoff: a later restage of this step (the supervisor's resume after a second review) rebuilds the
       // executor from the planning state and would otherwise lose them with the conversation.
       if (notes) this.memory.recordReviewNotes?.(this.activePlanKey(), review.step_id, notes)
+      if (reviewRound) await completeProgressReview(this, plan.chatMessage)
       // Fold C3 into C8: an executor restaged at the step close that asked for this review and has done nothing since resumes its own
       // conversation (one packet, one restage); every other handback restages as C3.
       const folded = reviewRound ? await this.foldReviewHandback({ planId: heldForRoleHandoff.plan_id, requestId: this.traceRequest?.id, notesChars: notes.length, expectedKept: review?.executor_kept === true }) : undefined
@@ -18369,6 +18380,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return this.endBlockedPreflightWithPause({ stateResult, plan, durablePlan, before, preflight: error?.preflight, blockedEnd, recoverySpent })
       }
 
+      const progressAttempt = await prepareProgressAttempt(this, plan.operations)
+      if (progressAttempt && Object.hasOwn(progressAttempt, 'result')) return progressAttempt.result
       const admitGeneration = this.generation
       const admitRequestId = this.traceRequest?.id
       const sendOwner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
@@ -18395,6 +18408,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {
+        assertSendOwner(pendingAdmission)
+        await bindProgressAttempt(this, progressAttempt, pendingAdmission)
         assertSendOwner(pendingAdmission)
         if (this.entityRefreshAdmission) {
           this.entityRefreshAdmission.pendingKey = pendingAdmission?.operation_key

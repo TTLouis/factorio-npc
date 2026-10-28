@@ -5,6 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { operationSignature, reconcilePendingOperation, duplicateEffectGuard } from './operation-reconciliation.mjs'
+import { progressObligationKey, progressVector } from './executor-progress-audit.mjs'
 import { gatherDeficit } from './gather-recovery.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
@@ -388,4 +389,33 @@ for (const variant of ['far', 'wrong_surface', 'wrong_resource']) test(`coordina
     .catch(error => assert.match(error.message, /AR regression|blocked|preflight/i))
   assert.equal(w.game.mutations.length, 0)
   assert.equal(w.events.filter(row => row.event === 'mining.location_corrected').length, 0)
+})
+
+
+test('progress auditor composes with exact terminal partial gather reconciliation before deficit admission', async () => {
+  const w = world()
+  w.agent.executorProgressAudit = true
+  w.agent.allowEphemeralProgressAudit = true
+  const plan = w.held(); const step = plan.steps[plan.active_step_index]
+  const pending = w.memory.pendingOperations(ar.key)[0]
+  const contract = step.completion_contract
+  const beforeFacts = await w.agent.completionFactsForContract(contract, undefined, [], { committedIdentity: true })
+  // Explicit replay substitution: original pre-attempt facts are not in AR's
+  // snapshot. Use zero relevant stock to exercise an advancing partial attempt.
+  for (const fact of Object.values(beforeFacts)) if (Number.isFinite(fact.current)) fact.current = 0
+  const before = progressVector(contract, beforeFacts)
+  assert.ok(before)
+  w.memory.progressAudits = new Map([[JSON.stringify([ar.key, plan.goal_id, progressObligationKey(contract, step.obligations?.preserve)]), {
+    version: 1, attempts: 1, reviews: 0, state: 'claimed', baseline: before, previous: before, peak: { ...before }, history: [], blocked: [],
+    claim: { operation_key: pending.operation_key, signature: pending.signature, actor: pending.actor,
+      plan_id: pending.plan_id, step_id: pending.step_id, attempt_id: pending.attempt_id, ordinal: pending.ordinal, operations: ar.operations },
+  }]])
+  try { await w.agent.failed('mining:mining_rejected') } catch (error) { throw new Error(JSON.stringify(w.events.slice(-10)), { cause: error }) }
+  assert.equal(w.game.mutations.length, 1)
+  assert.match(w.game.mutations[0], /'gather_resource','coal',10,1024/)
+  assert.doesNotMatch(w.game.mutations[0], /'gather_resource','copper-ore'/)
+  const episode = [...w.memory.progressAudits.values()][0]
+  assert.equal(episode.history[0].decision, 'progress')
+  assert.equal(episode.attempts, 2)
+  assert.equal(w.providers.length, 0)
 })

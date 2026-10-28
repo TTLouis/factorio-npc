@@ -217,6 +217,7 @@ export function configuration(raw = {}, env = process.env) {
 
   const config = {
     actorMode,
+    executorProgressAudit: String(env.SGLUNA_EXECUTOR_PROGRESS_AUDIT ?? raw.executorProgressAudit ?? 'false') === 'true',
     chatPlayers: parseChatPlayers(cleanString(chatPlayersSource, 'SGLUNA_CHAT_PLAYERS', 512)),
     save: cleanString(env.SAVE_NAME ?? raw.save ?? '', 'SAVE_NAME', 160),
     model: modelList[0],
@@ -3775,6 +3776,7 @@ export class Session {
       completionProtocolVersion: 3,
       executorObservationRate: true, // harness-owned replenishing live-read rate
       requireTypedObligations: true,
+      executorProgressAudit: this.config.executorProgressAudit === true,
       replacementWake: true, // MW5: player-objective grant at admission and the replacement wake
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
