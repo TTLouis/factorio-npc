@@ -105,12 +105,13 @@ const sideEffects = () => lua('local charted=0; local generated=0; '
   + 'rcon.print(helpers.table_to_json({charted=charted,generated=generated,explored=k.explored_chunks,revision=k.revision,'
   + 'window=c and {surface_index=c.surface_index,x=c.x,y=c.y} or nil,reservations=#remote.call("autorio_reservations","status").reservations,standing=standing}))')
 
-const START = { x: -48.5, y: -16.5 }        // chunk (-2, -1): window x -4..0
+const START = { x: -60.5, y: -16.5 }        // chunk (-2, -1): window x -4..0; within build reach of PLAN_AT
 const ONE_OVER = { x: -20.5, y: -16.5 }     // chunk (-1, -1): window x -3..1; chunk x=-4 leaves the window
 const FAR = { x: 40.5, y: 20.5 }            // chunk (1, 0): window x -1..3, y -2..2; the fixture chunk (-3, -1) is fogged
 const FRAME = { position: { x: -48, y: -16 }, radius: 3 }  // one crop frame for every comparison: chunks x -5..1, y -4..2
 const letter = (crop, chunk) => crop.rows[chunk.y - crop.origin.chunk.y][chunk.x - crop.origin.chunk.x]
 const FIXTURE_CHUNK = { x: -3, y: -1 }
+const PLAN_AT = { x: -66.5, y: -16.5 }      // a chest in the fixture chunk (-3, -1), six tiles from START: plans need build reach
 
 function assertCropShape(crop, label) {
   assert.equal(crop.source, 'npc_map_knowledge', label)
@@ -143,7 +144,7 @@ async function prepare() {
     + 'for _,e in pairs(other.find_entities_filtered{area={{-4,-4},{4,4}}}) do e.destroy() end; '
     + 'local elsewhere=other.create_entity{name="car",position={0.5,0.5},force=a.force}; '
     + 'inv.clear(); inv.insert{name="wooden-chest",count=10}; inv.insert{name="burner-mining-drill",count=2}; '
-    + 'local p=s.find_non_colliding_position("character",{-48.5,-16.5},6,0.5); assert(p,"no start spot"); a.teleport(p); '
+    + 'local p=s.find_non_colliding_position("character",{-60.5,-16.5},6,0.5); assert(p,"no start spot"); a.teleport(p); '
     + 'rcon.print(helpers.table_to_json({humans=#game.connected_players,anchor=anchor.unit_number,foreign=foreign.unit_number,elsewhere=elsewhere.unit_number,elsewhere_indexed=game.get_entity_by_unit_number(elsewhere.unit_number)~=nil,'
     + 'anchor_position=anchor.position,actor_force=a.force.name,start=a.position}))')
   assert.equal(fixture.humans, 0, 'zero humans')
@@ -175,7 +176,7 @@ async function prepare() {
   const drills = await tool('getPlacementCandidates', { entity_name: 'burner-mining-drill', target_resource: 'iron-ore', center: { x: -80, y: -7.5 }, radius: 4, limit: 2 })
   assert.equal(drills.ok, true, JSON.stringify(drills).slice(0, 2000)); assert.ok(drills.candidates.length > 0)
   const drillPick = drills.candidates[0]
-  const planAt = { x: chestPick.position.x + 3, y: chestPick.position.y }
+  const planAt = PLAN_AT
   const planTick = await tick()
   const plan = await tool('validateConstructionPlan', { plan_id: 'm3-fogged-plan', placements: [{ entity_name: 'wooden-chest', x: planAt.x, y: planAt.y }] })
   assert.equal(plan.ok, true, JSON.stringify(plan).slice(0, 2000))
