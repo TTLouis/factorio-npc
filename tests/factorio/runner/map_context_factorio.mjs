@@ -141,10 +141,10 @@ async function prepare() {
     + 'for x=-82,-79 do for y=-9,-6 do s.create_entity{name="iron-ore",position={x+0.5,y+0.5},amount=400} end end; '
     + 'local other=game.surfaces["m3-elsewhere"] or game.create_surface("m3-elsewhere"); other.request_to_generate_chunks({0,0},1); other.force_generate_chunk_requests(); '
     + 'for _,e in pairs(other.find_entities_filtered{area={{-4,-4},{4,4}}}) do e.destroy() end; '
-    + 'local elsewhere=other.create_entity{name="wooden-chest",position={0.5,0.5},force=a.force}; '
+    + 'local elsewhere=other.create_entity{name="car",position={0.5,0.5},force=a.force}; '
     + 'inv.clear(); inv.insert{name="wooden-chest",count=10}; inv.insert{name="burner-mining-drill",count=2}; '
     + 'local p=s.find_non_colliding_position("character",{-48.5,-16.5},6,0.5); assert(p,"no start spot"); a.teleport(p); '
-    + 'rcon.print(helpers.table_to_json({humans=#game.connected_players,anchor=anchor.unit_number,foreign=foreign.unit_number,elsewhere=elsewhere.unit_number,'
+    + 'rcon.print(helpers.table_to_json({humans=#game.connected_players,anchor=anchor.unit_number,foreign=foreign.unit_number,elsewhere=elsewhere.unit_number,elsewhere_indexed=game.get_entity_by_unit_number(elsewhere.unit_number)~=nil,'
     + 'anchor_position=anchor.position,actor_force=a.force.name,start=a.position}))')
   assert.equal(fixture.humans, 0, 'zero humans')
   evidence.fixture = fixture
@@ -162,6 +162,10 @@ async function prepare() {
   console.log(`PASS: CROP - bounded 7x7 crop, surface nauvis, origin chunk (-5,-4), revision ${crop0.revision}, ${crop0.counts.visible} visible`)
 
   // ---- SELECTION while visible ---------------------------------------------------------------
+  // Chests are not indexed by unit number in the engine; an observation read gives the harness its identity hint, as the
+  // model's own reads do. A unit number the NPC never observed is simply not found.
+  const seen = await tool('getNearbyEntities', { name: 'wooden-chest', radius: 32, limit: 8 })
+  assert.ok(JSON.stringify(seen).includes(String(fixture.anchor)), `the observation names the anchor chest: ${JSON.stringify(seen).slice(0, 600)}`)
   const anchored = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: fixture.anchor }, radius: 4, limit: 4 })
   assert.equal(anchored.ok, true, JSON.stringify(anchored).slice(0, 2000))
   assert.ok(anchored.candidates.length > 0)
@@ -182,7 +186,9 @@ async function prepare() {
   const elsewhereAnchor = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: fixture.elsewhere }, radius: 4, limit: 2 })
   assert.equal(elsewhereAnchor.ok, false); assert.ok(refusedFor(elsewhereAnchor, 'anchor_entity_not_found'), JSON.stringify(elsewhereAnchor))
   const elsewhereSites = await tool('findConstructionSites', { width: 2, height: 2, anchor_unit_number: fixture.elsewhere })
-  assert.equal(elsewhereSites.ok, false); assert.ok(refusedFor(elsewhereSites, 'another surface'), JSON.stringify(elsewhereSites))
+  assert.equal(elsewhereSites.ok, false)
+  // The engine indexes few prototypes by unit number; only an indexed entity on another surface is recognised as one.
+  assert.ok(refusedFor(elsewhereSites, fixture.elsewhere_indexed ? 'another surface' : 'anchor entity not found'), JSON.stringify(elsewhereSites))
   evidence.selection = { chest_pick: chestPick, candidate_set_id: anchored.candidate_set_id, drill_pick: drillPick, drill_set_id: drills.candidate_set_id,
     plan: { validation_id: plan.validation_id, at: planAt }, sites: sites.candidates, foreign: foreignAnchor, elsewhere: { candidates: elsewhereAnchor, sites: elsewhereSites } }
   console.log('PASS: SELECTION - anchored candidates, a drill on ore, a validated plan and a site search while visible; another force and another surface refused as anchors')
