@@ -14,7 +14,7 @@
 //   MOVEMENT    a real walk takes the fixtures out of view: the stored candidates and the validated plan are refused at
 //               the authoritative boundary as not visible, before any walk or mutation; the anchor, site search and
 //               local observation are refused as not visible; destroying the anchor and the ore in the fog changes
-//               none of those answers, refreshes no hint, and no read charts, generates or reserves anything
+//               none of those answers, and no read charts, generates or reserves anything
 //   RELOAD      after game.server_save() and a real process restart: the knowledge record, revision and crop persist and
 //               the stale candidate and plan are still refused
 //   RETURN      a real walk back: the chunk is visible again, the destroyed anchor is now not found (not "not visible"),
@@ -95,16 +95,15 @@ async function walk(label, to) {
 
 const actorFacts = () => lua('rcon.print(helpers.table_to_json({x=a.position.x,y=a.position.y,surface=s.name,chests=inv.get_item_count("wooden-chest"),drills=inv.get_item_count("burner-mining-drill"),humans=#game.connected_players}))')
 
-// What no read may change: the engine chart and generated chunks around the test map, the NPC's knowledge record, the
-// reservations, the hints the reads could refresh, and the entities standing in the fixture chunk.
-const sideEffects = (units = []) => lua('local charted=0; local generated=0; '
+// What no read may change: the engine chart and generated chunks around the test map, the NPC's knowledge record and the
+// reservations (both read through the mod's own remotes, since RCON runs in the level's script context, not the mod's), and
+// the entities standing in the fixture chunk. Hint freshness is internal mod storage with no remote; the unit tests cover it.
+const sideEffects = () => lua('local charted=0; local generated=0; '
   + 'for cx=-8,8 do for cy=-8,8 do if a.force.is_chunk_charted(s,{cx,cy}) then charted=charted+1 end; if s.is_chunk_generated({cx,cy}) then generated=generated+1 end end end; '
-  + 'local k=storage.sgluna_map_knowledge; local explored=0; if k then for _ in pairs(k.explored) do explored=explored+1 end end; '
-  + 'local hints={}; local h=storage.sgluna_entity_reference_hints or {}; '
-  + `for _,u in pairs({${units.join(',')}}) do local x=h[u]; hints[tostring(u)]=x and x.observed_tick or -1 end; `
+  + 'local k=remote.call("autorio_map","context").map_knowledge; local c=k.visible_center; '
   + 'local standing=#s.find_entities_filtered{area={{-96,-32},{-64,0}}}; '
-  + 'rcon.print(helpers.table_to_json({charted=charted,generated=generated,explored=explored,revision=k and k.revision or 0,'
-  + 'window=k and {x=k.visible_chunk_x,y=k.visible_chunk_y} or nil,reservations=#(storage.sgluna_area_reservations or {}),hints=hints,standing=standing}))')
+  + 'rcon.print(helpers.table_to_json({charted=charted,generated=generated,explored=k.explored_chunks,revision=k.revision,'
+  + 'window=c and {surface_index=c.surface_index,x=c.x,y=c.y} or nil,reservations=#remote.call("autorio_reservations","status").reservations,standing=standing}))')
 
 const START = { x: -48.5, y: -16.5 }        // chunk (-2, -1): window x -4..0
 const ONE_OVER = { x: -20.5, y: -16.5 }     // chunk (-1, -1): window x -3..1; chunk x=-4 leaves the window
@@ -151,7 +150,7 @@ async function prepare() {
   evidence.fixture = fixture
   await waitTicks(120)
   const startFacts = await sideEffects()
-  assert.deepEqual(startFacts.window, { x: -2, y: -1 }, `the NPC window is around its own chunk: ${JSON.stringify(startFacts)}`)
+  assert.deepEqual(startFacts.window, { surface_index: 1, x: -2, y: -1 }, `the NPC window is around its own chunk: ${JSON.stringify(startFacts)}`)
 
   // ---- CROP -----------------------------------------------------------------------------------
   const crop0 = (await tool('getMapContext', FRAME)).crop
@@ -208,8 +207,7 @@ async function prepare() {
   assert.ok(crop2.revision > crop1.revision)
   assert.equal(letter(crop2, FIXTURE_CHUNK), 'F', 'the fixture chunk is explored but fogged')
   const here = await actorFacts()
-  const units = [fixture.anchor]
-  const before = await sideEffects(units)
+  const before = await sideEffects()
   const stale = {}
   stale.place_candidate = await attempt('stale-candidate', { name: 'place_candidate', args: { candidate_set_id: anchored.candidate_set_id, candidate_id: chestPick.id } })
   stale.place_drill = await attempt('stale-drill', { name: 'place_candidate', args: { candidate_set_id: drills.candidate_set_id, candidate_id: drillPick.id } })
@@ -234,11 +232,11 @@ async function prepare() {
   stale.sites_destroyed = await tool('findConstructionSites', { width: 2, height: 2, anchor_unit_number: fixture.anchor })
   assert.equal(stale.anchor_destroyed.code ?? stale.anchor_destroyed.error?.code, stale.anchor.code ?? stale.anchor.error?.code, 'a destroyed anchor in the fog reads exactly like a standing one')
   assert.equal(stale.sites_destroyed.error.code, 'ANCHOR_NOT_VISIBLE')
-  const after = await sideEffects(units)
+  const after = await sideEffects()
   const afterActor = await actorFacts()
   assert.ok(Math.hypot(afterActor.x - here.x, afterActor.y - here.y) < 0.5, 'no stale refusal walked the NPC')
   assert.equal(afterActor.chests, here.chests); assert.equal(afterActor.drills, here.drills)
-  assert.deepEqual({ ...after, standing: undefined }, { ...before, standing: undefined }, 'no read charted, generated, explored, reserved or refreshed a hint')
+  assert.deepEqual({ ...after, standing: undefined }, { ...before, standing: undefined }, 'no read charted, generated, explored or reserved anything')
   assert.equal(after.standing, before.standing - 1 - 16, 'the only change in the fixture chunk is the anchor and ore removed by the fixture')
   evidence.movement = { crop: crop2, before, after, stale }
   console.log(`PASS: MOVEMENT - out of view (revision ${crop2.revision}): stale candidate, drill and plan refused at the boundary; anchor, site search and local observation not visible; fog removal unnoticed; no side effects`)
@@ -286,7 +284,7 @@ async function verify() {
   await walk('walk-back', START)
   const back = (await tool('getMapContext', FRAME)).crop
   assert.equal(letter(back, FIXTURE_CHUNK), 'V'); assert.ok(back.revision > crop.revision)
-  const before = await sideEffects([saved.fixture.anchor])
+  const before = await sideEffects()
   const returned = {}
   returned.anchor = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: saved.fixture.anchor }, radius: 4, limit: 2 })
   assert.ok(refusedFor(returned.anchor, 'anchor_entity_not_found'), `seen again, the destroyed anchor is not found: ${JSON.stringify(returned.anchor)}`)
@@ -299,7 +297,7 @@ async function verify() {
   assert.equal((await actorFacts()).drills, drillsBefore.drills, 'no drill was placed')
   returned.foreign = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: saved.fixture.foreign }, radius: 4, limit: 2 })
   assert.ok(refusedFor(returned.foreign, 'anchor_entity_not_found'), JSON.stringify(returned.foreign))
-  const after = await sideEffects([saved.fixture.anchor])
+  const after = await sideEffects()
   assert.equal(after.charted, before.charted); assert.equal(after.generated, before.generated); assert.equal(after.explored, before.explored)
   assert.equal(after.revision, before.revision); assert.equal(after.reservations, before.reservations)
   // The positive control: a fresh plan where the NPC sees now validates and builds.
