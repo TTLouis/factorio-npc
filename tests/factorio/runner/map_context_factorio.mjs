@@ -224,10 +224,14 @@ async function prepare() {
   const stale = {}
   stale.place_candidate = await attempt('stale-candidate', { name: 'place_candidate', args: { candidate_set_id: anchored.candidate_set_id, candidate_id: chestPick.id } })
   stale.place_drill = await attempt('stale-drill', { name: 'place_candidate', args: { candidate_set_id: drills.candidate_set_id, candidate_id: drillPick.id } })
-  stale.execute_plan = await attempt('stale-plan', { name: 'execute_construction_plan', args: { validation_id: plan.validation_id, placement_count: 1 } })
-  for (const key of ['place_candidate', 'place_drill', 'execute_plan']) assert.equal(stale[key].refused_at_submission, true, `${key} is refused at the authoritative preflight: ${JSON.stringify(stale[key])}`)
+  // The plan is checked through the authoritative preflight, which does not consume it: executing a stale plan clears the
+  // single stored validation (fail closed), and the reload phase must still find it.
+  const planPreflight = () => lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation","execute_construction_plan",{validation_id=${plan.validation_id},placement_count=1})))`)
+  stale.plan_preflight = await planPreflight()
+  for (const key of ['place_candidate', 'place_drill']) assert.equal(stale[key].refused_at_submission, true, `${key} is refused at the authoritative preflight: ${JSON.stringify(stale[key])}`)
   for (const key of ['place_candidate', 'place_drill']) assert.ok(refusedFor(stale[key], 'placement_candidate_not_visible'), `${key}: ${JSON.stringify(stale[key])}`)
-  assert.ok(refusedFor(stale.execute_plan, 'NOT_VISIBLE'), `execute_plan: ${JSON.stringify(stale.execute_plan)}`)
+  assert.deepEqual({ ok: stale.plan_preflight.ok, code: stale.plan_preflight.code, evaluation_code: stale.plan_preflight.evaluation_code, refusal_class: stale.plan_preflight.refusal_class },
+    { ok: false, code: 'construction_plan_stale', evaluation_code: 'NOT_VISIBLE', refusal_class: 'world' }, `plan preflight: ${JSON.stringify(stale.plan_preflight)}`)
   stale.anchor = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: fixture.anchor }, radius: 4, limit: 2 })
   assert.ok(refusedFor(stale.anchor, 'anchor_not_visible'), JSON.stringify(stale.anchor))
   stale.sites = await tool('findConstructionSites', { width: 2, height: 2, anchor_unit_number: fixture.anchor })
@@ -283,14 +287,21 @@ async function verify() {
   assert.deepEqual(crop.visible_window, saved.crop2.visible_window)
   const reloaded = {}
   reloaded.place_candidate = await attempt('reload-stale-candidate', { name: 'place_candidate', args: { candidate_set_id: saved.anchored, candidate_id: saved.chestPick.id } })
-  reloaded.execute_plan = await attempt('reload-stale-plan', { name: 'execute_construction_plan', args: { validation_id: saved.plan, placement_count: 1 } })
   assert.ok(refusedFor(reloaded.place_candidate, 'placement_candidate_not_visible'), JSON.stringify(reloaded.place_candidate))
-  // A validation lives 3600 ticks (VALIDATION_MAX_AGE_TICKS). Inside that it must be refused as not visible; past it the
-  // expiry check comes first, so the visibility gate is proven at validation time instead.
-  const planAge = (await tick()) - saved.planTick
-  if (planAge <= 3600) assert.ok(refusedFor(reloaded.execute_plan, 'NOT_VISIBLE'), JSON.stringify(reloaded.execute_plan))
-  else assert.ok(refusedFor(reloaded.execute_plan, 'construction_plan_expired'), JSON.stringify(reloaded.execute_plan))
-  reloaded.plan_age_ticks = planAge
+  // The validation survived the save. A validation lives 3600 ticks (VALIDATION_MAX_AGE_TICKS): inside that it must be stale
+  // as not visible; past it the expiry check comes first, so the visibility gate is proven at validation time instead.
+  reloaded.plan_age_ticks = (await tick()) - saved.planTick
+  reloaded.plan_preflight = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation","execute_construction_plan",{validation_id=${saved.plan},placement_count=1})))`)
+  reloaded.execute_plan = await attempt('reload-stale-plan', { name: 'execute_construction_plan', args: { validation_id: saved.plan, placement_count: 1 } })
+  assert.equal(reloaded.execute_plan.refused_at_submission, true, JSON.stringify(reloaded.execute_plan))
+  if (reloaded.plan_preflight.code === 'construction_plan_stale') {
+    assert.equal(reloaded.plan_preflight.evaluation_code, 'NOT_VISIBLE', JSON.stringify(reloaded.plan_preflight))
+    assert.ok(refusedFor(reloaded.execute_plan, 'became stale: NOT_VISIBLE'), JSON.stringify(reloaded.execute_plan))
+  } else {
+    assert.equal(reloaded.plan_preflight.code, 'construction_plan_expired', JSON.stringify(reloaded.plan_preflight))
+    assert.ok(reloaded.plan_age_ticks > 3600, JSON.stringify(reloaded))
+    assert.ok(refusedFor(reloaded.execute_plan, 'validated construction plan expired'), JSON.stringify(reloaded.execute_plan))
+  }
   reloaded.revalidate = await tool('validateConstructionPlan', { plan_id: 'm3-reload-fogged', placements: [{ entity_name: 'wooden-chest', x: saved.planAt.x, y: saved.planAt.y }] })
   assert.equal(reloaded.revalidate.ok, false); assert.ok(refusedFor(reloaded.revalidate, 'NOT_VISIBLE'), JSON.stringify(reloaded.revalidate))
   evidence.reload = { crop, reloaded }
@@ -306,16 +317,17 @@ async function verify() {
   assert.ok(refusedFor(returned.anchor, 'anchor_entity_not_found'), `seen again, the destroyed anchor is not found: ${JSON.stringify(returned.anchor)}`)
   returned.sites = await tool('findConstructionSites', { width: 2, height: 2, anchor_unit_number: saved.fixture.anchor })
   assert.equal(returned.sites.error.code, 'INVALID_ANCHOR')
-  const drillsBefore = await actorFacts()
-  returned.place_drill = await attempt('return-stale-drill', { name: 'place_candidate', args: { candidate_set_id: saved.drills, candidate_id: saved.drillPick.id } })
-  assert.ok(!refusedFor(returned.place_drill, 'not_visible'), 'visibility is no longer the reason')
-  assert.ok(returned.place_drill.refused_at_submission || returned.place_drill.result?.completed !== true, `a drill candidate whose ore was mined away does not place: ${JSON.stringify(returned.place_drill)}`)
-  assert.equal((await actorFacts()).drills, drillsBefore.drills, 'no drill was placed')
   returned.foreign = await tool('getPlacementCandidates', { entity_name: 'wooden-chest', anchor: { unit_number: saved.fixture.foreign }, radius: 4, limit: 2 })
   assert.ok(refusedFor(returned.foreign, 'anchor_entity_not_found'), JSON.stringify(returned.foreign))
   const after = await sideEffects()
   assert.equal(after.charted, before.charted); assert.equal(after.generated, before.generated); assert.equal(after.explored, before.explored)
   assert.equal(after.revision, before.revision); assert.equal(after.reservations, before.reservations)
+  // An operation, not a read: the stale drill candidate may walk the NPC before the live world refuses it.
+  const drillsBefore = await actorFacts()
+  returned.place_drill = await attempt('return-stale-drill', { name: 'place_candidate', args: { candidate_set_id: saved.drills, candidate_id: saved.drillPick.id } })
+  assert.ok(!refusedFor(returned.place_drill, 'not_visible'), 'visibility is no longer the reason')
+  assert.ok(returned.place_drill.refused_at_submission || returned.place_drill.result?.completed !== true, `a drill candidate whose ore was mined away does not place: ${JSON.stringify(returned.place_drill)}`)
+  assert.equal((await actorFacts()).drills, drillsBefore.drills, 'no drill was placed')
   // The positive control: a fresh plan where the NPC sees now validates and builds.
   const fresh = await tool('validateConstructionPlan', { plan_id: 'm3-fresh-plan', placements: [{ entity_name: 'wooden-chest', x: saved.planAt.x, y: saved.planAt.y }] })
   assert.equal(fresh.ok, true, JSON.stringify(fresh).slice(0, 2000))
