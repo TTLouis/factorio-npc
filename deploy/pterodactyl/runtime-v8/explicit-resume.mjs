@@ -121,8 +121,8 @@ export async function settleExplicitResumeFailure(agent, owner, error, readActor
   if (!eligible()) return
   let actor
   try { actor = await readActor() }
-  catch { actor = agent.epoch } // loss of native reads cannot strand a locally owned, idle activation
-  if (!eligible() || actor.actor_id !== authority.actor.actor_id || actor.epoch !== authority.actor.epoch
+  catch { actor = owner.nativeActor } // loss of native reads cannot strand a locally owned, idle activation
+  if (!eligible() || actor?.actor_id !== authority.actor.actor_id || actor.epoch !== authority.actor.epoch
     || actor.session !== authority.actor.session) return
   agent.memory.pausePlan(key, 'explicit_resume_setup_failed', { pause_class: 'guard' })
   await agent.persistState({ strict: true })
