@@ -182,7 +182,15 @@ async function hiddenReachProof() {
   assert.equal(removed.count, 2)
   await waitTicks(10)
   const destroyed = await reachReads(fixture)
-  assert.deepEqual(destroyed, standing, 'hidden native neighbours standing and destroyed give identical geometry and topology')
+  // Own network-derived state remains readable by the reviewed M3 contract: disconnecting a hidden pipe changes native
+  // fluidbox capacity (200 -> 100). Preserve both complete replies below; compare every linked-neighbour field here.
+  const neighbours = reads => ({
+    pipe_connections: reads.pipe.fluid_storages.map(storage => storage.pipe_connections),
+    pipe_topology: reads.pipe_topology,
+    inserter_route: reads.inserter.item_io,
+    inserter_topology: reads.inserter_topology,
+  })
+  assert.deepEqual(neighbours(destroyed), neighbours(standing), 'hidden native neighbours standing and destroyed give identical link facts and topology')
   const after = await sideEffects()
   assert.deepEqual(after, before, 'these reads and fixture changes outside the historical fixture chunk do not chart, explore or reserve')
   await lua(`assert(s.create_entity{name="npc-test-long-underground-pipe",position={46.5,-40.5},direction=${fixture.target_direction},force=a.force}); assert(s.create_entity{name="wooden-chest",position={46.5,-50.5},force=a.force}); rcon.print("{}")`)
