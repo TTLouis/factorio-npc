@@ -11,7 +11,7 @@ const pack = { schema: 1, profile: 'leveled', default_enabled: false,
   description: 'Optional knowledge and skill methods. No recipes or ratios. Current tool availability and live facts remain mandatory.', skills: entries }
 const json = `${JSON.stringify(pack, null, 2)}\n`
 if (process.argv.includes('--check')) {
-  if (readFileSync(output, 'utf8') !== json) throw new Error('Leveled library export is stale; run node scripts/export-leveled-library.mjs')
+  if (readFileSync(output, 'utf8').replaceAll('\r\n', '\n') !== json) throw new Error('Leveled library export is stale; run node scripts/export-leveled-library.mjs')
 }
 else writeFileSync(output, json)
 console.log(`${process.argv.includes('--check') ? 'Checked' : 'Exported'} ${entries.length} entries: ${output.pathname}`)
