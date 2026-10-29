@@ -142,6 +142,7 @@ test('bounded append-only store is idempotent, capacity refuses without eviction
   assert.throws(() => store.record({ ...original, name: 'conflicting' }, WORLD), error => error.code === 'factory_placement_identity_conflict')
   const restored = new FactoryPlacementStore(); restored.restore(store.snapshot(), WORLD)
   assert.throws(() => restored.read(original.receipt_id), error => error.code === 'factory_placement_store_fault')
+  assert.deepEqual(restored.snapshot().factory_placement_receipts, store.snapshot().factory_placement_receipts)
 })
 
 test('malformed, wrong-world, duplicate and rollback restores fail closed without deleting retained evidence', () => {

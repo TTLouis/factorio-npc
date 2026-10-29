@@ -93,14 +93,21 @@ export class FactoryPlacementStore {
   restore(snapshot, worldId) {
     if (this.#fault) return
     try {
-      if (Object.hasOwn(snapshot, 'factory_placement_fault')) fail('factory_placement_persisted_fault')
+      const persistedFault = Object.hasOwn(snapshot, 'factory_placement_fault')
       const raw = snapshot.factory_placement_receipts
-      if (raw === undefined) { if (this.#rows.length) fail('factory_placement_history_rewritten'); return }
+      if (raw === undefined) {
+        if (this.#rows.length) fail('factory_placement_history_rewritten')
+        if (persistedFault) fail('factory_placement_persisted_fault')
+        return
+      }
       if (!Array.isArray(raw) || raw.length > FACTORY_PLACEMENT_LIMIT) fail('factory_placement_schema_invalid')
       const restored = new FactoryPlacementStore()
       for (const row of raw) if (restored.record(row, worldId).status !== 'recorded') fail('factory_placement_duplicate')
       for (const old of this.#rows) if (JSON.stringify(restored.read(old.receipt_id)) !== JSON.stringify(old)) fail('factory_placement_history_rewritten')
       this.#rows = restored.#rows
+      // A sticky fault disables lookup, but valid retained originals still
+      // survive another canonical save/restart for causal evidence.
+      if (persistedFault) this.#fault = 'factory_placement_persisted_fault'
     }
     catch (error) { this.#fault = error.code ?? 'factory_placement_restore_failed' }
   }
