@@ -12,6 +12,9 @@ import { toolCommand, parseOperation, renderOperation, luaString } from '../pter
 import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
 import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
 import { createFactoryCellObserver } from '../pterodactyl/runtime-v8/factory-cell-observation.mjs'
+import { NpcAgentLoop } from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
+import { captureFactoryPlacementContext } from '../pterodactyl/runtime-v8/factory-placement-provenance.mjs'
+import { batchWatermark, buildPendingOperation } from '../pterodactyl/runtime-v8/operation-reconciliation.mjs'
 
 let forbiddenFetchCalls = 0
 globalThis.fetch = async () => { forbiddenFetchCalls++; throw new Error('Inference forbidden in factory-cell native proof') }
@@ -29,26 +32,60 @@ const lua = async body => {
 }
 const tool = async (name, args) => JSON.parse(await rcon.command(toolCommand(name, args)))
 const native = (method, payload) => lua(`rcon.print(helpers.table_to_json(remote.call("sgluna_factory",${luaString(method)}${payload === undefined ? '' : `,${typeof payload === 'string' ? luaString(payload) : `helpers.json_to_table(${luaString(JSON.stringify(payload))})`}`})))`)
-async function operation(name, args) {
+async function operation(name, args, tracking) {
   const actor = await deploymentStatus(rcon, { requireAllowed: true })
-  const admission = await executeAuthorizedBatch(rcon, actor.epoch, [renderOperation(parseOperation({ name, args }))])
+  const parsed = parseOperation({ name, args })
+  let pending, captured, preflight
+  if (tracking) {
+    const state = tracking.memory.planningState(KEY)
+    const plan = state.plans.find(row => ['COMMITTED', 'EXECUTING'].includes(row.status))
+    assert.ok(plan)
+    const step = plan.steps[plan.active_step_index]
+    const ordinal = (state.operation_ledger?.sequence ?? 0) + 1
+    const requestId = `native-placement-${ordinal}`
+    preflight = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation",${luaString(name)},helpers.json_to_table(${luaString(JSON.stringify(args))}))))`)
+    assert.equal(preflight.ok, true, JSON.stringify(preflight))
+    pending = tracking.memory.recordPendingOperation(KEY, buildPendingOperation({ requestId,
+      operationKey: `${requestId}/batch`, attemptId: `${requestId}/attempt`, ordinal, protocolVersion: 2,
+      operations: [parsed], preflight: [preflight], goalId: state.goal.goal_id, planId: plan.plan_id, stepId: step.step_id,
+      actor: { actor_id: actor.actor_id, epoch: actor.epoch }, surfaceIndex: tracking.setup.surface_index,
+      baseline: batchWatermark(await tool('getTaskStatus', {})), now: Date.now() }), { requestId })
+    assert.ok(pending)
+    captured = captureFactoryPlacementContext(tracking.memory, KEY, actor)
+    assert.equal(captured?.candidates.length, 1)
+  }
+  const admission = await executeAuthorizedBatch(rcon, actor.epoch, [renderOperation(parsed)], undefined, pending)
   const deadline = Date.now() + 60000
   for (;;) {
     const status = await tool('getTaskStatus', {})
     if (status.task_state === 'idle' && status.queue_length === 0 && !status.active_batch) {
       const receipt = status.basic_operation?.last_result
       assert.equal(receipt?.completed, true, JSON.stringify(status))
-      evidence.operations.push({ name, args, admission, receipt })
+      let retained
+      if (tracking) {
+        assert.equal(receipt.placed_world_id, tracking.memory.factoryWorldBinding().world_id)
+        assert.equal(receipt.placed_force_index, tracking.setup.force_index)
+        assert.equal(receipt.placed_surface_index, tracking.setup.surface_index)
+        assert.equal(receipt.actor_id, actor.actor_id)
+        assert.equal(receipt.actor_kind, 'standalone_character')
+        assert.ok(receipt.placed_last_user == null)
+        for (const field of ['batch_id', 'batch_generation', 'batch_ref']) assert.equal(receipt[`placed_${field}`], status.last_completed_batch[field])
+        retained = NpcAgentLoop.prototype.retainFactoryPlacementReceipt.call({ memory: tracking.memory }, status, captured)
+        assert.equal(retained.status, 'recorded', JSON.stringify({ retained, status, captured }))
+        assert.deepEqual(tracking.memory.factoryPlacementReceipt(retained.receipt.receipt_id), retained.receipt)
+        assert.equal(tracking.memory.clearPendingOperation(KEY, { operationKey: pending.operation_key }), true)
+      }
+      evidence.operations.push({ name, args, admission, receipt, ...(tracking ? { preflight, pending, captured, retained, terminal_status: status } : {}) })
       return receipt
     }
     assert.ok(Date.now() < deadline, `${name} timed out`); await delay(100)
   }
 }
-async function place(name, request) {
+async function place(name, request, tracking) {
   const candidates = await tool('getPlacementCandidates', { entity_name: name, limit: 4, ...request })
   assert.ok(candidates.candidates?.length, JSON.stringify(candidates))
   const candidate = candidates.candidates[0]
-  const receipt = await operation('place_candidate', { candidate_set_id: candidates.candidate_set_id, candidate_id: candidate.id })
+  const receipt = await operation('place_candidate', { candidate_set_id: candidates.candidate_set_id, candidate_id: candidate.id }, tracking)
   assert.ok(receipt.placed_unit_number)
   return { candidate, receipt }
 }
@@ -62,24 +99,30 @@ function task(memory, resource) {
   }, { validatedPlannerAdmission: true })
   memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
 }
-function host(memory, setup, actor, receipts = new Map()) {
+function host(memory, setup, actor) {
   const context = { surface_index: setup.surface_index, force_index: setup.force_index, actor_id: actor.actor_id, actor_epoch: actor.epoch,
     session_id: actor.session ?? 'factory-cell-native-20261029', request_id: `native-${phase}`, native_idle: true, pending: false, uncertain: false }
   const observer = createFactoryCellObserver({ memory, key: KEY,
     readContext: () => ({ ...context, world_id: memory.factoryWorldBinding().world_id }),
-    callNative: native, readPlacementReceipt: id => structuredClone(receipts.get(id)),
+    callNative: native,
     trace: (name, payload) => evidence.events.push({ name, ...payload }) })
-  return { observer, context, receipts }
+  return { observer, context }
 }
-function register(memory, observer, receipts, members, actualReceipts) {
+function register(memory, observer, members, actualReceipts) {
   const scope = observer.runtime.scope()
   const originalIntent = JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans })
   const registered = members.map((locator, index) => {
     const receipt = actualReceipts[index]
     assert.equal(receipt.placed_unit_number, locator.unit_number)
+    assert.equal(receipt.entity_name, locator.name)
+    assert.deepEqual(receipt.placed_position, locator.position)
+    assert.equal(receipt.placed_surface_index, locator.surface_index)
+    assert.equal(receipt.placed_force_index, locator.force_index)
+    assert.equal(receipt.placed_world_id, scope.world_id)
     memory.recordNpcPlacement(KEY, { unit_number: locator.unit_number, entity_name: locator.name, actor_id: scope.actor_id, actor_epoch: scope.actor_epoch })
-    const receiptId = `native-factory/${locator.unit_number}/${receipt.tick ?? 'completed'}`
-    receipts.set(receiptId, { ...scope, ...locator, receipt_id: receiptId })
+    const receiptId = `${receipt.placed_world_id}/${receipt.placed_batch_ref}/${receipt.operation_id}`
+    const retained = memory.factoryPlacementReceipt(receiptId)
+    assert.equal(retained.unit_number, locator.unit_number)
     return observer.runtime.recordPlacement({ ...locator, provenance: { source: 'npc_placement_receipt', receipt_id: receiptId } }, scope)
   })
   assert.equal(JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans }), originalIntent, 'recording actual placement history cannot change goal or committed plans')
@@ -88,7 +131,7 @@ function register(memory, observer, receipts, members, actualReceipts) {
     assignment: { products: ['copper-plate'], purpose: 'Retain the copper supplier', method: 'Native drill direct feed into furnace' },
     members: registered, ports: [{ port_id: 'fuel', direction: 'input', kind: 'fuel', resource: 'coal' },
       { port_id: 'output', direction: 'output', kind: 'item', resource: 'copper-plate' }],
-    origin: { ...registered[0].provenance, source: 'runtime_registration' } }, observer.runtime.scope())
+    origin: observer.runtime.origin() }, observer.runtime.scope())
   assert.equal(JSON.stringify(memory.planningState(KEY)), before)
   assert.equal(cell.state, 'unverified')
   return cell
@@ -139,8 +182,21 @@ try {
       local inv=a.get_main_inventory();inv.clear();for _,v in pairs({{"burner-mining-drill",1},{"stone-furnace",1},{"coal",4}}) do assert(inv.insert{name=v[1],count=v[2]}==v[2]) end;
       rcon.print(helpers.table_to_json({ox=ox,oy=oy,humans=#game.connected_players,speed=game.speed,actor_id=a.unit_number,surface_index=s.index,force_index=a.force.index,fixtures=fixtures}))`)
     assert.equal(setup.humans, 0); assert.equal(setup.speed, 1); evidence.setup = setup
-    const drill = await place('burner-mining-drill', { center: { x: setup.ox + 5, y: setup.oy }, radius: 4, target_resource: 'copper-ore' })
-    const furnace = await place('stone-furnace', { covers_position: drill.candidate.item_output_position })
+    const memory = new CanonicalTaskBoardMemory(); task(memory, 'copper-ore')
+    const originalIntent = JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans })
+    const w = host(memory, setup, actor)
+    evidence.world = await w.observer.initializeWorld()
+    evidence.world_before_placement = await native('world_identity')
+    assert.equal(evidence.world_before_placement.world_id, memory.factoryWorldBinding().world_id)
+    const tracking = { memory, setup }
+    const drill = await place('burner-mining-drill', { center: { x: setup.ox + 5, y: setup.oy }, radius: 4, target_resource: 'copper-ore' }, tracking)
+    const furnace = await place('stone-furnace', { covers_position: drill.candidate.item_output_position }, tracking)
+    assert.equal(JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans }), originalIntent,
+      'automatic placement provenance capture cannot rewrite goal or committed plans')
+    evidence.retained_placements = memory.snapshot().factory_placement_receipts
+    assert.equal(evidence.retained_placements.length, 2)
+    // Neither actual placements nor automatic provenance retention enroll cells.
+    assert.deepEqual(memory.getFactoryRegistry().cells, [])
     const machines = [drill, furnace]
     for (const machine of machines) await operation('supply_entity', { unit_number: machine.receipt.placed_unit_number, items: [{ item_name: 'coal', count: 2 }] })
     const members = await lua(`local s=game.surfaces[${setup.surface_index}];local rows={};for _,id in pairs({${machines.map(row => row.receipt.placed_unit_number).join(',')}}) do
@@ -154,10 +210,7 @@ try {
       if (production.plates > 0 && production.drop_target === members[1].unit_number) { evidence.production = production; break }
       assert.ok(Date.now() < productionDeadline, `no native copper output: ${JSON.stringify(production)}`); await delay(150)
     }
-    const memory = new CanonicalTaskBoardMemory(); task(memory, 'copper-ore')
-    const w = host(memory, setup, actor)
-    evidence.world = await w.observer.initializeWorld()
-    const cell = register(memory, w.observer, w.receipts, members, machines.map(row => row.receipt))
+    const cell = register(memory, w.observer, members, machines.map(row => row.receipt))
     evidence.compatible = await compare(memory, w.observer, cell, members, 'compatible')
     const worldId = memory.factoryWorldBinding().world_id
     const nativeRequest = { schema_version: 1, request_id: 'native-readonly-proof', world_id: worldId, actor_id: actor.actor_id,
@@ -177,12 +230,13 @@ try {
     evidence.rebind = await native('bind_world_id', randomUUID())
     assert.equal(evidence.rebind.ok, false); assert.equal(evidence.rebind.world_id, worldId)
     const second = new CanonicalTaskBoardMemory({ expectedFactoryWorldId: worldId }); second.restore(memory.snapshot())
+    for (const receipt of evidence.retained_placements) assert.deepEqual(second.factoryPlacementReceipt(receipt.receipt_id), receipt)
     second.clearTaskContext(KEY); task(second, 'iron-ore')
     const iron = host(second, setup, actor); await iron.observer.initializeWorld()
     evidence.iron_mismatch = await compare(second, iron.observer, cell, members, 'mismatch')
     assert.ok(JSON.stringify(evidence.iron_mismatch).includes('mining_source_resource_mismatch'))
     assert.deepEqual(memory.getFactoryRegistry().cells[0].assignment.products, ['copper-plate'])
-    await fs.writeFile(statePath, JSON.stringify({ worldId, setup, members, cell, snapshot: memory.snapshot() }, null, 2))
+    await fs.writeFile(statePath, JSON.stringify({ worldId, setup, members, cell, retained_placements: evidence.retained_placements, snapshot: memory.snapshot() }, null, 2))
     const save = path.resolve(arg('save')); const previous = await fs.stat(save)
     assert.equal(path.extname(save), '.zip', 'exact restart save must be a ZIP')
     const saveName = path.basename(save, '.zip')
@@ -206,6 +260,13 @@ try {
     evidence.rebind = await native('bind_world_id', randomUUID())
     assert.equal(evidence.rebind.ok, false); assert.equal(evidence.rebind.world_id, saved.worldId)
     const memory = new CanonicalTaskBoardMemory({ expectedFactoryWorldId: saved.worldId }); memory.restore(saved.snapshot)
+    evidence.retained_placements = saved.retained_placements.map(receipt => {
+      const restored = memory.factoryPlacementReceipt(receipt.receipt_id)
+      assert.deepEqual(restored, receipt)
+      assert.equal(restored.world_id, evidence.world.world_id)
+      return restored
+    })
+    assert.equal(evidence.retained_placements.length, 2)
     const w = host(memory, saved.setup, actor); await w.observer.initializeWorld()
     evidence.compatible = await compare(memory, w.observer, saved.cell, saved.members, 'compatible')
     assert.equal(memory.getFactoryRegistry().cells[0].state, 'unverified')

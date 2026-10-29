@@ -112,8 +112,44 @@ describe('precise placement runtime', () => {
       placed_entity_type: 'container',
       placed_position: { x: 4.5, y: -1.5 },
       placed_surface_index: 1,
+      placed_force_index: 1,
+      placed_batch_id: 1,
+      placed_batch_generation: 1,
+      placed_batch_ref: 'batch-g1-1',
       placed_direction: 6,
     })
+    expect(f.controller.status().last_result?.placed_world_id).toBeUndefined()
+    expect((storage as any).sgluna_factory_world_id).toBeUndefined()
+  })
+
+  it('retains the already bound native world and exact placed force and batch identity', () => {
+    const world = 'c451a0cc-bf88-4a60-a8ca-92cc1705033f'
+    ;(storage as any).sgluna_factory_world_id = world
+    const f = fixture()
+    // Check receipt provenance comes from the created entity, not actor defaults.
+    const create = f.surface.create_entity.getMockImplementation()!
+    f.surface.create_entity.mockImplementation((args: any) => ({ ...create(args), force: { index: 7 } }))
+    expect(f.controller.submit_placement('steel-chest', 4.5, -1.5, 6)).toBe(true)
+    const batch = f.manager.get_active_batch_identity()
+    expect(f.runtime.state_placing(f.actor)?.[0]).toBe(true)
+    expect(f.controller.status().last_result).toMatchObject({
+      entity_name: 'steel-chest', placed_force_index: 7, placed_world_id: world,
+      placed_batch_id: batch?.batch_id, placed_batch_generation: batch?.batch_generation, placed_batch_ref: batch?.batch_ref,
+    })
+    expect(f.manager.get_active_batch_identity()).toBeUndefined()
+    expect(f.manager.get_status_snapshot().last_completed_batch).toMatchObject(batch!)
+    expect((storage as any).sgluna_factory_world_id).toBe(world)
+    expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([undefined, '', 'not-a-uuid'])('does not bind or repair unavailable world metadata (%s) on placement', world => {
+    if (world !== undefined) (storage as any).sgluna_factory_world_id = world
+    const f = fixture()
+    expect(f.controller.submit_placement('steel-chest', 4.5, -1.5, 6)).toBe(true)
+    expect(f.runtime.state_placing(f.actor)?.[0]).toBe(true)
+    expect(f.controller.status().last_result?.placed_world_id).toBeUndefined()
+    expect((storage as any).sgluna_factory_world_id).toBe(world)
+    expect(f.surface.create_entity).toHaveBeenCalledTimes(1)
   })
 
   it('snaps an auto-picked position onto the tile grid when no coordinate is given', () => {

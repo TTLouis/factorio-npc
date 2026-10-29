@@ -2,6 +2,7 @@ import { createFactoryRegistry, restoreFactoryRegistry, registerFactoryCell, reg
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { pendingOperations } from './operation-ledger.mjs'
 import { restoreFactoryObservationSummaries } from './factory-cell-observation.mjs'
+import { FactoryPlacementStore } from './factory-placement-provenance.mjs'
 
 const clone = value => structuredClone(value)
 const fail = (code, message = code) => { throw new FactoryRegistryError(code, message) }
@@ -20,6 +21,7 @@ export class FactoryRegistryStore {
   #fault
   #generation = 0
   #observations = []
+  #placementReceipts = new FactoryPlacementStore()
 
   constructor(expectedWorldId) {
     if (expectedWorldId !== undefined) {
@@ -48,9 +50,17 @@ export class FactoryRegistryStore {
 
   worldBinding() { return { world_id: this.#worldId, generation: this.#generation } }
   observations() { return clone(this.#observations) }
+  placementReceipt(id) { return this.#placementReceipts.read(id) }
+  invalidatePlacementPersistence() { this.#placementReceipts.invalidatePersistence() }
+  recordPlacementReceipt(receipt, generation) {
+    if (generation !== this.#generation) fail('factory_runtime_stale')
+    this.read()
+    return this.#placementReceipts.record(receipt, this.#worldId)
+  }
 
   snapshot() {
     return {
+      ...this.#placementReceipts.snapshot(),
       ...(this.#worldId !== undefined ? { factory_registry_world_id: this.#worldId } : {}),
       ...(this.#registry ? { factory_registry: clone(this.#registry) } : {}),
       ...(this.#fault ? { factory_registry_fault: clone(this.#fault) } : {}),
@@ -61,6 +71,9 @@ export class FactoryRegistryStore {
   restore(snapshot) {
     // Every restore invalidates ephemeral registration capabilities/receipts.
     this.#generation++
+    // Restore evidence even when the assignment store is faulted; its durable
+    // fault remains independent and cannot remove existing assignment guards.
+    this.#placementReceipts.restore(snapshot ?? {}, this.#worldId ?? snapshot?.factory_registry_world_id)
     if (this.#fault) return
     const has = key => Object.hasOwn(snapshot ?? {}, key)
     if (!has('factory_registry') && !has('factory_registry_fault') && !has('factory_registry_world_id') && !has('factory_cell_observations')) return

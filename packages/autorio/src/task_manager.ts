@@ -676,6 +676,18 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     return state.player_state.task_state === TaskStates.IDLE && state.task_queue.length === 0 && state.active_batch_id === undefined
   }
 
+  // Receipt provenance must read the admitted identity without creating an
+  // actor, initializing storage or deriving replacement counters for old saves.
+  function get_active_batch_identity(): TaskBatchIdentity | undefined {
+    const batch = storage.sgluna_task_active_batch
+    if (!batch || !valid_persisted_counter(batch.batch_id) || batch.batch_id < 1
+      || !valid_persisted_counter(batch.batch_generation) || batch.batch_generation < 1
+      || batch.batch_id !== execution().active_batch_id
+      || batch.batch_generation !== storage.sgluna_task_batch_generation
+      || batch.batch_ref !== `batch-g${batch.batch_generation}-${batch.batch_id}`) return undefined
+    return { batch_id: batch.batch_id, batch_generation: batch.batch_generation, batch_ref: batch.batch_ref }
+  }
+
   function get_status_snapshot() {
     return {
       task_state: execution().player_state.task_state,
@@ -760,6 +772,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     interrupt_current_with,
     is_task_queue_empty,
     is_idle_for_observation,
+    get_active_batch_identity,
     get_status_snapshot,
     reset_task_state,
     cancel_task,
