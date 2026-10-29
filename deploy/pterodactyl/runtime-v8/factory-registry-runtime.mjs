@@ -1,6 +1,7 @@
 import { createFactoryRegistry, restoreFactoryRegistry, registerFactoryCell, registerFactoryDependency, findFactoryCellByMember, FactoryRegistryError } from './factory-registry.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { pendingOperations } from './operation-ledger.mjs'
+import { restoreFactoryObservationSummaries } from './factory-cell-observation.mjs'
 
 const clone = value => structuredClone(value)
 const fail = (code, message = code) => { throw new FactoryRegistryError(code, message) }
@@ -18,6 +19,7 @@ export class FactoryRegistryStore {
   #worldId
   #fault
   #generation = 0
+  #observations = []
 
   constructor(expectedWorldId) {
     if (expectedWorldId !== undefined) {
@@ -44,11 +46,15 @@ export class FactoryRegistryStore {
 
   status() { return { status: this.#fault ? 'fault' : this.#registry ? 'initialized' : 'uninitialized' } }
 
+  worldBinding() { return { world_id: this.#worldId, generation: this.#generation } }
+  observations() { return clone(this.#observations) }
+
   snapshot() {
     return {
       ...(this.#worldId !== undefined ? { factory_registry_world_id: this.#worldId } : {}),
       ...(this.#registry ? { factory_registry: clone(this.#registry) } : {}),
       ...(this.#fault ? { factory_registry_fault: clone(this.#fault) } : {}),
+      ...(this.#observations.length ? { factory_cell_observations: clone(this.#observations) } : {}),
     }
   }
 
@@ -57,7 +63,7 @@ export class FactoryRegistryStore {
     this.#generation++
     if (this.#fault) return
     const has = key => Object.hasOwn(snapshot ?? {}, key)
-    if (!has('factory_registry') && !has('factory_registry_fault') && !has('factory_registry_world_id')) return
+    if (!has('factory_registry') && !has('factory_registry_fault') && !has('factory_registry_world_id') && !has('factory_cell_observations')) return
     try {
       if (has('factory_registry_fault')) fail('persisted_factory_registry_fault')
       const storedWorld = snapshot.factory_registry_world_id
@@ -66,7 +72,10 @@ export class FactoryRegistryStore {
         if (this.#worldId !== undefined && this.#worldId !== storedWorld) fail('factory_world_mismatch')
         this.#worldId = storedWorld
       }
-      if (!has('factory_registry')) return
+      if (!has('factory_registry')) {
+        if (has('factory_cell_observations')) fail('factory_observation_registry_missing')
+        return
+      }
       // Never infer the world identity from the payload being restored.
       if (this.#worldId === undefined) fail('factory_world_unbound')
       const restored = restoreFactoryRegistry(snapshot.factory_registry, { worldId: this.#worldId })
@@ -86,6 +95,7 @@ export class FactoryRegistryStore {
         }
       }
       this.#registry = restored
+      this.#observations = restoreFactoryObservationSummaries(snapshot.factory_cell_observations, restored)
     }
     catch (error) {
       // A bounded durable fault is sufficient to preserve rejection. Never save
@@ -138,6 +148,31 @@ export class FactoryRegistryStore {
     if (typeof readContext !== 'function' || typeof readPlacementReceipt !== 'function' || !token(key)) fail('factory_runtime_context_required')
     const generation = this.#generation
     const placements = new Map()
+    // Read-only inspection can inform a planner before a plan is committed.
+    // This scope never grants enrollment, dependency or historical-cache writes.
+    const readScope = () => {
+      this.read()
+      if (generation !== this.#generation) fail('factory_runtime_stale')
+      const raw = readContext()
+      const planning = memory.planningState(key)
+      const plan = getActivePlan(planning)
+      const step = plan?.steps?.[plan.active_step_index]
+      if (!raw || raw.world_id !== this.#worldId || !positive(raw.surface_index) || !positive(raw.force_index)
+        || !positive(raw.actor_id) || !Number.isSafeInteger(raw.actor_epoch) || raw.actor_epoch < 0 || !token(raw.request_id)) fail('factory_runtime_scope_invalid')
+      if (raw.native_idle !== true || raw.pending !== false || raw.uncertain !== false || pendingOperations(planning).length > 0) fail('factory_runtime_not_idle')
+      return { world_id: this.#worldId, surface_index: raw.surface_index, force_index: raw.force_index,
+        actor_id: raw.actor_id, actor_epoch: raw.actor_epoch, request_id: raw.request_id,
+        goal_id: planning?.goal?.goal_id, goal_status: planning?.goal?.status,
+        plan_id: plan?.plan_id, plan_version: plan?.plan_version, plan_status: plan?.status,
+        step_id: step?.step_id, semantic_step_id: step?.semantic_step_id ?? step?.step_id,
+        paused: planning?.run?.paused === true, expected_revision: this.#registry.revision }
+    }
+    const checkedRead = scope => {
+      const current = readScope()
+      if (scope?.expected_revision !== current.expected_revision) fail('factory_registry_revision_stale')
+      if (!scope || Object.keys(current).some(field => current[field] !== scope[field])) fail('factory_runtime_scope_stale')
+      return current
+    }
     const context = () => {
       this.read()
       if (generation !== this.#generation) fail('factory_runtime_stale')
@@ -179,6 +214,17 @@ export class FactoryRegistryStore {
     }
     return Object.freeze({
       scope: () => clone(context()),
+      assertScope: scope => clone(checked(scope)),
+      readScope: () => clone(readScope()),
+      assertReadScope: scope => clone(checkedRead(scope)),
+      recordObservation: (observation, scope) => run('record_observation', scope, current => {
+        if (observation.world_id !== current.world_id || observation.registry_revision !== current.expected_revision
+          || observation.request_id !== current.request_id || observation.actor_id !== current.actor_id
+          || observation.actor_epoch !== current.actor_epoch) fail('factory_observation_scope_mismatch')
+        const rows = this.#observations.filter(row => row.cell_id !== observation.cell_id)
+        this.#observations = restoreFactoryObservationSummaries([...rows, observation], this.#registry)
+        return clone(this.#observations.find(row => row.cell_id === observation.cell_id))
+      }),
       origin: () => clone(origin(context())),
       recordPlacement: (member, scope) => run('record_placement', scope, current => {
         const recorded = memory.authorizationState(key)?.world?.npc_placements?.find(row => row.unit_number === member?.unit_number)

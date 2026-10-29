@@ -816,7 +816,9 @@ export class NpcAgentLoop {
     let duplicateThisRound = false
 
     for (const entry of prepared) {
-      const cached = this.toolCache.get(entry.signature)
+      const hostObservation = ['listFactoryCells', 'inspectFactoryCell'].includes(entry.tool.function.name)
+      if (hostObservation && (entry.command !== null || typeof entry._sglunaExecuteObservation !== 'function')) throw new AgentLoopError('Factory observation host executor is missing')
+      const cached = hostObservation ? undefined : this.toolCache.get(entry.signature)
       let output
 
       if (cached !== undefined) {
@@ -840,7 +842,13 @@ export class NpcAgentLoop {
         }
       }
       else {
-        if (entry.tool.function.name === THROUGHPUT_MEASUREMENT_TOOL) {
+        if (hostObservation) {
+          await this.assertCurrent()
+          if (typeof entry._sglunaReadFence === 'function') await entry._sglunaReadFence()
+          output = await entry._sglunaExecuteObservation()
+          await this.assertCurrent()
+        }
+        else if (entry.tool.function.name === THROUGHPUT_MEASUREMENT_TOOL) {
           output = await this.runThroughputMeasurement(entry)
         }
         else if (typeof entry._sglunaPrereadOutput === 'string') {
@@ -851,6 +859,7 @@ export class NpcAgentLoop {
         }
         else {
           await this.assertCurrent()
+          if (typeof entry.command !== 'string' || !entry.command) throw new AgentLoopError('Observation command is unavailable')
           const raw = String(await this.rcon.command(entry.command))
           // Internal harness probes validate full native identity before any
           // rendering, caching or publication. Model tool arguments cannot set this hook.

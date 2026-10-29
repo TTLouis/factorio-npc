@@ -559,6 +559,25 @@
     }
   },
   "tools": {
+    "listFactoryCells": {
+      "args": ["offset", "limit"],
+      "category": "status",
+      "execution": "host-observation",
+      "host_handler": "factory-cell-tools",
+      "harness_only_remotes": [["sgluna_factory", "world_identity"], ["sgluna_factory", "bind_world_id"]],
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only",
+      "argument_bounds": { "offset": { "minimum": 0, "maximum": 256, "default": 0 }, "limit": { "minimum": 1, "maximum": 32, "default": 16 } }
+    },
+    "inspectFactoryCell": {
+      "args": ["cell_id", "binding"],
+      "category": "status",
+      "execution": "host-observation",
+      "host_handler": "factory-cell-tools",
+      "harness_only_remotes": [["sgluna_factory", "world_identity"], ["sgluna_factory", "bind_world_id"], ["sgluna_factory", "observe"]],
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only"
+    },
     "getActorStatus": {
       "remote": [
         "autorio_actor",

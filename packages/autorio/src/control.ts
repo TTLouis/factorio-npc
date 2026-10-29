@@ -31,6 +31,7 @@ import { new_follow_controller } from './follow'
 import { find_harvest_source, new_harvest_controller } from './harvest'
 import { new_interaction_recovery } from './interaction_recovery'
 import { create_knowledge_remote_interface } from './knowledge'
+import { create_factory_cell_remote_interface } from './factory_cell_observation'
 import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
@@ -72,6 +73,10 @@ let setup_complete = false
 
 export const task_manager = new_task_manager(get_controlled_actor)
 const operation_admission = new_operation_admission(get_controlled_actor, () => task_manager.get_status_snapshot())
+create_factory_cell_remote_interface(peek_controlled_actor, () => {
+  const status = task_manager.get_status_snapshot()
+  return status.task_state === 'idle' && status.queue_length === 0 && status.active_batch === undefined
+})
 const tick_sprint = new_tick_sprint_guard(peek_controlled_actor, () => task_manager.get_status_snapshot(), () => operation_admission.status().records)
 remote.add_interface('sgluna_tick_sprint', {
   configure: (binding: Parameters<typeof tick_sprint.configure>[0]) => tick_sprint.configure(binding),

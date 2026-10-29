@@ -4,6 +4,7 @@ import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
 import { PLANNER_REVIEW_RATIONALE_MAX_CHARS, PLANNER_SKILL_LOOKUP_TOOLS } from './role-contracts.mjs'
 import { PRODUCTION_TASK_SCHEMA, normalizeProductionIntent } from './production-task.mjs'
 import { HARNESS_DEFAULTS_SCHEMA } from './production-repair.mjs'
+import { factoryCellToolDefinitions, isFactoryCellTool, validateFactoryCellTool } from './factory-cell-tools.mjs'
 
 export * from '../staging/structured-policy.mjs'
 
@@ -1454,6 +1455,7 @@ const researchPathDefinition = {
 
 export const toolDefinitions = [
   ...base.toolDefinitions,
+  ...factoryCellToolDefinitions,
   ...reservationDefinitions,
   placementCandidatesDefinition,
   fluidSourceTilesDefinition,
@@ -1566,6 +1568,8 @@ export const executionOnlyProviderToolDefinitions = [
 ]
 
 const OBSERVATION_TOOL_FAMILY = Object.freeze({
+  listFactoryCells: 'entity_status',
+  inspectFactoryCell: 'entity_status',
   getActorStatus: 'runtime_status',
   getTaskStatus: 'runtime_status',
   getNavigationStatus: 'runtime_status',
@@ -1636,6 +1640,8 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
 // Every read still counts against Jev's budget, so an exhausted budget still
 // forces the next decision without tools.
 export const OBSERVATION_TOOL_TIER = Object.freeze({
+  listFactoryCells: 'fact',
+  inspectFactoryCell: 'fact',
   getActorStatus: 'fact',
   getTaskStatus: 'fact',
   getNavigationStatus: 'fact',
@@ -1738,6 +1744,12 @@ export function isObservationToolName(name) {
 }
 
 export function toolCommand(name, args) {
+  if (isFactoryCellTool(name)) {
+    validateFactoryCellTool(name, args)
+    // Host-only observations have no RCON command. The trusted prepared hook
+    // is required; the base dispatcher refuses null commands if it is absent.
+    return null
+  }
   if (name === 'validateConstructionReservation') {
     exactKeys(args, ['goal_id', 'plan_id', 'x', 'y', 'width', 'height'])
     check(['x', 'y', 'width', 'height'].every(key => Number.isInteger(args[key])), 'Area coordinates and dimensions are required integers')
