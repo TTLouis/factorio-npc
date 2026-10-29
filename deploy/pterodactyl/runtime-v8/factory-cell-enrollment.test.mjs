@@ -4,6 +4,8 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { ensureCommittedFactoryCellBeforeClose, validateFactoryCellDraft } from './factory-cell-enrollment.mjs'
+import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
+import { classifyRequestFailure, isProviderFailurePause } from './pause-class.mjs'
 
 const KEY = 'npc:enrollment-test'
 const WORLD = '1e837e91-4f33-43a2-a3aa-c891ee06ec66'
@@ -233,4 +235,61 @@ test('canonical goal-completion and runtime satisfaction backstops cannot abando
   assert.equal(result.decision.rejection_reason, 'factory_enrollment_required')
   w.memory.recordGoalSatisfaction(KEY, { source: 'runtime', evidenceRefs: ['fixture-goal-proof'] })
   assert.deepEqual(w.memory.planningState(KEY), before)
+})
+
+test('restored enrolled pair must revalidate native facts before actual early-goal completion', async () => {
+  for (const mutate of [r => { r.members[1].recipe.state = 'unknown' }, r => { r.members[1].recipe.products[0].name = 'iron-plate' }]) {
+    const w = await fixture().build(); await w.enroll()
+    const assignment = clone(w.memory.getFactoryRegistry().cells[0])
+    w.memory.restore(w.memory.snapshot())
+    const reads = w.game.observeCount
+    w.game.onObserve = mutate
+    w.memory.goalDefinition = () => ({ scope: 'finite' })
+    w.agent.evaluateGoalCompletion = async () => ({ satisfied: true, results: [{ id: 'held', satisfied: true, current: 1 }], _sglunaGoalFence: { key: KEY } })
+    w.agent.assertGoalEvaluationCurrent = async () => {}
+    w.agent.pauseForStepContract = async ({ reason }) => ({ paused: true, reason })
+    const result = await w.agent.finishIfGoalMet({ chatMessage: 'Original goal condition is met' }, w.memory.currentPlan(KEY))
+    assert.equal(result.paused, true)
+    assert.match(result.reason, /^factory_enrollment_native_(unverified|mismatch)$/)
+    assert.ok(w.game.observeCount > reads)
+    assert.equal(w.memory.planningState(KEY).goal.status, 'active')
+    assert.deepEqual(w.memory.getFactoryRegistry().cells, [assignment])
+    assert.ok(w.events.some(row => row.event === 'factory_cell.goal_completion_refused' && row.data.original_goal_satisfied === true))
+  }
+})
+
+test('actual request failure and supervisor pause preserve factory precommit/presend guard classification', async () => {
+  for (const phase of ['draft', 'pre_send']) {
+    const w = fixture({ bound: phase !== 'draft' })
+    const before = clone(getActivePlan(w.memory.planningState(KEY)).steps)
+    if (phase === 'draft') {
+      // Earlier role/checkpoint validators have independent suites; this
+      // isolates the real commitPlan factory prerequisite and failure unwind.
+      w.agent.enforceExecutorContract = async value => value
+      w.agent.validatePreflightCorrectionScope = async () => {}
+      w.agent.validateStepCompletionDeclarations = async () => {}
+      w.agent.runTurnRedriving = () => w.agent.commitPlan(clone(w.draft))
+    }
+    else w.agent.runTurnRedriving = () => w.agent.recordPendingOperationBeforeSend([
+      { name: 'place_entity', args: { entity_name: INTENT.sourceEntity } }, { name: 'wait', args: {} },
+    ], w.game.deployment)
+    let failure
+    await assert.rejects(w.agent.runGuardedTurn(), error => { failure = error; return true })
+    const expected = phase === 'draft' ? 'factory_enrollment_world_unbound' : 'factory_enrollment_single_placement_required'
+    assert.equal(failure.failure_code, expected)
+    assert.equal(classifyRequestFailure(failure).pause_class, 'guard')
+    assert.equal(classifyRequestFailure(failure).code, expected)
+    assert.equal(failure.detail.current_batch_sent, false)
+    assert.equal(failure.detail.prior_world_effects, 'not_reclassified')
+    assert.equal(w.memory.pendingOperations(KEY).length, 0)
+    assert.deepEqual(getActivePlan(w.memory.planningState(KEY)).steps, before)
+    const failed = w.events.findLast(row => row.event === 'request.failed')
+    assert.equal(failed.data.failure_code, expected)
+    assert.equal(failed.data.pause_class, 'guard')
+    const paused = await pauseStrandedPlanAfterRequestError({ agent: w.agent, currentPlanState: () => w.memory.currentPlan(KEY) }, failure)
+    assert.equal(paused.status, 'paused')
+    assert.ok(paused.pause_reason.startsWith(`${expected}:`))
+    assert.equal(isProviderFailurePause(w.memory.pauseRecord(KEY), paused.pause_reason), false)
+    assert.equal(w.events.findLast(row => row.event === 'goal.paused').data.provider_failure, false)
+  }
 })

@@ -16,7 +16,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
-import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion } from './factory-cell-enrollment.mjs'
+import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError } from './factory-cell-enrollment.mjs'
 import { captureFactoryPlacementContext, deriveFactoryPlacementReceipt } from './factory-placement-provenance.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
@@ -10487,7 +10487,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const planning = this.memory.planningState?.(key)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
     const step = plan?.steps?.[plan.active_step_index]
-    const factoryScope = await factoryPlacementAdmissionScope(this, operations, preflight)
+    const factoryScope = await atFactoryCellBoundary(this, 'pre_send', () => factoryPlacementAdmissionScope(this, operations, preflight))
     current()
     if (factoryScope && (factoryScope.actor_id !== before?.actor_id || factoryScope.actor_epoch !== before?.epoch)) {
       throw new AgentLoopError('Factory placement admission cancelled or superseded by actor change')
@@ -12382,6 +12382,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...(intakeFailure ? { intake_retry_candidate: true } : {}),
           usage: requestTrace.usage,
           failure_snapshot: this.failureSnapshot('runtime', message, proofFailure),
+          ...(error instanceof FactoryCellBoundaryError ? { failure_code: error.failure_code, pause_class: error.pause_class, factory_boundary: error.detail } : {}),
         }, { requestId })
         if (ownsFailure()) this.traceRequest = null
       }
@@ -17550,7 +17551,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const supplyReview = await this.reviewExecutorSupplyDrift(plan)
     if (supplyReview !== undefined) return supplyReview
     await this.validateStepCompletionDeclarations(plan)
-    await validateFactoryCellDraft(this, plan)
+    await atFactoryCellBoundary(this, 'draft', () => validateFactoryCellDraft(this, plan))
     const heldForRoleHandoff = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     if (this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
       && FROZEN_PLAN_STATUSES.has(heldForRoleHandoff?.status)

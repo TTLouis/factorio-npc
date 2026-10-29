@@ -40,7 +40,6 @@ async function operation(name, args, tracking) {
     const state = tracking.memory.planningState(KEY)
     const plan = state.plans.find(row => ['COMMITTED', 'EXECUTING'].includes(row.status))
     assert.ok(plan)
-    const step = plan.steps[plan.active_step_index]
     const ordinal = (state.operation_ledger?.sequence ?? 0) + 1
     const requestId = `native-placement-${ordinal}`
     preflight = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation",${luaString(name)},helpers.json_to_table(${luaString(JSON.stringify(args))}))))`)
@@ -119,13 +118,37 @@ function enrollmentAgent(memory, actor) {
 }
 async function register(memory, agent) {
   const original = JSON.stringify(memory.planningState(KEY))
-  const enrolled = await ensureCommittedFactoryCellBeforeClose(agent, agent.captureCheckpointOwner())
+  // Deterministic proof sampling only: a furnace between executions may report
+  // no current recipe. Retain every refused snapshot; never weaken production's
+  // unknown-fact pause or alter the game to manufacture compatible evidence.
+  const sample = async label => {
+    const deadline = Date.now() + 15000
+    evidence.enrollment_attempts ??= []
+    for (let attempt = 1; ; attempt++) {
+      const eventStart = evidence.events.length
+      try {
+        const result = await ensureCommittedFactoryCellBeforeClose(agent, agent.captureCheckpointOwner())
+        evidence.enrollment_attempts.push({ label, attempt, status: 'accepted', result })
+        return result
+      }
+      catch (error) {
+        const refusal = evidence.events.slice(eventStart).findLast(row => row.event === 'factory_cell.enrollment_refused')?.data
+        evidence.enrollment_attempts.push({ label, attempt, status: 'refused', code: error.code, refusal })
+        const dormant = error.code === 'factory_enrollment_native_unverified' && refusal?.state === 'unverified'
+          && refusal.codes?.includes('target_recipe_unknown')
+          && refusal.codes.every(code => ['native_member_identity_match', 'target_recipe_unknown', 'assigned_product_capability_unverified'].includes(code))
+        if (!dormant || Date.now() >= deadline) throw error
+        await delay(150)
+      }
+    }
+  }
+  const enrolled = await sample('enroll')
   assert.equal(enrolled.ok, true)
   assert.equal(JSON.stringify(memory.planningState(KEY)), original, 'enrollment cannot rewrite the committed plan or close its step')
   const cell = memory.getFactoryRegistry().cells.find(row => row.cell_id === enrolled.cell_id)
   assert.equal(cell.enrollment.receipt_ids.length, 2)
   assert.equal(cell.state, 'unverified')
-  const again = await ensureCommittedFactoryCellBeforeClose(agent, agent.captureCheckpointOwner())
+  const again = await sample('duplicate')
   assert.equal(again.duplicate, true); assert.equal(again.cell_id, cell.cell_id)
   evidence.enrollment = { first: enrolled, duplicate: again,
     coverage: 'Actual production pre-send, post-batch receipt and enrollment helper; full shared applyStepClose checkpoint flow is covered by deterministic host lifecycle tests, not invoked by this native lane.' }

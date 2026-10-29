@@ -74,6 +74,11 @@ construction do not qualify. The shared pre-send boundary now obtains an exact
 native surface for eligible UUID-bound placements, including intentless ones.
 Earlier stage-3a helper/native fixtures supplied that field explicitly; they did
 not prove the former ordinary caller supplied it.
+The intent-bearing step admits placement only of its declared source and target;
+place ancillary infrastructure in a separate step. Expected draft and pre-send
+factory refusals keep their exact harness guard classification through request
+failure and supervisor pause. They mark only the current batch as unsent, and
+do not reclassify previous native effects or authorize automatic retries.
 
 The shared step-close boundary runs enrollment after the ordinary checkpoint and
 preservation checks, before completion authority. It selects exactly one retained

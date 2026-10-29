@@ -3,9 +3,39 @@ import { committedFactoryCellIntent, readFactoryCellIntent, factoryCellIntentSig
 import { FACTORY_REGISTRY_LIMITS, FactoryRegistryError } from './factory-registry.mjs'
 import { placedEntityName } from './operation-reconciliation.mjs'
 import { prepareFactoryCellHost } from './factory-cell-tools.mjs'
+import { PAUSE_CLASS } from './pause-class.mjs'
 
 const fail = code => { throw new FactoryRegistryError(code, code) }
 const placement = op => ['place_entity', 'place_candidate'].includes(op?.name)
+
+export class FactoryCellBoundaryError extends FactoryRegistryError {
+  constructor(cause, phase) {
+    super(cause.code, cause.message)
+    this.name = 'FactoryCellBoundaryError'
+    this.cause = cause
+    this.failure_code = cause.code
+    this.pause_class = PAUSE_CLASS.GUARD
+    this.detail = { factory_boundary: phase, current_batch_sent: false, prior_world_effects: 'not_reclassified',
+      ...(phase === 'draft' ? { draft_committed_at_boundary: false } : {}) }
+  }
+}
+
+// Only these two internal factory boundaries stamp expected host refusals.
+// Arbitrary errors/strings elsewhere retain existing request classification.
+export async function atFactoryCellBoundary(agent, phase, action) {
+  const owner = agent.captureCheckpointOwner()
+  try { return await action() }
+  catch (cause) {
+    if (!(cause instanceof FactoryRegistryError) && cause?.code !== 'factory_cell_intent_invalid') throw cause
+    if (!/^factory_[a-z0-9_]{2,70}$/.test(cause.code)) throw cause
+    agent.assertCheckpointOwnerIdentity(owner)
+    const failure = new FactoryCellBoundaryError(cause, phase)
+    await agent.traceEvent('factory_cell.boundary_refused', { request_id: owner.requestTrace?.id, goal_id: owner.goalId,
+      plan_id: owner.planId, step_id: owner.stepId, code: failure.failure_code, pause_class: failure.pause_class, ...failure.detail })
+    agent.assertCheckpointOwnerIdentity(owner)
+    throw failure
+  }
+}
 function active(agent) {
   const key = agent.activePlanKey(); const state = agent.memory.planningState(key)
   const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
@@ -85,7 +115,12 @@ function membersForIntent(agent, current, scope) {
 // moot. It cannot abandon actual members of an accepted assignment obligation.
 export async function ensureFactoryCellBeforeGoalCompletion(agent, owner) {
   const status = agent.memory.factoryGoalEnrollmentStatus(agent.activePlanKey())
-  if (!status.required || status.enrolled) return { ok: true, ...status }
+  if (!status.required) return { ok: true, ...status }
+  // Recording the goal proof after an already completed plan needs no second
+  // step authority. An active committed step always revalidates native facts,
+  // including a durable assignment restored after cancellation or restart.
+  const plan = getActivePlan(agent.memory.planningState(agent.activePlanKey()))
+  if (status.enrolled && plan?.status === PLAN_STATUS.COMPLETED) return { ok: true, ...status }
   return ensureCommittedFactoryCellBeforeClose(agent, owner)
 }
 
