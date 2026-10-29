@@ -57,7 +57,13 @@ async function placedMachines(agent, cache, names, preserve) {
   const placements = key ? agent.memory.authorizationState?.(key)?.world?.npc_placements : undefined
   const counts = {}; const unresolved = new Set()
   if (!Array.isArray(placements)) return { counts, unresolved }
-  const recorded = placements.filter(row => names.has(row.entity_name) && !preserve.includes(row.unit_number))
+  const recorded = placements.filter(row => {
+    if (!names.has(row.entity_name) || preserve.includes(row.unit_number)) return false
+    const assignment = agent.memory.factoryPlacementAvailability?.(row)
+    if (assignment?.status === 'assigned') return false
+    if (assignment?.status === 'unknown') { unresolved.add(row.entity_name); return false }
+    return true
+  })
   const cut = Math.max(0, recorded.length - DIRECT_FEED_BOOTSTRAP_LIMITS.placements)
   for (const placement of recorded.slice(0, cut)) unresolved.add(placement.entity_name)
   for (const placement of recorded.slice(cut)) {
@@ -74,6 +80,7 @@ async function placedMachines(agent, cache, names, preserve) {
 }
 
 async function factsFor(agent, cache, resource, preserve) {
+  if (agent.memory.factoryRegistryStatus?.().status === 'fault') return undefined
   const { value: mining } = await readJson(agent, cache, 'getMiningDetails', { resource_or_item: resource })
   if (mining?.found !== true || mining.truncated === true || !Array.isArray(mining.resources) || mining.resources.length === 0
     || mining.resources.some(row => row?.drills_truncated === true || !Array.isArray(row?.drills))) return undefined

@@ -14,6 +14,7 @@ import { restoreEntityRefreshClaims } from './entity-refresh.mjs'
 import { restoreProgressAudits } from './executor-progress-audit.mjs'
 import { restorePreservationRecoveries } from './preservation-recovery.mjs'
 import { restoreStockDependencyBarriers } from './bg-stock-dependency.mjs'
+import { FactoryRegistryStore } from './factory-registry-runtime.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -688,8 +689,11 @@ function sanitizeIntakeRetry(record) {
 }
 
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
+  #factoryRegistry
+
   constructor(options = {}) {
     super(options)
+    this.#factoryRegistry = new FactoryRegistryStore(options.expectedFactoryWorldId)
     this.planningByNpc = new Map()
     this.plannerSkillHandoffs = new Map()
     // The pending intake retry (at most one: a new request or control cancels it). Durable.
@@ -708,6 +712,16 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   planningState(key) {
     return key ? this.planningByNpc.get(key) : undefined
+  }
+
+  // Host-only world lifecycle. No goal/actor-derived identity and no model tool.
+  initializeFactoryRegistry(worldId) { return this.#factoryRegistry.initialize(worldId) }
+  getFactoryRegistry() { return this.#factoryRegistry.read() }
+  factoryRegistryStatus() { return this.#factoryRegistry.status() }
+  getFactoryMemberAssignment(identity) { return this.#factoryRegistry.member(identity) }
+  factoryPlacementAvailability(placement) { return this.#factoryRegistry.placementAvailability(placement) }
+  createFactoryRegistryRuntime(key, readContext, readPlacementReceipt) {
+    return this.#factoryRegistry.runtime(this, key, readContext, readPlacementReceipt, (name, payload) => this.#authTrace(name, payload, payload.request_id))
   }
 
   // The pending intake retry, or undefined. The caller persists (agent.persistState) after a change.
@@ -1931,7 +1945,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         plan_id: plan.plan_id,
       }, requestId)
     }
-    if (verdict.ok) return verdict
+    if (verdict.ok) {
+      const factory = this.#factoryRegistry.admission(operations)
+      if (!factory.ok) this.#authTrace('admission.factory_cell_refused', { ...factory, plan_id: plan?.plan_id }, requestId)
+      return factory
+    }
     const payload = {
       stage: 'admission',
       code: verdict.code,
@@ -3106,6 +3124,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const snapshot = super.snapshot()
     return {
       ...snapshot,
+      ...this.#factoryRegistry.snapshot(),
       ...(this.plannerSkillHandoffs?.size ? { planner_skill_handoffs: [...this.plannerSkillHandoffs.entries()].slice(0, 128) } : {}),
       production_tasks: [...(this.productionTasks ?? new Map()).entries()],
       stock_dependency_barriers: [...(this.stockDependencyBarriers ?? new Map()).entries()],
@@ -3250,6 +3269,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   restore(snapshot) {
+    this.#factoryRegistry.restore(snapshot)
     // Rehydrate contracts before the generic memory sanitization can discard
     // unknown fields. This is deliberately independent of the retired project
     // hierarchy: the Task Board remains the compatibility projection for a
