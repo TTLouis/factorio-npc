@@ -19,7 +19,7 @@ import { discardContractPrediction, startContractPrediction, takeContractPredict
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
 import { prepareProgressAttempt, bindProgressAttempt, auditExecutorProgress, completeProgressReview } from './executor-progress-audit.mjs'
 import { preservationObservationAdmission, preservationReobservationVerified } from './preservation-recovery.mjs'
-import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent, constructionPlanWitnessCommand } from './contract-obligation-runtime.mjs'
+import { recoverContractObligations, capturePlannerObligationProof, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkItemPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent, constructionPlanWitnessCommand } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { candidateScopeVerdict, committedPlacementRegions, compilePlacementScope, describeRegion, distanceFromAnchor, resolvedPlacements } from './placement-region.mjs'
@@ -8630,7 +8630,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (!completionContractSupported(compiled, obligationContractContext(declaration.obligations))) throw await this.checkpointRejectionError({ reason: 'typed_compilation_unrepresentable' })
         if (!declaration.checkpoint && (index === plan.currentStep || index === firstReducerIndex)) declaration.checkpoint = compiled
         const owner = this.captureCheckpointOwner()
-        declaration.obligationProof = await captureObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
+        declaration.obligationProof = await capturePlannerObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
         if (declaration.checkpoint && !obligationContractMatches(declaration.checkpoint, declaration.obligations)) {
           // Every recorded mismatch (Runs AW-BA, both planner models) was this shape: the outcome restated without the
           // preservation rows. The harness owns those rows, so it compiles them instead of spending a correction round.
@@ -15906,6 +15906,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       failure.preflightResults = results.slice()
       throw failure
     }
+    await checkItemPreservationAdmission(this, { operations, preflight: results })
     await checkFluidPreservationEligibility(this, { operations, preflight: results })
     return results
   }
@@ -18922,6 +18923,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // review off: a held draft there would run a full planner turn inside the
   // recovery and could turn a recovery that commits into a failed one.
   async recoverPlan(generation, reason, roundBase) {
+    if (reason?.code === 'preservation_capture_superseded') throw reason
+    if (preservationFailure(reason)?.category === 'unsupported' || preservationFailure(reason)?.stage === 'capture_recovery') throw reason
     this.recoveryCommitDepth = (this.recoveryCommitDepth ?? 0) + 1
     try {
       return await this.recoverPlanRoute(generation, reason, roundBase)
@@ -19441,7 +19444,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return await this.commitRecoveryRouteDraft(generation, message, roundBase, recoveryOwner, routed.route)
       }
       catch (error) {
-        if (error?.code === 'planner_skill_handoff_unavailable' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
+        if (preservationFailure(error) || error?.code === 'planner_skill_handoff_unavailable' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
         throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
       finally {

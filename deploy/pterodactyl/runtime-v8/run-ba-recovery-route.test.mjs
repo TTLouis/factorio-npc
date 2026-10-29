@@ -32,7 +32,10 @@ function baWorld(row, replies) {
   game.command = async text => {
     const geometry = /"entity_geometry",(\d+)/.exec(text)
     if (geometry) {
-      const unit = units.get(Number(geometry[1]))
+      const originalUnit = units.get(Number(geometry[1]))
+      // This route-correction fixture still needs an unsupported capability.
+      // BF adds ordinary containers; substitute a logistic container here only.
+      const unit = originalUnit?.type === 'container' ? { ...originalUnit, type: 'logistic-container' } : originalUnit
       if (!unit) return JSON.stringify({ found: false })
       const position = { x: unit.unit_number * 3 + 0.5, y: 0.5 }
       const routed = ['mining-drill', 'inserter'].includes(unit.type)
@@ -54,6 +57,14 @@ function baWorld(row, replies) {
     },
     interactionDecisionProvider: async () => ({ answers: { recovery_semantics: { choice: 'semantic_replan', confidence: 0.99 }, one_observation_can_resolve: { noul: 0 } } }),
     systemPrompt: 'BA offline exact-state replay', npcId: 'npc-1', stateFile: null, traceFile: null, decisionTraceFile: null, goalDefinitionPolicy: 'required' })
+  // Keep the historical route-correction scenario isolated: production now
+  // pauses unsupported capabilities directly. This fixture explicitly injects
+  // its old recoverable classification; BF tests cover the production refusal.
+  const recover = agent.recoverPlan.bind(agent)
+  agent.recoverPlan = (generation, reason, round) => {
+    if (reason?.code === 'preservation_type_unsupported') reason.category = 'unproven'
+    return recover(generation, reason, round)
+  }
   const rows = []
   agent.behaviorTrace = { emit: async entry => { rows.push(entry) } }
   agent.lastMemoryKey = key

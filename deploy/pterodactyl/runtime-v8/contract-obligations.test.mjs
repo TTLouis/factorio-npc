@@ -39,7 +39,7 @@ function world({ required = false, progressAudit = false, onRead, onTrace, first
   const preflight = text => {
     const x = Number(/\['x'\]=(-?[\d.]+)/.exec(text)?.[1]); const y = Number(/\['y'\]=(-?[\d.]+)/.exec(text)?.[1])
     const name = /\['entity_name'\]='([^']+)'/.exec(text)?.[1]
-    return /["']place_entity["']/.test(text) && name && Number.isFinite(x) && Number.isFinite(y) ? { ok: true, planned_footprint: { entity_name: name, position: { x, y }, direction: 0 } } : { ok: true }
+    return /["']place_entity["']/.test(text) && name && Number.isFinite(x) && Number.isFinite(y) ? { ok: true, planned_footprint: { entity_name: name, position: { x, y }, direction: 0, tile_box: { left_top: { x: x - 1, y: y - 1 }, right_bottom: { x: x + 1, y: y + 1 } }, world_box: { left_top: { x: x - 0.7, y: y - 0.7 }, right_bottom: { x: x + 0.7, y: y + 0.7 } } } } : { ok: true }
   }
   const game = new FakeFactorio({ inventory: { 'stone-furnace': 1, 'copper-plate': 10, 'iron-plate': 58, ...(bootstrapFuel ? { coal: 1 } : {}) }, preflight })
   game.status.connected_players = 0

@@ -128,6 +128,16 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
   }
 
   describe('inserter pickup and drop targets', () => {
+    it('ordinary container capability and queued native preservation agree without reading inventory stock', () => {
+      const chest: any = base('wooden-chest', 'container', UNIT, { x: 10.5, y: 10.5 })
+      chest.get_inventory = () => { throw new Error('Stock is not preservation geometry') }
+      lookup[UNIT] = chest
+      expect((entity_geometry_for_actor(actor, UNIT) as any).preservation_capability.supported_type).toBe(true)
+      expect(preservation_geometry_for_actor(actor, UNIT)).toMatchObject({ found: true, entity: { unit_number: UNIT, type: 'container' } })
+      chest.type = 'logistic-container'
+      expect((entity_geometry_for_actor(actor, UNIT) as any).preservation_capability.supported_type).toBe(false)
+      expect(preservation_geometry_for_actor(actor, UNIT)).toBeUndefined()
+    })
     // The inserter at x = 94.5 is seen (chunk 2); its drop position 95.5 is seen too, but the chest there is not when it
     // reaches 96 (chunk 3). At x = 95.5 the drop position itself (96.5) is in chunk 3.
     it('marks a drop target in an unseen chunk not visible without reading it, standing or destroyed', () => {

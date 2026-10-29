@@ -654,6 +654,13 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     actor_id: actor.status_snapshot().actor_id,
     actor_surface_index: actor.surface.index,
     actor_force_index: actor.force.index,
+    preservation_capability: {
+      supported_type: fluid_box_count === 0
+        ? ['furnace', 'mining-drill', 'inserter', 'container'].includes(entity.type)
+        : ['offshore-pump', 'boiler', 'steam-engine', 'pipe'].includes(entity.name),
+      proof_required: 'fresh_identity_scope_and_routes',
+      container_stock_frozen: false,
+    },
     item_io: inserter
       ? {
           pickup_position: entity.pickup_position,
@@ -696,7 +703,7 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
         if (port.connection_type !== 'normal' || port.target_valid !== true) return undefined
       }
     }
-  } else if (!['furnace', 'mining-drill', 'inserter'].includes(raw.entity.type)) return undefined
+  } else if (!['furnace', 'mining-drill', 'inserter', 'container'].includes(raw.entity.type)) return undefined
   // A route end in a chunk the NPC does not see now cannot prove preservation.
   if (raw.item_io?.pickup_target?.not_visible === true || raw.item_io?.drop_target?.not_visible === true) return undefined
   const storages: any[] = raw.fluid_storages ?? []
