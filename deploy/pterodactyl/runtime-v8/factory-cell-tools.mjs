@@ -81,7 +81,17 @@ const nativeRead = async read => {
 
 /** Host-created capability; provider JSON never supplies this callback or Lua. */
 export function prepareFactoryCellTool(agent, name, rawArgs) {
-  const args = validateFactoryCellTool(name, rawArgs)
+  return prepareFactoryCellAccess(agent, name, validateFactoryCellTool(name, rawArgs))
+}
+
+// Internal capability for committed enrollment/world validation. Never exposed
+// in tool definitions or provider JSON; read tools retain their existing path.
+export function prepareFactoryCellHost(agent, action) {
+  if (typeof action !== 'function') fail('factory_host_action_required')
+  return prepareFactoryCellAccess(agent, 'factoryCellEnrollment', {}, action)
+}
+
+function prepareFactoryCellAccess(agent, name, args, hostAction) {
   const key = agent.activePlanKey()
   const epoch = { ...agent.epoch }
   const request = agent.traceRequest
@@ -93,7 +103,7 @@ export function prepareFactoryCellTool(agent, name, rawArgs) {
   const conversation = agent.agentContext.conversationSeq
   const mutation = agent.worldMutationSeq ?? 0
   const binding = agent.memory.factoryWorldBinding()
-  const expectedRevision = agent.memory.factoryRegistryStatus().status === 'initialized' ? agent.memory.getFactoryRegistry().revision : 0
+  let expectedRevision = agent.memory.factoryRegistryStatus().status === 'initialized' ? agent.memory.getFactoryRegistry().revision : 0
   const planningOwner = () => {
     const state = agent.memory.planningState(key); const plan = getActivePlan(state)
     return JSON.stringify([state?.goal?.goal_id, state?.goal?.status, plan?.plan_id, plan?.plan_version, plan?.active_step_index])
@@ -161,7 +171,11 @@ export function prepareFactoryCellTool(agent, name, rawArgs) {
     await observer.initializeWorld()
     fence()
     let result
-    if (name === 'listFactoryCells') {
+    if (hostAction) result = await hostAction(observer, {
+      refresh, fence, readContext,
+      acceptPublishedRevision: () => { expectedRevision = agent.memory.getFactoryRegistry().revision; fence() },
+    })
+    else if (name === 'listFactoryCells') {
       const listing = observer.list()
       result = { ...listing, total_cells: listing.cells.length, offset: args.offset,
         cells: listing.cells.slice(args.offset, args.offset + args.limit), next_offset: null }
@@ -171,7 +185,7 @@ export function prepareFactoryCellTool(agent, name, rawArgs) {
       await agent.traceEvent(event.event, event.payload, { requestId }); fence()
     }
     await refresh()
-    return projectFactoryCellResult(result)
+    return hostAction ? result : projectFactoryCellResult(result)
   }
   const execute = async () => {
     try { return await executeInner() }
@@ -179,6 +193,7 @@ export function prepareFactoryCellTool(agent, name, rawArgs) {
       await agent.captureFactoryObservationTrace(traceOwner, 'factory_cell.tool_refused', { request_id: requestId, session_id: epoch.session, actor_id: epoch.actor_id,
         actor_epoch: epoch.epoch, tool: name, cell_id: args.cell_id, code: error.code ?? 'factory_native_read_failed' })
       fence()
+      if (hostAction) throw error
       // A refused observation is usable diagnostic data, never a provider
       // outage or a reason to mutate gameplay. Superseded ownership still throws.
       if (error instanceof FactoryRegistryError && !/stale|world_mismatch|owner_mismatch/.test(error.code)) {

@@ -15,6 +15,7 @@ import { restoreProgressAudits } from './executor-progress-audit.mjs'
 import { restorePreservationRecoveries } from './preservation-recovery.mjs'
 import { restoreStockDependencyBarriers } from './bg-stock-dependency.mjs'
 import { FactoryRegistryStore } from './factory-registry-runtime.mjs'
+import { committedFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -721,6 +722,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   factoryWorldBinding() { return this.#factoryRegistry.worldBinding() }
   factoryCellObservations() { return this.#factoryRegistry.observations() }
   factoryPlacementReceipt(id) { return this.#factoryRegistry.placementReceipt(id) }
+  factoryPlacementReceipts(scope) { return this.#factoryRegistry.placementReceipts(scope) }
+  factoryPlacementCapacity() { return this.#factoryRegistry.placementCapacity() }
+  invalidateFactoryEnrollmentPersistence() { this.#factoryRegistry.invalidateEnrollmentPersistence() }
+  factoryGoalEnrollmentStatus(key) {
+    try {
+      const state = this.planningState(key); const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
+      if (!committedFactoryCellIntent(step)) return { required: false }
+      const scope = { world_id: this.#factoryRegistry.worldBinding().world_id, goal_id: plan.goal_id, semantic_step_id: step.semantic_step_id ?? step.step_id }
+      const cell = this.#factoryRegistry.read().cells.find(row => row.enrollment?.goal_id === scope.goal_id && row.enrollment.semantic_step_id === scope.semantic_step_id)
+      if (cell && cell.enrollment.intent_signature === factoryCellIntentSignature(step.execution_guidance)) return { required: true, enrolled: true, cell_id: cell.cell_id, receipt_ids: [...cell.enrollment.receipt_ids] }
+      const receipts = this.#factoryRegistry.placementReceipts(scope)
+      const pending = pendingOperations(state).some(row => row.goal_id === plan.goal_id && row.operations?.some(op => ['place_entity', 'place_candidate', 'execute_construction_plan'].includes(op.name)))
+      return { required: Boolean(cell || receipts.length || pending), enrolled: false, reason: 'factory_enrollment_required', receipt_ids: receipts.map(row => row.receipt_id) }
+    }
+    catch { return { required: true, enrolled: false, reason: 'factory_enrollment_unavailable' } }
+  }
   invalidateFactoryPlacementPersistence() { this.#factoryRegistry.invalidatePlacementPersistence() }
   recordFactoryPlacementReceipt(receipt, generation) {
     const result = this.#factoryRegistry.recordPlacementReceipt(receipt, generation)
@@ -2809,6 +2826,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       .filter(ref => typeof ref === 'string' && ref.trim())
     const before = this.planningByNpc.get(key)
     if (!before?.goal || refs.length === 0) return before
+    const enrollment = source === 'runtime' ? this.factoryGoalEnrollmentStatus(key) : undefined
+    if (enrollment?.required && !enrollment.enrolled) return before
     const after = this.dispatchPlanningEvent(key, {
       type: PLANNING_EVENT.GOAL_SATISFIED,
       now,
@@ -2959,6 +2978,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
 
     const step = plan.steps[plan.active_step_index]
+    try {
+      if (committedFactoryCellIntent(step) && !this.#factoryRegistry.read().cells.some(cell => cell.enrollment?.goal_id === plan.goal_id
+        && cell.enrollment.semantic_step_id === (step.semantic_step_id ?? step.step_id)
+        && cell.enrollment.intent_signature === factoryCellIntentSignature(step.execution_guidance))) return refuse('factory_enrollment_required')
+    }
+    catch { return refuse('factory_enrollment_unavailable') }
     const now = state.updated_at ?? Date.now()
     const events = this.#stepCloseEvents({ plan, step, candidate, decision, now })
     let simulated = planning
@@ -3009,6 +3034,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   applyOutcomeAuthority(key, candidate, options = {}) {
     const beforeLegacy = key ? this.planByNpc.get(key) : undefined
     if (beforeLegacy) this.ensurePlanningDraft(key, beforeLegacy, { now: beforeLegacy.updated_at })
+    if (candidate?.metadata?.scope !== 'step') {
+      const decision = validateOutcomeCandidate(candidate, { world: options?.world ?? {} })
+      const enrollment = decision.accepted && decision.durable_status === 'completed' ? this.factoryGoalEnrollmentStatus(key) : undefined
+      if (enrollment?.required && !enrollment.enrolled) return { state: beforeLegacy, changed: false,
+        decision: { ...decision, accepted: false, rejection_reason: enrollment.reason } }
+    }
     const stepClose = this.#decideStepClose(key, candidate, options)
     if (stepClose?.refused) return stepClose.refused
     const result = super.applyOutcomeAuthority(key, candidate, options)

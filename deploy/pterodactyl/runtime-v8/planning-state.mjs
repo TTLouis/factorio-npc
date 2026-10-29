@@ -28,6 +28,7 @@ import { authoredCompletionContractSupported, completionContractSupported, sanit
 import { obligationContractContext, storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, contractDefectShape, preservedProofMatches, effectivePreservationProof, normalizeFluidAdmission, normalizeFluidCertificate, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
+import { factoryCellIntentPreserved, validFactoryCellIntentStep } from './factory-cell-intent.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   authorizationHasContent,
@@ -1067,6 +1068,7 @@ function sanitizeStep(raw, { planId, planVersion, sequence, goalId, bindProof = 
   const contract = sanitizeOptionalCompletionContract(source.completion_contract, context)
   const pending = !contract && source.completion_mode === 'deterministic' && source.contract_status === 'pending'
   const binding = contract ? sanitizeContractBinding(source.contract_binding) : undefined
+  const guidance = storedExecutionGuidance(source.execution_guidance)
   return {
     step_id: stepId,
     ...(source.semantic_step_id || obligations ? { semantic_step_id: semanticStepId } : {}),
@@ -1075,7 +1077,7 @@ function sanitizeStep(raw, { planId, planVersion, sequence, goalId, bindProof = 
     ...(Object.hasOwn(source, 'obligations') || source.obligation_protocol === 1 ? { obligation_protocol: 1 } : {}),
     ...(obligations ? { obligations } : {}),
     ...(proof ? { obligation_proof: proof } : {}),
-    ...(storedExecutionGuidance(source.execution_guidance) ? { execution_guidance: storedExecutionGuidance(source.execution_guidance) } : {}),
+    ...(guidance ? { execution_guidance: guidance } : {}),
     ...(source.completion_mode === 'deterministic' || source.completion_mode === 'semantic'
       ? { completion_mode: source.completion_mode, ...(source.completion_mode === 'semantic' ? { semantic_rationale: text(source.semantic_rationale, 600) } : {}) }
       : {}),
@@ -2481,6 +2483,12 @@ Object.assign(HANDLERS, {
       carriedForwardEvidence: inheritedLineage?.carried_forward_evidence ?? [],
     })
     if (plan.steps.length === 0) return state
+    if (plan.steps.some(step => !validFactoryCellIntentStep(step))) return state
+    const predecessor = getPlan(state, plan.derived_from_plan_id)
+    if (predecessor && plan.steps.some(step => {
+      const original = predecessor.steps.find(row => (row.semantic_step_id ?? row.step_id) === (step.semantic_step_id ?? step.step_id))
+      return original && !factoryCellIntentPreserved(original, step)
+    })) return state
     // Re-authoring a replacement draft must not shed the grant check: lineage is preserved, and the commit
     // refuses it if the steps drifted from what the grant was classified against.
     if (inheritedLineage?.replacement) plan.replacement = inheritedLineage.replacement
@@ -2507,6 +2515,12 @@ Object.assign(HANDLERS, {
     // executable.
     if (event.runtime_validation?.passed !== true) return state
     if (plan.steps.length === 0) return state
+    if (plan.steps.some(step => !validFactoryCellIntentStep(step))) return state
+    const predecessor = getPlan(state, plan.derived_from_plan_id)
+    if (predecessor && plan.steps.some(step => {
+      const original = predecessor.steps.find(row => (row.semantic_step_id ?? row.step_id) === (step.semantic_step_id ?? step.step_id))
+      return original && !factoryCellIntentPreserved(original, step)
+    })) return state
     // The step that runs first must carry its checkpoint. Later steps may still be pending.
     if (isStepContractPending(plan.steps[plan.active_step_index])) return state
     if (plan.steps.some(step => step.obligation_protocol === 1 && (!step.obligations || !step.obligation_proof
@@ -2680,6 +2694,7 @@ Object.assign(HANDLERS, {
     const index = plan.active_step_index
     const step = plan.steps[index]
     if (!step || text(event.step_id, 200) !== step.step_id) return state
+    if (!validFactoryCellIntentStep(step)) return state
     // A step with no bound contract cannot close, by runtime evidence or by a semantic claim.
     if (isStepContractPending(step)) return state
 
@@ -3161,6 +3176,10 @@ Object.assign(HANDLERS, {
     }
 
     const predecessor = getPlan(state, predecessorId)
+    if (Array.isArray(event.steps) && event.steps.some(step => {
+      const original = predecessor.steps.find(row => (row.semantic_step_id ?? row.step_id) === (step.semantic_step_id ?? step.step_id))
+      return original && !factoryCellIntentPreserved(original, step)
+    })) return state
     if (predecessor.blocker?.kind === 'contract_defect') {
       const active = predecessor.steps[predecessor.active_step_index]
       const suffix = predecessor.steps.slice(predecessor.active_step_index)

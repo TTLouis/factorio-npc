@@ -112,8 +112,16 @@ function observation(raw) {
   return result
 }
 
+function enrollment(raw) {
+  record(raw, ['goal_id', 'semantic_step_id', 'intent_signature', 'receipt_ids'], 'enrollment')
+  const result = { goal_id: string(raw.goal_id, 'enrollment.goal_id', 512), semantic_step_id: string(raw.semantic_step_id, 'enrollment.semantic_step_id', 512),
+    intent_signature: string(raw.intent_signature, 'enrollment.intent_signature', 64), receipt_ids: strings(raw.receipt_ids, 'enrollment.receipt_ids', 2, 2, 512) }
+  if (!/^[a-f0-9]{64}$/.test(result.intent_signature)) fail('invalid_schema', 'Invalid intent signature')
+  return result
+}
+
 function cell(raw) {
-  record(raw, ['cell_id', 'revision', 'state', 'surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin', 'observation'], 'cell')
+  record(raw, ['cell_id', 'revision', 'state', 'surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin', 'observation', 'enrollment'], 'cell')
   generatedId(raw.cell_id, 'cell')
   if (raw.revision !== 1 || raw.state !== 'unverified') fail('invalid_schema', 'Stage 1 cells have revision 1 and unverified state')
   const surface = integer(raw.surface_index, 'cell.surface_index', 1)
@@ -131,6 +139,7 @@ function cell(raw) {
     cell_id: raw.cell_id, revision: 1, state: 'unverified', surface_index: surface, force_index: force, assignment,
     members: array(raw.members, 'members', FACTORY_REGISTRY_LIMITS.members, 1).map(value => member(value, surface, force)),
     ports, origin: history(raw.origin, 'origin'),
+    ...(Object.hasOwn(raw, 'enrollment') ? { enrollment: enrollment(raw.enrollment) } : {}),
     ...(Object.hasOwn(raw, 'observation') ? { observation: observation(raw.observation) } : {}),
   }
 }
@@ -155,7 +164,15 @@ export function restoreFactoryRegistry(raw, { worldId } = {}) {
   const ids = new Set()
   const units = new Set()
   const locations = new Set()
+  const enrollments = new Set()
   for (const entry of cells) {
+    if (entry.enrollment) {
+      const identity = JSON.stringify([entry.enrollment.goal_id, entry.enrollment.semantic_step_id])
+      if (enrollments.has(identity)) fail('duplicate_enrollment', 'Semantic step already has a cell')
+      enrollments.add(identity)
+      if (entry.members.length !== 2 || entry.origin.goal_id !== entry.enrollment.goal_id || entry.origin.semantic_step_id !== entry.enrollment.semantic_step_id
+        || entry.enrollment.receipt_ids.some((id, i) => entry.members[i].provenance.receipt_id !== id)) fail('invalid_enrollment', 'Enrollment members/origin mismatch')
+    }
     if (ids.has(entry.cell_id)) fail('duplicate_id', 'Duplicate cell ID')
     ids.add(entry.cell_id)
     if (generatedId(entry.cell_id, 'cell') >= nextCell) fail('invalid_counter', 'Cell counter would reuse an identity')
@@ -192,7 +209,7 @@ function increment(raw, label) {
 
 export function registerFactoryCell(registry, declaration) {
   const state = restoreFactoryRegistry(registry)
-  record(declaration, ['surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin'], 'cell declaration')
+  record(declaration, ['surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin', 'enrollment'], 'cell declaration')
   const entry = cell({ ...declaration, cell_id: `cell-${state.next_cell_id}`, revision: 1, state: 'unverified' })
   return restoreFactoryRegistry({ ...state, revision: increment(state.revision, 'revision'), next_cell_id: increment(state.next_cell_id, 'cell counter'), cells: [...state.cells, entry] })
 }
