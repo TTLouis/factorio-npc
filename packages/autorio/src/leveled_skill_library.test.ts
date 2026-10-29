@@ -40,21 +40,38 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
     expect(get_skill_definition(personal.id)!.goal_tags).toEqual(['owner-choice'])
   })
 
-  it('keeps the legacy default unchanged and installs the complete classified profile without duplicate basic curation', () => {
+  it('incorporates every basic canonical id as a classified method and restores the unchanged basic profile', () => {
     expect(curated_library_profile()).toBe('basic')
     ensure_basic_skill_definitions()
     const baseline = list_skill_definitions().map(entry => JSON.stringify(entry))
     expect(baseline).toHaveLength(11)
-    expect(select_curated_library('leveled')).toMatchObject({ profile: 'leveled', added: 48, removed: 11, total: 48 })
+    expect(select_curated_library('leveled')).toMatchObject({ profile: 'leveled', added: 49, upgraded: 11, removed: 0, total: 60 })
     const entries = list_skill_definitions()
-    expect(entries).toHaveLength(48)
+    expect(entries).toHaveLength(60)
     expect(entries.filter(entry => entry.content_type === 'knowledge')).toHaveLength(6)
-    expect(entries.filter(entry => entry.content_type === 'skill')).toHaveLength(42)
-    for (let level = 0; level <= 7; level++) expect(entries.filter(entry => entry.level === level)).toHaveLength(6)
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 0, total: 48 })
+    expect(entries.filter(entry => entry.content_type === 'skill')).toHaveLength(54)
+    for (const raw of BASIC_SKILL_DEFINITIONS) {
+      const foundation = get_skill_definition(raw.id)!
+      expect(foundation.content_type).toBe('skill')
+      expect([1, 2]).toContain(foundation.level)
+      expect(foundation.guidance!.steps.length).toBeGreaterThanOrEqual(3)
+      expect(foundation.revision).toBeGreaterThan(raw.revision)
+    }
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 0, total: 60 })
     select_curated_library('basic')
     expect(list_skill_definitions().map(entry => JSON.stringify(entry))).toEqual(baseline)
     for (const entry of BASIC_SKILL_DEFINITIONS) expect(get_skill_definition(entry.id)).toBeDefined()
+  })
+
+  it('restores incorporated foundations when loading a save made by the former replacement profile', () => {
+    select_curated_library('leveled')
+    const registry = (globalThis as any).storage.sgluna_skill_definitions
+    for (const raw of BASIC_SKILL_DEFINITIONS) delete registry[raw.id]
+    delete registry['burner-inserter-refueling']
+    expect(list_skill_definitions()).toHaveLength(48)
+    expect(ensure_basic_skill_definitions()).toMatchObject({ added: 12, removed: 0, total: 60 })
+    expect(list_skill_definitions()).toHaveLength(60)
+    expect(find_skill_definitions('煤蛇', 10).some(entry => entry.id === 'burner-coal-loop')).toBe(true)
   })
 
   it('preserves personal edits and learned entries across profile selection and refuses invalid selection without mutation', () => {
@@ -77,7 +94,7 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
     const pack = JSON.parse(readFileSync(new URL('./fixtures/leveled-library-v1.json', import.meta.url), 'utf8'))
     expect(pack.skills).toEqual(LEVELED_SKILL_DEFINITIONS)
     const ids = LEVELED_SKILL_DEFINITIONS.map(entry => entry.id)
-    expect(new Set(ids).size).toBe(48)
+    expect(new Set(ids).size).toBe(60)
     for (const raw of LEVELED_SKILL_DEFINITIONS) {
       const entry = canonicalize_skill_definition(raw)
       expect(entry.inputs).toEqual([])
@@ -95,6 +112,33 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
       expect(prose).not.toMatch(/\d|\bper (?:second|minute|tick)\b/i)
       for (const id of entry.guidance!.related_ids) expect(ids).toContain(id)
       expect(canonicalize_skill_definition(JSON.parse(JSON.stringify(entry)))).toEqual(entry)
+    }
+  })
+
+  it('preserves customized imports with inherited curated refs across profile changes and saved storage reload', () => {
+    for (const profile of ['basic', 'leveled'] as const) {
+      ;(globalThis as any).storage = {}
+      select_curated_library(profile)
+      const original = get_skill_definition('burner-coal-loop')!
+      const imported = put_untrusted_skill_definition({ ...original, revision: 100, name: 'Imported custom coal method' })
+      expect(imported.source.evidence_refs).toContain('imported:caller-definition')
+      select_curated_library(profile === 'basic' ? 'leveled' : 'basic')
+      ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+      ensure_basic_skill_definitions()
+      select_curated_library(profile)
+      expect(get_skill_definition(imported.id)).toEqual(imported)
+      // Older saves may predate the import marker. A different family may
+      // replace only an exact current canonical copy, even at a lower revision.
+      for (const revision of [1, original.revision, 100]) {
+        const legacy = { ...original, revision, name: 'Older imported custom method' }
+        const expected = JSON.parse(JSON.stringify(legacy))
+        delete (globalThis as any).storage.sgluna_preserved_curated_variants?.[legacy.id]
+        ;(globalThis as any).storage.sgluna_skill_definitions[legacy.id] = legacy
+        select_curated_library(profile === 'basic' ? 'leveled' : 'basic')
+        ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+        select_curated_library(profile)
+        expect(get_skill_definition(legacy.id)).toEqual(expected)
+      }
     }
   })
 
@@ -128,7 +172,7 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
   })
 
   it('refuses invalid new metadata and does not let physical verification claim knowledge mastery', () => {
-    const entry = LEVELED_SKILL_DEFINITIONS[0]
+    const entry = LEVELED_SKILL_DEFINITIONS.find(value => value.content_type === 'knowledge')!
     for (const level of [-1, 8, 1.5, '0']) expect(() => canonicalize_skill_definition({ ...entry, level })).toThrow(/level/)
     expect(() => canonicalize_skill_definition({ ...entry, content_type: 'recipe' })).toThrow(/content_type/)
     expect(() => canonicalize_skill_definition({ ...entry, guidance: { ...entry.guidance, steps: [] } })).toThrow(/steps/)

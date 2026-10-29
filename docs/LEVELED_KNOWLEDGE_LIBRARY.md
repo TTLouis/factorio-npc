@@ -7,7 +7,8 @@ Task branch: `feat/leveled-knowledge-library`.
 The owner requested the approved method catalog be built, independently reviewed
 by a stand-alone Sol 6.1 for practical NPC content gaps using only local
 knowledge, and reflected in the in-game GUI. This implements a selectable
-library of six knowledge entries and forty-two skills across complexity levels.
+library of six knowledge entries and fifty-four skills across complexity levels,
+including the incorporated basic patterns and built-in tutorial methods.
 It does not establish autonomous gameplay mastery or authorize a live test.
 
 ## Methods and live facts
@@ -37,11 +38,27 @@ metadata is optional; canonical legacy records omit it, preserving old JSON.
 ## Select the library and browse it
 
 The basic curated profile remains the default for comparison compatibility.
-Open the existing learning/library window and choose **Leveled curated library**
-to install the new catalog. **Basic curated library** restores basic curation.
-Switching removes only untouched curation from the inactive profile. Personal
+Open the existing learning/library window and choose **Leveled library · foundations included**.
+The catalog incorporates every basic pattern under its existing canonical ID,
+with a complexity level and full method guidance: sixty entries, six knowledge
+and fifty-four skills. The coal loop, mining collection, direct smelting,
+steam power, belt lanes/merges, insertion chains, bootstrap, stock and expansion
+patterns are first-class leveled entries rather than an unclassified add-on.
+The burner-inserter refueling method adds explicit startup, replenishment and
+upstream fuel protection checks. See [the built-in tutorial mapping](BUILTIN_TUTORIAL_METHODS.md).
+
+**Basic curated library** restores the original basic-only definitions.
+Existing leveled saves automatically regain the incorporated foundations on
+ordinary library initialization. Switching removes only untouched curation
+whose IDs are absent from the selected catalog. Shared untouched IDs refresh to
+the selected profile's canonical method. Personal
 edits, learned entries and other dynamic imports survive; therefore a customized
 save can contain more entries than the selected curated profile.
+
+Caller imports retain personal provenance even when copied from a curated
+export. Crossing profile families replaces only a known untouched canonical
+copy. An unrecognized historical variant is retained without rewriting its
+content and gains durable protection across subsequent switching and reload.
 
 The window separates **Knowledge** and **Skills**, filters by complexity level,
 labels unclassified older entries as **Unleveled**, and displays the complete

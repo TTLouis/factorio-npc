@@ -1,7 +1,7 @@
 // Methods only. Recipes, unlock chains, quantities, rates and ratios belong to
 // request-scoped live game results, never this reusable authored library.
-// Optional profile: selecting it replaces untouched basic curation, not personal
-// edits or pinned committed-plan instructions. No entry asserts native mastery.
+// Basic patterns are incorporated under their canonical ids as leveled methods.
+// Personal edits and pinned committed-plan instructions remain authoritative.
 interface Entry {
   id: string
   name: string
@@ -20,6 +20,114 @@ interface Entry {
 }
 
 const ENTRIES: Entry[] = [
+  {
+    id: 'missing-item-bootstrap', name: 'Missing Item Bootstrap', level: 1, revision: 3,
+    tags: ['missing', 'craft', 'bootstrap', 'dependency', 'blocked'],
+    use: 'The next authorized action needs an item that is not ready in inventory.', skip: 'The required item is already available and unreserved.',
+    checks: ['Current inventory, accessible reusable equipment and reservations.', 'Live acquisition routes, recipe availability and supported crafting tools.'],
+    steps: ['Identify the specific dependency of the next executable action.', 'Compare held stock and authorized reuse before reading the live acquisition route.', 'Obtain the grounded missing inputs and craft or collect only the needed bootstrap supply; verify the resulting inventory.'],
+    done: 'The next action has the required usable item, or an exact unsupported dependency is evidenced.',
+    failures: ['Repeated world scans replace a live craftability check.', 'Remembered recipes or quantities are treated as current facts.'], related: ['knowledge-acquisition-paths', 'skill-reuse-before-building'],
+  },
+  {
+    id: 'burner-coal-loop', name: 'Burner Coal Loop', level: 1, revision: 3,
+    tags: ['coal', 'coal-snake', 'burner', 'fuel', 'mining', '煤蛇'],
+    use: 'Live-compatible fuel-burning miners can mine their own fuel and a continuing fuel source is useful.', skip: 'Existing fuel service is sufficient or a finite manual bootstrap costs less.',
+    checks: ['Live mineable fuel, machine fuel compatibility, patch coverage and held startup supply.', 'Actual miner output positions, receiving inventory roles and supported fuel transfers.'],
+    steps: ['Place a resource-covering miner and inspect its actual output before choosing the receiving miner.', 'Close a legal output-to-fuel path using observed geometry; derive machine count and startup needs from live tools.', 'Start the loop and observe every miner replenishing its fuel. Keep export closed until live output exceeds continuing fuel needs.', 'Add a verified surplus takeoff and recheck fuel continuity after export; an unfueled miner means the loop has not passed commissioning.'],
+    done: 'The loop continues mining with replenishing fuel and delivers evidenced surplus to the intended consumer.',
+    failures: ['Taking coal for export drains a miner needed to keep the loop alive.', 'Facing miners are mistaken for proof of a working fuel route.'], related: ['skill-complete-operating-cell', 'burner-inserter-refueling', 'starter-mining-belt-output'],
+  },
+  {
+    id: 'direct-miner-smelting', name: 'Direct Miner Smelting', level: 1, revision: 5,
+    tags: ['smelting', 'smelt', 'ore', 'furnace', 'mining', 'natural-resource', 'automated-factory'],
+    use: 'A live-compatible miner output can directly feed a useful smelting process.', skip: 'A shared route is already adequate or a small manual batch finishes the current need sooner.',
+    checks: ['Live process inputs, eligible machines, resource coverage and automatic versus explicit recipe selection.', 'Actual mining output position, receiving inventory, separate energy needs and output access.'],
+    steps: ['Ground the current process and compare direct feed with available supply routes.', 'Place the upstream component, inspect its receipt and output, then validate the receiving machine against that geometry.', 'Commission input, configuration, fuel or power and accessible output; verify new native output before copying the cell.'],
+    done: 'New mined material reaches the compatible process and produces usable native output.',
+    failures: ['Direct material delivery is assumed to fuel the receiving machine.', 'An illustrative miner-to-machine proportion becomes a sizing rule.'], related: ['skill-place-observe-connect', 'skill-complete-operating-cell'],
+  },
+  {
+    id: 'starter-mining-belt-output', name: 'Starter Mining Belt Output', level: 1, revision: 3,
+    tags: ['mining', 'belt', 'coal', 'collection', 'ore', 'fuel'],
+    use: 'A resource patch needs continuing output collected onto a supported transport path.', skip: 'Direct output already serves the consumer or transport adds no useful service.',
+    checks: ['Patch coverage, held equipment and live mining, energy and transport estimates.', 'Miner output, loader pickup/drop, receiving belt direction and protected route dependencies.'],
+    steps: ['Prove a resource-covering miner and inspect its output before selecting the collection path.', 'Validate each transfer endpoint and power or fuel supply; commission a short loading section before extending it.', 'Observe new mined output reaching the destination and verify fuel remains replenished while exporting.', 'Extend only after the working section and continuing supply are proved; reobserve interfaces after every relevant mutation.'],
+    done: 'New resource output arrives through a verified collection route with continuing energy supply.',
+    failures: ['An extractor removes the fuel needed by its source miner.', 'A belt exists near the output but receives no material.'], related: ['burner-coal-loop', 'burner-inserter-refueling', 'skill-deliberate-belt-routing'],
+  },
+  {
+    id: 'two-item-half-belt', name: 'Two Item Half-Belt', level: 1, revision: 3,
+    tags: ['belt', 'lane', 'mixed', 'transport', 'supply'],
+    use: 'Different observed item streams can use separate lanes of a shared belt.', skip: 'Shared transport complicates supply or cannot meet live demand.',
+    checks: ['Live required streams, lane occupancy and available transport capacity.', 'Actual side-loading behavior, downstream pickup geometry and output blockage.'],
+    steps: ['Assign each grounded stream to an intended lane without assuming a recipe relationship.', 'Validate the local loading geometry and inspect where material actually lands.', 'Observe both streams arriving at the intended consumers without cross-contamination or starvation.'],
+    done: 'Each required stream reaches its intended consumer through the verified lane arrangement.',
+    failures: ['Different sources load the same lane.', 'A stocked lane conceals an absent replenishment path.'], related: ['belt-side-load-merge', 'skill-deliberate-belt-routing'],
+  },
+  {
+    id: 'belt-side-load-merge', name: 'Belt Side-Load Merge', level: 1, revision: 4,
+    tags: ['belt', 'side-load', 'merge', 'lane', '并线'],
+    use: 'Combining observed streams with a local side-loading connection simplifies useful transport.', skip: 'The existing path is sufficient or shared capacity would starve a consumer.',
+    checks: ['Actual belt directions, lane contents and endpoints.', 'Current supply, demand and transport estimates rather than a remembered merge rating.'],
+    steps: ['Choose the receiving lane and the source path using live geometry.', 'Validate a bounded merge and observe its actual lane behavior.', 'Check the downstream consumers and source blockage under continuing flow before extending or copying the merge.'],
+    done: 'The intended streams merge into usable downstream delivery without a new supply bottleneck.',
+    failures: ['A merge is treated as creating additional production.', 'Remembered orientation replaces native lane observation.'], related: ['two-item-half-belt', 'skill-test-uneven-transport'],
+  },
+  {
+    id: 'burner-inserter-refueling', name: 'Burner Inserter Refueling and Fuel-Safe Takeoff', level: 1,
+    tags: ['burner', 'inserter', 'refuel', 'coal', 'fuel', 'takeoff'],
+    use: 'A fuel-burning transfer device must start and continue moving the intended stream.', skip: 'The device uses another energy source or continuing fuel service is already proved.',
+    checks: ['Live pickup/drop geometry, inventory roles, supported fuel and device state.', 'Fuel access for the transfer device and any upstream machine whose output is being extracted.'],
+    steps: ['Inspect the actual device and source inventories; tutorial keyboard shortcuts are not NPC operations.', 'Use admitted transfers to provide a grounded startup supply and verify new item movement.', 'Observe whether the device can replenish its own fuel from this actual input stream; arrange separate replenishment when it cannot.', 'Check upstream fuel remains available while exporting, and verify the intended destination receives new material.'],
+    done: 'Transfer continues with evidenced replenishment and does not starve protected upstream fuel service.',
+    failures: ['A fuel-bearing input is assumed to guarantee self-refueling in every geometry.', 'A running extractor empties a miner fuel path.'], related: ['burner-coal-loop', 'starter-mining-belt-output', 'knowledge-connection-geometry'],
+  },
+  {
+    id: 'buffered-building-stock', name: 'Buffered Building and Supply Stock', level: 2, revision: 2,
+    tags: ['buffer', 'stock', 'buildings', 'supplies', 'mall', 'belt'],
+    use: 'The owner wants reusable stock at an authorized storage destination.', skip: 'The output is a continuous process flow or no stock target is authorized.',
+    checks: ['Current owner stock policy, actual demand, live stack size and exact destination inventory.', 'Supported control tools, existing wiring and producer-to-storage geometry.'],
+    steps: ['Resolve the target from explicit owner requirements and live demand without inventing a numeric default.', 'Where admitted controls exist, bind output control to the exact destination and item; preserve unrelated networks.', 'Verify replenishment after withdrawal and bounded output at the target, including material already in transfer.'],
+    done: 'Requested reusable stock is replenished under verified controls without capping continuous production.',
+    failures: ['A building-stock policy is applied to science or other continuously consumed output.', 'Unrelated storage contaminates the count controlling production.'], related: ['knowledge-rates-stocks-freshness', 'skill-protect-critical-supply'],
+  },
+  {
+    id: 'starter-smelting-row', name: 'Starter Smelting Row', level: 2, revision: 4,
+    tags: ['smelting', 'row', 'furnace', 'ore', 'fuel', 'plates'],
+    use: 'A commissioned smelting cell needs measured additional output.', skip: 'The current cell meets the goal or its supply path is the actual bottleneck.',
+    checks: ['Live target process, demand, measured cell output and expansion cost.', 'Actual input, fuel or power, transfer geometry, destination capacity and protected access.'],
+    steps: ['Commission a useful cell before selecting repetition and spacing.', 'Ask live tools to size the smallest useful expansion and validate the repeated native geometry.', 'Verify shared material and energy supply plus downstream removal under the expanded load.'],
+    done: 'The row provides evidenced additional useful output while its shared interfaces remain supplied.',
+    failures: ['More machines amplify an existing supply bottleneck.', 'A remembered row ratio replaces current measurements.'], related: ['direct-miner-smelting', 'skill-commission-before-copying', 'scale-out-production-line'],
+  },
+  {
+    id: 'direct-insertion-chain', name: 'Direct Insertion Chain', level: 2, revision: 3,
+    tags: ['direct', 'insertion', 'chain', 'intermediate', 'transfer'],
+    use: 'Live production dependencies favor adjacent producer-consumer links.', skip: 'Shared transport, branching demand or access needs favor another route.',
+    checks: ['Current process dependencies and compatible input/output inventories.', 'Native footprints, pickup/drop geometry, energy and measured transfer capacity.'],
+    steps: ['Read the live dependency and choose the next useful producer-consumer link.', 'Prove that link with admitted placements and observed transfer before extending the chain.', 'Commission all continuing material, energy and output paths; measure useful delivery under the intended downstream load.'],
+    done: 'The grounded chain supplies its requested consumer through verified continuing transfers.',
+    failures: ['A memorized intermediate chain assumes unavailable recipes.', 'A compact footprint hides an inaccessible or unpowered transfer.'], related: ['skill-direct-transfer', 'knowledge-production-dependencies'],
+  },
+  {
+    id: 'steam-power-bootstrap', name: 'Steam Power Bootstrap', level: 2, revision: 3,
+    tags: ['steam', 'power', 'electricity', 'water', 'generator', 'fuel'],
+    use: 'The next useful process needs electricity and a live-compatible steam generation route is available.', skip: 'Existing power can meet the load or this generation route is unsupported.',
+    checks: ['Current unlocks, live heat/fluid/generator compatibility and acquisition needs.', 'Actual water access, fluid ports, fuel, electric coverage, network connections and demand.'],
+    steps: ['Ground the live-compatible source-to-generation route and size it from the intended load.', 'Place and inspect bounded fluid connections and each energy consumer; do not copy tutorial offsets or machine ratios.', 'Connect the intended consumers and verify generation, network connectivity, coverage and operation under load.', 'Observe continuing fuel and fluid replenishment; an available technology or placed pole is not a working power supply.'],
+    done: 'The intended consumer operates on evidenced generated power with continuing inputs.',
+    failures: ['Electric coverage is mistaken for connection to a producing network.', 'A generator has fluid but no useful electrical service.'], related: ['knowledge-available-capabilities', 'skill-place-observe-connect', 'skill-complete-operating-cell'],
+  },
+  {
+    id: 'scale-out-production-line', name: 'Scale Out A Production Line', level: 2, revision: 2,
+    tags: ['scale', 'expand', 'production', 'rate', 'deadline'],
+    use: 'Verified output falls below the unchanged owner target and replication offers useful progress.', skip: 'Supply, transport or configuration is limiting the existing line.',
+    checks: ['Current goal, live measured output and estimator results.', 'Acquisition/build time, shared inputs, energy, reservations and output demand.'],
+    steps: ['Diagnose the existing bottleneck and commission the initial cell.', 'Compare live-derived expansion sizes against the target and their own setup cost.', 'Validate the repeated footprints and supported interfaces, then measure additional delivered output under shared load.'],
+    done: 'The expansion yields evidenced useful progress toward the owner rate or deadline.',
+    failures: ['Installed machine count is reported as production capacity.', 'Expansion consumes the supply needed to keep the original cell working.'], related: ['starter-smelting-row', 'skill-find-actual-bottleneck', 'skill-choose-next-investment'],
+  },
   {
     id: 'knowledge-available-capabilities', name: 'Available Capabilities', level: 0, type: 'knowledge',
     tags: ['capability', 'surface', 'research', 'prototype', 'technology'],
