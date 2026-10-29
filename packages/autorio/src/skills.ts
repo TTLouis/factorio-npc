@@ -181,6 +181,7 @@ declare const storage: {
   sgluna_skill_definitions?: Record<string, SkillDefinition>
   sgluna_skill_exports?: Record<string, SkillExportRecord>
   sgluna_curated_library_profile?: CuratedLibraryProfile
+  sgluna_preserved_curated_variants?: Record<string, boolean>
 }
 
 const MAX_TEXT = 1000
@@ -625,6 +626,24 @@ function is_unedited_curated_copy(stored: SkillDefinition) {
   return true
 }
 
+function same_curated_value(left: any, right: any): boolean {
+  if (left === right) return true
+  if (typeof left !== 'object' || typeof right !== 'object' || left === null || right === null) return false
+  for (const key in left) if (!same_curated_value(left[key], right[key])) return false
+  for (const key in right) if (left[key] === undefined) return false
+  return true
+}
+
+function is_current_canonical_copy(stored: SkillDefinition) {
+  for (const raw of BASIC_SKILL_DEFINITIONS) {
+    if (raw.id === stored.id && same_curated_value(stored, canonicalize_skill_definition(raw))) return true
+  }
+  for (const raw of LEVELED_SKILL_DEFINITIONS) {
+    if (raw.id === stored.id && same_curated_value(stored, canonicalize_skill_definition(raw))) return true
+  }
+  return false
+}
+
 // Curated ids that were removed from BASIC_SKILL_DEFINITIONS. Saves seeded
 // earlier still hold a stored copy; seeding deletes it, but only while it is an
 // unedited curated copy, so a player-edited or learned skill that reuses the id
@@ -656,6 +675,10 @@ export function ensure_basic_skill_definitions() {
   let added = 0
   let upgraded = 0
   let removed = 0
+  const preserve_variant = (id: string) => {
+    if (storage.sgluna_preserved_curated_variants === undefined) storage.sgluna_preserved_curated_variants = {}
+    storage.sgluna_preserved_curated_variants[id] = true
+  }
   for (const id of RETIRED_BASIC_SKILL_IDS) {
     const stored = registry[id]
     if (stored !== undefined && is_unedited_curated_copy(stored)) {
@@ -664,19 +687,35 @@ export function ensure_basic_skill_definitions() {
     }
   }
   for (const raw of inactive) {
+    // Shared canonical ids are incorporated foundations, not inactive content.
+    if (source.some(entry => entry.id === raw.id)) continue
     const stored = registry[raw.id]
+    if (storage.sgluna_preserved_curated_variants?.[raw.id]) continue
+    if (stored !== undefined && is_unedited_curated_copy(stored) && !is_current_canonical_copy(stored)) {
+      preserve_variant(raw.id)
+      continue
+    }
     if (stored !== undefined && is_unedited_curated_copy(stored)) { delete registry[raw.id]; removed++ }
   }
   for (const raw of source) {
     const skill = canonicalize_skill_definition(raw)
     const stored = registry[skill.id]
+    if (storage.sgluna_preserved_curated_variants?.[skill.id]) continue
     if (stored === undefined) {
       registry[skill.id] = skill
       added++
     }
-    else if (stored.revision < skill.revision && is_unedited_curated_copy(stored)) {
-      registry[skill.id] = skill
-      upgraded++
+    else if (is_unedited_curated_copy(stored)) {
+      const same_family = stored.source.evidence_refs.join('\n') === skill.source.evidence_refs.join('\n')
+      if (!same_family && !is_current_canonical_copy(stored)) {
+        // Unknown historical copies may be imports without an edit marker.
+        // Retain their bytes and durable protection across switch-back/reload.
+        preserve_variant(skill.id)
+      }
+      else if (stored.revision < skill.revision || !same_family) {
+        registry[skill.id] = skill
+        upgraded++
+      }
     }
   }
   return { added, upgraded, removed, total: source.length }
@@ -1195,6 +1234,9 @@ export function put_skill_definition(value: any) {
 export function put_untrusted_skill_definition(value: any) {
   const skill = canonicalize_skill_definition(value)
   if (skill.status === 'verified') throw new Error('verified skill promotion requires the live runtime verifier; caller-supplied verified definitions are not trusted')
+  // An external import is a caller-owned definition even if copied from a
+  // curated export. Curated evidence alone does not grant overwrite authority.
+  if (is_unedited_curated_copy(skill)) skill.source.evidence_refs.push('imported:caller-definition')
   return store_dynamic_skill_definition(skill)
 }
 

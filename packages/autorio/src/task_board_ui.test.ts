@@ -772,7 +772,9 @@ describe('console refresh leaves unchanged sections alone', () => {
       const profile = find(root, SKILLS_WINDOW.library)
       profile.selected_index = 2
       get_handler((globalThis as any).defines.events.on_gui_selection_state_changed)({ player_index: 1, element: profile })
-      expect(find(root, SKILLS_WINDOW.list).tags.ids).toHaveLength(48)
+      expect(find(root, SKILLS_WINDOW.list).tags.ids).toHaveLength(60)
+      expect(profile.items[1]).toContain('foundations included')
+      expect(find(root, SKILLS_WINDOW.list).tags.ids).toContain('burner-coal-loop')
       const types = find(root, SKILLS_WINDOW.type_filter)
       types.selected_index = 2
       get_handler((globalThis as any).defines.events.on_gui_selection_state_changed)({ player_index: 1, element: types })

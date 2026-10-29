@@ -6,7 +6,7 @@ import { compactLoadedSkill, parseSkillOffers, renderSkillCard } from './skill-o
 const pack = JSON.parse(readFileSync(new URL('../../../packages/autorio/src/fixtures/leveled-library-v1.json', import.meta.url), 'utf8'))
 
 test('all authored leveled methods survive the real model-context compactor without losing decisions or applicability', () => {
-  assert.equal(pack.skills.length, 48)
+  assert.equal(pack.skills.length, 60)
   assert.equal(pack.default_enabled, false)
   const sizes = []
   for (const original of pack.skills) {
@@ -26,7 +26,7 @@ test('all authored leveled methods survive the real model-context compactor with
 })
 
 test('discovery preserves knowledge/skill and level labels without treating difficulty as verification', () => {
-  const raw = { ...pack.skills[0], produces: [], needs: [], matched: ['capability'], score: 1 }
+  const raw = { ...pack.skills.find(entry => entry.id === 'knowledge-available-capabilities'), produces: [], needs: [], matched: ['capability'], score: 1 }
   const offer = parseSkillOffers(JSON.stringify({ ok: true, cards: [raw] }))
   assert.equal(offer.cards[0].content_type, 'knowledge')
   assert.equal(offer.cards[0].level, 0)
