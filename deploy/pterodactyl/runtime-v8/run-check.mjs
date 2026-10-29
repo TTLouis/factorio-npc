@@ -875,7 +875,15 @@ function detectUnrecoveredEntityBinding(rows) {
     first_ts: row.ts, count: 1, detail: `exact entity ${row.data?.unit_number} lacks a verified checkpoint recovery` }))
 }
 
+function detectPreservationGuard(rows) {
+  const matches = rows.filter(row => ['contract.defect_refused', 'contract.preservation_close_refused', 'contract.preservation_refused', 'goal.paused'].includes(row.event)
+    && /preservation_|argument_correction_limit_exhausted/.test(String(row.data?.code ?? row.data?.reason ?? row.data?.cause ?? '')))
+  if (!matches.length) return undefined
+  return { count: matches.length, first_ts: firstTsOf(matches), detail: `Preservation guard: ${matches[0].data.code ?? matches[0].data.reason ?? matches[0].data.cause}; terminal evidence, not proof of repaired gameplay` }
+}
+
 const SIGNATURES = [
+  { id: 'preservation_guard', label: 'preservation guard refused continuation', detect: detectPreservationGuard },
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
   { id: 'contract_defect_exhausted', label: 'bounded contract-defect successor exhausted', detect: detectContractDefectExhausted },
