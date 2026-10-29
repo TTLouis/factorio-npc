@@ -1,6 +1,8 @@
 import type { LuaEntity, LuaInventory } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { protected_read } from './electric_facts'
+import { factory_input_requirements } from './factory_input_requirements'
+import { factory_native_endpoints, factory_selected_quality } from './factory_native_endpoints'
 import { area_known_visible } from './map_knowledge'
 import { find_world_entities, is_npc_vision_entity } from './npc_vision'
 import { rotate_cardinal, vector_xy } from './placement_geometry'
@@ -84,10 +86,10 @@ function products(raw: any) {
 }
 function recipe(entity: LuaEntity) {
   if (!['assembling-machine', 'furnace', 'rocket-silo'].includes(entity.type)) return { state: 'unsupported', ingredients: [], products: [], truncated: false }
-  const [current] = entity.get_recipe()
+  const [current, quality] = entity.get_recipe()
   if (!current) return { state: 'none', ingredients: [], products: [], truncated: false }
   const inputs = products(current.ingredients); const outputs = products(current.products)
-  return { state: 'known', name: current.name, ingredients: inputs.values, products: outputs.values, truncated: inputs.truncated || outputs.truncated }
+  return { state: 'known', name: current.name, selected_quality: factory_selected_quality(quality), ingredients: inputs.values, products: outputs.values, truncated: inputs.truncated || outputs.truncated }
 }
 function inventory(inventory: LuaInventory | undefined, role: string) {
   if (!inventory || !inventory.valid) return { role, state: 'unavailable', items: [], truncated: false }
@@ -97,7 +99,7 @@ function inventory(inventory: LuaInventory | undefined, role: string) {
     if (items.length >= FACTORY_CELL_LIMITS.inventory_items) { truncated = true; break }
     items.push({ name: value.name, count: value.count, quality: value.quality })
   }
-  return { role, state: 'known', items, truncated }
+  return { role, state: 'known', index: protected_read(() => inventory.index), items, truncated }
 }
 function inventories(entity: LuaEntity) {
   const result = []
@@ -177,7 +179,9 @@ function source_resources(actor: ControlledActor, entity: LuaEntity) {
     const mineable = resource.prototype.mineable_properties
     if (!mineable?.products) { unknown = true; continue }
     const yields = products(mineable.products)
+    const fluid_read = protected_read(() => ({ required_fluid: mineable.required_fluid, fluid_amount: mineable.fluid_amount }))
     resources.push({ name: resource.name, position: { x: resource.position.x, y: resource.position.y }, amount: resource.amount,
+      mining_fluid: fluid_read ? { state: 'known', ...fluid_read } : { state: 'unknown', code: 'mining_fluid_unreadable' },
       category, products: yields.values, products_truncated: yields.truncated })
   }
   return { state: unknown ? 'unknown' : 'known', code: unknown ? 'resource_products_unavailable' : undefined,
@@ -246,14 +250,23 @@ export function observe_factory_cell(actor: ControlledActor | undefined, request
     seen[locator.unit_number] = true
   }
   const members = request.members.map(locator => {
-    const resolved = exact_entity(actor, locator)
+    const resolved = protected_read(() => exact_entity(actor, locator)) ?? { code: 'member_identity_unreadable' }
     if (!resolved.entity) return { locator, state: 'unknown', code: resolved.code }
     const entity = resolved.entity
     const energy = protected_read(() => entity.energy)
     const network = protected_read(() => entity.electric_network_id)
-    return { locator, state: 'observed', ...identity(entity), status: entity.status, recipe: recipe(entity), inventories: inventories(entity),
-      burner_fuel_requirement: burner_fuel_requirement(entity),
-      source_resources: source_resources(actor, entity), item_routes: item_routes(actor, entity), fluids: fluids(actor, entity),
+    const burner = burner_fuel_requirement(entity)
+    const resources = protected_read(() => source_resources(actor, entity)) ?? { state: 'unknown', code: 'source_resources_unreadable', resources: [], truncated: false }
+    const current_recipe = protected_read(() => recipe(entity)) ?? { state: 'unknown', code: 'recipe_unreadable', ingredients: [], products: [], truncated: false }
+    const current_inventories = protected_read(() => inventories(entity)) ?? [{ state: 'unknown', code: 'inventories_unreadable', items: [], truncated: false }]
+    const routes = protected_read(() => item_routes(actor, entity)) ?? { state: 'unknown', code: 'item_routes_unreadable', routes: [], truncated: false }
+    return { locator, state: 'observed', ...identity(entity), status: entity.status,
+      recipe: current_recipe, inventories: current_inventories,
+      burner_fuel_requirement: burner, input_requirements: factory_input_requirements(entity, burner, resources),
+      endpoint_facts: factory_native_endpoints(entity, current_inventories, routes, current_recipe),
+      source_resources: resources,
+      item_routes: routes,
+      fluids: protected_read(() => fluids(actor, entity)) ?? { state: 'unknown', code: 'fluids_unreadable', storages: [], truncated: false },
       power: { state: energy === undefined && network === undefined ? 'unknown' : 'known', energy, electric_network_id: network } }
   })
   return { ...base, ok: true, code: 'ok', actor_id: request.actor_id, surface_index: request.surface_index, force_index: request.force_index, members }

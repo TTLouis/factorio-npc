@@ -217,6 +217,49 @@ describe('bounded native factory cell facts', () => {
     expect(row.inventories[0]).toMatchObject({ role: 'input', state: 'known', truncated: true })
     expect(row.inventories[0].items).toHaveLength(24)
   })
+  it('routes protected requirement reads through the real observe boundary and isolates getter failures', () => {
+    machine.type = 'assembling-machine'
+    machine.get_inventory = () => undefined
+    machine.get_recipe = () => [{ name: 'synthetic-live-process', ingredients: [{ type: 'item', name: 'synthetic-feed', amount: 2 }], products: [] }]
+    const before = JSON.stringify(G.storage)
+    expect(observe().members[0].input_requirements.material).toMatchObject({ state: 'known', inputs: [{ kind: 'item', name: 'synthetic-feed', amount: 2 }] })
+    Object.defineProperty(machine.prototype, 'electric_energy_source_prototype', { get: () => { throw new Error('synthetic power getter failure') } })
+    const read = observe().members[0]
+    expect(read.input_requirements.material.state).toBe('known')
+    expect(read.input_requirements.power).toMatchObject({ state: 'unknown', code: 'energy_source_unreadable' })
+    machine.get_recipe = () => { throw new Error('synthetic recipe getter failure') }
+    expect(observe().members[0]).toMatchObject({ recipe: { state: 'unknown' }, input_requirements: { material: { state: 'unknown', code: 'current_recipe_unreadable' }, fluid: { state: 'unknown' } } })
+    expect(JSON.stringify(G.storage)).toBe(before)
+    const fencedRead = vi.fn(() => { throw new Error('must not read fenced requirements') })
+    machine.get_recipe = fencedRead
+    visible = false
+    expect(observe().members[0].input_requirements).toBeUndefined()
+    visible = true
+    expect((observe_factory_cell(actor, request, false) as any).members).toBeUndefined()
+    expect((observe_factory_cell(actor, { ...request, world_id: FOREIGN }, true) as any).members).toBeUndefined()
+    expect(fencedRead).not.toHaveBeenCalled()
+  })
+  it('projects endpoints through the shared native fences and isolates endpoint getter faults', () => {
+    machine.type = 'assembling-machine'
+    machine.get_inventory = () => undefined
+    machine.get_max_inventory_index = () => 0
+    machine.get_recipe = () => [{ name: 'synthetic-process', ingredients: [], products: [] }, { name: 'synthetic-quality' }]
+    const before = JSON.stringify(G.storage)
+    expect(observe().members[0].endpoint_facts).toMatchObject({ inventories: { state: 'known', endpoints: [] },
+      recipe_selection: { state: 'known', recipe: 'synthetic-process', quality: { state: 'known', name: 'synthetic-quality' } } })
+    machine.get_max_inventory_index = () => { throw new Error('inventory fault') }
+    expect(observe().members[0].endpoint_facts).toMatchObject({ inventories: { state: 'error' }, recipe_selection: { state: 'known' } })
+    const read = vi.fn(() => { throw new Error('fenced endpoint getter') })
+    machine.get_max_inventory_index = read
+    visible = false
+    expect(observe().members[0].endpoint_facts).toBeUndefined()
+    visible = true
+    for (const [candidate, idle] of [[request, false], [{ ...request, world_id: FOREIGN }, true], [{ ...request, actor_id: 999 }, true], [{ ...request, surface_index: 999 }, true], [{ ...request, force_index: 999 }, true]] as const) {
+      expect((observe_factory_cell(actor, candidate, idle) as any).members).toBeUndefined()
+    }
+    expect(read).not.toHaveBeenCalled()
+    expect(JSON.stringify(G.storage)).toBe(before)
+  })
   it('does not disclose hidden or oversized belt neighbour positions or identities', () => {
     machine.type = 'transport-belt'
     actor.force.is_chunk_visible = (_surface: unknown, chunk: any) => chunk.x >= -1 && chunk.x <= 0 && chunk.y >= -1 && chunk.y <= 0
