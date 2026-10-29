@@ -13,6 +13,7 @@ import { restoreControllerRecoveries } from './controller-liveness.mjs'
 import { restoreEntityRefreshClaims } from './entity-refresh.mjs'
 import { restoreProgressAudits } from './executor-progress-audit.mjs'
 import { restorePreservationRecoveries } from './preservation-recovery.mjs'
+import { restoreStockDependencyBarriers } from './bg-stock-dependency.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -3107,6 +3108,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       ...snapshot,
       ...(this.plannerSkillHandoffs?.size ? { planner_skill_handoffs: [...this.plannerSkillHandoffs.entries()].slice(0, 128) } : {}),
       production_tasks: [...(this.productionTasks ?? new Map()).entries()],
+      stock_dependency_barriers: [...(this.stockDependencyBarriers ?? new Map()).entries()],
+      ...(this.stockDependencyBarrierFault ? { stock_dependency_barrier_fault: true } : {}),
       gather_recoveries: [...(this.gatherRecoveries ?? new Map()).entries()],
       ...(this.gatherRecoveryFault ? { gather_recovery_fault: true } : {}),
       controller_recoveries: [...(this.controllerRecoveries ?? new Map()).entries()],
@@ -3267,6 +3270,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     super.restore(snapshot)
     this.plannerSkillHandoffs = restorePlannerSkillHandoffs(snapshot?.planner_skill_handoffs)
+    const stockBarriers = restoreStockDependencyBarriers(snapshot?.stock_dependency_barriers)
+    this.stockDependencyBarriers = stockBarriers.records
+    this.stockDependencyBarrierFault = stockBarriers.fault || snapshot?.stock_dependency_barrier_fault === true
     const progressAudits = restoreProgressAudits(snapshot?.executor_progress_audits)
     this.progressAudits = progressAudits.records
     this.progressAuditFault = progressAudits.fault || snapshot?.executor_progress_audit_fault === true

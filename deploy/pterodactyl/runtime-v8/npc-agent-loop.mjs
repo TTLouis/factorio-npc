@@ -11,6 +11,7 @@ import { setTimeout as observationDelay } from 'node:timers/promises'
 import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeProductionIntent } from './production-task.mjs'
 import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
+import { activeStockDependencyBarrier, bindStockDependencyAdmission, continueStockDependencyBarrier, startStockDependencyBarrier } from './bg-stock-dependency.mjs'
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
@@ -5227,6 +5228,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const scope = this.currentTurnScope()
       return await this.turnScope.run(scope, async () => {
         this.restorePlannerSelectedSkills()
+        const stockBarrier = await continueStockDependencyBarrier(this)
+        if (stockBarrier !== undefined) return stockBarrier
         const interruptedRefresh = await recoverInterruptedEntityRefresh(this)
         if (interruptedRefresh !== undefined) return interruptedRefresh
         const gather = await recoverGatherFailure(this)
@@ -9235,6 +9238,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the active step's durable verified ledger. Prose-only and controller-state contracts never close here. The step it closes is always the one active right now, so a
   // second call (or the ordinary close after it) finds the next step and cannot close this one twice.
   async closeActiveStepOnFreshRead({ previousState, trigger, operations = [] }) {
+    if (activeStockDependencyBarrier(this)) return { closed: false, reason: 'stock_dependency_barrier_pending' }
     if (preservationObservationAdmission(this, operations)) return { closed: false }
     const key = this.requestInfo?.memoryKey
     const board = previousState?.task_board
@@ -10457,7 +10461,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
       preflight,
       protocolVersion: 2,
-      surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex,
+      surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.stockDependencyAdmission?.claim.surface_index ?? this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex,
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -10476,6 +10480,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
     }
     try {
+      bindStockDependencyAdmission(this, record)
       await this.persistState({ strict: true })
       current()
     } catch (error) {
@@ -11360,6 +11365,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
   async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}, expectedOwner) {
     const guardPause = pauseInfo.pause_class === PAUSE_CLASS.GUARD
+    // A projection may return a fresh object for the same pending amendment.
+    // Compare its stable body, which also detects in-place text/id changes.
+    const amendmentIdentity = () => JSON.stringify(this.currentPendingAmendment(), (_key, value) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))) : value)
+    const amendment = amendmentIdentity()
+    const active = this.active
+    const actorIdentity = () => JSON.stringify([this.epoch?.session, this.epoch?.actor_id, this.epoch?.epoch, this.epoch?.surface_index])
+    const actor = actorIdentity()
+    const assertGuardPauseCurrent = () => {
+      if (guardPause && (amendmentIdentity() !== amendment || this.active !== active || actorIdentity() !== actor)) {
+        const stale = new AgentLoopError('Guard pause cancelled or superseded by amendment or actor')
+        stale.code = STALE_REPLY_ERROR_CODE
+        throw stale
+      }
+    }
     const checkpointOwner = expectedOwner ?? (guardPause ? this.captureCheckpointOwner() : undefined)
     const callerAdmission = checkpointOwner?.admissionOwner
       ?? (requestAdmissionScope.getStore()?.agent === this && requestAdmissionScope.getStore()?.phase === 'turn' ? requestAdmissionScope.getStore() : null)
@@ -11373,6 +11394,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw new AgentLoopError('Request admission cancelled or superseded before pause')
     }
     await this.loadPersistentState()
+    assertGuardPauseCurrent()
     if (this.requestAdmissionOwner !== admission) {
       throw new AgentLoopError('Request admission cancelled or superseded during pause')
     }
@@ -11384,6 +11406,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // result of that synchronous owned mutation across the persistence await.
     const pausedOwner = checkpointOwner ? this.captureCheckpointOwner() : undefined
     await this.persistState()
+    assertGuardPauseCurrent()
     if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
     if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
       throw new AgentLoopError('Request admission cancelled or superseded during pause')
@@ -11394,6 +11417,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     // The diagnostic is an awaited writer too: no late pause may abort/reset a
     // request or checkpoint that arrived while its final row was queued.
+    assertGuardPauseCurrent()
     if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
     if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
       throw new AgentLoopError('Request admission cancelled or superseded during pause diagnostic')
@@ -12862,6 +12886,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.traceEvent('factorio.completed_signal', pendingAmendment ? { pending_amendment: true } : {})
     await this.dropIfStale(this.turnConversation)
     const receipt = await this.taskStatusReceipt()
+    const stockBarrier = await continueStockDependencyBarrier(this)
+    if (stockBarrier !== undefined) return stockBarrier
     const receiptKey = runtimeReceiptKey('completion', receipt.view, '', this.epoch?.epoch)
     if (this.lastHandledRuntimeReceipt.completion === receiptKey) {
       if (this.traceRequest?.usage) this.traceRequest.usage.coalesced_runtime_events++
@@ -13046,6 +13072,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.reasoningTriggerSource = null
     const cleanError = cleanMemoryText(errorText, 4000)
     const receipt = await this.taskStatusReceipt()
+    const stockBarrier = await continueStockDependencyBarrier(this)
+    if (stockBarrier !== undefined) return stockBarrier
     const prefixSettlement = this.receiptPrefixSettlement
     this.receiptPrefixSettlement = undefined
     const receiptKey = runtimeReceiptKey('failure', receipt.view, cleanError, this.epoch?.epoch)
@@ -16059,6 +16087,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async recoverArgumentPreflight(error, plan, _stateResult) {
+    const stockBarrier = await startStockDependencyBarrier(this, { ...plan, stepId: plan.stepId ?? this.captureCheckpointOwner().stepId }, error, { residual: true })
+    if (stockBarrier !== undefined) return stockBarrier
     const owner = this.captureCheckpointOwner()
     const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment(); const trace = this.traceRequest
     let grant
@@ -17204,7 +17234,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the executor may correct them like a parse-time refusal. Its own per-step allowance keeps a restage from renewing it.
   async correctProductionAdmission(plan, error) {
     const requestId = this.traceRequest?.id
-    await this.assertCurrent()
+    const owner = this.captureCheckpointOwner()
+    const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment()
+    const identity = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      if (amendment || this.requestAdmissionOwner !== intake || this.currentPendingAmendment() !== amendment) {
+        const stale = new AgentLoopError('Production correction cancelled or superseded')
+        stale.code = STALE_REPLY_ERROR_CODE
+        throw stale
+      }
+    }
+    const fence = async () => { await this.assertCheckpointOwnerCurrent(owner); identity() }
+    await fence()
     const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     const stepId = committed?.steps?.[committed.active_step_index]?.step_id
     const ledger = this.memory.productionAdmissionLedger ??= new Map()
@@ -17214,14 +17255,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason: error.code, limit: PRODUCTION_ADMISSION_CORRECTION_LIMIT }
     if (used >= PRODUCTION_ADMISSION_CORRECTION_LIMIT) {
       await this.traceEvent('production.admission_exhausted', { ...details, attempts: used }, { requestId })
+      await fence()
       return this.pauseForExecutorCorrection('production_admission_exhausted', stepId,
         `I paused this goal: my step executor kept sending a production task this step cannot admit (${error.code}), so I stopped instead of guessing. ${RESUME_HINT}`)
     }
     ledger.delete(key)
     ledger.set(key, used + 1)
     while (ledger.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
-    await this.persistState()
+    await this.persistState({ strict: true })
+    await fence()
     await this.traceEvent('production.admission_correction', { ...details, attempt: used + 1 }, { requestId })
+    await fence()
+    identity()
     this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
     this.messages.push({ role: 'user', content: `[HARNESS] productionTask refused (${error.code}): ${error.message}. Nothing ran; the committed plan is unchanged.` })
     return this.runTurn()
@@ -17263,7 +17308,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async reportProductionRepairs(plan, repairs) {
     const requestId = this.traceRequest?.id
-    await this.assertCurrent()
+    const owner = this.captureCheckpointOwner()
+    const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment()
+    const identity = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      if (amendment || this.requestAdmissionOwner !== intake || this.currentPendingAmendment() !== amendment) {
+        const stale = new AgentLoopError('Production repair cancelled or superseded')
+        stale.code = STALE_REPLY_ERROR_CODE
+        throw stale
+      }
+    }
+    const fence = async () => { await this.assertCheckpointOwnerCurrent(owner); identity() }
+    await fence()
     const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     const stepId = committed?.steps?.[committed.active_step_index]?.step_id
     const ledger = this.memory.productionRepairLedger ??= new Map()
@@ -17274,11 +17330,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ledger.set(key, used + 1)
     }
     while (ledger.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
-    await this.persistState()
+    await this.persistState({ strict: true })
+    await fence()
     for (const repair of repairs) {
       await this.traceEvent('production.admission_repaired', { request_id: requestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
         step_id: stepId, reason: repair.code, rule: repair.rule, note: repair.note }, { requestId })
+      await fence()
     }
+    identity()
     this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
     this.messages.push({ role: 'user', content: `[HARNESS] The harness repaired your productionTask before admission: ${repairs.map(row => `${row.note} (refused as ${row.code})`).join('; ')}. Nothing else in your reply changed.` })
   }
@@ -17326,6 +17385,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async commitPlan(plan) {
+    if (!this.stockDependencyAdmission && activeStockDependencyBarrier(this)) return continueStockDependencyBarrier(this)
     let refreshed = plan[REFRESHED_ENTITY_PLAN]
     if (refreshed && !refreshed.current()) throw new AgentLoopError('Entity refresh plan was cancelled or superseded')
     if (!refreshed && this.pendingEntityRefresh?.current()) refreshed = this.pendingEntityRefresh
@@ -17474,6 +17534,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await retireGoalRequirements(this, plan)
 
     const before = await this.assertCurrent()
+    if (this.stockDependencyAdmission) await this.stockDependencyAdmission.fence()
     if (this.entityRefreshAdmission) await this.entityRefreshAdmission.fence()
     if (this.gatherAdmission) {
       await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
@@ -18120,6 +18181,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (caughtError) {
         let error = caughtError
         if (!error?.preflight) throw error
+        if (this.stockDependencyAdmission) {
+          await this.stockDependencyAdmission.fence()
+          error.stockDependencyNotAdmitted = true
+          throw error
+        }
+        const stockBarrier = await startStockDependencyBarrier(this, { ...plan, stepId: miningStepId }, error)
+        if (stockBarrier !== undefined) return stockBarrier
         const miningCorrection = await correctMiningLocation(this, { ...plan, stepId: miningStepId }, error.preflight)
         if (miningCorrection?.handled) return miningCorrection.result
         if (this.gatherAdmission) {
@@ -18448,6 +18516,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         await this.traceEvent('operations.admit', { operations })
         const beforeSend = await this.assertCurrent()
+        if (this.stockDependencyAdmission) await this.stockDependencyAdmission.idleFence()
         if (this.entityRefreshAdmission) await this.entityRefreshAdmission.idleFence()
         if (this.gatherAdmission) {
           await this.assertCheckpointOwnerCurrent(this.gatherAdmission)

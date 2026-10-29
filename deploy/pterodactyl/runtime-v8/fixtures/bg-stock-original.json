@@ -1,0 +1,71 @@
+[
+  {
+    "response_id": "resp_04e8fd33d5c8ee00016ae2b469432c87d19c87f246169b06df",
+    "tap": "tap_14",
+    "operations": [
+      {
+        "name": "gather_resource",
+        "args": {
+          "resource_name": "iron-ore",
+          "count": 50,
+          "search_radius": 1024
+        }
+      },
+      {
+        "name": "move_items_exact",
+        "args": {
+          "item_name": "copper-plate",
+          "unit_number": 26,
+          "max_count": 10,
+          "to_entity": false
+        }
+      },
+      {
+        "name": "supply_entity",
+        "args": {
+          "unit_number": 26,
+          "items": [
+            {
+              "item_name": "iron-ore",
+              "count": 50
+            },
+            {
+              "item_name": "coal",
+              "count": 3
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "response_id": "resp_0de96897f5bae887016ae2b59f818487d19296f7acb0bb700e",
+    "tap": "tap_24",
+    "operations": [
+      {
+        "name": "gather_resource",
+        "args": {
+          "resource_name": "coal",
+          "count": 3,
+          "search_radius": 256
+        }
+      },
+      {
+        "name": "supply_entity",
+        "args": {
+          "unit_number": 26,
+          "items": [
+            {
+              "item_name": "iron-ore",
+              "count": 42
+            },
+            {
+              "item_name": "coal",
+              "count": 3
+            }
+          ]
+        }
+      }
+    ]
+  }
+]
