@@ -1,7 +1,8 @@
-// Protocol 3 separates strategy from actions. These records are advisory:
-// completion, permissions, exact entity identity and budgets remain harness-owned.
+// Protocol 3 separates strategy from actions. Prose guidance is advisory;
+// typed supply and cell intent constrain meaning. World authority remains harness-owned.
 import { sanitizeDurableModelText } from './durable-text.mjs'
 import { COMPLETION_CONTRACT_GUIDANCE } from './step-completion.mjs'
+import { normalizeFactoryCellIntent } from './factory-cell-intent.mjs'
 
 function text(value, max) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(`Expected non-empty text up to ${max} characters`)
@@ -12,7 +13,7 @@ export function normalizeExecutionGuidance(value, stepCount) {
   if (!Array.isArray(value) || value.length !== stepCount) throw new Error('executionGuidance must have one brief per plan step')
   return value.map(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
-      || Object.keys(entry).some(key => !['approach', 'rationale', 'constraints', 'skillIds', 'materialSupply'].includes(key))) throw new Error('Invalid executionGuidance entry')
+      || Object.keys(entry).some(key => !['approach', 'rationale', 'constraints', 'skillIds', 'materialSupply', 'cellIntent'].includes(key))) throw new Error('Invalid executionGuidance entry')
     if (!Array.isArray(entry.constraints) || entry.constraints.length > 3
       || !Array.isArray(entry.skillIds) || entry.skillIds.length > 3) throw new Error('A brief permits at most three constraints and three skills')
     return {
@@ -21,6 +22,7 @@ export function normalizeExecutionGuidance(value, stepCount) {
       constraints: entry.constraints.map(item => text(item, 100)),
       skillIds: [...new Set(entry.skillIds.map(item => text(item, 120)))],
       ...(entry.materialSupply !== undefined ? { materialSupply: normalizeMaterialSupply(entry.materialSupply) } : {}),
+      ...(Object.hasOwn(entry, 'cellIntent') ? { cellIntent: normalizeFactoryCellIntent(entry.cellIntent, entry.materialSupply) } : {}),
     }
   })
 }
@@ -76,7 +78,14 @@ export function protocol3SharedPrompt(value) {
 export function storedExecutionGuidance(value) {
   if (value === undefined) return undefined
   try { return normalizeExecutionGuidance([value], 1)[0] }
-  catch { return undefined }
+  catch {
+    // Preserve the original committed data as evidence, with a bounded durable
+    // fault. Never turn an explicit malformed obligation into legacy absence.
+    if (value && typeof value === 'object' && (Object.hasOwn(value, 'cellIntent') || Object.hasOwn(value, 'cellIntentFault'))) {
+      return { ...structuredClone(value), cellIntentFault: { code: 'factory_cell_intent_invalid' } }
+    }
+    return undefined
+  }
 }
 
 export const PLANNER_REVIEW_RATIONALE_MAX_CHARS = 400
@@ -116,6 +125,7 @@ export function plannerReviewConflicts(raw, protocolVersion, role) {
 export const SHELF_MILESTONE_GUIDANCE = '[SHELF SCOPE] Use the same capability-milestone altitude for sibling Shelf nodes. Each node names one independently verifiable capability or result with an explicit exit boundary in why_it_matters. Similar altitude does not mean equal duration, word count or number of steps. Keep construction actions, exact layouts and observation boundaries inside the Active Plan. Split a broad bundle before commitment when its parts have different outputs, independently useful completion boundaries or different prerequisite chains; do not make one node per building. For production, give each distinct resource/output chain its own milestone and separate shared fuel delivery, steam electricity, assembly capability and sustained final throughput. For example, replace "automate mining, fuel and smelting" with separate iron supply, copper supply and fuel-delivery milestones. Keep their future quantities/layouts tentative; dependencies describe actual prerequisites, not merely your preferred order. Audit all sibling nodes together before the first commit; do not rewrite an existing Shelf or committed plan merely to tidy its wording.'
 
 export const PLANNING_ONLY_PROMPT = [
+  'Optional executionGuidance.cellIntent:{kind:"direct_feed",product,sourceEntity,targetEntity,purpose} declares one new two-member production cell in that deterministic step. Use live native product and distinct prototype names, with materialSupply:{mode:"direct_feed",resource} in the same brief. Call listFactoryCells to establish the world binding before proposing an intent. Null or absence declares no enrollment. Once committed, this is an immutable assignment obligation: the harness requires exact placements from this semantic step and fresh native compatibility before step close. It does not grant gameplay permission, adopt existing hardware or prove commissioning. Do not change its job or resource during a contract-preserving replacement.',
   'Every newly authored deterministic step also declares obligations:{outcome:{mode:"all",requirements:[supported intended-result predicates]},preserve:[fresh exact unit numbers of existing structures whose identity and native item routes must remain intact]}. Use preserve:[] when no existing structure is promised preservation. These typed intents freeze with the plan; a later checkpoint cannot add new outcomes. Keep outcome quantities and scope explicit, including legitimate future global count goals. Preservation is not an extra global machine count. The harness reads preservation geometry and compiles the checkpoint; later step checkpoints still bind only when active. Observe unknown existing identities before declaring them, and keep future new entity identities unspecified.',
   'A full factory can span many immutable slices. Keep the Shelf as capability milestones and refine one bounded result at a time; do not imply that the current outline is the complete build. Supply exact result counts; execution compiles live recipe quantities and handles material shortfalls. Later step contracts may be predicted under an explicit assumed outcome and must pass fresh harness validation before binding.',
   '[ROLE: PLANNER] Choose the approach, dependencies, build order, quantities and worthwhile investments for a bounded slice. Compare relevant loaded skills and deterministic recipe/rate/cost facts. Explain optional investments as possible time savings with setup costs; they are not mandatory layouts.',
@@ -129,6 +139,7 @@ export const PLANNING_ONLY_PROMPT = [
 // Protocol 3 executors keep authority and verification rules, without the
 // durable planner's instructions to author goals, shelves or new step lists.
 export const EXECUTOR_STATE_PROMPT = [
+  'An active execution_guidance.cellIntent is a required assignment obligation. Place each intended member in a separate single place_entity or place_candidate operation batch so the harness can retain its exact receipt. Use fresh native facts to configure the selected resource and product; existing or unrelated hardware cannot substitute for those receipts. The shared close boundary validates and durably enrolls the pair. Never claim registration, change the assigned job or treat enrollment as commissioning.',
   '[EXECUTOR STATE] [PLANNING_STATE] owns the Goal, immutable Active Plan and read-only Plan Tracker. [RUNTIME_COMPAT_STATE] is historical evidence, not planning authority. Neither is live world state.',
   'The planner selects skillIds for this step; the harness supplies their matching loaded instructions in [SKILL_CONTEXT]. Skill lookup belongs to the planner: do not call findSkills or getSkillDetails. If a necessary referenced procedure is unavailable, request plannerReview instead of inventing it.',
   'Execute only the active stepId. Never change its meaning, order, completion contract, resource method or the goal. Only the harness advances verified progress. A receipt proves its correlated operations, not the whole step or goal.',

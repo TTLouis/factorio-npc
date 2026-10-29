@@ -105,6 +105,19 @@ test('programmatic planner admission cannot bypass the action prohibition', asyn
   assert.equal(w.game.mutations.length, 0)
 })
 
+test('real planner correction rejects malformed cell intent before creating a committed assignment obligation', async () => {
+  const cellIntent = { kind: 'direct_feed', product: 'copper-plate', sourceEntity: 'fixture-miner', targetEntity: 'fixture-receiver', purpose: 'Supply the accepted output.' }
+  for (const bad of [{ ...cellIntent, worldUuid: 'model-world' }, { ...cellIntent, targetEntity: cellIntent.sourceEntity },
+    { ...cellIntent, purpose: 'x'.repeat(241) }]) {
+    const w = world([draft({ executionGuidance: [{ ...brief(), materialSupply: { mode: 'direct_feed', resource: 'copper-ore' }, cellIntent: bad }] }), draft(), action])
+    await w.say()
+    assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'planner', 'executor'])
+    assert.equal(w.events.filter(row => row.event === 'role.contract_refused' && row.data.reason === 'invalid_execution_guidance').length, 1)
+    assert.equal(w.plan().steps[0].execution_guidance.cellIntent, undefined)
+    assert.equal(w.game.mutations.length, 1, 'only the corrected ordinary plan may execute')
+  }
+})
+
 test('selecting an unloaded strategy skill is corrected instead of claiming its contents were considered', async () => {
   const w = world([draft({ executionGuidance: [brief(['not-loaded'])] }), draft(), action])
   await w.say()

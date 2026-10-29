@@ -14,7 +14,7 @@ import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-ta
 import { createFactoryCellObserver } from '../pterodactyl/runtime-v8/factory-cell-observation.mjs'
 import { NpcAgentLoop } from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
 import { captureFactoryPlacementContext } from '../pterodactyl/runtime-v8/factory-placement-provenance.mjs'
-import { batchWatermark, buildPendingOperation } from '../pterodactyl/runtime-v8/operation-reconciliation.mjs'
+import { ensureCommittedFactoryCellBeforeClose } from '../pterodactyl/runtime-v8/factory-cell-enrollment.mjs'
 
 let forbiddenFetchCalls = 0
 globalThis.fetch = async () => { forbiddenFetchCalls++; throw new Error('Inference forbidden in factory-cell native proof') }
@@ -45,11 +45,8 @@ async function operation(name, args, tracking) {
     const requestId = `native-placement-${ordinal}`
     preflight = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation",${luaString(name)},helpers.json_to_table(${luaString(JSON.stringify(args))}))))`)
     assert.equal(preflight.ok, true, JSON.stringify(preflight))
-    pending = tracking.memory.recordPendingOperation(KEY, buildPendingOperation({ requestId,
-      operationKey: `${requestId}/batch`, attemptId: `${requestId}/attempt`, ordinal, protocolVersion: 2,
-      operations: [parsed], preflight: [preflight], goalId: state.goal.goal_id, planId: plan.plan_id, stepId: step.step_id,
-      actor: { actor_id: actor.actor_id, epoch: actor.epoch }, surfaceIndex: tracking.setup.surface_index,
-      baseline: batchWatermark(await tool('getTaskStatus', {})), now: Date.now() }), { requestId })
+    tracking.agent.traceRequest = { id: requestId, seq: 0 }
+    pending = await tracking.agent.recordPendingOperationBeforeSend([parsed], actor, [preflight])
     assert.ok(pending)
     captured = captureFactoryPlacementContext(tracking.memory, KEY, actor)
     assert.equal(captured?.candidates.length, 1)
@@ -70,10 +67,12 @@ async function operation(name, args, tracking) {
         assert.equal(receipt.actor_kind, 'standalone_character')
         assert.ok(receipt.placed_last_user == null)
         for (const field of ['batch_id', 'batch_generation', 'batch_ref']) assert.equal(receipt[`placed_${field}`], status.last_completed_batch[field])
-        retained = NpcAgentLoop.prototype.retainFactoryPlacementReceipt.call({ memory: tracking.memory }, status, captured)
-        assert.equal(retained.status, 'recorded', JSON.stringify({ retained, status, captured }))
-        assert.deepEqual(tracking.memory.factoryPlacementReceipt(retained.receipt.receipt_id), retained.receipt)
-        assert.equal(tracking.memory.clearPendingOperation(KEY, { operationKey: pending.operation_key }), true)
+        const settlement = await tracking.agent.taskStatusReceipt()
+        assert.equal(settlement.view.status_error, undefined, JSON.stringify(settlement))
+        const receiptId = `${receipt.placed_world_id}/${receipt.placed_batch_ref}/${receipt.operation_id}`
+        retained = { status: 'recorded', receipt: tracking.memory.factoryPlacementReceipt(receiptId) }
+        assert.ok(retained.receipt)
+        assert.equal(tracking.memory.pendingOperations(KEY).length, 0)
       }
       evidence.operations.push({ name, args, admission, receipt, ...(tracking ? { preflight, pending, captured, retained, terminal_status: status } : {}) })
       return receipt
@@ -94,7 +93,7 @@ function task(memory, resource) {
   const checkpoint = { mode: 'all', requirements: [{ id: 'held', kind: 'inventory_count', item_name: resource === 'copper-ore' ? 'copper-plate' : 'iron-plate', minimum: 1 }] }
   memory.recordPlan(KEY, { sender: 'owner', text: `Build dedicated ${resource} production without converting assigned suppliers` }, {
     chatMessage: 'Use live native production facts.', plan: ['Inspect dedicated production'], currentStep: 0, operations: [],
-    executionGuidance: [{ approach: 'Inspect the assigned source and its exact native output route.', rationale: 'Keep each accepted production assignment.', constraints: [], skillIds: [], materialSupply: { mode: 'direct_feed', resource } }],
+    executionGuidance: [{ approach: 'Inspect the assigned source and its exact native output route.', rationale: 'Keep each accepted production assignment.', constraints: [], skillIds: [], materialSupply: { mode: 'direct_feed', resource }, cellIntent: { kind: 'direct_feed', product: resource === 'copper-ore' ? 'copper-plate' : 'iron-plate', sourceEntity: 'burner-mining-drill', targetEntity: 'stone-furnace', purpose: 'Retain the dedicated supplier' } }],
     stepCompletions: [{ kind: 'deterministic', checkpoint }],
   }, { validatedPlannerAdmission: true })
   memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
@@ -108,32 +107,28 @@ function host(memory, setup, actor) {
     trace: (name, payload) => evidence.events.push({ name, ...payload }) })
   return { observer, context }
 }
-function register(memory, observer, members, actualReceipts) {
-  const scope = observer.runtime.scope()
-  const originalIntent = JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans })
-  const registered = members.map((locator, index) => {
-    const receipt = actualReceipts[index]
-    assert.equal(receipt.placed_unit_number, locator.unit_number)
-    assert.equal(receipt.entity_name, locator.name)
-    assert.deepEqual(receipt.placed_position, locator.position)
-    assert.equal(receipt.placed_surface_index, locator.surface_index)
-    assert.equal(receipt.placed_force_index, locator.force_index)
-    assert.equal(receipt.placed_world_id, scope.world_id)
-    memory.recordNpcPlacement(KEY, { unit_number: locator.unit_number, entity_name: locator.name, actor_id: scope.actor_id, actor_epoch: scope.actor_epoch })
-    const receiptId = `${receipt.placed_world_id}/${receipt.placed_batch_ref}/${receipt.operation_id}`
-    const retained = memory.factoryPlacementReceipt(receiptId)
-    assert.equal(retained.unit_number, locator.unit_number)
-    return observer.runtime.recordPlacement({ ...locator, provenance: { source: 'npc_placement_receipt', receipt_id: receiptId } }, scope)
-  })
-  assert.equal(JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans }), originalIntent, 'recording actual placement history cannot change goal or committed plans')
-  const before = JSON.stringify(memory.planningState(KEY))
-  const cell = observer.runtime.registerCell({ surface_index: scope.surface_index, force_index: scope.force_index,
-    assignment: { products: ['copper-plate'], purpose: 'Retain the copper supplier', method: 'Native drill direct feed into furnace' },
-    members: registered, ports: [{ port_id: 'fuel', direction: 'input', kind: 'fuel', resource: 'coal' },
-      { port_id: 'output', direction: 'output', kind: 'item', resource: 'copper-plate' }],
-    origin: observer.runtime.origin() }, observer.runtime.scope())
-  assert.equal(JSON.stringify(memory.planningState(KEY)), before)
+function enrollmentAgent(memory, actor) {
+  const agent = new NpcAgentLoop({ rcon, memory, stateFile: null, traceFile: null, decisionTraceFile: null,
+    npcId: 'factory-cell-native', completionProtocolVersion: 3, jevCheckpoints: false,
+    provider: async () => { forbiddenFetchCalls++; throw new Error('Inference forbidden') } })
+  agent.active = true; agent.epoch = { ...actor }; agent.requestInfo = { memoryKey: KEY }; agent.traceRequest = { id: `enrollment-${phase}`, seq: 0 }
+  agent.turnConversation = agent.agentContext.beginRequest(0)
+  agent.behaviorTrace = { emit: async row => { evidence.events.push(row) } }
+  agent.persistState = async () => { await fs.writeFile(path.join(results, `canonical-${phase}.json`), JSON.stringify(memory.snapshot(), null, 2)) }
+  return agent
+}
+async function register(memory, agent) {
+  const original = JSON.stringify(memory.planningState(KEY))
+  const enrolled = await ensureCommittedFactoryCellBeforeClose(agent, agent.captureCheckpointOwner())
+  assert.equal(enrolled.ok, true)
+  assert.equal(JSON.stringify(memory.planningState(KEY)), original, 'enrollment cannot rewrite the committed plan or close its step')
+  const cell = memory.getFactoryRegistry().cells.find(row => row.cell_id === enrolled.cell_id)
+  assert.equal(cell.enrollment.receipt_ids.length, 2)
   assert.equal(cell.state, 'unverified')
+  const again = await ensureCommittedFactoryCellBeforeClose(agent, agent.captureCheckpointOwner())
+  assert.equal(again.duplicate, true); assert.equal(again.cell_id, cell.cell_id)
+  evidence.enrollment = { first: enrolled, duplicate: again,
+    coverage: 'Actual production pre-send, post-batch receipt and enrollment helper; full shared applyStepClose checkpoint flow is covered by deterministic host lifecycle tests, not invoked by this native lane.' }
   return cell
 }
 async function compare(memory, observer, cell, members, expected) {
@@ -183,15 +178,18 @@ try {
       rcon.print(helpers.table_to_json({ox=ox,oy=oy,humans=#game.connected_players,speed=game.speed,actor_id=a.unit_number,surface_index=s.index,force_index=a.force.index,fixtures=fixtures}))`)
     assert.equal(setup.humans, 0); assert.equal(setup.speed, 1); evidence.setup = setup
     const memory = new CanonicalTaskBoardMemory(); task(memory, 'copper-ore')
-    const originalIntent = JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans })
+    const immutableIntent = () => JSON.stringify({ goal: memory.planningState(KEY).goal,
+      steps: memory.planningState(KEY).plans.map(plan => plan.steps) })
+    const originalIntent = immutableIntent()
     const w = host(memory, setup, actor)
     evidence.world = await w.observer.initializeWorld()
     evidence.world_before_placement = await native('world_identity')
     assert.equal(evidence.world_before_placement.world_id, memory.factoryWorldBinding().world_id)
-    const tracking = { memory, setup }
+    const agent = enrollmentAgent(memory, actor)
+    const tracking = { memory, setup, agent }
     const drill = await place('burner-mining-drill', { center: { x: setup.ox + 5, y: setup.oy }, radius: 4, target_resource: 'copper-ore' }, tracking)
     const furnace = await place('stone-furnace', { covers_position: drill.candidate.item_output_position }, tracking)
-    assert.equal(JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans }), originalIntent,
+    assert.equal(immutableIntent(), originalIntent,
       'automatic placement provenance capture cannot rewrite goal or committed plans')
     evidence.retained_placements = memory.snapshot().factory_placement_receipts
     assert.equal(evidence.retained_placements.length, 2)
@@ -210,7 +208,7 @@ try {
       if (production.plates > 0 && production.drop_target === members[1].unit_number) { evidence.production = production; break }
       assert.ok(Date.now() < productionDeadline, `no native copper output: ${JSON.stringify(production)}`); await delay(150)
     }
-    const cell = register(memory, w.observer, members, machines.map(row => row.receipt))
+    const cell = await register(memory, agent)
     evidence.compatible = await compare(memory, w.observer, cell, members, 'compatible')
     const worldId = memory.factoryWorldBinding().world_id
     const nativeRequest = { schema_version: 1, request_id: 'native-readonly-proof', world_id: worldId, actor_id: actor.actor_id,
@@ -268,6 +266,10 @@ try {
     })
     assert.equal(evidence.retained_placements.length, 2)
     const w = host(memory, saved.setup, actor); await w.observer.initializeWorld()
+    const agent = enrollmentAgent(memory, actor)
+    const reEnrolled = await register(memory, agent)
+    assert.equal(reEnrolled.cell_id, saved.cell.cell_id)
+    assert.equal(memory.getFactoryRegistry().cells.length, 1)
     evidence.compatible = await compare(memory, w.observer, saved.cell, saved.members, 'compatible')
     assert.equal(memory.getFactoryRegistry().cells[0].state, 'unverified')
   }

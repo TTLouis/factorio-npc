@@ -53,8 +53,59 @@ reconciliation authority and reports known applied effects separately.
 
 The guarded runtime uses this retained lookup by default. Tests or trusted host
 integrations may still supply an explicit receipt callback; model arguments never
-select it. Automatic population, typed committed cell intents, current-identity
-enrollment validation and legacy adoption remain subsequent stages.
+select it. Legacy adoption remains a separate, unimplemented protocol.
+
+## Committed pair enrollment (stage 3b)
+
+A new planner may declare one optional `cellIntent` in a deterministic step's
+execution guidance: `kind: direct_feed`, one `product`, distinct `sourceEntity`
+and `targetEntity` prototype names, and a bounded `purpose`. Its existing
+`materialSupply` must explicitly select `direct_feed` and the resource. All names
+are claims checked against native facts. No recipes, ratios, flow rates or supply
+assumptions are stored in the declaration. Old committed plans receive no intent.
+An explicitly corrupt restored intent remains a fault and cannot disappear.
+
+Before accepting this draft, the runtime requires an already bound host world
+identity and a fresh matching native identity. The planner can initialize this
+through `listFactoryCells`. A declaration grants no gameplay authority: normal
+task, stock, preservation and native admission still apply. Both machines must be
+placed in separate single-placement admissions; mixed batches and compound
+construction do not qualify. The shared pre-send boundary now obtains an exact
+native surface for eligible UUID-bound placements, including intentless ones.
+Earlier stage-3a helper/native fixtures supplied that field explicitly; they did
+not prove the former ordinary caller supplied it.
+
+The shared step-close boundary runs enrollment after the ordinary checkpoint and
+preservation checks, before completion authority. It selects exactly one retained
+placement for each prototype from the same goal and semantic step. Original
+placement-plan intent must match the current immutable intent. Another step's
+machines, old generic placement lists, multiple matching receipts or a later
+model label cannot establish membership. Configuration may be completed before
+enrollment; registered members then receive the existing reconfiguration guards.
+
+A provisional bounded native observation must prove current exact identities,
+compatible mining products, receiver recipe inputs/output and direct output route.
+The declared item output requires a native item product; a fluid with the same
+name is a mismatch, and an absent native product type remains unknown.
+Mismatch or unknown facts refuse enrollment without changing the intended job.
+A copper declaration cannot become iron because the observed source produces iron.
+The registry records the original job and output port, with an atomic enrollment
+identity and the two original receipt IDs. Identical repeats and restart reuse the
+same cell; changed members or jobs refuse. Persistence failure faults enrollment
+and prevents close while preserving already applied native placements.
+
+If the original goal becomes satisfied early, a wholly unbuilt optional cell
+intent may become moot. Any retained member placement makes the accepted intent
+an obligation to protect before automatic goal completion: a complete compatible
+pair enrolls first, while a partial or unverifiable pair safely pauses with the
+original goal proof retained. This does not authorize building extra machines,
+cleanup or recovery merely to finish enrollment.
+
+Assignments remain `unverified`. Compatibility and enrollment do not establish
+commissioning, throughput or sustained automated output. Dependencies remain
+unverified; an empty declared dependency list does not establish independence or
+self-supply. No expansion, conversion, retirement, legacy adoption, automatic
+gameplay correction or general BH repair is implemented by this slice.
 
 Native commissioning, automatic enrollment, legacy adoption, cell expansion or
 conversion, retirement, temporary-building cleanup and automatic gameplay

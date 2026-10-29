@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { FactoryRegistryError } from './factory-registry.mjs'
+import { createFactoryRegistry, registerFactoryCell, FactoryRegistryError } from './factory-registry.mjs'
 import { getActivePlan } from './planning-state.mjs'
 
 export const FACTORY_OBSERVATION_LIMITS = Object.freeze({ members: 32, body_chars: 262144, summaries: 256 })
@@ -76,6 +76,11 @@ function directFeed(cell, rows, binding, supply) {
   if (!targetRecipe) return unknown('target_recipe_unknown')
   if (!mined.products.every(product => targetRecipe.ingredients.some(item => item.name === product && item.type === 'item'))) return verdict('mismatch', 'target_recipe_input_mismatch')
   if (binding.product !== undefined && !targetRecipe.products.some(item => item.name === binding.product)) return verdict('mismatch', 'target_recipe_product_mismatch')
+  if (binding.product !== undefined) {
+    const outputs = targetRecipe.products.filter(item => item.name === binding.product)
+    if (outputs.some(item => item.type !== undefined && item.type !== 'item')) return verdict('mismatch', 'target_recipe_product_type_mismatch')
+    if (outputs.some(item => item.type !== 'item')) return unknown('target_recipe_product_type_unknown')
+  }
   const routes = observedSource.item_routes
   if (routes?.state !== 'known' || routes.truncated !== false || !Array.isArray(routes.routes)) return unknown('direct_feed_route_unknown')
   const drops = routes.routes.filter(route => route.kind === 'drop')
@@ -191,6 +196,27 @@ export function createFactoryCellObserver({ memory, key, readContext, callNative
         surface_index: cell.surface_index, force_index: cell.force_index, member_count: cell.members.length,
         location: recordedLocation(cell), commissioning: 'unverified' })) }
     },
+    // Host-only provisional read. No assignment enters the registry and no
+    // observation summary can turn this candidate into a commissioned cell.
+    observeCandidate: (declaration, binding) => guarded('observe_candidate', async owner => {
+      if (!runtime) fail('factory_world_unbound')
+      const scope = runtime.scope()
+      const registry = memory.getFactoryRegistry()
+      const cell = registerFactoryCell(createFactoryRegistry(scope.world_id), declaration).cells[0]
+      if (cell.members.length !== 2 || cell.surface_index !== scope.surface_index || cell.force_index !== scope.force_index) fail('factory_cell_scope_mismatch')
+      const plan = getActivePlan(memory.planningState(key))
+      const materialSupply = plan?.steps?.[plan.active_step_index]?.execution_guidance?.materialSupply
+      directFeed(cell, [], binding, materialSupply)
+      const request = { schema_version: 1, world_id: scope.world_id, actor_id: scope.actor_id, request_id: scope.request_id,
+        surface_index: scope.surface_index, force_index: scope.force_index, members: cell.members.map(({ provenance, ...member }) => member) }
+      const native = nativeBody(await callNative('observe', request))
+      same(owner); runtime.assertScope(scope)
+      if (native.schema_version !== 1 || native.ok !== true) fail(token(native.code) ? native.code : 'factory_native_observation_refused')
+      if (['world_id', 'actor_id', 'request_id', 'surface_index', 'force_index'].some(field => native[field] !== request[field])) fail('factory_native_observation_identity_mismatch')
+      if (!Number.isSafeInteger(native.tick) || native.tick < 0 || !Array.isArray(native.members) || native.members.length !== 2
+        || cell.members.some(member => native.members.filter(row => identity(row?.locator, member)).length !== 1)) fail('factory_native_observation_members_mismatch')
+      return { ...validateFactoryCellObservation({ registry, cell, native, binding, materialSupply }), native }
+    }),
     observe: ({ cell_id, binding } = {}) => guarded('observe', async owner => {
       if (!runtime) fail('factory_world_unbound')
       const scope = binding ? runtime.scope() : runtime.readScope()

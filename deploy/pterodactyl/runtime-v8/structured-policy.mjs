@@ -1,6 +1,7 @@
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
+import { FACTORY_CELL_INTENT_SCHEMA } from './factory-cell-intent.mjs'
 import { PLANNER_REVIEW_RATIONALE_MAX_CHARS, PLANNER_SKILL_LOOKUP_TOOLS } from './role-contracts.mjs'
 import { PRODUCTION_TASK_SCHEMA, normalizeProductionIntent } from './production-task.mjs'
 import { HARNESS_DEFAULTS_SCHEMA } from './production-repair.mjs'
@@ -1536,6 +1537,7 @@ planningOnly.parameters.properties.executionGuidance = {
     rationale: { type: 'string', minLength: 1, maxLength: 240 },
     constraints: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 100 } },
     skillIds: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 120 } },
+    cellIntent: FACTORY_CELL_INTENT_SCHEMA,
     materialSupply: { description: 'Explicit method for the step resource, or null for other work. A skill alone does not mandate a layout. Explain setup/time savings in rationale.', anyOf: [
       { type: 'null' },
       { type: 'object', additionalProperties: false, required: ['mode', 'resource'], properties: {

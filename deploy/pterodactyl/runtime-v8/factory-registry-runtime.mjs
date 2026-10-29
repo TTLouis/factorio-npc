@@ -3,6 +3,7 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { pendingOperations } from './operation-ledger.mjs'
 import { restoreFactoryObservationSummaries } from './factory-cell-observation.mjs'
 import { FactoryPlacementStore } from './factory-placement-provenance.mjs'
+import { committedFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
 
 const clone = value => structuredClone(value)
 const fail = (code, message = code) => { throw new FactoryRegistryError(code, message) }
@@ -51,6 +52,9 @@ export class FactoryRegistryStore {
   worldBinding() { return { world_id: this.#worldId, generation: this.#generation } }
   observations() { return clone(this.#observations) }
   placementReceipt(id) { return this.#placementReceipts.read(id) }
+  placementReceipts(scope) { return this.#placementReceipts.scoped(scope) }
+  placementCapacity() { return this.#placementReceipts.capacity() }
+  invalidateEnrollmentPersistence() { this.#fault ??= { code: 'factory_enrollment_persistence_failed' } }
   invalidatePlacementPersistence() { this.#placementReceipts.invalidatePersistence() }
   recordPlacementReceipt(receipt, generation) {
     if (generation !== this.#generation) fail('factory_runtime_stale')
@@ -274,6 +278,22 @@ export class FactoryRegistryStore {
       registerCell: (declaration, scope) => run('register_cell', scope, current => {
         if (declaration?.surface_index !== current.surface_index || declaration?.force_index !== current.force_index) fail('factory_cell_scope_mismatch')
         if (!declaration?.origin || Object.entries(origin(current)).some(([field, value]) => declaration.origin[field] !== value)) fail('factory_origin_stale')
+        if (declaration.enrollment) {
+          const plan = getActivePlan(memory.planningState(key)); const step = plan?.steps?.[plan.active_step_index]
+          const intent = committedFactoryCellIntent(step)
+          const enrolled = declaration.enrollment
+          if (!intent || enrolled.goal_id !== current.goal_id || enrolled.semantic_step_id !== current.semantic_step_id
+            || enrolled.intent_signature !== factoryCellIntentSignature(step.execution_guidance)
+            || JSON.stringify(declaration.assignment) !== JSON.stringify({ products: [intent.product], purpose: intent.purpose, method: 'direct_feed' })
+            || declaration.members?.length !== 2 || declaration.members[0].name !== intent.sourceEntity || declaration.members[1].name !== intent.targetEntity
+            || declaration.members.some((member, i) => member.provenance?.receipt_id !== enrolled.receipt_ids?.[i]
+              || member.provenance.goal_id !== current.goal_id || member.provenance.semantic_step_id !== current.semantic_step_id)) fail('factory_enrollment_intent_mismatch')
+          const existing = this.#registry.cells.find(cell => cell.enrollment?.goal_id === current.goal_id && cell.enrollment.semantic_step_id === current.semantic_step_id)
+          if (existing) {
+            if (['surface_index', 'force_index', 'assignment', 'members', 'ports', 'enrollment'].some(field => JSON.stringify(existing[field]) !== JSON.stringify(declaration[field]))) fail('factory_enrollment_conflict')
+            return clone(existing)
+          }
+        }
         for (const member of declaration.members ?? []) {
           const receipt = placements.get(member.unit_number)
           if (!receipt || ['world_id', 'surface_index', 'force_index', 'goal_id'].some(field => receipt.scope[field] !== current[field])

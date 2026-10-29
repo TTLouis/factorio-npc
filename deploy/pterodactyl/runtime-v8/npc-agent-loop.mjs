@@ -16,6 +16,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
+import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion } from './factory-cell-enrollment.mjs'
 import { captureFactoryPlacementContext, deriveFactoryPlacementReceipt } from './factory-placement-provenance.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
@@ -8868,6 +8869,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { closed: false, reason: preservation.reason,
         contractPause: await this.pauseForStepContract({ reason: preservation.reason, owner }) }
     }
+    try { await ensureCommittedFactoryCellBeforeClose(this, closeOwner) }
+    catch (error) {
+      this.assertCheckpointOwnerIdentity(closeOwner)
+      const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
+      if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
+      const reason = error.code ?? 'factory_enrollment_failed'
+      await this.traceEvent('factory_cell.enrollment_close_refused', { request_id: requestId, trigger, reason,
+        goal_id: closeOwner.goalId, plan_id: closeOwner.planId, step_id: closeOwner.stepId })
+      this.assertCheckpointOwnerIdentity(closeOwner)
+      return { closed: false, reason, contractPause: await this.pauseForStepContract({ reason, owner: closeOwner }) }
+    }
+    await this.assertCheckpointOwnerCurrent(closeOwner)
+    const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
+    if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
       source: 'deterministic_runtime',
@@ -10472,6 +10487,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const planning = this.memory.planningState?.(key)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
     const step = plan?.steps?.[plan.active_step_index]
+    const factoryScope = await factoryPlacementAdmissionScope(this, operations, preflight)
+    current()
+    if (factoryScope && (factoryScope.actor_id !== before?.actor_id || factoryScope.actor_epoch !== before?.epoch)) {
+      throw new AgentLoopError('Factory placement admission cancelled or superseded by actor change')
+    }
     const baseline = batchWatermark(await this.readTaskStatusRaw()) ?? null
     current()
     const record = this.memory.recordPendingOperation(key, buildPendingOperation({
@@ -10480,7 +10500,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
       preflight,
       protocolVersion: 2,
-      surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.stockDependencyAdmission?.claim.surface_index ?? this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex,
+      surfaceIndex: factoryScope?.surface_index ?? (operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.stockDependencyAdmission?.claim.surface_index ?? this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex),
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -11838,6 +11858,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const fence = evaluation._sglunaGoalFence
     if (!fence || !evaluation.satisfied) throw new AgentLoopError('Goal satisfaction requires current authoritative evaluation')
     await this.assertGoalEvaluationCurrent(fence)
+    await ensureFactoryCellBeforeGoalCompletion(this, this.captureCheckpointOwner())
+    await this.assertGoalEvaluationCurrent(fence)
     this.memory.recordGoalSatisfaction(fence.key, {
       source: 'runtime',
       evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
@@ -11860,6 +11882,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const unverifiable = evaluation.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? ''))
     if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
     if (!evaluation.satisfied) return undefined
+    const enrollmentOwner = this.captureCheckpointOwner()
+    try { await ensureFactoryCellBeforeGoalCompletion(this, enrollmentOwner) }
+    catch (error) {
+      this.assertCheckpointOwnerIdentity(enrollmentOwner)
+      await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
+      const reason = error.code ?? 'factory_enrollment_failed'
+      await this.traceEvent('factory_cell.goal_completion_refused', { request_id: enrollmentOwner.requestTrace?.id,
+        goal_id: enrollmentOwner.goalId, plan_id: enrollmentOwner.planId, step_id: enrollmentOwner.stepId,
+        reason, receipt_ids: this.memory.factoryGoalEnrollmentStatus(key).receipt_ids, original_goal_satisfied: true, disposition: 'protect_built_committed_intent_before_goal_close' })
+      this.assertCheckpointOwnerIdentity(enrollmentOwner)
+      return this.pauseForStepContract({ reason, owner: enrollmentOwner })
+    }
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
     // Close the legacy plan before recording satisfaction: recording first
     // would let the plan-close path re-admit the goal as a new active one.
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
@@ -17515,6 +17550,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const supplyReview = await this.reviewExecutorSupplyDrift(plan)
     if (supplyReview !== undefined) return supplyReview
     await this.validateStepCompletionDeclarations(plan)
+    await validateFactoryCellDraft(this, plan)
     const heldForRoleHandoff = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     if (this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
       && FROZEN_PLAN_STATUSES.has(heldForRoleHandoff?.status)

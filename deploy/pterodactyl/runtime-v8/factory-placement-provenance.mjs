@@ -77,6 +77,12 @@ export class FactoryPlacementStore {
   #fault
   invalidatePersistence() { this.#fault ??= 'factory_placement_persistence_failed' }
   read(id) { if (this.#fault) fail('factory_placement_store_fault'); return copy(this.#rows.find(row => row.receipt_id === id)) }
+  capacity() { if (this.#fault) fail('factory_placement_store_fault'); return { used: this.#rows.length, limit: FACTORY_PLACEMENT_LIMIT } }
+  scoped({ world_id, goal_id, semantic_step_id }) {
+    if (this.#fault) fail('factory_placement_store_fault')
+    if (!uuid(world_id) || !token(goal_id) || !token(semantic_step_id)) fail('factory_placement_scope_invalid')
+    return copy(this.#rows.filter(row => row.world_id === world_id && row.goal_id === goal_id && row.semantic_step_id === semantic_step_id))
+  }
   snapshot() { return { ...(this.#rows.length ? { factory_placement_receipts: copy(this.#rows) } : {}), ...(this.#fault ? { factory_placement_fault: this.#fault } : {}) } }
   record(raw, worldId) {
     if (this.#fault) fail('factory_placement_store_fault')
