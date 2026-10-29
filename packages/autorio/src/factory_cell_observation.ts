@@ -114,6 +114,13 @@ function inventories(entity: LuaEntity) {
   if (burner) result.push(inventory(burner.inventory, 'fuel'))
   return result
 }
+// Keep typeof separate from the comparison: TSTL rewrites a direct object
+// comparison as a table-only test, but native LuaObjects can be userdata.
+function native_value_type(value: unknown): string { return typeof value }
+function native_record(value: unknown): value is Record<string, unknown> {
+  const kind = native_value_type(value)
+  return value !== null && (kind === 'object' || kind === 'table' || kind === 'userdata')
+}
 function burner_fuel_requirement(entity: LuaEntity) {
   const base = { scope: 'burner_fuel_only', supply: 'unverified', delivery: 'unverified', external_source: 'unverified' }
   const unknown = (required: true | 'unknown', code: string, truncated = false) => ({ ...base,
@@ -123,10 +130,10 @@ function burner_fuel_requirement(entity: LuaEntity) {
   const read = protected_read(() => ({ burner: entity.prototype.burner_prototype }))
   if (!read) return unknown('unknown', 'burner_prototype_unreadable')
   if (read.burner === undefined) return { ...base, state: 'not_applicable', required: false, fuel_categories: [], truncated: false }
-  if (typeof read.burner !== 'object' || read.burner === null) return unknown('unknown', 'burner_prototype_malformed')
+  if (!native_record(read.burner)) return unknown('unknown', 'burner_prototype_malformed')
   const categories = protected_read(() => {
     const raw: unknown = read.burner!.fuel_categories
-    if (typeof raw !== 'object' || raw === null) return unknown(true, 'fuel_categories_malformed')
+    if (!native_record(raw)) return unknown(true, 'fuel_categories_malformed')
     // Empty Lua tables represent an empty dictionary too; a nonempty sequence
     // cannot be the native string-keyed category dictionary.
     if (Array.isArray(raw) && raw.length > 0) return unknown(true, 'fuel_categories_malformed')

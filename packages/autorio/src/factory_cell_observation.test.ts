@@ -88,11 +88,11 @@ describe('bounded native factory cell facts', () => {
       expect(requirement()).toMatchObject({ state: 'unknown', required: true, fuel_categories: [], code: 'fuel_categories_unreadable' })
     })
     it('rejects malformed prototypes, category containers and nonboolean entries without inventing absence', () => {
-      for (const burner of [false, 3, 'invalid', null]) {
+      for (const burner of [false, 3, 'invalid', null, () => ({})]) {
         machine.prototype.burner_prototype = burner
         expect(requirement()).toMatchObject({ state: 'unknown', required: 'unknown', code: 'burner_prototype_malformed' })
       }
-      for (const fuel_categories of [undefined, null, false, 3, 'invalid', [true], { '': true }, { 'test-category': 1 }, { 'test-category': 'true' }]) {
+      for (const fuel_categories of [undefined, null, false, 3, 'invalid', () => ({}), [true], { '': true }, { 'test-category': 1 }, { 'test-category': 'true' }]) {
         machine.prototype.burner_prototype = { fuel_categories }
         expect(requirement()).toMatchObject({ state: 'unknown', required: true, fuel_categories: [], code: 'fuel_categories_malformed' })
       }
