@@ -146,7 +146,7 @@ export async function ensureCommittedFactoryCellBeforeClose(agent, owner) {
       const assigned = registry.cells.find(cell => cell.members.some(row => row.unit_number === member.unit_number))
       if (assigned && assigned.cell_id !== previous?.cell_id) fail('factory_enrollment_member_assigned')
     }
-    if (previous && ['surface_index', 'force_index', 'assignment', 'members', 'ports', 'enrollment'].some(field => JSON.stringify(previous[field]) !== JSON.stringify(declaration[field]))) fail('factory_enrollment_conflict')
+    if (previous && ['surface_index', 'force_index', 'assignment', 'members', 'ports', 'enrollment'].some(field => JSON.stringify(field === 'ports' ? previous.metadata_history?.[0]?.ports ?? previous.ports : previous[field]) !== JSON.stringify(declaration[field]))) fail('factory_enrollment_conflict')
     if (!previous && registry.cells.length >= FACTORY_REGISTRY_LIMITS.cells) fail('factory_registry_capacity')
     const observation = await observer.observeCandidate(declaration, { source_unit_number: members[0].unit_number, target_unit_number: members[1].unit_number, product: current.intent.product })
     agent.assertCheckpointOwnerIdentity(owner); access.fence(); runtime.assertScope(scope)

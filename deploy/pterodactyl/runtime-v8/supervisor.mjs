@@ -4062,19 +4062,46 @@ export class Session {
     const stop = control === 'stop'
     if (stop) this.agent.cancel('user_stop_immediate')
     const received = this.currentActorCorrelation() // what the request arrived under: an intake retry is fenced to it
+    const stopAgent = this.agent
+    const stopKey = stopAgent.activePlanKey?.()
+    const stopGoal = stopAgent.memory?.planningState?.(stopKey)?.goal?.goal_id
+    const stopSession = this.lastStatus?.session
+    const stopEpoch = JSON.stringify(stopAgent.epoch)
+    const ownsStop = () => this.agent === stopAgent && this.cancelGeneration === generation
+      && this.currentActorCorrelation().actor_id === received.actor_id && this.currentActorCorrelation().epoch === received.epoch
+      && this.lastStatus?.session === stopSession && JSON.stringify(stopAgent.epoch) === stopEpoch
+      && stopAgent.activePlanKey?.() === stopKey && stopAgent.memory?.planningState?.(stopKey)?.goal?.goal_id === stopGoal
     this.queueEvent(async () => {
       try {
         if (stop) {
-          const state = typeof this.agent.pausePersistentPlan === 'function'
-            ? await this.agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
-            : undefined
-          if (state) await this.syncTaskBoardUi(state)
+          if (!ownsStop()) return
+          let state, saveError
+          try {
+            state = typeof stopAgent.pausePersistentPlan === 'function'
+              ? await stopAgent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
+              : undefined
+          } catch (error) { saveError = error }
+          // A storage failure must not leave this owner's native work running.
+          // A superseded stop must not cancel the replacement actor/goal either.
+          if (!ownsStop()) { if (saveError) this.log('Superseded stop save failed; replacement owner retained'); return }
           await this.ensureAuthorization()
+          if (!ownsStop()) { if (saveError) this.log('Superseded stop save failed; replacement owner retained'); return }
           await this.rcon.command('/silent-command remote.call("sgluna_deployment","cancel")')
+          if (!ownsStop()) return
+          if (saveError) throw saveError
+          if (state) await this.syncTaskBoardUi(state)
+          if (!ownsStop()) return
           await this.printChat(pauseChatLine(state, { cancelledWork: true }))
           return
         }
         await this.processPlayerRequest(sender, text, { received, generation })
+      }
+      catch (error) {
+        // Rejected awaits need the same ownership fence as successful returns.
+        // Generic queue failure recovery acts on the current goal, so an old
+        // stop must not send its late authorization/native/UI error there.
+        if (!stop || ownsStop()) throw error
+        this.log('Superseded stop failed; replacement owner retained')
       }
       finally {
         if (typeof onSettled === 'function') await onSettled()
