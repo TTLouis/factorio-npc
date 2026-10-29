@@ -209,6 +209,24 @@ async function compare(memory, observer, cell, members, expected) {
   assert.equal(JSON.stringify(memory.currentPlan(KEY)), board)
   assert.equal(JSON.stringify(memory.getFactoryRegistry()), registry, 'raw facts do not commission/reassign the registry')
   await compareBurnerRequirements(result.native, members)
+  if (expected === 'compatible') {
+    const source = result.native.members.find(row => row.unit_number === members[0].unit_number)
+    const receiver = result.native.members.find(row => row.unit_number === members[1].unit_number)
+    assert.equal(source.state, 'observed'); assert.equal(receiver.state, 'observed')
+    const endpoint = source.endpoint_facts.item_drop
+    assert.equal(endpoint.state, 'known')
+    assert.equal(endpoint.routes.length, 1)
+    const drop = endpoint.routes[0]
+    assert.equal(drop.kind, 'drop'); assert.equal(drop.state, 'connected')
+    assert.deepEqual(drop, source.item_routes.routes.find(row => row.kind === 'drop'))
+    const exactReceiver = Object.fromEntries(['unit_number', 'name', 'type', 'position', 'surface_index', 'force_index', 'direction', 'box'].map(key => [key, receiver[key]]))
+    assert.deepEqual(drop.target, exactReceiver, 'productive drill endpoint must identify the complete exact receiver')
+    for (const key of Object.keys(members[1])) assert.deepEqual(drop.target[key], members[1][key])
+    assert.equal(endpoint.target_inventory, 'unverified')
+    evidence.productive_drop_comparisons ??= []
+    evidence.productive_drop_comparisons.push({ phase, request_id: result.native.request_id, tick: result.native.tick,
+      source: members[0], receiver: members[1], endpoint, matches_existing_item_route: true })
+  }
   return result
 }
 try {
