@@ -113,8 +113,8 @@ test('BH copper source cannot satisfy active iron direct_feed guidance, even whi
   assert.ok(wrongJob.checks.some(row => row.code === 'assigned_product_mismatch'))
 })
 
-test('native modded resource entity and actual mined item need not share names or vanilla recipe assumptions', async () => {
-  const w = await enrolled({ resource: 'alien-vein' })
+for (const resource of ['alien-vein', 'alien-chunk']) test(`direct feed accepts native resource/product mapping for input ${resource}`, async () => {
+  const w = await enrolled({ resource })
   w.bodyMutate = body => {
     body.members[0].source_resources.resources[0].name = 'alien-vein'
     body.members[0].source_resources.resources[0].products[0].name = 'alien-chunk'
@@ -124,6 +124,67 @@ test('native modded resource entity and actual mined item need not share names o
   }
   assert.equal((await w.observer.observe(w.request)).state, 'compatible')
 })
+
+test('read-only observer cannot certify an assigned output from a resource entity alias', async () => {
+  const w = await enrolled()
+  w.bodyMutate = body => {
+    body.members[0].source_resources.resources[0].name = 'copper-plate'
+    body.members[0].source_resources.resources[0].products = [{ name: 'different-output', type: 'item', probability: 1 }]
+    body.members[1].recipe.state = 'none'
+    return body
+  }
+  const planning = JSON.stringify(w.memory.planningState(KEY)); const board = JSON.stringify(w.memory.currentPlan(KEY))
+  const registry = JSON.stringify(w.memory.getFactoryRegistry())
+  const result = await w.observer.observe({ cell_id: w.cell.cell_id })
+  assert.equal(result.state, 'unverified')
+  assert.ok(result.checks.some(row => row.code === 'assigned_product_capability_unverified'))
+  assert.equal(result.commissioning, 'unverified'); assert.equal(result.throughput, 'unverified')
+  assert.deepEqual(result.cache, { state: 'not_recorded', reason: 'read_only_observation' })
+  assert.deepEqual(w.memory.factoryCellObservations(), [])
+  assert.equal(JSON.stringify(w.memory.planningState(KEY)), planning)
+  assert.equal(JSON.stringify(w.memory.currentPlan(KEY)), board)
+  assert.equal(JSON.stringify(w.memory.getFactoryRegistry()), registry)
+  const event = w.events.find(row => row.name === 'factory_cell.observation_completed')
+  assert.equal(event.request_id, 'request-1')
+  assert.ok(event.codes.includes('assigned_product_capability_unverified'))
+})
+
+for (const source of ['recipe', 'mining']) {
+  for (const [label, kinds, type, alteration, expected] of [
+    ['exact item output', ['item'], 'item', undefined, 'compatible'],
+    ['fluid cannot certify item', ['item'], 'fluid', undefined, 'unverified'],
+    ['item cannot certify fluid', ['fluid'], 'item', undefined, 'unverified'],
+    ['exact fluid output', ['fluid'], 'fluid', undefined, 'compatible'],
+    ['fuel output requires item', ['fuel'], 'fluid', undefined, 'unverified'],
+    ['missing type', ['item'], undefined, undefined, 'unverified'],
+    ['malformed type', ['item'], 'unknown', undefined, 'unverified'],
+    ['missing type without ports', [], undefined, undefined, 'unverified'],
+    ['typed fluid without ports', [], 'fluid', undefined, 'compatible'],
+    ['both declared kinds need proof', ['item', 'fluid'], 'item', undefined, 'unverified'],
+    ['truncated products', ['item'], 'item', 'truncated', 'unverified'],
+    ['unknown native source', ['item'], 'item', 'unknown', 'unverified'],
+    ['truncated native source', ['item'], 'item', 'source-truncated', 'unverified'],
+    ['wrong actual product', ['item'], 'item', 'wrong-name', 'unverified'],
+    ['zero probability', ['item'], 'item', 'zero-probability', 'unverified'],
+    ['malformed probability', ['item'], 'item', 'bad-probability', 'unverified'],
+  ]) test(`assigned ${source} capability: ${label}`, async () => {
+    const w = await enrolled()
+    const registry = w.memory.getFactoryRegistry(); const cell = clone(registry.cells[0])
+    cell.assignment.products = ['fixture-output']
+    cell.ports = kinds.map((kind, index) => ({ port_id: `out-${index}`, direction: 'output', kind, resource: 'fixture-output' }))
+    const output = { name: alteration === 'wrong-name' ? 'different-output' : 'fixture-output', type, probability: 1 }
+    if (alteration === 'zero-probability') output.probability = 0
+    if (alteration === 'bad-probability') output.probability = '1'
+    const row = { locator: cell.members[0], state: 'observed' }
+    if (source === 'recipe') row.recipe = { state: alteration === 'unknown' ? 'unknown' : 'known', ingredients: [], products: [output], truncated: ['truncated', 'source-truncated'].includes(alteration) }
+    else row.source_resources = { state: alteration === 'unknown' ? 'unknown' : 'known', truncated: alteration === 'source-truncated', resources: [
+      { name: alteration === 'wrong-name' ? 'fixture-output' : 'fixture-resource', products: [output], products_truncated: alteration === 'truncated' },
+    ] }
+    const result = validateFactoryCellObservation({ registry, cell, native: { members: [row, { locator: cell.members[1], state: 'observed' }] } })
+    assert.equal(result.state, expected)
+    assert.equal(result.checks.at(-1).code, expected === 'compatible' ? 'assigned_product_native_capability' : 'assigned_product_capability_unverified')
+  })
+}
 
 for (const [label, mutate, state, code] of [
   ['wrong recipe input', body => { body.members[1].recipe.ingredients[0].name = 'iron-ore' }, 'mismatch', 'target_recipe_input_mismatch'],

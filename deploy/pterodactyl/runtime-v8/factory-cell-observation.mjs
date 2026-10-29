@@ -47,6 +47,18 @@ function recipe(row) {
   return value
 }
 
+function assignedOutput(row, product, kind) {
+  // Resource entity names identify input sources, not their produced outputs.
+  // A typed native product is required even when no output port declares a kind.
+  const matches = products => names(products) && products.some(item => item.name === product
+    && ['item', 'fluid'].includes(item.type) && (kind === undefined || item.type === kind)
+    && (item.probability === undefined || (Number.isFinite(item.probability) && item.probability > 0 && item.probability <= 1)))
+  if (matches(recipe(row)?.products)) return true
+  const source = row?.source_resources
+  return source?.state === 'known' && source.truncated === false && Array.isArray(source.resources)
+    && source.resources.length <= 64 && source.resources.some(entry => entry?.products_truncated === false && matches(entry.products))
+}
+
 function recordedLocation(cell) {
   const points = cell.members.map(member => member.position)
   return { state: 'historical_unverified', anchor: copy(points[0]), member_position_bounds: {
@@ -103,8 +115,9 @@ export function validateFactoryCellObservation({ registry, cell, native, binding
   // are useful; absence of a matching machine is not a fabricated failure.
   if (cell.assignment.products.length === 0) checks.push(unknown('assigned_service_capability_unverified'))
   for (const product of cell.assignment.products) {
-    const found = rows.some(row => row.state === 'observed' && (recipe(row)?.products.some(item => item.name === product)
-      || mining(row, product).state === 'compatible'))
+    const kinds = [...new Set(cell.ports.filter(port => port.direction === 'output' && port.resource === product)
+      .map(port => port.kind === 'fuel' ? 'item' : port.kind))]
+    const found = (kinds.length ? kinds : [undefined]).every(kind => rows.some(row => row.state === 'observed' && assignedOutput(row, product, kind)))
     checks.push(found ? verdict('compatible', 'assigned_product_native_capability', { product }) : { ...unknown('assigned_product_capability_unverified'), product })
   }
   const dependencies = registry.dependencies.filter(dep => dep.consumer.cell_id === cell.cell_id).map(dep => ({
