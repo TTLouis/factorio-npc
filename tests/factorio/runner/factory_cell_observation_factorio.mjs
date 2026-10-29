@@ -187,7 +187,8 @@ try {
     assert.equal(path.extname(save), '.zip', 'exact restart save must be a ZIP')
     const saveName = path.basename(save, '.zip')
     assert.match(saveName, /^[A-Za-z0-9_-]+$/, 'explicit safe native save basename')
-    await rcon.command(`/silent-command game.server_save(${luaString(saveName)})`)
+    const saveReply = await rcon.command(`/silent-command game.server_save(${luaString(saveName)})`)
+    assert.ok(!/Cannot execute command|Error:/i.test(saveReply), `native save command refused: ${saveReply}`)
     const saveDeadline = Date.now() + 30000
     while ((await fs.stat(save)).mtimeMs <= previous.mtimeMs) { assert.ok(Date.now() < saveDeadline, 'native save did not finish'); await delay(100) }
     const savedBytes = await fs.readFile(save)
