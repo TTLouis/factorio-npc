@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { createFactoryCellObserver, FACTORY_OBSERVATION_LIMITS } from './factory-cell-observation.mjs'
+import { createFactoryCellObserver, FACTORY_OBSERVATION_LIMITS, validateFactoryCellObservation } from './factory-cell-observation.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import { createFactoryRegistry, registerFactoryCell } from './factory-registry.mjs'
 
 const KEY = 'factory-observer-test'
 const WORLD = '1e837e91-4f33-43a2-a3aa-c891ee06ec66'
@@ -295,4 +296,20 @@ test('list exposes only historical member-center anchor and bounds even when nat
   assert.equal(w.observer.list().cells[0].location.anchor.x, 27)
   assert.equal(w.observer.list().cells[0].location.member_position_bounds.right_bottom.y, -4)
   assert.deepEqual(w.memory.factoryCellObservations(), [])
+})
+
+test('power-only service declarations cannot become compatible from member identity alone', async () => {
+  const w = await enrolled()
+  const original = w.memory.getFactoryRegistry()
+  const registry = registerFactoryCell(createFactoryRegistry(WORLD), {
+    surface_index: 1, force_index: 1, members: original.cells[0].members, origin: original.cells[0].origin,
+    assignment: { products: [], purpose: 'Power service', method: 'Native power service' },
+    ports: [{ port_id: 'power', direction: 'output', kind: 'power' }],
+  })
+  const cell = registry.cells[0]
+  const result = validateFactoryCellObservation({ registry, cell,
+    native: { members: cell.members.map(locator => ({ locator, state: 'observed', power: { state: 'known', energy: 100 } })) } })
+  assert.equal(result.state, 'unverified')
+  assert.ok(result.checks.some(row => row.code === 'assigned_service_capability_unverified'))
+  assert.deepEqual(w.memory.getFactoryRegistry(), original)
 })

@@ -96,6 +96,7 @@ export function validateFactoryCellObservation({ registry, cell, native, binding
   // Assignment describes final products but stage 1 has no member roles. A known
   // intermediate recipe cannot refute the entire cell. Positive matching facts
   // are useful; absence of a matching machine is not a fabricated failure.
+  if (cell.assignment.products.length === 0) checks.push(unknown('assigned_service_capability_unverified'))
   for (const product of cell.assignment.products) {
     const found = rows.some(row => row.state === 'observed' && (recipe(row)?.products.some(item => item.name === product)
       || mining(row, product).state === 'compatible'))
