@@ -877,6 +877,7 @@ function detectUnrecoveredEntityBinding(rows) {
 
 function detectPreservationGuard(rows) {
   const matches = rows.filter(row => ['contract.defect_refused', 'contract.preservation_close_refused', 'contract.preservation_refused', 'goal.paused'].includes(row.event)
+    && !String(row.data?.preflight_code ?? '').startsWith('batch_stock_')
     && /preservation_|argument_correction_limit_exhausted/.test(String(row.data?.code ?? row.data?.reason ?? row.data?.cause ?? '')))
   if (!matches.length) return undefined
   return { count: matches.length, first_ts: firstTsOf(matches), detail: `Preservation guard: ${matches[0].data.code ?? matches[0].data.reason ?? matches[0].data.cause}; terminal evidence, not proof of repaired gameplay` }
@@ -1090,7 +1091,35 @@ const INFORMATIONAL_SIGNATURES = [
 ]
 
 // Trace-scoped signatures (see the delegation detectors above).
+// Trace-scoped because controller callbacks can emit without a request id.
+// production-task-runtime pause is terminal; admission/recovery attempts alone
+// are not findings. Count one terminal shape per owner/reason, not its mirrors.
+function terminalRecoveryGuards(rows, family) {
+  const found = new Map()
+  for (const row of rows) {
+    const d = row.data ?? {}
+    const reason = String(row.event === 'request.blocked_plan_paused' ? d.code ?? d.reason : d.reason ?? d.code ?? d.cause ?? '')
+    const stock = row.event === 'stock_dependency.exhausted' || row.event === 'contract.preservation_refused'
+      && d.code === 'argument_correction_limit_exhausted' && String(d.preflight_code ?? '').startsWith('batch_stock_')
+    const production = ['production.paused', 'request.blocked_plan_paused', 'production.admission_exhausted'].includes(row.event)
+      && (reason.startsWith('production_producer_unbound') || reason === 'production_producer_binding_unrepairable')
+    const controller = row.event === 'production.paused'
+      && ['production_recovery_exhausted', 'production_task_exhausted', 'production_no_progress'].includes(reason)
+    if (family === 'stock' ? !stock : family === 'controller' ? !controller : !production) continue
+    const key = JSON.stringify([row.request_id ?? d.request_id, d.goal_id, d.plan_id, d.step_id, reason])
+    if (!found.has(key)) found.set(key, { request_id: row.request_id ?? d.request_id, count: 1, first_ts: row.ts,
+      detail: `${family === 'stock' ? 'Stock dependency correction exhausted' : family === 'controller' ? 'Production controller reached a terminal recovery guard' : 'Production producer binding unavailable'}: ${d.preflight_code ?? reason}; terminal enforcement, not a provider failure or repaired gameplay` })
+  }
+  return [...found.values()]
+}
+
 const TRACE_SIGNATURES = [
+  { id: 'stock_dependency_guard', label: 'stock dependency recovery reached a terminal guard',
+    detect: (_all, _withRequest, scoped) => terminalRecoveryGuards(scoped, 'stock') },
+  { id: 'production_controller_guard', label: 'production controller reached a durable limit',
+    detect: (_all, _withRequest, scoped) => terminalRecoveryGuards(scoped, 'controller') },
+  { id: 'production_binding_guard', label: 'production task lacks a verified producer binding',
+    detect: (_all, _withRequest, scoped) => terminalRecoveryGuards(scoped, 'production') },
   {
     id: 'sprint_superseded_owner_fault', label: 'superseded sprint boundary became a global fault',
     detect: (_all, _withRequest, rows) => rows.filter(row => row.event === 'sprint.fault'

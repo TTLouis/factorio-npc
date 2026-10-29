@@ -284,6 +284,8 @@ case "$LANE" in
     run_node contract_obligation_geometry_factorio.mjs
     run_node fluid_preservation_factorio.mjs
     run_node item_preservation_factorio.mjs
+    run_node bg_stock_recovery_factorio.mjs
+    run_node bg_producer_recovery_factorio.mjs
     ;;
   craft-trigger)
     run_py craft_trigger_cell.py
