@@ -73,7 +73,7 @@ function host(memory, setup, actor, receipts = new Map()) {
 }
 function register(memory, observer, receipts, members, actualReceipts) {
   const scope = observer.runtime.scope()
-  const before = JSON.stringify(memory.planningState(KEY))
+  const originalIntent = JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans })
   const registered = members.map((locator, index) => {
     const receipt = actualReceipts[index]
     assert.equal(receipt.placed_unit_number, locator.unit_number)
@@ -82,6 +82,8 @@ function register(memory, observer, receipts, members, actualReceipts) {
     receipts.set(receiptId, { ...scope, ...locator, receipt_id: receiptId })
     return observer.runtime.recordPlacement({ ...locator, provenance: { source: 'npc_placement_receipt', receipt_id: receiptId } }, scope)
   })
+  assert.equal(JSON.stringify({ goal: memory.planningState(KEY).goal, plans: memory.planningState(KEY).plans }), originalIntent, 'recording actual placement history cannot change goal or committed plans')
+  const before = JSON.stringify(memory.planningState(KEY))
   const cell = observer.runtime.registerCell({ surface_index: scope.surface_index, force_index: scope.force_index,
     assignment: { products: ['copper-plate'], purpose: 'Retain the copper supplier', method: 'Native drill direct feed into furnace' },
     members: registered, ports: [{ port_id: 'fuel', direction: 'input', kind: 'fuel', resource: 'coal' },
