@@ -73,10 +73,7 @@ let setup_complete = false
 
 export const task_manager = new_task_manager(get_controlled_actor)
 const operation_admission = new_operation_admission(get_controlled_actor, () => task_manager.get_status_snapshot())
-create_factory_cell_remote_interface(peek_controlled_actor, () => {
-  const status = task_manager.get_status_snapshot()
-  return status.task_state === 'idle' && status.queue_length === 0 && status.active_batch === undefined
-})
+create_factory_cell_remote_interface(peek_controlled_actor, () => task_manager.is_idle_for_observation())
 const tick_sprint = new_tick_sprint_guard(peek_controlled_actor, () => task_manager.get_status_snapshot(), () => operation_admission.status().records)
 remote.add_interface('sgluna_tick_sprint', {
   configure: (binding: Parameters<typeof tick_sprint.configure>[0]) => tick_sprint.configure(binding),

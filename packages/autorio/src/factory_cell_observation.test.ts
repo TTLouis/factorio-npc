@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bind_factory_world_id, factory_world_identity, observe_factory_cell } from './factory_cell_observation'
+import { new_task_manager } from './task_manager'
+import { TaskStates } from './types'
 
 const WORLD = '5db29844-e821-4c04-8329-177b64ef17e2'
 const FOREIGN = 'b3161b9b-e637-4cb9-84eb-f0104d4b65f6'
@@ -47,6 +49,33 @@ describe('persistent native factory world identity', () => {
 })
 describe('bounded native factory cell facts', () => {
   beforeEach(() => { bind_factory_world_id(WORLD) })
+  it('refuses real busy crafting without taking the full snapshot or reconciling its actor', () => {
+    const mutatingActorGetter = vi.fn(() => { throw new Error('factory observation cannot reconcile/create the actor') })
+    const manager = new_task_manager(mutatingActorGetter)
+    const snapshot = vi.spyOn(manager, 'get_status_snapshot')
+    const freshStorage = JSON.stringify(G.storage)
+    expect(manager.is_idle_for_observation()).toBe(true)
+    expect(JSON.stringify(G.storage), 'fresh idle checks do not initialize batch generation or execution storage').toBe(freshStorage)
+    manager.initialize()
+    manager.player_state.task_state = TaskStates.CRAFTING
+    manager.player_state.parameters_craft_item = { type: TaskStates.CRAFTING, item_name: 'iron-plate', count: 1, crafted: 0, started: true } as any
+    const craftingStorage = JSON.stringify(G.storage)
+    expect(observe_factory_cell(actor, request, manager.is_idle_for_observation())).toMatchObject({ ok: false, code: 'native_busy' })
+    expect(snapshot).not.toHaveBeenCalled()
+    expect(mutatingActorGetter).not.toHaveBeenCalled()
+    expect(JSON.stringify(G.storage)).toBe(craftingStorage)
+    expect(scan).not.toHaveBeenCalled()
+    manager.player_state.task_state = TaskStates.IDLE
+    G.storage.sgluna_task_execution.task_queue.push({ type: TaskStates.WAITING })
+    expect(manager.is_idle_for_observation()).toBe(false)
+    G.storage.sgluna_task_execution.task_queue.length = 0
+    G.storage.sgluna_task_execution.active_batch_id = 1
+    expect(manager.is_idle_for_observation()).toBe(false)
+    delete G.storage.sgluna_task_execution.active_batch_id
+    expect(manager.is_idle_for_observation()).toBe(true)
+    expect(snapshot).not.toHaveBeenCalled()
+    expect(mutatingActorGetter).not.toHaveBeenCalled()
+  })
   it('reads live mineable products rather than assuming a resource name is its product, without storage writes', () => {
     const before = JSON.stringify(G.storage)
     const result = observe()

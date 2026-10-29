@@ -97,8 +97,24 @@ async function compare(memory, observer, cell, members, expected) {
   const planning = JSON.stringify(memory.planningState(KEY))
   const board = JSON.stringify(memory.currentPlan(KEY))
   const registry = JSON.stringify(memory.getFactoryRegistry())
-  const result = await observer.observe({ cell_id: cell.cell_id, binding: {
-    source_unit_number: members[0].unit_number, target_unit_number: members[1].unit_number, product: 'copper-plate' } })
+  let result
+  const deadline = Date.now() + 15000
+  const samples = []
+  for (;;) {
+    result = await observer.observe({ cell_id: cell.cell_id, binding: {
+      source_unit_number: members[0].unit_number, target_unit_number: members[1].unit_number, product: 'copper-plate' } })
+    assert.equal(JSON.stringify(memory.planningState(KEY)), planning)
+    assert.equal(JSON.stringify(memory.currentPlan(KEY)), board)
+    assert.equal(JSON.stringify(memory.getFactoryRegistry()), registry)
+    samples.push({ tick: result.native.tick, state: result.state, checks: result.checks })
+    const dormant = expected === 'compatible' && result.state === 'unverified'
+      && result.checks.some(row => row.code === 'target_recipe_unknown')
+      && result.checks.every(row => ['native_member_identity_match', 'target_recipe_unknown', 'assigned_product_capability_unverified'].includes(row.code))
+    if (!dormant || Date.now() >= deadline) break
+    await delay(150)
+  }
+  evidence.observation_samples ??= []
+  evidence.observation_samples.push({ expected, samples })
   assert.equal(result.state, expected, JSON.stringify(result))
   assert.equal(JSON.stringify(memory.planningState(KEY)), planning, 'observation cannot rewrite the original goal or committed plan')
   assert.equal(JSON.stringify(memory.currentPlan(KEY)), board)

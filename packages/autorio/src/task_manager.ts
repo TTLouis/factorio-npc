@@ -669,6 +669,13 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     }
   }
 
+  // Internal read-only queries must not take the full status path: it ensures
+  // batch-generation storage and crafting status may reconcile/create an actor.
+  function is_idle_for_observation() {
+    const state = execution()
+    return state.player_state.task_state === TaskStates.IDLE && state.task_queue.length === 0 && state.active_batch_id === undefined
+  }
+
   function get_status_snapshot() {
     return {
       task_state: execution().player_state.task_state,
@@ -752,6 +759,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     next_task,
     interrupt_current_with,
     is_task_queue_empty,
+    is_idle_for_observation,
     get_status_snapshot,
     reset_task_state,
     cancel_task,
