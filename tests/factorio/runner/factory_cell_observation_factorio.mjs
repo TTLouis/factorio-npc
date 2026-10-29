@@ -154,6 +154,34 @@ async function register(memory, agent) {
     coverage: 'Actual production pre-send, post-batch receipt and enrollment helper; full shared applyStepClose checkpoint flow is covered by deterministic host lifecycle tests, not invoked by this native lane.' }
   return cell
 }
+async function compareBurnerRequirements(nativeResult, members) {
+  assert.equal(nativeResult.ok, true)
+  evidence.burner_requirement_comparisons ??= []
+  for (const locator of members) {
+    const row = nativeResult.members.find(member => member.unit_number === locator.unit_number)
+    assert.ok(row, 'requirement must belong to the exact observed member')
+    assert.equal(row.state, 'observed')
+    for (const key of ['name', 'surface_index', 'force_index']) assert.equal(row[key], locator[key])
+    assert.deepEqual(row.position, locator.position)
+    const requirement = row.burner_fuel_requirement
+    assert.ok(requirement)
+    assert.equal(requirement.scope, 'burner_fuel_only')
+    for (const key of ['supply', 'delivery', 'external_source']) assert.equal(requirement[key], 'unverified')
+    // Positive live API corroboration only. The convenience details projection
+    // may collapse read errors, so its absence never proves a non-burner here.
+    const details = await tool('getPrototypeDetails', { name: row.name })
+    assert.equal(details.found, true)
+    assert.equal(details.entity.name, row.name)
+    assert.ok(details.entity.burner)
+    assert.ok(Array.isArray(details.entity.burner.fuel_categories) && details.entity.burner.fuel_categories.length > 0)
+    assert.equal(requirement.state, 'known')
+    assert.equal(requirement.required, true)
+    assert.equal(requirement.truncated, false)
+    assert.deepEqual(requirement.fuel_categories, [...details.entity.burner.fuel_categories].sort())
+    evidence.burner_requirement_comparisons.push({ request_id: nativeResult.request_id, world_id: nativeResult.world_id,
+      tick: nativeResult.tick, locator, requirement, prototype_details: details })
+  }
+}
 async function compare(memory, observer, cell, members, expected) {
   const planning = JSON.stringify(memory.planningState(KEY))
   const board = JSON.stringify(memory.currentPlan(KEY))
@@ -180,6 +208,7 @@ async function compare(memory, observer, cell, members, expected) {
   assert.equal(JSON.stringify(memory.planningState(KEY)), planning, 'observation cannot rewrite the original goal or committed plan')
   assert.equal(JSON.stringify(memory.currentPlan(KEY)), board)
   assert.equal(JSON.stringify(memory.getFactoryRegistry()), registry, 'raw facts do not commission/reassign the registry')
+  await compareBurnerRequirements(result.native, members)
   return result
 }
 try {
@@ -243,6 +272,12 @@ try {
     evidence.static_fixture_geometry = await native('observe', { ...nativeRequest, request_id: 'declared-static-fixtures', members: setup.fixtures })
     assert.equal(evidence.static_fixture_geometry.ok, true)
     const fixtureRows = evidence.static_fixture_geometry.members
+    for (const row of fixtureRows) {
+      assert.equal(row.burner_fuel_requirement.state, 'not_applicable')
+      assert.equal(row.burner_fuel_requirement.required, false)
+      assert.equal(row.burner_fuel_requirement.truncated, false)
+      assert.equal(row.burner_fuel_requirement.supply, 'unverified')
+    }
     assert.ok(fixtureRows[0].fluids.storages.some(row => row.current_fluid?.name === 'water' && row.current_fluid.amount > 0))
     assert.ok(fixtureRows[0].fluids.storages.some(row => row.connections.some(edge => edge.state === 'connected' && edge.target?.unit_number === setup.fixtures[1].unit_number)))
     assert.ok(fixtureRows[1].fluids.storages.some(row => row.connections.some(edge => edge.state === 'connected' && edge.target?.unit_number === setup.fixtures[0].unit_number)))

@@ -133,6 +133,20 @@ facts cannot become negative absence evidence or successful compatibility proof.
 Recipes, products and sizing are read from the native game rather than authored
 ingredient lists or model memory.
 
+Each exactly matched visible member also carries `burner_fuel_requirement`, a
+fresh read of its native burner prototype. This field covers burner fuel only,
+not all power, fluid or material requirements. Successful native absence is
+`not_applicable` with `required: false`; an existing burner stays `required: true`
+even when its known category set is empty. Unreadable or malformed prototype
+reads are `unknown`, never absence. Categories are sorted true keys from the
+native boolean dictionary. Software bounds of 32 dictionary entries and 160
+characters per name return explicit unknown/truncated coverage when exceeded;
+incomplete sets are not published as complete accepted categories. Supply,
+delivery and external source remain `unverified` in every state. These scoped
+facts do not add dependency edges, revise ports or assignments, prove automation,
+or commission a cell. An omitted field in an older response is unknown, not
+evidence that a requirement is absent.
+
 The host compares these facts with immutable assigned products. An optional
 direct-feed binding identifies exact source and receiver members; its resource
 requirement comes from the committed active step's material-supply choice. Tool

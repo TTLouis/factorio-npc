@@ -49,6 +49,82 @@ describe('persistent native factory world identity', () => {
 })
 describe('bounded native factory cell facts', () => {
   beforeEach(() => { bind_factory_world_id(WORLD) })
+  describe('fresh native burner fuel requirements', () => {
+    const requirement = () => observe().members[0].burner_fuel_requirement
+    beforeEach(() => {
+      // This member has no other prototype-dependent projections, so getter
+      // faults below exercise precisely the new protected requirement read.
+      machine.type = 'simple-entity'
+    })
+    it('sorts only true native dictionary keys, without supply or automation claims or storage writes', () => {
+      machine.prototype.burner_prototype = { fuel_categories: { 'test-z': true, 'test-no': false, 'test-a': true } }
+      const before = JSON.stringify(G.storage)
+      expect(requirement()).toEqual({ state: 'known', required: true, fuel_categories: ['test-a', 'test-z'], truncated: false,
+        scope: 'burner_fuel_only', supply: 'unverified', delivery: 'unverified', external_source: 'unverified' })
+      machine.prototype.burner_prototype.fuel_categories = { 'test-fresh': true }
+      expect(requirement().fuel_categories).toEqual(['test-fresh'])
+      expect(JSON.stringify(G.storage)).toBe(before)
+    })
+    it('keeps an empty or all-false category set required and distinguishes successful nil', () => {
+      for (const fuel_categories of [{}, { 'test-no': false }]) {
+        machine.prototype.burner_prototype = { fuel_categories }
+        expect(requirement()).toMatchObject({ state: 'known', required: true, fuel_categories: [], truncated: false })
+      }
+      delete machine.prototype.burner_prototype
+      expect(requirement()).toMatchObject({ state: 'not_applicable', required: false, fuel_categories: [], truncated: false })
+    })
+    it('keeps prototype and burner getter failures unknown instead of treating them as native nil', () => {
+      const raises = () => { throw new Error('unreadable native property') }
+      Object.defineProperty(machine.prototype, 'burner_prototype', { get: raises })
+      expect(requirement()).toMatchObject({ state: 'unknown', required: 'unknown', code: 'burner_prototype_unreadable' })
+      Object.defineProperty(machine, 'prototype', { get: raises })
+      expect(requirement()).toMatchObject({ state: 'unknown', required: 'unknown', code: 'burner_prototype_unreadable' })
+    })
+    it('retains required true after category getter or entry reads fail', () => {
+      const raises = () => { throw new Error('unreadable category') }
+      machine.prototype.burner_prototype = Object.defineProperty({}, 'fuel_categories', { get: raises })
+      expect(requirement()).toMatchObject({ state: 'unknown', required: true, code: 'fuel_categories_unreadable' })
+      machine.prototype.burner_prototype = { fuel_categories: Object.defineProperty({}, 'test-category', { enumerable: true, get: raises }) }
+      expect(requirement()).toMatchObject({ state: 'unknown', required: true, fuel_categories: [], code: 'fuel_categories_unreadable' })
+    })
+    it('rejects malformed prototypes, category containers and nonboolean entries without inventing absence', () => {
+      for (const burner of [false, 3, 'invalid', null, () => ({})]) {
+        machine.prototype.burner_prototype = burner
+        expect(requirement()).toMatchObject({ state: 'unknown', required: 'unknown', code: 'burner_prototype_malformed' })
+      }
+      for (const fuel_categories of [undefined, null, false, 3, 'invalid', () => ({}), [true], { '': true }, { 'test-category': 1 }, { 'test-category': 'true' }]) {
+        machine.prototype.burner_prototype = { fuel_categories }
+        expect(requirement()).toMatchObject({ state: 'unknown', required: true, fuel_categories: [], code: 'fuel_categories_malformed' })
+      }
+    })
+    it('bounds dictionary traversal and name width and marks incomplete sets unknown', () => {
+      const fuel_categories = Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`test-${i}`, true]))
+      machine.prototype.burner_prototype = { fuel_categories }
+      expect(requirement()).toMatchObject({ state: 'known', required: true, truncated: false })
+      expect(requirement().fuel_categories).toHaveLength(32)
+      const overCapRead = vi.fn(() => { throw new Error('must stop before reading the extra value') })
+      Object.defineProperty(fuel_categories, 'test-over-cap', { enumerable: true, get: overCapRead })
+      expect(requirement()).toMatchObject({ state: 'unknown', required: true, truncated: true, fuel_categories: [], code: 'fuel_categories_truncated' })
+      expect(overCapRead).not.toHaveBeenCalled()
+      machine.prototype.burner_prototype.fuel_categories = { ['x'.repeat(160)]: true }
+      expect(requirement()).toMatchObject({ state: 'known', required: true, truncated: false })
+      machine.prototype.burner_prototype.fuel_categories = { ['x'.repeat(161)]: true }
+      expect(requirement()).toMatchObject({ state: 'unknown', required: true, truncated: true, fuel_categories: [], code: 'fuel_category_name_truncated' })
+    })
+    it('does not touch the member prototype for hidden or busy observations or create an actor', () => {
+      const read = vi.fn(() => { throw new Error('fenced prototype must not be read') })
+      Object.defineProperty(machine, 'prototype', { get: read })
+      const before = JSON.stringify(G.storage)
+      visible = false
+      expect(observe().members[0]).toMatchObject({ state: 'unknown', code: 'member_not_visible' })
+      visible = true
+      expect(observe_factory_cell(actor, request, false)).toMatchObject({ ok: false, code: 'native_busy' })
+      expect(observe_factory_cell(undefined, request, true)).toMatchObject({ ok: false, code: 'actor_identity_mismatch' })
+      expect(read).not.toHaveBeenCalled()
+      expect(scan).not.toHaveBeenCalled()
+      expect(JSON.stringify(G.storage)).toBe(before)
+    })
+  })
   it('refuses real busy crafting without taking the full snapshot or reconciling its actor', () => {
     const mutatingActorGetter = vi.fn(() => { throw new Error('factory observation cannot reconcile/create the actor') })
     const manager = new_task_manager(mutatingActorGetter)

@@ -7,7 +7,7 @@ import { rotate_cardinal, vector_xy } from './placement_geometry'
 import { area_around, belt_link_area, entity_area, pipe_link_area, point_area, seen_link, seen_now } from './visible_reads'
 
 // Internal host observation only. No assignment, commissioning or gameplay authority.
-export const FACTORY_CELL_LIMITS = { members: 32, resources: 64, products: 24, inventory_items: 24, fluid_storages: 16, connections: 16 }
+export const FACTORY_CELL_LIMITS = { members: 32, resources: 64, products: 24, inventory_items: 24, fluid_storages: 16, connections: 16, fuel_categories: 32, fuel_category_name: 160 }
 interface Point { x: number, y: number }
 export interface FactoryMemberLocator { unit_number: number, name: string, position: Point, surface_index: number, force_index: number }
 export interface FactoryCellRequest {
@@ -114,6 +114,47 @@ function inventories(entity: LuaEntity) {
   if (burner) result.push(inventory(burner.inventory, 'fuel'))
   return result
 }
+// Keep typeof separate from the comparison: TSTL rewrites a direct object
+// comparison as a table-only test, but native LuaObjects can be userdata.
+function native_value_type(value: unknown): string { return typeof value }
+function native_record(value: unknown): value is Record<string, unknown> {
+  const kind = native_value_type(value)
+  return value !== null && (kind === 'object' || kind === 'table' || kind === 'userdata')
+}
+function burner_fuel_requirement(entity: LuaEntity) {
+  const base = { scope: 'burner_fuel_only', supply: 'unverified', delivery: 'unverified', external_source: 'unverified' }
+  const unknown = (required: true | 'unknown', code: string, truncated = false) => ({ ...base,
+    state: 'unknown', required, fuel_categories: [] as string[], truncated, code })
+  // The wrapper distinguishes successful nil (no native burner) from a raised
+  // getter. Do not use the convenience prototype projection's empty fallback.
+  const read = protected_read(() => ({ burner: entity.prototype.burner_prototype }))
+  if (!read) return unknown('unknown', 'burner_prototype_unreadable')
+  if (read.burner === undefined) return { ...base, state: 'not_applicable', required: false, fuel_categories: [], truncated: false }
+  if (!native_record(read.burner)) return unknown('unknown', 'burner_prototype_malformed')
+  const categories = protected_read(() => {
+    const raw: unknown = read.burner!.fuel_categories
+    if (!native_record(raw)) return unknown(true, 'fuel_categories_malformed')
+    // Empty Lua tables represent an empty dictionary too; a nonempty sequence
+    // cannot be the native string-keyed category dictionary.
+    if (Array.isArray(raw) && raw.length > 0) return unknown(true, 'fuel_categories_malformed')
+    const values: string[] = []
+    let entries = 0
+    // Iterate the native boolean dictionary directly: bound work as well as
+    // output. Never turn an incomplete set into evidence that fuel is absent.
+    for (const name in raw) {
+      if (entries >= FACTORY_CELL_LIMITS.fuel_categories) return unknown(true, 'fuel_categories_truncated', true)
+      entries++
+      if (typeof name !== 'string' || name.length === 0) return unknown(true, 'fuel_categories_malformed')
+      if (name.length > FACTORY_CELL_LIMITS.fuel_category_name) return unknown(true, 'fuel_category_name_truncated', true)
+      const accepted = (raw as Record<string, unknown>)[name]
+      if (typeof accepted !== 'boolean') return unknown(true, 'fuel_categories_malformed')
+      if (accepted) values.push(name)
+    }
+    values.sort()
+    return { ...base, state: 'known', required: true, fuel_categories: values, truncated: false }
+  })
+  return categories ?? unknown(true, 'fuel_categories_unreadable')
+}
 function source_resources(actor: ControlledActor, entity: LuaEntity) {
   const empty = { resources: [], truncated: false }
   if (entity.type !== 'mining-drill') return { ...empty, state: 'not_applicable' }
@@ -211,6 +252,7 @@ export function observe_factory_cell(actor: ControlledActor | undefined, request
     const energy = protected_read(() => entity.energy)
     const network = protected_read(() => entity.electric_network_id)
     return { locator, state: 'observed', ...identity(entity), status: entity.status, recipe: recipe(entity), inventories: inventories(entity),
+      burner_fuel_requirement: burner_fuel_requirement(entity),
       source_resources: source_resources(actor, entity), item_routes: item_routes(actor, entity), fluids: fluids(actor, entity),
       power: { state: energy === undefined && network === undefined ? 'unknown' : 'known', energy, electric_network_id: network } }
   })
