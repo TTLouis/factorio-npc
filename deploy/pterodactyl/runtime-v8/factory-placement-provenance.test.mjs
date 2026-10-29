@@ -166,3 +166,19 @@ test('capture persistence failure retains pending authority and known effects bu
   assert.equal(trace.data.native_effect, 'completed')
   assert.equal(trace.data.placement_request_id, 'original-placement-request')
 })
+
+test('actual capture identity-conflict refusal retains original causal trace and native completed settlement', async () => {
+  const w = fixture()
+  const original = w.agent.retainFactoryPlacementReceipt(w.status, w.context).receipt
+  w.status.basic_operation.last_result.placed_unit_number++
+  const response = await w.agent.taskStatusReceipt()
+  assert.equal(response.view.status_error, undefined)
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
+  assert.deepEqual(w.memory.snapshot().factory_placement_receipts, [original])
+  const trace = w.events.find(row => row.event === 'factory_placement.capture')
+  assert.equal(trace.data.status, 'refused')
+  assert.equal(trace.data.reason, 'factory_placement_identity_conflict')
+  assert.equal(trace.data.placement_request_id, original.request_id)
+  for (const field of ['receipt_id', 'operation_key', 'batch_ref', 'goal_id', 'plan_id', 'step_id']) assert.equal(trace.data[field], original[field])
+  assert.ok(w.events.some(row => row.event === 'operation.reconciled' && row.data.verdict === 'admitted_completed'))
+})

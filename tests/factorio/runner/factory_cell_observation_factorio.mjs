@@ -131,7 +131,7 @@ function register(memory, observer, members, actualReceipts) {
     assignment: { products: ['copper-plate'], purpose: 'Retain the copper supplier', method: 'Native drill direct feed into furnace' },
     members: registered, ports: [{ port_id: 'fuel', direction: 'input', kind: 'fuel', resource: 'coal' },
       { port_id: 'output', direction: 'output', kind: 'item', resource: 'copper-plate' }],
-    origin: { ...registered[0].provenance, source: 'runtime_registration' } }, observer.runtime.scope())
+    origin: observer.runtime.origin() }, observer.runtime.scope())
   assert.equal(JSON.stringify(memory.planningState(KEY)), before)
   assert.equal(cell.state, 'unverified')
   return cell

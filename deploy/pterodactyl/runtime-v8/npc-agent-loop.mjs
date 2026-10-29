@@ -7079,7 +7079,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch { return { status: 'unavailable', reason: 'native_status_unreadable' } }
     const receipt = deriveFactoryPlacementReceipt(status, context)
     if (!receipt) return { status: 'unavailable', reason: 'exact_placement_provenance_missing' }
-    return this.memory.recordFactoryPlacementReceipt(receipt, context.generation)
+    try { return this.memory.recordFactoryPlacementReceipt(receipt, context.generation) }
+    catch (error) {
+      // This is the derived native witness, never a model-supplied error field.
+      // Preserve its original owner even when the evidence store refuses it.
+      Object.defineProperty(error, 'factoryPlacementReceipt', { value: receipt })
+      throw error
+    }
   }
 
   recordPlacementReceipt(raw) {
@@ -12460,7 +12466,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       let retained
       try { retained = this.retainFactoryPlacementReceipt(status, factoryPlacementContext) }
       catch (error) {
-        retained = { status: 'refused', reason: error.code ?? 'factory_placement_store_failed' }
+        retained = { status: 'refused', reason: error.code ?? 'factory_placement_store_failed', receipt: error.factoryPlacementReceipt }
       }
       if (retained.status !== 'unavailable') {
         try { await this.persistState({ strict: true }) }
