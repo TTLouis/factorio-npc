@@ -16,6 +16,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
+import { captureFactoryPlacementContext, deriveFactoryPlacementReceipt } from './factory-placement-provenance.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
@@ -7070,6 +7071,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Historical evidence only: callers capture context before reading native state.
+  // No fallback to the current plan, legacy NPC list, or a later request owner.
+  retainFactoryPlacementReceipt(raw, context) {
+    let status
+    try { status = typeof raw === 'string' ? JSON.parse(raw) : raw }
+    catch { return { status: 'unavailable', reason: 'native_status_unreadable' } }
+    const receipt = deriveFactoryPlacementReceipt(status, context)
+    if (!receipt) return { status: 'unavailable', reason: 'exact_placement_provenance_missing' }
+    return this.memory.recordFactoryPlacementReceipt(receipt, context.generation)
+  }
+
   recordPlacementReceipt(raw) {
     let parsed
     try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw }
@@ -12406,6 +12418,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.receiptBatchSettlement = undefined
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
+    const factoryPlacementContext = captureFactoryPlacementContext(this.memory, this.activePlanKey(), this.epoch)
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       this.assertCheckpointOwnerIdentity(owner)
@@ -12442,6 +12455,36 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           && (basic.tick === cancelled.tick || basic.tick === row.tick))) return false
         return [RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, RECONCILE_VERDICT.ADMITTED_PARTIAL].includes(result.verdict)
       })
+      // Persist original receipt lineage before settlement can retire the pending
+      // admission. Missing evidence does not change normal operation settlement.
+      let retained
+      try { retained = this.retainFactoryPlacementReceipt(status, factoryPlacementContext) }
+      catch (error) {
+        retained = { status: 'refused', reason: error.code ?? 'factory_placement_store_failed' }
+      }
+      if (retained.status !== 'unavailable') {
+        try { await this.persistState({ strict: true }) }
+        catch (error) {
+          // Keep original pending reconciliation authority. Applied native work
+          // is not an unsent/refused operation when metadata persistence fails.
+          this.memory.invalidateFactoryPlacementPersistence()
+          await this.traceEvent('factory_placement.capture_persistence_failed', {
+            native_effect: retained.receipt ? 'completed' : 'see_original_native_receipt',
+            receipt_id: retained.receipt?.receipt_id, placement_request_id: retained.receipt?.request_id,
+            operation_key: retained.receipt?.operation_key, batch_ref: retained.receipt?.batch_ref,
+            goal_id: retained.receipt?.goal_id, plan_id: retained.receipt?.plan_id, step_id: retained.receipt?.step_id,
+          }, { requestId: owner.requestTrace?.id })
+          throw error
+        }
+        this.assertCheckpointOwnerIdentity(owner)
+      }
+      if (status.basic_operation?.last_result?.type === 'placing') {
+        await this.traceEvent('factory_placement.capture', { status: retained.status, reason: retained.reason,
+          receipt_id: retained.receipt?.receipt_id, placement_request_id: retained.receipt?.request_id,
+          operation_key: retained.receipt?.operation_key, batch_ref: retained.receipt?.batch_ref,
+          goal_id: retained.receipt?.goal_id, plan_id: retained.receipt?.plan_id, step_id: retained.receipt?.step_id })
+        this.assertCheckpointOwnerIdentity(owner)
+      }
       await this.settleOutstandingOperation(raw, undefined, { actor: currentActor, receiptOwner: owner })
       this.assertCheckpointOwnerIdentity(owner)
       this.recordPlacementReceipt(raw)

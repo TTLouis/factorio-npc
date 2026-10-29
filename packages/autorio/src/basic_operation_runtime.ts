@@ -5,6 +5,7 @@ import type { new_basic_operation_controller, TransferInventorySnapshot, Transfe
 import { layout_node_precheck, record_layout_node_placed } from './construction_layout'
 import { entity_last_user } from './entity_provenance'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { factory_world_identity } from './factory_cell_observation'
 import { record_hand_insert } from './hand_work'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { entity_role_inventories } from './inventory_roles'
@@ -672,11 +673,19 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       log(`[AUTORIO] ERROR placement item accounting mismatch after creating ${task.entity_name}: required=${requirement.count} ${requirement.item_name}, removed=${removed}`)
     }
     log(`[AUTORIO] Entity placed successfully: ${task.entity_name} using ${requirement.count} ${requirement.item_name} at ${serpent.line(position)} direction=${task.direction ?? 'default'}`)
+    const placed_world = factory_world_identity()
+    const placed_batch = manager.get_active_batch_identity()
     controller.complete(actor, task, {
+      entity_name: entity.name,
       placed_unit_number: entity.unit_number,
       placed_entity_type: entity.type,
       placed_position: { x: entity.position.x, y: entity.position.y },
       placed_surface_index: entity.surface.index,
+      placed_force_index: entity.force.index,
+      placed_world_id: placed_world.ok ? placed_world.world_id : undefined,
+      placed_batch_id: placed_batch?.batch_id,
+      placed_batch_generation: placed_batch?.batch_generation,
+      placed_batch_ref: placed_batch?.batch_ref,
       placed_direction: entity.direction,
       preservation_binding: task.preservation_binding,
       // MW1: the engine's last_user right after placement (nil for the standalone

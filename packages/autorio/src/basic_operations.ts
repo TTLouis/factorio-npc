@@ -59,6 +59,12 @@ export interface BasicOperationResult {
   placed_entity_type?: string
   placed_position?: { x: number, y: number }
   placed_surface_index?: number
+  placed_force_index?: number
+  /** Present only when the native save already has a valid persistent world UUID. */
+  placed_world_id?: string
+  placed_batch_id?: number
+  placed_batch_generation?: number
+  placed_batch_ref?: string
   placed_direction?: number
   placed_last_user?: string
   preservation_binding?: PlayerParametersPlaceEntity['preservation_binding']

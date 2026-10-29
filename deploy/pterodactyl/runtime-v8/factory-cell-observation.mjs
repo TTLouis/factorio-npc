@@ -125,7 +125,7 @@ export function restoreFactoryObservationSummaries(raw, registry) {
   })
 }
 
-export function createFactoryCellObserver({ memory, key, readContext, callNative, readPlacementReceipt = () => undefined, trace = () => {} }) {
+export function createFactoryCellObserver({ memory, key, readContext, callNative, readPlacementReceipt, trace = () => {} }) {
   if (!memory || typeof readContext !== 'function' || typeof callNative !== 'function') fail('factory_observer_dependencies_required')
   let runtime
   let inFlight = false

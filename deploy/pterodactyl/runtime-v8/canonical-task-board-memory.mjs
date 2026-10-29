@@ -720,10 +720,19 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   factoryRegistryStatus() { return this.#factoryRegistry.status() }
   factoryWorldBinding() { return this.#factoryRegistry.worldBinding() }
   factoryCellObservations() { return this.#factoryRegistry.observations() }
+  factoryPlacementReceipt(id) { return this.#factoryRegistry.placementReceipt(id) }
+  invalidateFactoryPlacementPersistence() { this.#factoryRegistry.invalidatePlacementPersistence() }
+  recordFactoryPlacementReceipt(receipt, generation) {
+    const result = this.#factoryRegistry.recordPlacementReceipt(receipt, generation)
+    this.#authTrace('factory_placement.retained', { receipt_id: receipt.receipt_id, status: result.status,
+      operation_key: receipt.operation_key, batch_ref: receipt.batch_ref, goal_id: receipt.goal_id,
+      plan_id: receipt.plan_id, step_id: receipt.step_id, unit_number: receipt.unit_number }, receipt.request_id)
+    return result
+  }
   getFactoryMemberAssignment(identity) { return this.#factoryRegistry.member(identity) }
   factoryPlacementAvailability(placement) { return this.#factoryRegistry.placementAvailability(placement) }
   createFactoryRegistryRuntime(key, readContext, readPlacementReceipt) {
-    return this.#factoryRegistry.runtime(this, key, readContext, readPlacementReceipt, (name, payload) => this.#authTrace(name, payload, payload.request_id))
+    return this.#factoryRegistry.runtime(this, key, readContext, readPlacementReceipt ?? (id => this.factoryPlacementReceipt(id)), (name, payload) => this.#authTrace(name, payload, payload.request_id))
   }
 
   // The pending intake retry, or undefined. The caller persists (agent.persistState) after a change.

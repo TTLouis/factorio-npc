@@ -26,6 +26,36 @@ cannot create production assignments or mutate gameplay structures. Automatic
 enrollment and model-facing cell declarations remain later work. Existing
 unregistered hardware is not silently adopted or protected as an assigned cell.
 
+Stage 3a adds durable placement provenance, a prerequisite for controlled
+enrollment. The production post-batch path snapshots original pending admission
+and committed plan ownership before reading native status, then retains an exact
+completed placement receipt before retiring that pending admission. It does not
+add cell intent to a committed plan or automatically register any cell.
+
+This bounded capture accepts only one `place_entity` or `place_candidate`
+operation, one native placing task, a fully completed protocol-2 admission and
+matching terminal journal, last-completed batch and placement result. The native
+result supplies the actual world UUID, force, surface, unit, position and active
+batch identity. The world must already have a native UUID and matching host
+binding; placement never creates a UUID. Unbound worlds, legacy placements,
+mixed batches, partial/refused/cancelled work, missing evidence and stale owners
+remain unavailable for enrollment. These exclusions do not reclassify known
+native effects or change ordinary operation settlement.
+
+Canonical memory keeps at most 512 immutable receipt records, with defensive
+host-only lookup. Duplicate polling is idempotent. Capacity refuses a new record
+without evicting earlier facts; conflicting identity, corrupt or rewritten
+restore, and capture persistence failure disable lookup with a durable fault.
+Assignments remain protected independently. Captured contexts expire on restore;
+already retained evidence remains historical and never proves current native
+identity, commissioning or throughput. A persistence failure retains the pending
+reconciliation authority and reports known applied effects separately.
+
+The guarded runtime uses this retained lookup by default. Tests or trusted host
+integrations may still supply an explicit receipt callback; model arguments never
+select it. Automatic population, typed committed cell intents, current-identity
+enrollment validation and legacy adoption remain subsequent stages.
+
 Native commissioning, automatic enrollment, legacy adoption, cell expansion or
 conversion, retirement, temporary-building cleanup and automatic gameplay
 correction are later stages. These foundations are not evidence that the BH
