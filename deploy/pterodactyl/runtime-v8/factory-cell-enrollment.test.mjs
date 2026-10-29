@@ -6,12 +6,31 @@ import { getActivePlan } from './planning-state.mjs'
 import { ensureCommittedFactoryCellBeforeClose, validateFactoryCellDraft } from './factory-cell-enrollment.mjs'
 import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { classifyRequestFailure, isProviderFailurePause } from './pause-class.mjs'
+import { appendFactoryCellMetadata, factoryCellMetadataHead } from './factory-registry.mjs'
 
 const KEY = 'npc:enrollment-test'
 const WORLD = '1e837e91-4f33-43a2-a3aa-c891ee06ec66'
 const INTENT = { kind: 'direct_feed', product: 'copper-plate', sourceEntity: 'burner-mining-drill', targetEntity: 'stone-furnace', purpose: 'Keep copper production assigned' }
 const CHECKPOINT = { mode: 'all', confidence: 0.9, requirements: [{ id: 'held', kind: 'inventory_count', item_name: 'copper-plate', minimum: 1 }] }
 const clone = v => structuredClone(v)
+
+test('original committed enrollment stays idempotent after additive metadata revision and restore', async () => {
+  const w = await fixture().build(); await w.enroll()
+  const snapshot = w.memory.snapshot(); const registry = snapshot.factory_registry; const cell = registry.cells[0]
+  const { provenance, ...member } = cell.members[1]
+  const request = { transaction_id: 'enrolled-input', cell_id: cell.cell_id, expected_registry_revision: registry.revision,
+    expected_cells: [{ cell_id: cell.cell_id, revision: cell.revision, digest: factoryCellMetadataHead(cell) }],
+    input_ports: [{ port_id: 'input', direction: 'input', kind: 'item', resource: 'copper-ore' }],
+    port_bindings: [{ port_id: 'input', member, endpoint: { kind: 'inventory', inventory_index: 1 }, state: 'unverified', evidence_refs: ['unverified-host-declaration'] }],
+    dependencies: [{ consumer: { cell_id: cell.cell_id, port_id: 'input' }, supplier: { kind: 'unresolved' }, delivery: { kind: 'unknown' } }] }
+  const next = appendFactoryCellMetadata(registry, request, cell.origin).registry
+  w.memory.restore({ ...snapshot, factory_registry: next })
+  const result = await w.enroll()
+  assert.equal(result.ok, true); assert.equal(result.duplicate, true)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 1)
+  assert.equal(w.memory.getFactoryRegistry().cells[0].revision, 2)
+  assert.deepEqual(w.memory.getFactoryRegistry().cells[0].enrollment, cell.enrollment)
+})
 function fixture({ intent = true, bound = true } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   if (bound) memory.initializeFactoryRegistry(WORLD)

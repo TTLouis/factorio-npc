@@ -91,6 +91,47 @@ export function prepareFactoryCellHost(agent, action) {
   return prepareFactoryCellAccess(agent, 'factoryCellEnrollment', {}, action)
 }
 
+// Trusted host declaration bridge only. No model tool, observation publication,
+// endpoint verification or gameplay authority is added by this transaction.
+export async function commitFactoryCellMetadata(agent, change) {
+  if (!agent.stateFile) fail('factory_metadata_persistence_unavailable')
+  const traceOwner = Object.freeze({ request: agent.traceRequest, requestId: agent.traceRequest?.id,
+    actorId: agent.epoch?.actor_id, actorEpoch: agent.epoch?.epoch, sessionId: agent.epoch?.session, turn: agent.continuations + 1 })
+  return prepareFactoryCellHost(agent, async (observer, access) => {
+    const runtime = observer.runtime; const scope = runtime.scope()
+    let prepared
+    try { prepared = runtime.prepareMetadata(change, scope) }
+    catch (error) {
+      if (agent.memory.factoryRegistryStatus().status === 'fault') {
+        try { await agent.persistState({ strict: true }) } catch { /* Original committed transaction remains on disk; never retry publication. */ }
+      }
+      throw error
+    }
+    if (prepared.duplicate) return prepared
+    const { ticket } = prepared
+    try {
+      await agent.persistState({ strict: true, requiredFactoryMetadata: { ticket, phase: 'prepare' } })
+      await access.refresh(); access.fence()
+      await agent.persistState({ strict: true, requiredFactoryMetadata: { ticket, phase: 'commit' } })
+      access.fence()
+      const cell = agent.memory.finishFactoryMetadata(ticket)
+      access.acceptPublishedRevision()
+      await agent.traceEvent('factory_metadata.published', { request_id: scope.request_id, session_id: scope.session_id,
+        goal_id: scope.goal_id, plan_id: scope.plan_id, cell_id: cell.cell_id, cell_revision: cell.revision,
+        transaction_id: change.transaction_id, state: 'unverified' })
+      return { duplicate: false, cell }
+    } catch (error) {
+      agent.memory.abortFactoryMetadata(ticket)
+      // WAL restoration already fails closed if candidate commit did not land.
+      // Fault persistence is best effort when storage or request ownership fails.
+      try { await agent.persistState({ strict: true }) } catch { /* Retain WAL and original failure. */ }
+      await agent.captureFactoryObservationTrace(traceOwner,
+      'factory_cell.tool_refused', { request_id: scope.request_id, tool: 'factoryMetadataPublication', code: error.code ?? 'factory_metadata_persistence_failed' })
+      throw error
+    }
+  }).execute()
+}
+
 function prepareFactoryCellAccess(agent, name, args, hostAction) {
   const key = agent.activePlanKey()
   const epoch = { ...agent.epoch }

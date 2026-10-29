@@ -1,4 +1,4 @@
-import { createFactoryRegistry, restoreFactoryRegistry, registerFactoryCell, registerFactoryDependency, findFactoryCellByMember, FactoryRegistryError } from './factory-registry.mjs'
+import { createFactoryRegistry, restoreFactoryRegistry, registerFactoryCell, registerFactoryDependency, findFactoryCellByMember, FactoryRegistryError, appendFactoryCellMetadata, factoryCellIdentity, factoryCellMetadataHead, factoryMetadataDigest, reconcileFactoryMetadataPublication } from './factory-registry.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { pendingOperations } from './operation-ledger.mjs'
 import { restoreFactoryObservationSummaries } from './factory-cell-observation.mjs'
@@ -9,7 +9,7 @@ const clone = value => structuredClone(value)
 const fail = (code, message = code) => { throw new FactoryRegistryError(code, message) }
 const positive = value => Number.isSafeInteger(value) && value > 0
 const token = value => typeof value === 'string' && value.length > 0 && value.length <= 512
-const SCOPE = ['world_id', 'surface_index', 'force_index', 'actor_id', 'actor_epoch', 'request_id', 'goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id']
+const SCOPE = ['world_id', 'surface_index', 'force_index', 'actor_id', 'actor_epoch', 'request_id', 'session_id', 'goal_id', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id']
 // Native area_clearing.clearable_construction_blocker independently excludes
 // placed buildings. Ordinary natural clearance does not reassign cell members.
 const MUTATIONS = new Set(['mine_entity_exact', 'mine_entity', 'rotate_entity', 'set_machine_recipe'])
@@ -23,6 +23,7 @@ export class FactoryRegistryStore {
   #generation = 0
   #observations = []
   #placementReceipts = new FactoryPlacementStore()
+  #metadata
 
   constructor(expectedWorldId) {
     if (expectedWorldId !== undefined) {
@@ -66,21 +67,94 @@ export class FactoryRegistryStore {
     return {
       ...this.#placementReceipts.snapshot(),
       ...(this.#worldId !== undefined ? { factory_registry_world_id: this.#worldId } : {}),
-      ...(this.#registry ? { factory_registry: clone(this.#registry) } : {}),
+      ...(this.#registry ? { factory_registry: clone(this.#metadata?.candidateStaged ? this.#metadata.candidate : this.#registry) } : {}),
       ...(this.#fault ? { factory_registry_fault: clone(this.#fault) } : {}),
+      ...(this.#metadata ? { factory_metadata_pending: this.#metadataMarker() } : {}),
       ...(this.#observations.length ? { factory_cell_observations: clone(this.#observations) } : {}),
     }
   }
 
-  restore(snapshot) {
+  #metadataMarker() {
+    return { schema_version: 1, transaction_id: this.#metadata.change.transaction_id, candidate_digest: factoryMetadataDigest(this.#metadata.candidate),
+      previous_digest: factoryMetadataDigest(this.#registry), request_digest: factoryMetadataDigest(this.#metadata.change),
+      owner: clone(this.#metadata.owner), previous_revision: this.#registry.revision, state: 'publication_unconfirmed',
+      previous_registry: clone(this.#registry), change: clone(this.#metadata.change) }
+  }
+
+  #metadataTicket(ticket) {
+    if (!this.#metadata || this.#metadata.ticket !== ticket) fail('factory_metadata_ticket_stale')
+    if (this.#fault) fail('factory_registry_fault')
+    this.#metadata.assert()
+    return this.#metadata
+  }
+
+  assertMetadataPersistence(ticket, phase) {
+    const pending = this.#metadataTicket(ticket)
+    if (!['prepare', 'commit'].includes(phase) || (phase === 'commit' && !pending.walDurable)) fail('factory_metadata_wal_required')
+    if (pending.commitDurable) fail('factory_metadata_ticket_stale')
+    return true
+  }
+  assertMetadataOwner(ticket) { this.#metadataTicket(ticket); return true }
+
+  metadataPersistenceSnapshot(ticket, phase) {
+    this.assertMetadataPersistence(ticket, phase)
+    const snapshot = this.snapshot()
+    if (phase === 'commit') {
+      this.#metadata.candidateStaged = true
+      snapshot.factory_registry = clone(this.#metadata.candidate)
+      // Retain unresolved publication evidence through the rename/ownership
+      // acknowledgement window. Only a later ordinary save of the successfully
+      // finished live store may clear it. Cold restore reconciles only exact
+      // complete old/candidate files and never restores this live capability.
+      // Existing observation summaries remain historical but may refer to old
+      // revisions; never carry a validation cache into the new metadata head.
+      delete snapshot.factory_cell_observations
+    }
+    return snapshot
+  }
+
+  markMetadataPersisted(ticket, phase) {
+    // Called immediately after successful atomic rename, before the post-await
+    // ownership fence. This is acknowledgement, not live publication authority.
+    if (!this.#metadata || this.#metadata.ticket !== ticket) fail('factory_metadata_ticket_stale')
+    if (phase === 'prepare') this.#metadata.walDurable = true
+    else if (phase === 'commit') this.#metadata.commitDurable = true
+  }
+
+  finishMetadata(ticket) {
+    const pending = this.#metadataTicket(ticket)
+    if (!pending.commitDurable) fail('factory_metadata_persistence_required')
+    this.#registry = pending.candidate; this.#observations = []; this.#metadata = undefined
+    return clone(this.#registry.cells.find(c => c.cell_id === pending.change.cell_id))
+  }
+
+  abortMetadata(ticket) {
+    if (!this.#metadata || this.#metadata.ticket !== ticket) return
+    const pending = this.#metadata
+    // Before the WAL succeeds no candidate can have been written. Once it has
+    // succeeded, keep the old assignment plus a durable fault on every snapshot.
+    if (pending.walDurable) this.#fault ??= { code: 'factory_metadata_publication_failed', transaction_id: pending.change.transaction_id,
+      commit_acknowledged: pending.commitDurable }
+    if (pending.candidateStaged) this.#registry = pending.candidate
+    this.#metadata = undefined
+    this.#generation++
+  }
+
+  metadataPending() { return Boolean(this.#metadata) }
+
+  restore(snapshot, trace = () => {}) {
     // Every restore invalidates ephemeral registration capabilities/receipts.
     this.#generation++
+    if (this.#metadata) {
+      this.#fault ??= { code: 'factory_metadata_restore_during_publication' }
+      this.#metadata = undefined
+    }
     // Restore evidence even when the assignment store is faulted; its durable
     // fault remains independent and cannot remove existing assignment guards.
     this.#placementReceipts.restore(snapshot ?? {}, this.#worldId ?? snapshot?.factory_registry_world_id)
     if (this.#fault) return
     const has = key => Object.hasOwn(snapshot ?? {}, key)
-    if (!has('factory_registry') && !has('factory_registry_fault') && !has('factory_registry_world_id') && !has('factory_cell_observations')) return
+    if (!has('factory_registry') && !has('factory_registry_fault') && !has('factory_registry_world_id') && !has('factory_cell_observations') && !has('factory_metadata_pending')) return
     try {
       if (has('factory_registry_fault')) fail('persisted_factory_registry_fault')
       const storedWorld = snapshot.factory_registry_world_id
@@ -90,12 +164,15 @@ export class FactoryRegistryStore {
         this.#worldId = storedWorld
       }
       if (!has('factory_registry')) {
+        if (has('factory_metadata_pending')) fail('factory_metadata_publication_unconfirmed')
         if (has('factory_cell_observations')) fail('factory_observation_registry_missing')
         return
       }
       // Never infer the world identity from the payload being restored.
       if (this.#worldId === undefined) fail('factory_world_unbound')
       const restored = restoreFactoryRegistry(snapshot.factory_registry, { worldId: this.#worldId })
+      const reconciled = has('factory_metadata_pending')
+        ? reconcileFactoryMetadataPublication(restored, snapshot.factory_metadata_pending, this.#worldId) : undefined
       if (this.#registry && (restored.revision < this.#registry.revision
         || (restored.revision === this.#registry.revision && JSON.stringify(restored) !== JSON.stringify(this.#registry)))) fail('factory_registry_rollback')
       if (this.#registry) {
@@ -106,13 +183,18 @@ export class FactoryRegistryStore {
             if (!next) fail('factory_registry_history_rewritten')
             // Observations may evolve; declared jobs, membership, origins and
             // dependencies have no change/removal authority in stage 1.
-            const immutable = row => field === 'cells' ? Object.fromEntries(Object.entries(row).filter(([name]) => name !== 'observation')) : row
-            if (JSON.stringify(immutable(previous)) !== JSON.stringify(immutable(next))) fail('factory_registry_history_rewritten')
+            if (field === 'cells') {
+              if (factoryMetadataDigest(factoryCellIdentity(previous)) !== factoryMetadataDigest(factoryCellIdentity(next)) || next.revision < previous.revision) fail('factory_registry_history_rewritten')
+              if (previous.revision === 1) {
+                if (factoryCellMetadataHead(previous) !== (next.metadata_history?.[0]?.digest ?? factoryCellMetadataHead(next))) fail('factory_registry_history_rewritten')
+              } else if (factoryMetadataDigest(previous.metadata_history) !== factoryMetadataDigest(next.metadata_history?.slice(0, previous.revision))) fail('factory_registry_history_rewritten')
+            } else if (JSON.stringify(previous) !== JSON.stringify(next)) fail('factory_registry_history_rewritten')
           }
         }
       }
       this.#registry = restored
-      this.#observations = restoreFactoryObservationSummaries(snapshot.factory_cell_observations, restored)
+      this.#observations = reconciled ? [] : restoreFactoryObservationSummaries(snapshot.factory_cell_observations, restored)
+      if (reconciled) trace('factory_metadata.reconciled', reconciled)
     }
     catch (error) {
       // A bounded durable fault is sufficient to preserve rejection. Never save
@@ -137,6 +219,7 @@ export class FactoryRegistryStore {
   }
 
   admission(operations) {
+    if (this.#metadata && operations?.length) return { ok: false, refusal_class: 'world', stage: 'admission', code: 'factory_metadata_publication_pending', operation_index: 0, operation: operations[0]?.name }
     for (const [index, operation] of (operations ?? []).entries()) {
       if (!MUTATIONS.has(operation?.name)) continue
       const base = { ok: false, refusal_class: 'world', stage: 'admission', operation: operation.name, operation_index: index }
@@ -169,6 +252,7 @@ export class FactoryRegistryStore {
     // This scope never grants enrollment, dependency or historical-cache writes.
     const readScope = () => {
       this.read()
+      if (this.#metadata) fail('factory_metadata_publication_pending')
       if (generation !== this.#generation) fail('factory_runtime_stale')
       const raw = readContext()
       const planning = memory.planningState(key)
@@ -178,7 +262,7 @@ export class FactoryRegistryStore {
         || !positive(raw.actor_id) || !Number.isSafeInteger(raw.actor_epoch) || raw.actor_epoch < 0 || !token(raw.request_id)) fail('factory_runtime_scope_invalid')
       if (raw.native_idle !== true || raw.pending !== false || raw.uncertain !== false || pendingOperations(planning).length > 0) fail('factory_runtime_not_idle')
       return { world_id: this.#worldId, surface_index: raw.surface_index, force_index: raw.force_index,
-        actor_id: raw.actor_id, actor_epoch: raw.actor_epoch, request_id: raw.request_id,
+        actor_id: raw.actor_id, actor_epoch: raw.actor_epoch, request_id: raw.request_id, session_id: raw.session_id,
         goal_id: planning?.goal?.goal_id, goal_status: planning?.goal?.status,
         plan_id: plan?.plan_id, plan_version: plan?.plan_version, plan_status: plan?.status,
         step_id: step?.step_id, semantic_step_id: step?.semantic_step_id ?? step?.step_id,
@@ -190,8 +274,9 @@ export class FactoryRegistryStore {
       if (!scope || Object.keys(current).some(field => current[field] !== scope[field])) fail('factory_runtime_scope_stale')
       return current
     }
-    const context = () => {
+    const context = (allowPending = false) => {
       this.read()
+      if (this.#metadata && !allowPending) fail('factory_metadata_publication_pending')
       if (generation !== this.#generation) fail('factory_runtime_stale')
       const raw = readContext()
       const planning = memory.planningState(key)
@@ -203,12 +288,12 @@ export class FactoryRegistryStore {
         || !positive(raw.actor_id) || !Number.isSafeInteger(raw.actor_epoch) || raw.actor_epoch < 0 || !token(raw.request_id)) fail('factory_runtime_scope_invalid')
       if (raw.native_idle !== true || raw.pending !== false || raw.uncertain !== false || pendingOperations(planning).length > 0) fail('factory_runtime_not_idle')
       return { world_id: this.#worldId, surface_index: raw.surface_index, force_index: raw.force_index,
-        actor_id: raw.actor_id, actor_epoch: raw.actor_epoch, request_id: raw.request_id,
+        actor_id: raw.actor_id, actor_epoch: raw.actor_epoch, request_id: raw.request_id, session_id: raw.session_id,
         goal_id: planning.goal.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
         step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? step.step_id, expected_revision: this.#registry.revision }
     }
-    const checked = scope => {
-      const current = context()
+    const checked = (scope, allowPending = false) => {
+      const current = context(allowPending)
       if (!scope || SCOPE.some(field => scope[field] !== current[field])) fail('factory_runtime_scope_stale')
       if (scope.expected_revision !== current.expected_revision) fail('factory_registry_revision_stale')
       return current
@@ -220,7 +305,7 @@ export class FactoryRegistryStore {
       try {
         const current = checked(scope)
         const result = mutate(current)
-        trace('factory_registry.updated', { action, world_id: this.#worldId, registry_revision: this.#registry.revision,
+        trace(action === 'prepare_metadata' ? 'factory_metadata.prepared' : 'factory_registry.updated', { action, world_id: this.#worldId, registry_revision: this.#registry.revision,
           goal_id: current.goal_id, plan_id: current.plan_id, step_id: current.semantic_step_id, request_id: current.request_id })
         return result
       }
@@ -230,6 +315,26 @@ export class FactoryRegistryStore {
       }
     }
     return Object.freeze({
+      prepareMetadata: (change, scope) => run('prepare_metadata', scope, current => {
+        if (!token(current.session_id)) fail('factory_metadata_session_required')
+        const target = this.#registry.cells.find(c => c.cell_id === change?.cell_id)
+        if (!target || target.surface_index !== current.surface_index || target.force_index !== current.force_index) fail('factory_metadata_scope_mismatch')
+        let result
+        try { result = appendFactoryCellMetadata(this.#registry, change, origin(current, 'runtime_metadata_declaration')) }
+        catch (error) {
+          if (error.code === 'factory_metadata_transaction_conflict') this.#fault ??= { code: error.code }
+          throw error
+        }
+        if (result.duplicate) return { duplicate: true, cell: clone(this.#registry.cells.find(c => c.cell_id === result.cell_id)) }
+        const ticket = Object.freeze({ transaction_id: change.transaction_id })
+        this.#metadata = { ticket, change: clone(change), candidate: result.registry, walDurable: false, commitDurable: false,
+          owner: clone(current), assert: () => checked(scope, true) }
+        // Refuse capacity/schema issues before writing a WAL that cold restore
+        // cannot reconcile. This uses the same bounded rule as restoration.
+        try { reconcileFactoryMetadataPublication(this.#registry, this.#metadataMarker(), this.#worldId) }
+        catch (error) { this.#metadata = undefined; throw error }
+        return { duplicate: false, ticket }
+      }),
       scope: () => clone(context()),
       assertScope: scope => clone(checked(scope)),
       readScope: () => clone(readScope()),
@@ -290,7 +395,7 @@ export class FactoryRegistryStore {
               || member.provenance.goal_id !== current.goal_id || member.provenance.semantic_step_id !== current.semantic_step_id)) fail('factory_enrollment_intent_mismatch')
           const existing = this.#registry.cells.find(cell => cell.enrollment?.goal_id === current.goal_id && cell.enrollment.semantic_step_id === current.semantic_step_id)
           if (existing) {
-            if (['surface_index', 'force_index', 'assignment', 'members', 'ports', 'enrollment'].some(field => JSON.stringify(existing[field]) !== JSON.stringify(declaration[field]))) fail('factory_enrollment_conflict')
+            if (['surface_index', 'force_index', 'assignment', 'members', 'ports', 'enrollment'].some(field => JSON.stringify(field === 'ports' ? existing.metadata_history?.[0]?.ports ?? existing.ports : existing[field]) !== JSON.stringify(declaration[field]))) fail('factory_enrollment_conflict')
             return clone(existing)
           }
         }

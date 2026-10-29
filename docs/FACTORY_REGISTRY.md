@@ -13,6 +13,76 @@ Goal, plan and authorization ownership remain defined by the
 
 ## Implemented stages
 
+### Additive metadata revisions (host prerequisite)
+
+`commitFactoryCellMetadata(agent, change)` in `factory-cell-tools.mjs` is an
+internal host capability, not a model tool. It appends declared input ports,
+exact member endpoint bindings and their dependency records as one transaction.
+Existing output ports can acquire bindings; existing ports, bindings and edges
+cannot be retargeted or removed. Cell IDs, assignment, physical membership,
+enrollment, placement provenance and original origin remain immutable. Every
+binding and dependency remains **unverified**. Inventory/fluidbox indices and
+electric network IDs are declarations, not native endpoint proof. Electrical
+bindings do not represent heat. Native requirements and a fresh evidence-bound
+bridge are separate work; no fuel item or category is invented by this API.
+
+The change contains `transaction_id`, `cell_id`, `expected_registry_revision`,
+`expected_cells`, `input_ports`, `port_bindings` and `dependencies`. Every involved
+cell, including cell suppliers, needs its expected revision and metadata head
+digest. Endpoints include the exact existing member locator and one typed
+inventory, fluidbox or electric-network identifier. Host code derives dependency
+IDs and revision-bound endpoint digests. Validation covers the complete candidate
+graph before publication. A matching repeated transaction is idempotent; reusing
+its ID with another payload faults the store. There are at most 64 revisions per
+cell and 1,024 metadata transactions globally, with no eviction or ID reuse.
+
+Legacy revision-one snapshots retain their shape. Their immutable anchor is
+derived when the first revision is appended. Every later entry hashes its full
+normalized metadata, immutable identity digest and previous digest; observation
+caches are excluded. Restore validates the entire chain, dependency joins and
+current projection. A live store also compares the complete previously accepted
+prefix. A cold process cannot detect replacement of the entire file with an
+older self-consistent snapshot without an external durable watermark; this stage
+does not claim that protection.
+
+The guarded bridge binds world, surface, force, actor/epoch, session, request,
+goal, committed plan/step and registry revision, with fresh native idle checks.
+It first persists the old registry plus a pending publication marker, then the
+complete candidate plus that marker. The marker contains transaction/request
+digests, the complete predecessor and request, and captured owner scope. The live
+view changes only after the candidate write and ownership fences succeed. The
+next ordinary settled canonical save clears the marker. Cold restore validates
+and recomputes the candidate once from the recorded predecessor and request. An
+exact predecessor file discards the uncommitted intent; an exact candidate file
+retains already-written, unverified metadata, including a lost rename acknowledgement.
+Neither result replays gameplay or restores the old publication capability.
+Unknown markers, mismatched files, explicit faults and restore during live
+publication still fail closed. Reconciliation clears historical observations
+and emits `factory_metadata.reconciled`; the next canonical save persists the
+normalized outcome. This idempotent normalization has no world-action retry or
+allowance to renew across restarts. Once a candidate write is staged,
+failure retains that candidate behind the fault instead of rolling its history
+back. Failure of the initial prepare write has no live registry effect.
+
+Canonical persistence captures the latest snapshot inside its serialized write
+queue and compares the complete payload again before rename. Changed payloads
+receive at most three fresh snapshot attempts; capability and skill-handoff
+writes receive one. Exhaustion is visible even for ordinary non-strict callers.
+Operator pause requires a strict durable save, reports `goal.pause_save_failed`
+on failure, and resets only its unchanged owner. The supervisor still cancels
+that owner's native work after a save failure, with generation, actor, epoch,
+session and goal fences across awaits. Operator pause and replacement goal
+writes remain possible while publication is pending and preserve its marker.
+Required skill-handoff records are rechecked at the actual write boundary. No
+filesystem scheme can promise a new durable fault when all writes fail; the
+already persisted marker supplies the restart fence. The tests inject filesystem
+boundaries through the actual persistence method; they do not certify filesystem
+power-loss durability or multiple independent file writers.
+
+This prerequisite does not authorize physical updates, retirement, temporary
+asset cleanup, commissioning, verified supply, recovery allowances or E2E success.
+Those remain part of the subsequent tracker stages.
+
 The foundation includes world identity, stable cell IDs, immutable assignments,
 exact member identities, declared input/output ports, dependency validation,
 reverse consumer lookup and canonical-memory persistence. Guarded runtime

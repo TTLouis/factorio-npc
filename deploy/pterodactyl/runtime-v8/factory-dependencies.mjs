@@ -1,7 +1,11 @@
 // Stage 1 declarations only: these edges never prove connectivity, capacity,
 // native fuel suitability, delivery, or supply. Evidence references are labels,
 // not verification authority. This module never edits cells or assigned jobs.
+import { createHash } from 'node:crypto'
 const LIMIT = Object.freeze({ cells: 4096, ports: 128, products: 64, dependencies: 4096, evidence: 32 })
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value
+export const factoryMetadataDigest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex')
 const PORT_KINDS = new Set(['item', 'fuel', 'fluid', 'power'])
 const DELIVERY_KINDS = new Set(['direct', 'belt', 'inserter', 'fluid', 'electric', 'manual', 'unknown'])
 
@@ -83,7 +87,7 @@ function endpoint(raw, label) {
   return { cell_id: id(raw.cell_id, 'cell'), port_id: text(raw.port_id, `${label} port_id`, 128) }
 }
 function shape(raw) {
-  record(raw, 'declaration', ['dependency_id', 'consumer', 'supplier', 'delivery', 'state', 'evidence_refs'])
+  record(raw, 'declaration', ['dependency_id', 'consumer', 'supplier', 'delivery', 'state', 'evidence_refs', 'endpoint_bindings'])
   const dependencyId = id(raw.dependency_id, 'dependency')
   const consumer = endpoint(raw.consumer, 'consumer')
   record(raw.supplier, 'supplier', ['kind', 'cell_id', 'port_id', 'reference'])
@@ -108,6 +112,18 @@ function shape(raw) {
   if (Object.hasOwn(raw, 'state') && raw.state !== 'unverified') invalid('only unverified declarations are allowed')
   const result = { dependency_id: dependencyId, consumer, supplier, delivery, state: 'unverified' }
   if (Object.hasOwn(raw, 'evidence_refs')) result.evidence_refs = uniqueStrings(raw.evidence_refs, 'evidence_refs', LIMIT.evidence, 512)
+  if (Object.hasOwn(raw, 'endpoint_bindings')) {
+    record(raw.endpoint_bindings, 'endpoint bindings', ['consumer', 'supplier'])
+    result.endpoint_bindings = {}
+    for (const side of ['consumer', ...(supplier.kind === 'cell' ? ['supplier'] : [])]) {
+      const binding = raw.endpoint_bindings[side]
+      record(binding, `${side} binding`, ['cell_revision', 'binding_digest'])
+      scope(binding.cell_revision, 'binding cell revision')
+      if (!/^[a-f0-9]{64}$/.test(binding.binding_digest)) invalid('invalid endpoint digest')
+      result.endpoint_bindings[side] = { cell_revision: binding.cell_revision, binding_digest: binding.binding_digest }
+    }
+    if (supplier.kind !== 'cell' && Object.hasOwn(raw.endpoint_bindings, 'supplier')) invalid('non-cell supplier cannot bind a cell endpoint')
+  }
   return result
 }
 function resolve(index, value, direction) {
@@ -130,6 +146,13 @@ function relate(dependency, index) {
       invalid('cell supplier must share consumer surface and force; use an explicit external boundary otherwise')
     const compatible = supplier.port.kind === kind || (supplier.port.kind === 'item' && kind === 'fuel')
     if (!compatible || supplier.port.resource !== consumer.port.resource) invalid('supplier and consumer resource types differ')
+  }
+  if (dependency.endpoint_bindings) for (const side of ['consumer', ...(dependency.supplier.kind === 'cell' ? ['supplier'] : [])]) {
+    const endpoint = dependency[side]; const cell = index.get(endpoint.cell_id)?.raw
+    const proof = dependency.endpoint_bindings[side]
+    const revision = cell?.metadata_history?.find(row => row.revision === proof.cell_revision)
+    const binding = revision?.port_bindings?.find(row => row.port_id === endpoint.port_id)
+    if (!binding || factoryMetadataDigest(binding) !== proof.binding_digest) invalid('endpoint binding revision/digest mismatch')
   }
   return dependency
 }

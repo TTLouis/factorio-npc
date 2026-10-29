@@ -5326,30 +5326,68 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async persistState({ strict = false, requiredSkillHandoff } = {}) {
+  async persistState({ strict = false, requiredSkillHandoff, requiredFactoryMetadata } = {}) {
     this.assertRequestAdmission()
     if (!this.stateFile || typeof this.memory.snapshot !== 'function') {
+      if (requiredFactoryMetadata) throw new AgentLoopError('factory_metadata_persistence_unavailable')
       if (requiredSkillHandoff && !this.allowEphemeralSkillHandoff) throw skillHandoffError('persistence_unavailable')
       return
     }
     const filename = this.stateFile
-    const snapshot = this.memory.snapshot()
-    if (requiredSkillHandoff) {
-      const records = Array.isArray(snapshot?.planner_skill_handoffs) ? snapshot.planner_skill_handoffs : []
-      const stored = records.find(entry => entry?.[0] === requiredSkillHandoff.scope.memory_key)?.[1]
-      if (JSON.stringify(stored) !== JSON.stringify(requiredSkillHandoff)) throw skillHandoffError('snapshot_missing_pinned_skills')
+    const metadataFence = () => {
+      if (requiredFactoryMetadata) this.memory.assertFactoryMetadataPersistence(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase)
+    }
+    const capture = () => {
+      const snapshot = this.memory.snapshot()
+      if (requiredFactoryMetadata) {
+        for (const name of ['factory_registry', 'factory_registry_world_id', 'factory_metadata_pending', 'factory_cell_observations', 'factory_registry_fault']) delete snapshot[name]
+        Object.assign(snapshot, this.memory.factoryMetadataPersistenceSnapshot(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase))
+      }
+      if (requiredSkillHandoff) {
+        const records = Array.isArray(snapshot?.planner_skill_handoffs) ? snapshot.planner_skill_handoffs : []
+        const stored = records.find(entry => entry?.[0] === requiredSkillHandoff.scope.memory_key)?.[1]
+        if (JSON.stringify(stored) !== JSON.stringify(requiredSkillHandoff)) throw skillHandoffError('snapshot_missing_pinned_skills')
+      }
+      return `${JSON.stringify(snapshot, null, 2)}\n`
     }
     const write = this.persistQueue.then(async () => {
       this.assertRequestAdmission()
+      metadataFence()
       await fsp.mkdir(path.dirname(filename), { recursive: true })
       this.assertRequestAdmission()
+      metadataFence()
       const temp = `${filename}.${process.pid}.tmp`
-      await fsp.writeFile(temp, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-      this.assertRequestAdmission()
+      // Retry ordinary snapshot churn in this queue, never by recursively
+      // enqueueing a write. Capabilities/handoffs get no implicit retry.
+      const attempts = requiredFactoryMetadata || requiredSkillHandoff ? 1 : 3
+      for (let attempt = 1; ; attempt++) {
+        this.assertRequestAdmission()
+        metadataFence()
+        const serialized = capture()
+        await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 })
+        this.assertRequestAdmission()
+        metadataFence()
+        if (capture() === serialized) break
+        if (attempt >= attempts) {
+          const error = new AgentLoopError('canonical_state_changed_during_persistence')
+          error.code = 'canonical_persistence_churn_exhausted'
+          error.attempts = attempts
+          throw error
+        }
+      }
       await fsp.rename(temp, filename)
+      if (requiredFactoryMetadata) {
+        this.memory.markFactoryMetadataPersisted(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase)
+        this.assertRequestAdmission()
+        this.memory.assertFactoryMetadataOwner(requiredFactoryMetadata.ticket)
+      }
     })
     this.persistQueue = write.catch(error => this.log(`[memory] durable NPC state write failed: ${error instanceof Error ? error.message : String(error)}`))
-    return strict ? write : this.persistQueue
+    // Ordinary callers must not acknowledge a new control/goal after churn
+    // exhaustion. Keep the serial queue usable and legacy I/O logging intact.
+    return strict ? write : write.catch(error => {
+      if (error?.code === 'canonical_persistence_churn_exhausted') throw error
+    })
   }
 
   activePlanKey() {
@@ -11432,8 +11470,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (expectedOwner && !guardPause && expectedOwner.admissionOwner !== admission) {
       throw new AgentLoopError('Request admission cancelled or superseded before pause')
     }
+    const loadingOwner = { generation: this.generation, trace: this.traceRequest, key: this.activePlanKey(),
+      goal: this.memory.planningState?.(this.activePlanKey())?.goal?.goal_id, loaded: this.stateLoaded }
     await this.loadPersistentState()
     assertGuardPauseCurrent()
+    if (this.generation !== loadingOwner.generation || this.traceRequest !== loadingOwner.trace || actorIdentity() !== actor
+      || this.activePlanKey() !== loadingOwner.key || (loadingOwner.loaded
+        && this.memory.planningState?.(loadingOwner.key)?.goal?.goal_id !== loadingOwner.goal)) {
+      throw new AgentLoopError('Request cancelled or superseded during pause load')
+    }
     if (this.requestAdmissionOwner !== admission) {
       throw new AgentLoopError('Request admission cancelled or superseded during pause')
     }
@@ -11444,30 +11489,57 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Pausing can reconcile a torn legacy/reducer projection. Fence the exact
     // result of that synchronous owned mutation across the persistence await.
     const pausedOwner = checkpointOwner ? this.captureCheckpointOwner() : undefined
-    await this.persistState()
-    assertGuardPauseCurrent()
-    if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
-    if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
-      throw new AgentLoopError('Request admission cancelled or superseded during pause')
+    const stopOwner = { generation: this.generation, trace: this.traceRequest, lineage: this.agentContext.lineageSequence,
+      goal: this.memory.planningState?.(key)?.goal?.goal_id, actor: actorIdentity(), amendment: amendmentIdentity(),
+      actorId: this.epoch?.actor_id, actorEpoch: this.epoch?.epoch, sessionId: this.epoch?.session }
+    const ownsPause = () => this.requestAdmissionOwner === (preserveAdmission ? admission : null)
+      && this.generation === stopOwner.generation && this.traceRequest === stopOwner.trace
+      && this.agentContext.lineageSequence === stopOwner.lineage && this.activePlanKey() === key
+      && this.memory.planningState?.(key)?.goal?.goal_id === stopOwner.goal
+      && actorIdentity() === stopOwner.actor && amendmentIdentity() === stopOwner.amendment
+    try {
+      try { await this.persistState({ strict: true }) }
+      catch (error) {
+        this.log(`[memory] control pause save failed: ${error?.code ?? 'canonical_persistence_failed'}`)
+        // Pinned diagnostic only: do not attribute a late failed save to a new
+        // request or enter its usage/recovery machinery through traceEvent.
+        try {
+          await this.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), event: 'goal.pause_save_failed',
+            request_id: stopOwner.trace?.id, seq: stopOwner.trace ? ++stopOwner.trace.seq : 0,
+            actor_id: stopOwner.actorId, epoch: stopOwner.actorEpoch, session_id: stopOwner.sessionId,
+            data: { memory_key: key, goal_id: stopOwner.goal, reason, code: error?.code ?? 'canonical_persistence_failed',
+              attempts: error?.attempts, durability: 'unconfirmed' } })
+        } catch { /* The original storage error remains the visible failure. */ }
+        throw error
+      }
+      assertGuardPauseCurrent()
+      if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
+      if (!ownsPause()) {
+        throw new AgentLoopError('Request admission cancelled or superseded during pause')
+      }
+      if (!this.traceRequest) {
+        const paused = this.goalPausedTrace('pause_persistent_plan')
+        if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
+      }
+      // The diagnostic is an awaited writer too: no late pause may abort/reset a
+      // request or checkpoint that arrived while its final row was queued.
+      assertGuardPauseCurrent()
+      if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
+      if (!ownsPause()) {
+        throw new AgentLoopError('Request admission cancelled or superseded during pause diagnostic')
+      }
+      return state
     }
-    if (!this.traceRequest) {
-      const paused = this.goalPausedTrace('pause_persistent_plan')
-      if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
+    finally {
+      // A failed durable save still stops this owner; it must not reset a new
+      // request, actor, amendment or goal that arrived during the await.
+      if (ownsPause()) {
+        abortSkillChoice(this, reason)
+        this.abortStepContractCalls()
+        if (preserveAdmission) this.reset({ preserveAdmission: admission })
+        else super.cancel()
+      }
     }
-    // The diagnostic is an awaited writer too: no late pause may abort/reset a
-    // request or checkpoint that arrived while its final row was queued.
-    assertGuardPauseCurrent()
-    if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
-    if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
-      throw new AgentLoopError('Request admission cancelled or superseded during pause diagnostic')
-    }
-    abortSkillChoice(this, reason)
-    this.abortStepContractCalls()
-    // Base cancel is exactly reset(). Preserve/re-anchor an unrelated intake
-    // across this physical reset, rather than lending it to the guard as owner.
-    if (preserveAdmission) this.reset({ preserveAdmission: admission })
-    else super.cancel()
-    return state
   }
 
   async finalizeCompletedTaskContext(result) {

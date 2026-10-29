@@ -724,6 +724,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   factoryPlacementReceipt(id) { return this.#factoryRegistry.placementReceipt(id) }
   factoryPlacementReceipts(scope) { return this.#factoryRegistry.placementReceipts(scope) }
   factoryPlacementCapacity() { return this.#factoryRegistry.placementCapacity() }
+  factoryMetadataPending() { return this.#factoryRegistry.metadataPending() }
+  factoryMetadataPersistenceSnapshot(ticket, phase) { return this.#factoryRegistry.metadataPersistenceSnapshot(ticket, phase) }
+  assertFactoryMetadataPersistence(ticket, phase) { return this.#factoryRegistry.assertMetadataPersistence(ticket, phase) }
+  assertFactoryMetadataOwner(ticket) { return this.#factoryRegistry.assertMetadataOwner(ticket) }
+  markFactoryMetadataPersisted(ticket, phase) { return this.#factoryRegistry.markMetadataPersisted(ticket, phase) }
+  finishFactoryMetadata(ticket) { return this.#factoryRegistry.finishMetadata(ticket) }
+  abortFactoryMetadata(ticket) { return this.#factoryRegistry.abortMetadata(ticket) }
   invalidateFactoryEnrollmentPersistence() { this.#factoryRegistry.invalidateEnrollmentPersistence() }
   factoryGoalEnrollmentStatus(key) {
     try {
@@ -3311,7 +3318,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   restore(snapshot) {
-    this.#factoryRegistry.restore(snapshot)
+    this.#factoryRegistry.restore(snapshot, (event, data) => {
+      try { this.traceSink?.(event, data) } catch { /* Diagnostics never grant or revoke registry validity. */ }
+    })
     // Rehydrate contracts before the generic memory sanitization can discard
     // unknown fields. This is deliberately independent of the retired project
     // hierarchy: the Task Board remains the compatibility projection for a
