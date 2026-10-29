@@ -11,7 +11,7 @@ Goal, plan and authorization ownership remain defined by the
 [planning roadmap](NPC_PLANNING_ROADMAP.md) and
 [macro execution contract](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md).
 
-## Stage 1 boundary
+## Implemented stages
 
 The foundation includes world identity, stable cell IDs, immutable assignments,
 exact member identities, declared input/output ports, dependency validation,
@@ -19,17 +19,60 @@ reverse consumer lookup and canonical-memory persistence. Guarded runtime
 enrollment is separate from provider submissions. No model JSON operation writes
 the registry.
 
-Stage 1 ships the guarded runtime API and its persistence/admission integration;
-no production caller currently initializes or enrolls cells automatically. A
-trusted host integration must supply the explicit world identity, current runtime
-context and retained exact native placement receipt lookup. Installing this stage
-alone does not populate the registry or protect legacy hardware as assigned cells.
-Automatic population and model-facing declarations belong to later stages.
+Stage 1 ships the guarded runtime API and its persistence/admission integration.
+Stage 2 connects bounded native observations and read-only registry tools to the
+runtime. The first use can initialize persistent world-identity metadata, but
+cannot create production assignments or mutate gameplay structures. Automatic
+enrollment and model-facing cell declarations remain later work. Existing
+unregistered hardware is not silently adopted or protected as an assigned cell.
 
 Native commissioning, automatic enrollment, legacy adoption, cell expansion or
-conversion, retirement, temporary-building cleanup, public model lookup tools and
-automatic gameplay correction are later stages. This foundation is not evidence
-that the BH autonomous failure has been repaired.
+conversion, retirement, temporary-building cleanup and automatic gameplay
+correction are later stages. These foundations are not evidence that the BH
+autonomous failure has been repaired.
+
+## Native observations and lookup
+
+`listFactoryCells` lists bounded, paginated assignment summaries. An empty list
+means that no cells have been registered; it does not mean the native world has no
+machines. `inspectFactoryCell` reads exact members from the registry through the
+native factory observation interface. The Pterodactyl runtime owns these host
+tools; they do not pretend to be standalone native registry lookups.
+
+The native query checks world, actor, surface, force, unit, prototype, position and
+current visibility. Member, resource, product, inventory and connection lists have
+finite limits with explicit truncation or unknown states. It returns actual
+mining products, recipes and route facts where readable. Unsupported or hidden
+facts cannot become negative absence evidence or successful compatibility proof.
+Recipes, products and sizing are read from the native game rather than authored
+ingredient lists or model memory.
+
+The host compares these facts with immutable assigned products. An optional
+direct-feed binding identifies exact source and receiver members; its resource
+requirement comes from the committed active step's material-supply choice. Tool
+arguments cannot replace that choice or waive a compatibility check. Resource
+entity identity and produced item identity remain distinct, including modded
+resource/product mappings.
+
+Compatibility is not commissioning. Observed configuration and a direct output
+route do not prove sustained output, a complete dependency graph, sufficient
+capacity, or an automated supply. Dependency declarations stay unverified until a
+later port/member verification protocol exists. Native belt and fluid projections
+must be distinguished from fully verified transport behavior.
+
+The native save retains a fixed world UUID. On first use, a trusted host generates
+a candidate and asks the native metadata interface to bind it once. Existing
+native identity is read on resume; a different identity is refused rather than
+overwritten. World identity cannot be derived from seed, actor, goal or a model
+argument. A host snapshot's conflicting identity fails closed.
+
+Observations retain the original request/session/actor/epoch/goal/plan/step and
+registry revision across awaits. Newer world work, busy or uncertain native work,
+changed authority or restore invalidates the read. Native request/reply evidence
+belongs to its original request even when later validation refuses publication.
+Saved summaries are historical only: restore, revision changes and new sessions
+require fresh native reads before validation. Observation updates cannot revise
+assignments, advance a checkpoint or renew recovery allowances.
 
 ## Identity and assignments
 

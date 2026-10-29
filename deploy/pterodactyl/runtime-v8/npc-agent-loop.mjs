@@ -15,6 +15,7 @@ import { activeStockDependencyBarrier, bindStockDependencyAdmission, continueSto
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
+import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
@@ -12006,6 +12007,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Native factory replies must survive cancellation as evidence belonging to
+  // the original request. This narrow capture path grants no gameplay authority,
+  // updates no live usage ledger and never attributes a late reply to a new turn.
+  captureFactoryObservationTrace(owner, event, data) {
+    if (!['factory_cell.native_evidence', 'factory_cell.tool_refused'].includes(event)) throw new AgentLoopError('Unsupported factory evidence event')
+    const record = { schema: 1, ts: new Date().toISOString(), event, request_id: owner.requestId,
+      seq: owner.request?.id === owner.requestId && Number.isSafeInteger(owner.request.seq) ? ++owner.request.seq : 0,
+      turn: owner.turn, actor_id: owner.actorId, epoch: owner.actorEpoch, session_id: owner.sessionId, data }
+    if (this.onActivity) {
+      try { this.onActivity(event, data) }
+      catch (error) { this.log(`[trace] activity listener failed: ${error instanceof Error ? error.message : String(error)}`) }
+    }
+    return this.behaviorTrace ? this.behaviorTrace.emit(record) : Promise.resolve()
+  }
+
   traceEvent(event, data = {}, { requestId } = {}) {
     if (event !== 'request.cancelled' && event !== 'lifecycle.entered') this.assertRequestAdmission()
     if (event === 'request.completed' || event === 'request.failed') {
@@ -15111,7 +15127,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ? { ...message, tool_calls: rawCalls.slice(0, MAX_OBSERVATION_TOOL_CALLS_PER_BATCH) }
         : message
       const prepared = super.prepareToolBatch(admittedMessage)
+      const factorySignatures = new Set()
       for (const entry of prepared) {
+        if (isFactoryCellTool(entry.tool?.function?.name)) {
+          if (factorySignatures.has(entry.signature)) throw new AgentLoopError('Duplicate factory observation in one batch')
+          factorySignatures.add(entry.signature)
+          const host = prepareFactoryCellTool(this, entry.tool.function.name, entry.args)
+          Object.defineProperties(entry, { _sglunaExecuteObservation: { value: host.execute }, _sglunaReadFence: { value: host.fence } })
+          this.toolCache.delete(entry.signature)
+        }
         // The command already carries the committed region (observationToolCommand). The entry's args and signature say so too, so
         // the read cache and duplicate detection never treat a committed-region search as the same read as an unscoped one.
         if (entry.tool?.function?.name !== 'getPlacementCandidates') continue
@@ -15239,6 +15263,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Check again at dispatch: a caller-supplied prepared batch cannot bypass
     // the executor role boundary (including closed/targeted read paths).
     this.assertExecutorSkillHandoffTools([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)])
+    const factorySignatures = new Set()
+    for (const entry of prepared) {
+      if (!isFactoryCellTool(entry.tool?.function?.name)) continue
+      if (factorySignatures.has(entry.signature)) throw new AgentLoopError('Duplicate factory observation in one batch')
+      factorySignatures.add(entry.signature)
+      if (entry.command !== null || typeof entry._sglunaExecuteObservation !== 'function' || typeof entry._sglunaReadFence !== 'function') throw new AgentLoopError('Factory observation requires its trusted prepared host executor')
+      entry._sglunaReadFence()
+      this.toolCache.delete(entry.signature)
+    }
     // Result traces can wait on queued file writes. Keep the owner from before any await;
     // never stamp an old native answer with a replacement request's actor or trace state.
     const batchOwner = { generation: this.generation, lineage: this.agentContext.lineageSequence,
@@ -15440,6 +15473,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     catch (error) {
+      if (admittedPrepared.some(entry => isFactoryCellTool(entry.tool?.function?.name))) {
+        assertBatchCurrent()
+        for (const entry of admittedPrepared) if (isFactoryCellTool(entry.tool?.function?.name)) entry._sglunaReadFence()
+      }
       await this.traceEvent('tool.error', { message: error instanceof Error ? error.message : String(error) })
       throw error
     }

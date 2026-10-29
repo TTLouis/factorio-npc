@@ -718,6 +718,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   initializeFactoryRegistry(worldId) { return this.#factoryRegistry.initialize(worldId) }
   getFactoryRegistry() { return this.#factoryRegistry.read() }
   factoryRegistryStatus() { return this.#factoryRegistry.status() }
+  factoryWorldBinding() { return this.#factoryRegistry.worldBinding() }
+  factoryCellObservations() { return this.#factoryRegistry.observations() }
   getFactoryMemberAssignment(identity) { return this.#factoryRegistry.member(identity) }
   factoryPlacementAvailability(placement) { return this.#factoryRegistry.placementAvailability(placement) }
   createFactoryRegistryRuntime(key, readContext, readPlacementReceipt) {
