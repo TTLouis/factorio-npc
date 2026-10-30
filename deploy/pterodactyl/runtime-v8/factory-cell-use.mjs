@@ -117,6 +117,14 @@ function preparationOnly(requirement, phase, operations, productionIntent) {
   })
 }
 
+// The registry can only attribute producers whose native cell facts exist
+// (mining sources, recipes, generators). An offshore pump's only source is a
+// water tile and no native endpoint projects a pumped-fluid product, so no cell
+// can ever contain it. Requiring one would make a plain pump placement step
+// permanently unclosable; its working state is proven by its own entity_count
+// evaluation. A step that also names boilers or engines keeps those rows.
+const UNREGISTERABLE_SOURCE_PROTOTYPES = Object.freeze(new Set(['offshore-pump']))
+
 export function factoryStepRequirement(step) {
   const guidance = step?.execution_guidance ?? step
   const intent = readFactoryCellIntent(guidance)
@@ -124,7 +132,7 @@ export function factoryStepRequirement(step) {
   if (intent) return { kind: 'establishment', intent }
   const requirements = step?.completion_contract?.requirements ?? step?.checkpoint?.requirements ?? []
   const producers = requirements.filter(row => row.kind === 'entity_state' && row.expected === 'working'
-    || row.kind === 'entity_count' && ['working', 'powered'].includes(row.state))
+    || row.kind === 'entity_count' && ['working', 'powered'].includes(row.state) && !UNREGISTERABLE_SOURCE_PROTOTYPES.has(row.prototype))
   if (producers.length) return { kind: 'operating_checkpoint', producers: clone(producers) }
   return undefined
 }
