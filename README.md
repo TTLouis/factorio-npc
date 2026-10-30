@@ -4,11 +4,15 @@
 standalone character with real inventory, crafting and mining, and can operate
 on a headless server with nobody connected.
 
-> [!NOTE]
-> **Use this branch for current development. Jev is optional:**
-> `experiment/jev-agent-architecture` also runs without a Jev/TypeSafe key.
-> For Docker, leave `JEV_TYPESAFE_API_KEY` blank to disable Jev. Your main LLM
-> provider is still required; the runtime uses its non-Jev decision paths.
+## Control your NPC with Codex or Claude
+
+This `feat/external-harness-mcp` branch lets Codex, Claude, or another
+MCP-compatible assistant control your standalone Factorio NPC. Your assistant
+plans the work and directs native game actions through a local connection.
+
+This mode is experimental and separate from the built-in autonomous planner.
+Follow the [setup guide](docs/EXTERNAL_HARNESS.md) to get started on Windows or
+with a Docker-hosted game.
 
 The runtime gives models structured game observations and bounded actions.
 Deterministic code handles game facts, validation and recovery; Factorio remains
@@ -24,6 +28,7 @@ choosing a checkpoint; newer development is not automatically a stable release.
 
 | Your goal | Next step |
 | --- | --- |
+| Control an NPC with Codex or Claude | [External-harness setup](docs/EXTERNAL_HARNESS.md) |
 | Run SGLuna on your own server | [Docker setup](deploy/docker/README.md) or [Pterodactyl setup](deploy/pterodactyl/README.md) |
 | Help with a bug, test or explanation | [Contributing](CONTRIBUTING.md) |
 | Understand the design | [Project contract](SPEC.md) and [documentation index](docs/README.md) |
