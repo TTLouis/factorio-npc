@@ -10,6 +10,8 @@ import {
 } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { checkpointBatchContradiction } from './step-completion.mjs'
+import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 
 // A plan whose own actions remove the stock its checkpoint requires (live 2026-10-05: furnace 15 >= 50 iron plates,
 // then the NPC collected the plates). Draft time: the contradicting draft is refused on the plan_category correction
@@ -33,6 +35,8 @@ function deployment(epoch = 3) {
     actor_interface: true,
     operations: true,
     tools: true,
+    surface_index: 1,
+    force_index: 1,
   }
 }
 
@@ -55,8 +59,9 @@ const COAL_SUPPLY = { name: 'supply_entity', args: { unit_number: 15, items: [{ 
 const takePlates = (unit = 15, item = 'iron-plate') => ({ name: 'move_items_exact', args: { item_name: item, unit_number: unit, max_count: 50, to_entity: false } })
 const mineFurnace = { name: 'mine_entity_exact', args: { unit_number: 15 } }
 
-class Rcon {
+class Rcon extends FakeFactorio {
   constructor() {
+    super()
     this.commands = []
     this.mutations = []
     this.epoch = 3
@@ -103,6 +108,8 @@ class Rcon {
 
   async command(text) {
     this.commands.push(text)
+    this.status = deployment(this.epoch)
+    if (/remote\.call\(["'](?:sgluna_factory|autorio_actor)["']/.test(text)) return super.command(text)
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment(this.epoch))
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
     if (text.includes('remote.call("autorio_tools","evaluate_condition"')) {
@@ -130,7 +137,7 @@ class Rcon {
       const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
       if (encoded) {
         const identity = JSON.parse(JSON.parse(encoded))
-        this.admissions.push({ ...identity, generation: 1, batch_id: batchId, state: 'admitted', slots: Array.from({ length: count }, (_, index) => ({
+        this.admissions.push({ ...identity, tick: 300, generation: 1, batch_id: batchId, state: 'admitted', slots: Array.from({ length: count }, (_, index) => ({
           index: index + 1, ok: true, batch_refs: [{ batch_id: batchId, batch_generation: 1, batch_ref: `batch-g1-${batchId}` }] })) })
       }
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: count }, () => [true, 'Task started']) })}`
@@ -140,6 +147,11 @@ class Rcon {
 }
 
 function harness(rcon, script, { memory = new CanonicalTaskBoardMemory() } = {}) {
+  // A cold fake engine independently declares the same synthetic iron job.
+  // Existing restored registry history is never replaced by this supplement.
+  const seed = memory.factoryRegistryStatus().status === 'uninitialized' ? memory : new CanonicalTaskBoardMemory()
+  installHistoricalFactorySupplement(seed, rcon, { unit_number: 15, name: 'stone-furnace', type: 'furnace', position: { x: 3, y: 0 } },
+    { products: ['iron-plate'], ingredients: ['iron-ore'] })
   const calls = []
   const rows = []
   const agent = new NpcAgentLoop({
@@ -284,15 +296,20 @@ test('the live shape: a draft whose batch extracts the checkpoint stock is refus
   assert.equal(checkpointStockRefusalCount(state.task_board), 0)
 })
 
-test('extracting a different item from the unit, or the same item from another unit, is not a contradiction', async () => {
+test('noncontradicting iron input withdrawal still refuses; another unit output transfer is admitted', async () => {
   for (const batch of [[takePlates(15, 'iron-ore')], [takePlates(77)]]) {
     const rcon = new Rcon()
     const world = harness(rcon, [
       observe(),
       planMessage(batch, { plan: ['Move things around'], checkpoint: furnaceCheckpoint() }),
     ])
-    await world.agent.request('move things', { sender: 'tester' })
-    assert.equal(rcon.mutations.length, 1, 'the batch was admitted')
+    if (batch[0].args.unit_number === 15) {
+      await assert.rejects(world.agent.request('move things', { sender: 'tester' }), { failure_code: 'factory_cell_withdrawal_not_output' })
+      assert.equal(rcon.mutations.length, 0, 'the original input withdrawal remains an explicit guard negative')
+    } else {
+      await world.agent.request('move things', { sender: 'tester' })
+      assert.equal(rcon.mutations.length, 1, 'the other-unit batch was admitted')
+    }
     assert.equal(world.named('checkpoint.contradicts_batch').length, 0)
     assert.equal(world.calls.length, 2, 'no correction round')
   }
@@ -477,6 +494,7 @@ async function committedStep(world, rcon, { stock = 20 } = {}) {
   assert.equal(rcon.mutations.length, 1, 'the smelt batch was admitted')
   // The first batch finished, so no unresolved work fences the next one.
   rcon.operationStatus = { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1', task_count: 1, task_types: ['moving_items'], tick: 300 } }
+  await world.agent.taskStatusReceipt()
   const planning = getActivePlan(world.memory.planningState(KEY))
   assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(planning.status), `committed (was ${planning.status})`)
   return { committed: world.plan(), planId: planning.plan_id }
@@ -632,7 +650,7 @@ test('commit time: an already satisfied checkpoint is never refused; the step cl
   assert.equal(getActivePlan(world.memory.planningState(KEY)).status, PLAN_STATUS.COMPLETED)
 })
 
-test('commit time: another item or another unit is unaffected, mining the checkpoint entity is refused', async () => {
+test('commit time: input withdrawal and registered-cell mining refuse independently; another unit is unaffected', async () => {
   for (const [batch, refused] of [[[takePlates(15, 'iron-ore')], false], [[takePlates(77)], false], [[mineFurnace], true]]) {
     const rcon = new Rcon()
     const world = harness(rcon, [
@@ -642,11 +660,18 @@ test('commit time: another item or another unit is unaffected, mining the checkp
       planMessage([{ name: 'wait', args: { ticks: 600 } }], SMELT),
     ])
     await committedStep(world, rcon)
+    if (batch[0].args.item_name === 'iron-ore') {
+      await assert.rejects(continuation(world), { failure_code: 'factory_cell_withdrawal_not_output' })
+      assert.equal(rcon.mutations.length, 1)
+      assert.equal(checkpointStockRefusalCount(world.plan().task_board), 0)
+      continue
+    }
     await continuation(world)
-    assert.equal(world.named('checkpoint.stock_extraction_refused').length, refused ? 1 : 0, JSON.stringify(batch))
+    assert.equal(world.named('checkpoint.stock_extraction_refused').length, 0)
+    assert.equal(checkpointStockRefusalCount(world.plan().task_board), 0)
     assert.equal(rcon.mutations.length, 2)
     assert.equal(/move_items_exact|mine_entity_exact/.test(rcon.mutations[1]), !refused, 'the refused batch never reached the world')
-    if (refused) assert.equal(data(world.named('checkpoint.stock_extraction_refused')[0]).effect, 'removes_entity')
+    if (refused) assert.equal(data(world.named('admission.factory_cell_refused')[0]).code, 'factory_cell_change_forbidden')
   }
 })
 
@@ -690,12 +715,12 @@ test('commit time: an actor epoch change fails safely before any refusal is reco
   assert.equal(state.blocker, '')
 })
 
-test('the immutable committed contract still ignores a changed checkpoint when nothing conflicts', async () => {
+test('synthetic other-container transfer cannot change the immutable furnace checkpoint', async () => {
   const rcon = new Rcon()
   const world = harness(rcon, [
     observe(),
     planMessage([COAL_SUPPLY], { ...SMELT, checkpoint: furnaceCheckpoint() }),
-    planMessage([takePlates(15, 'iron-ore')], { ...SMELT, checkpoint: furnaceCheckpoint(10) }),
+    planMessage([takePlates(77)], { ...SMELT, checkpoint: furnaceCheckpoint(10) }),
   ])
   const { committed } = await committedStep(world, rcon)
 

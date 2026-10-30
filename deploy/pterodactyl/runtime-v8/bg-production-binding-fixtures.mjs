@@ -22,7 +22,69 @@ export const bgRecipes = [
   { name: 'stone-furnace', enabled: true, hand_craftable_category: true, energy: 0.5,
     ingredients: [{ name: 'stone', amount: 5 }], products: [{ name: 'stone-furnace', amount: 1 }], crafting_machines: [] },
 ]
-export function bgWorld({ safe = true, onRead, provider, onTrace, directFeed = false } = {}) {
+
+// Explicit synthetic native/retained-receipt adapter for controller tests. It
+// does not infer qualification from old NPC placement rows or edit the plan.
+export function installProductionFactoryFixture({ agent, memory, game, plan, step, machines, recipes, projectMember = row => row }) {
+  const world = '226a063b-b2ac-4ec1-a6c4-a4d9ac7a747a'
+  memory.initializeFactoryRegistry(world)
+  const writes = []
+  agent.stateFile = '/synthetic/production-factory-state'
+  agent.persistState = async () => { writes.push(memory.snapshot()) }
+  const command = game.command.bind(game)
+  game.command = async text => {
+    if (text.includes("'sgluna_factory','world_identity'")) return JSON.stringify({ schema_version: 1, ok: true, code: 'ok', world_id: world })
+    if (!text.includes("'sgluna_factory','observe'")) {
+      const result = await command(text)
+      // The shared legacy fake omits these native exact-batch identity fields.
+      // Supply them from the same fake engine generation, not from host intent.
+      if (result.startsWith('{') && (text.includes('"status"') || text.includes('next_slice_ownership'))) {
+        const body = JSON.parse(result)
+        const status = body.operations ?? body
+        if (status.last_completed_batch) {
+          const last = status.last_completed_batch
+          last.batch_generation = status.batch_generation
+          last.batch_ref = `batch-g${status.batch_generation}-${last.batch_id}`
+          status.receipt_journal.push({ ...last, state: 'completed' })
+          return JSON.stringify(body)
+        }
+      }
+      return result
+    }
+    const request = JSON.parse(text.match(/helpers\.json_to_table\('(.+)'\)/)[1])
+    return JSON.stringify({ ...request, ok: true, code: 'ok', tick: 1000 + game.batchId, members: request.members.map(locator => {
+      const entity = machines.get(locator.unit_number)
+      if (!entity) return { locator, state: 'unknown', code: 'member_not_found' }
+      const selected = recipes.find(recipe => recipe.name === entity.recipe)
+      const typed = rows => rows.map(row => ({ type: 'item', ...row }))
+      return projectMember({ ...locator, locator, state: 'observed', type: entity.type,
+        recipe: selected ? { state: 'known', name: selected.name, truncated: false, ingredients: typed(selected.ingredients), products: typed(selected.products) }
+          : { state: 'none', truncated: false, ingredients: [], products: [] },
+        inventories: entity.inventories.map(inventory => ({ state: 'known', truncated: false, index: inventory.index,
+          role: inventory.index === 1 ? 'fuel' : inventory.index === 2 ? 'input' : 'output', items: structuredClone(inventory.items) })),
+        progress_facts: { crafting_progress: { state: 'known', value: entity.crafting_progress } },
+        source_resources: { state: 'not_applicable', resources: [], truncated: false },
+        burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['chemical'], truncated: false },
+        fuel_item_facts: { state: 'known', coverage: 'complete', truncated: false, items: [{ name: 'coal', category: 'chemical', fuel_value: 4e6 }] },
+        endpoint_facts: { schema_version: 1, inventories: { state: 'known', truncated: false, endpoints: entity.inventories.map(inventory => ({
+          state: 'known', inventory_index: inventory.index, roles: { state: 'known', values: [inventory.index === 1 ? 'fuel' : inventory.index === 2 ? 'input' : 'output'] } })) },
+        recipe_selection: { state: selected ? 'known' : 'not_applicable', quality: { state: 'known', name: 'normal' } } } }, entity)
+    }) })
+  }
+  const retain = entity => {
+    const p = plan(); const s = step(); const n = 10000 + entity.unit_number
+    const receipt = { receipt_id: `${world}/batch-g1-${n}/${n}`, world_id: world, surface_index: 1, force_index: 1,
+      actor_id: agent.epoch.actor_id, actor_epoch: agent.epoch.epoch, request_id: `synthetic-placement-${n}`, goal_id: p.goal_id,
+      plan_id: p.plan_id, plan_version: p.plan_version, step_id: s.step_id, semantic_step_id: s.semantic_step_id ?? s.step_id,
+      operation_key: `synthetic-placement-${n}`, operation_id: n, batch_ref: `batch-g1-${n}`, batch_id: n, batch_generation: 1,
+      unit_number: entity.unit_number, name: entity.name, position: structuredClone(entity.position), tick: n }
+    memory.recordFactoryPlacementReceipt(receipt, memory.factoryWorldBinding().generation)
+    return receipt
+  }
+  return { world, retain, writes }
+}
+
+export function bgWorld({ safe = true, onRead, provider, onTrace, directFeed = false, receiptBacked = true } = {}) {
   const raw = structuredClone(bg.memory)
   raw.dialogue = []
   // Reopen only the terminal fixture's run/controller flags for an offline
@@ -48,11 +110,12 @@ export function bgWorld({ safe = true, onRead, provider, onTrace, directFeed = f
   const native = game.command.bind(game)
   game.command = async text => {
     await onRead?.({ agent, memory, game, text, machines })
-    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ actor: { actor_id: 24 }, surface_index: 1, force_index: 1 })
+    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: 'npc', actor: { actor_id: 24, valid: true, kind: 'standalone_character' }, surface_index: 1, force_index: 1 })
     if (text.includes('"recipe_details"')) {
       const name = /"recipe_details",'([^']+)'/.exec(text)?.[1]
       const recipe = bgRecipes.find(row => row.name === name)
-      return JSON.stringify(recipe ? { found: true, truncated: false, recipes: [recipe], burner_fuels: { truncated: false, items: [
+      return JSON.stringify(recipe ? { found: true, truncated: false, recipes: [{ ...recipe,
+        ingredients: recipe.ingredients.map(row => ({ type: 'item', ...row })), products: recipe.products.map(row => ({ type: 'item', ...row })) }], burner_fuels: { truncated: false, items: [
         { name: 'coal', category: 'chemical', fuel_value: 4e6, mined_from: ['coal'], harvested_from: [] }] } }
         : { found: false, code: 'no_recipe', mined_from: [], harvested_from: [] })
     }
@@ -78,10 +141,12 @@ export function bgWorld({ safe = true, onRead, provider, onTrace, directFeed = f
     const result = await settle(state, { ...options, allowContinuation: false })
     return result ?? (state?.status === 'completed' ? { sliceComplete: true } : undefined)
   }
+  const factory = installProductionFactoryFixture({ agent, memory, game, key: bg.key, plan, step, machines, recipes: bgRecipes })
   const add = (entity = furnace) => {
     machines.set(entity.unit_number, entity)
     memory.recordNpcPlacement(bg.key, { unit_number: entity.unit_number, entity_name: entity.name, actor_id: 24, actor_epoch: 1 })
     agent.recordLiveEntityObservation({ ...entity, surface_index: 1 }, undefined, 'placement_receipt', { surface_index: 1 })
+    if (receiptBacked) factory.retain(entity)
   }
   if (safe) add()
   game.onMutation = text => {
@@ -122,6 +187,8 @@ export function bgWorld({ safe = true, onRead, provider, onTrace, directFeed = f
       game.inventory['stone-furnace']--; machines.set(60, furnace)
       game.lastBasicResult = { type: 'placing', operation_id: game.batchId, tick: 600 + game.batchId, actor_id: 24,
         accepted: true, completed: true, code: 'completed', placed_unit_number: 60, entity_name: 'stone-furnace',
+        actor_kind: 'standalone_character', placed_world_id: factory.world, placed_last_user: undefined, placed_force_index: 1,
+        placed_batch_id: game.batchId, placed_batch_generation: game.generation ?? 1, placed_batch_ref: `batch-g${game.generation ?? 1}-${game.batchId}`,
         placed_entity_type: 'furnace', placed_position: furnace.position, placed_surface_index: 1, placed_direction: 0 }
     }
   }
@@ -134,5 +201,5 @@ export function bgWorld({ safe = true, onRead, provider, onTrace, directFeed = f
     memory.productionTasks = new Map([[`${bg.key}/${materialOwnerKey(owner)}`, task]])
     return task
   }
-  return { agent, memory, game, events, ops, providers, furnace, machines, add, start, residual, plan, step, preserved }
+  return { agent, memory, game, events, ops, providers, furnace, machines, add, start, residual, plan, step, preserved, factory }
 }

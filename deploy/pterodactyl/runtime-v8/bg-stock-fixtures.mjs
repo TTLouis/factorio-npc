@@ -4,14 +4,52 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { FakeFactorio, answersStepContract, planReply } from './task-loop-fixtures.mjs'
 import { operationSignature } from './operation-reconciliation.mjs'
+import { registerFactoryCell } from './factory-registry.mjs'
+
+// Explicit synthetic evidence for historical controller replays which predate
+// factory assignments. These are scripted capabilities, not recovered native
+// facts, recipe mechanics, or a migration of the frozen historical fixture.
+export function installHistoricalFactorySupplement(memory, game, entity, { products, ingredients }) {
+  const world = game.factoryWorldId
+  const locator = { unit_number: entity.unit_number, name: entity.name, position: structuredClone(entity.position), surface_index: 1, force_index: 1 }
+  const n = 10000 + entity.unit_number
+  const receipt = { receipt_id: `${world}/batch-g1-${n}/${n}`, world_id: world, ...locator,
+    actor_id: game.status.actor_id, actor_epoch: game.status.epoch, request_id: 'synthetic-historical-placement',
+    goal_id: 'synthetic-historical-goal', plan_id: 'synthetic-historical-plan', plan_version: 1,
+    step_id: 'synthetic-historical-step', semantic_step_id: 'synthetic-historical-step',
+    operation_key: `synthetic-placement-${n}`, operation_id: n, batch_ref: `batch-g1-${n}`, batch_id: n, batch_generation: 1, tick: 1 }
+  const registry = registerFactoryCell(memory.initializeFactoryRegistry(world), {
+    surface_index: 1, force_index: 1,
+    assignment: { products, purpose: 'Synthetic controller replay capability; not historical game evidence', method: 'synthetic_controller_fixture' },
+    members: [{ ...locator, provenance: { source: 'synthetic_fixture', receipt_id: receipt.receipt_id } }],
+    ports: products.map((resource, index) => ({ port_id: `output-${index}`, direction: 'output', kind: 'item', resource })),
+    origin: { source: 'synthetic_fixture' },
+  })
+  memory.restore({ ...memory.snapshot(), factory_registry: registry })
+  memory.recordFactoryPlacementReceipt(receipt, memory.factoryWorldBinding().generation)
+  game.factoryMembers.set(entity.unit_number, { locator, state: 'observed', type: entity.type,
+    recipe: { state: 'known', truncated: false, name: 'synthetic-controller-replay',
+      ingredients: ingredients.map(name => ({ type: 'item', name })), products: products.map(name => ({ type: 'item', name })) },
+    burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['synthetic-fixture-fuel'], truncated: false },
+    fuel_item_facts: { state: 'known', truncated: false, items: [{ name: 'coal', category: 'synthetic-fixture-fuel', fuel_value: 1 }] },
+    endpoint_facts: { schema_version: 1, inventories: { state: 'known', truncated: false, endpoints: [
+      { state: 'known', inventory_index: 3, roles: { state: 'known', values: ['output'] } },
+    ] }, recipe_selection: { quality: { state: 'known', name: 'normal' } } },
+  })
+}
 
 export const KEY = 'npc:bg-stock'
 export const original = JSON.parse(fs.readFileSync(new URL('./fixtures/bg-stock-original.json', import.meta.url)))
-export function stockWorld({ trace, read, persist, initial = 0, noYield = false, spentArgument = false, operations = original[initial].operations } = {}) {
+export function stockWorld({ trace, read, persist, initial = 0, noYield = false, spentArgument = false, operations = original[initial].operations,
+  factoryCapability = { products: ['copper-plate', 'iron-plate'], ingredients: ['iron-ore'] } } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const game = new FakeFactorio({ inventory: initial ? { 'iron-ore': 42 } : { coal: 3 } })
   Object.assign(game.status, { connected_players: 0, surface_index: 1, force_index: 1 })
   game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ unit_number: 26, name: 'stone-furnace', type: 'furnace', position: { x: 1, y: 0 } }] }
+  // tap14 withdraws copper then supplies iron to the same furnace. A real
+  // copper-only assignment would reject that job change. The dual-output test
+  // capability isolates the stock barrier while preserving the issued list.
+  installHistoricalFactorySupplement(memory, game, game.nearby.entities[0], factoryCapability)
   const native = game.command.bind(game)
   const rows = []; const calls = []; const receipts = []
   let agent

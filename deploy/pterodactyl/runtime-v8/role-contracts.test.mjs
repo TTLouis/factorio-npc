@@ -14,7 +14,7 @@ import { Session } from './supervisor.mjs'
 import { providerRequest } from './provider.mjs'
 import { executionOnlyControlToolDefinitions, planningOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
-import { answerBootstrapRead } from './direct-feed-bootstrap-fixtures.mjs'
+import { answerBootstrapRead, scriptedDirectFeedMembers, vanillaRecipes } from './direct-feed-bootstrap-fixtures.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 
 const KEY = 'npc:sgluna'
@@ -30,6 +30,9 @@ const draft = (overrides = {}) => ({ chatMessage: '', plan: ['Gather ten copper 
 function world(script, options = {}) {
   const { game = new FakeFactorio(), objective = 'Gather ten copper ore.', ...loopOptions } = options
   const memory = new CanonicalTaskBoardMemory()
+  // The synthetic native world has an identity even before any cell is established.
+  // An empty registry grants no member ownership or production capability.
+  memory.initializeFactoryRegistry(game.factoryWorldId)
   const calls = []
   const events = []
   const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, memory, completionProtocolVersion: 3, replacementWake: true,
@@ -282,7 +285,11 @@ test('Run AD: research-only post-batch coverage permits drill and output-coverin
   game.nearby = { source: 'live_factorio_nearby_entities', matched_count: 1,
     entities: [{ name: 'iron-ore', type: 'resource', position: resource, amount: 44 }] }
   game.command = async command => {
-    if (command.includes("remote.call('autorio_preflight','operation','place_candidate'")) return '{"ok":true}'
+    if (command.includes("remote.call('autorio_preflight','operation','place_candidate'")) {
+      const drill = command.includes("'placement-11'")
+      return JSON.stringify({ ok: true, operation: 'place_candidate', placement_item: { entity_name: drill ? 'burner-mining-drill' : 'stone-furnace' },
+        candidate_position: drill ? resource : output, candidate_direction: 4 })
+    }
     if (command.includes('"get_placement_candidates"')) {
       candidateReads.push(command)
       const drill = command.includes("entity_name='burner-mining-drill'")
@@ -301,6 +308,16 @@ test('Run AD: research-only post-batch coverage permits drill and output-coverin
     const name = command.includes("'placement-11'") ? 'burner-mining-drill' : 'stone-furnace'
     assert.equal(game.inventory[name], 1); game.inventory[name]--; placed.push(name)
     game.lastTaskTypes = ['placing']
+    const unit = name === 'burner-mining-drill' ? 201 : 202
+    const position = name === 'burner-mining-drill' ? resource : output
+    game.lastBasicResult = { type: 'placing', accepted: true, completed: true, code: 'completed', operation_id: game.batchId,
+      actor_id: game.status.actor_id, tick: 600 + game.batchId, entity_name: name, placed_unit_number: unit,
+      placed_position: position, placed_surface_index: 1 }
+    if (placed.length === 2) {
+      const source = { unit_number: 201, name: 'burner-mining-drill', position: resource, surface_index: 1, force_index: 1 }
+      const target = { unit_number: 202, name: 'stone-furnace', position: output, surface_index: 1, force_index: 1 }
+      for (const row of scriptedDirectFeedMembers(source, target, 'iron-ore', vanillaRecipes()['iron-plate'], game.gameTick)) game.factoryMembers.set(row.locator.unit_number, row)
+    }
   }
   const typed = (ctx, tool, args, transport = 'submit') => {
     assert.equal(ctx.context.allowTools, true)
@@ -336,7 +353,10 @@ test('Run AD: research-only post-batch coverage permits drill and output-coverin
   w.agent.routePostStepDecision = async () => ({ route: 'targeted_observation', decision_called: true,
     steering: { observation_budget: 1, observation_relevance: { source: 'typed_relevance', threshold: 0.5,
       selected_families: ['research_state'], budget: 1 } } })
+  const writes = []
+  w.agent.persistState = async () => { writes.push(w.memory.snapshot()) }
   await w.say()
+  w.agent.stateFile = '/synthetic/role-contract-state'
   const before = structuredClone(w.plan())
   assert.equal(w.calls.length, 3, JSON.stringify(w.events.slice(-6)))
   await w.agent.completed()
@@ -347,6 +367,7 @@ test('Run AD: research-only post-batch coverage permits drill and output-coverin
   assert.equal(candidateReads.length, 2)
   assert.equal(game.mutations.length, 4, 'walk, drill placement, furnace placement and subsequent work were admitted')
   assert.equal(w.calls.length, 8)
+  assert.ok(writes.some(snapshot => snapshot.factory_registry.cells.length === 1), 'exact retained new placements were assigned before wait admission')
   assert.deepEqual(w.plan().steps, before.steps, 'observations cannot rewrite or complete the committed step')
   assert.equal(w.memory.currentPlan(KEY).task_board.completed_count, 0)
   assert.equal(w.memory.targetedObservationLedger?.size ?? 0, 0)

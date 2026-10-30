@@ -510,7 +510,7 @@ test('D2 B1: after the batch receipt lands the executor first continuation carri
   const currentStep = textOf(stepBlock(request.messages))
   assert.doesNotMatch(currentStep, /counts_deferred/, 'the volatile step block no longer claims that the completed batch is in flight')
   assert.match(currentStep, /^held_counts .*copper-plate=10/m)
-  assert.match(currentStep, /^receipt #[0-9]+ operation_receipt batch_1: outcome=completed; task_state=idle/m)
+  assert.match(currentStep, /^receipt #[0-9]+ operation_receipt batch-g1-1: outcome=completed; task_state=idle/m)
   assert.match(currentStep, /^authority: .*latest_receipt=#[0-9]+ deterministic_verification batch_1 \(this step\)/m, 'the current step block names the receipt that just landed')
   assert.equal(request.messages.map(textOf).find(text => text.startsWith('[HANDOFF]')), stablePlan, 'the stable plan prefix remains byte-identical')
   assert.equal(world.agent.agentContext.handoffId, handoffId)

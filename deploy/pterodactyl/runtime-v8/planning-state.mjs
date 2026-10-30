@@ -3764,7 +3764,7 @@ Object.assign(HANDLERS, {
     const appended = incoming.map(entry => ({ ...entry, seq: ++seq }))
     const nextLedger = appended.length === 0
       ? ledger
-      : { ...ledger, [stepId]: [...held, ...appended].slice(-RECEIPT_LEDGER_LIMITS.perStep) }
+      : { ...ledger, [stepId]: compactActiveReceiptLedger([...held, ...appended]) }
     const seeded = plan.execution.receipts_seeded === true || seeding
     return {
       ...withPlan(state, plan.plan_id, current => ({
@@ -4239,6 +4239,24 @@ export function activeStepVerifiedOperationNames(state) {
   return [...new Set((plan.execution?.receipts?.[step.step_id] ?? [])
     .filter(entry => entry.kind === 'deterministic_verification' && entry.source === 'runtime')
     .flatMap(entry => entry.verified_operation_names ?? []))]
+}
+
+// Retain a correlated witness for each verified operation while the step can
+// still execute. Repeated waits must not erase a prior mixed-checkpoint fact.
+// This preserves original entries, never unions names onto another receipt.
+function compactActiveReceiptLedger(entries) {
+  const cap = RECEIPT_LEDGER_LIMITS.perStep
+  if (entries.length <= cap) return entries
+  const selected = new Set(); const names = new Set()
+  for (let index = entries.length - 1; index >= 0 && selected.size < cap; index--) {
+    const row = entries[index]
+    if (row.kind !== 'deterministic_verification' || row.source !== 'runtime') continue
+    const unseen = (row.verified_operation_names ?? []).filter(name => !names.has(name))
+    if (!unseen.length) continue
+    selected.add(index); unseen.forEach(name => names.add(name))
+  }
+  for (let index = entries.length - 1; index >= 0 && selected.size < cap; index--) selected.add(index)
+  return entries.filter((_, index) => selected.has(index))
 }
 
 function runEventAllowed(state, event) {

@@ -103,6 +103,8 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   handoffPlacingItems: f('process', true, V8, 'entity prototype to placing item: stable prototype data'),
   handoffTriggerCraftingReports: f('process', true, V8, 'trigger-crafting reports merged by technology in recordRequirementsFacts, never cleared (ambiguous: research state, not strictly static)'),
   worldMutationSeq: f('process', true, V8, 'monotonic world-change sequence (noteWorldMutation) that orders observations; never reset'),
+  factoryDeliveryMutationSeq: f('process', false, V8, 'monotonic non-wait mutation sequence invalidating attributed delivery windows; never reset'),
+  productionAdmission: f('turn', false, V8, 'captured owner for trusted production/lifecycle operation admission; restored in finally'),
   topologyPrototypeFacts: f('process', true, V8, 'prototype details Map, dropped only when the epoch session changes (gatherTopologyContext)'),
   topologyPrototypeSession: f('process', false, V8, 'session id the topology prototype Map belongs to'),
   latestCompletedBatchId: f('process', false, V8, 'last completed batch id from inspectAuthoritativeRuntime; stamps Jev observation log entries'),

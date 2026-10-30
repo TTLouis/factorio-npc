@@ -7,6 +7,8 @@ import { captureObligationProof, effectivePreservationProof, obligationProofOrig
 import { STALE_REPLY_ERROR_CODE } from './agent-context.mjs'
 import { productionBindings } from './production-task.mjs'
 import { authorizationOf, checkGrant, evaluateOperationAdmission } from './authorization.mjs'
+import { enrollFactoryProductionProducers } from './factory-cell-enrollment.mjs'
+import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
 
 export const PRODUCTION_BINDING_CANDIDATE_LIMIT = 8
 const nativeList = value => Array.isArray(value) ? value : value && typeof value === 'object' && Object.keys(value).length === 0 ? [] : undefined
@@ -91,23 +93,43 @@ export async function resolveProductionBindings(agent, s, task, facts, nodes, { 
   // A route's destination is occupied even if its input happens to be empty.
   const routeUnits = new Set(fresh.preserved.flatMap(row => [row.item_io?.pickup_target?.unit_number, row.item_io?.drop_target?.unit_number]).filter(Number.isSafeInteger))
   const placements = agent.memory.authorizationState(s.owner.key)?.world?.npc_placements ?? []
+  const registry = agent.memory.factoryRegistryStatus?.().status === 'initialized' ? agent.memory.getFactoryOperationalRegistry() : undefined
+  const receipts = registry ? agent.memory.factoryPlacementReceipts({ world_id: registry.world_id, goal_id: task.owner.goal_id,
+    semantic_step_id: s.step.semantic_step_id ?? s.step.step_id }) : []
   const result = []
   for (const node of nodes) {
     const recipe = facts.recipes.find(row => row.name === node.name)
     if (!recipe || recipe.crafting_machines_truncated === true || !Array.isArray(recipe.crafting_machines)) fail('recipe_unreadable')
     const names = new Set(recipe.crafting_machines.map(row => row.name))
-    const possible = placements.filter(row => row.actor_id === actor.actor_id && row.actor_epoch === actor.epoch && names.has(row.entity_name))
+    const possibleByUnit = new Map(placements.filter(row => row.actor_id === actor.actor_id && row.actor_epoch === actor.epoch && names.has(row.entity_name))
+      .map(row => [row.unit_number, row]))
+    for (const cell of registry?.cells ?? []) {
+      if (['retired', 'degraded'].includes(cell.lifecycle_state) || !cell.assignment.products.includes(node.item_name)) continue
+      for (const member of cell.members) if (names.has(member.name) && !possibleByUnit.has(member.unit_number)) {
+        possibleByUnit.set(member.unit_number, { unit_number: member.unit_number, entity_name: member.name })
+      }
+    }
+    const possible = [...possibleByUnit.values()]
     if (possible.length > PRODUCTION_BINDING_CANDIDATE_LIMIT) fail('candidate_limit')
     const candidates = []
+    const needsFuel = new Set()
     for (const placement of possible) {
       const unit = placement.unit_number
       if (routeUnits.has(unit) || productionBindings(task).some(row => row.unit_number === unit)
         || result.some(row => row.unit_number === unit)) continue
       if ([...(agent.memory.productionTasks?.values() ?? [])].some(other => materialOwnerKey(other.owner) !== materialOwnerKey(task.owner)
         && other.status !== 'complete' && productionBindings(other).some(row => row.unit_number === unit))) continue
-      const locator = agent.liveObservedExactTarget(unit) ?? agent.exactTargetLocator(unit)
+      const assigned = registry?.cells.find(cell => cell.members.some(member => member.unit_number === unit))
+      const locator = assigned?.members.find(member => member.unit_number === unit) ?? agent.liveObservedExactTarget(unit) ?? agent.exactTargetLocator(unit)
       if (!locator?.name || !locator.position || locator.name !== placement.entity_name
         || locator.surface_index !== undefined && locator.surface_index !== actor.surface_index) fail('locator_unproven')
+      if (assigned) {
+        if (['retired', 'degraded'].includes(assigned.lifecycle_state) || !assigned.assignment.products.includes(node.item_name)
+          || !assigned.ports.some(port => port.direction === 'output' && port.kind === 'item' && port.resource === node.item_name)
+          || assigned.assignment.method.startsWith('native_recipe:') && assigned.assignment.method !== `native_recipe:${node.name}`) continue
+      }
+      else if (!receipts.some(row => row.unit_number === unit && row.name === locator.name && row.surface_index === actor.surface_index
+        && row.force_index === forceIndex && row.position?.x === locator.position.x && row.position?.y === locator.position.y)) continue
       const raw = await read('getEntityStatus', { unit_number: unit })
       const detail = validateRefreshedEntity(raw, { unit, locator, placement, actorId: actor.actor_id, surfaceIndex: actor.surface_index, forceIndex })
       const entity = detail.entity
@@ -123,20 +145,32 @@ export async function resolveProductionBindings(agent, s, task, facts, nodes, { 
         || entity.inventories.filter(row => [2, 3].includes(row.index)).some(row => nativeList(row.items).length)) continue
       // A restored target-only record has no new fuel grant. Its setup executor
       // must establish fuel through ordinary operations before adoption.
-      if (residual && !task.intent.fuel && entity.energy_source === 'burner' && entity.status_name === 'no_fuel') continue
+      if (residual && !task.intent.fuel && entity.energy_source === 'burner' && entity.status_name === 'no_fuel') needsFuel.add(unit)
       const supply = s.step.execution_guidance?.materialSupply
       if (supply?.mode === 'direct_feed') continue // Explicit feeder binding remains required.
       candidates.push({ recipe_name: node.name, unit_number: unit })
       agent.recordLiveEntityToolResult('getEntityStatus', raw)
     }
-    if (candidates.length !== 1) {
+    const unfueled = candidates.length === 1 && needsFuel.has(candidates[0].unit_number)
+    if (unfueled) {
+      // Establish the unique receipt-backed job before ordinary setup fuel is
+      // sent. This grants neither fuel nor a runnable production binding.
+      await enrollFactoryProductionProducers(agent, candidates)
+      await fence()
+    }
+    if (candidates.length !== 1 || unfueled) {
       await idle()
-      const error = new Error(`production_binding_${candidates.length ? 'ambiguous' : 'no_eligible_producer'}`)
-      if (!candidates.length) error.productionBindingContinuation = { fence, idle }
+      const error = new Error(`production_binding_${candidates.length > 1 ? 'ambiguous' : 'no_eligible_producer'}`)
+      if (!candidates.length || unfueled) error.productionBindingContinuation = { fence, idle }
       throw error
     }
     result.push(candidates[0])
   }
+  const producers = [...productionBindings(task), ...result]
+  await enrollFactoryProductionProducers(agent, producers)
+  await fence()
+  await reconcileFactoryCellUse(agent, { step: s.step, phase: 'production_binding', productionIntent: { ...task.intent, producers } })
+  await fence()
   await idle()
   return { bindings: result, fence, idle }
 }

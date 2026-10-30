@@ -1,11 +1,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { startContractPrediction } from './contract-prediction.mjs'
 import { recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
 import { pinLegacyFixtureSkillContext, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 
 export const ao = JSON.parse(fs.readFileSync(new URL('./fixtures/run-ao-controller.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
 
@@ -15,7 +16,7 @@ export function preserveAoRepair(name, w) {
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(path.join(dir, `${name}.jsonl`), `${w.events.map(row => JSON.stringify(row)).join('\n')}\n`)
   fs.writeFileSync(path.join(dir, `${name}-outcome.json`), `${JSON.stringify({
-    source: ao.baseline_sha, fixture: 'recorded AO plans plus scripted native scheduling/provider continuation',
+    source: ao.baseline_sha, fixture: 'recorded AO plans plus scripted scheduling/provider continuation and synthetic factory assignment/native capability',
     gameplay_success: false, active_step_index: w.held().active_step_index,
     native_batches_admitted: w.game.mutations.length, transfer_calls: w.game.mutations.filter(text => text.includes("'move_items_exact'")).length,
     recoveries: w.events.filter(row => /^controller.recovery_/.test(row.event)),
@@ -31,6 +32,7 @@ export async function aoWorld({ traceHook, readHook, providerHook } = {}) {
   Object.assign(game.status, { actor_id: 19, epoch: 1, connected_players: 0 })
   game.nearby = { actor_position: { x: -21, y: 1 }, entities: [{ name: 'stone-furnace', type: 'furnace',
     unit_number: 44, position: { x: -21, y: 1 } }] }
+  installHistoricalFactorySupplement(memory, game, game.nearby.entities[0], { products: ['iron-plate'], ingredients: ['iron-ore'] })
   game.batchId = ao.native_batch_id - 1
   game.lastTaskTypes = ['waiting']
   const events = []; const contracts = []; const providers = []; const chats = []

@@ -31,6 +31,9 @@ function world({ readHook, traceHook, inventory, memory: snapshot, preflight } =
   Object.assign(game.status, { actor_id: 25, epoch: 1, connected_players: 0, surface_index: 1 })
   game.batchId = 1
   game.cancelledBatch = structuredClone(ar.native.last_cancelled_batch)
+  // Restore the actual retained native receipt journal as well as its latest summary.
+  // Status polling never manufactures a deliberately absent terminal witness.
+  game.factoryTerminalBatchReceipts = new Map(ar.native.receipt_journal.map(row => [row.batch_ref, structuredClone(row)]))
   game.lastBasicResult = structuredClone(ar.native.basic_operation.last_result)
   game.admissions = structuredClone(ar.native.admission_journal)
   game.admissions[0].batch_id = 1
@@ -168,6 +171,7 @@ test('restart/restage preserves the gather recovery allowance and explicit exhau
     const next = world({ memory: snapshot })
     next.game.batchId = w.game.batchId
     next.game.admissions = [record]; next.game.cancelledBatch = failed
+    next.game.factoryTerminalBatchReceipts.set(failed.batch_ref, { ...failed, state: 'cancelled' })
     next.game.lastBasicResult = { ...next.game.lastBasicResult, tick: failed.tick }
     assert.equal(next.memory.pendingOperations(ar.key)[0].operation_key, pending.operation_key)
     w = next

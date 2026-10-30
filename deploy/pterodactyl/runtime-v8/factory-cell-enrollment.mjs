@@ -1,9 +1,11 @@
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
-import { committedFactoryCellIntent, readFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
+import { committedFactoryCellIntent, readFactoryCellIntent, factoryCellIntentSignature, factoryIntentAssignment, factoryIntentMembers, factoryIntentOutputs, factoryIntentPorts } from './factory-cell-intent.mjs'
 import { FACTORY_REGISTRY_LIMITS, FactoryRegistryError } from './factory-registry.mjs'
 import { placedEntityName } from './operation-reconciliation.mjs'
 import { prepareFactoryCellHost } from './factory-cell-tools.mjs'
 import { PAUSE_CLASS } from './pause-class.mjs'
+import { reconcileFactoryCellUse, readFactoryProducerRecipe, factoryNativeOutput, factoryEstablishmentGrant, factoryDirectFeedRecipe } from './factory-cell-use.mjs'
+import { validateFactoryMiningSource } from './factory-cell-observation.mjs'
 
 const fail = code => { throw new FactoryRegistryError(code, code) }
 const placement = op => ['place_entity', 'place_candidate'].includes(op?.name)
@@ -37,7 +39,7 @@ export async function atFactoryCellBoundary(agent, phase, action) {
   }
 }
 function active(agent) {
-  const key = agent.activePlanKey(); const state = agent.memory.planningState(key)
+  const key = agent.activePlanKey(); const state = agent.memory.planningState?.(key)
   const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
   const intent = committedFactoryCellIntent(step)
   if (intent && (state.goal?.status !== 'active' || state.run?.paused || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status))) fail('factory_enrollment_authority_missing')
@@ -58,7 +60,10 @@ export async function validateFactoryCellDraft(agent, draft) {
   let declared = false
   for (const [i, guidance] of briefs.entries()) {
     const intent = readFactoryCellIntent(guidance)
-    if (!intent) continue
+    if (!intent) {
+      if (i === (draft.currentStep ?? 0)) await reconcileFactoryCellUse(agent, { step: { execution_guidance: guidance, completion_contract: draft.stepCompletions?.[i]?.checkpoint }, phase: 'draft' })
+      continue
+    }
     if (draft.assessmentOnly === true || draft.stepCompletions?.[i]?.kind !== 'deterministic') fail('factory_cell_intent_invalid')
     declared = true
   }
@@ -74,20 +79,28 @@ export async function validateFactoryCellDraft(agent, draft) {
 // Shared pre-send boundary, including intentless placements when a world is
 // already UUID-bound. Never fill pending.surface_index from model arguments.
 export async function factoryPlacementAdmissionScope(agent, operations, preflight) {
-  const current = active(agent)
   const placements = operations.filter(placement)
+  if (!placements.length) return undefined
+  const current = active(agent)
+  const legacy = agent.memory.currentPlan?.(agent.activePlanKey())
+  const guidance = current.step?.execution_guidance ?? legacy?.task_board?.steps?.[legacy.task_board.active_index]?.execution_guidance
+  // Explicit historical v1 replay has no new factory adoption authority. Live
+  // protocol-3 placements always enter exact world/receipt capture below.
+  if (agent.completionProtocolVersion === 1 && !current.intent && !guidance?.materialSupply
+    && !(agent.memory.factoryTemporaryIntents?.() ?? []).length
+    && ![...(agent.memory.productionTasks?.values() ?? [])].some(task => task.status !== 'complete')) return undefined
   if (current.intent && operations.some(op => op.name === 'execute_construction_plan')) fail('factory_enrollment_single_placement_required')
   if (current.intent && placements.length && (placements.length !== 1 || operations.length !== 1)) fail('factory_enrollment_single_placement_required')
   if (operations.length !== 1 || placements.length !== 1) return undefined
-  if (!current.intent && agent.memory.factoryRegistryStatus().status !== 'initialized') return undefined
-  bound(agent)
+  if (current.intent) bound(agent)
   return prepareFactoryCellHost(agent, (_observer, access) => {
     const scope = access.readContext()
     if (current.intent) {
       const name = placedEntityName(operations[0], preflight?.[0])
-      if (![current.intent.sourceEntity, current.intent.targetEntity].includes(name)) fail('factory_enrollment_unexpected_member')
+      const intended = factoryIntentMembers(current.intent).filter(member => member.entity === name)
+      if (!intended.length) fail('factory_enrollment_unexpected_member')
       const receipts = scopeReceipts(agent, current.state, current.step)
-      if (receipts.some(row => row.name === name)) fail('factory_enrollment_duplicate_placement')
+      if (receipts.filter(row => row.name === name).length >= intended.length) fail('factory_enrollment_duplicate_placement')
       const capacity = agent.memory.factoryPlacementCapacity()
       if (capacity.used >= capacity.limit) fail('factory_placement_capacity')
       if (agent.memory.getFactoryRegistry().cells.length >= FACTORY_REGISTRY_LIMITS.cells) fail('factory_registry_capacity')
@@ -98,10 +111,14 @@ export async function factoryPlacementAdmissionScope(agent, operations, prefligh
 
 function membersForIntent(agent, current, scope) {
   const receipts = scopeReceipts(agent, current.state, current.step)
-  return [current.intent.sourceEntity, current.intent.targetEntity].map(name => {
-    const matches = receipts.filter(row => row.name === name)
-    if (matches.length !== 1) fail(matches.length ? 'factory_enrollment_member_ambiguous' : 'factory_enrollment_placement_missing')
-    const row = matches[0]
+  const intended = factoryIntentMembers(current.intent)
+  const assigned = new Set()
+  return intended.map(member => {
+    const matches = receipts.filter(row => row.name === member.entity).sort((a, b) => a.tick - b.tick || a.operation_id - b.operation_id || a.receipt_id.localeCompare(b.receipt_id))
+    const expected = intended.filter(row => row.entity === member.entity).length
+    if (matches.length !== expected) fail(matches.length > expected ? 'factory_enrollment_member_ambiguous' : 'factory_enrollment_placement_missing')
+    const row = matches.find(receipt => !assigned.has(receipt.receipt_id))
+    assigned.add(row.receipt_id)
     const original = current.state.plans.find(plan => plan.plan_id === row.plan_id && plan.plan_version === row.plan_version && plan.goal_id === row.goal_id)
     const step = original?.steps.find(step => step.step_id === row.step_id && (step.semantic_step_id ?? step.step_id) === row.semantic_step_id)
     if (!step || !committedFactoryCellIntent(step) || factoryCellIntentSignature(step.execution_guidance) !== current.signature
@@ -109,6 +126,117 @@ function membersForIntent(agent, current, scope) {
     return { unit_number: row.unit_number, name: row.name, position: row.position, surface_index: row.surface_index, force_index: row.force_index,
       provenance: { receipt_id: row.receipt_id } }
   })
+}
+
+// Typed finite production can establish a newly placed machine without an
+// optional model cell declaration. Old or random world entities cannot enroll.
+export async function enrollFactoryProductionProducers(agent, producers) {
+  if (!Array.isArray(producers) || producers.length > 16 || producers.some(row => !Number.isSafeInteger(row.unit_number) || typeof row.recipe_name !== 'string')) fail('factory_cell_producer_invalid')
+  if (!producers.length) return []
+  bound(agent)
+  const current = active(agent); const owner = agent.captureCheckpointOwner()
+  const unassigned = producers.filter(producer => !agent.memory.getFactoryOperationalRegistry().cells.some(cell => cell.members.some(member => member.unit_number === producer.unit_number)))
+  if (!unassigned.length) return []
+  if (!agent.stateFile) fail('factory_enrollment_persistence_unavailable')
+  if (current.intent) {
+    await ensureCommittedFactoryCellBeforeClose(agent, owner)
+    return []
+  }
+  const enrolled = []
+  for (const producer of unassigned) {
+    const result = await prepareFactoryCellHost(agent, async (observer, access) => {
+      const runtime = observer.runtime; const scope = runtime.scope()
+      const matches = scopeReceipts(agent, current.state, current.step).filter(row => row.unit_number === producer.unit_number)
+      if (matches.length !== 1) fail('factory_cell_producer_placement_unproven')
+      const receipt = matches[0]
+      if (agent.memory.factoryTemporaryAssets().some(asset => asset.receipt_id === receipt.receipt_id)
+        || agent.memory.getFactoryRegistry().cells.some(cell => cell.members.some(member => member.unit_number === producer.unit_number))) fail('factory_enrollment_member_assigned')
+      const native = await observer.observePlacement(receipt.receipt_id)
+      const row = native.members[0]
+      const recipe = await readFactoryProducerRecipe(agent, access, row, producer.recipe_name)
+      if (!recipe.products?.length || recipe.products.length > 32 || recipe.products.some(product => !['item', 'fluid'].includes(product.type) || typeof product.name !== 'string')) fail('factory_cell_producer_output_unknown')
+      const ports = recipe.products.map((product, index) => ({ port_id: `output-${index + 1}`, direction: 'output', kind: product.type, resource: product.name }))
+      if (ports.some(port => !factoryNativeOutput(row, port))) fail('factory_cell_producer_output_unknown')
+      const member = runtime.recordPlacement({ unit_number: receipt.unit_number, name: receipt.name, position: receipt.position,
+        surface_index: receipt.surface_index, force_index: receipt.force_index, provenance: { receipt_id: receipt.receipt_id } }, scope)
+      const declaration = { surface_index: scope.surface_index, force_index: scope.force_index,
+        assignment: { products: [...new Set(ports.map(port => port.resource))], purpose: `Production for semantic step ${scope.semantic_step_id}`, method: `native_recipe:${producer.recipe_name}` },
+        members: [member], ports, origin: runtime.origin() }
+      access.fence(); runtime.assertScope(scope)
+      const cell = runtime.registerCell(declaration, scope); access.acceptPublishedRevision()
+      try { await agent.persistState({ strict: true }) }
+      catch (error) { agent.memory.invalidateFactoryEnrollmentPersistence(); throw error }
+      agent.assertCheckpointOwnerIdentity(owner); access.fence()
+      await agent.traceEvent('factory_cell.enrolled_from_production', { cell_id: cell.cell_id, receipt_id: receipt.receipt_id, unit_number: receipt.unit_number,
+        recipe_name: producer.recipe_name, goal_id: scope.goal_id, semantic_step_id: scope.semantic_step_id, native_tick: native.tick, commissioning: 'unverified' })
+      access.fence()
+      return cell
+    }).execute()
+    enrolled.push(result)
+  }
+  return enrolled
+}
+
+// Infer an omitted declaration only from new, retained placements in this
+// unchanged semantic job. Existing/legacy entities never become candidates.
+export async function enrollImplicitDirectFeed(agent, requirement, { targets = [] } = {}) {
+  const current = active(agent)
+  if (current.intent || current.step?.execution_guidance?.materialSupply?.mode !== 'direct_feed'
+    || current.step.execution_guidance.materialSupply.resource !== requirement.resource
+    || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(current.plan?.status)) return undefined
+  const registry = agent.memory.getFactoryOperationalRegistry()
+  if (targets.length && targets.every(unit => registry.cells.some(cell => cell.members.some(member => member.unit_number === unit)))) return undefined
+  const receipts = scopeReceipts(agent, current.state, current.step).filter(receipt =>
+    agent.memory.factoryPlacementAvailability({ unit_number: receipt.unit_number, entity_name: receipt.name }).status === 'unassigned'
+    && !agent.memory.factoryTemporaryAssets().some(asset => asset.receipt_id === receipt.receipt_id))
+  if (receipts.length < 2) return undefined
+  if (receipts.length > 32) fail('factory_cell_resolution_capacity')
+  const checkGrant = factoryEstablishmentGrant(agent, requirement)
+  if (!checkGrant) fail('factory_establishment_authority_missing')
+  if (!agent.stateFile) fail('factory_enrollment_persistence_unavailable')
+  const owner = agent.captureCheckpointOwner()
+  return prepareFactoryCellHost(agent, async (observer, access) => {
+    const runtime = observer.runtime; const scope = runtime.scope()
+    const members = receipts.map(receipt => runtime.recordPlacement({ unit_number: receipt.unit_number, name: receipt.name,
+      position: receipt.position, surface_index: receipt.surface_index, force_index: receipt.force_index, provenance: { receipt_id: receipt.receipt_id } }, scope))
+    const provisional = { surface_index: scope.surface_index, force_index: scope.force_index,
+      assignment: { products: [requirement.resource], purpose: 'Inspect retained establishment receipts', method: 'provisional_direct_feed' },
+      members, ports: [], origin: runtime.origin() }
+    const observed = await observer.observeCandidate(provisional)
+    checkGrant(); access.fence()
+    const pairs = []
+    for (const source of observed.native.members) {
+      const mined = validateFactoryMiningSource(source, requirement.resource)
+      if (mined.state !== 'compatible' || !mined.item_only || source.item_routes?.state !== 'known'
+        || source.item_routes.truncated !== false || !Array.isArray(source.item_routes.routes)) continue
+      const drops = source.item_routes.routes.filter(route => route.kind === 'drop')
+      if (drops.length !== 1 || drops[0].state !== 'connected') continue
+      const target = observed.native.members.find(row => ['unit_number', 'name', 'surface_index', 'force_index'].every(field => row.locator[field] === drops[0].target?.[field])
+        && row.locator.position.x === drops[0].target?.position?.x && row.locator.position.y === drops[0].target?.position?.y)
+      if (!target || targets.some(unit => ![source.locator.unit_number, target.locator.unit_number].includes(unit))) continue
+      const recipe = factoryDirectFeedRecipe(target, mined.products)
+      if (!recipe || !Array.isArray(recipe.products) || !recipe.products.length || recipe.products.length > 32
+        || recipe.products.some(product => product.type !== 'item' || typeof product.name !== 'string')) continue
+      const ports = recipe.products.map((product, index) => ({ port_id: `output-${index + 1}`, direction: 'output', kind: 'item', resource: product.name }))
+      if (ports.some(port => !factoryNativeOutput(target, port))) continue
+      pairs.push({ source, target, recipe, ports })
+    }
+    if (pairs.length !== 1) fail(pairs.length ? 'factory_enrollment_member_ambiguous' : 'factory_enrollment_native_unverified')
+    const pair = pairs[0]
+    const declaration = { surface_index: scope.surface_index, force_index: scope.force_index,
+      assignment: { products: [...new Set(pair.ports.map(port => port.resource))], purpose: `Direct feed for semantic step ${scope.semantic_step_id}`,
+        method: `native_direct_feed:${requirement.resource}:${pair.recipe.name}` },
+      members: [pair.source, pair.target].map(row => members.find(member => member.unit_number === row.locator.unit_number)),
+      ports: pair.ports, origin: runtime.origin() }
+    checkGrant(); access.fence(); runtime.assertScope(scope)
+    const cell = runtime.registerCell(declaration, scope); access.acceptPublishedRevision()
+    try { await agent.persistState({ strict: true }) } catch (error) { agent.memory.invalidateFactoryEnrollmentPersistence(); throw error }
+    agent.assertCheckpointOwnerIdentity(owner); checkGrant(); access.fence()
+    await agent.traceEvent('factory_cell.enrolled_from_direct_feed', { ...scope, cell_id: cell.cell_id,
+      receipt_ids: declaration.members.map(member => member.provenance.receipt_id), commissioning: 'unverified', delivery_ready: false })
+    access.fence(); checkGrant()
+    return cell
+  }).execute()
 }
 
 // An already satisfied original goal may make wholly unbuilt investment steps
@@ -128,18 +256,22 @@ export async function ensureFactoryCellBeforeGoalCompletion(agent, owner) {
 // enrolls the already configured pair; it never advances a step or repairs it.
 export async function ensureCommittedFactoryCellBeforeClose(agent, owner) {
   const current = active(agent)
-  if (!current.intent) return { ok: true, applicable: false }
+  if (!current.intent) return reconcileFactoryCellUse(agent, { phase: 'close' })
   bound(agent)
   agent.assertCheckpointOwnerIdentity(owner)
-  return prepareFactoryCellHost(agent, async (observer, access) => {
+  const result = await prepareFactoryCellHost(agent, async (observer, access) => {
     const runtime = observer.runtime; const scope = runtime.scope()
     const rawMembers = membersForIntent(agent, current, scope)
     const members = rawMembers.map(member => runtime.recordPlacement(member, scope))
     const enrollment = { goal_id: scope.goal_id, semantic_step_id: scope.semantic_step_id, intent_signature: current.signature,
       receipt_ids: members.map(member => member.provenance.receipt_id) }
+    if (current.intent.kind === 'production_block') {
+      enrollment.member_roles = factoryIntentMembers(current.intent).map((member, index) => ({ role: member.role, receipt_id: enrollment.receipt_ids[index] }))
+      enrollment.output_roles = factoryIntentOutputs(current.intent).map((output, index) => ({ port_id: factoryIntentPorts(current.intent)[index].port_id, role: output.role }))
+    }
     const declaration = { surface_index: scope.surface_index, force_index: scope.force_index,
-      assignment: { products: [current.intent.product], purpose: current.intent.purpose, method: 'direct_feed' }, members,
-      ports: [{ port_id: 'output', direction: 'output', kind: 'item', resource: current.intent.product }], origin: runtime.origin(), enrollment }
+      assignment: factoryIntentAssignment(current.intent), members,
+      ports: factoryIntentPorts(current.intent), origin: runtime.origin(), enrollment }
     const registry = agent.memory.getFactoryRegistry()
     const previous = registry.cells.find(cell => cell.enrollment?.goal_id === scope.goal_id && cell.enrollment.semantic_step_id === scope.semantic_step_id)
     for (const member of members) {
@@ -148,7 +280,8 @@ export async function ensureCommittedFactoryCellBeforeClose(agent, owner) {
     }
     if (previous && ['surface_index', 'force_index', 'assignment', 'members', 'ports', 'enrollment'].some(field => JSON.stringify(field === 'ports' ? previous.metadata_history?.[0]?.ports ?? previous.ports : previous[field]) !== JSON.stringify(declaration[field]))) fail('factory_enrollment_conflict')
     if (!previous && registry.cells.length >= FACTORY_REGISTRY_LIMITS.cells) fail('factory_registry_capacity')
-    const observation = await observer.observeCandidate(declaration, { source_unit_number: members[0].unit_number, target_unit_number: members[1].unit_number, product: current.intent.product })
+    const observation = await observer.observeCandidate(declaration, current.intent.kind === 'direct_feed'
+      ? { source_unit_number: members[0].unit_number, target_unit_number: members[1].unit_number, product: current.intent.product } : undefined)
     agent.assertCheckpointOwnerIdentity(owner); access.fence(); runtime.assertScope(scope)
     if (observation.state !== 'compatible') {
       await agent.traceEvent('factory_cell.enrollment_refused', { request_id: scope.request_id, goal_id: scope.goal_id, plan_id: scope.plan_id,
@@ -175,4 +308,7 @@ export async function ensureCommittedFactoryCellBeforeClose(agent, owner) {
     agent.assertCheckpointOwnerIdentity(owner); access.fence()
     return { ok: true, applicable: true, cell_id: cell.cell_id, duplicate: Boolean(previous) }
   }).execute()
+  await reconcileFactoryCellUse(agent, { phase: 'close' })
+  agent.assertCheckpointOwnerIdentity(owner)
+  return result
 }

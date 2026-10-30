@@ -25,9 +25,10 @@ function craft(inventory, name, count) {
   inventory[name] = (inventory[name] ?? 0) + count * recipe.yield
 }
 class RunNFactorio extends FurnaceFactorio {
-  constructor() {
-    super({ inventory: { coal: 10, 'copper-ore': 10, 'iron-plate': 16, 'iron-gear-wheel': 10, 'copper-cable': 20 },
-      furnace: { fuel: { coal: 2 }, output: { 'iron-plate': 44 }, energy_kj: 100 } })
+  constructor({ dedicatedCopper = false } = {}) {
+    super({ factoryJob: dedicatedCopper ? 'copper-plate' : 'iron-plate',
+      inventory: { coal: 10, 'copper-ore': 10, 'iron-plate': 16, 'iron-gear-wheel': 10, 'copper-cable': 20 },
+      furnace: { fuel: { coal: 2 }, output: dedicatedCopper ? { 'copper-plate': 1 } : { 'iron-plate': 44 }, energy_kj: 100 } })
     this.preflight = text => text.includes("'craft_item'") ? { ok: true, operation: 'craft_item', craftable_now_count: 1 } : this.furnacePreflight(text)
   }
   async command(text) {
@@ -71,9 +72,9 @@ function full(messages) {
 const diagnostic = ctx => JSON.stringify({ labels: ctx.model.labels, violations: ctx.model.violations, logs: ctx.logs,
   last: ctx.world.trace.slice(-12).map(row => ({ event: row.event, data: row.data })) })
 const collect = (item_name, max_count) => ({ name: 'move_items_exact', args: { unit_number: FURNACE_UNIT, item_name, max_count, to_entity: false } })
-async function begin(t) {
+async function begin(t, options) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new RunNFactorio()
+  const game = new RunNFactorio(options)
   const model = new ScriptedModel()
     .push('planner', 'sol:lab-checkpoint', reply([], { goal: { scope: 'finite', summary: 'Hold one crafted lab', doneWhen: [{ kind: 'inventory_count', item_name: 'lab', minimum: 1 }] } }))
     .push('executor', 'luna:initial-reads', observe())
@@ -92,15 +93,37 @@ async function begin(t) {
   assert.equal(game.sent.length, 0, 'unsupported blocker and refused supplies do not dispatch gameplay')
   return ctx
 }
-test('Run N full loop: closed C5 recovery -> C7 full machine facts -> clear output -> smelt copper -> craft lab -> verified goal', async t => {
+test('original Run N iron collection cannot authorize a subsequent copper job on the assigned iron furnace', async t => {
   const ctx = await begin(t)
+  const steps = structuredClone(ctx.world.memory.planningState(KEY).plans.at(-1).steps)
+  ctx.model.push('executor', 'original:C7-reads', observe())
+    .push('executor', 'original:collect-iron-output', reply([collect('iron-plate', 44)]))
+    .push('executor', 'original:feed-copper-after-clear', reply([{ name: 'supply_entity', args: {
+      unit_number: FURNACE_UNIT, items: [{ item_name: 'copper-ore', count: 5 }],
+    } }]))
+  await fireResumeTimer(ctx)
+  assert.equal(ctx.game.sent.length, 1)
+  const heldOre = ctx.game.inventory['copper-ore']
+  await completeAndReport(ctx)
+  assert.equal(ctx.world.named('request.failed').at(-1).failure_code, 'factory_cell_input_unproven')
+  assert.equal(ctx.game.sent.length, 1, 'no copper supply is admitted after the valid iron collection')
+  assert.equal(ctx.game.inventory['copper-ore'], heldOre)
+  assert.equal(ctx.game.inventory['iron-plate'], 60)
+  assert.deepEqual(ctx.game.furnace.source, {})
+  assert.deepEqual(ctx.world.memory.planningState(KEY).plans.at(-1).steps, steps)
+})
+
+test('synthetic dedicated-copper Run N counterpart: C5 recovery -> C7 full facts -> two collections -> craft lab -> verified goal', async t => {
+  // New same-job variant isolates baseline recovery; it does not claim repair
+  // of the historical iron-to-copper job switch, which remains guarded below.
+  const ctx = await begin(t, { dedicatedCopper: true })
   const goalId = ctx.world.memory.planningState(KEY).goal.goal_id
   const steps = structuredClone(ctx.world.memory.planningState(KEY).plans.at(-1).steps)
   ctx.model.push('executor', 'luna:C7-reads', observe())
     .push('executor', 'luna:C7-full-baseline-and-clear', messages => {
       full(messages)
       assert.deepEqual(ctx.world.memory.planningState(KEY).plans.at(-1).steps, steps)
-      return reply([collect('iron-plate', 44)])
+      return reply([collect('copper-plate', 1)])
     })
     .push('executor', 'luna:feed-copper-after-clear', reply([{ name: 'supply_entity', args: { unit_number: FURNACE_UNIT, items: [{ item_name: 'copper-ore', count: 5 }] } }]))
     .push('executor', 'luna:collect-processed-copper', reply([collect('copper-plate', 5)]))
@@ -109,11 +132,11 @@ test('Run N full loop: closed C5 recovery -> C7 full machine facts -> clear outp
   assert.equal(ctx.world.memory.planningState(KEY).goal.goal_id, goalId)
   assert.ok(ctx.game.pendingBatch, diagnostic(ctx))
   await completeAndReport(ctx)
-  assert.equal(ctx.game.furnace.output['iron-plate'] ?? 0, 0)
+  assert.equal(ctx.game.furnace.output['copper-plate'] ?? 0, 0)
   await completeAndReport(ctx, { smelt: 5 })
   assert.equal(ctx.game.furnace.output['copper-plate'], 5)
   await completeAndReport(ctx)
-  assert.equal(ctx.game.inventory['copper-plate'], 5)
+  assert.equal(ctx.game.inventory['copper-plate'], 6)
   await completeAndReport(ctx)
   assert.equal(ctx.game.inventory.lab, 1)
   assert.equal(ctx.world.named('goal.evaluated').at(-1).satisfied, true)

@@ -39,6 +39,18 @@ function replay({ count = 2, verified = true } = {}) {
   memory.restore(snapshot)
   const game = new FakeFactorio()
   Object.assign(game.status, { actor_id: am.native.actor_id, epoch: 1, connected_players: 0 })
+  // Supplemental synthetic provenance for a staged copper miner, separate from
+  // the sealed AM batch21/unit17 evidence. No complete production cell is invented.
+  memory.initializeFactoryRegistry(game.factoryWorldId)
+  const planning = memory.planningState(am.key); const plan = getActivePlan(planning); const step = plan.steps[plan.active_step_index]
+  const locator = { unit_number: 203, name: 'burner-mining-drill', position: { x: -66, y: 96 }, surface_index: 1, force_index: 1 }
+  memory.recordNpcPlacement(am.key, { unit_number: locator.unit_number, entity_name: locator.name, actor_id: am.native.actor_id, actor_epoch: 1, placed_last_user: null })
+  memory.recordFactoryPlacementReceipt({ receipt_id: `${game.factoryWorldId}/batch-g1-1/1`, world_id: game.factoryWorldId, ...locator,
+    actor_id: am.native.actor_id, actor_epoch: 1, request_id: 'synthetic-am-placement', goal_id: planning.goal.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
+    step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? step.step_id, operation_key: 'synthetic-am-placement', operation_id: 1,
+    batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1', tick: 1 }, memory.factoryWorldBinding().generation)
+  game.factoryMembers.set(locator.unit_number, { locator, state: 'observed', type: 'mining-drill', recipe: { state: 'unsupported' },
+    source_resources: { state: 'known', truncated: false, resources: [{ name: 'copper-ore', products_truncated: false, products: [{ type: 'item', name: 'copper-ore' }] }] } })
   const native = game.command.bind(game)
   game.command = async text => text.includes('evaluate_condition') && text.includes('entity_count')
     ? JSON.stringify({ ok: true, kind: 'entity_count', prototype: 'burner-mining-drill', minimum: 2, current: count, found: count, truncated: false, satisfied: count >= 2 })
@@ -60,7 +72,7 @@ function replay({ count = 2, verified = true } = {}) {
     receipt: { view: { last_completed_batch: am.native.last_completed_batch } } }
 }
 
-test('Run AM exact restored batch21, unit17 and frozen copper step close from candidate receipt plus fresh count=2', async () => {
+test('Run AM restored batch21 and frozen copper step close with explicit synthetic miner provenance plus fresh count=2', async () => {
   const w = replay()
   const before = structuredClone(w.plan().steps[3])
   assert.deepEqual(activeStepVerifiedOperationNames(w.memory.planningState(am.key)), ['place_candidate'])

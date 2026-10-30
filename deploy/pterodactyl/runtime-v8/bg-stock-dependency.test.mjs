@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { stockWorld, original, KEY } from './bg-stock-fixtures.mjs'
 import { activeStockDependencyBarrier, continueStockDependencyBarrier, restoreStockDependencyBarriers, stockDependencyShape } from './bg-stock-dependency.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 
 for (const initial of [0, 1]) test(`BG original ${original[initial].tap}: one acquisition prefix then unchanged suffix without another model reply`, async () => {
   const w = stockWorld({ initial }); await w.start()
@@ -231,7 +232,20 @@ for (const [label, journal, allowed] of [['native empty Lua object', {}, true], 
   test(`shared admission parser: ${label}`, async () => {
     const w = stockWorld({ initial: 1, read: ({ text, game }) => game.batchId === 0 && text.includes('autorio_operations","status')
       ? { task_state: 'idle', queue_empty: true, queue_length: 0, batch_generation: 1, admission_journal: journal, receipt_journal: {} } : undefined })
-    await w.start()
+    if (allowed) await w.start()
+    else {
+      // Factory observation now reaches this shared journal fence first. Keep
+      // the real supervisor error-closeout boundary and assert the exact guard;
+      // no malformed journal may advance to the stock acquisition prefix.
+      let failure
+      await assert.rejects(w.start(), error => { failure = error; return error.failure_code === 'factory_runtime_not_idle' })
+      assert.equal(w.memory.pendingOperations(KEY).length, 0)
+      assert.equal(w.memory.stockDependencyBarriers.size, 0)
+      assert.equal(w.memory.planningState(KEY).goal.argument_corrections.claims.length, 0)
+      const paused = await pauseStrandedPlanAfterRequestError({ agent: w.agent, currentPlanState: () => w.memory.currentPlan(KEY) }, failure)
+      assert.equal(paused.status, 'paused')
+      assert.ok(paused.pause_reason.startsWith('factory_runtime_not_idle:'))
+    }
     assert.equal(w.game.mutations.length, allowed ? 1 : 0)
     if (allowed) { await w.agent.completed(); assert.equal(w.game.mutations.length, 2) }
     else assert.equal(w.agent.memory.currentPlan(KEY).status, 'paused')

@@ -12,7 +12,8 @@ import { getActivePlan, PLANNING_EVENT } from './planning-state.mjs'
 import { configuration, Session, recoverInterruptedAgentPlan } from './supervisor.mjs'
 import { recoverySession, settle, fireResumeTimer } from './recovery-loop-fixtures.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
-import { answersStepContract, FakeFactorio, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { answersStepContract, assignScriptedFactoryPlacement, FakeFactorio, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { registerFactoryCell } from './factory-registry.mjs'
 
 const recorded = JSON.parse(readFileSync(new URL('./fixtures/run-av-contract-drift.json', import.meta.url)))
 const correctedReply = JSON.parse(recorded.exact_assistant_replies.tap_63.content)
@@ -43,6 +44,23 @@ function world({ required = false, progressAudit = false, onRead, onTrace, first
   }
   const game = new FakeFactorio({ inventory: { 'stone-furnace': 1, 'copper-plate': 10, 'iron-plate': 58, ...(bootstrapFuel ? { coal: 1 } : {}) }, preflight })
   game.status.connected_players = 0
+  // New synthetic assignment/native facts supplement the recorded AV payload;
+  // they are not claimed as recovered historical evidence.
+  const fuel = { burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['synthetic-fuel'], truncated: false },
+    fuel_item_facts: { state: 'known', coverage: 'complete', truncated: false, items: [{ name: 'coal', category: 'synthetic-fuel', fuel_value: 1 }] } }
+  if (bootstrapFuel) {
+    memory.initializeFactoryRegistry(game.factoryWorldId)
+    const locator = { ...geometry(21).entity, surface_index: 1, force_index: 1 }; delete locator.type; delete locator.direction
+    const origin = { source: 'placement_receipt', goal_id: 'synthetic-prior-goal', plan_id: 'synthetic-prior-plan', plan_version: 1,
+      semantic_step_id: 'synthetic-prior-step', request_id: 'synthetic-prior-request', actor_id: 18, actor_epoch: 3, tick: 1 }
+    const registry = registerFactoryCell(memory.getFactoryRegistry(), { surface_index: 1, force_index: 1, origin,
+      assignment: { products: ['iron-ore'], purpose: 'Synthetic existing iron drill', method: 'Native mining' },
+      members: [{ ...locator, provenance: { ...origin, receipt_id: 'synthetic-prior-drill-placement' } }],
+      ports: [{ port_id: 'out', direction: 'output', kind: 'item', resource: 'iron-ore' }] })
+    memory.restore({ ...memory.snapshot(), factory_registry: registry })
+    game.factoryMembers.set(21, { locator, state: 'observed', type: 'mining-drill', ...fuel,
+      source_resources: { state: 'known', truncated: false, resources: [{ name: 'iron-ore', products_truncated: false, products: [{ type: 'item', name: 'iron-ore' }] }] } })
+  }
   const native = game.command.bind(game)
   const rows = []
   const calls = []
@@ -115,6 +133,8 @@ function world({ required = false, progressAudit = false, onRead, onTrace, first
         operations: bootstrapFuel ? [{ name: 'supply_entity', args: { unit_number: 21, items: [{ item_name: 'coal', count: 1 }] } }]
           : [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 46, y: 12 } }] })
       agent.recordLiveEntityObservation(geometry(23).entity, undefined, 'fixture_fresh_native_read')
+      assignScriptedFactoryPlacement(agent, game, KEY, 23, { products: ['copper-plate'], native: { type: 'furnace', ...fuel,
+        recipe: { state: 'known', truncated: false, name: 'synthetic-copper', ingredients: [{ type: 'item', name: 'copper-ore' }], products: [{ type: 'item', name: 'copper-plate' }] } } })
       return planReply({ stepId: held.steps[held.active_step_index].step_id,
         operations: [{ name: 'supply_entity', args: { unit_number: 23, items: [{ item_name: 'copper-ore', count: 5 }, { item_name: 'coal', count: 1 }] } }] })
     }) })
@@ -671,7 +691,7 @@ function losePreservationVisibility(w, { persistently = false } = {}) {
     }
   }
   w.game.command = async text => {
-    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 18, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
+    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ mode: 'npc', actor: { actor_id: 18, kind: 'standalone_character', valid: true, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
     if (invisible && text.includes('entity_geometry')) return JSON.stringify({ found: false, code: 'entity_not_visible', unit_number: 21 })
     return native(text)
   }

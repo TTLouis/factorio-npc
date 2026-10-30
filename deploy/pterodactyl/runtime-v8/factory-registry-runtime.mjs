@@ -1,9 +1,11 @@
-import { createFactoryRegistry, restoreFactoryRegistry, registerFactoryCell, registerFactoryDependency, findFactoryCellByMember, FactoryRegistryError, appendFactoryCellMetadata, factoryCellIdentity, factoryCellMetadataHead, factoryMetadataDigest, reconcileFactoryMetadataPublication } from './factory-registry.mjs'
+import { createFactoryRegistry, restoreFactoryRegistry, registerFactoryCell, registerFactoryDependency, FactoryRegistryError, appendFactoryCellMetadata, factoryCellIdentity, factoryCellMetadataHead, factoryMetadataDigest, reconcileFactoryMetadataPublication } from './factory-registry.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { pendingOperations } from './operation-ledger.mjs'
 import { restoreFactoryObservationSummaries } from './factory-cell-observation.mjs'
 import { FactoryPlacementStore } from './factory-placement-provenance.mjs'
-import { committedFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
+import { FactoryCellLifecycleStore } from './factory-cell-lifecycle.mjs'
+import { operationSignature } from './operation-reconciliation.mjs'
+import { committedFactoryCellIntent, factoryCellIntentSignature, factoryIntentAssignment, factoryIntentMembers, factoryIntentOutputs, factoryIntentPorts } from './factory-cell-intent.mjs'
 
 const clone = value => structuredClone(value)
 const fail = (code, message = code) => { throw new FactoryRegistryError(code, message) }
@@ -24,6 +26,7 @@ export class FactoryRegistryStore {
   #observations = []
   #placementReceipts = new FactoryPlacementStore()
   #metadata
+  #lifecycle = new FactoryCellLifecycleStore({ readPlacementReceipt: id => this.#placementReceipts.read(id), readPlacementReceipts: scope => this.#placementReceipts.scoped(scope) })
 
   constructor(expectedWorldId) {
     if (expectedWorldId !== undefined) {
@@ -48,6 +51,62 @@ export class FactoryRegistryStore {
     return clone(this.#registry)
   }
 
+  operational() { const registry = this.read(); return { ...registry, cells: registry.cells.map(cell => this.#lifecycle.project(cell)) } }
+  lifecycleRevision() { return this.#lifecycle.revision() }
+  lifecycleTransactions() { return this.#lifecycle.transactions() }
+  lifecycleTemporaryIntents() { return this.#lifecycle.pendingTemporaryIntents() }
+  lifecycleTemporaryAssets() { return this.#lifecycle.temporaryAssets() }
+  lifecycleResidualRetryKeys(operations, context) {
+    this.#lifecycle.assertDurable()
+    const tx = this.#lifecycle.transactions().find(row => row.state === 'degraded'
+      && ['goal_id', 'plan_id', 'plan_version', 'semantic_step_id', 'request_id'].every(field => row.owner[field] === context[field])
+      && row.operations[row.next_operation] && operationSignature(operations) === operationSignature([row.operations[row.next_operation].operation]))
+    return tx?.claims.filter(claim => claim.state === 'residual_reconciled' && claim.binding.signature === operationSignature(operations)).map(claim => claim.binding.operation_key) ?? []
+  }
+  assertTemporaryCell(cell) {
+    if (!cell.support) return
+    const asset = this.#lifecycle.temporaryAssets().find(row => row.intent_id === cell.support.intent_id && row.receipt_id === cell.support.receipt_id)
+    const receipt = asset && this.#placementReceipts.read(asset.receipt_id)
+    const member = cell.members?.[0]
+    if (!asset || !receipt || factoryMetadataDigest(receipt) !== factoryMetadataDigest(asset.placement_receipt)
+      || cell.assignment.purpose !== asset.purpose || cell.assignment.method !== 'receipt_backed_temporary_support'
+      || ['unit_number', 'name', 'surface_index', 'force_index'].some(field => member?.[field] !== receipt[field])
+      || factoryMetadataDigest(member?.position) !== factoryMetadataDigest(receipt.position)) fail('factory_temporary_provenance_mismatch')
+  }
+  markLifecyclePersisted(snapshot) { return this.#lifecycle.revision() === 0 || this.#lifecycle.markPersisted(snapshot) }
+  lifecycleRuntime(memory, key, readContext) {
+    if (typeof readContext !== 'function' || !token(key)) fail('factory_runtime_context_required')
+    const generation = this.#generation
+    const context = () => {
+      if (generation !== this.#generation) fail('factory_runtime_stale')
+      if (this.#metadata) fail('factory_metadata_publication_pending')
+      const state = memory.planningState(key); const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
+      const raw = readContext()
+      if (raw?.world_id !== this.#worldId || !step || state?.goal?.status !== 'active'
+        || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) fail('factory_lifecycle_plan_authority_missing')
+      return { ...raw, goal_id: state.goal.goal_id, goal_status: state.goal.status, plan_id: plan.plan_id, plan_version: plan.plan_version,
+        step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? step.step_id, paused: state.run?.paused === true,
+        authority_fingerprint: factoryMetadataDigest({ goal_id: state.goal.goal_id, objective: state.goal.objective ?? null, constraints: state.goal.constraints ?? [],
+          goal_definition: state.goal.definition ?? state.goal.requested_result ?? null,
+          plan_id: plan.plan_id, plan_version: plan.plan_version, steps: plan.steps, control_revision: memory.factoryControlRevision() }),
+        control_revision: memory.factoryControlRevision() }
+    }
+    return Object.freeze({
+      begin: (change, evidence) => this.#lifecycle.begin(change, this.operational(), context(), evidence),
+      rebind: (id, evidence) => this.#lifecycle.rebind(id, this.operational(), context(), evidence),
+      claim: (id, pending) => this.#lifecycle.claim(id, pending, this.operational(), context()),
+      settle: (status, pending, receipt) => this.#lifecycle.settle(status, pending, context(), receipt),
+      notSent: (pending, witness) => this.#lifecycle.notSent(pending, context(), witness),
+      finish: (id, evidence) => this.#lifecycle.finish(id, this.operational(), context(), evidence),
+      reconcileResidual: (id, evidence) => this.#lifecycle.reconcileResidual(id, this.operational(), context(), evidence),
+      admission: (operations, pending) => this.#lifecycle.admission(operations, pending, context()),
+      declareTemporary: intent => this.#lifecycle.declareTemporary(intent, context()),
+      bindTemporaryPlacement: (id, pending) => this.#lifecycle.bindTemporaryPlacement(id, pending, context()),
+      temporary: (intent, receipt) => this.#lifecycle.temporary(intent, receipt, context()),
+      scheduleCleanup: completions => this.#lifecycle.scheduleCleanup(completions, context()),
+    })
+  }
+
   status() { return { status: this.#fault ? 'fault' : this.#registry ? 'initialized' : 'uninitialized' } }
 
   worldBinding() { return { world_id: this.#worldId, generation: this.#generation } }
@@ -66,6 +125,7 @@ export class FactoryRegistryStore {
   snapshot() {
     return {
       ...this.#placementReceipts.snapshot(),
+      ...this.#lifecycle.snapshot(),
       ...(this.#worldId !== undefined ? { factory_registry_world_id: this.#worldId } : {}),
       ...(this.#registry ? { factory_registry: clone(this.#metadata?.candidateStaged ? this.#metadata.candidate : this.#registry) } : {}),
       ...(this.#fault ? { factory_registry_fault: clone(this.#fault) } : {}),
@@ -152,6 +212,7 @@ export class FactoryRegistryStore {
     // Restore evidence even when the assignment store is faulted; its durable
     // fault remains independent and cannot remove existing assignment guards.
     this.#placementReceipts.restore(snapshot ?? {}, this.#worldId ?? snapshot?.factory_registry_world_id)
+    this.#lifecycle.restore(snapshot ?? {}, this.#worldId ?? snapshot?.factory_registry_world_id)
     if (this.#fault) return
     const has = key => Object.hasOwn(snapshot ?? {}, key)
     if (!has('factory_registry') && !has('factory_registry_fault') && !has('factory_registry_world_id') && !has('factory_cell_observations') && !has('factory_metadata_pending')) return
@@ -193,6 +254,17 @@ export class FactoryRegistryStore {
         }
       }
       this.#registry = restored
+      for (const cell of restored.cells) this.assertTemporaryCell(cell)
+      const lifecycle = this.#lifecycle.snapshot().factory_lifecycle
+      for (const cell of restored.cells) for (const metadata of cell.metadata_history ?? []) {
+        if (!metadata.installed_members) continue
+        if (!lifecycle || metadata.lifecycle_revision > lifecycle.events.length) fail('factory_metadata_physical_history_missing')
+        const historical = new FactoryCellLifecycleStore()
+        historical.restore({ factory_lifecycle: { ...lifecycle, events: lifecycle.events.slice(0, metadata.lifecycle_revision) } }, this.#worldId)
+        const installed = historical.project(cell)
+        if (installed.lifecycle_state !== 'installed' || installed.physical_revision !== metadata.physical_revision
+          || factoryMetadataDigest(installed.members) !== factoryMetadataDigest(metadata.installed_members)) fail('factory_metadata_physical_history_mismatch')
+      }
       this.#observations = reconciled ? [] : restoreFactoryObservationSummaries(snapshot.factory_cell_observations, restored)
       if (reconciled) trace('factory_metadata.reconciled', reconciled)
     }
@@ -204,8 +276,11 @@ export class FactoryRegistryStore {
   }
 
   member(identity) {
-    const registry = this.read()
-    return findFactoryCellByMember(registry, identity)
+    const registry = this.operational()
+    if (identity?.world_id !== registry.world_id || !positive(identity.surface_index) || !positive(identity.force_index) || !positive(identity.unit_number)) return null
+    return registry.cells.find(cell => cell.members.some(member => member.surface_index === identity.surface_index && member.force_index === identity.force_index
+      && member.unit_number === identity.unit_number && (identity.name === undefined || identity.name === member.name)
+      && (identity.position === undefined || identity.position?.x === member.position.x && identity.position?.y === member.position.y))) ?? null
   }
 
   placementAvailability(placement) {
@@ -214,12 +289,24 @@ export class FactoryRegistryStore {
     if (!positive(placement?.unit_number) || !token(placement?.entity_name)) return { status: 'unknown', reason: 'placement_identity_missing' }
     // This is a conservative exclusion, not a positive world lookup: any cell
     // claiming this unit prevents reuse, even if the caller lacks surface facts.
-    const cell = this.#registry.cells.find(row => row.members.some(member => member.unit_number === placement.unit_number))
+    const cell = [...this.#registry.cells, ...this.operational().cells].find(row => row.members.some(member => member.unit_number === placement.unit_number))
     return cell ? { status: 'assigned', cell_id: cell.cell_id } : { status: 'unassigned' }
   }
 
-  admission(operations) {
+  admission(operations, owner) {
     if (this.#metadata && operations?.length) return { ok: false, refusal_class: 'world', stage: 'admission', code: 'factory_metadata_publication_pending', operation_index: 0, operation: operations[0]?.name }
+    try { this.#lifecycle.assertDurable() }
+    catch (error) { return { ok: false, refusal_class: 'world', stage: 'admission', code: error.code } }
+    if (this.#lifecycle.pending()) {
+      // This is only the planning admission preview. The pre-send boundary
+      // additionally persists an exact protocol-2 claim and checks admission.
+      const tx = this.#lifecycle.transactions().find(row => row.state === 'degraded'
+        && ['goal_id', 'plan_id', 'request_id', 'actor_id', 'actor_epoch'].every(field => owner?.[field] === row.owner[field])
+        && operationSignature(operations) === operationSignature([row.operations[row.next_operation]?.operation]))
+      if (tx) return { ok: true, lifecycle_transaction_id: tx.transaction_id }
+      return { ok: false, refusal_class: 'world', stage: 'admission', code: 'factory_lifecycle_reconciliation_required' }
+    }
+    const installed = this.#registry ? this.operational() : undefined
     for (const [index, operation] of (operations ?? []).entries()) {
       if (!MUTATIONS.has(operation?.name)) continue
       const base = { ok: false, refusal_class: 'world', stage: 'admission', operation: operation.name, operation_index: index }
@@ -228,12 +315,12 @@ export class FactoryRegistryStore {
       const args = operation.args ?? {}
       let cell
       if (operation.name === 'mine_entity') {
-        cell = this.#registry.cells.find(row => row.members.some(member => member.name === args.entity_name))
+        cell = installed.cells.find(row => row.members.some(member => member.name === args.entity_name))
         if (!token(args.entity_name)) return { ...base, code: 'factory_cell_change_forbidden', reason: 'mutation_target_unproven' }
       }
       else {
         if (!positive(args.unit_number)) return { ...base, code: 'factory_cell_change_forbidden', reason: 'mutation_target_unproven' }
-        cell = this.#registry.cells.find(row => row.members.some(member => member.unit_number === args.unit_number))
+        cell = installed.cells.find(row => row.members.some(member => member.unit_number === args.unit_number))
       }
       if (cell) return { ...base, code: 'factory_cell_change_forbidden', reason: 'registered_member_assignment', cell_id: cell.cell_id,
         ...(positive(args.unit_number) ? { unit_number: args.unit_number } : {}) }
@@ -317,6 +404,19 @@ export class FactoryRegistryStore {
     return Object.freeze({
       prepareMetadata: (change, scope) => run('prepare_metadata', scope, current => {
         if (!token(current.session_id)) fail('factory_metadata_session_required')
+        this.#lifecycle.assertDurable()
+        if (this.#lifecycle.pending()) fail('factory_lifecycle_reconciliation_required')
+        const operational = this.operational()
+        const physical = operational.cells.find(c => c.cell_id === change?.cell_id)
+        if (change?.physical_context !== undefined) fail('factory_metadata_physical_context_host_owned')
+        if (this.#lifecycle.revision() > 0) {
+          if (change.expected_lifecycle_revision !== this.#lifecycle.revision()) fail('factory_lifecycle_revision_stale')
+          for (const expected of change.expected_cells ?? []) {
+            const installed = operational.cells.find(c => c.cell_id === expected.cell_id)
+            if (!installed || (installed.physical_revision ?? 0) !== expected.physical_revision || ['retired', 'degraded'].includes(installed.state)) fail('factory_cell_physical_revision_stale')
+          }
+          if (physical?.physical_revision) change = { ...clone(change), physical_context: { physical_revision: physical.physical_revision, members: physical.members } }
+        }
         const target = this.#registry.cells.find(c => c.cell_id === change?.cell_id)
         if (!target || target.surface_index !== current.surface_index || target.force_index !== current.force_index) fail('factory_metadata_scope_mismatch')
         let result
@@ -383,14 +483,22 @@ export class FactoryRegistryStore {
       registerCell: (declaration, scope) => run('register_cell', scope, current => {
         if (declaration?.surface_index !== current.surface_index || declaration?.force_index !== current.force_index) fail('factory_cell_scope_mismatch')
         if (!declaration?.origin || Object.entries(origin(current)).some(([field, value]) => declaration.origin[field] !== value)) fail('factory_origin_stale')
+        if (declaration.support) {
+          this.assertTemporaryCell(declaration)
+          const existing = this.#registry.cells.find(cell => cell.support?.receipt_id === declaration.support.receipt_id)
+          if (existing) return clone(existing)
+        }
         if (declaration.enrollment) {
           const plan = getActivePlan(memory.planningState(key)); const step = plan?.steps?.[plan.active_step_index]
           const intent = committedFactoryCellIntent(step)
           const enrolled = declaration.enrollment
           if (!intent || enrolled.goal_id !== current.goal_id || enrolled.semantic_step_id !== current.semantic_step_id
             || enrolled.intent_signature !== factoryCellIntentSignature(step.execution_guidance)
-            || JSON.stringify(declaration.assignment) !== JSON.stringify({ products: [intent.product], purpose: intent.purpose, method: 'direct_feed' })
-            || declaration.members?.length !== 2 || declaration.members[0].name !== intent.sourceEntity || declaration.members[1].name !== intent.targetEntity
+            || JSON.stringify(declaration.assignment) !== JSON.stringify(factoryIntentAssignment(intent))
+            || declaration.members?.length !== factoryIntentMembers(intent).length
+            || declaration.members.some((member, i) => member.name !== factoryIntentMembers(intent)[i].entity)
+            || (intent.kind === 'production_block' && (JSON.stringify(enrolled.member_roles) !== JSON.stringify(factoryIntentMembers(intent).map((member, i) => ({ role: member.role, receipt_id: enrolled.receipt_ids[i] })))
+              || JSON.stringify(enrolled.output_roles) !== JSON.stringify(factoryIntentOutputs(intent).map((output, i) => ({ port_id: factoryIntentPorts(intent)[i].port_id, role: output.role })))))
             || declaration.members.some((member, i) => member.provenance?.receipt_id !== enrolled.receipt_ids?.[i]
               || member.provenance.goal_id !== current.goal_id || member.provenance.semantic_step_id !== current.semantic_step_id)) fail('factory_enrollment_intent_mismatch')
           const existing = this.#registry.cells.find(cell => cell.enrollment?.goal_id === current.goal_id && cell.enrollment.semantic_step_id === current.semantic_step_id)

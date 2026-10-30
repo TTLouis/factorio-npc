@@ -17,7 +17,7 @@ import { STEAM_SCRIPTED_BLOCKED_ANSWER, steamReplayHarness } from './steam-run-f
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const GOLDEN_FILE = path.join(here, 'fixtures', 'context-restage', 'no-restage-steam-replay.golden.json')
+const GOLDEN_FILE = path.join(here, 'fixtures', 'context-restage', 'no-restage-steam-synthetic-factory-current.golden.json')
 
 const sha = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex').slice(0, 16)
 
@@ -42,6 +42,8 @@ function normalizeRow(record, ids) {
     .replace(/(?<=_s\d+_)[a-z0-9]{4,10}(?![a-z0-9])/g, id => placeholder(id, 'sid'))
 }
 
+// The historical no-restage-steam-replay.golden.json is retained unchanged.
+// This separately labeled current synthetic factory replay includes native identity and cell events.
 // The whole steam replay (recorded usage, 300-rule system prompt, tool results
 // at their recorded sizes) through the real loop and the real provider stack.
 // Captured: the exact HTTP body of every provider call, the context object the
@@ -50,6 +52,8 @@ async function steamReplayFingerprint() {
   // The golden is the run with no executor (delegation U6 hands every committed slice to one; that
   // run has its own tests in executor-wiring.test.mjs): the seam itself must stay byte-identical.
   const world = steamReplayHarness({ transport: 'http', extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER], agentOptions: { executorHandoff: false } })
+  const nativeOwner = JSON.parse(await world.game.command('remote.call("autorio_actor","status")'))
+  assert.deepEqual([nativeOwner.actor.actor_id, nativeOwner.surface_index, nativeOwner.force_index], [18, 1, 1])
   await world.request()
   await world.closeStep1()
   await world.failSupplyBatch()
@@ -61,18 +65,18 @@ async function steamReplayFingerprint() {
   assert.deepEqual(cleanupRows.map(row => ({ event: row.event, request_id: row.request_id,
     data: row.data, turn: row.turn, seq: row.seq })), [
     { turn: 1, seq: 70 },
-    { turn: 2, seq: 131 },
+    { turn: 2, seq: 168 },
     { turn: undefined, seq: 0 },
   ].map(boundary => ({ event: 'decision.budgets_restored', request_id: requestId,
     data: { request_id: requestId, reason: 'decision_scope_finished' }, ...boundary })))
-  // Fresh topology is a separately labelled volatile contract. This historical fixture has
-  // no actor surface/force scope, so it reports unavailable (or deferred behind its batch), without extra world reads.
+  // Current synthetic actor scope is explicit. The legacy topology response still lacks
+  // scoped native geometry; one bounded read remains unavailable, and pending work defers it.
   const topologyRows = world.trace.filter(row => row.event === 'context.topology_refreshed')
   assert.ok(topologyRows.length > 0)
   for (const row of topologyRows) {
     assert.ok(['unavailable', 'deferred'].includes(row.data.state))
-    assert.equal(row.data.reason, row.data.state === 'deferred' ? 'mutation_pending' : 'actor_scope_unknown')
-    assert.equal(row.data.reads_attempted, 0)
+    assert.equal(row.data.reason, row.data.state === 'deferred' ? 'mutation_pending' : 'malformed_or_unscoped_native_read')
+    assert.equal(row.data.reads_attempted, row.data.state === 'deferred' ? 0 : 1)
     assert.equal(row.data.candidate_solves, 0)
   }
   const requestIds = new Map()
@@ -88,7 +92,7 @@ async function steamReplayFingerprint() {
   }
 }
 
-test('a run that never restages preserves its frozen requests and trace with the explicit volatile topology contract', async () => {
+test('current synthetic factory replay preserves exact requests and trace without modifying the historical golden', async () => {
   const actual = await steamReplayFingerprint()
   if (process.env.UPDATE_RESTAGE_GOLDEN === '1') {
     await fsp.mkdir(path.dirname(GOLDEN_FILE), { recursive: true })

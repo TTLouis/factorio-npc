@@ -178,8 +178,9 @@ test('dry run: a launch before the rocket is built tells the planner how many pa
   await agent.request('launch a rocket', { sender: 'Louis' })
   assert.ok(game.mutations.at(-1).includes(`'launch_rocket',${SILO}`))
 
-  game.lastBasicResult = {
-    operation_id: game.batchId,
+  // Model the native cancelled batch as well as the basic refusal. Leaving a
+  // completed-batch receipt here would falsely prove the launch checkpoint.
+  game.failLastBatch({
     type: 'launching_rocket',
     accepted: false,
     completed: false,
@@ -188,7 +189,7 @@ test('dry run: a launch before the rocket is built tells the planner how many pa
     rocket_parts: 12,
     rocket_parts_required: 50,
     tick: 600 + game.batchId,
-  }
+  })
   await agent.failed('[AUTORIO] [ERROR] launching_rocket failed: rocket_not_ready; dependent operations cancelled')
 
   const failurePrompt = prompts.at(-1)

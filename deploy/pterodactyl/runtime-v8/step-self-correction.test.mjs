@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { ensureCommittedFactoryCellBeforeClose } from './factory-cell-enrollment.mjs'
 import { activeStepVerifiedOperationNames, getActivePlan } from './planning-state.mjs'
 import { normalizePlannerReview, repairPlannerReview } from './role-contracts.mjs'
 import { pinLegacyFixtureSkillContext, FakeFactorio } from './task-loop-fixtures.mjs'
@@ -11,7 +12,7 @@ const am = JSON.parse(await fs.readFile(new URL('./fixtures/run-am-receipt-liven
 const review = am.refused_decision.plannerReview
 const gather = { name: 'gather_resource', args: { resource_name: 'coal', count: 1, search_radius: 32 } }
 
-function recordedWorld({ count = 2, receipt = 'verified', onCount, firstAction = false, finalSlice = false, invalidNextContract = false } = {}) {
+function recordedWorld({ count = 2, receipt = 'verified', onCount, firstAction = false, finalSlice = false, invalidNextContract = false, partialEvidence = true, mixedOutput = false } = {}) {
   const snapshot = structuredClone(am.memory)
   if (finalSlice) {
     const legacy = snapshot.plans[0].state
@@ -26,11 +27,24 @@ function recordedWorld({ count = 2, receipt = 'verified', onCount, firstAction =
     const held = getActivePlan(state)
     if (held?.steps?.[3]) delete held.execution.receipts[held.steps[3].step_id]
   }
+  if (mixedOutput) getActivePlan(snapshot.planning_states[0].state).steps[3].completion_contract.requirements.push({ id: 'output', kind: 'inventory_count', item_name: 'copper-plate', minimum: 1 })
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(snapshot)
   pinLegacyFixtureSkillContext(memory)
   const game = new FakeFactorio()
+  memory.initializeFactoryRegistry(game.factoryWorldId)
   Object.assign(game.status, { actor_id: 8, epoch: 1, connected_players: 0 })
+  // Supplemental synthetic native provenance for the historical staged miner.
+  // No receiver or complete production cell is invented; original plan/receipt history is retained.
+  const planning = memory.planningState(am.key); const plan = getActivePlan(planning); const step = plan.steps[plan.active_step_index]
+  const locator = { unit_number: 203, name: 'burner-mining-drill', position: { x: -66, y: 96 }, surface_index: 1, force_index: 1 }
+  memory.recordNpcPlacement(am.key, { unit_number: locator.unit_number, entity_name: locator.name, actor_id: 8, actor_epoch: 1, placed_last_user: null })
+  if (partialEvidence) memory.recordFactoryPlacementReceipt({ receipt_id: `${game.factoryWorldId}/batch-g1-1/1`, world_id: game.factoryWorldId, ...locator,
+    actor_id: 8, actor_epoch: 1, request_id: 'synthetic-am-placement', goal_id: planning.goal.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
+    step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? step.step_id, operation_key: 'synthetic-am-placement', operation_id: 1,
+    batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1', tick: 1 }, memory.factoryWorldBinding().generation)
+  game.factoryMembers.set(locator.unit_number, { locator, state: 'observed', type: 'mining-drill', recipe: { state: 'unsupported' },
+    source_resources: { state: 'known', truncated: false, resources: [{ name: 'copper-ore', products_truncated: false, products: [{ type: 'item', name: 'copper-ore' }] }] } })
   const native = game.command.bind(game)
   const calls = []
   const events = []
@@ -269,3 +283,29 @@ for (const work of ['native_busy', 'new_pending']) {
     assert.ok(w.events.some(row => row.event === 'request.waiting'))
   })
 }
+
+for (const fault of ['missing_receipt', 'wrong_resource', 'receiver_type', 'mixed_output', 'stale_owner']) test('partial miner close refuses ' + fault + ' without commissioning', async () => {
+  const w = recordedWorld({ partialEvidence: fault !== 'missing_receipt', mixedOutput: fault === 'mixed_output' })
+  const row = w.game.factoryMembers.get(203)
+  if (fault === 'wrong_resource') { row.source_resources.resources[0].name = 'iron-ore'; row.source_resources.resources[0].products[0].name = 'iron-ore' }
+  if (fault === 'receiver_type') row.type = 'furnace'
+  if (fault === 'stale_owner') {
+    const command = w.game.command.bind(w.game)
+    w.game.command = async text => { const result = await command(text); if (text.includes("'sgluna_factory','observe'")) w.agent.traceRequest = { id: 'replacement' }; return result }
+  }
+  const owner = w.agent.captureCheckpointOwner()
+  await assert.rejects(ensureCommittedFactoryCellBeforeClose(w.agent, owner), { code: fault === 'missing_receipt' ? 'factory_partial_placement_receipt_required'
+    : fault === 'mixed_output' ? 'factory_cell_resolution_required' : fault === 'stale_owner' ? 'factory_tool_owner_stale' : 'factory_partial_miner_native_unverified' })
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  assert.equal(w.memory.currentPlan(am.key).task_board.completed_count, 3)
+  assert.equal(w.game.mutations.length, 0)
+})
+
+test('partial miner proof carries no delivery or complete-cell authority', async () => {
+  const w = recordedWorld()
+  const before = JSON.stringify(w.held().steps)
+  const result = await ensureCommittedFactoryCellBeforeClose(w.agent, w.agent.captureCheckpointOwner())
+  assert.equal(result.kind, 'establishment_partial'); assert.equal(result.delivery_ready, false); assert.equal(result.commissioning, 'unverified')
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  assert.equal(JSON.stringify(w.held().steps), before)
+})

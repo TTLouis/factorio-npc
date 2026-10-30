@@ -4,7 +4,9 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { NpcAgentLoop as BaseNpcAgentLoop } from '../staging/npc-agent-loop.mjs'
 import { createFactoryRegistry, registerFactoryCell } from './factory-registry.mjs'
-import { projectFactoryCellResult, validateFactoryCellTool } from './factory-cell-tools.mjs'
+import { prepareFactoryCellHost, projectFactoryCellResult, validateFactoryCellTool } from './factory-cell-tools.mjs'
+import { buildPendingOperation } from './operation-reconciliation.mjs'
+import { getActivePlan } from './planning-state.mjs'
 import { toolCommand } from './structured-policy.mjs'
 
 const WORLD = '1e837e91-4f33-43a2-a3aa-c891ee06ec66'
@@ -275,4 +277,49 @@ test('projection returns bounded valid JSON, omission counts and a resumable lis
   assert.equal(bounded.cells[0].cell_id, 'cell-1')
   assert.equal(bounded.cells[0].assignment_omissions.products, 56)
   assert.equal(bounded.next_offset, 1)
+})
+
+async function settledHostFixture() {
+  const w = fixture(); const state = w.memory.planningState(KEY); const plan = getActivePlan(state)
+  const operations = [{ name: 'supply_entity', args: { unit_number: 27, items: [{ item_name: 'coal', count: 1 }] } }, { name: 'place_entity', args: { entity_name: 'lab' } }]
+  const pending = buildPendingOperation({ requestId: w.agent.traceRequest.id, ordinal: 1, protocolVersion: 2, actor: w.agent.epoch,
+    goalId: state.goal.goal_id, planId: plan.plan_id, stepId: plan.steps[0].step_id, operations, baseline: { generation: 1, max_batch_id: 0 }, now: 1 })
+  w.memory.recordPendingOperation(KEY, pending)
+  const ref = { batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1' }
+  const cancelled = { ...ref, task_count: 2, task_types: ['moving_items', 'placing'], tick: 101, reason: 'placing:no_position',
+    started_count: 2, tasks_started: 2, failed_before_mutation: true, failed_task_index: 1 }
+  w.game.task = { task_state: 'idle', queue_empty: true, queue_length: 0, batch_generation: 1,
+    admission_journal: [{ operation_key: pending.operation_key, attempt_id: pending.attempt_id, signature: pending.signature,
+      actor_id: 24, epoch: 2, ordinal: 1, operation_count: 2, state: 'uncertain', generation: 1, tick: 100,
+      ok: true, error: 'batch_reconciliation_required', slots: operations.map((operation, index) => ({ index: index + 1, ok: true, operation: operation.name, batch_refs: [ref], queued_tasks: 1 })) }],
+    receipt_journal: [{ ...cancelled, state: 'cancelled' }], last_cancelled_batch: cancelled,
+    basic_operation: { last_result: { operation_id: 2, type: 'placing', accepted: false, completed: false, code: 'no_position', tick: 101, actor_id: 24, entity_name: 'lab' } } }
+  await w.agent.settleOutstandingOperation(w.game.task, pending.operation_key)
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
+  return w
+}
+
+test('factory host re-proves exact durable per-slot settlement while provider reads retain raw uncertainty', async () => {
+  const w = await settledHostFixture()
+  const before = JSON.stringify(w.game.task)
+  const result = await prepareFactoryCellHost(w.agent, (_observer, access) => { access.fence(); return 'readmitted' }).execute()
+  assert.equal(result, 'readmitted')
+  assert.equal(JSON.stringify(w.game.task), before)
+  const request = message(call('listFactoryCells'))
+  await w.agent.handleToolBatch(request, w.agent.prepareToolBatch(request))
+  assert.equal(results(w).at(-1).parsed.code, 'factory_runtime_not_idle')
+  assert.equal(results(w).at(-1).parsed.refused, true)
+})
+
+for (const fault of ['signature', 'attempt', 'ordinal', 'receipt', 'actor', 'goal', 'stale-owner']) test('factory host settled uncertain admission refuses ' + fault, async () => {
+  const w = await settledHostFixture()
+  if (fault === 'signature') w.game.task.admission_journal[0].signature = 'f'.repeat(64)
+  if (fault === 'attempt') w.game.task.admission_journal[0].attempt_id += '-other'
+  if (fault === 'ordinal') w.game.task.admission_journal[0].ordinal++
+  if (fault === 'receipt') { w.game.task.receipt_journal = []; delete w.game.task.last_cancelled_batch }
+  if (fault === 'actor') { w.agent.epoch.epoch++; w.game.status.epoch++ }
+  if (fault === 'goal') w.memory.planningState(KEY).goal.goal_id = 'replacement-goal'
+  const prepared = prepareFactoryCellHost(w.agent, () => assert.fail('held native state cannot acquire capability'))
+  if (fault === 'stale-owner') w.agent.traceRequest = { id: 'replacement-request' }
+  await assert.rejects(prepared.execute(), { code: fault === 'stale-owner' ? 'factory_tool_owner_stale' : 'factory_runtime_not_idle' })
 })

@@ -1,9 +1,11 @@
 import { luaString } from '../staging/structured-policy.mjs'
 import { deploymentStatus } from '../staging/supervisor-adapter.mjs'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
-import { createFactoryCellObserver } from './factory-cell-observation.mjs'
+import { createFactoryCellObserver, validateFactoryCellObservation } from './factory-cell-observation.mjs'
+import { factoryMetadataDigest as digest } from './factory-dependencies.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
 import { getActivePlan } from './planning-state.mjs'
+import { unresolvedNativeAdmissions } from './operation-reconciliation.mjs'
 
 const names = new Set(['listFactoryCells', 'inspectFactoryCell'])
 const fail = code => { throw new FactoryRegistryError(code, /stale|world_mismatch|owner_mismatch/.test(code) ? `${code}: observation cancelled or superseded` : code) }
@@ -91,6 +93,13 @@ export function prepareFactoryCellHost(agent, action) {
   return prepareFactoryCellAccess(agent, 'factoryCellEnrollment', {}, action)
 }
 
+// A terminal partial removal still owns its canonical pending row. This seam
+// reads that exact retained transaction only; it grants no publication or send.
+export function prepareFactoryCellReconciliationHost(agent, pending, action) {
+  if (typeof action !== 'function' || !pending?.operation_key) fail('factory_host_action_required')
+  return prepareFactoryCellAccess(agent, 'factoryCellReconciliation', {}, action, structuredClone(pending))
+}
+
 // Trusted host declaration bridge only. No model tool, observation publication,
 // endpoint verification or gameplay authority is added by this transaction.
 export async function commitFactoryCellMetadata(agent, change) {
@@ -132,7 +141,7 @@ export async function commitFactoryCellMetadata(agent, change) {
   }).execute()
 }
 
-function prepareFactoryCellAccess(agent, name, args, hostAction) {
+function prepareFactoryCellAccess(agent, name, args, hostAction, reconciliation) {
   const key = agent.activePlanKey()
   const epoch = { ...agent.epoch }
   const request = agent.traceRequest
@@ -145,12 +154,35 @@ function prepareFactoryCellAccess(agent, name, args, hostAction) {
   const mutation = agent.worldMutationSeq ?? 0
   const binding = agent.memory.factoryWorldBinding()
   let expectedRevision = agent.memory.factoryRegistryStatus().status === 'initialized' ? agent.memory.getFactoryRegistry().revision : 0
+  const physicalRevision = agent.memory.factoryLifecycleRevision?.() ?? 0
   const planningOwner = () => {
     const state = agent.memory.planningState(key); const plan = getActivePlan(state)
     return JSON.stringify([state?.goal?.goal_id, state?.goal?.status, plan?.plan_id, plan?.plan_version, plan?.active_step_index])
   }
   const planning = planningOwner()
   let live
+  let residualTransaction
+  const residual = task => {
+    if (!reconciliation) return false
+    const rows = agent.memory.pendingOperations(key)
+    const tx = agent.memory.factoryLifecycleTransactions().find(row => row.claims.at(-1)?.binding.operation_key === reconciliation.operation_key)
+    const claim = tx?.claims.at(-1)
+    if (rows.length !== 1 || digest(rows[0]) !== digest(reconciliation) || !claim || !['partial', 'refused'].includes(claim.state)
+      || !claim.terminal || tx.owner.actor_id !== epoch.actor_id || tx.owner.actor_epoch !== epoch.epoch
+      || tx.owner.session_id !== epoch.session || tx.owner.request_id !== requestId
+      || reconciliation.goal_id !== tx.owner.goal_id || reconciliation.plan_id !== tx.owner.plan_id
+      || ['operation_key', 'attempt_id', 'signature', 'ordinal'].some(field => claim.binding[field] !== reconciliation[field])) fail('factory_lifecycle_reconciliation_owner_mismatch')
+    residualTransaction = tx
+    if (!task) return true
+    const journal = nativeAdmissionJournal(task.admission_journal)
+    const records = Array.isArray(task.admission_journal) ? task.admission_journal : []
+    const record = records.find(row => row.operation_key === reconciliation.operation_key)
+    const batches = Array.isArray(task.receipt_journal) ? task.receipt_journal : []
+    const batch = batches.find(row => row.batch_ref === claim.terminal.batch.batch_ref)
+    if (!journal.known || journal.records.some(row => row.operation_key !== reconciliation.operation_key && ['admitting', 'admitted', 'uncertain'].includes(row.state))
+      || digest({ admission: record, batch, generation: task.batch_generation }) !== digest(claim.terminal)) fail('factory_lifecycle_terminal_uncorrelated')
+    return true
+  }
   const fence = () => {
     if (agent.active !== true || agent.requestAdmissionOwner !== admissionOwner || agent.generation !== generation || agent.agentContext.lineageSequence !== lineage || agent.agentContext.conversationSeq !== conversation
       || agent.traceRequest !== request || agent.traceRequest?.id !== requestId || agent.activePlanKey() !== key
@@ -158,11 +190,12 @@ function prepareFactoryCellAccess(agent, name, args, hostAction) {
       || (agent.worldMutationSeq ?? 0) !== mutation || agent.memory.factoryWorldBinding().generation !== binding.generation || planningOwner() !== planning) fail('factory_tool_owner_stale')
     if (binding.world_id !== undefined && agent.memory.factoryWorldBinding().world_id !== binding.world_id) fail('factory_world_mismatch')
     if (agent.memory.factoryRegistryStatus().status === 'initialized' && agent.memory.getFactoryRegistry().revision !== expectedRevision) fail('factory_registry_revision_stale')
+    if ((agent.memory.factoryLifecycleRevision?.() ?? 0) !== physicalRevision) fail('factory_lifecycle_revision_stale')
   }
   const refresh = async () => {
     fence()
     if (agent.memory.factoryRegistryStatus().status === 'fault') fail('factory_registry_fault')
-    if (agent.batchInFlight || agent.memory.pendingOperation?.(key) || (agent.memory.pendingOperations?.(key) ?? []).length) fail('factory_runtime_not_idle')
+    if (agent.batchInFlight || !residual() && (agent.memory.pendingOperation?.(key) || (agent.memory.pendingOperations?.(key) ?? []).length)) fail('factory_runtime_not_idle')
     const deployment = await nativeRead(() => deploymentStatus(agent.rcon, { requireAllowed: true })); fence()
     const actor = parse(await nativeRead(() => agent.rcon.command(agent.observationToolCommand('getActorStatus', {})))); fence()
     const task = parse(await agent.readTaskStatusRaw()); fence()
@@ -176,9 +209,14 @@ function prepareFactoryCellAccess(agent, name, args, hostAction) {
       || (deployment.surface_index !== undefined && deployment.surface_index !== actor.surface_index)
       || (deployment.force_index !== undefined && deployment.force_index !== actor.force_index)) fail('factory_tool_native_owner_stale')
     if (live && (live.surface_index !== actor.surface_index || live.force_index !== actor.force_index)) fail('factory_tool_native_owner_stale')
+    const state = agent.memory.planningState(key)
+    const retained = [...(state?.operation_ledger?.records ?? []), ...(state?.operation_ledger?.closed ?? [])]
+      .filter(record => record.goal_id === state?.goal?.goal_id && record.actor?.actor_id === epoch.actor_id && record.actor?.epoch === epoch.epoch)
+    const unresolved = name === 'factoryCellEnrollment' && !reconciliation
+      ? unresolvedNativeAdmissions(task, retained, epoch).length > 0 : journal.unresolved
     if (deployment.idle !== true || task.task_state !== 'idle' || task.queue_empty !== true || task.queue_length !== 0 || task.active_batch
-      || task.actor?.mining_state?.mining || !journal.known || journal.unresolved) fail('factory_runtime_not_idle')
-    live = { surface_index: actor.surface_index, force_index: actor.force_index, native_idle: true, pending: false, uncertain: false }
+      || task.actor?.mining_state?.mining || !journal.known || (reconciliation ? !residual(task) : unresolved)) fail('factory_runtime_not_idle')
+    live = { surface_index: actor.surface_index, force_index: actor.force_index, native_idle: true, pending: false, uncertain: false, connected_players: deployment.connected_players }
   }
   const readContext = () => {
     fence()
@@ -188,6 +226,42 @@ function prepareFactoryCellAccess(agent, name, args, hostAction) {
   }
   const executeInner = async () => {
     await refresh()
+    if (reconciliation) {
+      const registry = agent.memory.getFactoryOperationalRegistry()
+      const known = [...registry.cells.flatMap(cell => cell.members), ...residualTransaction.members]
+      const exact = (a, b) => ['unit_number', 'name', 'surface_index', 'force_index'].every(field => a?.[field] === b?.[field]) && a?.position?.x === b?.position?.x && a?.position?.y === b?.position?.y
+      const scope = () => {
+        fence(); residual()
+        const plan = getActivePlan(agent.memory.planningState(key)); const step = plan?.steps?.[plan.active_step_index]
+        if (plan?.plan_id !== residualTransaction.owner.plan_id || (step?.semantic_step_id ?? step?.step_id) !== residualTransaction.owner.semantic_step_id) fail('factory_lifecycle_reconciliation_owner_mismatch')
+        return { ...readContext(), goal_id: residualTransaction.owner.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
+          step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? step.step_id, reconciliation: true }
+      }
+      const observeCandidate = async cell => {
+        const owner = scope()
+        if (!Array.isArray(cell.members) || !cell.members.length || cell.members.length > 32 || cell.members.some(member => !known.some(row => exact(row, member)))) fail('factory_lifecycle_reconciliation_member_mismatch')
+        await refresh()
+        const request = { schema_version: 1, world_id: owner.world_id, actor_id: owner.actor_id, request_id: owner.request_id,
+          surface_index: owner.surface_index, force_index: owner.force_index, members: cell.members.map(({ provenance, ...member }) => member) }
+        const raw = String(await nativeRead(() => agent.rcon.command(`/silent-command rcon.print(helpers.table_to_json(remote.call('sgluna_factory','observe',helpers.json_to_table(${luaString(JSON.stringify(request))}))))`)))
+        await agent.captureFactoryObservationTrace(traceOwner, 'factory_cell.native_evidence', { request_id: requestId, tool: name, native_request: request,
+          native_response: raw.slice(0, 262144), native_response_chars: raw.length, capture_truncated: raw.length > 262144 })
+        fence(); await refresh()
+        if (raw.length > 262144) fail('factory_observation_body_limit')
+        const native = parse(raw)
+        if (native.schema_version !== 1 || native.ok !== true || ['world_id', 'actor_id', 'request_id', 'surface_index', 'force_index'].some(field => native[field] !== request[field])
+          || !Number.isSafeInteger(native.tick) || native.tick < 0 || !Array.isArray(native.members) || native.members.length !== cell.members.length
+          || cell.members.some(member => native.members.filter(row => exact(row.locator, member)).length !== 1)) fail('factory_native_observation_members_mismatch')
+        return { ...validateFactoryCellObservation({ registry, cell, native }), native }
+      }
+      const observer = Object.freeze({ observeCandidate, observe: ({ cell_id }) => {
+        const cell = registry.cells.find(row => row.cell_id === cell_id); if (!cell) fail('factory_cell_unknown')
+        return observeCandidate(cell)
+      } })
+      const result = await hostAction(observer, Object.freeze({ refresh, fence, readContext: scope }))
+      await refresh(); fence()
+      return result
+    }
     const events = []
     const observer = createFactoryCellObserver({ memory: agent.memory, key, readContext,
       trace: (event, payload) => events.push({ event, payload }),

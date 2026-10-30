@@ -8,6 +8,8 @@ import { advanceProductionTask, bindProductionFuelSource, bindProductionProducer
 import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 import { missingProductionBindings, resolveProductionBindings } from './bg-production-binding.mjs'
 import { STALE_REPLY_ERROR_CODE } from './agent-context.mjs'
+import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
+import { enrollFactoryProductionProducers } from './factory-cell-enrollment.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
 export function restoreProductionRecords(rows) {
@@ -42,6 +44,16 @@ function scope(agent) {
   } }
 }
 function recordKey(s) { return `${s.owner.key}/${materialOwnerKey(s.materialOwner)}` }
+// Restored/adopted bindings are executable authority too. Never resolve just
+// the immutable model intent while silently omitting the durable correction.
+export function effectiveProductionFactoryIntent(task) {
+  return { ...task.intent, producers: productionBindings(task) }
+}
+async function reconcileProductionFactoryUse(agent, s, task, phase, operations = []) {
+  const productionIntent = effectiveProductionFactoryIntent(task)
+  await checked(agent, s.owner, enrollFactoryProductionProducers(agent, productionIntent.producers))
+  return checked(agent, s.owner, reconcileFactoryCellUse(agent, { step: s.step, phase, productionIntent, operations }))
+}
 function verifiedSetupReceipt(s) {
   const receipt = [...(s.plan.execution?.receipts?.[s.owner.stepId] ?? [])].reverse()
     .find(row => row.kind === 'deterministic_verification' && row.verified_operation_names?.length)
@@ -134,18 +146,20 @@ async function factsFor(agent, s, task, status, { skipMachines = false } = {}) {
   for (const unit_number of new Set(skipMachines ? [] : [...productionBindings(task), ...task.intent.feeders].map(row => row.unit_number))) {
     const raw = await read('getEntityStatus', { unit_number })
     const adopted = task.producer_bindings?.some(row => row.unit_number === unit_number)
-    const locator = adopted ? agent.liveObservedExactTarget(unit_number) ?? agent.exactTargetLocator?.(unit_number) : agent.exactTargetLocator?.(unit_number)
+    const assignedMember = adopted && !task.collection_only && agent.memory.factoryRegistryStatus?.().status === 'initialized'
+      ? agent.memory.getFactoryOperationalRegistry().cells.flatMap(cell => cell.members).find(member => member.unit_number === unit_number) : undefined
+    const locator = assignedMember ?? (adopted ? agent.liveObservedExactTarget(unit_number) ?? agent.exactTargetLocator?.(unit_number) : agent.exactTargetLocator?.(unit_number))
     const placement = agent.memory.authorizationState?.(s.owner.key)?.world?.npc_placements?.find(row => row.unit_number === unit_number)
     if (task.collection_only || adopted || locator?.position && Number.isSafeInteger(locator.surface_index) && placement) {
       // A restored collection successor may carry an old incomplete locator.
       // Missing historical scope must never disable the native identity checks.
-      if ((task.collection_only || adopted) && (!locator?.name || !locator.position || !placement
-        || placement.actor_id !== status.actor_id || placement.actor_epoch !== status.epoch
-        || placement.entity_name !== locator.name
+      if ((task.collection_only || adopted) && (!locator?.name || !locator.position
+        || !assignedMember && (!placement || placement.actor_id !== status.actor_id || placement.actor_epoch !== status.epoch || placement.entity_name !== locator.name)
         || locator.surface_index !== undefined && locator.surface_index !== status.surface_index)) throw new Error('production_collection_identity_unproven')
       const body = JSON.parse(await read('getActorStatus', {}))
-      if (body.actor?.actor_id !== status.actor_id || body.surface_index !== status.surface_index) throw new Error('production_body_scope_changed')
-      validateRefreshedEntity(raw, { unit: unit_number, locator, placement, actorId: status.actor_id,
+      if (body.actor?.actor_id !== status.actor_id || body.surface_index !== status.surface_index
+        || assignedMember && assignedMember.force_index !== body.force_index) throw new Error('production_body_scope_changed')
+      validateRefreshedEntity(raw, { unit: unit_number, locator, placement: placement ?? {}, actorId: status.actor_id,
         surfaceIndex: body.surface_index, forceIndex: body.force_index })
     }
     const detail = JSON.parse(raw)
@@ -305,6 +319,11 @@ export async function admitProductionIntent(agent, plan, { collectionOnly = fals
   if (!productionScopeMatches(intent, s.step.completion_contract)) throw admissionRefusal(agent, 'production_scope_mismatch', productionScopeMismatch(intent, s.step.completion_contract))
   const supply = s.step.execution_guidance?.materialSupply
   if (supply?.mode === 'direct_feed' && intent.resources.some(row => row.item_name === supply.resource)) throw admissionRefusal(agent, 'production_supply_drift', 'Direct-feed steps cannot acquire their ore by hand')
+  const previous = agent.memory.productionTasks?.get(recordKey(s))
+  if (previous && (JSON.stringify(previous.intent) !== JSON.stringify(intent) || (previous.collection_only === true) !== collectionOnly)) {
+    throw admissionRefusal(agent, 'production_intent_immutable', 'An admitted production intent cannot change targets, bindings, fuel or collection authority')
+  }
+  await reconcileProductionFactoryUse(agent, s, previous ?? { intent }, 'production_admission')
   if (agent.memory.productionTasks?.get(recordKey(s))?.producer_wait) throw admissionRefusal(agent, 'production_producer_unbound', 'The admitted finite task is waiting for a safe exact producer. Establish one using ordinary authorized operations, preserving the committed structures and routes. A target-only resubmission cannot renew its recovery allowance')
   // An existing record is immutable and keeps its own allowance; it is checked
   // for identity below instead of being refused for a rule it predates.
@@ -452,6 +471,7 @@ export async function continueProductionTask(agent) {
       const status = await checked(agent, s.owner, deploymentStatus(agent.rcon, { requireAllowed: true }))
       if (status.actor_id !== task.actor_id || status.epoch !== task.epoch) return pause(agent, s.owner, 'production_actor_changed')
       if (!status.idle || pending(agent, s.owner.key) || agent.batchInFlight) return { production: 'deferred', reason: 'native_or_uncertain_work_pending', operations: [] }
+      const factoryUse = await reconcileProductionFactoryUse(agent, s, task, 'production_continuation')
       if (task.collection_only) await agent.entityRefreshAdmission.idleFence()
       let result
       let facts
@@ -524,6 +544,16 @@ export async function continueProductionTask(agent) {
         }
         if (repair) result = repair
       }
+      if (result.action === 'complete' && factoryUse.delivery_required && !factoryUse.delivery_ready) {
+        // Collection invalidates the earlier delivery window. Keep the active
+        // ledger and existing limits while an ordinary native wait supplies a
+        // fresh frame; a fulfilled stock target cannot renew any allowance.
+        result = Date.now() - task.last_progress_at >= PRODUCTION_LIMITS.stalled_ms
+          ? { action: 'pause', reason: 'factory_cell_delivery_unverified', task: { ...task, status: 'paused', pause_reason: 'factory_cell_delivery_unverified' } }
+          : { action: 'execute', reason: 'factory_cell_delivery_observation', operation: { name: 'wait', args: { ticks: 120 } },
+              task: { ...task, transitions: task.transitions + 1 } }
+      }
+      if (result.action === 'execute') await reconcileProductionFactoryUse(agent, s, task, 'production_operation', [result.operation])
       task = result.task
       await store(agent, s.owner, key, task)
       await checked(agent, s.owner, agent.traceEvent(`production.${result.action}`, { plan_id: s.owner.planId, step_id: s.owner.stepId,

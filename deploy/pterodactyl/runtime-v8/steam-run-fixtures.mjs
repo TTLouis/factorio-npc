@@ -24,6 +24,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { providerRequest } from './provider.mjs'
 import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 
 export const STEAM_REQUEST_ID = 'req_muhsihjg_1'
 export const STEAM_REQUEST_TEXT = 'Can you get steam power going and run an electric mining drill with it?'
@@ -278,6 +279,8 @@ export class RecordedSteamFactorio extends FakeFactorio {
   }
 
   async command(text) {
+    // Native owner identity is required independently of the historical padded read.
+    if (text.includes('"autorio_actor","status"')) return super.command(text)
     if (text.includes('"get_inventory_items"')) {
       return JSON.stringify(Object.entries(this.inventory).map(([name, count]) => ({ name, count })))
     }
@@ -404,6 +407,11 @@ export function steamReplayHarness({
 } = {}) {
   const game = gameOverride ?? new RecordedSteamFactorio()
   const memory = new CanonicalTaskBoardMemory()
+  // Supplemental synthetic dedicated jobs; the historical issued supply list stays unchanged.
+  for (const entity of game.nearby.entities) {
+    const resource = entity.unit_number === 57 ? 'copper' : 'iron'
+    installHistoricalFactorySupplement(memory, game, entity, { products: [`${resource}-plate`], ingredients: [`${resource}-ore`] })
+  }
   const rounds = [...(roundsOverride ?? STEAM_ROUNDS), ...extraRounds]
   const calls = []
   const trace = []

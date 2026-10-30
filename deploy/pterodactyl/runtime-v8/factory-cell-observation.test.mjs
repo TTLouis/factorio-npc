@@ -17,9 +17,9 @@ function setup({ resource = 'copper-ore', nativeWorld = WORLD } = {}) {
     chatMessage: 'Build the assigned production', plan: ['Build assigned cell'], currentStep: 0, operations: [],
     stepCompletions: [{ kind: 'deterministic', checkpoint: { mode: 'all', confidence: 0.9,
       requirements: [{ id: 'stock', kind: 'inventory_count', item_name: 'copper-plate', minimum: 1 }] } }],
-    executionGuidance: [{ approach: 'Direct native feeding', rationale: 'Keep the selected supply method', constraints: [], skillIds: [], materialSupply: { mode: 'direct_feed', resource } }],
+    executionGuidance: [{ approach: 'Direct native feeding', rationale: 'Keep the selected supply method', constraints: [], skillIds: [], materialSupply: { mode: 'direct_feed', resource },
+      cellIntent: { kind: 'direct_feed', product: 'copper-plate', sourceEntity: 'burner-mining-drill', targetEntity: 'stone-furnace', purpose: 'Establish the observed fixture pair' } }],
   }, { validatedPlannerAdmission: true })
-  memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
   const context = { surface_index: 1, force_index: 1, actor_id: 24, actor_epoch: 2,
     request_id: 'request-1', session_id: 'session-1', native_idle: true, pending: false, uncertain: false }
   const receipts = new Map(); const events = []; const calls = []
@@ -52,6 +52,7 @@ function setup({ resource = 'copper-ore', nativeWorld = WORLD } = {}) {
 async function enrolled(options) {
   const w = setup(options)
   await w.observer.initializeWorld()
+  w.memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
   const runtime = w.observer.runtime
   const members = [[27, 'burner-mining-drill'], [28, 'stone-furnace']].map(([unit, name]) => {
     const scope = runtime.scope()

@@ -9,6 +9,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { activeStepVerifiedOperationNames, getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { ACTOR_ID, EPOCH, FurnaceFactorio, FURNACE_UNIT, KEY, recoverySession, ScriptedModel, settle } from './recovery-loop-fixtures.mjs'
 import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { continueProductionTask } from './production-task-runtime.mjs'
 
 // Synthetic two-step scenario, not a rewrite of AS/AU's historical plans. Only
 // the game and provider edges are scripted; completion, continuation, admission
@@ -44,7 +45,8 @@ function world({ memory = initialMemory(), game, model = new ScriptedModel(), st
     assert.equal(game.smelt(10), 10, 'declared fixture ore/fuel, not inventory fabrication, produces furnace output')
     const native = game.command.bind(game)
     game.command = async text => {
-      if (text.includes('"autorio_actor","status"')) return JSON.stringify({ actor: { actor_id: game.status.actor_id }, surface_index: game.status.surface_index, force_index: 1 })
+      if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: game.status.mode,
+        actor: { actor_id: game.status.actor_id, valid: game.status.allowed === true, kind: game.status.actor_kind }, surface_index: game.status.surface_index, force_index: 1 })
       if (text.includes('"autorio_crafting","status"')) return JSON.stringify({ task_active: false, native_queue: [] })
       if (text.includes('"get_entity_status"')) return JSON.stringify({ ...game.entityRead(), actor_id: game.status.actor_id,
         surface_index: game.status.surface_index, force_index: 1, observed_tick: game.gameTick,
@@ -400,8 +402,10 @@ for (const owner of ['goal', 'plan', 'step']) test(`completed historical work ca
   assert.equal(w.game.sent.length, 1)
 })
 
-for (const stock of [0, 10]) test(`sealed old-actor completion is historical proof, not replacement-actor inventory (stock=${stock})`, async t => {
+for (const stock of [0, 10]) test(`sealed old-actor proof is retained but its active controller pauses before replacement-actor work (stock=${stock})`, async t => {
   const first = await completedWorld(t)
+  const original = structuredClone(first.held())
+  const allowance = first.memory.autoResumeAllowance(KEY)
   first.game.status.actor_id++
   first.game.status.epoch++
   first.game.inventory['copper-plate'] = stock
@@ -414,8 +418,20 @@ for (const stock of [0, 10]) test(`sealed old-actor completion is historical pro
   assert.equal(context.actor_id, ACTOR_ID)
   assert.equal(context.actor_epoch, EPOCH)
   const fresh = await w.agent.settleIdleStepCheckpoint()
-  assert.equal(fresh.closed, stock === 10, JSON.stringify({ fresh, events: w.events.slice(-8), logs: w.agentLogs }))
-  assert.equal(w.held().active_step_index, stock === 10 ? 1 : 0)
+  assert.equal(fresh.closed, false)
+  assert.equal(fresh.reason, 'production_controller_pending')
+  await continueProductionTask(w.agent)
+  assert.equal(w.memory.pauseRecord(KEY).pause_reason, 'production_actor_changed')
+  assert.equal(w.memory.pauseRecord(KEY).pause_class, 'guard')
+  assert.equal(w.held().active_step_index, 0)
+  assert.equal(w.held().goal_id, original.goal_id)
+  assert.equal(w.held().plan_id, original.plan_id)
+  assert.equal(w.held().plan_version, original.plan_version)
+  assert.deepEqual(w.held().steps, original.steps)
+  assert.deepEqual(w.memory.currentPlan(KEY).task_board.evidence.find(row => row.kind === 'operation_receipt'), proof)
+  const after = w.memory.autoResumeAllowance(KEY)
+  for (const key of ['step_attempts', 'goal_attempts', 'per_step', 'per_goal']) assert.equal(after[key], allowance[key], key)
+  assert.deepEqual(w.model.calls, [])
   assert.equal(w.game.sent.length, 1)
 })
 
@@ -431,6 +447,9 @@ test('transport-paused recovery records proof passively and reactivation checks 
   assert.equal(w.held().active_step_index, 0)
   assert.equal(w.game.sent.length, 1)
   assert.equal(w.memory.resumePausedPlan(KEY, { pauseClasses: ['transport'] }).resumed, true)
+  // Passive receipt ingestion does not finish the active collection controller.
+  // Let its real same-owner transition reconcile fresh stock before close.
+  await continueProductionTask(w.agent)
   const fresh = await w.agent.settleIdleStepCheckpoint()
   assert.equal(fresh.closed, true, JSON.stringify({ fresh, events: w.events.slice(-8), logs: w.agentLogs, state: w.memory.currentPlan(KEY) }))
   assert.equal(w.held().active_step_index, 1)

@@ -9,7 +9,7 @@ import { checkFluidPreservationEligibility } from './contract-obligation-runtime
 import { buildPendingOperation, sanitizePendingOperation } from './operation-reconciliation.mjs'
 import { planReply } from './task-loop-fixtures.mjs'
 
-for (const mismatch of [false, true]) test(`fluid candidate lifecycle after retained terminal navigation; host proof mismatch=${mismatch}`, async () => {
+for (const mode of ['current-native-refresh', 'historical-uncertain', 'signature-mismatch']) test(`fluid candidate lifecycle after retained terminal navigation: ${mode}`, async () => {
   const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8'))
   const w = await candidateWorld()
   let installed = false
@@ -30,15 +30,21 @@ for (const mismatch of [false, true]) test(`fluid candidate lifecycle after reta
     }
     const admission = structuredClone(ay.native.admission_journal[0])
     Object.assign(admission, { actor_id: 10, epoch: 3 })
-    if (mismatch) admission.signature = 'wrong'
+    if (mode === 'signature-mismatch') admission.signature = 'wrong'
+    // Explicit synthetic projection of current operation_admission.ts refresh:
+    // exact terminal navigation now has a retained partial classification. The
+    // original AY file stays untouched and is separately tested as uncertain.
+    if (mode === 'current-native-refresh') Object.assign(admission, { state: 'partial', ok: false, error: 'exact_terminal_navigation_cancelled' })
     status.admission_journal = [...status.admission_journal, admission]
     status.receipt_journal = [...status.receipt_journal, ...ay.native.receipt_journal]
     return JSON.stringify(status)
   }
-  if (mismatch) {
+  if (mode === 'signature-mismatch') {
     await assert.rejects(w.start(), /preservation_pre_admission_receipt_boundary_unproven/)
     assert.equal(w.game.mutations.length, 0)
   } else {
+    // The shared host boundary re-proves the exact retained terminal receipt
+    // even for the original uncertain journal; its label alone grants nothing.
     await w.start()
     assert.equal(w.game.mutations.length, 1)
     assert.ok(w.rows.some(row => row.event === 'operations.preflight_recoverable'))
@@ -442,48 +448,43 @@ const setRecipe = unit => ({ name: 'set_machine_recipe', args: { unit_number: un
 const observeFurnace = (agent, unit, type) => agent.recordLiveEntityObservation({ name: 'stone-furnace', ...(type ? { type } : {}), unit_number: unit,
   position: { x: 5, y: 5 } }, undefined, 'getNearbyEntities')
 
-test('run BB lane C: batch_stock refusal spends the step claim, a later not_recipe_machine exhausts it, and the guard names both refusals', async () => {
-  let preflights = 0
+test('original BB furnace recipe change is refused as unassigned use without renewing the prior argument credit', async () => {
+  let preflights = 0; let recipePreflights = 0
   const w = await candidateWorld({
     response: ({ text }) => {
       if (!text.includes('autorio_preflight')) return undefined
-      if (text.includes('set_machine_recipe')) return NOT_RECIPE_MACHINE
+      if (text.includes('set_machine_recipe')) { recipePreflights++; return NOT_RECIPE_MACHINE }
       if (text.includes('place_candidate') && preflights++ === 0) return STOCK_UNVERIFIED
     },
     executor: ({ agent, step, round }) => {
       if (round === 0) return undefined // the first reply is the default place_candidate batch, refused batch_stock_unverified_dependency
       // The in-memory counter starts over (a passed preflight or a restage does that); only the durable claim remains.
       agent.modelCorrectablePreflightRetries = 0
-      observeFurnace(agent, 23) // type not read: the mod's own preflight is the one that refuses it
+      observeFurnace(agent, 23) // original incomplete subtype observation; never authorizes assigning/changing this furnace
       return planReply({ stepId: step.step_id, operations: [setRecipe(23)] })
     },
   })
-  await assert.rejects(w.start(), /argument_correction_limit_exhausted/)
+  // Bind the explicit synthetic world, without inventing a job for unit 23.
+  w.memory.initializeFactoryRegistry(w.game.factoryWorldId)
+  await assert.rejects(w.start(), { failure_code: 'factory_cell_resolution_required' })
   assert.equal(w.game.mutations.length, 0, 'neither refused batch reached the game')
+  assert.equal(recipePreflights, 0, 'the original unassigned recipe-change attempt never reaches native preflight')
   const claims = w.memory.planningState(KEY).goal.argument_corrections.claims
   assert.equal(claims.length, 1)
   assert.deepEqual([claims[0].reason, claims[0].operation_index, claims[0].operation_name], ['batch_stock_unverified_dependency', 0, 'place_candidate'])
 
-  const refused = w.rows.filter(row => row.event === 'contract.preservation_refused').at(-1)
-  assert.equal(refused.data.code, 'argument_correction_limit_exhausted')
-  assert.equal(refused.data.disposition, 'classified_guard_pause')
-  assert.deepEqual([refused.data.preflight_code, refused.data.refusal_class, refused.data.operation_index, refused.data.operation_name],
-    ['not_recipe_machine', 'argument', 0, 'set_machine_recipe'])
-  assert.equal(refused.data.prior_claims.length, 1)
-  assert.deepEqual([refused.data.prior_claims[0].reason, refused.data.prior_claims[0].operation_index, refused.data.prior_claims[0].operation_name],
-    ['batch_stock_unverified_dependency', 0, 'place_candidate'])
-  assert.ok(refused.data.prior_claims[0].request_id); assert.ok(Number.isFinite(refused.data.prior_claims[0].at))
-  assert.deepEqual([refused.data.in_memory_retries, refused.data.retry_limit, refused.data.ledger_claims, refused.data.ledger_claim_cap], [0, 1, 1, 64])
-  assert.equal(refused.data.semantic_step_id, claims[0].semantic_step_id)
+  assert.ok(claims[0].request_id); assert.ok(Number.isFinite(claims[0].at))
+  assert.equal(w.rows.filter(row => row.event === 'operations.preflight_recoverable').length, 1)
+  assert.equal(argumentCorrectionAvailable(w.memory.planningState(KEY)), false)
+  const refused = w.rows.filter(row => row.event === 'factory_cell.boundary_refused').at(-1)
+  assert.equal(refused.data.code, 'factory_cell_resolution_required')
+  assert.equal(refused.data.current_batch_sent, false)
   const failed = w.rows.filter(row => row.event === 'request.failed').at(-1)
-  assert.equal(failed.data.failure_snapshot.guard.preflight_code, 'not_recipe_machine', 'the failed-request snapshot carries the same detail')
+  assert.equal(failed.data.failure_code, 'factory_cell_resolution_required')
 
-  const record = w.memory.pauseRecord(KEY)
-  assert.deepEqual([record.paused, record.pause_class], [true, 'guard'])
-  assert.match(record.pause_reason, /^argument_correction_limit_exhausted: /)
-  const paused = w.rows.filter(row => row.event === 'goal.paused')
-  assert.ok(paused.length >= 1)
-  for (const row of paused) assert.deepEqual([row.data.provider_failure, row.data.cause], [false, 'argument_correction_limit_exhausted'], row.data.pause_reason)
+  // This direct agent request propagates the classified guard. The supervisor
+  // owns its persistent pause; this fixture does not manufacture that receipt.
+  assert.equal(failed.data.pause_class, 'guard')
 })
 
 test('run BB lane C: set_machine_recipe on a furnace the live read named is refused at parse, before the durable claim, and the corrected reply proceeds', async () => {

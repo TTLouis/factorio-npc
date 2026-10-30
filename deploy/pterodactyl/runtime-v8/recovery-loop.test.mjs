@@ -28,8 +28,8 @@ import { analyzeBehaviorTrace } from './run-check.mjs'
 import { deployment, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
 // Unit 17 (composed recovery-loop regressions). Earlier focused recovery tests often stopped at checkpoint acceptance or batch admission,
-// or called resume helpers directly with scripted inventory readings. These drive the live failure chain
-// (run G -> H -> I, 2026-10-14) through the production scheduling path to a verified completion: a player request, the mod's
+// or called resume helpers directly with scripted inventory readings. These drive a synthetic single-job counterpart of
+// run G -> H -> I through the production scheduling path to a verified completion: a player request, the mod's
 // completion line, goal.paused -> considerPauseForAutoResume, the mocked 15 s timer, the fired resume, the restage, the executor's
 // batch, the game's receipt and the harness's own verification. The fake game changes only through admitted operations (see
 // recovery-loop-fixtures.mjs); the scripted model throws on any call a scenario did not script; zero humans are connected.
@@ -67,10 +67,10 @@ test('R-GHI: run G, H and I through the scheduled resume reach a verified comple
     return { goal_id: goalId, plan_id: planId, plan_version: planVersion, step_id: stepId }
   })()
 
-  // --- run G: the mixed-ore batch is refused before admission, corrected once, refused again ----------------------------------------
+  // --- synthetic run G: incompatible fuels in one slot are refused, corrected once, refused again ----------------------------------
   assert.deepEqual(model.labels, [
     'planner:observe', 'planner:load-furnace', 'executor:observe', 'executor:collect-ready-plates',
-    'executor:observe-again', 'executor:mixed-ore-batch', 'executor:mixed-ore-batch-again',
+    'executor:observe-again', 'executor:synthetic-fuel-conflict', 'executor:synthetic-fuel-conflict-again',
   ])
   assert.deepEqual(game.preflights.filter(entry => entry.result.ok === false).map(entry => [entry.name, entry.result.code]),
     [['supply_entity', 'supply_missing'], ['supply_entity', 'supply_missing']], 'the game refused the batch both times; the loop reads the one-slot conflict out of that answer')
@@ -137,12 +137,12 @@ test('R-GHI: run G, H and I through the scheduled resume reach a verified comple
   assert.match(residual, /copper-plate required=10 held=9 in_machine_output=3@stone-furnace unit=26 missing_after_machine=0/)
   assert.doesNotMatch(residual, /copper-ore required=/, 'no copper ore is demanded: the furnace output covers the shortfall')
   assert.equal(ctx.atI.packet.some(line => line.startsWith('raw_leaf_acquisition')), false, 'no copper-ore acquisition row')
-  assert.match(ctx.atI.packet.find(line => line.startsWith('placed_machines')), /stone-furnace unit=26 \[FRESH as_of=tick:\d+,epoch:3\] working=false machine_fuel=\{coal:4\} machine_source=empty machine_output=\{copper-plate:3\}/)
+  assert.match(ctx.atI.packet.find(line => line.startsWith('placed_machines')), /stone-furnace unit=26 \[FRESH as_of=tick:\d+,epoch:3\] working=false machine_fuel=empty machine_source=empty machine_output=\{copper-plate:3\}/)
   assert.match(ctx.atI.packet.find(line => line.startsWith('held_counts')), /copper-plate=9/)
   // The world the packet describes came from admitted operations and smelting time: 12 ore -> 12 plates, 9 collected, 3 in the furnace.
   assert.deepEqual(ctx.atI.inventory, { coal: 5, 'iron-ore': 20, 'copper-plate': 9 })
   assert.deepEqual(ctx.atI.furnace.output, { 'copper-plate': 3 })
-  assert.deepEqual(game.effects.map(effect => [effect.operation, effect.item, effect.moved]), [['supply_entity', 'coal', 5], ['supply_entity', 'copper-ore', 12], ['move_items_exact', 'copper-plate', 9]])
+  assert.deepEqual(game.effects.map(effect => [effect.operation, effect.item, effect.moved]), [['supply_entity', 'coal', 1], ['supply_entity', 'copper-ore', 12], ['move_items_exact', 'copper-plate', 9]])
   // No silent replan: the goal and the one plan are the ones the run started with.
   assert.deepEqual(ctx.atI.plans, [[identity.plan_id, identity.plan_version]])
   assert.equal(ctx.atI.goalId, identity.goal_id)
