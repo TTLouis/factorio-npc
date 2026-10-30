@@ -16,7 +16,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
-import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError } from './factory-cell-enrollment.mjs'
+import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
 import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
 import { recoverFactoryCellUse, validFactoryRecoveryWake } from './factory-cell-use-recovery.mjs'
 import { factoryLifecycleOperation, factoryLifecycleRuntime, claimFactoryLifecycleOperation, settleFactoryLifecycleOperation, retainUnsentFactoryLifecycleOperation, bindTemporaryFactoryPlacement } from './factory-cell-lifecycle-runtime.mjs'
@@ -16154,6 +16154,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         throw error
       }
+    }
+
+    const singleton = directFeedSingletonPlacementRefusal(this, operations)
+    if (singleton) {
+      const failure = new AgentLoopError(`Operation preflight rejected operation ${singleton.operation_index + 1} (${singleton.operation}): ${singleton.code}`)
+      failure.preflight = singleton
+      failure.preflightResults = []
+      throw failure
     }
 
     for (let index = 0; index < operations.length; index++) {

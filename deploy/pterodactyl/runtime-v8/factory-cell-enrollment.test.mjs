@@ -3,7 +3,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
-import { ensureCommittedFactoryCellBeforeClose, validateFactoryCellDraft, enrollFactoryProductionProducers, factoryPlacementAdmissionScope } from './factory-cell-enrollment.mjs'
+import { ensureCommittedFactoryCellBeforeClose, validateFactoryCellDraft, enrollFactoryProductionProducers, factoryPlacementAdmissionScope, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
 import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { classifyRequestFailure, isProviderFailurePause } from './pause-class.mjs'
 import { appendFactoryCellMetadata, factoryCellMetadataHead, registerFactoryCell } from './factory-registry.mjs'
@@ -646,4 +646,22 @@ for (const timing of ['during_trace', 'after_certificate']) test(`construction c
   assert.equal(factoryUseDecision(w.memory, KEY, plan.steps[0]).ok, false)
   assert.equal(w.memory.pendingOperations(KEY).length, 0)
   assert.deepEqual(getActivePlan(w.memory.planningState(KEY)).steps, before)
+})
+
+test('a direct-feed step without an explicit intent refuses any batch that is not one placement alone, before admission', () => {
+  const agentFor = step => ({ activePlanKey: () => KEY, memory: { planningState: () => undefined, currentPlan: () => ({ task_board: { active_index: 0, steps: [step] } }) } })
+  const directFeed = agentFor({ id: 'step_1', execution_guidance: { materialSupply: { mode: 'direct_feed', resource: 'copper-ore' } } })
+  const place = id => ({ name: 'place_candidate', args: { candidate_set_id: id, candidate_id: 'candidate-1' } })
+  const fuel = { name: 'supply_entity', args: { unit_number: 7, items: [{ item_name: 'coal', count: 1 }] } }
+  for (const [operations, index, placements] of [[[place('a'), place('b')], 1, 2], [[place('a'), fuel], 1, 1], [[fuel, place('a')], 1, 1], [[fuel, place('a'), place('b')], 2, 2]]) {
+    const refused = directFeedSingletonPlacementRefusal(directFeed, operations)
+    assert.deepEqual([refused.ok, refused.code, refused.refusal_class, refused.stage, refused.operation_index, refused.placements, refused.operations],
+      [false, 'factory_direct_feed_single_placement_required', 'argument', 'preflight', index, placements, operations.length])
+    assert.match(refused.correction_message, /no operation from this batch ran[\s\S]*one placement per batch/)
+  }
+  assert.equal(directFeedSingletonPlacementRefusal(directFeed, [place('a')]), undefined, 'one placement alone keeps exact custody')
+  assert.equal(directFeedSingletonPlacementRefusal(directFeed, [fuel, fuel]), undefined, 'a batch without a placement is not affected')
+  assert.equal(directFeedSingletonPlacementRefusal(agentFor({ id: 'step_1' }), [place('a'), place('b')]), undefined, 'only a direct-feed step')
+  assert.equal(directFeedSingletonPlacementRefusal(agentFor({ id: 'step_1', completion_mode: 'deterministic', execution_guidance: { cellIntent: INTENT, materialSupply: { mode: 'direct_feed', resource: 'copper-ore' } } }),
+    [place('a'), place('b')]), undefined, 'a committed intent keeps its own pre-send refusal')
 })

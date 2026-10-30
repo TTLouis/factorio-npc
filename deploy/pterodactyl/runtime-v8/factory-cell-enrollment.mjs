@@ -4,7 +4,8 @@ import { FACTORY_REGISTRY_LIMITS, FactoryRegistryError } from './factory-registr
 import { placedEntityName } from './operation-reconciliation.mjs'
 import { prepareFactoryCellHost } from './factory-cell-tools.mjs'
 import { PAUSE_CLASS } from './pause-class.mjs'
-import { reconcileFactoryCellUse, readFactoryProducerRecipe, factoryNativeOutput, factoryEstablishmentGrant, factoryDirectFeedRecipe } from './factory-cell-use.mjs'
+import { reconcileFactoryCellUse, readFactoryProducerRecipe, factoryNativeOutput, factoryEstablishmentGrant, factoryDirectFeedRecipe, factoryStepRequirement } from './factory-cell-use.mjs'
+import { REFUSAL_CLASS } from './refusal-class.mjs'
 import { validateFactoryMiningSource } from './factory-cell-observation.mjs'
 
 const fail = code => { throw new FactoryRegistryError(code, code) }
@@ -20,6 +21,27 @@ export class FactoryCellBoundaryError extends FactoryRegistryError {
     this.detail = { factory_boundary: phase, current_batch_sent: false, prior_world_effects: 'not_reclassified',
       ...(phase === 'draft' ? { draft_committed_at_boundary: false } : {}) }
   }
+}
+
+// The mod keeps one exact placement result per batch, so placement custody is
+// derived only for a single-operation placement batch. A direct-feed step needs
+// that custody for every machine it enrolls; without an explicit intent (which
+// keeps its own pre-send refusal) a mixed or multi-placement batch is refused
+// before any native read or send as a model-correctable argument error.
+export function directFeedSingletonPlacementRefusal(agent, operations) {
+  const index = operations.findIndex(placement)
+  if (index < 0 || operations.length === 1) return undefined
+  const plan = getActivePlan(agent.memory.planningState?.(agent.activePlanKey()))
+  const legacy = agent.memory.currentPlan?.(agent.activePlanKey())
+  const step = plan?.steps?.[plan.active_step_index] ?? legacy?.task_board?.steps?.[legacy.task_board.active_index]
+  if (!step || committedFactoryCellIntent(step) || factoryStepRequirement(step)?.kind !== 'direct_feed') return undefined
+  const second = operations.findIndex((op, i) => i > index && placement(op))
+  const refused = second >= 0 ? second : index === 0 ? 1 : index
+  return { ok: false, code: 'factory_direct_feed_single_placement_required', refusal_class: REFUSAL_CLASS.ARGUMENT, stage: 'preflight',
+    operation_index: refused, operation: operations[refused]?.name, placements: operations.filter(placement).length, operations: operations.length,
+    correction_message: '[HARNESS] Refused before admission (factory_direct_feed_single_placement_required); no operation from this batch ran. '
+      + 'This step builds a direct-feed pair, and the game returns an exact placement receipt for only one placement per batch, so each machine placement must be the only operation in its batch. '
+      + 'Resubmit the same step: one placement per batch, with any other operations in separate batches.' }
 }
 
 // Only these two internal factory boundaries stamp expected host refusals.
