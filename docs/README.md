@@ -9,6 +9,7 @@ contracts; the status page and dated evidence establish what has been verified.
 | --- | --- |
 | Understand SGLuna and its limits | [Project overview](../README.md), [current status](NPC_AGENT_HARNESS_STATUS.md) |
 | Run a server | [Docker](../deploy/docker/README.md) or [Pterodactyl](../deploy/pterodactyl/README.md) |
+| Use an external Codex/Claude harness | [Experimental local MCP operator](EXTERNAL_HARNESS.md) |
 | Make a first contribution or report a bug | [Contributing](../CONTRIBUTING.md) |
 | Work with a coding agent | [AGENTS.md](../AGENTS.md) |
 | Choose tests and a supported environment | [Testing](TESTING.md) |

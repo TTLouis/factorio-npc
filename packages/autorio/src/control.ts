@@ -632,8 +632,11 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New place_candidate task: ${candidate_set_id}/${candidate_id}`)
     return result
   },
-  place_entity: (entity_name: string, x?: number, y?: number, direction?: number) => {
-    const accepted = basic_operation_controller.submit_placement(entity_name, x, y, direction)
+  place_entity: (entity_name: string, x?: number, y?: number, direction?: number, refuse_clearance?: boolean) => {
+    // External harness placement is placement-only even if a blocker appears
+    // after admission. Omitted by the existing autonomous adapters.
+    const accepted = basic_operation_controller.submit_placement(entity_name, x, y, direction, undefined, undefined, undefined,
+      refuse_clearance === true ? { refuse_clearance: true } : undefined)
     if (accepted) {
       const position = x !== undefined && y !== undefined ? ` at (${x}, ${y})` : ''
       const facing = direction !== undefined ? ` direction=${direction}` : ''
@@ -694,6 +697,7 @@ remote.add_interface('autorio_operations', {
     const actor = get_controlled_actor()
     return {
       ...task_manager.get_status_snapshot(),
+      placement_no_clear_supported: true,
       admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       basic_operation: basic_operation_controller.status(),

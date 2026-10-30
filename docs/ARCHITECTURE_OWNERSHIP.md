@@ -30,6 +30,14 @@ Do not force parser identity or duplicate an adapter just to make two provider s
 
 ## Runtime state authority
 
+The opt-in [external-harness experiment](EXTERNAL_HARNESS.md) has a separate
+local stdio entrypoint. An external agent owns its planning and task tracking;
+the provider-free operator owns a durable operation journal, and reuses the
+runtime-v8 policy, v2 native admission wrapper and exact receipt reconciliation.
+It does not launch, replace or alter either existing autonomous runtime. Its
+strict subset and exclusions are recorded under `external_harness` in the
+contract manifest; the original two provider surfaces remain unchanged.
+
 Factorio simulation state and deterministic mod helpers are authoritative for world state. Provider prompts, model responses, console projections, and debug views are consumers/projections of that state; they are not alternate state stores.
 
 The task/goal lifecycle remains owned by the current NPC runtime. Provider output proposes actions; deterministic runtime code validates, queues, executes, and records them. New architecture work should extend that ownership rather than introducing a second task board or provider-owned lifecycle.

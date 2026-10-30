@@ -1,5 +1,20 @@
 {
   "version": 3,
+  "external_harness": {
+    "status": "experimental-bounded-operator",
+    "transport": "local-stdio-mcp",
+    "protocol_version": "2025-06-18",
+    "native_adapter": "pterodactyl-runtime-v8-subset",
+    "operation_admission_protocol": 2,
+    "operations": ["wait", "walk_to_position", "craft_item", "mine_resource_at", "move_items_exact", "place_entity"],
+    "place_entity_prototypes": ["stone-furnace", "burner-mining-drill", "wooden-chest"],
+    "place_entity_native_safety": { "argument_index": 5, "forced_value": true, "execution_flag": "refuse_clearance", "required_capability": "placement_no_clear_supported", "model_selectable": false },
+    "observations": ["getActorStatus", "getInventoryItems", "getEquipmentStatus", "getRecipeDetails", "getPrototypeDetails", "discoverPrototypes", "getNearbyEntities", "getEntityStatus", "getCraftingStatus", "getNavigationStatus"],
+    "mcp_tools": ["factorio_capabilities", "factorio_context", "factorio_observe", "factorio_submit", "factorio_receipt", "factorio_cancel", "factorio_resume"],
+    "limits": { "wait_ticks": 3600, "count": 100, "transfer_count": 1000, "walk_distance": 128, "receipt_wait_ms": 30000, "journal_records": 512 },
+    "resume_semantics": "read-and-reconcile-never-replay",
+    "completion_semantics": "native-execution-receipt-not-overall-goal-proof"
+  },
   "surfaces": [
     "ordinary-agent",
     "pterodactyl-runtime-v8"
