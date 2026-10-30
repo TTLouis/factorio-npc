@@ -4972,7 +4972,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const state = this.memory.planningState?.(this.activePlanKey())
     const committed = state ? getActivePlanningPlan(state) : undefined
-    const authorable = !committed || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(committed.status)
+    // A plan that does not belong to the goal the reducer now holds is not this
+    // executor's to run: the goal changed under it (mid-prediction or mid-turn), so the
+    // reply cannot admit work for a goal whose owner has been replaced.
+    const planGoalStale = Boolean(committed && state.goal?.goal_id && committed.goal_id !== state.goal.goal_id)
+    const authorable = planGoalStale || !committed || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(committed.status)
     if (authorable) {
       const requestId = this.traceRequest?.id
       await this.traceEvent('executor.plan_semantics_ignored', {
@@ -4980,7 +4984,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         role: EXECUTOR_ROLE,
         handoff_id: this.agentContext.handoffId,
         plan_id: committed?.plan_id,
-        reason: `executor_cannot_author_plan:plan_status_${committed?.status ?? 'none'}`,
+        reason: planGoalStale ? 'executor_cannot_author_plan:plan_goal_not_current' : `executor_cannot_author_plan:plan_status_${committed?.status ?? 'none'}`,
         ignored_fields: ['plan', 'operations'],
         incoming_steps: Array.isArray(plan.plan) ? plan.plan.length : 0,
         committed_steps: committed?.steps?.length ?? 0,
