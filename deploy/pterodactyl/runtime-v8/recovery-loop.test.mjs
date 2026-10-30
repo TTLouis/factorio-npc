@@ -497,49 +497,60 @@ async function runIWithLostAcknowledgement(ctx) {
 
 const collections = ctx => ctx.game.sent.filter(batch => batch.operations.some(operation => operation.name === 'move_items_exact' && operation.args.max_count === 3)).length
 
-test('R-noreplay: a lost acknowledgement whose effect is unknown after a restart stays held: no conflicting dispatch, a visible guard pause', async (t) => {
-  const stateFile = await tempStateFile(t)
-  const ctx = await reachRunG(t, { stateFile })
-  await runH(ctx)
-  await runIWithLostAcknowledgement(ctx)
+// The furnace is an assigned factory cell member, so the factory use boundary (reconcileFactoryCellUse at 'commit') runs before operation
+// admission and refuses any producer operation while the canonical pending row is unresolved (factory_runtime_not_idle). That fail-closed
+// guard now holds a replay before the ledger's duplicate-suppression check is reached; the unresolved-scope conflict itself stays covered
+// by operation-reconciliation-scenario.test.mjs. Each proposal (identical, changed) is its own restart so both must hold.
+for (const [label, count] of [['identical', 3], ['changed', 2]]) {
+  test(`R-noreplay: a lost acknowledgement whose effect is unknown after a restart stays held (${label} replay): no dispatch, a visible guard pause`, async (t) => {
+    const stateFile = await tempStateFile(t)
+    const ctx = await reachRunG(t, { stateFile })
+    await runH(ctx)
+    await runIWithLostAcknowledgement(ctx)
 
-  // The game reloads while the batch is still queued: the queue and its records are gone and nothing proves whether it ran.
-  ctx.game.reloadMod()
-  assert.equal(ctx.game.inventory['copper-plate'], 9)
-  const model = new ScriptedModel()
-    .push('executor', 'restart:observe', (messages) => {
-      ctx.atRestart = { text: messages.map(message => String(message.content)).join('\n') }
-      return observation()
-    })
-    .push('executor', 'restart:replay-identical-collection', executorPlan([collect(3)]))
-    .push('executor', 'restart:replay-changed-collection', executorPlan([collect(2)]))
-  const restarted = restartProcess(ctx, model)
-  await restarted.world.agent.loadPersistentState()
-  assert.equal(restarted.session.queueStartupRecovery(restarted.session.currentPlanState()), 'recover')
-  await settle(restarted.session)
+    // The game reloads while the batch is still queued: the queue and its records are gone and nothing proves whether it ran.
+    ctx.game.reloadMod()
+    assert.equal(ctx.game.inventory['copper-plate'], 9)
+    const model = new ScriptedModel()
+      .push('executor', 'restart:observe', (messages) => {
+        ctx.atRestart = { text: messages.map(message => String(message.content)).join('\n') }
+        return observation()
+      })
+      .push('executor', `restart:replay-${label}-collection`, executorPlan([collect(count)]))
+    const restarted = restartProcess(ctx, model)
+    await restarted.world.agent.loadPersistentState()
+    assert.equal(restarted.session.queueStartupRecovery(restarted.session.currentPlanState()), 'recover')
+    await settle(restarted.session)
 
-  const [reconciled] = restarted.world.named('operation.reconciled')
-  assert.deepEqual([reconciled.trigger, reconciled.verdict, reconciled.effect], ['runtime_restart', 'generation_changed', 'partial_unknown'])
-  assert.match(ctx.atRestart.text, /UNKNOWN, not as done and not as absent/)
-  const suppressed = restarted.world.named('operation.duplicate_suppressed')
-  assert.ok(suppressed.length >= 1)
-  assert.equal(suppressed[0].reason, 'unresolved_operation_scope_conflict')
-  assert.equal(suppressed[0].effect, 'partial_unknown')
-  // No conflicting dispatch: neither the identical nor the changed collection reached the game, and the world did not move.
-  assert.equal(ctx.game.sent.length, 3)
-  assert.equal(collections(ctx), 1)
-  assert.equal(ctx.game.pendingBatch, null)
-  assert.equal(ctx.game.inventory['copper-plate'], 9)
-  assert.equal(ctx.game.worldTotals()['copper-plate'], 12)
-  // The end is a visible guard pause that no timer resumes.
-  const pause = restarted.world.memory.pauseRecord(KEY)
-  assert.deepEqual([pause.paused, pause.pause_class, pause.pause_reason], [true, 'guard', 'blocked_duplicate_effect_suppressed'])
-  assert.equal(restarted.session.modelResume, null)
-  assert.equal(restarted.world.named('recovery.auto_resume_scheduled').length, 0)
-  assert.equal(restarted.world.named('goal.paused').filter(row => row.pause_reason === 'blocked_duplicate_effect_suppressed').length, 1)
-  assertStrictBoundary(restarted)
-  assert.deepEqual(ctx.model.remaining, [])
-})
+    const [reconciled] = restarted.world.named('operation.reconciled')
+    assert.deepEqual([reconciled.trigger, reconciled.verdict, reconciled.effect], ['runtime_restart', 'generation_changed', 'partial_unknown'])
+    assert.match(ctx.atRestart.text, /UNKNOWN, not as done and not as absent/)
+    assert.deepEqual(model.calls.map(call => call.label), ['restart:observe', `restart:replay-${label}-collection`], 'the replay was proposed and then refused')
+    // The earlier guard: the factory boundary refused the proposed producer operation before any batch was sent.
+    const [boundary, ...moreBoundaries] = restarted.world.named('factory_cell.boundary_refused')
+    assert.equal(moreBoundaries.length, 0)
+    assert.deepEqual([boundary.code, boundary.pause_class, boundary.factory_boundary, boundary.current_batch_sent, boundary.prior_world_effects],
+      ['factory_runtime_not_idle', 'guard', 'commit', false, 'not_reclassified'])
+    assert.equal(restarted.world.named('plan.accepted').length, 0, 'the replay never became an accepted plan')
+    // No conflicting dispatch: neither collection reached the game, and the world did not move.
+    assert.equal(ctx.game.sent.length, 3)
+    assert.equal(collections(ctx), 1)
+    assert.equal(ctx.game.pendingBatch, null)
+    assert.equal(ctx.game.inventory['copper-plate'], 9)
+    assert.equal(ctx.game.worldTotals()['copper-plate'], 12)
+    // The unknown effect stays unresolved: the pending row is neither settled nor cleared.
+    assert.equal(restarted.world.named('operation.recovery_settled').length, 0)
+    assert.equal(restarted.world.memory.pendingOperation(KEY).operation_key.startsWith('recovery_'), true)
+    // The end is a visible guard pause that no timer resumes.
+    const pause = restarted.world.memory.pauseRecord(KEY)
+    assert.deepEqual([pause.paused, pause.pause_class, pause.pause_reason], [true, 'guard', 'runtime_recovery_failed:runtime_restart:factory_runtime_not_idle'])
+    assert.equal(restarted.session.modelResume, null)
+    assert.equal(restarted.world.named('recovery.auto_resume_scheduled').length, 0)
+    assert.equal(restarted.world.named('goal.paused').filter(row => row.pause_reason === pause.pause_reason && row.pause_class === 'guard').length, 1)
+    assertStrictBoundary(restarted)
+    assert.deepEqual(ctx.model.remaining, [])
+  })
+}
 
 // Recovery must rebuild its machine facts before the executor answers, even though entity observations died with the process.
 test('R-restart: the first packet rediscovers fresh furnace output and completes without demanding more ore', async (t) => {
