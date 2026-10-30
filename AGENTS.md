@@ -87,6 +87,12 @@ together. Preserve intentional provider differences; see
 
 ## Configuration, secrets and live activity
 
+- For authorized external-harness deployment on a user's machine, follow the
+  [local deployment guide](docs/EXTERNAL_HARNESS.md): build the exact guarded
+  source; choose native Windows or Windows-host-to-Docker with loopback-only
+  RCON; keep the Windows ledger on local fixed NTFS with the PowerShell helper
+  permitted. Keep runtime credentials and state private, and verify native
+  execution receipts rather than treating admission as completion.
 - Deployment environment/Egg variables override non-secret config mirrors.
   `sgluna-config.json` is canonical; `airi-config.json` is a compatibility input.
 - Never read, print or copy `.env`, credentials or private provider endpoints
