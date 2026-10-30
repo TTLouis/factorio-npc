@@ -1,5 +1,17 @@
 # Factorio NPC
 
+## Control your NPC with Codex or Claude
+
+Want to use Codex, Claude, or another MCP-compatible assistant to control your
+standalone Factorio NPC? Try the experimental
+[`feat/external-harness-mcp` branch](https://github.com/TTLouis/factorio-npc/tree/feat/external-harness-mcp).
+Your external assistant plans the work and directs the NPC through native game
+actions. This mode is separate from the built-in autonomous planner.
+
+Switch to that branch and follow its
+[setup guide](https://github.com/TTLouis/factorio-npc/blob/feat/external-harness-mcp/docs/EXTERNAL_HARNESS.md)
+for Windows or Docker.
+
 An AI teammate that lives inside a Factorio world, with its own character,
 inventory and native game actions.
 
