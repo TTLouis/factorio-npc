@@ -227,6 +227,7 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   handoffFuelSources: f('step', true, V8, 'fuel source reads keyed plan|step|actor|epoch|resource, bounded LRU, never cleared'),
   reviewReadReopenedSteps: f('step', true, V8, 'once-per-step review reopen guard keyed by step key, bounded Set'),
   reviewContinuation: f('step', false, V8, 'one planner round per step marker: handlePlannerReview sets it, commitPlan consumes it'),
+  deliveryWindowPending: f('step', false, V8, 'goal/plan/step of the last delivery-window close decline: applyStepClose sets it, the next wait-only batch receipt consumes it once (deliveryWindowWaitCompleted); a stale owner only skips one fresh-read close'),
   stepFactWorkingSet: f('step', true, V8, 'recipes read per step key (post-batch-facts.mjs), bounded to 8 steps, never cleared'),
   stepReadLedger: f('step', false, V8, 'reads delivered to the executor per step identity (actor/epoch, session, plan id and version, step id) and the conversation that got them, bounded; survives a conversation swap so the first re-read of a dropped result costs no observation budget (StepReadLedger, handleToolBatch); never cleared'),
   localFluidSearchObservation: f('step', true, V8, 'water search fact scoped by localSearchScope; invalidated by noteWorldMutation (ambiguous: decision-length)'),

@@ -102,3 +102,30 @@ test('an observed interruption discards old delivery baseline even when exact to
   electric.args.producer.electric_component_facts.coverage = 'complete'
   assert.equal(electric.read().state, 'unverified')
 })
+
+test('a working consumer whose arrivals the arithmetic cannot attribute rebases the window; it never proves delivery by itself', () => {
+  const stock = (w, count) => { w.args.native.members[1].inventories[0].items = count ? [{ name: 'synthetic-resource', quality: 'normal', count }] : [] }
+  // The consumer began the window holding stock and finished more crafts than that stock: inconclusive, so the newer frame is the baseline.
+  const drained = fixture(); stock(drained, 1); drained.read(); drained.next(); stock(drained, 0)
+  drained.args.native.members[1].progress_facts.products_finished.value = 3
+  assert.deepEqual(drained.read(), { state: 'unverified', code: 'direct_delivery_window_rebased' })
+  // From that empty, idle baseline one more finished craft can only be smelted from a delivery.
+  drained.next(); drained.args.native.members[1].progress_facts.products_finished.value = 4
+  const proven = drained.read()
+  assert.deepEqual([proven.state, proven.basis, proven.from_tick, proven.to_tick], ['delivered', 'empty_receiver_started_and_completed_native_crafting', 11, 12])
+  // A craft running at the newer frame is native activity too.
+  const running = fixture(); running.read(); running.next(); running.args.native.members[1].progress_facts.crafting_progress.value = 0.5
+  assert.equal(running.read().code, 'direct_delivery_window_rebased')
+  // An idle consumer whose input did not grow received nothing that counts, and its baseline is kept.
+  const idle = fixture(); stock(idle, 2); idle.read(); idle.next()
+  assert.equal(idle.read().code, 'direct_delivery_window_no_attributed_progress')
+  idle.next(); stock(idle, 3)
+  assert.equal(idle.read().observed_inventory_increase, 1, 'the kept baseline still proves a later increase')
+  // A consumer that only drains its own stock, with no supplier, is never credited: each window rebases until it is empty and idle.
+  const draining = fixture(); stock(draining, 3); draining.read()
+  for (const left of [2, 1, 0]) {
+    draining.next(); stock(draining, left); draining.args.native.members[1].progress_facts.products_finished.value++
+    assert.equal(draining.read().code, 'direct_delivery_window_rebased')
+  }
+  draining.next(); assert.equal(draining.read().code, 'direct_delivery_window_no_attributed_progress')
+})

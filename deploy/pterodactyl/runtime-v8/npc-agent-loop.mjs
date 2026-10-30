@@ -17,7 +17,7 @@ import { continueProductionTask, prepareProductionTask, pruneClosedProductionRec
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
 import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
-import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
+import { reconcileFactoryCellUse, factoryDeliveryWindowPending } from './factory-cell-use.mjs'
 import { recoverFactoryCellUse, validFactoryRecoveryWake } from './factory-cell-use-recovery.mjs'
 import { factoryLifecycleOperation, factoryLifecycleRuntime, claimFactoryLifecycleOperation, settleFactoryLifecycleOperation, retainUnsentFactoryLifecycleOperation, bindTemporaryFactoryPlacement } from './factory-cell-lifecycle-runtime.mjs'
 import { captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles, isFactoryLifecycleControllerActive, validateFactoryLifecycleOperation } from './factory-cell-lifecycle-controller.mjs'
@@ -7792,6 +7792,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
   // what the machines hold now and that elapsed time proves nothing. Never throws except on an epoch change.
+  // True once per delivery-window decline, for a wait-only batch receipt of the same goal, plan and step.
+  deliveryWindowWaitCompleted(receipt) {
+    const pending = this.deliveryWindowPending
+    const types = receipt?.view?.last_completed_batch?.task_types
+    if (!pending || !Array.isArray(types) || types.length === 0 || !types.every(type => type === 'waiting')) return false
+    this.deliveryWindowPending = undefined
+    const owner = this.captureCheckpointOwner()
+    return owner.goalId === pending.goalId && owner.planId === pending.planId && owner.stepId === pending.stepId
+  }
+
   async blindWaitReceiptFacts(receipt) {
     const types = receipt?.view?.last_completed_batch?.task_types
     const waitOnly = Array.isArray(types) && types.length > 0 && types.every(type => type === 'waiting')
@@ -8998,7 +9008,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
       if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
       const reason = error.code ?? 'factory_enrollment_failed'
+      // Only the first frame of the delivery window exists; the step stays open
+      // unpaused and the executor is told that a native wait completes it.
+      if (factoryDeliveryWindowPending(error)) {
+        this.deliveryWindowPending = { goalId: closeOwner.goalId, planId: closeOwner.planId, stepId: closeOwner.stepId }
+        return this.declineStepClose(trigger, reason, { active_step_id: step.id,
+          observation: error.details.selected.delivery.observation.code, goal_id: closeOwner.goalId, plan_id: closeOwner.planId })
+      }
       await this.traceEvent('factory_cell.enrollment_close_refused', { request_id: requestId, trigger, reason,
+        observation: error.details?.selected?.delivery?.observation?.code,
         goal_id: closeOwner.goalId, plan_id: closeOwner.planId, step_id: closeOwner.stepId })
       this.assertCheckpointOwnerIdentity(closeOwner)
       return { closed: false, reason, contractPause: await this.pauseForStepContract({ reason, owner: closeOwner }) }
@@ -13262,15 +13280,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
     if (stepCompletion?.completionDeferred) return stepCompletion.completionDeferred
     if (stepCompletion?.contractPause) return stepCompletion.contractPause
+    let fresh
     if (!pendingAmendment && !stepCompletion?.verified) {
       const corrected = await recoverContractObligations(this, { trigger: 'native_completion' })
       if (corrected !== undefined) return corrected
       // A return walk proves arrival only. The original completed effects stay
       // in the durable receipt ledger; ordinary fresh settlement must re-evaluate
       // every unchanged checkpoint predicate before granting progress.
-      if (preservationReobservationVerified(this)) {
+      // A wait-only batch that follows a delivery-window decline of this same
+      // step was the window's second frame; it is read once, by the same close.
+      const preserved = preservationReobservationVerified(this)
+      if (preserved || this.deliveryWindowWaitCompleted(receipt)) {
         const recoveryOwner = this.captureCheckpointOwner()
-        const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(this.activePlanKey()), trigger: 'preservation_reobserved' })
+        fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(this.activePlanKey()), trigger: preserved ? 'preservation_reobserved' : 'delivery_window_wait' })
         if (fresh.completionDeferred) return fresh.completionDeferred
         if (fresh.contractRecovery) return fresh.contractRecovery
         if (fresh.contractPause) {
@@ -13296,7 +13318,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // finished batch and nothing about why the step stayed open.
     const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
       ? this.stepStaysOpenHint(stepCompletion.state)
-      : ''
+      : (fresh ?? stepCompletion)?.reason === 'factory_cell_delivery_unverified'
+        ? '[HARNESS] The active step stays open although its checkpoint counts are met: this direct-feed step closes only when two native frames, with no other operation between them, show the supplier delivering into its consumer. Every batch except a wait-only batch restarts that observation, and only its first frame exists now.'
+        : ''
     const completionState = stepCompletion?.state
     // The decision-scoped overrides are saved before the step settles and restored on every exit, as failed() and request() do:
     // a slice close inside settleCompletedStepState can commit the next slice and run its C3 executor decision to the end (Run AJ:

@@ -17,6 +17,13 @@ const operationCertificates = new WeakMap()
 const failures = new WeakMap()
 const startupRecipes = new WeakMap()
 export const factoryUseFailureWitness = error => failures.get(error?.cause ?? error)
+// A close that holds only the first frame of an attributed delivery window
+// (every non-wait batch restarts it, and an inconclusive window rebases on its
+// newer frame) has not refuted delivery: an ordinary native wait supplies the
+// second frame. Any other miss stays a guard failure.
+const PENDING_DELIVERY_WINDOW = new Set(['direct_delivery_window_started', 'direct_delivery_window_no_new_tick', 'direct_delivery_window_rebased'])
+export const factoryDeliveryWindowPending = error => error?.code === 'factory_cell_delivery_unverified'
+  && error.details?.phase === 'close' && PENDING_DELIVERY_WINDOW.has(error.details.selected?.delivery?.observation?.code)
 const fail = (code, details) => { const error = new FactoryRegistryError(code, code); error.details = details; throw error }
 const clone = value => structuredClone(value)
 const known = value => value?.state === 'known' && value.truncated !== true

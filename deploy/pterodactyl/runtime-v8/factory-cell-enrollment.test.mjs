@@ -7,7 +7,7 @@ import { ensureCommittedFactoryCellBeforeClose, validateFactoryCellDraft, enroll
 import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { classifyRequestFailure, isProviderFailurePause } from './pause-class.mjs'
 import { appendFactoryCellMetadata, factoryCellMetadataHead, registerFactoryCell } from './factory-registry.mjs'
-import { reconcileFactoryCellUse, factoryUseDecision, factoryUseFailureWitness } from './factory-cell-use.mjs'
+import { reconcileFactoryCellUse, factoryUseDecision, factoryUseFailureWitness, factoryDeliveryWindowPending } from './factory-cell-use.mjs'
 import { FactoryUseRecoveryStore, recoverFactoryCellUse } from './factory-cell-use-recovery.mjs'
 import { playerObjectiveGrant } from './replacement-wake.mjs'
 
@@ -664,4 +664,38 @@ test('a direct-feed step without an explicit intent refuses any batch that is no
   assert.equal(directFeedSingletonPlacementRefusal(agentFor({ id: 'step_1' }), [place('a'), place('b')]), undefined, 'only a direct-feed step')
   assert.equal(directFeedSingletonPlacementRefusal(agentFor({ id: 'step_1', completion_mode: 'deterministic', execution_guidance: { cellIntent: INTENT, materialSupply: { mode: 'direct_feed', resource: 'copper-ore' } } }),
     [place('a'), place('b')]), undefined, 'a committed intent keeps its own pre-send refusal')
+})
+
+test('only a close that holds the first frame of a delivery window is pending; every other delivery miss stays a guard failure', () => {
+  const miss = (code, phase = 'close') => Object.assign(new Error(code), { code: 'factory_cell_delivery_unverified', details: { phase, selected: { delivery: { observation: { state: 'unverified', code } } } } })
+  for (const code of ['direct_delivery_window_started', 'direct_delivery_window_no_new_tick', 'direct_delivery_window_rebased']) {
+    assert.equal(factoryDeliveryWindowPending(miss(code)), true, code)
+    assert.equal(factoryDeliveryWindowPending(miss(code, 'commit')), false, `${code} outside the close`)
+  }
+  for (const code of ['direct_delivery_window_no_attributed_progress', 'direct_incoming_cut_unverified', 'direct_receiver_endpoint_unverified', undefined]) {
+    assert.equal(factoryDeliveryWindowPending(miss(code)), false, String(code))
+  }
+  assert.equal(factoryDeliveryWindowPending(Object.assign(miss('direct_delivery_window_started'), { code: 'factory_cell_assignment_conflict' })), false)
+  assert.equal(factoryDeliveryWindowPending(undefined), false)
+})
+
+test('the wait that follows a delivery-window decline closes on a fresh read once, and only for the same goal, plan and step', () => {
+  const owner = { goalId: 'goal', planId: 'plan', stepId: 'step' }
+  const loop = current => ({ deliveryWindowPending: { ...owner }, captureCheckpointOwner: () => ({ ...owner, ...current }) })
+  const waited = types => ({ view: { last_completed_batch: { batch_id: 5, task_types: types } } })
+  const same = loop({})
+  assert.equal(NpcAgentLoop.prototype.deliveryWindowWaitCompleted.call(same, waited(['waiting'])), true)
+  assert.equal(same.deliveryWindowPending, undefined)
+  assert.equal(NpcAgentLoop.prototype.deliveryWindowWaitCompleted.call(same, waited(['waiting'])), false, 'read once')
+  for (const current of [{ goalId: 'other' }, { planId: 'other' }, { stepId: 'other' }]) {
+    const moved = loop(current)
+    assert.equal(NpcAgentLoop.prototype.deliveryWindowWaitCompleted.call(moved, waited(['waiting'])), false, JSON.stringify(current))
+    assert.equal(moved.deliveryWindowPending, undefined, 'a decline of another step is spent, not carried')
+  }
+  for (const types of [['waiting', 'moving_items'], ['placing'], [], undefined]) {
+    const other = loop({})
+    assert.equal(NpcAgentLoop.prototype.deliveryWindowWaitCompleted.call(other, waited(types)), false, JSON.stringify(types))
+    assert.deepEqual(other.deliveryWindowPending, owner, 'a non-wait batch leaves the decline for its own close')
+  }
+  assert.equal(NpcAgentLoop.prototype.deliveryWindowWaitCompleted.call({ captureCheckpointOwner: () => owner }, waited(['waiting'])), false, 'no decline, no fresh close')
 })

@@ -51,7 +51,16 @@ export function observeDirectFactoryDelivery(memory, { scope, cell, native, sour
   const consumed = previous.count === 0 && known(previous.progress) && previous.progress.value === 0
     && known(previous.cycles) && known(sample.cycles) && Number.isSafeInteger(previous.cycles.value) && Number.isSafeInteger(sample.cycles.value)
     && sample.cycles.value > previous.cycles.value
-  if (increase <= 0 && !consumed) return unknown('direct_delivery_window_no_attributed_progress')
+  if (increase <= 0 && !consumed) {
+    // A consumer that finished or is running a craft may have taken in what the
+    // supplier delivered, but without its productivity the arithmetic cannot say
+    // so: the window is inconclusive and the newer frame is the baseline. An
+    // idle consumer whose input did not grow received nothing that counts.
+    const active = (known(previous.cycles) && known(sample.cycles) && sample.cycles.value > previous.cycles.value)
+      || (known(sample.progress) && sample.progress.value > 0)
+    if (!active) return unknown('direct_delivery_window_no_attributed_progress')
+    entries.set(key, structuredClone(sample)); return unknown('direct_delivery_window_rebased')
+  }
   return { state: 'delivered', code: 'exclusive_direct_delivery_window', supplier: source.unit_number, consumer: target.unit_number,
     resource, quality: inventory.quality, from_tick: previous.tick, to_tick: sample.tick, scope: 'bounded_observed_window',
     basis: increase > 0 ? 'exact_receiver_inventory_increased' : 'empty_receiver_started_and_completed_native_crafting',
