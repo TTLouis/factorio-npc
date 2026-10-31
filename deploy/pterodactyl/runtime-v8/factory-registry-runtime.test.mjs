@@ -5,9 +5,11 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { miningDetails, recipeDetails } from './direct-feed-bootstrap-fixtures.mjs'
 import { buildPendingOperation, EFFECT } from './operation-reconciliation.mjs'
+import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { FakeFactorio } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:factory-test'
-const WORLD = 'save-world-explicit-1'
+const WORLD = 'ac8b843a-3e61-4df0-bd05-f5de2139f181'
 const CHECKPOINT = { mode: 'all', requirements: [{ id: 'held', kind: 'inventory_count', item_name: 'copper-plate', minimum: 1 }], confidence: 0.9 }
 
 function plan(memory, objective = 'Declare copper production') {
@@ -322,17 +324,30 @@ test('actual admission refuses registered destructive and ambiguous mutations wi
 
 async function bootstrap(memory) {
   const traces = []; const reads = []
-  const agent = { memory, activePlanKey: () => KEY, traceRequest: { id: 'bootstrap-request' },
-    observationToolCommand: (tool, args) => JSON.stringify({ tool, args }),
-    traceEvent: async (name, data) => traces.push({ name, ...data }),
-    rcon: { command: async command => {
+  const game = new FakeFactorio({ factoryWorldId: WORLD })
+  for (const cell of memory.factoryRegistryStatus().status === 'initialized' ? memory.getFactoryRegistry().cells : []) {
+    for (const member of cell.members) game.factoryMembers.set(member.unit_number, { locator: member, state: 'observed', type: 'mining-drill',
+      recipe: { state: 'unsupported' }, source_resources: { state: 'known', truncated: false,
+        resources: [{ name: 'copper-ore', products_truncated: false, products: [{ type: 'item', name: 'copper-ore' }] }] } })
+  }
+  const nativeCommand = game.command.bind(game)
+  game.command = async command => {
+      if (!command.startsWith('{')) return nativeCommand(command)
       const { tool, args } = JSON.parse(command); reads.push({ tool, args })
       if (tool === 'getMiningDetails') return JSON.stringify(miningDetails('iron-ore', ['burner-mining-drill']))
       if (tool === 'getRecipeDetails') return JSON.stringify(recipeDetails(args.item_or_recipe))
       if (tool === 'getInventoryItems') return JSON.stringify([{ name: 'iron-plate', count: 8 }, { name: 'stone-furnace', count: 1 }])
       if (tool === 'getEntityStatus') return JSON.stringify({ found: true, entity: { unit_number: args.unit_number, name: 'burner-mining-drill' } })
       throw new Error(`Unexpected read ${tool}`)
-    } } }
+    }
+  const agent = new NpcAgentLoop({ memory, rcon: game, npcId: 'factory-test', stateFile: null, traceFile: null, decisionTraceFile: null,
+    completionProtocolVersion: 3, jevCheckpoints: false, provider: async () => { throw new Error('No provider in bootstrap probe') } })
+  agent.active = true; agent.epoch = { ...game.status }; agent.requestInfo = { memoryKey: KEY }; agent.traceRequest = { id: 'bootstrap-request' }
+  agent.turnConversation = agent.agentContext.beginRequest(0)
+  agent.behaviorTrace = { emit: async row => traces.push({ name: row.event, ...row.data }) }
+  const observation = agent.observationToolCommand.bind(agent)
+  agent.observationToolCommand = (tool, args) => ['getMiningDetails', 'getRecipeDetails', 'getInventoryItems', 'getEntityStatus'].includes(tool)
+    ? JSON.stringify({ tool, args }) : observation(tool, args)
   const refusal = await directFeedBootstrapRefusal(agent, { executionGuidance: [{ materialSupply: { mode: 'direct_feed', resource: 'iron-ore' } }] })
   return { refusal, traces, reads }
 }
@@ -347,9 +362,10 @@ test('real bootstrap baseline counts an unassigned copper drill as spare; regist
   w.runtime.registerCell(declaration(member), w.runtime.scope())
   const protectedResult = await bootstrap(w.memory)
   assert.equal(protectedResult.refusal.code, 'direct_feed_bootstrap_infeasible')
-  assert.equal(protectedResult.traces[0].verdict, 'infeasible')
+  const checked = protectedResult.traces.find(row => row.name === 'plan.direct_feed_bootstrap_checked')
+  assert.equal(checked.verdict, 'infeasible')
   assert.equal(protectedResult.reads.filter(row => row.tool === 'getEntityStatus').length, 0)
-  assert.deepEqual(protectedResult.traces[0].preserved, [], 'world assignment does not depend on step preserve')
+  assert.deepEqual(checked.preserved, [], 'world assignment does not depend on step preserve')
 })
 
 test('real bootstrap reports unknown on a corrupt registry even when there are no recorded machines', async () => {

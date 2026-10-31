@@ -2,6 +2,7 @@
 // read through the ordinary observation path are used; a failed, clipped or unexpected answer is "unknown", never a fact.
 import { parseInventoryCounts } from './inventory-facts.mjs'
 import { directFeedBootstrapMessage, directFeedBootstrapVerdict, DIRECT_FEED_BOOTSTRAP_CODE, VERDICT } from './direct-feed-bootstrap.mjs'
+import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
 
 export const DIRECT_FEED_BOOTSTRAP_LIMITS = Object.freeze({ recipe_reads: 40, placements: 8, raw_chars: 200000 })
 
@@ -124,6 +125,24 @@ export async function directFeedBootstrapRefusal(agent, plan, { firstStep = 0 } 
       continue
     }
     if (index < firstStep) continue
+    // Construction feasibility is irrelevant only when the guarded shared
+    // resolver freshly proves an existing assigned supplier for this exact
+    // resource. A new-cell intent still owes its own construction. Declarations,
+    // startup permission and unknown/mismatched members never waive that bill.
+    if (index === firstStep && !brief.cellIntent && agent.memory.factoryRegistryStatus?.().status === 'initialized'
+      && agent.memory.getFactoryOperationalRegistry().cells.length > 0) {
+      let existing
+      try { existing = await reconcileFactoryCellUse(agent, { phase: 'draft', step: { execution_guidance: brief }, operations: [] }) }
+      catch (error) { if (error?.code !== 'factory_cell_resolution_required') throw error }
+      if (existing?.kind === 'existing') {
+        await agent.traceEvent('plan.direct_feed_existing_supplier_verified', { request_id: agent.traceRequest?.id,
+          step_index: index, resource: supply.resource, cell_id: existing.cell_id, cell_revision: existing.cell_revision,
+          commissioning: 'unverified', source: existing.source, target: existing.target })
+        // The resolver's private certificate is checked again at canonical
+        // commit and pre-send. This trace does not carry use authority.
+        continue
+      }
+    }
     const completion = plan.stepCompletions?.[index]
     const preserve = Array.isArray(completion?.obligations?.preserve) ? completion.obligations.preserve : []
     const protect = (completion?.checkpoint?.requirements ?? []).filter(row => row?.kind === 'inventory_count')

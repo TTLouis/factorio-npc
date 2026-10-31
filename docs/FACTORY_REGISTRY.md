@@ -5,6 +5,12 @@ dependencies. The native game remains authoritative for physical state; the
 registry is authoritative only for accepted assignments. A declaration does not
 prove that a machine is configured, connected, supplied or producing.
 
+The [October 31 completion addendum](validation/FACTORY_TRACKER_COMPLETION_2026-10-31.md)
+records the combined candidate's native lifecycle evidence, recovery regressions,
+current integration checks and remaining boundaries. Earlier stage notes below
+describe their original prerequisite scope; they are not cumulative acceptance
+claims for every later capability.
+
 This implements the first stage of the production-block observation direction
 in [the production validation ladder](NPC_PRODUCTION_VALIDATION_ROADMAP.md#7-production-block-observation-and-diagnostics).
 Goal, plan and authorization ownership remain defined by the

@@ -15,8 +15,16 @@ import { enrollImplicitDirectFeed } from './factory-cell-enrollment.mjs'
 const certificates = new WeakMap()
 const operationCertificates = new WeakMap()
 const failures = new WeakMap()
+const failureRefreshes = new WeakMap()
 const startupRecipes = new WeakMap()
 export const factoryUseFailureWitness = error => failures.get(error?.cause ?? error)
+// The original read's private capability owns native identity, restore, world
+// mutation and idle fences. A serialized witness cannot reacquire it.
+export async function refreshFactoryUseFailure(error) {
+  const refresh = failureRefreshes.get(error?.cause ?? error)
+  if (!refresh) fail('factory_cell_recovery_witness_unavailable')
+  await refresh()
+}
 // A close that holds only the first frame of an attributed delivery window
 // (every non-wait batch restarts it, and an inconclusive window rebases on its
 // newer frame) has not refuted delivery: an ordinary native wait supplies the
@@ -335,10 +343,13 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
     const accepted = new Set()
     const unresolved = (code, details) => {
       const error = new FactoryRegistryError(code, code); error.details = details
-      if (requirement && evidence.every(row => ['compatible', 'mismatch'].includes(row.state))) failures.set(error, {
-        code, scope: clone(scope), requirement: clone(requirement), evidence: clone(evidence), ...clone(details),
-        registry_revision: snapshot.revision, physical_revision: physicalRevision(agent.memory),
-      })
+      if (requirement && evidence.every(row => ['compatible', 'mismatch'].includes(row.state))) {
+        failures.set(error, {
+          code, scope: clone(scope), requirement: clone(requirement), evidence: clone(evidence), ...clone(details),
+          registry_revision: snapshot.revision, physical_revision: physicalRevision(agent.memory),
+        })
+        failureRefreshes.set(error, async () => { await access.refresh(); access.fence() })
+      }
       throw error
     }
     for (const cell of candidates) {

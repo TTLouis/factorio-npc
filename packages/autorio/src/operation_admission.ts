@@ -1,6 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { LayoutRecord } from './construction_layout_record'
 import type { TaskBatchIdentity, TaskBatchReceipt } from './task_manager'
+import type { EntityRemovalReceipt, RemovalBinding } from './entity_removal_receipt'
 import { node_ids, settle_execution } from './construction_layout_record'
 import { resolve_recorded_entity } from './entity_reference'
 
@@ -54,6 +55,7 @@ export type AdmissionSlotInput = Omit<AdmissionSlot, 'index' | 'refused_before_m
   refused?: boolean
 }
 export interface OperationAdmission extends OperationCorrelation {
+  entity_removal?: EntityRemovalReceipt
   state: 'admitting' | 'admitted' | 'uncertain' | 'completed' | 'failed' | 'partial' | 'not_admitted'
   generation: number
   tick: number
@@ -146,6 +148,35 @@ export function current_fluid_owner(actor: ControlledActor, owner: FluidPreserva
 // Module state deliberately disappears on load; journal history alone cannot
 // resurrect a previously admitting operation as a current caller.
 let current_admitting_key: string | undefined
+export function capture_removal_binding(actor: ControlledActor, status: any): RemovalBinding | undefined {
+  const record = journal().find(row => row.operation_key === current_admitting_key)
+  if (!record || record.state !== 'admitting' || record.operation_count !== 1 || record.slots.length !== 0
+    || record.actor_id !== actor.status_snapshot().actor_id || !status.active_batch
+    || record.generation !== status.active_batch.batch_generation
+    || !remote.interfaces.sgluna_deployment?.status) return undefined
+  const current: any = remote.call('sgluna_deployment', 'status')
+  if (current.allowed !== true || current.actor_id !== record.actor_id || current.epoch !== record.epoch || !text(current.session, 240)) return undefined
+  return { operation_key: record.operation_key, attempt_id: record.attempt_id, signature: record.signature, ordinal: record.ordinal,
+    actor_id: record.actor_id, epoch: record.epoch, session: current.session,
+    batch_id: status.active_batch.batch_id, batch_generation: status.active_batch.batch_generation, batch_ref: status.active_batch.batch_ref }
+}
+export function queued_removal_admission(actor: ControlledActor, binding: RemovalBinding | undefined, status: any): OperationAdmission | undefined {
+  if (!binding || !actor.is_valid || actor.status_snapshot().actor_id !== binding.actor_id
+    || !remote.interfaces.sgluna_deployment?.status || !remote.interfaces.sgluna_deployment?.authorize) return undefined
+  const current: any = remote.call('sgluna_deployment', 'status')
+  if (current.allowed !== true || current.actor_id !== binding.actor_id || current.epoch !== binding.epoch || current.session !== binding.session
+    || remote.call('sgluna_deployment', 'authorize', binding.epoch) !== true) return undefined
+  const record = journal().find(row => row.operation_key === binding.operation_key)
+  if (!record || record.state !== 'admitted' || record.operation_count !== 1 || record.actor_id !== binding.actor_id || record.epoch !== binding.epoch
+    || record.signature !== binding.signature || record.attempt_id !== binding.attempt_id || record.ordinal !== binding.ordinal
+    || record.generation !== binding.batch_generation || status.active_batch?.batch_id !== binding.batch_id
+    || status.active_batch.batch_generation !== binding.batch_generation || status.active_batch.batch_ref !== binding.batch_ref
+    || record.slots.length !== 1 || record.slots[0].operation !== 'mine_entity_exact' || record.slots[0].ok !== true
+    || record.slots[0].queued_tasks !== 1 || record.slots[0].batch_refs.length !== 1
+    || record.slots[0].batch_refs[0].batch_id !== binding.batch_id || record.slots[0].batch_refs[0].batch_generation !== binding.batch_generation
+    || record.slots[0].batch_refs[0].batch_ref !== binding.batch_ref) return undefined
+  return record
+}
 export function current_fluid_admission(actor: ControlledActor, key: string, signature: string, owner: FluidPreservationOwner) {
   const record = journal().find(row => row.operation_key === key)
   return current_admitting_key === key && record?.state === 'admitting' && record.operation_count === 1

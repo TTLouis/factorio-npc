@@ -1,8 +1,13 @@
 import type { LuaEntity, LuaInventory } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { protected_read } from './electric_facts'
+import { inspect_removal, removal_inventory } from './entity_removal_receipt'
 import { factory_input_requirements } from './factory_input_requirements'
 import { factory_native_endpoints, factory_selected_quality } from './factory_native_endpoints'
+import { factory_native_item_topology, factory_native_fuels, factory_native_progress } from './factory_native_activity'
+import { factory_native_power_component } from './factory_native_power'
+import { recipe_applicability } from './knowledge'
+import { crafting_categories_support_recipe } from './recipe_categories'
 import { area_known_visible } from './map_knowledge'
 import { find_world_entities, is_npc_vision_entity } from './npc_vision'
 import { rotate_cardinal, vector_xy } from './placement_geometry'
@@ -10,6 +15,7 @@ import { area_around, belt_link_area, entity_area, pipe_link_area, point_area, s
 
 // Internal host observation only. No assignment, commissioning or gameplay authority.
 export const FACTORY_CELL_LIMITS = { members: 32, resources: 64, products: 24, inventory_items: 24, fluid_storages: 16, connections: 16, fuel_categories: 32, fuel_category_name: 160 }
+export const FACTORY_STARTUP_LIMITS = { scanned_recipes: 4096, candidates: 16, categories: 32, surface_conditions: 32 }
 interface Point { x: number, y: number }
 export interface FactoryMemberLocator { unit_number: number, name: string, position: Point, surface_index: number, force_index: number }
 export interface FactoryCellRequest {
@@ -91,6 +97,66 @@ function recipe(entity: LuaEntity) {
   const inputs = products(current.ingredients); const outputs = products(current.products)
   return { state: 'known', name: current.name, selected_quality: factory_selected_quality(quality), ingredients: inputs.values, products: outputs.values, truncated: inputs.truncated || outputs.truncated }
 }
+function startup_recipe_candidates(actor: ControlledActor, entity: LuaEntity, current: { state: string },
+  held: Array<{ role?: string, state: string, truncated: boolean, items: Array<Record<string, unknown>> }>, budget: { scanned: number, candidates: number }) {
+  const candidates: Array<Record<string, unknown>> = []
+  const base = { schema_version: 1, tick: game.tick, basis: 'enabled_native_recipe_category_and_surface', limit_scope: 'observation_request', selection: 'unselected', commissioning: 'unverified' }
+  let scanned_recipes = 0
+  const result = (state: string, coverage: string, code: string, truncated = false) => ({ ...base, state, coverage, code, truncated,
+    scanned_recipes, candidates, multiplicity: candidates.length > 1 ? 'multiple' : candidates.length === 1 ? 'single' : 'none' })
+  if (entity.type !== 'furnace' || current.state === 'known') return result('not_applicable', 'complete', 'not_an_empty_unselected_furnace')
+  if (current.state !== 'none') return result('unknown', 'partial', 'startup_selected_recipe_unreadable')
+  try {
+    if (!finite(entity.crafting_progress) || entity.status === undefined) return result('unknown', 'partial', 'startup_activity_unreadable')
+    if (entity.crafting_progress !== 0 || entity.status === defines.entity_status.working) return result('not_applicable', 'complete', 'startup_process_active')
+    for (const role of ['input', 'output']) {
+      const matches = held.filter(row => row.role === role)
+      if (matches.length !== 1 || matches[0].state !== 'known' || matches[0].truncated) return result('unknown', 'partial', 'startup_inventory_unreadable')
+      if (matches[0].items.length !== 0) return result('not_applicable', 'complete', 'startup_inventory_not_empty')
+    }
+    const fluidboxes = entity.fluidbox.length
+    if (!finite(fluidboxes) || fluidboxes < 0 || fluidboxes > FACTORY_CELL_LIMITS.fluid_storages) return result('unknown', 'partial', 'startup_fluidboxes_unbounded')
+    for (let i = 0; i < fluidboxes; i++) if (entity.fluidbox[i] !== undefined) return result('not_applicable', 'complete', 'startup_fluid_present')
+    const supported = entity.prototype.crafting_categories
+    if (!supported) return result('unknown', 'partial', 'startup_categories_unavailable')
+    let category_count = 0
+    for (const [name, allowed] of pairs(supported)) {
+      category_count++
+      if (category_count > FACTORY_STARTUP_LIMITS.categories) return result('unknown', 'partial', 'startup_categories_truncated', true)
+      if (!member_name(name) || typeof allowed !== 'boolean') return result('unknown', 'partial', 'startup_categories_invalid')
+    }
+    if (!actor.force.recipes) return result('unknown', 'partial', 'startup_recipes_unavailable')
+    let unresolved: string | undefined
+    for (const [, candidate] of pairs(actor.force.recipes)) {
+      scanned_recipes++
+      budget.scanned++
+      if (budget.scanned > FACTORY_STARTUP_LIMITS.scanned_recipes) return result('unknown', 'partial', 'startup_recipe_scan_truncated', true)
+      if (candidate.enabled === false) continue
+      if (candidate.enabled !== true) { unresolved ??= 'startup_recipe_enablement_unknown'; continue }
+      const additional: readonly string[] | undefined = candidate.additional_categories
+      if (additional && additional.length > FACTORY_STARTUP_LIMITS.categories) return result('unknown', 'partial', 'startup_recipe_categories_truncated', true)
+      if (typeof candidate.category !== 'string' || additional?.some(value => !member_name(value))) { unresolved ??= 'startup_recipe_categories_unknown'; continue }
+      if (!crafting_categories_support_recipe(supported, candidate)) continue
+      const conditions = candidate.prototype?.surface_conditions
+      if (conditions && conditions.length > FACTORY_STARTUP_LIMITS.surface_conditions) return result('unknown', 'partial', 'startup_surface_conditions_truncated', true)
+      const applicability = recipe_applicability(actor, candidate)
+      if (applicability.state === 'unavailable') continue
+      if (applicability.state !== 'available') { unresolved ??= 'startup_recipe_applicability_unknown'; continue }
+      if (!candidate.ingredients || !candidate.products || !member_name(candidate.name)) { unresolved ??= 'startup_recipe_details_unknown'; continue }
+      const inputs = products(candidate.ingredients); const outputs = products(candidate.products)
+      if (inputs.truncated || outputs.truncated) return result('unknown', 'partial', 'startup_recipe_details_truncated', true)
+      if (!outputs.values.length || [...inputs.values, ...outputs.values].some(row => !['item', 'fluid'].includes(row.type as string) || !member_name(row.name))) {
+        unresolved ??= 'startup_recipe_details_unknown'; continue
+      }
+      if (budget.candidates >= FACTORY_STARTUP_LIMITS.candidates) return result('unknown', 'partial', 'startup_candidates_truncated', true)
+      candidates.push({ name: candidate.name, ingredients: inputs.values, products: outputs.values, applicability })
+      budget.candidates++
+    }
+    candidates.sort((left, right) => (left.name as string) < (right.name as string) ? -1 : (left.name as string) > (right.name as string) ? 1 : 0)
+    return unresolved ? result('unknown', 'partial', unresolved) : result('known', 'complete', 'ok')
+  }
+  catch { return result('error', 'partial', 'startup_recipe_getter_failed') }
+}
 function inventory(inventory: LuaInventory | undefined, role: string) {
   if (!inventory || !inventory.valid) return { role, state: 'unavailable', items: [], truncated: false }
   const items: Array<Record<string, unknown>> = []
@@ -115,6 +181,20 @@ function inventories(entity: LuaEntity) {
   const burner = entity.burner
   if (burner) result.push(inventory(burner.inventory, 'fuel'))
   return result
+}
+function removal_readiness(actor: ControlledActor, entity: LuaEntity) {
+  const base = { schema_version: 1, tick: game.tick, scope: 'exact_building_only', recovery_capacity: 'unknown' }
+  const read = protected_read(() => {
+    if (entity.prototype.is_building !== true) return { ...base, state: 'refused', code: 'removal_building_required' }
+    const inventory = actor.get_main_inventory()
+    if (!inventory?.valid) return { ...base, state: 'unknown', code: 'removal_actor_inventory_unavailable' }
+    const inspected = inspect_removal(entity, inventory)
+    if (inspected.ok) return { ...base, state: 'known', code: 'ok', recovery_capacity: 'verified', snapshot: inspected.snapshot, actor_inventory: inspected.actor }
+    const refusal = ['removal_not_minable', 'removal_target_working', 'removal_process_in_flight', 'removal_contents_domain_unsupported',
+      'removal_fluid_present', 'removal_item_unsupported', 'removal_products_unsupported', 'removal_inventory_full'].includes(inspected.code)
+    return { ...base, state: refusal ? 'refused' : 'unknown', code: inspected.code }
+  })
+  return read ?? { ...base, state: 'unknown', code: 'removal_readiness_unreadable' }
 }
 // Keep typeof separate from the comparison: TSTL rewrites a direct object
 // comparison as a table-only test, but native LuaObjects can be userdata.
@@ -249,9 +329,11 @@ export function observe_factory_cell(actor: ControlledActor | undefined, request
     if (!valid_locator(locator) || seen[locator.unit_number]) return refuse('invalid_members')
     seen[locator.unit_number] = true
   }
+  const startup_budget = { scanned: 0, candidates: 0 }
   const members = request.members.map(locator => {
     const resolved = protected_read(() => exact_entity(actor, locator)) ?? { code: 'member_identity_unreadable' }
-    if (!resolved.entity) return { locator, state: 'unknown', code: resolved.code }
+    if (!resolved.entity) return { locator, state: 'unknown', code: resolved.code,
+      absence_facts: resolved.code === 'member_not_found' ? { state: 'known', coverage: 'complete', scope: 'exact_locator', absent: true, truncated: false } : undefined }
     const entity = resolved.entity
     const energy = protected_read(() => entity.energy)
     const network = protected_read(() => entity.electric_network_id)
@@ -262,14 +344,32 @@ export function observe_factory_cell(actor: ControlledActor | undefined, request
     const routes = protected_read(() => item_routes(actor, entity)) ?? { state: 'unknown', code: 'item_routes_unreadable', routes: [], truncated: false }
     return { locator, state: 'observed', ...identity(entity), status: entity.status,
       recipe: current_recipe, inventories: current_inventories,
+      startup_recipe_candidates: startup_recipe_candidates(actor, entity, current_recipe, current_inventories, startup_budget),
       burner_fuel_requirement: burner, input_requirements: factory_input_requirements(entity, burner, resources),
+      fuel_item_facts: factory_native_fuels(burner),
       endpoint_facts: factory_native_endpoints(entity, current_inventories, routes, current_recipe),
+      progress_facts: factory_native_progress(entity), ...factory_native_item_topology(actor, entity),
+      electric_component_facts: factory_native_power_component(actor, entity),
+      removal_readiness: removal_readiness(actor, entity),
       source_resources: resources,
       item_routes: routes,
       fluids: protected_read(() => fluids(actor, entity)) ?? { state: 'unknown', code: 'fluids_unreadable', storages: [], truncated: false },
       power: { state: energy === undefined && network === undefined ? 'unknown' : 'known', energy, electric_network_id: network } }
   })
-  return { ...base, ok: true, code: 'ok', actor_id: request.actor_id, surface_index: request.surface_index, force_index: request.force_index, members }
+  const actor_inventory = protected_read(() => {
+    if (!remote.interfaces.sgluna_deployment?.status) return { state: 'unknown', code: 'actor_inventory_owner_unavailable' }
+    const deployment: any = remote.call('sgluna_deployment', 'status')
+    const session: unknown = deployment.session
+    if (deployment.allowed !== true || deployment.actor_id !== request.actor_id || !positive_integer(deployment.epoch)
+      || typeof session !== 'string' || session.length < 1 || session.length > 240) return { state: 'unknown', code: 'actor_inventory_owner_unverified' }
+    const binding = { world_id: world.world_id, actor_id: request.actor_id, epoch: deployment.epoch, session, request_id: request.request_id, tick: game.tick }
+    const got = protected_read(() => ({ inventory: actor.get_main_inventory() }))
+    if (!got) return { state: 'error', code: 'actor_inventory_getter_failed', binding }
+    if (!got.inventory?.valid) return { state: 'unknown', code: 'actor_inventory_unavailable', binding }
+    const observed = protected_read(() => removal_inventory(got.inventory!))
+    return observed ? { state: 'known', items: observed.items, binding } : { state: 'unknown', code: 'actor_inventory_unreadable_or_unsupported', binding }
+  }) ?? { state: 'error', code: 'actor_inventory_owner_unreadable' }
+  return { ...base, ok: true, code: 'ok', actor_id: request.actor_id, surface_index: request.surface_index, force_index: request.force_index, members, actor_inventory }
 }
 export function create_factory_cell_remote_interface(get_actor: () => ControlledActor | undefined, is_idle: () => boolean) {
   remote.add_interface('sgluna_factory', {

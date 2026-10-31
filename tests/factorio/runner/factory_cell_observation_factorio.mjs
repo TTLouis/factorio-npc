@@ -223,6 +223,17 @@ async function compare(memory, observer, cell, members, expected) {
     assert.deepEqual(drop.target, exactReceiver, 'productive drill endpoint must identify the complete exact receiver')
     for (const key of Object.keys(members[1])) assert.deepEqual(drop.target[key], members[1][key])
     assert.equal(endpoint.target_inventory, 'unverified')
+    assert.equal(receiver.progress_facts.products_finished.state, 'known')
+    assert.ok(receiver.progress_facts.products_finished.value > 0, 'productive furnace exposes its actual native completed-cycle counter')
+    assert.equal(source.progress_facts.products_finished.state, 'not_applicable', 'drill has no native crafting-cycle counter')
+    assert.ok(source.consumer_facts.consumers.some(row => row.relation === 'mining_drop' && row.state === 'connected'
+      && row.consumer.unit_number === receiver.unit_number), 'productive miner retains its exact native receiver as a consumer')
+    assert.equal(receiver.incoming_item_facts.coverage, 'complete', JSON.stringify(receiver.incoming_item_facts))
+    assert.equal(receiver.incoming_item_facts.unresolved, false)
+    assert.equal(receiver.incoming_item_facts.producers.length, 1)
+    assert.equal(receiver.incoming_item_facts.producers[0].relation, 'mining_drop')
+    assert.equal(receiver.incoming_item_facts.producers[0].state, 'connected')
+    assert.equal(receiver.incoming_item_facts.producers[0].producer.unit_number, source.unit_number)
     evidence.productive_drop_comparisons ??= []
     evidence.productive_drop_comparisons.push({ phase, request_id: result.native.request_id, tick: result.native.tick,
       source: members[0], receiver: members[1], endpoint, matches_existing_item_route: true })
