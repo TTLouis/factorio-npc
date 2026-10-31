@@ -103,9 +103,12 @@ try {
   assert.deepEqual(memory.snapshot().factory_placement_receipts, [evidence.retained_placement])
   assert.equal(events.filter(row => row.event === 'factory_cell.enrolled_from_production').length, 1)
   assert.equal(events.filter(row => row.event === 'factory_cell.enrollment_recovery_started').length, 0, 'Normal prevention spends no residual allowance')
-  evidence.native_product = await lua(`local a=game.get_entity_by_unit_number(${actor.actor_id});local f=game.get_entity_by_unit_number(${evidence.retained_placement.unit_number});assert(a and f);rcon.print(helpers.table_to_json({held=a.get_main_inventory().get_item_count(${luaString(output.name)}),products_finished=f.products_finished,recipe=f.get_recipe().name,speed=game.speed,humans=#game.connected_players}))`)
+  evidence.native_product = await lua(`local a=game.get_entity_by_unit_number(${actor.actor_id});local f=game.get_entity_by_unit_number(${evidence.retained_placement.unit_number});assert(a and f);rcon.print(helpers.table_to_json({held=a.get_main_inventory().get_item_count(${luaString(output.name)}),products_finished=f.products_finished,recipe=f.get_recipe() and f.get_recipe().name,recipe_selected=f.get_recipe()~=nil,speed=game.speed,humans=#game.connected_players}))`)
+  evidence.native_product.expected_recipe = recipe.name
+  evidence.native_product.output_item = output.name
+  evidence.native_product.recipe ??= null // Actual unselected native recipe, not expected assignment.
   assert.ok(evidence.native_product.held >= output.amount); assert.ok(evidence.native_product.products_finished > 0)
-  assert.equal(evidence.native_product.recipe, recipe.name); assert.equal(evidence.native_product.speed, 1); assert.equal(evidence.native_product.humans, 0)
+  assert.ok(evidence.native_product.recipe_selected === false || evidence.native_product.recipe === recipe.name); assert.equal(evidence.native_product.speed, 1); assert.equal(evidence.native_product.humans, 0)
   await agent.persistState({ strict: true })
   const restored = new CanonicalTaskBoardMemory(); restored.restore(JSON.parse(await fs.readFile(stateFile, 'utf8')))
   assert.deepEqual(restored.getFactoryRegistry(), memory.getFactoryRegistry())

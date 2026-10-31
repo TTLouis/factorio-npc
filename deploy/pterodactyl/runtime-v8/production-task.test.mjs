@@ -62,7 +62,7 @@ test('unconfigured assemblers cannot receive production materials and a running 
   assert.deepEqual(result.operation, { name: 'wait', args: { ticks: 120 } })
 })
 
-function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, fuelFacts = false, lostAck, provider, priorPlacement = false } = {}) {
+function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, fuelFacts = false, lostAck, provider, priorPlacement = false, dormantOutput = false } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(iron ? an.iron_memory : an.memory))
   pinLegacyFixtureSkillContext(memory)
@@ -245,7 +245,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
       if (text.includes("item_name='coal'")) { machine.inventories[0].items = [{ name: 'coal', count: 1 }]; machine.status_name = 'no_ingredients'; game.inventory.coal-- }
       else { machine.inventories[1].items = [{ name: 'copper-ore', count: 1 }]; machine.recipe = 'copper-plate'; machine.working = true; machine.status_name = 'working'; game.inventory['copper-ore']-- }
     }
-    if (op === 'wait') { machine.inventories[1].items = []; machine.inventories[2].items = [{ name: 'copper-plate', count: 1 }]; machine.working = false; machine.status_name = 'no_ingredients' }
+    if (op === 'wait') { machine.inventories[1].items = []; machine.inventories[2].items = [{ name: 'copper-plate', count: 1 }]; machine.working = false; machine.status_name = 'no_ingredients'; if (dormantOutput) delete machine.recipe }
     if (op === 'move_items_exact') { machine.inventories[2].items = []; game.inventory['copper-plate']++ }
   }
   const intent = iron ? { targets: [{ item_name: 'iron-plate', count: 58 }], producers: [{ recipe_name: 'iron-plate', unit_number: 44 }],
@@ -972,4 +972,24 @@ test('BI residual duplicate wake cannot renew a durably claimed attempt after in
   assert.equal(event.data.duplicate, true); assert.equal(event.data.used, 1)
   assert.deepEqual(w.memory.snapshot().factory_use_recovery, saved.factory_use_recovery)
   assert.deepEqual(w.ops, []); assert.equal(w.providers.length, 0)
+})
+
+// Native canary01 event280: completed furnace cycle has no selected recipe,
+// empty input, one copper plate in output, zero crafting progress. Keep that
+// actual native shape, rather than pretending a selected recipe survives.
+test('native dormant output completes real collection and subsequent controller work without replay or provider', async () => {
+  const w = world({ furnace: true, priorPlacement: true, dormantOutput: true })
+  const before = structuredClone(w.held().steps)
+  await w.start()
+  for (let i = 0; i < 12 && w.memory.currentPlan(an.key).status !== 'completed'; i++) await w.agent.completed()
+  assert.equal(w.memory.currentPlan(an.key).status, 'completed')
+  assert.equal(w.game.inventory['small-electric-pole'], 2)
+  assert.equal(w.machine.recipe, undefined, 'native observation is never rewritten as an active recipe')
+  assert.equal(w.ops.filter(name => name === 'move_items_exact').length, 1)
+  assert.equal(w.ops.filter(name => name === 'supply_entity').length, 2)
+  assert.equal(w.ops.filter(name => name === 'wait').length, 1)
+  assert.equal(w.ops.includes('place_entity'), false)
+  assert.equal(w.providers.length, 0)
+  assert.deepEqual(w.held().steps, before)
+  assert.ok(w.events.some(row => row.event === 'factory_cell.dormant_output_recipe_evidence' && row.data.commissioning === 'unverified'))
 })

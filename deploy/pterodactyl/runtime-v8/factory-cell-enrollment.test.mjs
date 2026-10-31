@@ -778,3 +778,86 @@ for (const variant of ['configured_assembler', 'unknown_recipe', 'occupied_furna
   if (variant === 'configured_assembler') assert.equal((await enrollFactoryProductionProducers(w.agent, [w.producer])).length, 1)
   else { await assert.rejects(enrollFactoryProductionProducers(w.agent, [w.producer])); assert.equal(w.memory.getFactoryRegistry().cells.length, 0) }
 })
+
+async function dormantFiniteProducer() {
+  const w = await splitFiniteProducer()
+  await enrollFactoryProductionProducers(w.agent, [w.producer])
+  const observe = w.game.onObserve
+  w.game.onObserve = response => {
+    observe(response)
+    response.members[0].inventories.find(row => row.role === 'output').items = [{ name: 'copper-plate', count: 1, quality: 'normal' }]
+    response.members[0].progress_facts.products_finished = { state: 'known', value: 1 }
+  }
+  w.resolveDormant = options => reconcileFactoryCellUse(w.agent, { productionIntent: { producers: [w.producer] },
+    operations: [{ name: 'move_items_exact', args: { unit_number: 36, item_name: 'copper-plate', max_count: 1, to_entity: false } }], ...options })
+  return w
+}
+
+test('registered dormant output survives restore as unselected capability, never a fresh enrollment or operating proof', async () => {
+  const w = await dormantFiniteProducer()
+  const snapshot = clone(w.memory.snapshot()); w.memory.restore(snapshot)
+  const resolved = await w.resolveDormant()
+  assert.equal(resolved.ok, true); assert.equal(resolved.commissioning, 'unverified')
+  const event = w.events.find(row => row.event === 'factory_cell.dormant_output_recipe_evidence')
+  assert.equal(event.data.native_recipe_state, 'none')
+  assert.deepEqual(event.data.output, [{ name: 'copper-plate', count: 1, quality: 'normal' }])
+  assert.deepEqual(w.memory.getFactoryRegistry(), snapshot.factory_registry)
+  assert.deepEqual(w.memory.snapshot().factory_placement_receipts, snapshot.factory_placement_receipts)
+  for (const step of [{ execution_guidance: { materialSupply: { mode: 'direct_feed', resource: 'copper-ore' } } },
+    { completion_contract: { requirements: [{ kind: 'entity_state', unit_number: 36, expected: 'working' }] } }]) {
+    await assert.rejects(w.resolveDormant({ step }), { code: 'factory_cell_producer_job_unknown' })
+  }
+  const fresh = await splitFiniteProducer()
+  fresh.game.onObserve = w.game.onObserve
+  await assert.rejects(enrollFactoryProductionProducers(fresh.agent, [fresh.producer]), { code: 'factory_cell_producer_job_unknown' })
+  assert.equal(fresh.memory.getFactoryRegistry().cells.length, 0)
+})
+
+for (const fault of ['wrong_output', 'mixed_output', 'unknown_output', 'truncated_output', 'malformed_output', 'occupied_input', 'active_progress', 'foreign_recipe', 'unknown_recipe', 'foreign_identity', 'changed_products']) test(`registered dormant output refuses ${fault}`, async () => {
+  const w = await dormantFiniteProducer(); const before = clone(w.memory.getFactoryRegistry())
+  const observe = w.game.onObserve
+  w.game.onObserve = response => {
+    observe(response); const row = response.members[0]; const output = row.inventories.find(item => item.role === 'output')
+    if (fault === 'wrong_output') output.items[0].name = 'iron-plate'
+    if (fault === 'mixed_output') output.items.push({ name: 'iron-plate', count: 1 })
+    if (fault === 'unknown_output') output.state = 'unknown'
+    if (fault === 'truncated_output') output.truncated = true
+    if (fault === 'malformed_output') output.items[0].count = -1
+    if (fault === 'occupied_input') row.inventories.find(item => item.role === 'input').items = [{ name: 'copper-ore', count: 1 }]
+    if (fault === 'active_progress') row.progress_facts.crafting_progress.value = 0.5
+    if (fault === 'foreign_recipe') row.recipe = { state: 'known', name: 'iron-plate', ingredients: [], products: [], truncated: false }
+    if (fault === 'unknown_recipe') row.recipe.state = 'unknown'
+    if (fault === 'foreign_identity') row.locator.unit_number++
+  }
+  if (fault === 'changed_products') {
+    const command = w.agent.rcon.command
+    w.agent.rcon.command = async text => {
+      const raw = await command(text)
+      if (!text.includes('recipe_details')) return raw
+      const body = JSON.parse(raw); body.recipes[0].products = [{ type: 'item', name: 'iron-plate' }]; return JSON.stringify(body)
+    }
+  }
+  await assert.rejects(w.resolveDormant())
+  assert.deepEqual(w.memory.getFactoryRegistry(), before)
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
+  assert.equal(w.events.some(row => row.event === 'factory_cell.dormant_output_recipe_evidence'), false)
+})
+
+for (const fault of ['actor', 'epoch', 'request', 'cancel', 'native_busy']) test(`registered dormant output loses ${fault} during native capability await`, async () => {
+  const w = await dormantFiniteProducer(); const before = clone(w.memory.getFactoryRegistry())
+  const command = w.agent.rcon.command
+  w.agent.rcon.command = async text => {
+    const raw = await command(text)
+    if (text.includes('recipe_details')) {
+      if (fault === 'actor') w.agent.epoch = { ...w.agent.epoch, actor_id: 999 }
+      if (fault === 'epoch') w.agent.epoch = { ...w.agent.epoch, epoch: 999 }
+      if (fault === 'request') w.agent.requestAdmissionOwner = { replaced: true }
+      if (fault === 'cancel') w.agent.active = false
+      if (fault === 'native_busy') w.game.status.queue_length = 1
+    }
+    return raw
+  }
+  await assert.rejects(w.resolveDormant())
+  assert.deepEqual(w.memory.getFactoryRegistry(), before)
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
+})

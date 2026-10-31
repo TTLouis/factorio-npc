@@ -387,6 +387,18 @@ A completed correction means fresh factory use resolved, not completed gameplay.
 Factory boundary errors retain their guard code through recovery-route commit;
 they are not provider failures.
 
+A registered finite furnace may clear its active recipe after a completed cycle
+while its result slot still holds output. Continuation and exact collection can
+reconcile that dormant state only against the existing immutable native-recipe
+assignment, exact member, fresh enabled native recipe/capability, complete empty
+input, zero progress and complete output containing only that recipe's assigned
+products. Native `recipe.state = none` remains unchanged. This is an ephemeral
+finite-job capability, not active production, delivery or commissioning proof;
+new unselected-furnace enrollment remains empty-only and direct-feed/operating
+checkpoints retain their stronger evidence requirements. The named
+`factory_cell.dormant_output_recipe_evidence` trace records the actual output and
+native recipe state separately from the expected recipe.
+
 
 Registered destructive or reconfiguration operations require the exact frozen
 physical lifecycle transaction at the existing admission boundary. Ordinary
