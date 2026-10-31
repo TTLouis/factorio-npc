@@ -4,6 +4,20 @@ Instructions for coding agents contributing to SGLuna, the standalone Factorio
 NPC. Read this file first, then only the references relevant to the task.
 Explicit user instructions remain authoritative.
 
+## External-harness setup requests
+
+When asked to set up the external-harness branch, including when given only its
+repository/branch link in auto mode, follow
+[docs/EXTERNAL_HARNESS_SETUP.md](docs/EXTERNAL_HARNESS_SETUP.md). Inspect local
+capabilities, make routine path/port/layout choices, build the exact requested
+source in isolation, bind once, register stdio MCP through the host's supported
+mechanism (or use the bundled process adapter) and verify the actual connection
+with `setup-check.mjs --fresh` and host-level read-only calls. Stop ready for the user's goal;
+setup does not authorize gameplay. Preserve private credentials and paired
+save/ledger state. Report only unavoidable prerequisite/permission blockers.
+This installation path stays on the requested feature branch and does not start
+the internal planner/Jev or use the ordinary server installers below.
+
 ## Start here
 
 1. Identify the requested outcome, affected subsystem and acceptance evidence.
@@ -87,8 +101,9 @@ together. Preserve intentional provider differences; see
 
 ## Configuration, secrets and live activity
 
-- For authorized external-harness deployment on a user's machine, follow the
-  [local deployment guide](docs/EXTERNAL_HARNESS.md): build the exact guarded
+- For authorized external-harness setup on a user's machine, follow the
+  [portable setup workflow](docs/EXTERNAL_HARNESS_SETUP.md) and
+  [runtime guide](docs/EXTERNAL_HARNESS.md): build the exact guarded
   source; choose native Windows or Windows-host-to-Docker with loopback-only
   RCON; keep the Windows ledger on local fixed NTFS with the PowerShell helper
   permitted. Keep runtime credentials and state private, and verify native

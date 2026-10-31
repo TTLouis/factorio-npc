@@ -6,6 +6,11 @@ planner**. It is a bounded experimental integration, not a replacement for the
 existing autonomous runtime or a claim of reliable factory-building capability.
 The Docker/Pterodactyl and ordinary-agent entrypoints are unchanged.
 
+For automatic setup from a repository/branch link, start with the
+[portable setup workflow](EXTERNAL_HARNESS_SETUP.md). It covers host discovery,
+isolated installation, supported MCP registration, readiness and cleanup for
+different kinds of harnesses. This page defines the runtime and tool contract.
+
 ## Ownership: three layers
 
 | Layer | Owns | Does not own |
