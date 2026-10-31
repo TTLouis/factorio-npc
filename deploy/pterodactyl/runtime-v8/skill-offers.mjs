@@ -71,6 +71,7 @@ export function compactLoadedSkill(raw, expectedId) {
   try { skill = typeof raw === 'string' ? JSON.parse(raw) : raw }
   catch { return undefined }
   if (!skill || typeof skill !== 'object' || Array.isArray(skill)) return undefined
+  if (skill.content_type !== undefined && skill.content_type !== 'skill') return undefined
   const id = typeof skill.id === 'string' ? cleanMemoryText(skill.id, 80) : ''
   if (!id || (expectedId && id !== expectedId)) return undefined
 
@@ -186,6 +187,14 @@ export function selectedPlannerSkillDetails(key, planning, record) {
   if (ids.length > PLANNER_SKILL_DETAIL_LIMIT || record.skills.length !== ids.length) fail('snapshot_bounds')
   const details = new Map()
   for (const raw of record.skills) {
+    // Preserve the exact historical record and plan. A reference selected by a
+    // different (future/completed) step need not block this procedural step.
+    if (raw?.content_type === 'knowledge') {
+      if (!ids.includes(raw.id) || details.has(raw.id)) fail('invalid_detail')
+      if (selected.includes(raw.id)) fail('legacy_knowledge_selected_as_skill')
+      details.set(raw.id, undefined)
+      continue
+    }
     const skill = compactLoadedSkill(raw, raw?.id)
     if (!skill || !ids.includes(skill.id) || details.has(skill.id)
       || JSON.stringify(skill) !== JSON.stringify(raw)) fail('invalid_detail')
@@ -266,10 +275,11 @@ export function skillOfferCommand(goal, limit = SKILL_OFFER_LIMIT) {
 
 export function sanitizeSkillCard(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  if (raw.content_type !== undefined && raw.content_type !== 'skill') return undefined
   const id = typeof raw.id === 'string' ? raw.id : ''
   if (!SKILL_ID_PATTERN.test(id) || id.length > 80 || id === 'none') return undefined
   return {
-    ...(['knowledge', 'skill'].includes(raw.content_type) ? { content_type: raw.content_type } : {}),
+    ...(raw.content_type === 'skill' ? { content_type: 'skill' } : {}),
     ...(Number.isInteger(raw.level) && raw.level >= 0 && raw.level <= 7 ? { level: raw.level } : {}),
     id,
     name: text(raw.name, 80) || id,
@@ -315,6 +325,8 @@ function renderNeed(need) {
 
 // The one card format, shared by the planner block and Jev's criteria.
 export function renderSkillCard(card) {
+  card = sanitizeSkillCard(card)
+  if (!card) return ''
   const parts = [
     `${card.id} "${card.name}" [${card.status}${card.content_type ? `; ${card.content_type}` : ''}${card.level !== undefined ? `; L${card.level}` : ''}]: ${card.summary}`,
     `Produces: ${card.produces.join(', ') || 'none recorded'}.`,
@@ -331,10 +343,11 @@ export function needCounts(cards) {
 }
 
 export function skillOfferBlock(offer) {
-  if (!offer?.cards?.length) return ''
+  const cards = (offer?.cards ?? []).map(sanitizeSkillCard).filter(Boolean)
+  if (cards.length === 0) return ''
   const lines = [
     `${SKILL_OFFERS_PREFIX} Skills matched to this goal by the harness (tags and live needs), best first. Needs: have = held or already placed; can craft = recipe enabled; locked = research first. These cards are discovery only. The harness opens bounded top-ranked details into [SKILL_CONTEXT]; for any other card call getSkillDetails before following it. Compare patterns for time savings and setup cost; no layout is required. Revalidate live state. You may still use findSkills for a different sub-problem.`,
-    ...offer.cards.map((card, index) => `${index + 1}. ${renderSkillCard(card)}`),
+    ...cards.map((card, index) => `${index + 1}. ${renderSkillCard(card)}`),
   ]
   if (SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY && offer.advisor?.applied) {
     lines.push(`Advisor: Jev ranked ${offer.advisor.pick} first (confidence ${offer.advisor.confidence.toFixed(2)}). Advisory only.`)
@@ -565,7 +578,8 @@ function skillReadFence(loop) {
 export async function loadOfferedSkillDetails(loop, offer, current = skillReadFence(loop)) {
   if (typeof loop.recordLoadedSkillToolResult !== 'function') return
   const deadline = Date.now() + SKILL_AUTOLOAD_TIMEOUT_MS
-  for (const card of offer.cards.slice(0, skillDiscoveryPolicy(loop).autoload)) {
+  const cards = (offer.cards ?? []).map(sanitizeSkillCard).filter(Boolean)
+  for (const card of cards.slice(0, skillDiscoveryPolicy(loop).autoload)) {
     if (!current() || loop.skillOffers !== offer || !offer.authoring) return
     if (loop.loadedSkillContext?.has(card.id)) continue
     let timer
@@ -582,7 +596,7 @@ export async function loadOfferedSkillDetails(loop, offer, current = skillReadFe
       // The task context keeps its most recent entries when it hits its size
       // ceiling. Keep the highest-ranked offered detail last so lower-ranked
       // supporting patterns cannot crowd it out of the actual planner prompt.
-      for (const ranked of offer.cards.slice(0, skillDiscoveryPolicy(loop).autoload).reverse()) {
+      for (const ranked of cards.slice(0, skillDiscoveryPolicy(loop).autoload).reverse()) {
         const loaded = loop.loadedSkillContext.get(ranked.id)
         if (!loaded) continue
         loop.loadedSkillContext.delete(ranked.id)

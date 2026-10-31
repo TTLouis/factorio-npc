@@ -1,3 +1,4 @@
+import { isKnowledgeTool, isValidatedKnowledgeBatch, handleKnowledgeToolBatch, sanitizeLibraryToolOutput, withoutKnowledgeExchange } from './knowledge-retrieval.mjs'
 import { explicitResumeIdentity, resumeExplicitContinuation, settleExplicitResumeFailure } from './explicit-resume.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 import { nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice, settleNextSliceExit } from './next-slice-liveness.mjs'
@@ -728,6 +729,7 @@ Before a non-empty operation batch, chatMessage should tell the human what concr
 
 The harness may add a [REQUIREMENTS] block while you author or revise a plan, and may send it once as a correction right after your first plan. It is authoritative live game data read from the running game: which recipes and machines needed for the goal's targets are still locked, which technology unlocks each, and the dependency-ordered research with each node's exact kind (lab science, or a trigger completed by performing its exact trigger). Your roadmap and plan must order the unlocking research before any node or step that needs a locked recipe or machine; never plan to craft or build something the block lists as locked before that research is done. It supplies facts only: you still write the goal, shelf and plan.
 
+Authored knowledge is separate reference material. Use findKnowledge and getKnowledgeDetails explicitly when a concept needs clarification; either role may read it without acquiring planning or mutation authority. References appear only as requested tool results, never skillIds or automatically loaded instructions. Query live deterministic tools for current game facts.
 Skill lifecycle distinguishes discovery from loaded details. findSkills and [SKILL_OFFERS] cards are discovery only. At planning boundaries the harness opens a bounded set of ranked details into [SKILL_CONTEXT]. Before following any other discovered skill, call getSkillDetails for that exact id. [SKILL_CONTEXT] contains only details actually opened for the current logical task. Compare their time savings and setup cost; patterns are options, not required layouts. Reuse their structure and constraints, but revalidate mutable world state, recipes, inventory, geometry, and placement with live deterministic tools before acting.
 
 ### Complete operation list
@@ -3816,7 +3818,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const active = getActivePlanningPlan(held)
     const guidance = active?.steps?.[active.active_step_index]?.execution_guidance
     const skillIds = packetRole === EXECUTOR_ROLE && guidance ? guidance.skillIds
-      : this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.keys()].slice(-3) : []
+      : this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).map(skill => skill.id).slice(-3) : []
     const state = skillIds.length > 0 && held.loaded_skill_ids === undefined ? { ...held, loaded_skill_ids: skillIds } : held
     return buildHandoffPacket({
       planningState: state,
@@ -5522,6 +5524,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const guidance = held?.steps?.[held.active_step_index]?.execution_guidance
     const policy = skillDiscoveryPolicy(this)
     const skills = [...this.loadedSkillContext.values()]
+      .map(skill => compactLoadedSkill(skill, skill?.id)).filter(Boolean)
       .filter(skill => !separatedExecution || guidance?.skillIds?.includes(skill.id))
       .slice(-policy.rendered)
     if (skills.length === 0) return ''
@@ -5529,7 +5532,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const payload = JSON.stringify(skills)
     if (payload.length > policy.chars) return ''
     const libraryNote = skills.some(skill => skill.content_type !== undefined)
-      ? ' Knowledge entries guide interpretation; skill entries describe methods. Levels indicate complexity, not verified ability or availability. Required capabilities must be available through current admitted tools. Read recipes and sizing from the live game; these entries grant no execution or completion authority.' : ''
+      ? ' Skill entries describe procedures; knowledge references are retrieved separately on demand. Levels indicate complexity, not verified ability or availability. Required capabilities must be available through current admitted tools. Read recipes and sizing from the live game; these entries grant no execution or completion authority.' : ''
     if (separatedExecution) return `[SKILL_CONTEXT] Planner-selected skill instructions supplied by the harness for the active execution_guidance.skillIds references. Use these details without searching or reopening the library. Revalidate mutable world facts before acting.${libraryNote}\n${payload}`
     return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.${libraryNote}\n${payload}`
   }
@@ -5602,7 +5605,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       while (end < this.messages.length && this.messages[end].role === 'tool') end++
       const removed = this.messages.splice(start, end - start)
       this.carryConversationState('fold')
-      const summary = this.summarizeToolExchange(removed)
+      // Preserve aligned world results from mixed historical exchanges, never reference bodies.
+      const observations = withoutKnowledgeExchange(removed)
+      if (observations.length === 0) continue
+      const summary = this.summarizeToolExchange(observations)
       const previous = this.messages[start - 1]
       if (previous?.role === 'user' && typeof previous.content === 'string' && previous.content.startsWith('[OBSERVATIONS COMPACTED]')) {
         previous.content = cleanMemoryText(`${previous.content}\n${summary}`, 12000)
@@ -5887,6 +5893,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples
   // labelled and last (placement-candidates-render.mjs); every other answer is delivered as read.
   renderToolOutput(toolName, raw, limit) {
+    if (['findSkills', 'getSkillDetails'].includes(toolName)) return sanitizeLibraryToolOutput(toolName, raw)
     return toolName === 'getPlacementCandidates' ? renderPlacementCandidatesResult(raw, limit) : super.renderToolOutput(toolName, raw, limit)
   }
 
@@ -10180,7 +10187,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const board = planState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const skills = this.loadedSkillContext instanceof Map
-      ? [...this.loadedSkillContext.values()].slice(-3).map(skill => ({
+      ? [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).slice(-3).map(skill => ({
           id: typeof skill?.id === 'string' ? cleanMemoryText(skill.id, 80) : undefined,
           name: typeof skill?.name === 'string' ? cleanMemoryText(skill.name, 160) : undefined,
           revision: Number.isSafeInteger(skill?.revision) ? skill.revision : undefined,
@@ -14466,7 +14473,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await this.traceEvent('skill.context_presented', {
         request_id: this.traceRequest?.id, round, role: this.agentContext.role, discovery_policy: skillDiscoveryPolicy(this),
-        loaded_ids: [...this.loadedSkillContext.keys()], presented_ids: presentedSkills,
+        loaded_ids: [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).map(skill => skill.id), presented_ids: presentedSkills,
         context_chars: skillBlock?.length ?? 0,
       })
     }
@@ -15461,6 +15468,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return checkpointBatchContradiction(plan.checkpoint, plan.operations)
   }
 
+  observationDecisionCost(prepared) { return isValidatedKnowledgeBatch(prepared) ? 0 : super.observationDecisionCost(prepared) }
+
   assertExecutorSkillHandoffTools(calls) {
     if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE) return
     const refused = [...new Set(calls.map(call => call?.function?.name).filter(name => PLANNER_SKILL_LOOKUP_TOOLS.includes(name)))]
@@ -15617,6 +15626,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Check again at dispatch: a caller-supplied prepared batch cannot bypass
     // the executor role boundary (including closed/targeted read paths).
     this.assertExecutorSkillHandoffTools([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)])
+    if ([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)].some(tool => isKnowledgeTool(tool?.function?.name))) {
+      return handleKnowledgeToolBatch(this, message, prepared)
+    }
     const factorySignatures = new Set()
     for (const entry of prepared) {
       if (!isFactoryCellTool(entry.tool?.function?.name)) continue
@@ -15880,8 +15892,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     for (let index = 0; index < results.length; index++) {
       assertBatchCurrent()
-      const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
+      if (['findSkills', 'getSkillDetails'].includes(toolName)) results[index].content = sanitizeLibraryToolOutput(toolName, results[index].content, admittedPrepared[index]?.args)
+      const original = String(results[index].content ?? '')
       if (admittedCached[index] !== true && admittedStaticCached[index] !== true) {
         // The base adapter may already have rendered an entity diff in `results`; the cache holds the actual
         // current raw native answer. Supersede from that answer, never from a partial/diff projection.
@@ -19288,7 +19301,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         planning_horizon: cleanMemoryText(this.planningHorizonOverride, 32) || undefined,
       },
       context: {
-        loaded_skill_ids: this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.keys()].slice(-3) : [],
+        loaded_skill_ids: this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).map(skill => skill.id).slice(-3) : [],
         dependency_summary: planState?.dependency_context ? sanitizeDurableModelValue(planState.dependency_context) : undefined,
       },
     }

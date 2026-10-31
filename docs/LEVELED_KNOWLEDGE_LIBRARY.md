@@ -1,5 +1,7 @@
 # Leveled knowledge and skill methods
 
+> Current delivery contract (2026-10-31): [On-demand knowledge references](KNOWLEDGE_RETRIEVAL.md) supersedes the mixed skill discovery/context behavior described in this original implementation record. The complete six-reference/54-skill catalog remains available.
+
 Owner: Codex chat 01a18444. Source: reviewed Jev integration
 `1ec2b1980f09788971d4cd9712ece73a1a30da28`.
 Task branch: `feat/leveled-knowledge-library`.

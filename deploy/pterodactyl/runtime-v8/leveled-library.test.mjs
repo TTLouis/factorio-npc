@@ -6,7 +6,7 @@ import { compactLoadedSkill, parseSkillOffers, renderSkillCard } from './skill-o
 const pack = JSON.parse(readFileSync(new URL('../../../packages/autorio/src/fixtures/leveled-library-v1.json', import.meta.url), 'utf8'))
 
 test('all authored leveled methods survive the real model-context compactor without losing decisions or applicability', () => {
-  assert.equal(pack.skills.length, 60)
+  assert.equal(pack.skills.length, 54)
   assert.equal(pack.default_enabled, false)
   const sizes = []
   for (const original of pack.skills) {
@@ -25,13 +25,14 @@ test('all authored leveled methods survive the real model-context compactor with
     'the largest planner set fits the existing planner ceiling')
 })
 
-test('discovery preserves knowledge/skill and level labels without treating difficulty as verification', () => {
-  const raw = { ...pack.skills.find(entry => entry.id === 'knowledge-available-capabilities'), produces: [], needs: [], matched: ['capability'], score: 1 }
-  const offer = parseSkillOffers(JSON.stringify({ ok: true, cards: [raw] }))
-  assert.equal(offer.cards[0].content_type, 'knowledge')
-  assert.equal(offer.cards[0].level, 0)
-  assert.match(renderSkillCard(offer.cards[0]), /candidate; knowledge; L0/)
-  const invalid = parseSkillOffers(JSON.stringify({ ok: true, cards: [{ ...raw, content_type: 'recipe', level: 99 }] }))
-  assert.equal(invalid.cards[0].content_type, undefined)
-  assert.equal(invalid.cards[0].level, undefined)
+test('knowledge stays out of procedural cards and compaction, including invalid type results', () => {
+  assert.equal(pack.schema, 2)
+  assert.equal(pack.knowledge.length, 6)
+  for (const raw of pack.knowledge) {
+    assert.equal(compactLoadedSkill(raw, raw.id), undefined)
+    assert.deepEqual(parseSkillOffers(JSON.stringify({ ok: true, cards: [raw] })).cards, [])
+    assert.equal(raw.verification, undefined)
+  }
+  assert.deepEqual(parseSkillOffers(JSON.stringify({ ok: true, cards: [{ ...pack.skills[0], content_type: 'recipe' }] })).cards, [])
+  assert.match(renderSkillCard({ ...pack.skills[0], produces: [], needs: [], matched: [], score: 1 }), /skill; L1/)
 })

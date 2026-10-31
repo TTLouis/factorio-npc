@@ -82,6 +82,8 @@ const toolSamples = {
   getRecipeDetails: { item_or_recipe: 'iron-plate' },
   discoverPrototypes: { capability: 'mining', resource_name: 'iron-ore' },
   getPrototypeDetails: { name: 'transport-belt' },
+  findKnowledge: { query: 'freshness', limit: 3 },
+  getKnowledgeDetails: { id: 'knowledge-rates-stocks-freshness' },
   findSkills: { query: 'early iron plate smelting', limit: 3 },
   getSkillDetails: { id: 'starter-smelting-row' },
   getPlayerStatus: { player_name: 'Louis' },
@@ -182,9 +184,11 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     .sort()
   assert.deepEqual(runtimeOnly, [
     'estimateProductionTime',
+    'findKnowledge',
     'findSkills',
     'getConstructionReservations',
     'getFluidSourceTiles',
+    'getKnowledgeDetails',
     'getLocalSpatialObservation',
     'getMapContext',
     'getMiningDetails',
@@ -387,4 +391,20 @@ test('getPlacementCandidates region is part of the manifest args, the runtime sc
   assert.match(command, /remote\.call\("autorio_tools","get_placement_candidates",\{.*region=\{shape='box'/)
   const agentSource = await readFile(new URL('packages/agent/src/llm/tools.ts', root), 'utf8')
   for (const key of contract.tools.getPlacementCandidates.args) assert.match(agentSource.slice(agentSource.indexOf('const placementCandidatesSchema')), new RegExp(`(^|\\s)${key}:`), `${key} missing from the agent schema`)
+})
+
+test('authored references have a separate native API and are explicit reads for both roles', async () => {
+  for (const name of ['findKnowledge', 'getKnowledgeDetails']) {
+    assert.equal(contract.tools[name].protocol3_role, 'planner-and-executor')
+    assert.equal(contract.tools[name].surface_policy, 'runtime-v8-only')
+    assert.ok(runtime.planningOnlyProviderToolDefinitions.some(tool => tool.function.name === name))
+    assert.ok(runtime.executionOnlyProviderToolDefinitions.some(tool => tool.function.name === name))
+    assert.equal(staging.toolDefinitions.some(tool => tool.function.name === name), false)
+    assert.match(runtime.toolCommand(name, toolSamples[name]), /autorio_references/)
+  }
+  assert.equal(runtime.toolDefinitions.find(tool => tool.function.name === 'findKnowledge').function.parameters.properties.limit.maximum,
+    contract.tools.findKnowledge.argument_bounds.limit.maximum)
+  assert.throws(() => runtime.toolCommand('findKnowledge', { query: 'freshness', limit: 11 }))
+  assert.throws(() => runtime.toolCommand('getKnowledgeDetails', { id: '../escape' }))
+  assert.throws(() => runtime.toolCommand('getKnowledgeDetails', { id: 'reference', lua: 'unrestricted' }))
 })

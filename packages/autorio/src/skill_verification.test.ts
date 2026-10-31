@@ -7,6 +7,7 @@ import {
   list_learning_opportunities,
   list_learning_verification_queue,
   queue_learning_verification,
+  set_learning_policy,
 } from './learning_opportunities'
 import {
   capture_skill_instance_template_from_block,
@@ -16,6 +17,7 @@ import {
   output_delta_satisfied,
   promote_verified_skill,
   start_next_skill_verification,
+  maybe_start_autonomous_bounded_verification,
   tick_skill_verification,
   type SkillVerificationRun,
 } from './skill_verification'
@@ -363,4 +365,59 @@ describe('Skill Verification / Instance Layer V1', () => {
     expect(source).toContain("operation_result('move_items_exact'")
     expect(source).toContain('validate_construction_execution_plan')
   })
+})
+describe('knowledge references cannot enter physical verification', () => {
+  it('rejects a queued knowledge record before actor lookup, template inspection or native submission', () => {
+    const skill = candidate_from_source()
+    const opportunity = queued_opportunity(skill.id)
+    capture_skill_instance_template_from_block(skill.id, skill.revision, 'source-analysis', 'block-1')
+    skill.content_type = 'knowledge' // old queued ID was reclassified in a saved/imported library
+    const before = JSON.stringify((globalThis as any).storage)
+    const actor = vi.fn(() => { throw new Error('actor lookup must not run') })
+    const native = vi.fn(() => { throw new Error('native calls must not run') })
+    ;(globalThis as any).remote.call = native
+    const result = start_next_skill_verification(actor, { opportunity_id: opportunity.id })
+    expect(result).toEqual({ ok: false, error: 'knowledge_reference_not_executable: physical skill verification does not apply' })
+    expect(actor).not.toHaveBeenCalled()
+    expect(native).not.toHaveBeenCalled()
+    expect(JSON.stringify((globalThis as any).storage)).toBe(before)
+  })
+
+  it('holds a restored active run whose current record became knowledge without inspecting or constructing the world', () => {
+    const skill = candidate_from_source()
+    const opportunity = queued_opportunity(skill.id)
+    capture_skill_instance_template_from_block(skill.id, skill.revision, 'source-analysis', 'block-1')
+    const run: SkillVerificationRun = { ...run_for(skill.id, opportunity.id, true, 1), state: 'constructing', active_batch_id: 7 }
+    store_active_verification_run(run)
+    skill.content_type = 'knowledge'
+    const before = JSON.stringify(skill)
+    const native = vi.fn(() => { throw new Error('native calls must not run') })
+    ;(globalThis as any).remote.call = native
+    tick_skill_verification()
+    expect(native).not.toHaveBeenCalled()
+    expect((globalThis as any).storage.sgluna_skill_verification_runs[run.id]).toMatchObject({ state: 'blocked', reason: 'knowledge_reference_not_executable: physical skill verification does not apply' })
+    expect(list_learning_verification_queue()[0].state).toBe('blocked')
+    expect(JSON.stringify(get_skill_definition(skill.id))).toBe(before)
+    expect(() => promote_verified_skill(run)).toThrow(/knowledge_reference_not_executable/)
+  })
+})
+
+for (const automatic of [false, true]) it(`a knowledge-first queue cannot starve the following procedure (${automatic ? 'autonomous' : 'untargeted'})`, () => {
+  const knowledge = candidate_from_source()
+  const first = queued_opportunity(knowledge.id)
+  knowledge.content_type = 'knowledge'
+  const procedure = create_skill_candidate({ ...knowledge, id: 'following-procedure', name: 'Following procedure', content_type: 'skill' })
+  const next = create_learning_opportunity({ source: 'manual', evidence_refs: ['test:following-procedure'], novelty_key: 'following-procedure',
+    estimated_cost: 'moderate', risk: 'safe', reason: 'Following procedural queue item.' })
+  queue_learning_verification(next.id, procedure.id, 'moderate', 'safe', 'Following procedural queue item.')
+  const firstEntry = JSON.stringify(list_learning_verification_queue()[0])
+  const originalReference = JSON.stringify(knowledge)
+  const actor = vi.fn(() => undefined)
+  if (automatic) set_learning_policy('autonomous_bounded')
+  const result = automatic ? maybe_start_autonomous_bounded_verification(actor) : start_next_skill_verification(actor)
+  expect(result?.ok).toBe(false) // the following procedure reaches its legitimate actor prerequisite
+  expect(result?.run).toMatchObject({ skill_id: procedure.id, opportunity_id: next.id, state: 'blocked', reason: 'controlled actor is unavailable' })
+  expect(actor).toHaveBeenCalledTimes(1)
+  expect(JSON.stringify(list_learning_verification_queue().find(item => item.opportunity_id === first.id))).toBe(firstEntry)
+  expect(JSON.stringify(get_skill_definition(knowledge.id))).toBe(originalReference)
 })

@@ -726,6 +726,7 @@ function output_evidence(run: SkillVerificationRun, item_name: string) {
 export function promote_verified_skill(run: SkillVerificationRun) {
   const skill = get_skill_definition(run.skill_id)
   if (!skill) throw new Error(`skill disappeared during verification: ${run.skill_id}`)
+  if (skill.content_type === 'knowledge') throw new Error('knowledge_reference_not_executable: physical skill verification does not apply')
   if (skill.status !== 'candidate') throw new Error(`skill is not a candidate: ${run.skill_id}`)
   if (skill.revision !== run.skill_revision) throw new Error(`skill revision changed during verification: ${run.skill_id}`)
   if (run.topology_match !== true) throw new Error('live topology has not matched the candidate')
@@ -840,6 +841,7 @@ function get_controlled_actor_for_run(_run: SkillVerificationRun) {
 function process_run_tick(run: SkillVerificationRun) {
   const skill = get_skill_definition(run.skill_id)
   if (!skill) return fail_skill_verification_run(run, 'execution', 'candidate skill disappeared during verification')
+  if (skill.content_type === 'knowledge') return block_run(run, 'knowledge_reference_not_executable: physical skill verification does not apply')
   if (skill.status !== 'candidate' || skill.revision !== run.skill_revision) return fail_skill_verification_run(run, 'execution', 'candidate skill changed during verification')
   const template = template_for_skill(skill)
   if (!template) return block_run(run, 'source example is no longer available to seed a translated verification instance')
@@ -939,11 +941,15 @@ export function start_next_skill_verification(get_actor: () => ControlledActor |
   for (const candidate of queue_records()) {
     if (candidate.state !== 'queued') continue
     if (requested_opportunity !== undefined && candidate.opportunity_id !== requested_opportunity) continue
+    // A historical reference in the shared queue cannot starve later procedures.
+    // Exact targeted requests still receive the explicit non-executable refusal.
+    if (requested_opportunity === undefined && get_skill_definition(candidate.skill_id)?.content_type === 'knowledge') continue
     item = candidate
     break
   }
   if (!item) return { ok: false as const, error: requested_opportunity ? 'requested verification is not queued' : 'verification queue has no runnable item' }
   const skill = get_skill_definition(item.skill_id)
+  if (skill?.content_type === 'knowledge') return { ok: false as const, error: 'knowledge_reference_not_executable: physical skill verification does not apply' }
   if (!skill || skill.status !== 'candidate') return { ok: false as const, error: `queued skill is not an executable candidate: ${item.skill_id}` }
   const run = create_run(item, skill)
   const actor = get_actor()
@@ -1039,6 +1045,7 @@ export function maybe_start_autonomous_bounded_verification(get_actor: () => Con
   for (const item of list_learning_verification_queue()) {
     if (item.state !== 'queued') continue
     if (item.risk !== 'safe') continue
+    if (get_skill_definition(item.skill_id)?.content_type === 'knowledge') continue
     return start_next_skill_verification(get_actor, { opportunity_id: item.opportunity_id })
   }
   return undefined

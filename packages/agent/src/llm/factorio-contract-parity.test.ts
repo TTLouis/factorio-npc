@@ -62,9 +62,11 @@ describe('canonical Factorio provider contract parity', () => {
   it('records current runtime-v8-only tools as intentional surface differences', () => {
     expect(toolsWithPolicy('runtime-v8-only')).toEqual([
       'estimateProductionTime',
+      'findKnowledge',
       'findSkills',
       'getConstructionReservations',
       'getFluidSourceTiles',
+      'getKnowledgeDetails',
       'getLocalSpatialObservation',
       'getMapContext',
       'getMiningDetails',

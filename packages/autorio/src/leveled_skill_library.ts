@@ -582,7 +582,7 @@ const ENTRIES: Entry[] = [
   },
 ]
 
-export const LEVELED_SKILL_DEFINITIONS = ENTRIES.map(entry => ({
+export const LEVELED_LIBRARY_DEFINITIONS = ENTRIES.map(entry => ({
   schema_version: 1,
   revision: entry.revision ?? 1,
   id: entry.id,
@@ -609,3 +609,7 @@ export const LEVELED_SKILL_DEFINITIONS = ENTRIES.map(entry => ({
   confidence: { level: 'low', basis: ['Authored decision procedure; use requires live applicability and supported tools. Difficulty is independent of evidence. No autonomous gameplay capability is established.'] },
   examples: [],
 }))
+
+// Typed views share immutable authored records; persistence retains legacy bytes.
+export const LEVELED_SKILL_DEFINITIONS = LEVELED_LIBRARY_DEFINITIONS.filter(entry => entry.content_type === 'skill')
+export const LEVELED_KNOWLEDGE_DEFINITIONS = LEVELED_LIBRARY_DEFINITIONS.filter(entry => entry.content_type === 'knowledge')
