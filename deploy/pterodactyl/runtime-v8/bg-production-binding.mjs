@@ -7,7 +7,7 @@ import { captureObligationProof, effectivePreservationProof, obligationProofOrig
 import { STALE_REPLY_ERROR_CODE } from './agent-context.mjs'
 import { productionBindings } from './production-task.mjs'
 import { authorizationOf, checkGrant, evaluateOperationAdmission } from './authorization.mjs'
-import { enrollFactoryProductionProducers } from './factory-cell-enrollment.mjs'
+import { enrollFactoryProductionProducers, finiteProductionPlacementReceipts } from './factory-cell-enrollment.mjs'
 import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
 
 export const PRODUCTION_BINDING_CANDIDATE_LIMIT = 8
@@ -94,8 +94,7 @@ export async function resolveProductionBindings(agent, s, task, facts, nodes, { 
   const routeUnits = new Set(fresh.preserved.flatMap(row => [row.item_io?.pickup_target?.unit_number, row.item_io?.drop_target?.unit_number]).filter(Number.isSafeInteger))
   const placements = agent.memory.authorizationState(s.owner.key)?.world?.npc_placements ?? []
   const registry = agent.memory.factoryRegistryStatus?.().status === 'initialized' ? agent.memory.getFactoryOperationalRegistry() : undefined
-  const receipts = registry ? agent.memory.factoryPlacementReceipts({ world_id: registry.world_id, goal_id: task.owner.goal_id,
-    semantic_step_id: s.step.semantic_step_id ?? s.step.step_id }) : []
+  const receipts = registry ? finiteProductionPlacementReceipts(agent) : []
   const result = []
   for (const node of nodes) {
     const recipe = facts.recipes.find(row => row.name === node.name)

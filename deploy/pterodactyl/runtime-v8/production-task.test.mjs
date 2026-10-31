@@ -11,6 +11,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { pinLegacyFixtureSkillContext, FakeFactorio } from './task-loop-fixtures.mjs'
 import { recoverySession } from './recovery-loop-fixtures.mjs'
+import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { plannerControlPayloadFromMessage, executionOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { installProductionFactoryFixture } from './bg-production-binding-fixtures.mjs'
 import { registerFactoryCell } from './factory-registry.mjs'
@@ -61,7 +62,7 @@ test('unconfigured assemblers cannot receive production materials and a running 
   assert.deepEqual(result.operation, { name: 'wait', args: { ticks: 120 } })
 })
 
-function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, fuelFacts = false, lostAck, provider } = {}) {
+function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, fuelFacts = false, lostAck, provider, priorPlacement = false } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(iron ? an.iron_memory : an.memory))
   pinLegacyFixtureSkillContext(memory)
@@ -162,7 +163,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   agent.behaviorTrace = { emit: async row => events.push(row) }
   const locator = entity => ({ unit_number: entity.unit_number, name: entity.name, position: entity.position, surface_index: 1, force_index: 1 })
   const factory = installProductionFactoryFixture({ agent, memory, game, key: an.key, plan: held,
-    step: () => held().steps[held().active_step_index], machines: new Map((iron ? [drill, machine] : [machine]).map(row => [row.unit_number, row])), recipes,
+    step: () => held().steps[priorPlacement ? 0 : held().active_step_index], machines: new Map((iron ? [drill, machine] : [machine]).map(row => [row.unit_number, row])), recipes,
     projectMember: row => {
       row.fuel_item_facts.items = burnerFuels.items.map(({ name, category, fuel_value }) => ({ name, category, fuel_value }))
       if (!iron) return row
@@ -873,4 +874,102 @@ test('Run BB lane A residual continues through real completed receipts: gathered
   assert.equal(w.events.filter(row => row.event === 'production.recovery' && row.data.mechanism === 'fuel_source_binding').length, 1, 'the source is bound once')
   assert.deepEqual(failed(w), [])
   assert.equal(w.providers.length, 0)
+})
+
+// Inject the finite registration miss after admission, using the real retained
+// placement and controller. Synthetic native facts remain in this fixture.
+function missingFactoryRegistration() {
+  const w = world({ furnace: true, priorPlacement: true })
+  const o = w.agent.captureCheckpointOwner()
+  const owner = { goal_id: o.goalId, plan_id: o.planId, plan_version: o.planVersion, step_id: o.stepId }
+  const protected_stock = Object.fromEntries(w.held().steps[w.held().active_step_index].completion_contract.requirements
+    .filter(row => row.kind === 'inventory_count' && !w.intent.targets.some(target => target.item_name === row.item_name))
+    .map(row => [row.item_name, row.minimum]).sort(([a], [b]) => a.localeCompare(b)))
+  const receipt = w.memory.snapshot().factory_placement_receipts[0]
+  assert.notEqual(receipt.step_id, owner.step_id)
+  assert.equal(w.held().execution.step_progress[receipt.step_id].status, 'completed')
+  const task = createProductionTask({ intent: w.intent, owner, actor_id: 18, epoch: 1, protected_stock })
+  w.memory.productionTasks.set(`${o.key}/${materialOwnerKey(owner)}`, task)
+  return { ...w, task }
+}
+const enrollmentEvents = w => w.events.filter(row => row.event.startsWith('factory_cell.enrollment_recovery_'))
+test('BI residual registration miss automatically continues through real runTurn and completed receipts without a model', async () => {
+  const w = missingFactoryRegistration()
+  const before = structuredClone(w.task.intent); const steps = structuredClone(w.held().steps)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  await w.agent.runTurn()
+  assert.deepEqual(enrollmentEvents(w).map(row => row.event), ['factory_cell.enrollment_recovery_started', 'factory_cell.enrollment_recovery_completed'])
+  assert.equal(enrollmentEvents(w)[0].data.used, 1)
+  assert.equal(enrollmentEvents(w)[0].data.limit, 3)
+  assert.deepEqual(w.ops, ['supply_entity'])
+  for (let i = 0; i < 12 && w.memory.currentPlan(an.key).status !== 'completed'; i++) await w.agent.completed()
+  assert.equal(w.memory.currentPlan(an.key).status, 'completed')
+  assert.equal(w.game.inventory['small-electric-pole'], 2)
+  assert.equal(w.ops.includes('place_entity'), false)
+  assert.equal(w.providers.length, 0)
+  assert.deepEqual(w.task.intent, before); assert.deepEqual(w.held().steps, steps)
+  assert.equal(enrollmentEvents(w).length, 2)
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(w.memory.snapshot())
+  assert.deepEqual(restored.snapshot().factory_use_recovery, w.memory.snapshot().factory_use_recovery)
+})
+
+test('BI residual allowance survives restart and explicitly exhausts before metadata or native action', async () => {
+  const w = missingFactoryRegistration()
+  for (let i = 0; i < 3; i++) w.memory.consumeFactoryUseRecovery(an.key, { kind: 'prior_factory_recovery', i }, {
+    request_id: `prior-${i}`, plan_id: w.task.owner.plan_id, code: 'prior_miss', evidence_digest: 'a'.repeat(64),
+  })
+  const snapshot = w.memory.snapshot(); w.memory.restore(JSON.parse(JSON.stringify(snapshot)))
+  let failure
+  await assert.rejects(w.agent.runTurn(), error => { failure = error; return error.code === 'factory_cell_recovery_exhausted' && error.pause_class === 'guard' })
+  const paused = await pauseStrandedPlanAfterRequestError({ agent: w.agent, currentPlanState: () => w.memory.currentPlan(an.key) }, failure)
+  assert.equal(paused.status, 'paused')
+  assert.equal(w.memory.pauseRecord(an.key).pause_class, 'guard')
+  assert.match(paused.pause_reason, /^factory_cell_recovery_exhausted:/)
+  assert.equal(enrollmentEvents(w).find(row => row.event.endsWith('_exhausted')).data.used, 3)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  assert.deepEqual(w.ops, []); assert.equal(w.providers.length, 0)
+  assert.deepEqual(w.memory.snapshot().factory_use_recovery, snapshot.factory_use_recovery)
+})
+
+for (const fault of ['persist', 'cancel', 'actor', 'epoch', 'goal', 'plan', 'step', 'request', 'amendment', 'native_busy', 'uncertain']) test(`BI residual ${fault} during durable allowance never publishes or continues`, async () => {
+  const w = missingFactoryRegistration()
+  const persist = w.agent.persistState.bind(w.agent)
+  w.agent.persistState = async options => {
+    if (w.memory.snapshot().factory_use_recovery.records.length) {
+      if (fault === 'persist') throw new Error('injected_disk_failure')
+      if (fault === 'cancel') w.agent.active = false
+      if (fault === 'actor') w.agent.epoch = { ...w.agent.epoch, actor_id: 999 }
+      if (fault === 'epoch') w.agent.epoch = { ...w.agent.epoch, epoch: 999 }
+      if (fault === 'plan') w.held().plan_version++
+      if (fault === 'request') { w.agent.requestAdmissionOwner = { replaced: true }; w.agent.traceRequest = { id: 'replacement-request', seq: 0 } }
+      if (fault === 'amendment') w.agent.currentPendingAmendment = () => ({ pending: true })
+      if (fault === 'uncertain') w.game.admissions.push({ state: 'unknown', operation_key: 'unsettled', actor_id: 18, epoch: 1 })
+      if (fault === 'goal') w.memory.planningState(an.key).goal.goal_id = 'superseded-goal'
+      if (fault === 'step') w.held().active_step_index--
+      if (fault === 'native_busy') { w.game.taskState = 'working'; w.game.queueLength = 1 }
+    }
+    return persist(options)
+  }
+  await assert.rejects(w.agent.runTurn())
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  assert.deepEqual(w.ops, []); assert.equal(w.providers.length, 0)
+  assert.equal(enrollmentEvents(w).some(row => row.event.endsWith('_completed')), false)
+  const failed = enrollmentEvents(w).find(row => row.event.endsWith('_failed'))
+  assert.equal(failed.request_id, 'run-an-production', 'late failure belongs to the original owner')
+  assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
+})
+
+test('BI residual duplicate wake cannot renew a durably claimed attempt after interrupted correction', async () => {
+  const w = missingFactoryRegistration()
+  const trace = w.agent.traceEvent.bind(w.agent)
+  w.agent.traceEvent = async (event, data) => { await trace(event, data); if (event === 'factory_cell.enrollment_recovery_started') throw new Error('injected interruption after durable claim') }
+  await assert.rejects(w.agent.runTurn(), /injected interruption/)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  const saved = JSON.parse(JSON.stringify(w.memory.snapshot()))
+  w.memory.restore(saved); w.agent.traceEvent = trace
+  await assert.rejects(w.agent.runTurn(), { code: 'factory_cell_recovery_exhausted' })
+  const event = enrollmentEvents(w).find(row => row.event.endsWith('_exhausted'))
+  assert.equal(event.data.duplicate, true); assert.equal(event.data.used, 1)
+  assert.deepEqual(w.memory.snapshot().factory_use_recovery, saved.factory_use_recovery)
+  assert.deepEqual(w.ops, []); assert.equal(w.providers.length, 0)
 })

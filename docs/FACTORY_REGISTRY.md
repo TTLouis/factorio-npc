@@ -366,6 +366,28 @@ within that goal and the same world/surface/force. This restriction does not era
 already registered cells when a later goal begins. Broader legacy adoption needs
 its own validated protocol.
 
+Finite-production enrollment selects exact receipts from the active step or the
+verified completed prefix of the same immutable plan/version. The historical
+placement facade validates original actor/epoch, goal, world, surface, force and
+locator; current authority and fresh native recipe/output evidence independently
+control registration. Both explicit finite producers and automatic producer
+binding use this selection. This does not broaden declared or inferred direct-feed
+pair membership, which remains scoped to its unchanged semantic step.
+
+An already admitted finite task missing that registration is a residual miss.
+After proving custody and native capability, the harness durably spends the
+existing same-goal factory recovery allowance (three aggregate attempts) before
+publishing metadata, then resolves factory use again and continues the ordinary
+production controller. Restart and duplicate wakes cannot renew the allowance.
+Unproven custody, uncertain/busy work, lost ownership, failed persistence and
+exhaustion remain guard failures; no placement or supply operation is replayed by
+the correction. `factory_cell.enrollment_recovery_started`, `_completed`, `_failed`
+and `_exhausted` retain request/plan/step, source receipt, allowance and disposition.
+A completed correction means fresh factory use resolved, not completed gameplay.
+Factory boundary errors retain their guard code through recovery-route commit;
+they are not provider failures.
+
+
 Registered destructive or reconfiguration operations require the exact frozen
 physical lifecycle transaction at the existing admission boundary. Ordinary
 operations still pass through existing authority, stock, preservation and native

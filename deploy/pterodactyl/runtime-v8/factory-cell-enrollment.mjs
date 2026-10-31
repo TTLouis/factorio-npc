@@ -75,6 +75,21 @@ function scopeReceipts(agent, state, step) {
     goal_id: state.goal.goal_id, semantic_step_id: step.semantic_step_id ?? step.step_id })
 }
 
+// Finite production may use exact placements from the verified completed prefix
+// of this immutable plan. This is not whole-goal discovery or pair membership:
+// declared/implicit direct-feed enrollment continues to use scopeReceipts above.
+export function finiteProductionPlacementReceipts(agent) {
+  const { state, plan, step } = active(agent)
+  if (!step || state.goal?.status !== 'active' || state.run?.paused
+    || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) fail('factory_enrollment_authority_missing')
+  const eligible = plan.steps.slice(0, plan.active_step_index + 1).filter(row => row.step_id === step.step_id
+    || plan.execution?.step_progress?.[row.step_id]?.status === 'completed')
+  return eligible.flatMap(source => scopeReceipts(agent, state, source).filter(receipt =>
+    receipt.world_id === agent.memory.factoryWorldBinding().world_id && receipt.goal_id === state.goal.goal_id
+    && receipt.semantic_step_id === (source.semantic_step_id ?? source.step_id)
+    && receipt.plan_id === plan.plan_id && receipt.plan_version === plan.plan_version && receipt.step_id === source.step_id))
+}
+
 // A draft declaration is not authority. This prerequisite is checked before
 // recordPlan/commit; existing listFactoryCells supplies bind-once initialization.
 export async function validateFactoryCellDraft(agent, draft) {
@@ -152,7 +167,7 @@ function membersForIntent(agent, current, scope) {
 
 // Typed finite production can establish a newly placed machine without an
 // optional model cell declaration. Old or random world entities cannot enroll.
-export async function enrollFactoryProductionProducers(agent, producers) {
+export async function enrollFactoryProductionProducers(agent, producers, { beforeRegister } = {}) {
   if (!Array.isArray(producers) || producers.length > 16 || producers.some(row => !Number.isSafeInteger(row.unit_number) || typeof row.recipe_name !== 'string')) fail('factory_cell_producer_invalid')
   if (!producers.length) return []
   bound(agent)
@@ -168,29 +183,40 @@ export async function enrollFactoryProductionProducers(agent, producers) {
   for (const producer of unassigned) {
     const result = await prepareFactoryCellHost(agent, async (observer, access) => {
       const runtime = observer.runtime; const scope = runtime.scope()
-      const matches = scopeReceipts(agent, current.state, current.step).filter(row => row.unit_number === producer.unit_number)
+      const matches = finiteProductionPlacementReceipts(agent).filter(row => row.unit_number === producer.unit_number)
       if (matches.length !== 1) fail('factory_cell_producer_placement_unproven')
       const receipt = matches[0]
       if (agent.memory.factoryTemporaryAssets().some(asset => asset.receipt_id === receipt.receipt_id)
         || agent.memory.getFactoryRegistry().cells.some(cell => cell.members.some(member => member.unit_number === producer.unit_number))) fail('factory_enrollment_member_assigned')
-      const native = await observer.observePlacement(receipt.receipt_id)
+      // Validate historical custody under current authority before the native
+      // read. The provisional candidate is never published or commissioned.
+      const member = runtime.recordPlacement({ unit_number: receipt.unit_number, name: receipt.name, position: receipt.position,
+        surface_index: receipt.surface_index, force_index: receipt.force_index, provenance: { receipt_id: receipt.receipt_id } }, scope)
+      const { native } = await observer.observeCandidate({ surface_index: scope.surface_index, force_index: scope.force_index,
+        assignment: { products: ['placement-proof'], purpose: 'Inspect retained finite producer', method: 'runtime receipt' },
+        members: [member], ports: [], origin: runtime.origin() })
       const row = native.members[0]
       const recipe = await readFactoryProducerRecipe(agent, access, row, producer.recipe_name)
       if (!recipe.products?.length || recipe.products.length > 32 || recipe.products.some(product => !['item', 'fluid'].includes(product.type) || typeof product.name !== 'string')) fail('factory_cell_producer_output_unknown')
       const ports = recipe.products.map((product, index) => ({ port_id: `output-${index + 1}`, direction: 'output', kind: product.type, resource: product.name }))
       if (ports.some(port => !factoryNativeOutput(row, port))) fail('factory_cell_producer_output_unknown')
-      const member = runtime.recordPlacement({ unit_number: receipt.unit_number, name: receipt.name, position: receipt.position,
-        surface_index: receipt.surface_index, force_index: receipt.force_index, provenance: { receipt_id: receipt.receipt_id } }, scope)
       const declaration = { surface_index: scope.surface_index, force_index: scope.force_index,
         assignment: { products: [...new Set(ports.map(port => port.resource))], purpose: `Production for semantic step ${scope.semantic_step_id}`, method: `native_recipe:${producer.recipe_name}` },
         members: [member], ports, origin: runtime.origin() }
+      if (beforeRegister) {
+        await beforeRegister({ receipt, scope, native_tick: native.tick })
+        await access.refresh()
+      }
       access.fence(); runtime.assertScope(scope)
       const cell = runtime.registerCell(declaration, scope); access.acceptPublishedRevision()
       try { await agent.persistState({ strict: true }) }
       catch (error) { agent.memory.invalidateFactoryEnrollmentPersistence(); throw error }
       agent.assertCheckpointOwnerIdentity(owner); access.fence()
       await agent.traceEvent('factory_cell.enrolled_from_production', { cell_id: cell.cell_id, receipt_id: receipt.receipt_id, unit_number: receipt.unit_number,
-        recipe_name: producer.recipe_name, goal_id: scope.goal_id, semantic_step_id: scope.semantic_step_id, native_tick: native.tick, commissioning: 'unverified' })
+        recipe_name: producer.recipe_name, goal_id: scope.goal_id, plan_id: scope.plan_id, plan_version: scope.plan_version,
+        request_id: scope.request_id, actor_id: scope.actor_id, actor_epoch: scope.actor_epoch, semantic_step_id: scope.semantic_step_id,
+        source_placement: Object.fromEntries(['request_id', 'actor_id', 'actor_epoch', 'plan_id', 'plan_version', 'step_id', 'semantic_step_id', 'tick'].map(field => [field, receipt[field]])),
+        native_tick: native.tick, commissioning: 'unverified' })
       access.fence()
       return cell
     }).execute()
