@@ -21,14 +21,14 @@ import {
 // This is an intentionally smaller capability surface, not an alternate policy.
 // Nonfluid sites require native zero-fluidbox witnesses. Fluid candidates use
 // the shared frozen native preservation claim and exact v2 admission owner.
-export const PLACEMENT_PROTOTYPES = Object.freeze(['stone-furnace', 'burner-mining-drill', 'wooden-chest', 'lab', 'small-electric-pole'])
+export const PLACEMENT_PROTOTYPES = Object.freeze(['stone-furnace', 'burner-mining-drill', 'wooden-chest', 'lab', 'small-electric-pole', 'assembling-machine-1', 'transport-belt', 'inserter', 'burner-inserter'])
 export const FLUID_PLACEMENT_PROTOTYPES = Object.freeze(['offshore-pump', 'boiler', 'steam-engine', 'pipe'])
-export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate'])
+export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate', 'set_machine_recipe'])
 export const OBSERVATION_NAMES = Object.freeze([
   'getActorStatus', 'getInventoryItems', 'getEquipmentStatus', 'getRecipeDetails',
   'getPrototypeDetails', 'discoverPrototypes', 'getNearbyEntities', 'getEntityStatus',
   'getCraftingStatus', 'getNavigationStatus', 'getTechnology', 'getResearchStatus',
-  'getPlacementCandidates', 'getFluidSourceTiles',
+  'getPlacementCandidates', 'getFluidSourceTiles', 'getEntityGeometry', 'getTransportCapacity',
 ])
 export const observationDefinitions = toolDefinitions.filter(tool => OBSERVATION_NAMES.includes(tool.function.name))
 export function capabilities() {
@@ -74,6 +74,13 @@ function preflightExpression(operation) {
   if (!command) return '{ok=true,validation="not_required"}'
   check(command.startsWith(JSON_PREFIX) && command.endsWith('))'), 'preflight_renderer_changed')
   const expression = command.slice(JSON_PREFIX.length, -2)
+  if (operation.name === 'set_machine_recipe') {
+    // This external capability is only for the bounded nonfluid assembler.
+    // Read both static and actual native fluidboxes, even when empty/disabled;
+    // rerun the same witness inside atomic admission, not just during prepare.
+    const unit = operation.args.unit_number
+    return `(function() local p=${expression}; if p.ok~=true then return p end; local t=p.target; local a=remote.call("sgluna_deployment","status"); local e=game.get_entity_by_unit_number(${unit}); if not e and t and t.position and t.surface_index==a.surface_index and t.force_index==a.force_index then local s=game.surfaces[t.surface_index]; if s then for _,candidate in pairs(s.find_entities_filtered({position=t.position,radius=0.25,name=t.name,force=a.force_index,limit=2})) do if candidate.valid and candidate.unit_number==${unit} then e=candidate end end end end; if not t or t.unit_number~=${unit} or not e or not e.valid or e.unit_number~=t.unit_number or e.name~="assembling-machine-1" or e.name~=t.name or e.type~="assembling-machine" or e.surface.index~=a.surface_index or e.force.index~=a.force_index or e.surface.index~=t.surface_index or e.force.index~=t.force_index then return {ok=false,code="external_recipe_target_unproven"} end; local ok,w=pcall(function() local boxes=e.prototype.fluidbox_prototypes; if type(boxes)~="table" then return nil end; for _,box in pairs(boxes) do return nil end; if #e.fluidbox~=0 then return nil end; return {version=1,unit_number=e.unit_number,entity_name=e.name,surface_index=e.surface.index,force_index=e.force.index,prototype_fluidbox_count=0,fluidbox_count=0} end); if not ok or not w then return {ok=false,code="external_recipe_target_unproven"} end; p.external_recipe_nonfluid=w; return p end)()`
+  }
   if (!['place_entity', 'place_candidate'].includes(operation.name)) return expression
   if (operation.name === 'place_candidate') return `(function() local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or not (${FLUID_PLACEMENT_PROTOTYPES.map(name => `n==${luaString(name)}`).join(' or ')}) or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; local found=surface.find_entities_filtered({area=f.world_box,limit=129}); if #found>=129 then return {ok=false,code="placement_footprint_dense"} end; for _,e in pairs(found) do if e.valid and e.type~="resource" then return {ok=false,code="placement_footprint_occupied"} end end; return p end)()`
   const { entity_name: name, x, y, direction = 0 } = operation.args

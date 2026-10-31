@@ -11,6 +11,7 @@ const external = manifest.external_harness
 test('external subset and MCP lifecycle exactly match the canonical manifest', () => {
   assert.deepEqual(external.operations, [...OPERATION_NAMES])
   assert.deepEqual(external.observations, [...OBSERVATION_NAMES])
+  assert.deepEqual(external.place_entity_prototypes, capabilities().limits.placement_prototypes)
   assert.deepEqual(external.mcp_tools, MCP_TOOLS.map(tool => tool.name))
   assert.equal(external.protocol_version, MCP_PROTOCOL_VERSION)
   assert.equal(external.operation_admission_protocol, 2)

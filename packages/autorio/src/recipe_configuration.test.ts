@@ -17,6 +17,10 @@ function machine(overrides: Record<string, unknown> = {}) {
     surface: { index: 1 },
     force: { index: 1 },
     prototype: { crafting_categories: { crafting: true } },
+    is_crafting: () => false,
+    get_fluid_count: () => 0,
+    get_max_inventory_index: () => 0,
+    get_inventory: () => undefined,
     get_recipe: vi.fn(() => [currentRecipe ? { name: currentRecipe } : undefined, undefined]),
     set_recipe: vi.fn((recipeName: string) => {
       if (applySet) currentRecipe = recipeName
@@ -97,9 +101,23 @@ describe('exact machine recipe configuration', () => {
     expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
   })
 
+  it.each([
+    ['active crafting', { is_crafting: () => true }],
+    ['fluid contents', { get_fluid_count: () => 5 }],
+    ['native inventory', { get_max_inventory_index: () => 1, get_inventory: () => ({ is_empty: () => false }) }],
+  ])('refuses a first recipe assignment with %s without displacing it', (_label, overrides) => {
+    const c = context()
+    const m = machine(overrides)
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => m.target)
+    expect(c.controller.submit_set_recipe_exact(101, 'iron-gear-wheel')[0]).toBe(true)
+    c.runtime.state_setting_recipe(c.actor)
+    expect(m.target.set_recipe).not.toHaveBeenCalled()
+    expect(c.controller.status().last_result).toMatchObject({ code: 'set_recipe_failed', completed: false })
+  })
+
   it('treats an already-matching recipe as idempotent success without resetting it', () => {
     const c = context()
-    const m = machine()
+    const m = machine({ is_crafting: () => true, get_fluid_count: () => 5 })
     m.setCurrentRecipe('iron-gear-wheel')
     ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => m.target)
 

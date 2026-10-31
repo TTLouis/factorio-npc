@@ -41,7 +41,8 @@ restricted construction. Unsupported operations fail closed; the complete existi
 runtime-v8 catalog is **not** implicitly exposed.
 
 `place_entity` accepts only `stone-furnace`, `burner-mining-drill` and
-`wooden-chest`, `lab` and `small-electric-pole`, with explicit exact-grid coordinates.
+`wooden-chest`, `lab`, `small-electric-pole`, `assembling-machine-1`,
+`transport-belt`, `inserter` and `burner-inserter`, with explicit exact-grid coordinates.
 Read native placement candidates to obtain valid snapped centers, including
 half-grid centers; do not assume integer coordinates. Native prototype/footprint
 and collision checks must prove a clear, nonfluid site. The bridge always passes
@@ -287,6 +288,39 @@ positive item transfer can be smaller than requested: inspect actual moved
 counts and destination state. Prove a crafting/mining quantity from native
 result/inventory evidence, navigation from the observed position, and production
 from actual output, not merely a placed machine.
+
+## Automatic production tools
+
+The bounded nonfluid placement list additionally supports `assembling-machine-1`,
+`transport-belt`, `inserter` and `burner-inserter`. These names grant placement
+capability, not availability: inspect current prototype, recipe and inventory
+facts first. Use fresh `getPlacementCandidates` positions and directions with
+explicit `place_entity`; its native zero-fluidbox, exact-grid and no-clear
+checks still apply. Nonfluid candidate IDs are not accepted by `place_candidate`.
+
+`set_machine_recipe {unit_number, recipe_name}` uses canonical native admission
+and execution. External recipe assignment additionally requires the exact
+`assembling-machine-1` target, actor force/surface and a native zero-fluidbox
+witness for both prototype and runtime. Empty or disabled fluid ports do not
+qualify. The same check runs again inside atomic admission; missing native proof
+fails closed. Canonical recipe operations on other interfaces retain their
+existing scope. A matching recipe is idempotent; replacing an existing recipe is
+refused. A first assignment also refuses active crafting, fluid contents or any
+occupied inventory at execution, preserving stock even after approach recovery.
+Read a refused machine again instead of emptying or replacing it implicitly.
+
+Use `getEntityGeometry {unit_number}` for exact native pickup/drop relationships
+and `getTransportCapacity` for live belt/inserter facts. Prototype rates are not
+proof of observed throughput. `getEntityStatus {unit_number}` now includes native
+`products_finished` for furnaces and assembling machines, alongside observed tick,
+recipe, progress, inventories and spatial facts. Compare samples for the same
+machine and recipe; a craft counter delta needs live recipe products and delivery
+proof before claiming an item quantity or automatic goal completion. These reads
+retain actor visibility constraints; machine status additionally requires the
+actor's force and surface, while geometry reports native force/surface identities
+for the caller to check before claiming a production connection. Manual input delivery
+or handcrafting the final product does not prove a fully automatic production
+chain; a run must freeze and verify its own acceptance window and provenance.
 
 ## Interruption, cancellation and restart
 

@@ -211,6 +211,55 @@ test('read-only observation accepts only curated tools and existing argument val
   assert.deepEqual(await f.bridge.observe('getRecipeDetails', { item_or_recipe: 'iron-gear-wheel' }), { example: true })
 })
 
+test('automatic production support keeps canonical recipe admission and bounded geometry reads', async () => {
+  const f = fixture()
+  const prepared = await f.bridge.prepare({ name: 'set_machine_recipe', args: { unit_number: 42, recipe_name: 'automation-science-pack' } }, 'run/recipe')
+  f.admission = row(prepared.pending)
+  await f.bridge.submit(prepared)
+  assert.match(f.calls.at(-1), /autorio_preflight.*set_machine_recipe/)
+  for (const fragment of ['external_recipe_target_unproven', 'e.name~="assembling-machine-1"', 'e.type~="assembling-machine"', 'e.unit_number~=t.unit_number', 'e.surface.index~=a.surface_index', 'e.force.index~=a.force_index', 'e.prototype.fluidbox_prototypes', 'for _,box in pairs(boxes)', '#e.fluidbox~=0', 'external_recipe_nonfluid=w', 'candidate.unit_number==42', 'radius=0.25']) {
+    assert.ok(f.calls[1].includes(fragment), `prepare: ${fragment}`)
+    assert.ok(f.calls.at(-1).includes(fragment), `atomic admission: ${fragment}`)
+  }
+  assert.match(f.calls.at(-1), /autorio_operations','set_machine_recipe',42,'automation-science-pack'/)
+  for (const name of ['getEntityGeometry', 'getTransportCapacity']) assert.ok(capabilities().observations.includes(name))
+  await f.bridge.observe('getEntityGeometry', { unit_number: 42 })
+  assert.match(f.calls.at(-1), /entity_geometry/)
+  await f.bridge.observe('getTransportCapacity', { kind: 'inserter_instance', unit_number: 42 })
+  await assert.rejects(f.bridge.observe('getEntityGeometry', { unit_number: 0 }))
+})
+
+test('native rejection of an empty connected fluid assembler cannot queue a recipe task', async () => {
+  const f = fixture()
+  // Real Lua branch/connection proof belongs to the native lane. This test
+  // checks how its authoritative rejection crosses the external boundary.
+  f.preflight = { ok: false, code: 'external_recipe_target_unproven' }
+  await assert.rejects(f.bridge.prepare({ name: 'set_machine_recipe', args: { unit_number: 42, recipe_name: 'automation-science-pack' } }, 'run/fluid-recipe'), error => error.code === 'preflight_rejected' && error.notAdmitted)
+  assert.ok(f.calls[1].includes('external_recipe_target_unproven'))
+  assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
+})
+
+for (const name of ['assembling-machine-1', 'transport-belt', 'inserter', 'burner-inserter']) {
+  test(`automatic production placement ${name} retains exact native no-clear fences`, async () => {
+    const f = fixture()
+    f.state.status.placement_no_clear_supported = true
+    const operation = { name: 'place_entity', args: { entity_name: name, x: 2, y: 2, direction: 0 } }
+    const prepared = await f.bridge.prepare(operation, 'run/place')
+    f.admission = row(prepared.pending)
+    await f.bridge.submit(prepared)
+    assert.ok(f.calls.at(-1).includes('preservation_nonfluid_output'))
+    assert.ok(f.calls.at(-1).includes('fluid_port_count~=0'))
+    assert.ok(f.calls.at(-1).includes('placement_footprint_occupied'))
+    assert.ok(renderExternalOperation(operation).endsWith(',true)'))
+    assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name: name } }))
+  })
+}
+
+test('external placement still excludes advanced or arbitrary prototypes', () => {
+  for (const entity_name of ['assembling-machine-2', 'fast-transport-belt', 'chemical-plant', 'arbitrary-prototype'])
+    assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name, x: 2, y: 2 } }), { code: 'placement_not_supported' })
+})
+
 test('explicit bind is not a tool capability and atomically refuses existing ownership/busy state', async () => {
   const f = fixture()
   await f.bridge.bind()
