@@ -1,3 +1,4 @@
+import { knowledgeToolDefinitions, isKnowledgeTool, knowledgeToolCommand } from './knowledge-retrieval.mjs'
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
@@ -1456,6 +1457,7 @@ const researchPathDefinition = {
 
 export const toolDefinitions = [
   ...base.toolDefinitions,
+  ...knowledgeToolDefinitions,
   ...factoryCellToolDefinitions,
   ...reservationDefinitions,
   placementCandidatesDefinition,
@@ -1592,6 +1594,8 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
 
   discoverPrototypes: 'prototype_knowledge',
   getPrototypeDetails: 'prototype_knowledge',
+  findKnowledge: 'prototype_knowledge',
+  getKnowledgeDetails: 'prototype_knowledge',
   findSkills: 'prototype_knowledge',
   getSkillDetails: 'prototype_knowledge',
 
@@ -1691,6 +1695,8 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   inspectConstructionIntent: 'discovery',
 
   getPlayerStatus: 'optional',
+  findKnowledge: 'optional',
+  getKnowledgeDetails: 'optional',
   findSkills: 'optional',
   getSkillDetails: 'optional',
 })
@@ -1746,6 +1752,7 @@ export function isObservationToolName(name) {
 }
 
 export function toolCommand(name, args) {
+  if (isKnowledgeTool(name)) return knowledgeToolCommand(name, args)
   if (isFactoryCellTool(name)) {
     validateFactoryCellTool(name, args)
     // Host-only observations have no RCON command. The trusted prepared hook

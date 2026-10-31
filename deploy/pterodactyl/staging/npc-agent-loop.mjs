@@ -904,6 +904,8 @@ export class NpcAgentLoop {
     }
   }
 
+  observationDecisionCost(prepared) { return prepared.length }
+
   async runTurn() {
     const generation = this.generation
     for (let round = 0; round < this.maxToolRounds; round++) {
@@ -970,9 +972,10 @@ export class NpcAgentLoop {
           continue
         }
         this.toolValidationRetries = 0
-        if (this.observationDecisionPressure && prepared.length > this.observationDecisionPressureRemaining) {
+        const observationCost = this.observationDecisionCost(prepared)
+        if (this.observationDecisionPressure && observationCost > this.observationDecisionPressureRemaining) {
           await this.forceDecisionFromObservations(
-            `Observation decision pressure had ${this.observationDecisionPressureRemaining} targeted observation call(s) remaining, but the provider requested ${prepared.length}.`,
+            `Observation decision pressure had ${this.observationDecisionPressureRemaining} targeted observation call(s) remaining, but the provider requested ${observationCost}.`,
             'observation_decision_budget_exhausted',
           )
           continue
@@ -1002,8 +1005,9 @@ export class NpcAgentLoop {
             content: `[HARNESS] ${reason}. The duplicate result was suppressed and earlier deterministic observations remain available. Tools stay enabled only for a specific missing fact: do not switch to a different read-only observation merely to avoid the duplicate guard. If the existing evidence already identifies a safe executable next action, return a strict-JSON plan now; otherwise make one targeted observation for the exact missing fact or report a truthful blocker. Do not guess an unobserved Factorio identity and do not force a mutation just to make progress.`,
           })
         }
+        if (observationCost === 0) continue
         if (this.observationDecisionPressure) {
-          this.observationDecisionPressureRemaining = Math.max(0, this.observationDecisionPressureRemaining - prepared.length)
+          this.observationDecisionPressureRemaining = Math.max(0, this.observationDecisionPressureRemaining - observationCost)
           if (this.observationDecisionPressureRemaining <= 0) {
             await this.forceDecisionFromObservations(
               'The targeted observation budget allowed by decision pressure is complete.',

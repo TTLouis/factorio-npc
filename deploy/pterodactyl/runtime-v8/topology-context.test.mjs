@@ -126,7 +126,9 @@ test('full Session delegates lean fresh topology and admitted obstruction facts 
   assert.deepEqual(ctx.world.modelRequests.map(row => row.model), ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-6-luna'])
   assert.deepEqual(ctx.world.modelRequests.map(row => row.tool_choice), ['auto', 'auto', 'none'])
   for (const wire of ctx.world.modelRequests) {
-    assert.equal(wire.tools.length, 49)
+    assert.equal(wire.tools.length, 51)
+    assert.ok(wire.tools.some(tool => tool.function.name === 'findKnowledge'))
+    assert.ok(wire.tools.some(tool => tool.function.name === 'getKnowledgeDetails'))
     assert.ok(wire.tools.some(tool => tool.function.name === 'listFactoryCells'))
     assert.ok(wire.tools.some(tool => tool.function.name === 'inspectFactoryCell'))
     contextOf(wire.messages)

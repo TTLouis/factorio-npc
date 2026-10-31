@@ -1097,6 +1097,23 @@
       ],
       "surface_policy": "runtime-v8-only"
     },
+    "findKnowledge": {
+      "protocol3_role": "planner-and-executor",
+      "delivery": "explicit-request-only reference tool result; no skill selection or autoload",
+      "argument_bounds": { "limit": { "minimum": 1, "maximum": 10, "default": 3 } },
+      "remote": ["autorio_references", "find"],
+      "category": "knowledge",
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only"
+    },
+    "getKnowledgeDetails": {
+      "protocol3_role": "planner-and-executor",
+      "delivery": "explicit-request-only reference tool result; no skill selection or autoload",
+      "remote": ["autorio_references", "get"],
+      "category": "knowledge",
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only"
+    },
     "findSkills": {
       "protocol3_role": "planner-only",
       "executor_delivery": "planner-selected references with harness-supplied skill context",

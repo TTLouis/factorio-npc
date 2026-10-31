@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,7 +13,7 @@ import { classifyRequestFailure } from './pause-class.mjs'
 const KEY = 'npc:sgluna'
 const IDS = ['restart-guide-a', 'restart-guide-b']
 const skills = IDS.map((id, index) => ({ schema_version: 1, id, revision: 7, name: id, status: 'candidate', stage: 'pattern',
-  content_type: index === 0 ? 'knowledge' : 'skill', level: index,
+  content_type: 'skill', level: index,
   guidance: { when_to_use: 'When the current request needs this method.', when_to_skip: 'When evidence already answers it.',
     live_checks: ['Read the current native state.'], steps: ['Inspect the live interface before choosing a supported action.'],
     completion: ['The intended native outcome is observed.'], required_capabilities: [], related_ids: [] },
@@ -228,4 +229,24 @@ for (const unavailable of ['state_file', 'snapshot_method', 'snapshot_payload'])
 test('the live supervisor never enables the explicit in-memory fixture exemption', async () => {
   const source = await fs.readFile(new URL('./supervisor.mjs', import.meta.url), 'utf8')
   assert.doesNotMatch(source, /allowEphemeralSkillHandoff\s*:/)
+})
+
+test('legacy mixed pinned records survive disk restore byte-for-byte but selected knowledge refuses execution', async t => {
+  const first = await firstProcess(t)
+  const snapshot = JSON.parse(await fs.readFile(first.file, 'utf8'))
+  const record = snapshot.planner_skill_handoffs[0][1]
+  record.skills[0].content_type = 'knowledge'
+  const payload = { schema: record.schema, scope: record.scope, skills: record.skills }
+  record.sha256 = createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+  await fs.writeFile(first.file, JSON.stringify(snapshot))
+  const restarted = await restartedProcess(first.file, first.game, { check: false })
+  assert.deepEqual(restarted.memory.plannerSkillHandoffs.get(KEY), record)
+  assert.deepEqual(getActivePlan(restarted.memory.planningState(KEY)).steps, getActivePlan(first.memory.planningState(KEY)).steps)
+  const reads = first.game.libraryReads, mutations = first.game.mutations.length
+  await assert.rejects(restarted.agent.runTurn(), /legacy_knowledge_selected_as_skill/)
+  assert.deepEqual(restarted.calls, [])
+  assert.equal(first.game.libraryReads, reads)
+  assert.equal(first.game.mutations.length, mutations)
+  await restarted.agent.persistState({ strict: true })
+  assert.deepEqual(JSON.parse(await fs.readFile(first.file, 'utf8')).planner_skill_handoffs[0][1], record)
 })

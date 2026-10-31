@@ -84,7 +84,7 @@ export function skill_detail_rows(skill: SkillDefinition): Array<[string, string
   const summary = skills.skill_ui_summary(skill)
   const rows: Array<[string, string]> = [
     ['ID', skill.id],
-    ['TYPE', skill.content_type === 'knowledge' ? 'Knowledge: interpretation and decision support; not live facts or an execution grant.' : 'Skill: a reusable method; not an execution or completion grant.'],
+    ['TYPE', skill.content_type === 'knowledge' ? 'Knowledge: explicit on-demand reference; never skill autoload or execution guidance. Not live facts or an execution grant.' : 'Skill: a reusable method; not an execution or completion grant.'],
     ['LEVEL', skill.level !== undefined ? `L${skill.level} complexity; availability and verification are separate.` : 'Unleveled legacy or personal entry.'],
     ['KIND', `${skill.kind} · stage ${skill.stage} · ${skill.status} · revision ${skill.revision}`],
     ['SOURCE', `${skill.source.kind}${skill.source.evidence_refs.length > 0 ? ` · ${skill.source.evidence_refs.join(', ')}` : ''}`],
@@ -111,7 +111,7 @@ export function skill_detail_rows(skill: SkillDefinition): Array<[string, string
       ['RELATED', skill.guidance.related_ids.join(', ')],
     )
   }
-  return rows.filter(([, value]) => value.length > 0)
+  return rows.filter(([key, value]) => value.length > 0 && (skill.content_type !== 'knowledge' || !['KIND', 'INPUTS', 'OUTPUTS', 'NEEDS', 'MACHINES', 'LINKS', 'RULES', 'PARAMS', 'CHECKED', 'CONFIDENCE'].includes(key)))
 }
 
 /**
@@ -215,6 +215,7 @@ function refresh_detail(frame: LuaGuiElement, skill: SkillDefinition | undefined
   const enabled = skill !== undefined && !editing
   if (edit.enabled !== enabled) edit.enabled = enabled
   if (export_button.enabled !== enabled) export_button.enabled = enabled
+  export_button.tooltip = skill?.content_type === 'knowledge' ? 'Export knowledge.json and KNOWLEDGE.md under script-output/sgluna-knowledge.' : 'Export skill.json and SKILL.md under script-output/sgluna-skills.'
   const signature = skill === undefined ? '' : `${skill.id}#${skill.revision}#${editing ? 'edit' : 'view'}`
   if (flow.tags.signature === signature) {
     const error_label = editing ? flow[SKILLS_WINDOW.edit_error] : undefined

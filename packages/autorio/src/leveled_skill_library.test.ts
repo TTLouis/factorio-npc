@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { LEVELED_SKILL_DEFINITIONS } from './leveled_skill_library'
+import { LEVELED_SKILL_DEFINITIONS, LEVELED_KNOWLEDGE_DEFINITIONS, LEVELED_LIBRARY_DEFINITIONS } from './leveled_skill_library'
 import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
 import {
   canonicalize_skill_definition, curated_library_profile, ensure_basic_skill_definitions,
-  find_skill_definitions, generate_skill_markdown, get_skill_definition, list_skill_definitions,
+  find_knowledge_references, get_knowledge_reference, get_procedural_skill, knowledge_reference, create_skill_remote_interface, export_skill, find_skill_definitions, generate_skill_markdown, get_skill_definition, list_skill_definitions,
   put_untrusted_skill_definition, select_curated_library, skill_cards_for_goal, trim_skill_text, normalize_skill_tag, goal_search_terms,
 } from './skills'
 import { filtered_library_entries, skill_detail_rows } from './skills_window'
@@ -93,9 +93,17 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
   it('contains methods and live checks, never a stored bill, numerical game mechanic, recipe topology or native-mastery claim', () => {
     const pack = JSON.parse(readFileSync(new URL('./fixtures/leveled-library-v1.json', import.meta.url), 'utf8'))
     expect(pack.skills).toEqual(LEVELED_SKILL_DEFINITIONS)
-    const ids = LEVELED_SKILL_DEFINITIONS.map(entry => entry.id)
+    expect(pack.schema).toBe(2)
+    expect(pack.knowledge).toEqual(LEVELED_KNOWLEDGE_DEFINITIONS.map(raw => knowledge_reference(canonicalize_skill_definition(raw))))
+    for (const reference of pack.knowledge) {
+      const imported = canonicalize_skill_definition(reference)
+      expect(imported.guidance!.steps).toEqual(reference.reference.concepts)
+      expect(imported.guidance!.completion).toEqual(reference.reference.interpretation_checks)
+      expect(knowledge_reference(imported)).toEqual(reference)
+    }
+    const ids = LEVELED_LIBRARY_DEFINITIONS.map(entry => entry.id)
     expect(new Set(ids).size).toBe(60)
-    for (const raw of LEVELED_SKILL_DEFINITIONS) {
+    for (const raw of LEVELED_LIBRARY_DEFINITIONS) {
       const entry = canonicalize_skill_definition(raw)
       expect(entry.inputs).toEqual([])
       expect(entry.outputs).toEqual([])
@@ -144,10 +152,13 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
 
   it('preserves type, complexity and actionable content through discovery, details and Markdown export', () => {
     select_curated_library('leveled')
-    const result = find_skill_definitions('freshness', 10).find(entry => entry.id === 'knowledge-rates-stocks-freshness')!
+    const result = find_knowledge_references('freshness', 10).find(entry => entry.id === 'knowledge-rates-stocks-freshness')!
     expect(result).toMatchObject({ content_type: 'knowledge', level: 0 })
     const card = skill_cards_for_goal('freshness', 10).find(entry => entry.id === result.id)!
-    expect(card).toMatchObject({ content_type: 'knowledge', level: 0 })
+    expect(card).toBeUndefined()
+    expect(find_skill_definitions('freshness', 10).every(entry => entry.content_type !== 'knowledge')).toBe(true)
+    expect(get_procedural_skill(result.id)).toBeUndefined()
+    expect(get_knowledge_reference(result.id)).not.toHaveProperty('verification')
     const entry = get_skill_definition(result.id)!
     const rows = new Map(skill_detail_rows(entry))
     expect(rows.get('TYPE')).toContain('Knowledge')
@@ -172,7 +183,7 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
   })
 
   it('refuses invalid new metadata and does not let physical verification claim knowledge mastery', () => {
-    const entry = LEVELED_SKILL_DEFINITIONS.find(value => value.content_type === 'knowledge')!
+    const entry = LEVELED_KNOWLEDGE_DEFINITIONS[0]
     for (const level of [-1, 8, 1.5, '0']) expect(() => canonicalize_skill_definition({ ...entry, level })).toThrow(/level/)
     expect(() => canonicalize_skill_definition({ ...entry, content_type: 'recipe' })).toThrow(/content_type/)
     expect(() => canonicalize_skill_definition({ ...entry, guidance: { ...entry.guidance, steps: [] } })).toThrow(/steps/)
@@ -182,4 +193,50 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
     expect(legacy).not.toHaveProperty('level')
     expect(legacy).not.toHaveProperty('guidance')
   })
+})
+
+it('native typed interfaces keep imported references out of every procedure endpoint through profile and save cycles', () => {
+  select_curated_library('leveled')
+  const native: Record<string, any> = {}
+  vi.stubGlobal('remote', { add_interface: (name: string, value: any) => { native[name] = value } })
+  create_skill_remote_interface()
+  const raw = get_skill_definition('knowledge-rates-stocks-freshness')!
+  const custom = put_untrusted_skill_definition({ ...raw, id: 'personal-reference', name: 'Personal concept', goal_tags: ['freshness'],
+    source: { ...raw.source, evidence_refs: ['owner:personal'] } })
+  const original = JSON.stringify(custom)
+  for (const profile of ['basic', 'leveled'] as const) {
+    select_curated_library(profile)
+    ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+    ensure_basic_skill_definitions()
+    expect(JSON.stringify(get_skill_definition(custom.id))).toBe(original)
+    expect(native.autorio_skills.get(custom.id)).toBeUndefined()
+    expect(native.autorio_skills.list().every((entry: any) => entry.content_type !== 'knowledge')).toBe(true)
+    expect(find_skill_definitions('freshness', 10).some(entry => entry.id === custom.id)).toBe(false)
+    expect(skill_cards_for_goal('freshness', 10).some(entry => entry.id === custom.id)).toBe(false)
+    expect(native.autorio_references.get(custom.id)).toEqual(knowledge_reference(custom))
+    expect(native.autorio_references.find('freshness', 10).results.some((entry: any) => entry.id === custom.id)).toBe(true)
+    expect(native.autorio_references.get('burner-coal-loop')).toBeUndefined()
+    expect(native.autorio_references.find('freshness', 11).ok).toBe(false)
+  }
+  const writes: Record<string, string> = {}
+  vi.stubGlobal('helpers', { table_to_json: JSON.stringify, write_file: (path: string, body: string) => { writes[path] = body } })
+  vi.stubGlobal('game', { tick: 1 })
+  export_skill(custom.id)
+  expect(Object.keys(writes)).toEqual([`sgluna-knowledge/${custom.id}/r${custom.revision}/knowledge.json`, `sgluna-knowledge/${custom.id}/r${custom.revision}/KNOWLEDGE.md`])
+  const exported = JSON.parse(Object.values(writes)[0])
+  expect(exported).toEqual(knowledge_reference(custom))
+  expect(exported).not.toHaveProperty('verification')
+  expect(skill_detail_rows(custom).some(([label]) => label === 'CHECKED')).toBe(false)
+  // The native RPC is bounded, while exports retain the full personal reference.
+  const large = put_untrusted_skill_definition({ ...custom, id: 'personal-large-reference',
+    guidance: { ...custom.guidance!, steps: Array.from({ length: 30 }, () => 'c'.repeat(280)) } })
+  expect(native.autorio_references.get(large.id)).toEqual({ ok: false, error: 'knowledge_reference_too_large' })
+  const exportResult = export_skill(large.id)
+  expect(exportResult.duplicate).toBe(false)
+  const full = JSON.parse(writes[`sgluna-knowledge/${large.id}/r${large.revision}/knowledge.json`])
+  expect(JSON.stringify(full).length).toBeGreaterThan(7000)
+  expect(full.reference.concepts).toEqual(large.guidance!.steps)
+  const imported = canonicalize_skill_definition(full)
+  expect(knowledge_reference(imported)).toEqual(full)
+  vi.unstubAllGlobals()
 })
