@@ -13,6 +13,51 @@ Goal, plan and authorization ownership remain defined by the
 
 ## Implemented stages
 
+### Receipt-backed use and physical lifecycle (integration validation pending)
+
+The runtime also accepts `production_block` intents with exact member roles and
+typed output roles. Repeated prototypes remain distinct members. Enrollment
+requires retained native placement receipts and fresh native compatibility;
+legacy `direct_feed` intent signatures retain their original representation.
+Finite production can enroll an exact newly placed producer without a model
+cell declaration. Its immutable job comes from the requested recipe and live
+native outputs. An empty furnace startup requires a fresh native recipe-machine
+capability, empty input/output inventories and zero crafting progress. Legacy
+placement lists or arbitrary nearby machines cannot establish provenance.
+
+Canonical commit, contract activation, admission and completion share typed cell
+resolution with the actual loop's production, wait and pre-send paths. Missing
+or null model fields do not exempt typed supply and operating requirements.
+Read-only review and a production proposal awaiting normal admission grant no
+use certificate. Certificates are ephemeral and fenced by world, owner, request,
+registry and physical revisions; restart requires fresh evidence.
+
+Supplier assignment, exact endpoint compatibility and delivered service are
+separate results. A supported direct delivery window requires two owned native
+frames, a complete sole incoming producer cut, and increased exact receiver
+inventory or consumption from an initially empty receiver. A supported power
+window requires a complete stable component with one capable producer, no
+storage/interfaces/unknown sources, and increased consumer energy. These are
+bounded delivery observations, not continuous-supply or whole-cell commissioning
+claims. Stock, gauges, network IDs, cycles and empty graphs cannot substitute.
+
+The private lifecycle ledger projects current installed members over immutable
+birth history. Metadata updates bind the physical revision and validate the
+installed member set; restore replays the corresponding lifecycle prefix.
+Physical claims and receipts persist before further operations. Exact partial
+removal custody may be reconciled from fresh native facts without refunding the
+frozen action allowance; uncertainty remains held. Temporary support cells have
+no fabricated product: their private pre-placement intent, beneficiaries and
+retained receipt authorize classification and eventual cleanup. Shared step
+close runs cleanup through ordinary admission and rechecks its checkpoint.
+
+Factory resolution recovery consumes an aggregate allowance of three attempts
+per unchanged goal before invoking the existing guarded structural successor
+path. Request callbacks, requirement changes, slices and restart cannot renew it.
+Focused host tests establish these boundaries; full native continuation and
+integration acceptance remain separately required. See the
+[lifecycle validation record](validation/FACTORY_CELL_LIFECYCLE_2026-10-29.md).
+
 ### Additive metadata revisions (host prerequisite)
 
 `commitFactoryCellMetadata(agent, change)` in `factory-cell-tools.mjs` is an
@@ -315,18 +360,18 @@ within that goal and the same world/surface/force. This restriction does not era
 already registered cells when a later goal begins. Broader legacy adoption needs
 its own validated protocol.
 
-Registered destructive or reconfiguration operations are refused at the existing
-admission boundary until a later authorized change protocol exists. Ordinary
+Registered destructive or reconfiguration operations require the exact frozen
+physical lifecycle transaction at the existing admission boundary. Ordinary
 operations still pass through existing authority, stock, preservation and native
 preflight checks. An unchanged assignment is not permission to bypass those checks.
 Natural area clearing independently excludes placed buildings in the native
 implementation. Compound construction is placement-only with clearance refused;
 the registry does not claim to validate a complete new construction design.
 
-## Updating a cell in later stages
+## Physical update invariants
 
 Keep a stable cell ID for expansion or modification that preserves its job. The
-future change protocol must retain immutable revisions, compare expected revision,
+change protocol must retain immutable revisions, compare expected revision,
 record exact affected assets and consumers, and reconcile every partial native
 effect. A failed modification cannot publish a new verified revision. An
 interrupted old installation must be reported as degraded rather than advertised
@@ -335,7 +380,7 @@ as still producing.
 Changing the job requires explicit conversion and lineage. Retirement requires
 consumer migration or explicit cessation, safe contents handling and native
 removal receipts. Temporary assets require beneficiaries and removal conditions.
-No stage-1 method implements those transitions or erases their future obligations.
+The metadata API cannot grant those transitions or erase their obligations.
 
 ## Validation claims
 

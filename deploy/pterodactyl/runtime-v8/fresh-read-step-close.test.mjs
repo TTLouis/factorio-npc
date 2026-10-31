@@ -4,6 +4,8 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 
 // Repair unit G (G1/G2): the harness closes the active step as soon as a FRESH read of its committed, machine-checkable
 // checkpoint shows it already met, before a batch is admitted or a wait runs. It reuses the ordinary step-close evaluator;
@@ -27,6 +29,8 @@ function deployment(epoch = 3) {
     actor_interface: true,
     operations: true,
     tools: true,
+    surface_index: 1,
+    force_index: 1,
   }
 }
 
@@ -44,8 +48,9 @@ const WAIT = { name: 'wait', args: { ticks: 600 } }
 const TAKE_PLATES = { name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 15, max_count: 50, to_entity: false } }
 const GEAR = { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }
 
-class Rcon {
+class Rcon extends FakeFactorio {
   constructor() {
+    super()
     this.commands = []
     this.mutations = []
     this.epoch = 3
@@ -85,6 +90,8 @@ class Rcon {
 
   async command(text) {
     this.commands.push(text)
+    this.status = deployment(this.epoch)
+    if (/remote\.call\(["'](?:sgluna_factory|autorio_actor)["']/.test(text)) return super.command(text)
     if (text.includes('remote.call("sgluna_deployment","status")')) {
       if (this.statusDown) throw new Error('rcon transport closed')
       return JSON.stringify(deployment(this.epoch))
@@ -110,7 +117,7 @@ class Rcon {
       const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
       if (encoded) {
         const identity = JSON.parse(JSON.parse(encoded))
-        this.admissions.push({ ...identity, generation: 1, batch_id: batchId, state: 'admitted', slots: Array.from({ length: count }, (_, index) => ({
+        this.admissions.push({ ...identity, tick: 300, generation: 1, batch_id: batchId, state: 'admitted', slots: Array.from({ length: count }, (_, index) => ({
           index: index + 1, ok: true, batch_refs: [{ batch_id: batchId, batch_generation: 1, batch_ref: `batch-g1-${batchId}` }] })) })
       }
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: count }, () => [true, 'Task started']) })}`
@@ -121,6 +128,10 @@ class Rcon {
 
 function harness(rcon, script) {
   const memory = new CanonicalTaskBoardMemory()
+  // Explicit synthetic dedicated-iron capability supplements the old checkpoint
+  // fixture; arbitrary observed entities or submitted operations never assign it.
+  installHistoricalFactorySupplement(memory, rcon, { unit_number: 15, name: 'stone-furnace', type: 'furnace', position: { x: 3, y: 0 } },
+    { products: ['iron-plate'], ingredients: ['iron-ore'] })
   const calls = []
   const rows = []
   const agent = new NpcAgentLoop({
@@ -249,7 +260,7 @@ test('the final step closes through the ordinary settlement, with no further mod
   assert.equal(data(world.named('plan.step_closed_on_fresh_read')[0]).reason, 'checkpoint_met_before_batch')
 })
 
-test('an unmet checkpoint changes nothing: the batch is handled exactly as before and no close or skip is traced', async () => {
+test('an unmet checkpoint admits the batch without closing and traces the native unsatisfied read', async () => {
   const rcon = new Rcon()
   const world = harness(rcon, firstTwo([planMessage([GEAR])]))
   await committedStep(world, rcon, { stock: 20 })
@@ -259,7 +270,7 @@ test('an unmet checkpoint changes nothing: the batch is handled exactly as befor
   assert.equal(rcon.mutations.length, 2)
   assert.match(rcon.mutations[1], /craft_item/)
   assert.equal(world.named('plan.step_closed_on_fresh_read').length, 0)
-  assert.equal(world.named('plan.step_close_skipped_on_fresh_read').length, 0)
+  assert.deepEqual(world.named('plan.step_close_skipped_on_fresh_read').map(row => data(row).reason), ['checkpoint_native_requirements_unsatisfied'])
   assert.equal(world.plan().task_board.completed_count, 0)
   assert.equal(world.plan().task_board.active_step_id, 'step_1')
   assert.equal(world.calls.length, 3)

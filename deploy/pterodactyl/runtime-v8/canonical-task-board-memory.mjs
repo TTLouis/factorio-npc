@@ -1,4 +1,6 @@
 import { completedSliceAnchor } from './next-slice-state.mjs'
+import { boardPlanAlignment, carriedPrefixLength } from './board-plan-alignment.mjs'
+export { boardPlanAlignment } from './board-plan-alignment.mjs'
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
@@ -15,7 +17,9 @@ import { restoreProgressAudits } from './executor-progress-audit.mjs'
 import { restorePreservationRecoveries } from './preservation-recovery.mjs'
 import { restoreStockDependencyBarriers } from './bg-stock-dependency.mjs'
 import { FactoryRegistryStore } from './factory-registry-runtime.mjs'
+import { FactoryUseRecoveryStore } from './factory-cell-use-recovery.mjs'
 import { committedFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
+import { factoryUseDecision, factoryOperationUseDecision } from './factory-cell-use.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -116,32 +120,6 @@ function revisionSuffix(previousBoard, incomingPlan) {
   const includesVerifiedPrefix = Array.from({ length: completed }, (_, index) =>
     clean(incoming[index]) === clean(previousBoard.steps?.[index]?.description)).every(Boolean)
   return includesVerifiedPrefix ? incoming.slice(completed) : incoming
-}
-
-// Two step lists describe the same slice when their normalized descriptions
-// match one for one. Long descriptions are compared on a bounded prefix so a
-// truncation on either side cannot split them.
-function stepKey(description) {
-  return clean(description).slice(0, 200)
-}
-
-function carriedPrefixLength(plan) {
-  return Array.isArray(plan?.carried_forward_evidence) ? plan.carried_forward_evidence.length : 0
-}
-
-/**
- * How the legacy board and the reducer plan line up: the board index of the
- * reducer plan's first step. A revised plan carries its verified predecessor
- * steps on the board only (offset = carried prefix); every other plan starts
- * at 0. `undefined` when the two do not describe the same steps.
- */
-export function boardPlanAlignment(board, plan) {
-  if (!Array.isArray(board?.steps) || !Array.isArray(plan?.steps) || plan.steps.length === 0) return undefined
-  const aligned = offset => board.steps.length === offset + plan.steps.length
-    && plan.steps.every((step, index) => stepKey(step?.description) === stepKey(board.steps[offset + index]?.description))
-  const carried = carriedPrefixLength(plan)
-  if (carried > 0 && aligned(carried)) return carried
-  return aligned(0) ? 0 : undefined
 }
 
 /**
@@ -691,6 +669,8 @@ function sanitizeIntakeRetry(record) {
 
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   #factoryRegistry
+  #factoryUseRecovery = new FactoryUseRecoveryStore()
+  #factoryControlRevision = 0
 
   constructor(options = {}) {
     super(options)
@@ -718,6 +698,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   // Host-only world lifecycle. No goal/actor-derived identity and no model tool.
   initializeFactoryRegistry(worldId) { return this.#factoryRegistry.initialize(worldId) }
   getFactoryRegistry() { return this.#factoryRegistry.read() }
+  consumeFactoryUseRecovery(key, requirement, attempt) {
+    const state = this.planningState(key); const plan = getActivePlan(state)
+    if (state?.goal?.status !== 'active' || plan?.plan_id !== attempt.plan_id) throw new Error('factory_use_recovery_owner_stale')
+    return this.#factoryUseRecovery.consume(state.goal.goal_id, requirement, attempt)
+  }
+  getFactoryOperationalRegistry() { return this.#factoryRegistry.operational() }
+  factoryLifecycleRevision() { return this.#factoryRegistry.lifecycleRevision() }
+  factoryControlRevision() {
+    if (this.#factoryControlRevision === Number.MAX_SAFE_INTEGER) throw new Error('factory_control_history_unavailable')
+    return this.#factoryControlRevision
+  }
+  factoryLifecycleTransactions() { return this.#factoryRegistry.lifecycleTransactions() }
+  factoryTemporaryIntents() { return this.#factoryRegistry.lifecycleTemporaryIntents() }
+  factoryTemporaryAssets() { return this.#factoryRegistry.lifecycleTemporaryAssets() }
+  markFactoryLifecyclePersisted(snapshot) { return this.#factoryRegistry.markLifecyclePersisted(snapshot) }
+  createFactoryCellLifecycleRuntime(key, readContext) { return this.#factoryRegistry.lifecycleRuntime(this, key, readContext) }
   factoryRegistryStatus() { return this.#factoryRegistry.status() }
   factoryWorldBinding() { return this.#factoryRegistry.worldBinding() }
   factoryCellObservations() { return this.#factoryRegistry.observations() }
@@ -885,6 +881,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   recordRunPause(key, state, reason, pauseInfo = {}) {
+    if (pauseInfo?.pause_class === PAUSE_CLASS.OPERATOR) this.#factoryControlRevision = Math.min(Number.MAX_SAFE_INTEGER, this.#factoryControlRevision + 1)
     if (!this.#reducerHoldsGoal(key, state)) return super.recordRunPause(key, state, reason, pauseInfo)
     const after = this.#applyRunEvent(key, {
       type: PLANNING_EVENT.RUN_PAUSED,
@@ -1564,6 +1561,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const validation = runtime_validation ?? runtimeValidation
     if (!validation || validation.passed !== true) return planning
 
+    const factoryUse = factoryUseDecision(this, key, plan.steps[plan.active_step_index])
+    if (!factoryUse.ok) {
+      const error = new Error(factoryUse.code)
+      error.code = factoryUse.code
+      throw error
+    }
+
     planning = applyPlanningEvent(planning, {
       type: PLANNING_EVENT.PLAN_COMMITTED,
       now,
@@ -1981,8 +1985,15 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }, requestId)
     }
     if (verdict.ok) {
-      const factory = this.#factoryRegistry.admission(operations)
+      const factory = this.#factoryRegistry.admission(operations, { goal_id: planning?.goal?.goal_id, plan_id: plan?.plan_id,
+        request_id: requestId, actor_id: actor?.actor_id, actor_epoch: actor?.actor_epoch ?? actor?.epoch })
       if (!factory.ok) this.#authTrace('admission.factory_cell_refused', { ...factory, plan_id: plan?.plan_id }, requestId)
+      if (factory.ok && !factory.lifecycle_transaction_id) {
+        const use = factoryUseDecision(this, key, plan?.steps?.[plan.active_step_index])
+        if (!use.ok) return { ok: false, code: use.code, refusal_class: 'world', stage: 'admission', operation_index: 0, operation: operations?.[0]?.name }
+        const resolved = factoryOperationUseDecision(this, key, operations, { requestId, actor })
+        if (!resolved.ok) return { ...resolved, refusal_class: 'world', stage: 'admission', operation_index: 0, operation: operations?.[0]?.name }
+      }
       return factory
     }
     const payload = {
@@ -2304,7 +2315,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const planning = this.planningState(key)
     const plan = getActivePlan(planning)
     const step = plan?.steps?.[plan.active_step_index]
-    const guard = conflictingOperation(planning, { operations, gatherRecoveryKey, planId: plan?.plan_id, stepId: step?.step_id })
+    const factoryLifecycleRecoveryKeys = this.#factoryRegistry.lifecycleResidualRetryKeys(operations, { goal_id: planning?.goal?.goal_id,
+      plan_id: plan?.plan_id, plan_version: plan?.plan_version, semantic_step_id: step?.semantic_step_id ?? step?.step_id, request_id: requestId })
+    const guard = conflictingOperation(planning, { operations, gatherRecoveryKey, factoryLifecycleRecoveryKeys, planId: plan?.plan_id, stepId: step?.step_id })
     if (guard.refuse) {
       const pending = this.pendingOperations(key).find(record => record.operation_key === guard.operation_key)
       this.#authTrace('operation.duplicate_suppressed', {
@@ -2342,6 +2355,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const event = { type: PLANNING_EVENT.STEP_CONTRACT_BOUND, now, source: 'runtime', plan_id: planId, step_id: stepId, contract, binding, request_id: requestId }
     const check = checkStepContractBind(planning, event)
     if (!check.ok) return refuse(check.reason)
+    const factoryUse = factoryUseDecision(this, key, { ...check.step, completion_contract: check.contract })
+    if (!factoryUse.ok) return refuse(factoryUse.code)
     const durable = safeDurableStepCompletionContract(check.contract, check.step)
     const alignment = boardPlanAlignment(legacy.task_board, check.plan)
     const boardIndex = alignment === undefined ? -1 : alignment + check.index
@@ -2989,6 +3004,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       if (committedFactoryCellIntent(step) && !this.#factoryRegistry.read().cells.some(cell => cell.enrollment?.goal_id === plan.goal_id
         && cell.enrollment.semantic_step_id === (step.semantic_step_id ?? step.step_id)
         && cell.enrollment.intent_signature === factoryCellIntentSignature(step.execution_guidance))) return refuse('factory_enrollment_required')
+      const use = factoryUseDecision(this, key, step, { close: true })
+      if (!use.ok) return refuse(use.code)
     }
     catch { return refuse('factory_enrollment_unavailable') }
     const now = state.updated_at ?? Date.now()
@@ -3174,6 +3191,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return {
       ...snapshot,
       ...this.#factoryRegistry.snapshot(),
+      ...this.#factoryUseRecovery.snapshot(),
+      factory_control_revision: this.#factoryControlRevision,
       ...(this.plannerSkillHandoffs?.size ? { planner_skill_handoffs: [...this.plannerSkillHandoffs.entries()].slice(0, 128) } : {}),
       production_tasks: [...(this.productionTasks ?? new Map()).entries()],
       stock_dependency_barriers: [...(this.stockDependencyBarriers ?? new Map()).entries()],
@@ -3318,6 +3337,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   restore(snapshot) {
+    this.#factoryUseRecovery.restore(snapshot)
+    const controlRevision = snapshot.factory_control_revision ?? 0
+    if (!Number.isSafeInteger(controlRevision) || controlRevision < this.#factoryControlRevision) this.#factoryControlRevision = Number.MAX_SAFE_INTEGER
+    else this.#factoryControlRevision = controlRevision
     this.#factoryRegistry.restore(snapshot, (event, data) => {
       try { this.traceSink?.(event, data) } catch { /* Diagnostics never grant or revoke registry validity. */ }
     })

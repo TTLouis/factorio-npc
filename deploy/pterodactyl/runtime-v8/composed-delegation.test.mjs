@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { DRILL_OUTPUT, DRILL_SET, DRILL_UNIT, DrillFurnaceFactorio, FURNACE_SET, GROUND_ORE } from './composed-delegation-fixtures.mjs'
@@ -23,8 +26,11 @@ import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 //                            no operations (plan.delegation_committed: validated_plan_without_initial_batch). The executor is
 //                            restaged fresh at commit (C3).
 //   2  placement             Run Z batch 21 / Run AA: the executor reads placement candidates (drill over the copper patch with its
-//                            item_output_position; a furnace whose footprint covers that drop point) and places both in ONE batch
-//                            of two placing tasks, through the held-item preflight, the batch stock ledger and admission.
+//                            item_output_position; a furnace whose footprint covers that drop point) and submits both in ONE batch
+//                            of two placing tasks. The mod keeps one exact placement result per batch, so a direct-feed step cannot
+//                            take custody of the first machine: the batch is refused before any native read or send as a
+//                            model-correctable argument (within the bounded correction budget), and the executor places the drill,
+//                            then the furnace, each alone, through the held-item preflight, the batch stock ledger and admission.
 //                            Run AE: spilled ore lies on the furnace footprint; the candidate lists it as ground_items and the
 //                            build picks it up. Run AF: the receipt carries ground_items_picked_up, the actor inventory gains
 //                            the ore, and the next executor turn is shown that receipt.
@@ -39,15 +45,20 @@ import { inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 //                            that restage (context.restage_folded): the C8 conversation resumes with the notes, no second packet.
 //   5  second review, resume Runs AD-AF: the executor asks for review of the same step again. There is no second planner round: the
 //                            goal takes a model_recoverable pause, the supervisor schedules the bounded auto-resume (X-1), the
-//                            timer fires, a C7 restage hands the step to a fresh executor, which acts (fuel, wait, collect); the
-//                            goal completes and is verified by the harness (goal.evaluated satisfied).
+//                            timer fires, a C7 restage hands the step to a fresh executor, which acts (fuel, collect). The plate
+//                            count is met, but the direct-feed step closes only on an attributed delivery window: two native
+//                            frames with no other operation between them. The collection restarted that window, so the close is
+//                            declined without a pause and the executor is told so; its wait-only batch supplies the second frame.
+//                            That window is inconclusive (the furnace started it holding ore and finished more crafts than it
+//                            received), so it rebases on its newer frame and the close is declined again; a second wait, from an
+//                            empty idle furnace, proves delivery, and the goal is verified by the harness (goal.evaluated satisfied).
 // Gates at the end: no dangling context reference (f36e837c), no silent stall, no unresumed model_recoverable pause, one review
 // round, a strict boundary. The C7 packet must carry the step contract, held counts and placed machines (U4), and the planner's review
 // notes (X-1b, a90c3d52). A protocol 3 packet and its topology block share 6,000 characters and the packet limit follows the block's real
 // size; this run's C7 packet was ~3,850 characters under a fixed 4,050 window, so the assertions failed first when a plan or receipt grew.
 //
-// A second test runs the same scenario with the first placement batch refused after its first task (Run Z batch 21 / Run AA): the
-// drill is built, the furnace is refused with the mod's native no-mutation proof, the settled prefix is stated as a fact, and the
+// A second test runs the same scenario with the furnace placement refused by the game (Run Z batch 21 / Run AA): the drill is
+// already built, the furnace is refused with the mod's native no-mutation proof, the refusal is settled as a fact, and the
 // corrected batch places the furnace alone over the spilled ore (Run AF).
 //
 // No finding is expected. Step 2 used to show one restage_loop (C8, then C3 for the review handback, then C7 for the resume, no
@@ -99,7 +110,10 @@ async function runScenario(t, { refusePrefix = false } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const game = new DrillFurnaceFactorio()
   const model = new ScriptedModel()
-  const world = recoveryWorld({ game, model, completionProtocolVersion: 3 })
+  // Factory enrollment at the step close is durable state, so this run persists like the deployed host.
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'composed-delegation-'))
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }))
+  const world = recoveryWorld({ game, model, completionProtocolVersion: 3, stateFile: path.join(directory, 'state.json') })
   world.agent.restageSoftLimitOption = { executor: EXECUTOR_SOFT_LIMIT_TOKENS }
   const { memory } = world
   const { session, chat, logs } = recoverySession(world)
@@ -113,11 +127,16 @@ async function runScenario(t, { refusePrefix = false } = {}) {
     .push('executor', 's1:read-drill-candidates', toolCall('s1-drill', 'getPlacementCandidates',
       { entity_name: 'burner-mining-drill', target_resource: 'copper-ore', center: { x: 13.5, y: -5.5 }, radius: 6, limit: 3 }))
     .push('executor', 's1:read-furnace-candidates', toolCall('s1-furnace', 'getPlacementCandidates', { entity_name: 'stone-furnace', covers_position: DRILL_OUTPUT, radius: 4, limit: 3 }))
-    .push('executor', 's1:place-drill-and-furnace', () => { observed.plan = structuredClone(getActivePlan(memory.planningState(KEY))); return contextPressure(act(memory, [placeCandidate(DRILL_SET), placeCandidate(FURNACE_SET)])) })
-  // Run Z / AA: the refused-prefix variant. The drill (task 1) is built, the furnace (task 2) is refused before it creates anything, and
-  // the corrected batch places the furnace alone.
-  if (refusePrefix) model.push('executor', 's1:place-furnace-alone', (messages) => { observed.correctionPrompt = textOf(messages); return contextPressure(act(memory, [placeCandidate(FURNACE_SET)])) })
+    .push('executor', 's1:place-drill-and-furnace', () => { observed.plan = structuredClone(getActivePlan(memory.planningState(KEY))); return act(memory, [placeCandidate(DRILL_SET), placeCandidate(FURNACE_SET)]) })
+    .push('executor', 's1:place-drill', (messages) => { observed.singletonPrompt = textOf(messages); return act(memory, [placeCandidate(DRILL_SET)]) })
+  // Run Z / AA: the refused-placement variant. The drill is built, the furnace is refused before it creates anything, and the corrected
+  // batch places the furnace alone.
+  if (refusePrefix) model.push('executor', 's1:place-furnace-refused', () => act(memory, [placeCandidate(FURNACE_SET)]))
   model
+    .push('executor', 's1:place-furnace', (messages) => {
+      if (refusePrefix) observed.correctionPrompt = textOf(messages)
+      return contextPressure(act(memory, [placeCandidate(FURNACE_SET)]))
+    })
     .push('executor', 's2:first-review', () => { observed.beforeReview = structuredClone(getActivePlan(memory.planningState(KEY))); return review(memory) })
     .push('planner', 's2:planner-review-round', () => draft({ chatMessage: NOTES, currentStep: 1 }))
     .push('executor', 's2:second-review', () => { observed.afterRound = structuredClone(getActivePlan(memory.planningState(KEY))); return review(memory) })
@@ -127,13 +146,19 @@ async function runScenario(t, { refusePrefix = false } = {}) {
     })
     .push('executor', 'c7:fuel-both-machines', () => act(memory, [supplyCoal(DRILL_UNIT, 5), supplyCoal(FURNACE_UNIT, 3)]))
     .push('executor', 'c7:collect-plates', () => act(memory, [collectPlates(20)]))
+    .push('executor', 'c7:wait-for-delivery', (messages) => { observed.deliveryPrompt = textOf(messages); return act(memory, [{ name: 'wait', args: { ticks: 600 } }]) })
+    .push('executor', 'c7:wait-again', (messages) => { observed.rebasedPrompt = textOf(messages); return act(memory, [{ name: 'wait', args: { ticks: 600 } }]) })
 
-  // --- 1 + 2: the player request, the planner draft, the executor's reads and its one batch of two placements ---------------------
+  // --- 1 + 2: the player request, the planner draft, the executor's reads, its refused two-placement batch, the drill alone -----------
   assert.equal(session.queuePlayerRequest('TTLouis', 'Make twenty copper plates with a burner mining drill feeding a stone furnace'), true)
   await settle(session)
   observed.admitted = { sent: structuredClone(game.sent), preflights: structuredClone(game.preflights), ground: structuredClone(game.ground) }
+
+  // --- the drill is built; the executor places the furnace alone ----------------------------------------------------------------------
+  await completeAndReport(ctx)
+  observed.furnaceAdmitted = { sent: structuredClone(game.sent), ground: structuredClone(game.ground) }
   if (refusePrefix) {
-    const reason = game.failAfterPrefix(1, { type: 'placing', code: 'not_placeable', entity_name: 'stone-furnace' })
+    const reason = game.failAfterPrefix(0, { type: 'placing', code: 'not_placeable', entity_name: 'stone-furnace' })
     observed.refusal = { reason, cancelled: structuredClone(game.cancelledBatch), drill: structuredClone(game.drill), inventory: { ...game.inventory } }
     session.lastErrorAt = 0
     session.onGameLine(`[AUTORIO] [ERROR] ${reason}`)
@@ -141,7 +166,7 @@ async function runScenario(t, { refusePrefix = false } = {}) {
     observed.corrected = { sent: structuredClone(game.sent), ground: structuredClone(game.ground) }
   }
 
-  // --- the game finishes the placements and reports it; step 1 closes; step 2 starts; the executor reviews twice -----------------------
+  // --- the game finishes the furnace placement and reports it; step 1 closes; step 2 starts; the executor reviews twice --------------
   await completeAndReport(ctx)
   observed.step2Start = { placements: structuredClone(game.placements), receipt: structuredClone(game.lastBasicResult), inventory: { ...game.inventory } }
 
@@ -154,7 +179,22 @@ async function runScenario(t, { refusePrefix = false } = {}) {
   game.advance(120) // the drill mines 30 ore and the furnace smelts them while the executor decides
   await reportCompletion(ctx)
   observed.afterFuel = { drill: structuredClone(game.drill), furnace: structuredClone(game.furnace) }
+  // The plates are collected: the count is met, and the attributed delivery window holds only its first frame.
   await completeAndReport(ctx)
+  observed.afterCollect = { status: memory.currentPlan(KEY).status, completed: memory.currentPlan(KEY).task_board.completed_count,
+    pause: memory.pauseRecord(KEY).paused, plates: game.inventory['copper-plate'] }
+  // The wait-only batch runs while the drill keeps feeding the furnace; its completion read is the window's second frame. The furnace
+  // started that window holding one ore and finished more crafts than it received, so the window is inconclusive and its newer frame
+  // becomes the first frame of the next one.
+  game.completeBatch()
+  game.advance(10)
+  await reportCompletion(ctx)
+  observed.afterFirstWait = { status: memory.currentPlan(KEY).status, completed: memory.currentPlan(KEY).task_board.completed_count,
+    pause: memory.pauseRecord(KEY).paused }
+  // The second wait starts from an empty, idle furnace, so a finished craft can only be smelted from ore the drill delivered.
+  game.completeBatch()
+  game.advance(10)
+  await reportCompletion(ctx)
   return { ...ctx, rows, data, observed }
 }
 
@@ -205,6 +245,7 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
   const ctx = await runScenario(t)
   const { game, model, world, chat, rows, data, observed } = ctx
   const calls = model.calls
+  const callAt = label => calls.find(call => call.label === label)
 
   await t.test('1 planner draft: protocol 3, the planner authors no operation and the executor is restaged fresh at commit', () => {
     assert.equal(world.agent.completionProtocolVersion, 3)
@@ -223,18 +264,25 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(data('plan.later_contracts_deferred').length, 1, 'the second step contract is authored when that step starts')
   })
 
-  await t.test('2 placement: both placements are one admitted batch; the ground ore is picked up and the receipt says so', () => {
+  await t.test('2 placement: the two-placement batch is refused before admission, each machine is placed alone, and the ground ore is picked up', () => {
     assert.deepEqual(game.candidateReads.map(read => [read.entity_name, read.args.target_resource ?? null, read.args.covers_position ?? null]),
       [['burner-mining-drill', 'copper-ore', null], ['stone-furnace', null, DRILL_OUTPUT]])
     assert.equal(data('observation.placement_candidates_observed').length, 2)
-    // Run Z batch 21: two placements of one batch go through the held-item preflight and the batch ledger, then are admitted together.
-    assert.deepEqual(observed.admitted.sent.map(batch => batch.operations.map(operation => [operation.name, operation.args.candidate_set_id])),
-      [[['place_candidate', DRILL_SET], ['place_candidate', FURNACE_SET]]])
-    assert.deepEqual(observed.admitted.preflights.map(entry => [entry.name, entry.result.ok]), [['place_candidate', true], ['place_candidate', true]])
+    // The mod keeps only the last placement result of a batch, so the first machine of a two-placement batch could not be enrolled
+    // from an exact receipt. The harness refuses that batch before anything is sent and gives the executor one correction turn.
+    const [refused, ...moreRefused] = data('operations.preflight_recoverable')
+    assert.equal(moreRefused.length, 0)
+    assert.deepEqual([refused.failure_class, refused.preflight.code, refused.preflight.refusal_class, refused.preflight.placements, refused.preflight.operations],
+      ['model_correctable_factory_direct_feed_single_placement_required', 'factory_direct_feed_single_placement_required', 'argument', 2, 2])
     assert.equal(rows('operations.preflight_rejected').length, 0)
-    assert.equal(rows('operations.preflight_recoverable').length, 0)
-    assert.equal(data('operations.admit').length >= 1, true)
-    assert.deepEqual(observed.admitted.ground, [GROUND_ORE], 'the ore was still on the ground when the batch was admitted')
+    assert.match(observed.singletonPrompt, /Refused before admission \(factory_direct_feed_single_placement_required\); no operation from this batch ran/)
+    assert.match(observed.singletonPrompt, /one placement per batch/)
+    assert.deepEqual(observed.admitted.sent.map(batch => batch.operations.map(operation => [operation.name, operation.args.candidate_set_id])),
+      [[['place_candidate', DRILL_SET]]], 'nothing from the refused batch was sent; the corrected batch is the drill alone')
+    assert.deepEqual(observed.admitted.preflights.map(entry => [entry.name, entry.result.ok]), [['place_candidate', true]])
+    assert.deepEqual(observed.furnaceAdmitted.sent.map(batch => batch.operations.map(operation => operation.args.candidate_set_id)), [[DRILL_SET], [FURNACE_SET]])
+    assert.deepEqual(observed.admitted.ground, [GROUND_ORE], 'the ore was still on the ground when the drill was admitted')
+    assert.deepEqual(observed.furnaceAdmitted.ground, [GROUND_ORE], 'and when the furnace was admitted')
     // Run AE / AF: the furnace placement picked the ore up; the actor holds it and the ground is clear.
     assert.deepEqual(game.placements.map(placed => [placed.entity_name, placed.picked_up.reduce((sum, item) => sum + item.count, 0)]), [['burner-mining-drill', 0], ['stone-furnace', 4]])
     assert.deepEqual(game.ground, [])
@@ -242,16 +290,18 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(observed.step2Start.inventory['stone-furnace'], 2)
     assert.equal(observed.step2Start.inventory['burner-mining-drill'], 1)
     assert.deepEqual(observed.step2Start.receipt.ground_items_picked_up, [GROUND_ORE])
+    assert.deepEqual([observed.step2Start.receipt.entity_name, observed.step2Start.receipt.placed_batch_id], ['stone-furnace', 2], 'an exact single-placement receipt')
     assert.equal(rows('placement.npc_recorded').length >= 1, true)
     // The next executor turn is shown the receipt with the pickup in it.
-    const afterBatch = calls[4].messages.filter(message => message.role === 'user' && String(message.content).startsWith('[MOD]')).map(message => message.content).join('\n')
+    const afterBatch = callAt('s2:first-review').messages.filter(message => message.role === 'user' && String(message.content).startsWith('[MOD]')).map(message => message.content).join('\n')
     assert.match(afterBatch, /"ground_items_picked_up":\[\{"name":"copper-ore","count":4/)
   })
 
   await t.test('3 step close: the live entity count closes step 1 and the next step starts with a fresh executor', () => {
     const counts = rows('step.entity_count_checked').map(row => row.data)
     assert.deepEqual(counts.slice(-2).map(row => [row.prototype, row.authoritative, row.current, row.satisfied]), [['burner-mining-drill', true, 1, true], ['stone-furnace', true, 1, true]])
-    assert.equal(data('step.completion_checked')[0].status, 'verified')
+    assert.deepEqual(data('step.completion_checked').map(row => row.status), ['waiting', 'verified', 'waiting', 'verified'],
+      'step 1 waits after the drill alone and closes after the furnace; step 2 waits, then closes on the delivery window')
     assert.deepEqual(data('step.verified').map(row => row.active_step_id), ['step_1', 'step_2'], 'step 1 here, step 2 at the end of the run')
     assert.equal(data('step.verified')[0].task_board.steps[0].status, 'completed')
     assert.equal(data('plan.contract_bound_just_in_time').length, 1, 'the step-2 contract was authored when the step started')
@@ -261,7 +311,7 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     const fresh = data('context.restaged').find(row => row.checkpoint === 'C8')
     assert.deepEqual([fresh.role, fresh.step_id], ['executor', stepTwo])
     // The step-2 executor's first provider call was built from the packet, not carried from step 1.
-    const messages = calls[4].messages
+    const messages = callAt('s2:first-review').messages
     assert.equal(messages.some(message => message.role === 'assistant'), false, 'no earlier executor turn is carried into the fresh conversation')
     assert.match(textOf(messages), /restage: role=executor checkpoint=C8/)
     assert.match(textOf(messages), new RegExp(`active_step: 2 of 2 ${stepTwo}`))
@@ -292,7 +342,7 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
 
     assert.deepEqual(observed.afterRound.steps, observed.beforeReview.steps, 'the review round cannot change the committed steps')
     assert.equal(observed.afterRound.plan_id, observed.beforeReview.plan_id)
-    const back = calls[6]
+    const back = callAt('s2:second-review')
     assert.equal(back.role, 'executor')
     assert.equal(textOf(back.messages).split('fuel the drill with 5 coal').length - 1, 1, 'the handed-back executor sees the planner notes once')
     // The handback is folded into the step-close restage: the executor that asked for the review resumes with its C8 packet (the
@@ -345,22 +395,41 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(c7.step_id, scheduled.step_id)
     assert.match(c7.reason, /auto_resume_after_model_recoverable_pause/)
     // Protocol 3 keeps the packet and the fresh_topology block of the same request inside the same 6,000 characters.
-    const topologyChars = lineStarting(calls[7].messages, 'fresh_topology: ').length
+    const topologyChars = lineStarting(callAt('c7:observe').messages, 'fresh_topology: ').length
     assert.ok(c7.packet_chars + 1 + topologyChars <= 6000, `the protocol 3 packet and its topology block fit 6,000 characters (${c7.packet_chars} + ${topologyChars})`)
-    assert.doesNotMatch(lineStarting(calls[7].messages, 'fresh_topology: '), /size_limit/, 'the C7 request sent the topology block, not the size stub')
+    assert.doesNotMatch(lineStarting(callAt('c7:observe').messages, 'fresh_topology: '), /size_limit/, 'the C7 request sent the topology block, not the size stub')
     assert.deepEqual(data('context.topology_trimmed'), [], 'no request trimmed or omitted its topology block')
     assert.deepEqual(calls.map(call => call.label), [
-      'planner:draft', 's1:read-drill-candidates', 's1:read-furnace-candidates', 's1:place-drill-and-furnace',
+      'planner:draft', 's1:read-drill-candidates', 's1:read-furnace-candidates', 's1:place-drill-and-furnace', 's1:place-drill', 's1:place-furnace',
       's2:first-review', 's2:planner-review-round', 's2:second-review', 'c7:observe', 'c7:fuel-both-machines', 'c7:collect-plates',
+      'c7:wait-for-delivery', 'c7:wait-again',
     ])
-    assert.equal(calls[7].context.triggerSource, 'recovery')
-    // The restaged executor acted on the same step: both machines fuelled in one batch, then the plates collected.
-    const [, fuelBatch, collectBatch] = game.sent
+    assert.equal(callAt('c7:observe').context.triggerSource, 'recovery')
+    // The restaged executor acted on the same step: both machines fuelled in one batch, then the plates collected, then two waits.
+    const [, , fuelBatch, collectBatch, ...waits] = game.sent
+    assert.deepEqual(waits.map(batch => batch.operations.map(operation => operation.name)), [['wait'], ['wait']])
+    assert.deepEqual(data('operations.admit').slice(-2).map(row => row.operations.map(operation => [operation.name, operation.args.ticks])), [[['wait', 600]], [['wait', 600]]])
     assert.deepEqual(fuelBatch.operations.map(operation => [operation.name, operation.args.unit_number, operation.args.items[0].count]), [['supply_entity', DRILL_UNIT, 5], ['supply_entity', FURNACE_UNIT, 3]])
     assert.deepEqual(collectBatch.operations.map(operation => [operation.name, operation.args.item_name, operation.args.max_count, operation.args.to_entity]), [['move_items_exact', 'copper-plate', 20, false]])
     assert.ok((observed.afterFuel.drill.fuel.coal ?? 0) < 5, 'the drill burned coal while it mined')
     assert.ok(observed.afterFuel.drill.mined >= 25, `the drill mined ore into the furnace (${observed.afterFuel.drill.mined})`)
     assert.ok(game.inventory['copper-plate'] >= 20, `the actor holds the plates (${game.inventory['copper-plate']})`)
+    // The plate count was met at the collect, but a direct-feed step closes only on an attributed delivery window: two native frames with
+    // no other operation between them. The collect's frame starts the window; the first wait's window is inconclusive (the furnace began
+    // it holding ore and finished more crafts than it received) and rebases; the second wait, from an empty idle furnace, proves delivery.
+    // Every miss declined the close without a pause and told the executor that a wait completes it.
+    assert.deepEqual([observed.afterCollect.status, observed.afterCollect.completed, observed.afterCollect.pause], ['active', 1, false])
+    assert.deepEqual([observed.afterFirstWait.status, observed.afterFirstWait.completed, observed.afterFirstWait.pause], ['active', 1, false])
+    assert.deepEqual(data('step.close_declined').filter(row => row.reason === 'factory_cell_delivery_unverified').map(row => [row.trigger, row.observation]), [
+      ['batch_receipt', 'direct_delivery_window_started'], ['fresh_read_checkpoint_met_before_wait', 'direct_delivery_window_no_new_tick'],
+      ['fresh_read_delivery_window_wait', 'direct_delivery_window_rebased'], ['fresh_read_checkpoint_met_before_wait', 'direct_delivery_window_no_new_tick']])
+    assert.equal(rows('factory_cell.enrollment_close_refused').length, 0, 'no delivery miss reached the guard pause')
+    for (const prompt of [observed.deliveryPrompt, observed.rebasedPrompt]) assert.match(prompt, /closes only when two native frames, with no other operation between them/)
+    const delivered = data('factory_cell.use_resolved').filter(row => row.phase === 'close').map(row => JSON.stringify(row))
+      .filter(text => text.includes('"code":"exclusive_direct_delivery_window"'))
+    assert.equal(delivered.length, 1, 'one close carried attributed delivery')
+    assert.match(delivered[0], /"basis":"empty_receiver_started_and_completed_native_crafting"/)
+    assert.match(delivered[0], /"continuous_supply":"unverified"/)
     assert.equal(data('goal.evaluated').at(-1).satisfied, true)
     const [validated] = data('outcome.validated').slice(-1)
     assert.deepEqual([validated.kind, validated.source, validated.reason_code, validated.task_board.status, validated.task_board.completed_count], ['verified_complete', 'step_completion_gate', 'verified_final_step', 'completed', 2])
@@ -369,7 +438,7 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
   })
 
   // --- the C7 packet (the restaged executor's first provider messages) ---------------------------------------------------------------
-  const c7Messages = calls[7].messages
+  const c7Messages = callAt('c7:observe').messages
 
   await t.test('C7 packet: the restaged executor is told the active step contract', () => {
     assert.match(lineStarting(c7Messages, 'active_step_contract:'), /copper-plate>=20/)
@@ -409,19 +478,20 @@ test('composed delegation, Z/AA prefix: a refused second placement settles with 
 
   await t.test('the game proved the refusal and the harness settled the prefix as a fact', () => {
     assert.equal(observed.refusal.cancelled.failed_before_mutation, true, 'the mod claims the refused placement changed nothing')
-    assert.equal(observed.refusal.cancelled.failed_task_index, 1)
-    assert.equal(observed.refusal.drill.placed, true, 'the first task of the batch built the drill')
+    assert.equal(observed.refusal.cancelled.failed_task_index, 0, "the furnace is its batch's only task")
+    assert.equal(observed.refusal.drill.placed, true, 'the drill was built by its own earlier batch')
     const [reconciled, ...more] = data('operation.reconciled').filter(row => row.verdict === 'refused_before_mutation')
     assert.equal(more.length, 0)
-    assert.deepEqual([reconciled.effect, reconciled.applied_slots, reconciled.refused_slots, reconciled.refusal_codes, reconciled.settled], ['happened', [1], [2], ['placing:not_placeable'], true])
-    assert.equal(rows('operation.uncertainty_blocked').length, 0, 'a proven prefix does not hold the step')
-    assert.match(observed.correctionPrompt, /refused operations 2 before changing anything[\s\S]*Operations 1 completed before the refusal; do not repeat them/)
+    assert.deepEqual([reconciled.effect, reconciled.applied_slots, reconciled.refused_slots, reconciled.refusal_codes, reconciled.settled], ['not_happened', [], [1], ['placing:not_placeable'], true])
+    assert.equal(rows('operation.uncertainty_blocked').length, 0, 'a proven refusal does not hold the step')
+    assert.match(observed.correctionPrompt, /Autorio operation error: placing:not_placeable/)
+    assert.match(observed.correctionPrompt, /"last_cancelled_batch":\{"batch_id":2,"task_count":1,"task_types":\["placing"\]/)
   })
 
   await t.test('only the furnace is placed again, over the spilled ore, and the drill is never placed twice', () => {
-    assert.deepEqual(game.sent.map(batch => batch.operations.map(operation => operation.args.candidate_set_id ?? operation.args.unit_number)),
-      [[DRILL_SET, FURNACE_SET], [FURNACE_SET], [DRILL_UNIT, FURNACE_UNIT], [FURNACE_UNIT]])
-    assert.deepEqual(game.placements.map(placed => [placed.batch_id, placed.entity_name, placed.picked_up.length]), [[1, 'burner-mining-drill', 0], [2, 'stone-furnace', 1]])
+    assert.deepEqual(game.sent.map(batch => batch.operations.map(operation => operation.args.candidate_set_id ?? operation.args.unit_number ?? operation.name)),
+      [[DRILL_SET], [FURNACE_SET], [FURNACE_SET], [DRILL_UNIT, FURNACE_UNIT], [FURNACE_UNIT], ['wait'], ['wait']])
+    assert.deepEqual(game.placements.map(placed => [placed.batch_id, placed.entity_name, placed.picked_up.length]), [[1, 'burner-mining-drill', 0], [3, 'stone-furnace', 1]])
     assert.deepEqual(observed.corrected.ground, [GROUND_ORE], 'the ore was still on the ground when the corrected batch was admitted')
     assert.deepEqual(game.ground, [], 'the corrected placement picked it up')
     assert.equal(game.inventory['burner-mining-drill'], 1, 'one of the two held drills was placed')

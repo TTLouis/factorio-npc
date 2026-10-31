@@ -312,9 +312,11 @@ test('actual admission refuses registered destructive and ambiguous mutations wi
     { name: 'mine_entity_exact', args: { unit_number: 900 } },
     { name: 'mine_entity', args: { entity_name: 'tree', count: 1 } },
     { name: 'clear_construction_area', args: { x: 0, y: 0, width: 4, height: 4 } },
+  ]) assert.equal(w.memory.checkOperationAdmission(KEY, { operations: [operation] }).ok, true)
+  for (const operation of [
     { name: 'supply_entity', args: { unit_number: 27, items: [{ item_name: 'coal', count: 1 }] } },
     { name: 'move_items_exact', args: { unit_number: 27, item_name: 'copper-plate', to_entity: false, max_count: 1 } },
-  ]) assert.equal(w.memory.checkOperationAdmission(KEY, { operations: [operation] }).ok, true)
+  ]) assert.equal(w.memory.checkOperationAdmission(KEY, { operations: [operation] }).code, 'factory_cell_operation_resolution_required')
   assert.equal(w.memory.getFactoryRegistry().cells[0].state, 'unverified', 'ordinary supply is not commissioning proof')
 })
 

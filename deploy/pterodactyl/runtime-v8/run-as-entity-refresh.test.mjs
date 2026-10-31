@@ -22,6 +22,7 @@ function world({ snapshot, readHook, traceHook, output = 10, provider } = {}) {
     furnace: { unit_number: machine.id, position: machine.position, fuel: stock(machine.inventories.fuel),
       source: {}, output: { 'copper-plate': output } } })
   Object.assign(game.status, { actor_id: 12, epoch: 1, surface_index: 1, connected_players: 0 })
+  game.installFactoryFixture(memory)
   game.batchId = 7 // AS's last native batch; new operations must not impersonate old receipts.
   game.researched.add('electronics')
   game.knownTechnologies.add('electronics')
@@ -30,7 +31,8 @@ function world({ snapshot, readHook, traceHook, output = 10, provider } = {}) {
   const native = game.command.bind(game)
   game.command = async text => {
     await readHook?.({ text, game, agent, memory })
-    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ actor: { actor_id: game.status.actor_id }, surface_index: game.status.surface_index, force_index: game.forceIndex ?? 1 })
+    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: game.status.mode,
+      actor: { actor_id: game.status.actor_id, valid: game.status.allowed === true, kind: game.status.actor_kind }, surface_index: game.status.surface_index, force_index: game.forceIndex ?? 1 })
     if (text.includes('"autorio_crafting","status"')) return JSON.stringify(game.craftingStatus ?? { task_active: false, native_queue: [] })
     if (text.includes('"get_entity_status"')) {
       const detail = game.entityRead()

@@ -26,7 +26,7 @@ function nativeBody(raw) {
 
 // Only exact observed native facts support compatibility. These are topology and
 // configuration checks, never commissioning, production, throughput or liveness.
-function mining(row, resource) {
+export function validateFactoryMiningSource(row, resource) {
   const source = row?.source_resources
   if (source?.state !== 'known' || source.truncated !== false || !Array.isArray(source.resources)
     || source.resources.length > 64 || !source.resources.length) return unknown('mining_source_unknown')
@@ -81,7 +81,7 @@ function directFeed(cell, rows, binding, supply) {
   const observedSource = rows.find(row => identity(row.locator, source))
   const observedTarget = rows.find(row => identity(row.locator, target))
   if (observedSource?.state !== 'observed' || observedTarget?.state !== 'observed') return unknown('binding_member_unverified')
-  const mined = mining(observedSource, supply.resource)
+  const mined = validateFactoryMiningSource(observedSource, supply.resource)
   if (mined.state !== 'compatible') return mined
   if (!mined.item_only) return unknown('direct_feed_product_type_unverified')
   const targetRecipe = recipe(observedTarget)
@@ -113,8 +113,21 @@ export function validateFactoryCellObservation({ registry, cell, native, binding
   // Assignment describes final products but stage 1 has no member roles. A known
   // intermediate recipe cannot refute the entire cell. Positive matching facts
   // are useful; absence of a matching machine is not a fabricated failure.
-  if (cell.assignment.products.length === 0) checks.push(unknown('assigned_service_capability_unverified'))
-  for (const product of cell.assignment.products) {
+  if (cell.enrollment?.output_roles) {
+    for (const output of cell.enrollment.output_roles) {
+      const role = cell.enrollment.member_roles.find(row => row.role === output.role)
+      const member = cell.members.find(row => row.provenance.receipt_id === role.receipt_id)
+      const row = rows.find(row => identity(row.locator, member))
+      const port = cell.ports.find(port => port.port_id === output.port_id)
+      const found = row?.state === 'observed' && (port.kind === 'power'
+        ? row.progress_facts?.electricity_production?.state === 'known' && row.progress_facts.electricity_production.producer === true
+        : assignedOutput(row, port.resource, port.kind))
+      checks.push(found ? verdict('compatible', 'assigned_role_native_capability', { role: output.role, port_id: port.port_id })
+        : { ...unknown('assigned_role_capability_unverified'), role: output.role, port_id: port.port_id })
+    }
+  }
+  else if (cell.assignment.products.length === 0) checks.push(unknown('assigned_service_capability_unverified'))
+  for (const product of cell.enrollment?.output_roles ? [] : cell.assignment.products) {
     const kinds = [...new Set(cell.ports.filter(port => port.direction === 'output' && port.resource === product)
       .map(port => port.kind === 'fuel' ? 'item' : port.kind))]
     const found = (kinds.length ? kinds : [undefined]).every(kind => rows.some(row => row.state === 'observed' && assignedOutput(row, product, kind)))
@@ -204,36 +217,49 @@ export function createFactoryCellObserver({ memory, key, readContext, callNative
       return native.world_id
     }),
     list: () => {
-      const registry = memory.getFactoryRegistry()
+      const registry = memory.getFactoryOperationalRegistry?.() ?? memory.getFactoryRegistry()
       return { world_id: registry.world_id, revision: registry.revision, cells: registry.cells.map(cell => ({ cell_id: cell.cell_id, revision: cell.revision, assignment: cell.assignment,
         surface_index: cell.surface_index, force_index: cell.force_index, member_count: cell.members.length,
         location: recordedLocation(cell), commissioning: 'unverified' })) }
     },
     // Host-only provisional read. No assignment enters the registry and no
     // observation summary can turn this candidate into a commissioned cell.
+    observePlacement: receiptId => guarded('observe_placement', async owner => {
+      if (!runtime) fail('factory_world_unbound')
+      const scope = runtime.scope(); const receipt = memory.factoryPlacementReceipt(receiptId)
+      if (!receipt || ['world_id', 'goal_id', 'semantic_step_id', 'surface_index', 'force_index'].some(field => receipt[field] !== scope[field])) fail('factory_placement_unproven')
+      const member = Object.fromEntries(['unit_number', 'name', 'position', 'surface_index', 'force_index'].map(field => [field, receipt[field]]))
+      const request = { schema_version: 1, world_id: scope.world_id, actor_id: scope.actor_id, request_id: scope.request_id,
+        surface_index: scope.surface_index, force_index: scope.force_index, members: [member] }
+      const native = nativeBody(await callNative('observe', request))
+      same(owner); runtime.assertScope(scope)
+      if (native.schema_version !== 1 || native.ok !== true || ['world_id', 'actor_id', 'request_id', 'surface_index', 'force_index'].some(field => native[field] !== request[field])
+        || !Number.isSafeInteger(native.tick) || native.tick < 0 || native.members?.length !== 1 || !identity(native.members[0]?.locator, member)) fail('factory_native_observation_members_mismatch')
+      return native
+    }),
     observeCandidate: (declaration, binding) => guarded('observe_candidate', async owner => {
       if (!runtime) fail('factory_world_unbound')
       const scope = runtime.scope()
-      const registry = memory.getFactoryRegistry()
+      const registry = memory.getFactoryOperationalRegistry?.() ?? memory.getFactoryRegistry()
       const cell = registerFactoryCell(createFactoryRegistry(scope.world_id), declaration).cells[0]
-      if (cell.members.length !== 2 || cell.surface_index !== scope.surface_index || cell.force_index !== scope.force_index) fail('factory_cell_scope_mismatch')
+      if (cell.members.length < 1 || cell.members.length > FACTORY_OBSERVATION_LIMITS.members || cell.surface_index !== scope.surface_index || cell.force_index !== scope.force_index) fail('factory_cell_scope_mismatch')
       const plan = getActivePlan(memory.planningState(key))
       const materialSupply = plan?.steps?.[plan.active_step_index]?.execution_guidance?.materialSupply
-      directFeed(cell, [], binding, materialSupply)
+      if (binding) directFeed(cell, [], binding, materialSupply)
       const request = { schema_version: 1, world_id: scope.world_id, actor_id: scope.actor_id, request_id: scope.request_id,
         surface_index: scope.surface_index, force_index: scope.force_index, members: cell.members.map(({ provenance, ...member }) => member) }
       const native = nativeBody(await callNative('observe', request))
       same(owner); runtime.assertScope(scope)
       if (native.schema_version !== 1 || native.ok !== true) fail(token(native.code) ? native.code : 'factory_native_observation_refused')
       if (['world_id', 'actor_id', 'request_id', 'surface_index', 'force_index'].some(field => native[field] !== request[field])) fail('factory_native_observation_identity_mismatch')
-      if (!Number.isSafeInteger(native.tick) || native.tick < 0 || !Array.isArray(native.members) || native.members.length !== 2
+      if (!Number.isSafeInteger(native.tick) || native.tick < 0 || !Array.isArray(native.members) || native.members.length !== cell.members.length
         || cell.members.some(member => native.members.filter(row => identity(row?.locator, member)).length !== 1)) fail('factory_native_observation_members_mismatch')
       return { ...validateFactoryCellObservation({ registry, cell, native, binding, materialSupply }), native }
     }),
     observe: ({ cell_id, binding } = {}) => guarded('observe', async owner => {
       if (!runtime) fail('factory_world_unbound')
       const scope = binding ? runtime.scope() : runtime.readScope()
-      const registry = memory.getFactoryRegistry()
+      const registry = memory.getFactoryOperationalRegistry?.() ?? memory.getFactoryRegistry()
       const cell = registry.cells.find(row => row.cell_id === cell_id)
       if (!cell) fail('factory_cell_unknown')
       if (cell.surface_index !== scope.surface_index || cell.force_index !== scope.force_index) fail('factory_cell_scope_mismatch')

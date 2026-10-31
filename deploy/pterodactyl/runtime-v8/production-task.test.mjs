@@ -12,6 +12,8 @@ import { getActivePlan } from './planning-state.mjs'
 import { pinLegacyFixtureSkillContext, FakeFactorio } from './task-loop-fixtures.mjs'
 import { recoverySession } from './recovery-loop-fixtures.mjs'
 import { plannerControlPayloadFromMessage, executionOnlyControlToolDefinitions } from './structured-policy.mjs'
+import { installProductionFactoryFixture } from './bg-production-binding-fixtures.mjs'
+import { registerFactoryCell } from './factory-registry.mjs'
 
 const an = JSON.parse(await fs.readFile(new URL('./fixtures/run-an-production.json', import.meta.url), 'utf8'))
 const owner = { goal_id: 'goal', plan_id: 'plan', plan_version: 1, step_id: 'step' }
@@ -89,7 +91,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
     game.inventory.coal = 11 // Ten are protected by the AN kit checkpoint.
   }
   const machine = { unit_number: 45, name: 'stone-furnace', type: 'furnace', energy_source: 'burner', status_name: 'no_fuel', working: false,
-    position: { x: 18, y: 109 }, inventories: [1, 2, 3].map(index => ({ index, items: [] })), inventories_truncated: false, inventory_items_truncated: false }
+    position: { x: 18, y: 109 }, crafting_progress: 0, inventories: [1, 2, 3].map(index => ({ index, items: [] })), inventories_truncated: false, inventory_items_truncated: false }
   if (iron) Object.assign(machine, { unit_number: 44, position: { x: -44, y: 59 }, recipe: 'iron-plate' })
   const drill = { ...structuredClone(machine), unit_number: 43, name: 'burner-mining-drill', type: 'mining-drill', position: { x: -43, y: 61 },
     spatial: { item_io: { drop_target: { unit_number: 44 } } } }
@@ -122,7 +124,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   }
   game.command = async text => {
     await onRead?.({ agent, memory, game, text })
-    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ actor: { actor_id: 18 }, surface_index: 1, force_index: 1 })
+    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: 'npc', actor: { actor_id: 18, valid: true, kind: 'standalone_character' }, surface_index: 1, force_index: 1 })
     if (lostAck && text.includes('local ok,result=pcall') && text.includes('"authorize"')) {
       const mode = lostAck
       lostAck = undefined
@@ -138,7 +140,8 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
     if (text.includes('"recipe_details"')) {
       const name = /"recipe_details",'([^']+)'/.exec(text)?.[1]
       const recipe = recipes.find(row => row.name === name)
-      return JSON.stringify(recipe ? { found: true, truncated: false, recipes: [recipe], ...(fuelFacts ? { burner_fuels: burnerFuels } : {}),
+      return JSON.stringify(recipe ? { found: true, truncated: false, recipes: [{ ...recipe,
+        ingredients: recipe.ingredients.map(row => ({ type: 'item', ...row })), products: recipe.products.map(row => ({ type: 'item', ...row })) }], ...(fuelFacts ? { burner_fuels: burnerFuels } : {}),
         ...(name === 'copper-cable' ? { harvested_from: ['fulgoran-ruin-big'] } : {}) } : { found: false, code: 'no_recipe', mined_from: [], harvested_from: [] })
     }
     if (fuelFacts && text.includes('"mining_details"')) {
@@ -157,6 +160,34 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
     requestInfo: { memoryKey: an.key, turnId: 1, sender: '<server>', text: 'Continue the committed steam kit' }, traceRequest: { id: 'run-an-production' } })
   agent.agentContext.beginLineage('executor')
   agent.behaviorTrace = { emit: async row => events.push(row) }
+  const locator = entity => ({ unit_number: entity.unit_number, name: entity.name, position: entity.position, surface_index: 1, force_index: 1 })
+  const factory = installProductionFactoryFixture({ agent, memory, game, key: an.key, plan: held,
+    step: () => held().steps[held().active_step_index], machines: new Map((iron ? [drill, machine] : [machine]).map(row => [row.unit_number, row])), recipes,
+    projectMember: row => {
+      row.fuel_item_facts.items = burnerFuels.items.map(({ name, category, fuel_value }) => ({ name, category, fuel_value }))
+      if (!iron) return row
+      if (row.locator.unit_number === drill.unit_number) {
+        row.recipe = { state: 'unsupported', truncated: false, ingredients: [], products: [] }
+        row.progress_facts = { products_finished: { state: 'not_applicable' }, crafting_progress: { state: 'not_applicable' } }
+        row.source_resources = { state: 'known', truncated: false, resources: [{ name: 'iron-ore', products_truncated: false, products: [{ type: 'item', name: 'iron-ore' }] }] }
+        row.item_routes = { state: 'known', truncated: false, routes: [{ kind: 'drop', state: 'connected', target: locator(machine) }] }
+        row.endpoint_facts.item_drop = row.item_routes
+      } else {
+        row.progress_facts.products_finished = { state: 'known', value: producedIron }
+        row.incoming_item_facts = { schema_version: 1, tick: 1000 + game.batchId, state: 'known', coverage: 'complete', truncated: false, unresolved: false,
+          producers: [{ relation: 'mining_drop', state: 'connected', producer: locator(drill) }] }
+      }
+      return row
+    } })
+  if (furnace || iron) factory.retain(machine)
+  if (iron) {
+    const members = [drill, machine].map(entity => ({ ...locator(entity), provenance: { source: 'npc_placement_receipt', receipt_id: factory.retain(entity).receipt_id } }))
+    // Explicit synthetic retained assignment: the historical plan alone does not
+    // authorize adoption of a drill or a furnace as a new production supplier.
+    memory.restore({ ...memory.snapshot(), factory_registry: registerFactoryCell(memory.getFactoryRegistry(), {
+      surface_index: 1, force_index: 1, assignment: { products: ['iron-plate'], purpose: 'Retain the synthetic iron supplier', method: 'direct_feed' },
+      members, ports: [{ port_id: 'output', kind: 'item', direction: 'output', resource: 'iron-plate' }], origin: { source: 'synthetic_fixture' } }) })
+  }
   const commit = agent.commitPlan.bind(agent)
   agent.commitPlan = plan => {
     if (agent.productionAdmission && inject > 0 && plan.operations?.[0]?.name === 'craft_item' && plan.operations[0].args.item_name === 'copper-cable') {
@@ -176,6 +207,8 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   game.onMutation = text => {
     const op = /remote\.call\('autorio_operations','([a-z_]+)'/.exec(text)?.[1]
     ops.push(op)
+    if (op === 'wait') game.lastBasicResult = { type: 'waiting', operation_id: game.batchId, tick: 600 + game.batchId, actor_id: 18,
+      accepted: true, completed: true, code: 'completed' }
     if (iron) {
       if (op === 'supply_entity') {
         const target = text.includes("'supply_entity',43,") ? drill : machine
@@ -209,7 +242,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
     }
     if (op === 'supply_entity') {
       if (text.includes("item_name='coal'")) { machine.inventories[0].items = [{ name: 'coal', count: 1 }]; machine.status_name = 'no_ingredients'; game.inventory.coal-- }
-      else { machine.inventories[1].items = [{ name: 'copper-ore', count: 1 }]; machine.working = true; machine.status_name = 'working'; game.inventory['copper-ore']-- }
+      else { machine.inventories[1].items = [{ name: 'copper-ore', count: 1 }]; machine.recipe = 'copper-plate'; machine.working = true; machine.status_name = 'working'; game.inventory['copper-ore']-- }
     }
     if (op === 'wait') { machine.inventories[1].items = []; machine.inventories[2].items = [{ name: 'copper-plate', count: 1 }]; machine.working = false; machine.status_name = 'no_ingredients' }
     if (op === 'move_items_exact') { machine.inventories[2].items = []; game.inventory['copper-plate']++ }
@@ -315,6 +348,29 @@ test('exact AN iron step retains drill43/furnace44, fuels them once and collects
   assert.equal(w.providers.length, 0)
   assert.equal(w.memory.planningState(an.key).goal.status, 'active')
 })
+
+for (const limit of ['transitions', 'deadline', 'stalled']) {
+  test(`fulfilled stock cannot bypass or renew the ${limit} limit while waiting for direct delivery`, async () => {
+    const w = world({ iron: true })
+    w.game.inventory['iron-plate'] = 58
+    w.game.onMutation = () => {} // Explicit residual: native wait drains but production makes no progress.
+    await w.start()
+    const [key, task] = [...w.memory.productionTasks.entries()][0]
+    assert.equal(task.status, 'active', 'stock alone cannot persist completed production')
+    assert.deepEqual(w.ops, []) // This override deliberately does not record fake gameplay effects.
+    assert.equal(w.game.mutations.length, 1)
+    const expired = { ...task,
+      ...(limit === 'transitions' ? { transitions: PRODUCTION_LIMITS.transitions } : {}),
+      ...(limit === 'deadline' ? { deadline_at: Date.now() - 1 } : {}),
+      ...(limit === 'stalled' ? { last_progress_at: Date.now() - PRODUCTION_LIMITS.stalled_ms - 1 } : {}) }
+    w.memory.productionTasks.set(key, expired)
+    await w.agent.completed()
+    assert.equal(w.game.mutations.length, 1, 'exhaustion cannot submit another wait')
+    assert.equal(w.memory.productionTasks.get(key).status, 'paused')
+    assert.equal(w.memory.productionTasks.get(key).deadline_at, expired.deadline_at)
+    assert.equal(w.providers.length, 0)
+  })
+}
 
 test('residual exhaustion is durable across restart and cannot be replenished by resubmitting the intent', async () => {
   const w = world({ inject: 10 })

@@ -31,6 +31,7 @@ import { conflictingOperation, openSettledFences, operationLedger, OPERATION_LED
 import { applyPlanningEvent, createEmptyPlanningState, getActivePlan, PLANNING_EVENT, restorePlanningState, serializePlanningState } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
 import { FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { registerFactoryCell } from './factory-registry.mjs'
 
 const ACTOR = { actor_id: 8, epoch: 1 }
 const SUPPLY = { name: 'supply_entity', args: { unit_number: 25, items: [{ item_name: 'coal', count: 20 }] } }
@@ -436,6 +437,18 @@ function loopWorld({ operationsFor }) {
   game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'boiler', type: 'boiler', unit_number: 25, position: { x: 48, y: 14.5 }, distance: 8 }] }
   const memory = new CanonicalTaskBoardMemory()
   const prompts = []
+  // Synthetic single steam assignment supplements the historical receipt lane;
+  // its exact boiler identity/job is fixed before any model proposal.
+  const boiler = { unit_number: 25, name: 'boiler', position: { x: 48, y: 14.5 }, surface_index: 1, force_index: 1 }
+  const registry = registerFactoryCell(memory.initializeFactoryRegistry(game.factoryWorldId), { surface_index: 1, force_index: 1,
+    assignment: { products: ['steam'], purpose: 'Synthetic historical boiler fuel fixture', method: 'synthetic_fixture' },
+    members: [{ ...boiler, provenance: { source: 'synthetic_fixture' } }],
+    ports: [{ port_id: 'steam-output', direction: 'output', kind: 'fluid', resource: 'steam' }], origin: { source: 'synthetic_fixture' } })
+  memory.restore({ ...memory.snapshot(), factory_registry: registry })
+  game.factoryMembers.set(25, { locator: boiler, state: 'observed', type: 'boiler',
+    recipe: { state: 'known', truncated: false, name: 'synthetic-steam', ingredients: [{ name: 'water', type: 'fluid' }], products: [{ name: 'steam', type: 'fluid' }] },
+    burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['synthetic-fuel'], truncated: false },
+    fuel_item_facts: { state: 'known', truncated: false, items: [{ name: 'coal', category: 'synthetic-fuel', fuel_value: 1 }] } })
   const trace = []
   const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
   const agent = new NpcAgentLoop({
@@ -460,7 +473,11 @@ function loopWorld({ operationsFor }) {
   // What the retained mod does: a supply before the refused placement leaves the admission row 'uncertain'.
   const markUncertain = () => {
     // Fixture clock substitution: FakeFactorio stamps receipts 600 + batch id but admissions at its game tick; the retained run had admission tick < receipt tick.
-    for (const record of game.admissions) Object.assign(record, { state: 'uncertain', error: 'batch_reconciliation_required', ok: true, proven_refusal: undefined, applied_slot_count: undefined, tick: (game.cancelledBatch?.tick ?? 600) - 1 })
+    const cancelled = game.cancelledBatch
+    for (const record of game.admissions) {
+      if (!cancelled || record.batch_id !== cancelled.batch_id || record.generation !== cancelled.batch_generation) continue
+      Object.assign(record, { state: 'uncertain', error: 'batch_reconciliation_required', ok: true, proven_refusal: undefined, applied_slot_count: undefined, tick: cancelled.tick - 1 })
+    }
   }
   return { game, memory, agent, prompts, trace, markUncertain, plan: () => getActivePlan(memory.planningState(KEY)) }
 }

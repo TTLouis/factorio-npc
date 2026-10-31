@@ -366,7 +366,7 @@ test('full Session routes inland via fresh candidate reads through JIT planner c
   let engine = false
   const original = game.command.bind(game)
   game.command = async text => {
-    if (text.includes("remote.call('autorio_preflight','operation','place_candidate'")) return JSON.stringify({ ok: true })
+    if (text.includes("remote.call('autorio_preflight','operation','place_candidate'")) return JSON.stringify({ ok: true, operation: 'place_candidate', placement_item: { entity_name: text.includes('candidate-3') ? 'steam-engine' : 'pipe', count: 1 } })
     if (text.includes('"evaluate_condition"') && text.includes('"kind":"entity_count"')) return JSON.stringify({ ok: true, kind: 'entity_count', satisfied: engine, current: engine ? 1 : 0, found: engine ? 1 : 0, minimum: 1, prototype: 'steam-engine', tick: 1000, truncated: false })
     if (text.includes('"get_placement_candidates"')) {
       game.topologyReads.push('placement')
@@ -381,16 +381,29 @@ test('full Session routes inland via fresh candidate reads through JIT planner c
     if (text.includes("'craft_item','pipe',2")) { game.inventory['iron-plate'] -= 2; game.inventory.pipe = 2 }
     if (text.includes("'place_candidate'")) {
       game.lastTaskTypes = ['placing']
+      // Synthetic native placement result: the exact admitted single placement, as the mod reports it.
+      const engineBatch = text.includes("'candidate-3'")
+      const placed = engineBatch ? { unit: 203, name: 'steam-engine', type: 'generator', position: { x: -25.5, y: -94 } } : { unit: 201 + pipes, name: 'pipe', type: 'pipe', position: { x: -23.5 - pipes, y: -94 } }
+      game.lastBasicResult = { type: 'placing', operation_id: game.batchId, tick: 600 + game.batchId, actor_id: game.status.actor_id, accepted: true, completed: true, code: 'completed',
+        placed_unit_number: placed.unit, entity_name: placed.name, placed_entity_type: placed.type, placed_position: placed.position, placed_surface_index: 1, placed_direction: 0 }
+      game.factoryMembers.set(placed.unit, { locator: { unit_number: placed.unit, name: placed.name, position: placed.position, surface_index: 1, force_index: 1 }, type: placed.type, state: 'observed',
+        recipe: { state: 'unsupported' }, endpoint_facts: { schema_version: 1 },
+        ...(placed.type === 'generator' ? { progress_facts: { electricity_production: { state: 'known', producer: true } } } : {}) })
       if (text.includes("'candidate-3'")) { assert.equal(pipes, 2); assert.equal(game.inventory['steam-engine'], 1); game.inventory['steam-engine']--; engine = true }
       else { assert.ok(game.inventory.pipe > 0); game.inventory.pipe--; pipes++ }
     }
     game.worldReadings['electric_network_satisfied:steam-engine'] = [{ ok: true, satisfied: engine, current: engine ? 1 : 0 }]
   }
   const ctx = harness(game, { rawProvider: true })
+  ctx.world.memory.initializeFactoryRegistry(game.factoryWorldId)
   t.after(() => { ctx.session.stopping = true; ctx.session.clearAutoResume(); if (ctx.session.modelResume?.timer) clearTimeout(ctx.session.modelResume.timer) })
   const steps = ['Craft two pipes for the steam engine', STEP]
   const first = inventoryCheckpoint('pipe', 2)
   const power = { mode: 'all', requirements: [{ kind: 'entity_count', prototype: 'steam-engine', state: 'powered', minimum: 1 }] }
+  // A powered engine is an operating obligation, so the routed pipes and the engine are one declared power block.
+  const POWER_GUIDANCE = { approach: 'Route the pipes and place the held engine', rationale: 'Declare the power block the powered-engine checkpoint obligates', constraints: [], skillIds: [],
+    cellIntent: { kind: 'production_block', purpose: 'Synthetic routed steam engine', members: [{ role: 'route-1', entity: 'pipe' }, { role: 'route-2', entity: 'pipe' }, { role: 'generator', entity: 'steam-engine' }],
+      outputs: [{ role: 'generator', kind: 'power', resource: null }] } }
   const control = (operations, checkpoint = power) => planReply({ plan: steps, currentStep: checkpoint === first ? 0 : 1, operations, checkpoint })
   const tool = entity_name => ({ tool_calls: [{ id: `route-${entity_name}-${pipes}`, type: 'function', function: { name: 'getPlacementCandidates', arguments: JSON.stringify({ entity_name, connects_to: { unit_number: 21, storage_index: 2 }, limit: 4 + pipes }) } }] })
   const place = messages => {
@@ -402,6 +415,7 @@ test('full Session routes inland via fresh candidate reads through JIT planner c
     assert.equal(contextOf(messages).capacity[0].consumers_per_producer, 2)
     return planReply({ plan: steps, currentStep: 0, operations: [], checkpoint: first,
       stepCompletions: [{ kind: 'deterministic', checkpoint: first }, { kind: 'deterministic', checkpoint: power }],
+      executionGuidance: [{ approach: 'Craft the pipes', rationale: 'Inventory step', constraints: [], skillIds: [] }, POWER_GUIDANCE],
       goal: { scope: 'finite', summary: 'Power one held steam engine through the existing boiler', doneWhen: [{ kind: 'electric_network_satisfied', entity_name: 'steam-engine', minimum: 1 }] } })
   }).push('executor', 'craft pipes from real fixture stock', () => control([{ name: 'craft_item', args: { item_name: 'pipe', count: 2 } }], first))
     .push('planner', 'JIT sees refreshed topology after crafting', messages => {
@@ -429,6 +443,7 @@ test('full Session routes inland via fresh candidate reads through JIT planner c
   assert.equal(ctx.world.memory.planningState(KEY).goal, null)
   assert.ok(ctx.world.named('plan.accepted').every(row => JSON.stringify(row.plan) === JSON.stringify(committed.map(step => step.description))))
   assert.equal(ctx.world.named('goal.evaluated').at(-1).satisfied, true)
+  assert.equal(ctx.world.named('factory_cell.enrolled').length, 1, 'the routed pipes and the engine enrolled as one power block from their placement receipts')
   assert.equal(ctx.world.named('recovery.auto_resume_started').length, 0)
 })
 

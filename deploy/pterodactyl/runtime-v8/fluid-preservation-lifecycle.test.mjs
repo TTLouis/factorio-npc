@@ -6,7 +6,8 @@ import { getActivePlan } from './planning-state.mjs'
 import { reconcilePreservationProof } from './contract-obligation-runtime.mjs'
 import { captureObligationProof, compileObligations, effectivePreservationProof } from './contract-obligations.mjs'
 import { fluidGeometry, fluidFixture } from './fluid-preservation-fixtures.mjs'
-import { answersStepContract, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
+import { answersStepContract, assignScriptedFactoryPlacement, FakeFactorio, planReply } from './task-loop-fixtures.mjs'
+import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 
 const KEY = 'npc:fluid-fixture'
 function world({ trace, persist, read, response, executorReply, journal, craftingQueue, secondOperation, doneMinimum = 99 } = {}) {
@@ -28,7 +29,7 @@ function world({ trace, persist, read, response, executorReply, journal, craftin
       return JSON.stringify(fluidGeometry(id, game.connected === true))
     }
     if (text.includes('autorio_preflight') && text.includes('place_candidate')) {
-      return JSON.stringify({ ok: true, operation: 'place_candidate', preservation_join: fluidFixture().admission.candidate })
+      return JSON.stringify({ ok: true, operation: 'place_candidate', placement_item: { entity_name: 'boiler' }, candidate_position: { x: 0, y: 3 }, candidate_direction: 0, preservation_join: fluidFixture().admission.candidate })
     }
     if (text.includes('fluid_preservation_candidate')) {
       const candidate = fluidFixture().admission.candidate
@@ -93,6 +94,11 @@ function world({ trace, persist, read, response, executorReply, journal, craftin
       if (reply !== undefined) return reply
       if (held.active_step_index === 0) return planReply({ stepId: step.step_id,
         operations: [{ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }] })
+      if (!secondOperation) assignScriptedFactoryPlacement(agent, game, KEY, 2, { products: ['steam'], kind: 'fluid', native: {
+        type: 'boiler', recipe: { state: 'known', truncated: false, name: 'synthetic-boiler-process', ingredients: [], products: [{ type: 'fluid', name: 'steam' }] },
+        burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['synthetic-fuel'], truncated: false },
+        fuel_item_facts: { state: 'known', coverage: 'complete', truncated: false, items: [{ name: 'coal', category: 'synthetic-fuel', fuel_value: 1 }] },
+      } })
       return planReply({ stepId: step.step_id, operations: [secondOperation ?? { name: 'supply_entity', args: { unit_number: 2, items: [{ item_name: 'coal', count: 1 }] } }] })
     }) })
   agent.behaviorTrace = { emit: async row => { rows.push(row); if (row.event === 'operations.admit') prepared.push(row.data.operations); await trace?.({ row, agent, memory, game }) } }
@@ -323,7 +329,20 @@ for (const [shape, journal] of [
 ]) {
   test(`actual helper refuses ${shape} native journal without fluid send or certificate`, async () => {
     const w = world({ journal })
-    await assert.rejects(w.start(), /preservation_pre_admission_receipt_boundary_unproven/)
+    let failure
+    await assert.rejects(w.start(), error => {
+      failure = error
+      return shape === 'exact pending already recorded'
+        ? /preservation_pre_admission_receipt_boundary_unproven/.test(error.message) : error.code === 'factory_runtime_not_idle'
+    })
+    if (shape !== 'exact pending already recorded') {
+      const paused = await pauseStrandedPlanAfterRequestError({ agent: w.agent, currentPlanState: () => w.memory.currentPlan(KEY) }, failure)
+      assert.equal(paused.status, 'paused')
+      assert.ok(paused.pause_reason.startsWith('factory_runtime_not_idle:'))
+      assert.equal(w.memory.factoryRegistryStatus().status, 'uninitialized')
+      assert.equal(w.memory.planningState(KEY).goal.replacements_accepted ?? 0, 0)
+      assert.equal(w.memory.snapshot().factory_use_recovery?.records?.length ?? 0, 0)
+    }
     assert.equal(w.game.mutations.length, 0)
     assert.equal(w.game.inventory.boiler, 1)
     assert.deepEqual(w.held().execution.preservation_certificates ?? [], [])
@@ -374,7 +393,7 @@ test('BD fluid-version2 invisible proof admits only owned observation walk and t
     if (text.includes("'walk_to_position'")) invisible = false
   }
   w.game.command = async text => {
-    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 10, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
+    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ mode: 'npc', actor: { actor_id: 10, kind: 'standalone_character', valid: true, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
     if (invisible && text.includes('entity_geometry')) return JSON.stringify({ found: false, code: 'entity_not_visible' })
     return native(text)
   }

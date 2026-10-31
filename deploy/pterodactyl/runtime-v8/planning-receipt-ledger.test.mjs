@@ -5,6 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcDialogueMemory } from './npc-agent-loop.mjs'
 import {
   applyPlanningEvent,
+  activeStepVerifiedOperationNames,
   buildContextRestagedEvent,
   CONTEXT_RESTAGE_LIMITS,
   createEmptyPlanningState,
@@ -112,6 +113,20 @@ test('the ledger caps entries per step, keeps the newest, and bounds every field
   assert.ok(entry.kind.length <= RECEIPT_LEDGER_LIMITS.kind)
   assert.ok(entry.ref.length <= RECEIPT_LEDGER_LIMITS.ref)
   assert.ok(entry.summary.length <= RECEIPT_LEDGER_LIMITS.summary)
+})
+
+test('long production waits retain exact same-step verified supply proof across restart', () => {
+  const initial = committed()
+  let state = receipt(initial, { kind: 'deterministic_verification', ref: 'batch_supply',
+    summary: JSON.stringify({ verdict: 'verified_complete', operations: ['supply_entity'] }) })
+  const supply = ledger(state)[0]
+  for (let i = 0; i < 80; i++) state = receipt(state, { ref: `batch_wait_${i}`, now: 200 + i })
+  assert.equal(ledger(state).length, RECEIPT_LEDGER_LIMITS.perStep)
+  assert.deepEqual(ledger(state)[0], supply, 'preserves the actual correlated witness unchanged')
+  state = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(state))))
+  assert.deepEqual(activeStepVerifiedOperationNames(state), ['supply_entity'])
+  assert.equal(planContent(state), planContent(restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(initial))))))
+  assert.deepEqual(ledger(state, 1), [], 'no evidence crosses to the next step')
 })
 
 test('receipts fail closed: wrong source, stale goal, plan, epoch or step, no goal, cancelled plan', () => {

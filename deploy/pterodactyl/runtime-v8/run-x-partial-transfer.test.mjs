@@ -15,24 +15,28 @@ const CHECKPOINT = { mode: 'all', requirements: [{ kind: 'inventory_count', item
 const extract = (item, count) => ({ name: 'move_items_exact', args: { unit_number: 49, item_name: item, max_count: count, to_entity: false } })
 const supply = items => ({ name: 'supply_entity', args: { unit_number: 49, items } })
 const ORIGINAL = [extract('iron-ore', 7), extract('iron-plate', 17), supply([{ item_name: 'copper-ore', count: 5 }, { item_name: 'coal', count: 5 }])]
-const REPAIR = [extract('iron-plate', 1), supply([{ item_name: 'copper-ore', count: 5 }])]
+const SYNTHETIC_STEP = 'Finish the assigned copper job and hold 33 copper plates'
+const SYNTHETIC_CHECKPOINT = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 33 }] }
+const SYNTHETIC_BATCH = [extract('copper-plate', 17), supply([{ item_name: 'copper-ore', count: 5 }, { item_name: 'coal', count: 5 }])]
+const REPAIR = [extract('copper-plate', 1), supply([{ item_name: 'copper-ore', count: 5 }])]
 const observe = () => ({ content: null, tool_calls: [{ id: 'fresh-furnace', type: 'function', function: { name: 'getEntityStatus', arguments: JSON.stringify({ name: 'stone-furnace', radius: 8 }) } }] })
 
-// Native physics is independently exercised by the run-x-transfer engine lane.
-// This fixture models its reserved iron craft and exact four-task receipt.
+// Separate synthetic SAME-JOB residual test, not a repair/replay of historical
+// Run X. A scripted destination refusal occurs after admission, after output
+// extraction and fuel delivery. One reserved copper craft produces the residual
+// output; no input withdrawal or furnace job change is authorized.
 class PartialFurnace extends FurnaceFactorio {
   constructor() {
     super({ inventory: { 'copper-plate': 10, 'copper-ore': 10, coal: 5 },
-      furnace: { unit_number: 49, source: { 'iron-ore': 7 }, output: { 'iron-plate': 17 } } })
+      factoryJob: 'copper-plate', furnace: { unit_number: 49, source: {}, output: { 'copper-plate': 17 } } })
     this.receiptOverride = null
+    this.reservedCopperCraft = 1 // explicit synthetic in-flight material at fixture creation
   }
-  collectPreflight(args) {
-    if (args.item_name === 'iron-ore' && args.to_entity === false) return { ok: true }
-    return super.collectPreflight(args)
-  }
-  furnacePreflight(text) {
-    if (this.sent.length === 0 && text.includes("'supply_entity'")) return { ok: true }
-    return super.furnacePreflight(text)
+  admissionJournal() {
+    // This lane scripts operation_admission.ts's exact_terminal_transfer_refusal
+    // classification; the older shared fake only models pre-mutation failures.
+    return super.admissionJournal().map(record => this.cancelledBatch?.batch_id === record.batch_id
+      ? { ...record, state: 'partial', ok: false, error: 'exact_terminal_transfer_refusal' } : record)
   }
   async command(text) {
     if (this.failCapture && text.includes('"sgluna_deployment","status"')) throw new Error('fixture actor status unavailable')
@@ -47,13 +51,15 @@ class PartialFurnace extends FurnaceFactorio {
   completeBatch() {
     if (this.sent.length !== 1) return super.completeBatch()
     const batch = this.pendingBatch
-    assert.deepEqual(batch.operations, ORIGINAL)
-    this.inventory['iron-ore'] = 7; this.inventory['iron-plate'] = 17; this.inventory.coal -= 5
-    this.furnace.source = {}; this.furnace.output = { 'iron-plate': 1 }; this.furnace.fuel = { coal: 4 }
-    this.effects.push(...ORIGINAL.slice(0, 2).map(operation => ({ operation: operation.name, item: operation.args.item_name, moved: operation.args.max_count })), { operation: 'supply_entity', item: 'coal', moved: 5 })
+    assert.deepEqual(batch.operations, SYNTHETIC_BATCH)
+    this.inventory['copper-plate'] += 17; this.inventory.coal -= 5
+    assert.equal(this.reservedCopperCraft, 1)
+    this.furnace.source = {}; this.furnace.output = { 'copper-plate': this.reservedCopperCraft }; this.furnace.fuel = { coal: 4 }
+    this.reservedCopperCraft = 0
+    this.effects.push({ operation: 'move_items_exact', item: 'copper-plate', moved: 17 }, { operation: 'supply_entity', item: 'coal', moved: 5 })
     const ref = { batch_id: batch.batch_id, batch_generation: 1, batch_ref: `batch-g1-${batch.batch_id}` }
-    this.cancelledBatch = { ...ref, task_count: 4, task_types: Array.from({ length: 4 }, () => 'moving_items'), started_count: 4,
-      completed_count: 3, refused_count: 1, outcome: 'refused', tick: 700,
+    this.cancelledBatch = { ...ref, task_count: 3, task_types: Array.from({ length: 3 }, () => 'moving_items'), started_count: 3,
+      completed_count: 2, refused_count: 1, outcome: 'refused', tick: 700,
       reason: 'moving_items:nothing_moved:target_rejects_item', refusals: [{ operation_id: 21, type: 'moving_items', code: 'nothing_moved', cause: 'target_rejects_item', item_name: 'copper-ore', target_unit_number: 49, held_count: 10, tick: 699 }] }
     this.receipts.push({ ...this.cancelledBatch, state: 'cancelled' })
     this.lastBasicResult = { operation_id: 21, type: 'moving_items', accepted: false, completed: false, code: 'nothing_moved', tick: 700,
@@ -76,14 +82,14 @@ function fixture(t) {
   const world = recoveryWorld({ game, model, agentRoleConfig: bridge.config, roleProvider: (messages, context) => bridge.roleProvider(messages, context) })
   const { session, logs } = recoverySession(world)
   const ctx = { game, model, world, session, logs, wire }
-  ctx.action = (operations, extra = {}) => ({ content: JSON.stringify({ chatMessage: 'Use the observed counts to finish the current copper step.', stepId: world.memory.currentPlan(KEY).task_board.active_step_id, operations, ...extra }) })
+  ctx.action = (operations, extra = {}) => ({ content: JSON.stringify({ chatMessage: 'Use the observed counts to finish the synthetic same-job copper step.', stepId: world.memory.currentPlan(KEY).task_board.active_step_id, operations, ...extra }) })
   ctx.start = async () => {
-    model.push('planner', 'sol:commit', planReply({ plan: [STEP], currentStep: 0, operations: [], checkpoint: CHECKPOINT,
-      stepCompletions: [{ kind: 'deterministic', checkpoint: CHECKPOINT }],
-      goal: { scope: 'finite', summary: STEP, doneWhen: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 15 }] } }))
+    model.push('planner', 'sol:commit', planReply({ plan: [SYNTHETIC_STEP], currentStep: 0, operations: [], checkpoint: SYNTHETIC_CHECKPOINT,
+      stepCompletions: [{ kind: 'deterministic', checkpoint: SYNTHETIC_CHECKPOINT }],
+      goal: { scope: 'finite', summary: SYNTHETIC_STEP, doneWhen: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 33 }] } }))
       .push('executor', 'luna:bind-target', observe())
-      .push('executor', 'luna:original', () => planReply({ plan: [STEP], stepId: world.memory.currentPlan(KEY).task_board.active_step_id, operations: ORIGINAL }))
-    session.queuePlayerRequest('TTLouis', STEP); await settle(session)
+      .push('executor', 'luna:synthetic-batch', () => planReply({ plan: [SYNTHETIC_STEP], stepId: world.memory.currentPlan(KEY).task_board.active_step_id, operations: SYNTHETIC_BATCH }))
+    session.queuePlayerRequest('TTLouis', SYNTHETIC_STEP); await settle(session)
     assert.equal(game.sent.length, 1, JSON.stringify({ logs, violations: model.violations, calls: model.calls.map(row => ({ label: row.label, tail: row.messages.slice(-2) })), trace: world.trace.map(row => ({ event: row.event, data: row.data })) }))
   }
   ctx.fail = async () => { game.completeBatch(); session.lastErrorAt = 0; session.onGameLine('[AUTORIO] [ERROR] moving_items failed: nothing_moved; cause=target_rejects_item'); await settle(session) }
@@ -95,7 +101,30 @@ function healthy(ctx) {
   assert.deepEqual(ctx.logs.filter(line => /listener failed|follow-up failed/.test(line)), [])
 }
 
-test('Run X full loop: exact terminal partial transfer, fresh furnace read, operation-only repair preserves the committed completion contract and physically finishes copper', async t => {
+// Keep the historical goal and operations above intact. A dedicated iron cell
+// cannot be repurposed by emptying its input or supplying copper for this goal.
+for (const [label, operations, code] of [
+  ['full original batch', ORIGINAL, 'factory_cell_withdrawal_not_output'],
+  ['original copper supply', [ORIGINAL[2]], 'factory_cell_input_unproven'],
+]) {
+  test(`Historical Run X ${label} is refused before any send against the iron job`, async () => {
+    const game = new FurnaceFactorio({ factoryJob: 'iron-plate', inventory: { 'copper-plate': 10, 'copper-ore': 10, coal: 5 },
+      furnace: { unit_number: 49, source: { 'iron-ore': 7 }, output: { 'iron-plate': 17 } } })
+    const model = new ScriptedModel(); const world = recoveryWorld({ game, model })
+    const before = structuredClone({ inventory: game.inventory, furnace: game.furnace, operations: ORIGINAL })
+    model.push('planner', 'historical:commit', planReply({ plan: [STEP], currentStep: 0, operations: [], checkpoint: CHECKPOINT,
+      stepCompletions: [{ kind: 'deterministic', checkpoint: CHECKPOINT }],
+      goal: { scope: 'finite', summary: STEP, doneWhen: CHECKPOINT.requirements } }))
+      .push('executor', 'historical:observe', observe())
+      .push('executor', 'historical:operations', () => planReply({ stepId: world.agent.targetedObservationIdentity().data.stepId, operations }))
+    await assert.rejects(world.agent.request(STEP, { sender: 'fixture' }), { failure_code: code })
+    assert.equal(game.sent.length, 0); assert.deepEqual(game.effects, [])
+    assert.deepEqual({ inventory: game.inventory, furnace: game.furnace, operations: ORIGINAL }, before)
+    assert.deepEqual(model.violations, []); assert.deepEqual(model.remaining, [])
+  })
+}
+
+test('Synthetic same-job full loop: exact terminal partial transfer, fresh furnace read, operation-only repair preserves the committed completion contract and finishes scripted copper production', async t => {
   const ctx = fixture(t); const { game, model, world } = ctx
   await ctx.start()
   const before = structuredClone(getActivePlan(world.memory.planningState(KEY)))
@@ -106,36 +135,47 @@ test('Run X full loop: exact terminal partial transfer, fresh furnace read, oper
   }).push('executor', 'luna:repair', () => ctx.action(REPAIR, { checkpoint: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 1 }] } }))
     .push('executor', 'luna:collect', () => ctx.action([extract('copper-plate', 5)]))
   await ctx.fail()
+  assert.equal(game.inventory['copper-plate'], 27)
+  assert.equal(game.inventory['copper-ore'], 10)
+  assert.equal(game.inventory.coal, 0)
+  assert.deepEqual(game.furnace.output, { 'copper-plate': 1 })
+  assert.deepEqual(game.furnace.fuel, { coal: 4 })
   assert.equal(game.sent.length, 2, JSON.stringify({ logs: ctx.logs, violations: model.violations, trace: world.trace.slice(-12) }))
   assert.match(recoveryGuidance, /Do not replay the original batch/)
   assert.deepEqual(game.sent[1].operations, REPAIR)
   const closed = world.memory.planningState(KEY).operation_ledger.closed.find(row => row.verdict === 'admitted_partial')
   assert.equal(closed.effect, 'partial_known')
   assert.equal(world.memory.pendingOperations(KEY).some(row => row.operation_key === closed.operation_key), false)
-  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: ORIGINAL }).refuse, true)
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: SYNTHETIC_BATCH }).refuse, true)
   const after = getActivePlan(world.memory.planningState(KEY))
   assert.equal(after.plan_id, before.plan_id); assert.equal(after.plan_version, before.plan_version)
   assert.deepEqual(after.steps[0].completion_contract, before.steps[0].completion_contract)
   assert.equal(transferSupplyRecoveryCount(world.memory.currentPlan(KEY).task_board), 1)
-  const restored = new CanonicalTaskBoardMemory(); restored.restore(JSON.parse(JSON.stringify(world.memory.snapshot())))
-  assert.equal(restored.checkDuplicateEffect(KEY, { operations: ORIGINAL }).refuse, true)
+  const saved = JSON.parse(JSON.stringify(world.memory.snapshot()))
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(saved)
+  assert.ok(restored.currentPlan(KEY), JSON.stringify({ plans: saved.plans, diagnostics: restored.restoreDiagnostics }))
+  assert.equal(transferSupplyRecoveryCount(restored.currentPlan(KEY).task_board), 1)
+  assert.equal(restored.checkDuplicateEffect(KEY, { operations: SYNTHETIC_BATCH }).refuse, true)
   const planning = restored.planningState(KEY)
   assert.equal(conflictingOperation({ ...planning, run: { ...planning.run, pending_operation: null }, operation_ledger: { ...planning.operation_ledger, records: [] } }, {
-    operations: ORIGINAL, planId: before.plan_id, stepId: before.steps[0].step_id,
+    operations: SYNTHETIC_BATCH, planId: before.plan_id, stepId: before.steps[0].step_id,
   }).reason, 'terminal_partial_batch_replay')
   await completeAndReport(ctx, { smelt: 5 })
+  assert.equal(transferSupplyRecoveryCount(world.memory.currentPlan(KEY).task_board), 1)
   await completeAndReport(ctx)
-  assert.equal(game.inventory['copper-plate'], 15)
-  assert.equal(game.sent.filter(row => operationSignature(row.operations) === operationSignature(ORIGINAL)).length, 1)
+  assert.equal(game.inventory['copper-plate'], 33)
+  assert.equal(game.inventory['copper-ore'], 5)
+  assert.equal(game.reservedCopperCraft, 0)
+  assert.equal(game.sent.filter(row => operationSignature(row.operations) === operationSignature(SYNTHETIC_BATCH)).length, 1)
   assert.equal(world.named('goal.evaluated').at(-1).satisfied, true)
   assert.equal(world.named('transfer.partial_recovery')[0].reason, 'exact_terminal_target_rejection_same_step')
-  assert.equal(world.named('operation.reconciled').find(row => row.verdict === 'admitted_partial').completed_tasks, 3)
+  assert.equal(world.named('operation.reconciled').find(row => row.verdict === 'admitted_partial').completed_tasks, 2)
   assert.equal(ctx.wire[0].body.model, 'gpt-6.1-sol'); assert.ok(ctx.wire.slice(1).every(row => row.body.model === 'gpt-6-luna'))
   healthy(ctx)
 })
 
 for (const mode of ['missing-count', 'cancelled-tail', 'wrong-ref', 'wrong-generation', 'wrong-signature', 'wrong-actor', 'wrong-epoch', 'wrong-item', 'wrong-cause', 'non-transfer', 'truncated-refusals', 'slot-operation', 'absent-basic-actor', 'capture-failure']) {
-  test(`Run X exact partial proof fails closed: ${mode}`, async t => {
+  test(`Synthetic same-job exact partial proof fails closed: ${mode}`, async t => {
     const ctx = fixture(t); const { game, world } = ctx
     await ctx.start(); game.completeBatch()
     const pending = world.memory.pendingOperations(KEY)[0]
@@ -164,16 +204,21 @@ for (const mode of ['missing-count', 'cancelled-tail', 'wrong-ref', 'wrong-gener
   })
 }
 
-test('Run X blocked continuation is rejected by canonical authority, never treated as a new completion draft', async t => {
+test('Synthetic same-job unresolved partial blocks continuation before any replacement completion draft', async t => {
   const ctx = fixture(t); const { game, model, world } = ctx
   await ctx.start()
+  const before = structuredClone(getActivePlan(world.memory.planningState(KEY)))
   game.receiptOverride = raw => { for (const receipt of raw.receipt_journal) delete receipt.completed_count; return raw }
-  model.push('executor', 'luna:blocked-continuation', () => ctx.action(REPAIR, { checkpoint: CHECKPOINT }))
+  model.push('executor', 'luna:blocked-continuation', () => ctx.action(REPAIR, { checkpoint: SYNTHETIC_CHECKPOINT }))
   await ctx.fail()
   assert.equal(game.sent.length, 1)
   assert.equal(world.memory.currentPlan(KEY).status, 'blocked')
-  assert.deepEqual(world.named('request.failed'), [])
-  assert.equal(world.named('plan.completion_declarations_preserved')[0].reason, 'canonical_plan_blocked')
-  assert.ok(world.named('operations.skipped').some(row => row.reason === 'plan_blocked_awaiting_user'))
-  healthy(ctx)
+  assert.equal(world.named('request.failed').length, 1)
+  assert.equal(world.named('request.failed')[0].failure_code, 'factory_runtime_not_idle')
+  assert.equal(world.named('factory_cell.boundary_refused')[0].current_batch_sent, false)
+  assert.equal(world.memory.pendingOperations(KEY).length, 1)
+  assert.equal(transferSupplyRecoveryCount(world.memory.currentPlan(KEY).task_board), 0)
+  const after = getActivePlan(world.memory.planningState(KEY))
+  assert.equal(after.plan_id, before.plan_id); assert.deepEqual(after.steps, before.steps)
+  assert.deepEqual(model.violations, []); assert.deepEqual(model.remaining, [])
 })

@@ -16,7 +16,11 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
-import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError } from './factory-cell-enrollment.mjs'
+import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
+import { reconcileFactoryCellUse, factoryDeliveryWindowPending } from './factory-cell-use.mjs'
+import { recoverFactoryCellUse, validFactoryRecoveryWake } from './factory-cell-use-recovery.mjs'
+import { factoryLifecycleOperation, factoryLifecycleRuntime, claimFactoryLifecycleOperation, settleFactoryLifecycleOperation, retainUnsentFactoryLifecycleOperation, bindTemporaryFactoryPlacement } from './factory-cell-lifecycle-runtime.mjs'
+import { captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles, isFactoryLifecycleControllerActive, validateFactoryLifecycleOperation } from './factory-cell-lifecycle-controller.mjs'
 import { captureFactoryPlacementContext, deriveFactoryPlacementReceipt } from './factory-placement-provenance.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
@@ -112,6 +116,7 @@ import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } 
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { actorChanged, deploymentStatus, executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import { OPERATION_LEDGER_LIMIT } from './operation-ledger.mjs'
+import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
@@ -245,6 +250,7 @@ export { AgentLoopError }
 // Intake exists before the base loop has an active turn, epoch or request id.
 // Its async scope also fences nested advisory/read helpers and queued writes.
 const requestAdmissionScope = new AsyncLocalStorage()
+const deferredAdmissionWakes = new WeakMap()
 
 const TRACE_MAX_BYTES = 5 * 1024 * 1024
 const TRACE_FILES = 5
@@ -4625,7 +4631,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
    * Called right after a request's active plan became BLOCKED. Returns the continued turn's result when the planner was
    * woken, or undefined when the request should end blocked exactly as before (every skip is traced with its reason).
    */
-  async wakePlannerForReplacement({ trigger, preflight, existed = false, provenRefusal = false, refusalCode, batchMayHaveRun = false }) {
+  async wakePlannerForReplacement({ trigger, preflight, existed = false, provenRefusal = false, refusalCode, batchMayHaveRun = false, factoryWitness }) {
     if (!this.replacementWakeEnabled || !this.requestInfo || typeof this.memory.requestReplacementFromDraft !== 'function') return undefined
     const key = this.requestInfo.memoryKey
     const requestId = this.traceRequest?.id
@@ -4638,7 +4644,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!plan.committed_at) return skip(REPLACEMENT_WAKE_SKIP.PLAN_NOT_COMMITTED)
     if (batchMayHaveRun) return skip(REPLACEMENT_WAKE_SKIP.NOT_PROVABLY_UNEXECUTED)
     // The wake is for blockers the harness observed in the game, never for argument errors, authorization refusals or holds.
-    const evidence = blockerWorldEvidence({ trigger, preflight, existed, provenRefusal, refusalCode })
+    const evidence = trigger === 'factory_cell_resolution' && validFactoryRecoveryWake(factoryWitness)
+      && factoryWitness.goal_id === planning.goal.goal_id && factoryWitness.plan_id === plan.plan_id && factoryWitness.request_id === requestId
+      ? { ok: true, detail: 'fresh_factory_cell_resolution' } : blockerWorldEvidence({ trigger, preflight, existed, provenRefusal, refusalCode })
     if (!evidence.ok) return skip(REPLACEMENT_WAKE_SKIP.BLOCKER_NOT_WORLD_EVIDENCE, { evidence_detail: evidence.detail })
     if (plan.blocker?.user_choice) return skip(REPLACEMENT_WAKE_SKIP.USER_CHOICE_RECORDED)
     const grant = this.memory.currentGoalGrant?.(key)
@@ -4964,7 +4972,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const state = this.memory.planningState?.(this.activePlanKey())
     const committed = state ? getActivePlanningPlan(state) : undefined
-    const authorable = !committed || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(committed.status)
+    // A plan that does not belong to the goal the reducer now holds is not this
+    // executor's to run: the goal changed under it (mid-prediction or mid-turn), so the
+    // reply cannot admit work for a goal whose owner has been replaced.
+    const planGoalStale = Boolean(committed && state.goal?.goal_id && committed.goal_id !== state.goal.goal_id)
+    const authorable = planGoalStale || !committed || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(committed.status)
     if (authorable) {
       const requestId = this.traceRequest?.id
       await this.traceEvent('executor.plan_semantics_ignored', {
@@ -4972,7 +4984,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         role: EXECUTOR_ROLE,
         handoff_id: this.agentContext.handoffId,
         plan_id: committed?.plan_id,
-        reason: `executor_cannot_author_plan:plan_status_${committed?.status ?? 'none'}`,
+        reason: planGoalStale ? 'executor_cannot_author_plan:plan_goal_not_current' : `executor_cannot_author_plan:plan_status_${committed?.status ?? 'none'}`,
         ignored_fields: ['plan', 'operations'],
         incoming_steps: Array.isArray(plan.plan) ? plan.plan.length : 0,
         committed_steps: committed?.steps?.length ?? 0,
@@ -5237,9 +5249,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (interruptedRefresh !== undefined) return interruptedRefresh
         const gather = await recoverGatherFailure(this)
         if (gather !== undefined) return gather
-        const production = await continueProductionTask(this)
+        const production = await this.continueProductionWithCheckpoint()
         return production === undefined ? super.runTurn() : production
       })
+    }
+    catch (error) {
+      const recovery = await recoverFactoryCellUse(this, error)
+      if (recovery.handled) return recovery.result
+      throw error
     }
     finally {
       if (--this.turnDepth === 0) this.turnConversation = null
@@ -5248,11 +5265,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async runTurnRedriving(generation) {
     const requestTrace = this.traceRequest
+    let deferredWake
     for (let redrive = 0; ; redrive++) {
       try {
+        if (deferredWake) {
+          const wake = deferredWake
+          deferredWake = undefined
+          return await this.continueReconciledAdmissionWake(wake)
+        }
         return await this.runTurn()
       }
       catch (error) {
+        const wake = deferredAdmissionWakes.get(error)
+        if (wake) {
+          deferredAdmissionWakes.delete(error) // one continuation, never a replayable callback capability
+          if (generation !== this.generation || !this.active || this.traceRequest !== requestTrace) throw error
+          deferredWake = wake
+          continue
+        }
         if (error?.code !== STALE_REPLY_ERROR_CODE || generation !== this.generation || !this.active || this.traceRequest !== requestTrace) throw error
         this.turnConversation = null
         if (redrive >= STALE_REDRIVE_LIMIT) {
@@ -5263,6 +5293,40 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await this.traceEvent('context.stale_reply_redriven', { attempt: redrive + 1, limit: STALE_REDRIVE_LIMIT })
       }
     }
+  }
+
+  async continueReconciledAdmissionWake({ owner, pending, wake, error, epoch, beforeSend }) {
+    const fence = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      this.assertModelRecoveryAllowed()
+      if (this.turnDepth !== 0 || this.requestAdmissionOwner !== owner.intakeToken
+        || this.pendingInteractionAmendment !== owner.amendment || JSON.stringify(this.epoch) !== epoch
+        || this.batchInFlight !== true || this.batchInFlightBeforeSend !== beforeSend || beforeSend !== false
+        || (this.memory.pendingOperations?.(owner.key) ?? []).length) throw new AgentLoopError('admission_refusal_wake_owner_changed')
+    }
+    fence()
+    // Reconciliation cleared the exact no-effect pending record. Make that and
+    // the blocker durable before releasing its in-flight marker at this boundary.
+    await this.persistState({ strict: true }); fence()
+    await this.traceEvent('operation.refusal_wake_pending', { request_id: pending.request_id, operation_key: pending.operation_key,
+      goal_id: pending.goal_id, plan_id: pending.plan_id, step_id: pending.step_id, reason: 'exact_no_effect_receipt_requires_idle_refresh' }); fence()
+    const deployment = await this.assertCurrent(); fence()
+    const raw = await this.readTaskStatusRaw(); fence()
+    let status
+    try { status = typeof raw === 'string' ? JSON.parse(raw) : raw } catch { throw new AgentLoopError('admission_refusal_wake_native_unknown') }
+    const journal = nativeAdmissionJournal(status?.admission_journal)
+    const result = reconcilePendingOperation(pending, { status, actor: { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } })
+    if (deployment.idle !== true || status?.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0
+      || status.active_batch || status.actor?.mining_state?.mining || !journal.known || journal.unresolved
+      || result.verdict !== RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION || result.effect !== EFFECT.NOT_HAPPENED
+      || result.applied_slots?.length) throw new AgentLoopError('admission_refusal_wake_native_unproven')
+    // No await between the final fresh native witness and release of this exact marker.
+    this.batchInFlight = false
+    this.batchInFlightBeforeSend = undefined
+    this.noteWorldMutation()
+    const continued = await this.wakePlannerForReplacement(wake)
+    if (continued !== undefined) return continued
+    throw error
   }
 
   // Every admission point calls assertCurrent (an RCON round trip) before it
@@ -5360,6 +5424,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Retry ordinary snapshot churn in this queue, never by recursively
       // enqueueing a write. Capabilities/handoffs get no implicit retry.
       const attempts = requiredFactoryMetadata || requiredSkillHandoff ? 1 : 3
+      let persistedSnapshot
       for (let attempt = 1; ; attempt++) {
         this.assertRequestAdmission()
         metadataFence()
@@ -5367,7 +5432,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 })
         this.assertRequestAdmission()
         metadataFence()
-        if (capture() === serialized) break
+        if (capture() === serialized) { persistedSnapshot = JSON.parse(serialized); break }
         if (attempt >= attempts) {
           const error = new AgentLoopError('canonical_state_changed_during_persistence')
           error.code = 'canonical_persistence_churn_exhausted'
@@ -5376,6 +5441,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       await fsp.rename(temp, filename)
+      this.memory.markFactoryLifecyclePersisted?.(persistedSnapshot)
       if (requiredFactoryMetadata) {
         this.memory.markFactoryMetadataPersisted(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase)
         this.assertRequestAdmission()
@@ -7381,6 +7447,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // admit it, no wait is registered and the caller takes its ordinary path instead of waiting on a step
   // that can never close. Returns the updated plan state, or undefined when nothing was registered.
   async registerCandidateConditionWait(candidate, { freshMachine, readScope } = {}) {
+    await atFactoryCellBoundary(this, 'wait_commit', () => reconcileFactoryCellUse(this, { phase: 'wait_commit' }))
     if (!candidate || !this.requestInfo) return undefined
     const key = this.requestInfo.memoryKey
     const generation = readScope?.generation ?? this.generation
@@ -7725,6 +7792,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
   // what the machines hold now and that elapsed time proves nothing. Never throws except on an epoch change.
+  // True once per delivery-window decline, for a wait-only batch receipt of the same goal, plan and step.
+  deliveryWindowWaitCompleted(receipt) {
+    const pending = this.deliveryWindowPending
+    const types = receipt?.view?.last_completed_batch?.task_types
+    if (!pending || !Array.isArray(types) || types.length === 0 || !types.every(type => type === 'waiting')) return false
+    this.deliveryWindowPending = undefined
+    const owner = this.captureCheckpointOwner()
+    return owner.goalId === pending.goalId && owner.planId === pending.planId && owner.stepId === pending.stepId
+  }
+
   async blindWaitReceiptFacts(receipt) {
     const types = receipt?.view?.last_completed_batch?.task_types
     const waitOnly = Array.isArray(types) && types.length > 0 && types.every(type => type === 'waiting')
@@ -7787,6 +7864,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!state || state.status !== 'active' || !rawWait || rawWait.state !== 'active') {
       return { action: 'absent', healthy: false, state }
     }
+    const factoryUse = await atFactoryCellBoundary(this, 'wait_poll', () => reconcileFactoryCellUse(this, { phase: 'wait_poll' }))
 
     const wait = safeConditionWait(rawWait)
     const identity = {
@@ -7895,6 +7973,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const normalizedObservation = normalizedConditionObservation(observation)
+    if (factoryUse.delivery_required && !factoryUse.delivery_ready) normalizedObservation.satisfied = false
     // Plan 2.5: the machine's expected finish from game data sets the wake
     // deadline and the expected finish the planner sees.
     const schedule = scheduleWait(wait, normalizedObservation.eta)
@@ -8887,6 +8966,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
+    if (isFactoryLifecycleControllerActive(this)) return { closed: false, reason: 'factory_lifecycle_controller_active' }
     const generation = this.generation // the slice-progress credit below belongs to this lineage only
     const requestId = this.traceRequest?.id
     const closeOwner = this.captureCheckpointOwner()
@@ -8907,13 +8987,36 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { closed: false, reason: preservation.reason,
         contractPause: await this.pauseForStepContract({ reason: preservation.reason, owner }) }
     }
-    try { await ensureCommittedFactoryCellBeforeClose(this, closeOwner) }
+    try {
+      if ((this.memory.factoryTemporaryAssets?.() ?? []).length || (this.memory.factoryLifecycleTransactions?.() ?? []).some(tx => !['retired', 'installed'].includes(tx.state))) {
+        const proof = captureFactoryLifecycleCloseProof(this, closeOwner, { key, step, contract, results, reasonCode, source })
+        const previousMutation = this.worldMutationSeq
+        await closeFactoryCellLifecycles(this, { proof })
+        await this.assertCheckpointOwnerCurrent(closeOwner)
+        if (this.worldMutationSeq !== previousMutation) {
+          const facts = await this.completionFactsForContract(contract, undefined, [], { committedIdentity: true })
+          await this.assertCheckpointOwnerCurrent(closeOwner)
+          const evaluation = this.evaluateCompletionContract(contract, facts)
+          if (!evaluation.satisfied) return { closed: false, reason: 'factory_lifecycle_checkpoint_revalidation_required' }
+          results = evaluation.results
+        }
+      }
+      await ensureCommittedFactoryCellBeforeClose(this, closeOwner)
+    }
     catch (error) {
       this.assertCheckpointOwnerIdentity(closeOwner)
       const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
       if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
       const reason = error.code ?? 'factory_enrollment_failed'
+      // Only the first frame of the delivery window exists; the step stays open
+      // unpaused and the executor is told that a native wait completes it.
+      if (factoryDeliveryWindowPending(error)) {
+        this.deliveryWindowPending = { goalId: closeOwner.goalId, planId: closeOwner.planId, stepId: closeOwner.stepId }
+        return this.declineStepClose(trigger, reason, { active_step_id: step.id,
+          observation: error.details.selected.delivery.observation.code, goal_id: closeOwner.goalId, plan_id: closeOwner.planId })
+      }
       await this.traceEvent('factory_cell.enrollment_close_refused', { request_id: requestId, trigger, reason,
+        observation: error.details?.selected?.delivery?.observation?.code,
         goal_id: closeOwner.goalId, plan_id: closeOwner.planId, step_id: closeOwner.stepId })
       this.assertCheckpointOwnerIdentity(closeOwner)
       return { closed: false, reason, contractPause: await this.pauseForStepContract({ reason, owner: closeOwner }) }
@@ -9215,6 +9318,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!outcome.ok) return failed(outcome.reason, outcome.attempts)
     await this.assertCheckpointOwnerCurrent(owner)
     if (step.obligations && this.currentPendingAmendment()) return { ok: true, skipped: true, deferred: 'pending_amendment' }
+    await atFactoryCellBoundary(this, 'activation', () => reconcileFactoryCellUse(this, { phase: 'activation', step: { ...step, completion_contract: outcome.contract } }))
+    await this.assertCheckpointOwnerCurrent(owner)
     const bound = this.memory.bindStepCompletionContract?.(key, {
       planId: plan.plan_id, stepId: step.step_id, contract: outcome.contract, binding: outcome.prediction ? 'prediction' : 'just_in_time', requestId,
     })
@@ -9311,18 +9416,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // second call (or the ordinary close after it) finds the next step and cannot close this one twice.
   async closeActiveStepOnFreshRead({ previousState, trigger, operations = [] }) {
     if (activeStockDependencyBarrier(this)) return { closed: false, reason: 'stock_dependency_barrier_pending' }
-    if (preservationObservationAdmission(this, operations)) return { closed: false }
+    if (preservationObservationAdmission(this, operations)) return { closed: false, reason: 'preservation_observation_pending' }
     const key = this.requestInfo?.memoryKey
     const board = previousState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!key || previousState?.status !== 'active' || !step) return { closed: false }
+    if (!key || previousState?.status !== 'active' || !step) return { closed: false, reason: 'active_checkpoint_owner_missing' }
     const reducerPlan = getActivePlanningPlan(this.memory.planningState?.(key))
-    if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false }
+    if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false, reason: 'checkpoint_plan_not_frozen' }
     const recoveryRequestId = this.traceRequest?.id
     // Typed pending activation has no authored contract to repair. Bind its complete
     // unchanged intent before settlement or admission can mistake null for a defect.
     const canonicalStep = reducerPlan.steps[reducerPlan.active_step_index]
+    if ([...(this.memory.productionTasks?.values() ?? [])].some(task => task.status === 'active'
+      && task.owner.goal_id === reducerPlan.goal_id && task.owner.plan_id === reducerPlan.plan_id
+      && task.owner.plan_version === reducerPlan.plan_version && task.owner.step_id === canonicalStep?.step_id)) {
+      return { closed: false, reason: 'production_controller_pending' }
+    }
     if (canonicalStep?.obligations && isStepContractPending(canonicalStep)) {
       if (this.currentPendingAmendment() || this.batchInFlight || this.memory.pendingOperation?.(key)
         || this.memory.currentPlan?.(key)?.condition_wait || this.memory.planningState?.(key)?.run?.paused) return { closed: false }
@@ -9332,7 +9442,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const contractRecovery = await recoverContractObligations(this, { trigger })
     if (contractRecovery !== undefined) return { closed: false, contractRecovery, recoveryRequestId }
     const contract = this.persistedStepCheckpoint(this.memory.currentPlan?.(key)?.task_board, step.id)?.contract
-    if (!contract || !freshSettlementContract(contract, this.currentContractContext())) return { closed: false }
+    if (!contract || !freshSettlementContract(contract, this.currentContractContext())) return { closed: false, reason: 'checkpoint_requires_non_world_evidence' }
     const continuationOwner = this.captureCheckpointOwner()
     const identity = {
       goalId: previousState.goal_id, canonicalGoalId: this.memory.planningState?.(key)?.goal?.goal_id,
@@ -9398,7 +9508,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const evaluation = this.evaluateCompletionContract(contract, facts)
     if (!evaluation.satisfied) {
       const gap = freshCheckpointReadGap(contract, facts, this.currentContractContext())
-      return gap ? skip(gap.reason, { requirement_id: gap.requirement_id }) : { closed: false }
+      return gap ? skip(gap.reason, { requirement_id: gap.requirement_id }) : skip('checkpoint_native_requirements_unsatisfied', { results: evaluation.results })
     }
     if (identityChanged()) return skip('settlement_identity_changed')
     if (this.currentPendingAmendment()) return skip('pending_amendment')
@@ -10517,28 +10627,41 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const owner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
     const intake = this.requestAdmissionOwner
     const amendment = this.pendingInteractionAmendment
+    let factoryFence
     const current = () => {
       this.assertCheckpointOwnerIdentity(owner)
       this.assertModelRecoveryAllowed()
       if (this.requestAdmissionOwner !== intake || this.pendingInteractionAmendment !== amendment) throw new AgentLoopError('Prepared operation cancelled or superseded')
+      if (factoryFence && (this.memory.factoryWorldBinding().generation !== factoryFence.generation
+        || this.memory.getFactoryRegistry().revision !== factoryFence.revision)) throw new AgentLoopError('Factory assignment changed during operation preparation')
     }
     const planning = this.memory.planningState?.(key)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
     const step = plan?.steps?.[plan.active_step_index]
+    await atFactoryCellBoundary(this, 'pre_send', () => reconcileFactoryCellUse(this, { phase: 'pre_send', operations }))
     const factoryScope = await atFactoryCellBoundary(this, 'pre_send', () => factoryPlacementAdmissionScope(this, operations, preflight))
+    if (this.memory.factoryRegistryStatus?.().status === 'initialized') factoryFence = { generation: this.memory.factoryWorldBinding().generation, revision: this.memory.getFactoryRegistry().revision }
+    const physicalRevision = this.memory.factoryLifecycleRevision?.() ?? 0
     current()
     if (factoryScope && (factoryScope.actor_id !== before?.actor_id || factoryScope.actor_epoch !== before?.epoch)) {
       throw new AgentLoopError('Factory placement admission cancelled or superseded by actor change')
     }
     const baseline = batchWatermark(await this.readTaskStatusRaw()) ?? null
     current()
+    if ((this.memory.factoryLifecycleRevision?.() ?? 0) !== physicalRevision) throw new AgentLoopError('Factory physical assignment changed during operation preparation')
+    const lifecycle = factoryLifecycleOperation(this, operations)
+    if (lifecycle) {
+      await validateFactoryLifecycleOperation(this, operations[0])
+      current()
+      if (this.memory.factoryLifecycleRevision() !== physicalRevision) throw new AgentLoopError('Factory physical assignment changed during operation preparation')
+    }
     const record = this.memory.recordPendingOperation(key, buildPendingOperation({
       requestId: this.traceRequest?.id,
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
       preflight,
       protocolVersion: 2,
-      surfaceIndex: factoryScope?.surface_index ?? (operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.stockDependencyAdmission?.claim.surface_index ?? this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex),
+      surfaceIndex: factoryScope?.surface_index ?? (lifecycle || operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.stockDependencyAdmission?.claim.surface_index ?? this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex),
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -10558,18 +10681,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     try {
       bindStockDependencyAdmission(this, record)
+      await bindTemporaryFactoryPlacement(this, record)
+      await claimFactoryLifecycleOperation(this, lifecycle, record)
       await this.persistState({ strict: true })
       current()
     } catch (error) {
       await this.settleUnsentOperation(record, key, 'prepared_operation_cancelled_before_return', owner)
       throw error
     }
+    if (operations.some(operation => operation.name !== 'wait')) this.factoryDeliveryMutationSeq = (this.factoryDeliveryMutationSeq ?? 0) + 1
     return record
   }
 
   // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
   // anything): settle it as not happened so it leaves no hold.
   async settleUnsentOperation(pending, ownerKey, reason, expectedOwner) {
+    await retainUnsentFactoryLifecycleOperation(this, pending, reason, expectedOwner)
     const current = () => !expectedOwner || (this.checkpointOwnerCurrent(expectedOwner)
       && this.requestAdmissionOwner === expectedOwner.intakeToken && this.pendingInteractionAmendment === expectedOwner.amendment)
     const emit = (event, data) => current() ? this.traceEvent(event, data, { requestId: pending.request_id })
@@ -10588,6 +10715,46 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     await this.persistState()
     await emit('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
+  }
+
+  async settleFactoryLifecycleResidual(pending) {
+    const owner = this.captureCheckpointOwner(); const key = this.activePlanKey()
+    if (!this.stateFile) throw new AgentLoopError('Factory lifecycle requires durable persistence')
+    const held = this.memory.pendingOperations(key).find(row => row.operation_key === pending.operation_key)
+    if (!held || held.signature !== pending.signature || held.attempt_id !== pending.attempt_id) throw new AgentLoopError('Factory lifecycle pending operation changed')
+    const status = JSON.parse(await this.readTaskStatusRaw()); await this.assertCheckpointOwnerCurrent(owner)
+    const result = factoryLifecycleRuntime(this, { pending }).settle(status, pending)
+    const tx = this.memory.factoryLifecycleTransactions().find(row => row.claims.at(-1)?.binding.operation_key === pending.operation_key)
+    if (!result.matched || result.hold || tx?.claims.at(-1)?.state !== 'residual_reconciled'
+      || status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch) throw new AgentLoopError('Factory lifecycle residual reconciliation not durable')
+    this.memory.updatePendingOperation(key, { state: PENDING_STATE.ADMITTED, effect: EFFECT.PARTIAL_KNOWN,
+      verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, reason: 'factory_lifecycle_residual_reconciled', reconciled_at: Date.now() }, pending.operation_key)
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    if (!this.memory.clearPendingOperation(key, { operationKey: pending.operation_key })) throw new AgentLoopError('Factory lifecycle residual settlement refused')
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    await this.traceEvent('factory_lifecycle.residual_settled', { operation_key: pending.operation_key, transaction_id: tx.transaction_id, effect: EFFECT.PARTIAL_KNOWN })
+  }
+
+  async executeFactoryLifecycleOperation(operation) {
+    const owner = this.captureCheckpointOwner()
+    if (!factoryLifecycleOperation(this, [operation])) throw new AgentLoopError('Factory lifecycle operation not authorized')
+    await this.assertCheckpointOwnerCurrent(owner)
+    const previous = this.productionAdmission
+    this.productionAdmission = owner
+    try {
+      const result = await this.commitPlan({ chatMessage: '', stepId: owner.stepId, plan: [], currentStep: 0, operations: [operation] })
+      await this.assertCheckpointOwnerCurrent(owner)
+      for (let poll = 0; poll < 120; poll++) {
+        const raw = await this.readTaskStatusRaw(); await this.assertCheckpointOwnerCurrent(owner)
+        const status = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (status.task_state === 'idle' && status.queue_empty === true && status.queue_length === 0 && !status.active_batch) {
+          await this.taskStatusReceipt(); await this.assertCheckpointOwnerCurrent(owner)
+          return result
+        }
+        await observationDelay(250); await this.assertCheckpointOwnerCurrent(owner)
+      }
+      throw new AgentLoopError('Factory lifecycle native operation remains pending after bounded wait')
+    } finally { if (this.productionAdmission === owner) this.productionAdmission = previous }
   }
 
   // A legacy (pre-journal) record that neither exact nor baseline evidence can settle must not hold silently: raise one
@@ -10754,6 +10921,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!pending) return
       const watermark = batchWatermark(rawStatus)
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
+      const lifecycle = await settleFactoryLifecycleOperation(this, typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus, pending, receiptOwner)
+      if (lifecycle.hold) return
       let actor = capturedActor ?? (this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined)
       let result = reconcilePendingOperation(pending, { status: rawStatus, actor })
       if (result.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !capturedActor) {
@@ -12524,6 +12693,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return status
   }
 
+  async continueProductionWithCheckpoint() {
+    const owner = this.captureCheckpointOwner()
+    const result = await continueProductionTask(this)
+    if (result !== undefined) return result
+    const complete = [...(this.memory.productionTasks?.values() ?? [])].some(task => task.status === 'complete'
+      && task.owner.goal_id === owner.goalId && task.owner.plan_id === owner.planId
+      && task.owner.plan_version === owner.planVersion && task.owner.step_id === owner.stepId)
+    if (!complete || this.currentPendingAmendment()) return undefined
+    await this.assertCheckpointOwnerCurrent(owner)
+    // A delivery-verification wait is not an inventory receipt. The controller's
+    // complete state therefore requests the ordinary fresh checkpoint boundary.
+    const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(owner.key), trigger: 'production_complete' })
+    if (fresh.closed && pruneClosedProductionRecords(this.memory)) await this.persistState({ strict: true })
+    await this.traceEvent('production.checkpoint_rechecked', { goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId,
+      closed: fresh.closed, reason: fresh.reason ?? 'checkpoint_not_satisfied_or_unavailable' })
+    if (fresh.completionDeferred) return fresh.completionDeferred
+    if (fresh.contractPause) return fresh.contractPause
+    await this.assertCheckpointOwnerCurrent(owner, { advanced: fresh.closed === true })
+    if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+    if (fresh.closed) return this.continueAfterFreshStepClose(fresh, { chatMessage: '', plan: [], currentStep: 0, operations: [] }, await this.assertCurrent())
+    return undefined
+  }
+
   async taskStatusReceipt() {
     await this.dropIfStale(this.turnConversation)
     const owner = this.captureCheckpointOwner()
@@ -13076,6 +13268,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!pendingAmendment) {
       const audited = await auditExecutorProgress(this)
       if (audited !== undefined) return audited
+      // The finite controller owns its final attributed-delivery wait. A stock
+      // checkpoint becoming true after collection cannot close ahead of it.
+      const production = await this.continueProductionWithCheckpoint()
+      if (production !== undefined) return production
     }
     const stepCompletion = pendingAmendment
       ? { verified: false, reason: 'pending_amendment' }
@@ -13084,15 +13280,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
     if (stepCompletion?.completionDeferred) return stepCompletion.completionDeferred
     if (stepCompletion?.contractPause) return stepCompletion.contractPause
+    let fresh
     if (!pendingAmendment && !stepCompletion?.verified) {
       const corrected = await recoverContractObligations(this, { trigger: 'native_completion' })
       if (corrected !== undefined) return corrected
       // A return walk proves arrival only. The original completed effects stay
       // in the durable receipt ledger; ordinary fresh settlement must re-evaluate
       // every unchanged checkpoint predicate before granting progress.
-      if (preservationReobservationVerified(this)) {
+      // A wait-only batch that follows a delivery-window decline of this same
+      // step was the window's second frame; it is read once, by the same close.
+      const preserved = preservationReobservationVerified(this)
+      if (preserved || this.deliveryWindowWaitCompleted(receipt)) {
         const recoveryOwner = this.captureCheckpointOwner()
-        const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(this.activePlanKey()), trigger: 'preservation_reobserved' })
+        fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(this.activePlanKey()), trigger: preserved ? 'preservation_reobserved' : 'delivery_window_wait' })
         if (fresh.completionDeferred) return fresh.completionDeferred
         if (fresh.contractRecovery) return fresh.contractRecovery
         if (fresh.contractPause) {
@@ -13114,16 +13314,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           { chatMessage: '', plan: [], currentStep: 0, operations: [] }, await this.assertCurrent())
       }
     }
-    if (!pendingAmendment && !stepCompletion?.verified) {
-      const production = await continueProductionTask(this)
-      if (production !== undefined) return production
-    }
-
     // The reason a step did not close used to be trace-only: the model saw a
     // finished batch and nothing about why the step stayed open.
     const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
       ? this.stepStaysOpenHint(stepCompletion.state)
-      : ''
+      : (fresh ?? stepCompletion)?.reason === 'factory_cell_delivery_unverified'
+        ? '[HARNESS] The active step stays open although its checkpoint counts are met: this direct-feed step closes only when two native frames, with no other operation between them, show the supplier delivering into its consumer. Every batch except a wait-only batch restarts that observation, and only its first frame exists now.'
+        : ''
     const completionState = stepCompletion?.state
     // The decision-scoped overrides are saved before the step settles and restored on every exit, as failed() and request() do:
     // a slice close inside settleCompletedStepState can commit the next slice and run its C3 executor decision to the end (Run AJ:
@@ -15983,6 +16180,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
+    const singleton = directFeedSingletonPlacementRefusal(this, operations)
+    if (singleton) {
+      const failure = new AgentLoopError(`Operation preflight rejected operation ${singleton.operation_index + 1} (${singleton.operation}): ${singleton.code}`)
+      failure.preflight = singleton
+      failure.preflightResults = []
+      throw failure
+    }
+
     for (let index = 0; index < operations.length; index++) {
       const command = renderOperationPreflight(operations[index])
       if (!command) {
@@ -16513,6 +16718,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Operations 0..index with the preflight results gathered so far (the failing one carries its target), so a
       // reserved/protected target earlier in the batch refuses first and no recovery budget is spent.
       const collected = Array.isArray(failure.preflightResults) ? failure.preflightResults : []
+      await atFactoryCellBoundary(this, 'admission', () => reconcileFactoryCellUse(this, { phase: 'admission', operations: plan.operations.slice(0, index + 1) }))
       const admission = this.memory.checkOperationAdmission(key, {
         operations: plan.operations.slice(0, index + 1),
         preflight: plan.operations.slice(0, index + 1).map((_, i) => (i === index ? { ok: true, operation: operation.name, target: preflight.target } : (collected[i] ?? { ok: true }))),
@@ -17602,6 +17808,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
+    if (!plan.productionTask && !plan.plannerReview) {
+      const supplyReview = await this.reviewExecutorSupplyDrift(plan)
+      if (supplyReview !== undefined) return supplyReview
+    }
+    try {
+      await atFactoryCellBoundary(this, 'commit', () => reconcileFactoryCellUse(this, {
+        step: plan.executionGuidance?.[plan.currentStep ?? 0] ? { execution_guidance: plan.executionGuidance[plan.currentStep ?? 0], completion_contract: plan.stepCompletions?.[plan.currentStep ?? 0]?.checkpoint } : undefined,
+        phase: 'commit', operations: plan.operations,
+        productionIntent: plan.productionTask, productionProposal: Boolean(plan.productionTask), readOnly: Boolean(plan.plannerReview),
+      }))
+    } catch (error) {
+      const recovery = await recoverFactoryCellUse(this, error)
+      if (recovery.handled) return recovery.result
+      throw error
+    }
     if (harnessDefaults) await this.recordHarnessDefaults(harnessDefaults)
     if (refreshed) return continueEntityRefresh(this, refreshed)
     const missing = plan.operations.find(operation => EXACT_ENTITY_TARGET_OPERATIONS.has(operation.name) && !this.liveObservedExactTarget(operation.args?.unit_number))
@@ -17620,8 +17841,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (plan.productionTask) return this.startExecutorProduction(plan, productionStepId)
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
-    const supplyReview = await this.reviewExecutorSupplyDrift(plan)
-    if (supplyReview !== undefined) return supplyReview
     await this.validateStepCompletionDeclarations(plan)
     await atFactoryCellBoundary(this, 'draft', () => validateFactoryCellDraft(this, plan))
     const heldForRoleHandoff = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
@@ -18172,6 +18391,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!draft || !this.plannerOnlyDraftCandidate(plan)) {
         throw new AgentLoopError('planner_only_commit_refused: draft identity or authority changed')
       }
+      await atFactoryCellBoundary(this, 'canonical_commit', () => reconcileFactoryCellUse(this, { phase: 'commit', operations: [] }))
       let committedState
       if (draft.replacement) {
         const replaced = this.memory.commitReplacementPlan(key, {
@@ -18245,6 +18465,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Observation-only work has an empty gameplay batch. Commit its already
       // validated semantics without inventing a mutation or claiming completion.
       await this.assertCurrent()
+      await atFactoryCellBoundary(this, 'canonical_commit', () => reconcileFactoryCellUse(this, { phase: 'commit', operations: [] }))
       const semanticPlanning = this.memory.commitPlanningPlan(this.requestInfo.memoryKey, {
         now: Date.now(), runtime_validation: { passed: true },
       })
@@ -18276,6 +18497,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // a player-built entity (grant-backed work) needs an approval record, reserved containers are never withdrawn from,
         // and (grant-backed work) a player's inventory is never a source. Commit re-checks the grant again below.
         if (this.requestInfo && typeof this.memory.checkOperationAdmission === 'function') {
+          await atFactoryCellBoundary(this, 'admission', () => reconcileFactoryCellUse(this, { phase: 'admission', operations: plan.operations }))
           const admission = this.memory.checkOperationAdmission(this.requestInfo.memoryKey, {
             operations: plan.operations,
             preflight,
@@ -18341,6 +18563,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const reducerPlanBeforeCommit = planningBeforeCommit ? getActivePlanningPlan(planningBeforeCommit) : undefined
         const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeCommit?.status)
         if (!planFrozen && this.requestInfo && typeof this.memory.commitPlanningPlan === 'function') {
+          await atFactoryCellBoundary(this, 'canonical_commit', () => reconcileFactoryCellUse(this, { phase: 'commit', operations }))
           // Preflight is the authoritative commit gate. Jev may help decide
           // what to observe or when to wake the planner, but it does not review
           // whether the Main LLM's draft is "correct" before execution.
@@ -18683,10 +18906,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const sendAmendment = this.pendingInteractionAmendment
       const sendBatchInFlight = this.batchInFlight
       const operationOwnerKey = this.activePlanKey()
+      let admittedFactoryFence
       const assertSendOwner = pending => {
         this.assertCheckpointOwnerIdentity(sendOwner)
         this.assertModelRecoveryAllowed()
         if (this.requestAdmissionOwner !== sendIntake || this.pendingInteractionAmendment !== sendAmendment) throw new AgentLoopError('Operation admission cancelled or superseded')
+        if (admittedFactoryFence && (this.memory.factoryWorldBinding().generation !== admittedFactoryFence.generation
+          || this.memory.getFactoryRegistry().revision !== admittedFactoryFence.revision || this.memory.factoryLifecycleRevision() !== admittedFactoryFence.physical)) throw new AgentLoopError('Factory assignment changed before native transport')
         if (pending) {
           const records = this.memory.pendingOperations?.(operationOwnerKey) ?? []
           const held = records.filter(record => record.operation_key === pending.operation_key)
@@ -18699,6 +18925,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       let fluidAdmission
       const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before, preflight)
+      if (this.memory.factoryRegistryStatus?.().status === 'initialized') admittedFactoryFence = { generation: this.memory.factoryWorldBinding().generation,
+        revision: this.memory.getFactoryRegistry().revision, physical: this.memory.factoryLifecycleRevision() }
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {
@@ -18753,7 +18981,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.persistState()
         }
         await this.assertCurrent()
-        startContractPrediction(this)
+        if (!isFactoryLifecycleControllerActive(this)) startContractPrediction(this)
       }
       catch (error) {
         // MW2b: the command was sent but no valid acknowledgement came back. Ask the game what really happened (exact batch,
@@ -18838,12 +19066,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           // MW5: only a refusal the game proved happened before any mutation of the first operation is world evidence; a batch
           // that may have run is never replanned, and a transport/epoch/journal refusal is a harness problem, not the world.
           const provenRefusal = error?.admission?.proven_refusal === true && operationIndex === 0
-          const admissionWake = await this.wakePlannerForReplacement({
+          const wake = {
             trigger: 'operation_admission_failure',
             provenRefusal,
             refusalCode: error?.admission?.slots?.[operationIndex ?? 0]?.refusal_code,
             batchMayHaveRun: error?.notSent !== true && error?.notAdmitted !== true && !provenRefusal,
-          })
+          }
+          if (this.replacementWakeEnabled && provenRefusal && pendingAdmission && sendBatchInFlight === false
+            && reconciliation?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
+            && reconciliation.effect === EFFECT.NOT_HAPPENED && !reconciliation.applied_slots?.length) {
+            // Leave this send/turn before waking a successor. The outer redrive
+            // boundary rechecks exact durable settlement, owner and native idle.
+            deferredAdmissionWakes.set(error, { owner: sendOwner, pending: pendingAdmission, wake, error,
+              epoch: JSON.stringify(this.epoch), beforeSend: sendBatchInFlight })
+            throw error
+          }
+          const admissionWake = await this.wakePlannerForReplacement(wake)
           if (admissionWake !== undefined) return admissionWake
           throw error
         }
@@ -18855,7 +19093,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // U6. The reply is admitted and appended; nothing is in flight. A reply that
     // committed the plan hands the slice to a fresh executor (C3). Otherwise a step this
     // reply closed may put an executor past its hard limit (C8).
-    if (this.requestInfo && this.executorHandoffEnabled) {
+    if (this.requestInfo && this.executorHandoffEnabled && !isFactoryLifecycleControllerActive(this)) {
       const boundaryRequestId = this.traceRequest?.id
       if (committedPlanId !== undefined && commands.length > 0) await this.startExecutorAtCommit({ planId: committedPlanId, requestId: boundaryRequestId })
       else await this.executorStepCloseBoundary({ withinTurn: true, requestId: boundaryRequestId })

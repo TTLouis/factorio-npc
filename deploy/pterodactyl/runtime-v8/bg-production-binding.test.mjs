@@ -5,6 +5,7 @@ import { continueProductionTask, prepareProductionTask } from './production-task
 import { advanceProductionTask, createProductionTask, normalizeProductionIntent, PRODUCTION_LIMITS, restoreProductionTask } from './production-task.mjs'
 import { recoverySession } from './recovery-loop-fixtures.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { enrollFactoryProductionProducers } from './factory-cell-enrollment.mjs'
 
 const repaired = w => w.events.filter(row => row.event === 'production.recovery' && row.data.mechanism === 'exact_producer_binding')
 // Original BG p11 has an exact verified gather receipt (batch53, evidence seq3).
@@ -57,6 +58,45 @@ test('BG injected old record: one durable exact binding resumes through real sup
   assert.deepEqual(w.plan().steps, original)
 })
 
+test('restored dynamic bindings must retain their assigned job even when immutable intent omits producers', async () => {
+  const w = bgWorld()
+  await enrollFactoryProductionProducers(w.agent, [{ recipe_name: 'copper-plate', unit_number: 60 }])
+  const assignment = structuredClone(w.memory.getFactoryRegistry())
+  const task = w.residual({ producer_bindings: [{ recipe_name: 'iron-plate', unit_number: 60 }] })
+  assert.deepEqual(task.intent.producers, [])
+  await assert.rejects(continueProductionTask(w.agent), { code: 'factory_cell_producer_job_mismatch' })
+  assert.deepEqual(w.memory.getFactoryRegistry(), assignment)
+  assert.deepEqual(w.ops, [])
+  assert.equal(w.providers.length, 0)
+})
+
+test('legacy NPC placement metadata without a retained exact receipt cannot become a dynamic supplier', async () => {
+  const w = bgWorld({ receiptBacked: false, provider: async () => ({ content: JSON.stringify({ chatMessage: '', plan: [], currentStep: 0, ...bg.reply }) }) })
+  w.residual()
+  await continueProductionTask(w.agent)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  assert.equal(w.memory.pauseRecord(bg.key).pause_reason, 'blocked_decision:production_producer_unbound')
+  assert.deepEqual(w.ops, [])
+})
+
+test('a matching assigned supplier remains selectable without a current actor placement hint', async () => {
+  const w = bgWorld()
+  await enrollFactoryProductionProducers(w.agent, [{ recipe_name: 'copper-plate', unit_number: 60 }])
+  const assigned = structuredClone(w.memory.getFactoryRegistry())
+  const authorization = w.agent.memory.authorizationState.bind(w.agent.memory)
+  w.agent.memory.authorizationState = key => {
+    const value = structuredClone(authorization(key))
+    value.world.npc_placements = []
+    return value
+  }
+  w.residual()
+  await continueProductionTask(w.agent)
+  assert.deepEqual([...w.memory.productionTasks.values()][0].producer_bindings, [{ recipe_name: 'copper-plate', unit_number: 60 }])
+  assert.deepEqual(w.memory.getFactoryRegistry(), assigned)
+  assert.equal(w.ops[0], 'supply_entity')
+  assert.equal(w.providers.length, 0)
+})
+
 test('BG historical preserved drill49 to furnace50 route is not automatic producer authority', async () => {
   const w = bgWorld({ safe: false, provider: async () => ({ content: JSON.stringify({ chatMessage: '', plan: [], currentStep: 0, ...bg.reply }) }) }); w.residual()
   await continueProductionTask(w.agent)
@@ -77,6 +117,10 @@ for (const withGrant of [true, false]) {
     ]
     const w = bgWorld({ safe: false, provider: async () => {
       const operation = setup.shift(); assert.ok(operation, 'unexpected extra model request')
+      if (operation.name === 'supply_entity') {
+        assert.equal(w.memory.getFactoryRegistry().cells[0]?.assignment.method, 'native_recipe:copper-plate')
+        assert.equal([...w.memory.productionTasks.values()][0].producer_bindings, undefined, 'assigning the startup job grants no runnable binding or fuel allowance')
+      }
       return { content: JSON.stringify({ chatMessage: '', plan: [], currentStep: 0, stepId: bg.reply.stepId, operations: [operation] }) }
     } })
     if (!withGrant) {
@@ -137,6 +181,12 @@ for (const fault of ['ambiguous', 'recipe', 'occupied', 'identity', 'ownership',
     if (fault === 'missing_energy') delete w.furnace.energy_source
     if (fault === 'missing_status') delete w.furnace.status_name
     w.residual()
+    if (fault === 'direct_feed') {
+      await assert.rejects(continueProductionTask(w.agent), { code: 'factory_cell_resolution_required' })
+      assert.deepEqual(w.ops, [])
+      assert.equal([...w.memory.productionTasks.values()][0].recoveries, 0, 'missing assigned direct supplier is refused before producer recovery')
+      return
+    }
     const result = await continueProductionTask(w.agent)
     const setup = ['recipe', 'occupied', 'direct_feed'].includes(fault)
     if (setup) assert.equal(w.memory.pauseRecord(bg.key).pause_reason, 'blocked_decision:production_producer_unbound')

@@ -114,15 +114,29 @@ function observation(raw) {
 }
 
 function enrollment(raw) {
-  record(raw, ['goal_id', 'semantic_step_id', 'intent_signature', 'receipt_ids'], 'enrollment')
+  record(raw, ['goal_id', 'semantic_step_id', 'intent_signature', 'receipt_ids', 'member_roles', 'output_roles'], 'enrollment')
   const result = { goal_id: string(raw.goal_id, 'enrollment.goal_id', 512), semantic_step_id: string(raw.semantic_step_id, 'enrollment.semantic_step_id', 512),
-    intent_signature: string(raw.intent_signature, 'enrollment.intent_signature', 64), receipt_ids: strings(raw.receipt_ids, 'enrollment.receipt_ids', 2, 2, 512) }
+    intent_signature: string(raw.intent_signature, 'enrollment.intent_signature', 64), receipt_ids: strings(raw.receipt_ids, 'enrollment.receipt_ids', 32, 1, 512) }
   if (!/^[a-f0-9]{64}$/.test(result.intent_signature)) fail('invalid_schema', 'Invalid intent signature')
+  if (Object.hasOwn(raw, 'member_roles') || Object.hasOwn(raw, 'output_roles')) {
+    result.member_roles = array(raw.member_roles, 'enrollment roles', 32, 1).map(row => {
+      record(row, ['role', 'receipt_id'], 'member role')
+      return { role: string(row.role, 'member role', 80), receipt_id: string(row.receipt_id, 'role receipt', 512) }
+    })
+    if (result.member_roles.length !== result.receipt_ids.length || new Set(result.member_roles.map(row => row.role)).size !== result.member_roles.length
+      || result.member_roles.some((row, i) => row.receipt_id !== result.receipt_ids[i])) fail('invalid_enrollment', 'Member role receipts must be exact and ordered')
+    result.output_roles = array(raw.output_roles, 'enrollment outputs', 32, 1).map(row => {
+      record(row, ['port_id', 'role'], 'output role')
+      if (!result.member_roles.some(member => member.role === row.role)) fail('invalid_enrollment', 'Output role has no member')
+      return { port_id: string(row.port_id, 'output port', 128), role: string(row.role, 'output role', 80) }
+    })
+    if (new Set(result.output_roles.map(row => row.port_id)).size !== result.output_roles.length) fail('invalid_enrollment', 'Output port role is ambiguous')
+  } else if (result.receipt_ids.length !== 2) fail('invalid_enrollment', 'Legacy direct-feed enrollment requires two receipts')
   return result
 }
 
 function cell(raw) {
-  record(raw, ['cell_id', 'revision', 'state', 'surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin', 'observation', 'enrollment', 'port_bindings', 'metadata_history'], 'cell')
+  record(raw, ['cell_id', 'revision', 'state', 'surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin', 'observation', 'enrollment', 'port_bindings', 'metadata_history', 'support'], 'cell')
   generatedId(raw.cell_id, 'cell')
   if (!Number.isSafeInteger(raw.revision) || raw.revision < 1 || raw.revision > FACTORY_REGISTRY_LIMITS.cell_revisions || raw.state !== 'unverified') fail('invalid_schema', 'Cell revision is bounded and metadata never verifies a cell')
   const surface = integer(raw.surface_index, 'cell.surface_index', 1)
@@ -135,18 +149,27 @@ function cell(raw) {
   }
   const ports = array(raw.ports, 'ports', FACTORY_REGISTRY_LIMITS.ports).map(value => port(value, assignment.products))
   if (new Set(ports.map(value => value.port_id)).size !== ports.length) fail('duplicate_port', 'Port IDs must be unique within a cell')
-  if (!assignment.products.length && !ports.some(value => value.direction === 'output' && value.kind === 'power')) fail('assignment_mismatch', 'A cell must have assigned material products or an explicit power output')
+  let support
+  if (raw.support !== undefined) {
+    record(raw.support, ['kind', 'intent_id', 'receipt_id'], 'support cell')
+    if (raw.support.kind !== 'temporary' || assignment.products.length || ports.length || raw.enrollment !== undefined || raw.members?.length !== 1) fail('assignment_mismatch', 'Temporary support cells cannot claim production')
+    support = { kind: 'temporary', intent_id: string(raw.support.intent_id, 'temporary intent', 512), receipt_id: string(raw.support.receipt_id, 'temporary receipt', 512) }
+    if (raw.members[0]?.provenance?.receipt_id !== support.receipt_id) fail('factory_temporary_provenance_mismatch', 'Support cell must retain exact placement provenance')
+  }
+  if (!support && !assignment.products.length && !ports.some(value => value.direction === 'output' && value.kind === 'power')) fail('assignment_mismatch', 'A cell must have assigned material products or an explicit power output')
   const result = {
     cell_id: raw.cell_id, revision: raw.revision, state: 'unverified', surface_index: surface, force_index: force, assignment,
     members: array(raw.members, 'members', FACTORY_REGISTRY_LIMITS.members, 1).map(value => member(value, surface, force)),
     ports, origin: history(raw.origin, 'origin'),
+    ...(support ? { support } : {}),
     ...(Object.hasOwn(raw, 'enrollment') ? { enrollment: enrollment(raw.enrollment) } : {}),
     ...(Object.hasOwn(raw, 'observation') ? { observation: observation(raw.observation) } : {}),
   }
   if (raw.revision === 1) {
     if (Object.hasOwn(raw, 'port_bindings') || Object.hasOwn(raw, 'metadata_history')) fail('factory_metadata_history_invalid', 'Legacy revision must not contain an explicit partial history')
   } else {
-    result.port_bindings = bindings(raw.port_bindings, result)
+    const latest = raw.metadata_history?.at(-1)
+    result.port_bindings = bindings(raw.port_bindings, latest?.installed_members ? { ...result, members: latest.installed_members } : result)
     result.metadata_history = metadataHistory(raw.metadata_history, result)
   }
   return result
@@ -165,7 +188,7 @@ function metadataData(value, budget = { remaining: 524288 }, depth = 0) {
   }
 }
 export function factoryCellIdentity(cell) {
-  return Object.fromEntries(['cell_id', 'state', 'surface_index', 'force_index', 'assignment', 'members', 'origin', 'enrollment'].filter(k => Object.hasOwn(cell, k)).map(k => [k, structuredClone(cell[k])]))
+  return Object.fromEntries(['cell_id', 'state', 'surface_index', 'force_index', 'assignment', 'members', 'origin', 'enrollment', 'support'].filter(k => Object.hasOwn(cell, k)).map(k => [k, structuredClone(cell[k])]))
 }
 function bindings(raw, cell) {
   const rows = array(raw, 'port bindings', FACTORY_REGISTRY_LIMITS.ports).map(value => {
@@ -178,11 +201,13 @@ function bindings(raw, cell) {
       position: position(value.member.position), surface_index: integer(value.member.surface_index, 'binding surface', 1), force_index: integer(value.member.force_index, 'binding force', 1) }
     if (!cell.members.some(({ provenance, ...member }) => equal(member, locator))) fail('factory_metadata_binding_member_mismatch', 'Binding must identify an exact existing member')
     const endpoint = value.endpoint
-    const expected = ['item', 'fuel'].includes(declared.kind) ? 'inventory' : declared.kind === 'fluid' ? 'fluidbox' : 'electric_network'
+    const expected = declared.direction === 'output' && declared.kind === 'item' && endpoint?.kind === 'item_drop' ? 'item_drop'
+      : declared.kind === 'power' && endpoint?.kind === 'electric_service' ? 'electric_service'
+        : ['item', 'fuel'].includes(declared.kind) ? 'inventory' : declared.kind === 'fluid' ? 'fluidbox' : 'electric_network'
     const field = { inventory: 'inventory_index', fluidbox: 'fluidbox_index', electric_network: 'electric_network_id' }[expected]
-    record(endpoint, ['kind', field], 'binding endpoint')
+    record(endpoint, ['kind', ...(field ? [field] : [])], 'binding endpoint')
     if (endpoint.kind !== expected) fail('factory_metadata_endpoint_kind_mismatch', 'Endpoint kind must match port kind')
-    return { port_id: portId, member: locator, endpoint: { kind: expected, [field]: integer(endpoint[field], 'native endpoint index', 1) }, state: 'unverified',
+    return { port_id: portId, member: locator, endpoint: { kind: expected, ...(field ? { [field]: integer(endpoint[field], 'native endpoint index', 1) } : {}) }, state: 'unverified',
       evidence_refs: strings(value.evidence_refs, 'binding evidence references', FACTORY_REGISTRY_LIMITS.evidence_refs, 1, 512) }
   })
   if (new Set(rows.map(r => r.port_id)).size !== rows.length) fail('factory_metadata_duplicate_binding', 'A port has one exact declared endpoint')
@@ -200,14 +225,18 @@ function metadataHistory(raw, cell) {
   if (rows.length !== cell.revision) fail('factory_metadata_history_invalid', 'Revision history cannot skip entries')
   const normalized = []
   for (const [i, value] of rows.entries()) {
-    record(value, ['revision', 'previous_digest', 'identity_digest', 'registry_revision', 'transaction_id', 'request_digest', 'origin', 'ports', 'port_bindings', 'dependencies', 'digest'], 'metadata revision')
+    record(value, ['revision', 'previous_digest', 'identity_digest', 'registry_revision', 'transaction_id', 'request_digest', 'origin', 'ports', 'port_bindings', 'dependencies', 'digest', 'installed_members', 'physical_revision', 'lifecycle_revision'], 'metadata revision')
     if (value.revision !== i + 1 || value.identity_digest !== factoryMetadataDigest(factoryCellIdentity(cell))) fail('factory_metadata_history_invalid', 'Revision identity or sequence changed')
     const ports = array(value.ports, 'revision ports', FACTORY_REGISTRY_LIMITS.ports).map(p => port(p, cell.assignment.products))
     if (new Set(ports.map(p => p.port_id)).size !== ports.length) fail('duplicate_port', 'Revision contains duplicate ports')
-    const portBindings = bindings(value.port_bindings, { ...cell, ports })
+    const installed = value.installed_members === undefined ? undefined : array(value.installed_members, 'installed members', FACTORY_REGISTRY_LIMITS.members, 1).map(row => member(row, cell.surface_index, cell.force_index))
+    if (installed) { integer(value.physical_revision, 'physical revision', 1); integer(value.lifecycle_revision, 'lifecycle revision', 1) }
+    else if (value.physical_revision !== undefined || value.lifecycle_revision !== undefined) fail('factory_metadata_history_invalid', 'Physical metadata context incomplete')
+    const portBindings = bindings(value.port_bindings, { ...cell, ports, ...(installed ? { members: installed } : {}) })
     const row = { revision: value.revision, previous_digest: value.previous_digest, identity_digest: value.identity_digest,
       registry_revision: value.registry_revision, transaction_id: value.transaction_id, request_digest: value.request_digest, origin: value.origin,
-      ports, port_bindings: portBindings, dependencies: structuredClone(array(value.dependencies, 'revision dependencies', FACTORY_REGISTRY_LIMITS.ports)) }
+      ports, port_bindings: portBindings, dependencies: structuredClone(array(value.dependencies, 'revision dependencies', FACTORY_REGISTRY_LIMITS.ports)),
+      ...(installed ? { installed_members: installed, physical_revision: value.physical_revision, lifecycle_revision: value.lifecycle_revision } : {}) }
     if (i === 0) {
       const base = baseMetadata({ ...cell, ports })
       if (!equal({ ...row, digest: value.digest }, base)) fail('factory_metadata_history_invalid', 'Initial revision anchor changed')
@@ -216,12 +245,15 @@ function metadataHistory(raw, cell) {
       if (!/^[a-f0-9]{64}$/.test(row.request_digest)) fail('factory_metadata_history_invalid', 'Request digest missing')
       row.origin = history(row.origin, 'metadata origin')
       const previous = normalized[i - 1]
+      const retainedBindings = installed ? previous.port_bindings.filter(binding => installed.some(({ provenance, ...member }) => equal(member, binding.member))) : previous.port_bindings
       if (row.previous_digest !== previous.digest || (i > 1 && row.registry_revision <= previous.registry_revision)
         || !equal(ports.slice(0, previous.ports.length), previous.ports) || ports.slice(previous.ports.length).some(p => p.direction !== 'input')
-        || !equal(portBindings.slice(0, previous.port_bindings.length), previous.port_bindings)) fail('factory_metadata_history_invalid', 'Metadata must preserve its complete additive prefix')
+        || !equal(portBindings.slice(0, retainedBindings.length), retainedBindings)
+        || (row.physical_revision ?? 0) < (previous.physical_revision ?? 0)
+        || (row.lifecycle_revision ?? 0) < (previous.lifecycle_revision ?? 0)) fail('factory_metadata_history_invalid', 'Metadata must preserve its complete additive prefix')
       const addedInputs = ports.slice(previous.ports.length)
       if (addedInputs.some(p => !portBindings.some(b => b.port_id === p.port_id) || !row.dependencies.some(d => d.consumer?.cell_id === cell.cell_id && d.consumer?.port_id === p.port_id))) fail('factory_metadata_half_publication', 'New inputs require endpoint and dependency together')
-      if (portBindings.slice(previous.port_bindings.length).some(b => ports.find(p => p.port_id === b.port_id)?.direction === 'input'
+      if (portBindings.slice(retainedBindings.length).some(b => ports.find(p => p.port_id === b.port_id)?.direction === 'input'
         && !row.dependencies.some(d => d.consumer?.cell_id === cell.cell_id && d.consumer?.port_id === b.port_id))) fail('factory_metadata_half_publication', 'Input bindings require corresponding dependency metadata')
     }
     if (value.digest !== factoryMetadataDigest(row)) fail('factory_metadata_history_invalid', 'Revision digest mismatch')
@@ -258,8 +290,10 @@ export function restoreFactoryRegistry(raw, { worldId } = {}) {
       const identity = JSON.stringify([entry.enrollment.goal_id, entry.enrollment.semantic_step_id])
       if (enrollments.has(identity)) fail('duplicate_enrollment', 'Semantic step already has a cell')
       enrollments.add(identity)
-      if (entry.members.length !== 2 || entry.origin.goal_id !== entry.enrollment.goal_id || entry.origin.semantic_step_id !== entry.enrollment.semantic_step_id
+      if (entry.members.length !== entry.enrollment.receipt_ids.length || entry.origin.goal_id !== entry.enrollment.goal_id || entry.origin.semantic_step_id !== entry.enrollment.semantic_step_id
         || entry.enrollment.receipt_ids.some((id, i) => entry.members[i].provenance.receipt_id !== id)) fail('invalid_enrollment', 'Enrollment members/origin mismatch')
+      if (entry.enrollment.output_roles && (entry.enrollment.output_roles.length !== entry.ports.filter(port => port.direction === 'output').length
+        || entry.enrollment.output_roles.some(row => !entry.ports.some(port => port.direction === 'output' && port.port_id === row.port_id)))) fail('invalid_enrollment', 'Every output port needs its exact enrolled role')
     }
     if (ids.has(entry.cell_id)) fail('duplicate_id', 'Duplicate cell ID')
     ids.add(entry.cell_id)
@@ -307,7 +341,7 @@ function revisionNumber(value) { return integer(value, 'registry revision') }
 export function appendFactoryCellMetadata(registry, change, origin) {
   const state = restoreFactoryRegistry(registry)
   metadataData(change)
-  record(change, ['transaction_id', 'cell_id', 'expected_registry_revision', 'expected_cells', 'input_ports', 'port_bindings', 'dependencies'], 'metadata change')
+  record(change, ['transaction_id', 'cell_id', 'expected_registry_revision', 'expected_cells', 'input_ports', 'port_bindings', 'dependencies', 'expected_lifecycle_revision', 'physical_context'], 'metadata change')
   const transactionId = string(change.transaction_id, 'transaction ID', 128)
   const requestDigest = factoryMetadataDigest(change)
   const prior = state.cells.flatMap(c => (c.metadata_history ?? []).map(r => ({ cell_id: c.cell_id, ...r }))).find(r => r.transaction_id === transactionId)
@@ -318,12 +352,19 @@ export function appendFactoryCellMetadata(registry, change, origin) {
   if (change.expected_registry_revision !== state.revision) fail('factory_registry_revision_stale', 'Registry CAS failed')
   const target = state.cells.find(c => c.cell_id === change.cell_id)
   if (!target) fail('unknown_cell', 'Metadata target missing')
+  let installed
+  if (change.physical_context !== undefined) {
+    record(change.physical_context, ['physical_revision', 'members'], 'physical metadata context')
+    integer(change.expected_lifecycle_revision, 'lifecycle revision', 1)
+    integer(change.physical_context.physical_revision, 'physical revision', 1)
+    installed = array(change.physical_context.members, 'installed members', FACTORY_REGISTRY_LIMITS.members, 1).map(row => member(row, target.surface_index, target.force_index))
+  }
   const declarations = array(change.dependencies, 'metadata dependencies', FACTORY_REGISTRY_LIMITS.ports)
   const involved = [...new Set([target.cell_id, ...declarations.filter(d => d.supplier?.kind === 'cell').map(d => d.supplier.cell_id)])].sort()
   const expected = array(change.expected_cells, 'expected cells', FACTORY_REGISTRY_LIMITS.cells, 1)
   if (!equal(expected.map(e => e.cell_id).sort(), involved)) fail('factory_metadata_expected_cells_invalid', 'CAS must cover exactly every participating cell')
   for (const entry of expected) {
-    record(entry, ['cell_id', 'revision', 'digest'], 'expected cell')
+    record(entry, ['cell_id', 'revision', 'digest', 'physical_revision'], 'expected cell')
     const current = state.cells.find(c => c.cell_id === entry.cell_id)
     if (!current || current.revision !== entry.revision || factoryCellMetadataHead(current) !== entry.digest) fail('factory_cell_revision_stale', 'Cell CAS failed')
     if (current.surface_index !== target.surface_index || current.force_index !== target.force_index) fail('factory_metadata_scope_mismatch', 'Metadata cells must share scope')
@@ -333,13 +374,15 @@ export function appendFactoryCellMetadata(registry, change, origin) {
   if (inputs.some(p => p.direction !== 'input')) fail('factory_metadata_output_addition_forbidden', 'Output assignment is immutable')
   const candidate = structuredClone(state); const cell = candidate.cells.find(c => c.cell_id === target.cell_id)
   cell.ports.push(...inputs)
-  cell.port_bindings = [...(target.port_bindings ?? []), ...bindings(change.port_bindings, cell)]
+  const retainedBindings = installed ? (target.port_bindings ?? []).filter(binding => installed.some(({ provenance, ...member }) => equal(member, binding.member))) : target.port_bindings ?? []
+  cell.port_bindings = [...retainedBindings, ...bindings(change.port_bindings, installed ? { ...cell, members: installed } : cell)]
   if (!inputs.length && !change.port_bindings.length && !declarations.length) fail('factory_metadata_empty', 'Empty revision is not a transaction')
   cell.revision++
   const oldHistory = target.metadata_history ?? [baseMetadata(target)]
   const next = { revision: cell.revision, previous_digest: oldHistory.at(-1).digest, identity_digest: factoryMetadataDigest(factoryCellIdentity(cell)),
     registry_revision: increment(state.revision, 'registry revision'), transaction_id: transactionId, request_digest: requestDigest,
-    origin: history(origin, 'metadata origin'), ports: structuredClone(cell.ports), port_bindings: structuredClone(cell.port_bindings), dependencies: [] }
+    origin: history(origin, 'metadata origin'), ports: structuredClone(cell.ports), port_bindings: structuredClone(cell.port_bindings), dependencies: [],
+    ...(installed ? { installed_members: installed, physical_revision: change.physical_context.physical_revision, lifecycle_revision: change.expected_lifecycle_revision } : {}) }
   cell.metadata_history = [...oldHistory, next]
   const endpoint = (id, portId) => {
     const c = candidate.cells.find(c => c.cell_id === id); const binding = c?.port_bindings?.find(b => b.port_id === portId)
@@ -402,7 +445,7 @@ function increment(raw, label) {
 
 export function registerFactoryCell(registry, declaration) {
   const state = restoreFactoryRegistry(registry)
-  record(declaration, ['surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin', 'enrollment'], 'cell declaration')
+  record(declaration, ['surface_index', 'force_index', 'assignment', 'members', 'ports', 'origin', 'enrollment', 'support'], 'cell declaration')
   const entry = cell({ ...declaration, cell_id: `cell-${state.next_cell_id}`, revision: 1, state: 'unverified' })
   return restoreFactoryRegistry({ ...state, revision: increment(state.revision, 'revision'), next_cell_id: increment(state.next_cell_id, 'cell counter'), cells: [...state.cells, entry] })
 }

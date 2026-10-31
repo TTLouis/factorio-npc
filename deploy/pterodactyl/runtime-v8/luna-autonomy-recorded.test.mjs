@@ -7,6 +7,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { pauseStrandedPlanAfterRequestError, recoverInterruptedAgentPlan } from './supervisor.mjs'
 import { deployment, FakeFactorio, recordingJev } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 
 // Repair unit E: a recorded, scripted-reply regression of the retained 2026-10-05 autonomy run (see
 // docs/validation/LUNA_AUTONOMY_FAILURE_ANALYSIS_2026-10-05.md). The model replies, tool outputs and world snapshots in
@@ -64,10 +65,11 @@ const TASK_TYPES = {
 }
 
 class RecordedWorld {
-  constructor({ furnace, held, inProgress = 0, counts }) {
+  constructor({ furnace, held, inProgress = 0, counts, factoryJob = 'iron-plate' }) {
     this.game = new FakeFactorio({ inventory: {} })
     this.game.status = deployment({ ...ACTOR })
     this.furnace = { ...furnaceFromSnapshot(furnace), inProgress, ...structuredClone(counts ?? {}) }
+    this.factoryJob = factoryJob
     this.held = { ...held }
     this.game.preflight = text => this.preflightFor(text)
     this.game.nearby = {
@@ -175,6 +177,11 @@ class RecordedWorld {
 
   async intercept(text) {
     this.commandsSeen.push(text)
+    if (text.includes("'sgluna_factory','observe'")) {
+      const row = this.game.factoryMembers.get(this.furnace.unit_number)
+      if (row) row.inventories = ['fuel', 'input', 'output'].map((slot, index) => ({ index: index + 1, role: slot,
+        state: 'known', truncated: false, items: slotItems(this.furnace[slot]) }))
+    }
     if (text.includes('"get_inventory_items"')) return toSerpent(this.held)
     if (text.includes('"get_entity_status"')) {
       return JSON.stringify({ found: true, actor_position: this.game.nearby.actor_position, radius: 16, entity: this.entitySnapshot() })
@@ -188,7 +195,13 @@ class RecordedWorld {
       const name = /"technology",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
       return { electronics: worldReads.technologyElectronics, 'automation-science-pack': worldReads.technologyAutomationScience }[name] ?? JSON.stringify({ found: false, name })
     }
-    if (text.includes('"autorio_actor","status"')) return worldReads.actorStatusReq4
+    if (text.includes('"autorio_actor","status"')) {
+      // Qualified synthetic live ownership supplements the retained old actor
+      // projection. The frozen recorded reply remains unchanged on disk.
+      const original = JSON.parse(worldReads.actorStatusReq4)
+      return JSON.stringify({ ...original, mode: this.game.status.mode, surface_index: this.game.status.surface_index, force_index: this.game.status.force_index,
+        actor: { ...original.actor, actor_id: this.game.status.actor_id, valid: this.game.status.allowed === true, kind: this.game.status.actor_kind } })
+    }
     if (text.includes('"evaluate_condition"')) {
       const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
       if (encoded) {
@@ -366,6 +379,12 @@ const recorded = (key, overrides = {}) => ({ content: JSON.stringify({ ...replie
 
 function loop(world, script, { agentOptions = {} } = {}) {
   const memory = new CanonicalTaskBoardMemory()
+  // Explicit single-job synthetic assignment/native capability for modern
+  // harness tests, not reconstructed evidence from the retained autonomy run.
+  const ingredient = { 'iron-plate': 'iron-ore', 'copper-plate': 'copper-ore' }[world.factoryJob]
+  assert.ok(ingredient, 'recorded replay must declare one supported fixture job')
+  installHistoricalFactorySupplement(memory, world.game, world.furnace, { products: [world.factoryJob], ingredients: [ingredient] })
+  world.game.factoryMembers.get(world.furnace.unit_number).recipe.name = world.factoryJob
   const calls = []
   const rows = []
   const jev = recordingJev(async (_state, questions) => {
@@ -724,7 +743,7 @@ test('shape 1 (truthful failure): a model that keeps re-sending the recorded col
   assert.equal(data(exhausted).refusals_used, 2)
 })
 
-test('shape 1 residual: with the furnace already holding 50 (the retained state at the turn-12 collection) the committed stock checkpoint should close before the collection empties it', async () => {
+test('shape 1 residual: fresh iron checkpoint closes before collection, then original cross-job copper load is refused', async () => {
   const world = new RecordedWorld({ furnace: worldReads.furnace47Plates, held: heldPlates(), inProgress: 1 })
   const run = loop(world, [
     furnaceReads(),
@@ -736,14 +755,14 @@ test('shape 1 residual: with the furnace already holding 50 (the retained state 
   const committedPlan = structuredClone(run.reducerPlan())
   world.finishBatch() // the furnace finishes its 50 inside the first wait, as in the retained run
   assert.equal(world.totalInFurnace('iron-plate'), 50)
+  const before = structuredClone({ held: world.held, furnace: world.furnace })
 
-  await run.agent.completed()
+  await assert.rejects(run.agent.completed(), { failure_code: 'factory_cell_input_unproven' })
 
   // The recorded turn-12 collection never ran: the smelting step closed from the furnace count that was already met.
   assert.equal(run.plan().task_board.completed_count, 1, 'the smelting step closed from the furnace count that was met')
-  assert.equal(world.mutations.length, 2)
-  assert.doesNotMatch(world.mutations[1], /iron-plate/, 'the collection was not admitted')
-  assert.match(world.mutations[1], /copper-ore/)
+  assert.equal(world.mutations.length, 1, 'neither old iron collection nor incompatible new copper supply is sent')
+  assert.deepEqual({ held: world.held, furnace: world.furnace }, before)
   assert.equal(world.totalInFurnace('iron-plate'), 50, 'the furnace stock the step required was never emptied')
   assert.equal(run.named('checkpoint.stock_extraction_refused').length, 0, 'not refused (unit C): closed')
   // The turn-12 reply's held-iron checkpoint change was dropped with its batch (only the re-authored copper one is ignored).
@@ -761,7 +780,7 @@ test('shape 1 residual: with the furnace already holding 50 (the retained state 
   assert.match(fact, /move_items_exact\) was written for the step that closed and did not run/)
   assert.equal(run.plan().status, 'active')
   assert.equal(run.plan().blocker, '')
-  assert.equal(world.finishBatch(), undefined, 'the re-authored batch for the new step ran')
+  assert.deepEqual(world.pending, [], 'the unchanged recorded copper reply cannot reassign the iron cell')
 })
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1005,7 +1024,7 @@ const planner4Reads = () => [
   readsRound(['getNearbyEntities', { radius: 10, name: 'stone-furnace', limit: 10 }], ['getRecipeDetails', { item_or_recipe: 'lab', requested_count: 1 }], ['getInventoryItems', {}], ['getTechnology', { name: 'electronics' }]),
   readsRound(['getEntityStatus', { name: 'stone-furnace', radius: 12 }], ['getRecipeDetails', { item_or_recipe: 'copper-plate', requested_count: 10 }], ['getTechnology', { name: 'automation-science-pack' }], ['getActorStatus', {}]),
 ]
-const fourthRequestWorld = () => new RecordedWorld({ furnace: { entity: worldReads.furnaceCopper10.entity }, held: fromSerpent(worldReads.inventoryReq4) })
+const fourthRequestWorld = () => new RecordedWorld({ furnace: { entity: worldReads.furnaceCopper10.entity }, held: fromSerpent(worldReads.inventoryReq4), factoryJob: 'copper-plate' })
 const GATHER_COPPER_ORE = { name: 'gather_resource', args: { resource_name: 'copper-ore', count: 5, search_radius: 256 } }
 
 async function plannerCollectedTenCopper(script) {
