@@ -21,7 +21,8 @@ const rcon = { command: async command => { assert.ok(!command.includes('"submit"
 const lua = async body => JSON.parse(await rcon.command(`/silent-command ${body}`))
 const read = async (name, args) => JSON.parse(await rcon.command(toolCommand(name, args)))
 const profile = async name => { const value = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_skills","select_curated_library",${luaString(name)})))`); assert.equal(value.ok, true); return value }
-const snapshot = () => lua('rcon.print(helpers.table_to_json({profile=storage.sgluna_curated_library_profile,definitions=storage.sgluna_skill_definitions,exports=storage.sgluna_skill_exports,preserved=storage.sgluna_preserved_curated_variants}))')
+// Console storage is scenario-local unless the exact mod scope is selected.
+const snapshot = () => lua('__autorio__ assert(script.mod_name=="autorio","wrong snapshot mod scope");assert(type(storage.sgluna_skill_definitions)=="table","library definitions are uninitialized");assert(storage.sgluna_curated_library_profile=="basic" or storage.sgluna_curated_library_profile=="leveled","library profile is uninitialized");rcon.print(helpers.table_to_json({profile=storage.sgluna_curated_library_profile,definitions=storage.sgluna_skill_definitions,exports=storage.sgluna_skill_exports,preserved=storage.sgluna_preserved_curated_variants}))')
 const list = () => lua('rcon.print(helpers.table_to_json(remote.call("autorio_skills","list")))')
 async function assertViews() {
   const refs = await read('findKnowledge', { query: 'capabilities freshness dependencies acquisition', limit: 10 })
@@ -110,7 +111,7 @@ try {
 catch (error) { evidence.error = error.stack ?? String(error); process.exitCode = 1 }
 finally {
   if (connection) {
-    try { evidence.final = await lua('game.speed=1;game.tick_paused=true;rcon.print(helpers.table_to_json({tick=game.tick,paused=game.tick_paused,speed=game.speed,humans=#game.connected_players}))') } catch (error) { evidence.final_error = String(error); process.exitCode = 1 }
+    try { evidence.final = await lua('game.speed=1;game.tick_paused=true;rcon.print(helpers.table_to_json({tick=game.tick,paused=game.tick_paused,speed=game.speed,humans=#game.connected_players}))') } catch (error) { evidence.status = 'failed'; evidence.final_error = String(error); process.exitCode = 1 }
     connection.close()
   }
   await fs.mkdir(results, { recursive: true })
