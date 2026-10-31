@@ -35,22 +35,43 @@ allowance and recovery contracts remain unchanged.
 
 Use `factorio_capabilities` to discover the exact supported operation names,
 arguments and bounded observation tools for the running revision. This initial
-slice supports walking, waiting, crafting, mining known resource positions,
-exact item transfers and tightly restricted nonfluid placement. Unsupported operations fail closed; the complete existing
+slice supports walking, waiting, hand crafting, bounded native harvesting,
+mining known resource positions, exact item transfers, research submission and
+restricted construction. Unsupported operations fail closed; the complete existing
 runtime-v8 catalog is **not** implicitly exposed.
 
 `place_entity` accepts only `stone-furnace`, `burner-mining-drill` and
-`wooden-chest`, with explicit exact-grid coordinates. Native prototype/footprint
+`wooden-chest`, `lab` and `small-electric-pole`, with explicit exact-grid coordinates.
+Read native placement candidates to obtain valid snapped centers, including
+half-grid centers; do not assume integer coordinates. Native prototype/footprint
 and collision checks must prove a clear, nonfluid site. The bridge always passes
 the native execution-time `refuse_clearance` flag: a later blocker causes refusal,
 not clearing or replacement. It refuses older mods without the explicit safety
 capability marker. The flag is not model-selectable. Discover and inspect the
 actual placed entity before supplying it; placement alone proves no production.
 
-Advanced placement/construction, fluid
-preservation, autonomous research/combat, multiplayer coordination and
-unrestricted world queries are outside this slice. The established preservation
-path has not been integrated into external mode; it is not replaced with prompts.
+`place_candidate` supports only the native preservation path's bounded fluid
+prototype set: `offshore-pump`, `boiler`, `steam-engine` and `pipe`. First discover
+current prototype, source-tile and placement facts with `getPrototypeDetails`,
+`getFluidSourceTiles` and `getPlacementCandidates`. A candidate without a declared
+relation is accepted only when a complete native scan proves zero possible fluid
+joins. A connection candidate must prove exactly its declared single additive
+join; the target's connected geometry is frozen by the shared native guard.
+The bridge persists the exact frozen claim before sending the v2 operation;
+queued execution rechecks owner, session, epoch, candidate lifetime, native
+admission and protected geometry, and refuses clearance. Missing guard capability,
+unknown geometry, extra joins, changed targets or lost claim history fail closed.
+An unused frozen claim remains durable; deleting claims or the ledger is unsafe.
+
+`research_technology` submits native research; its completed operation receipt does
+not prove research completion. Read `getTechnology({name})` and
+`getResearchStatus({})` for current requirements, progress and researched state.
+Obtain recipes, availability, ingredients and sizing from live observations.
+`harvest_product` uses native harvesting within 64 tiles, at most 100 requested
+items; its omitted radius defaults to this external bound. No items are injected.
+
+Other advanced construction, combat, multiplayer coordination and unrestricted
+world queries remain outside this slice.
 Do not emulate a missing operation with RCON, generated Lua or shell commands.
 The native world remains authoritative for inventory, recipes, reach, collisions,
 crafting time, mining and actual output.

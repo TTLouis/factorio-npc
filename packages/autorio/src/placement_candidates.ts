@@ -1260,7 +1260,7 @@ function preservation_guard_matches(actor: ControlledActor, set: PlacementCandid
   if (!actor.surface.can_place_entity({ name: set.entity_name, position: candidate.position, direction: candidate.direction,
     force: actor.force, ...placement_check_args(set.entity_name) })) return false
   const geometry = protected_geometry(actor, guard.protected_ids)
-  const join: any = preservation_candidate_join(actor, set, candidate)
+  const join: any = preservation_candidate_join(actor, set, candidate, guard.join.isolated === true)
   return !!geometry && join.complete === true && native_fact_equal(geometry, guard.geometry)
     && native_fact_equal({ ...join, tick: 0 }, { ...guard.join, tick: 0 })
 }
@@ -1278,19 +1278,21 @@ function native_admission_baseline() {
 
 // Harness-only native claim. Unknown/bulk geometry cannot be frozen. A claim
 // cannot be rebound to another operation or renewed with a changed baseline.
-export function freeze_fluid_preservation_candidate(actor: ControlledActor | undefined, candidate_set_id: string, candidate_id: string, operation_key: string, protected_ids: number[], context: { signature: string, owner: FluidPreservationOwner }) {
+export function freeze_fluid_preservation_candidate(actor: ControlledActor | undefined, candidate_set_id: string, candidate_id: string, operation_key: string, protected_ids: number[], context: { signature: string, owner: FluidPreservationOwner, isolated?: boolean }) {
   if (!claim_registry_valid()) return { ok: false, code: 'preservation_claim_history_missing' }
   if (!actor?.is_valid || typeof operation_key !== 'string' || operation_key.length < 1 || operation_key.length > 240
-    || !Array.isArray(protected_ids) || protected_ids.length < 1 || protected_ids.length > 8
+    || !Array.isArray(protected_ids) || (protected_ids.length < 1 && context?.isolated !== true) || protected_ids.length > 8
     || protected_ids.some(id => typeof id !== 'number' || id < 1 || math.floor(id) !== id)
     || new Set(protected_ids).size !== protected_ids.length || !context || typeof context.signature !== 'string'
     || context.signature.length < 1 || context.signature.length > 256 || !valid_fluid_owner(context.owner)
     || !current_fluid_owner(actor, context.owner)) return { ok: false, code: 'preservation_guard_invalid' }
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
-  if (!resolved.ok || !resolved.candidate.connects_to || !protected_ids.includes(resolved.candidate.connects_to.unit_number)) return { ok: false, code: 'preservation_guard_candidate_unavailable' }
+  if (!resolved.ok || (context.isolated === true
+    ? resolved.candidate.connects_to !== undefined || protected_ids.length !== 0
+    : !resolved.candidate.connects_to || !protected_ids.includes(resolved.candidate.connects_to.unit_number))) return { ok: false, code: 'preservation_guard_candidate_unavailable' }
   const { set, candidate } = resolved
   if (actor.status_snapshot().actor_id !== set.actor_id) return { ok: false, code: 'preservation_guard_actor_changed' }
-  const join: any = preservation_candidate_join(actor, set, candidate)
+  const join: any = preservation_candidate_join(actor, set, candidate, context.isolated === true)
   const geometry = protected_geometry(actor, protected_ids)
   const native_baseline = native_admission_baseline()
   if (!geometry || join.complete !== true || !native_baseline) return { ok: false, code: 'preservation_guard_geometry_unproven' }
@@ -1394,7 +1396,7 @@ export function placement_candidate_preflight(actor: ControlledActor, candidate_
     ...(candidate.connects_to ? { preservation_join: join } : {}) }
 }
 
-function preservation_candidate_join(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate) {
+function preservation_candidate_join(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate, isolated = false) {
   const unavailable = (reason: string) => ({ version: 1, complete: false, reason })
   const prototype = prototypes.entity[set.entity_name]
   const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
@@ -1410,7 +1412,8 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   const ports = candidate_fluid_ports(prototype, candidate.position, candidate.direction)
   if (!ports || expected !== ports.length || expected > 16 || expected < 1
     || ports.some(port => port.connection_type !== 'normal') || (candidate.clears?.length ?? 0) > 0) return unavailable('candidate_ports_incomplete_or_clearing')
-  if (!candidate.connects_to) return unavailable('relation_required')
+  if (!candidate.connects_to && !isolated) return unavailable('relation_required')
+  if (isolated && candidate.connects_to) return unavailable('isolated_candidate_has_relation')
   const storages = fluidboxes.map((storage, index) => ({ index: storage.index ?? index + 1,
     production_type: storage.production_type, volume: storage.volume, filter: storage.filter?.name,
     minimum_temperature: storage.minimum_temperature, maximum_temperature: storage.maximum_temperature }))
@@ -1422,6 +1425,10 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
     left = math.min(left, port.position.x); right = math.max(right, port.position.x)
     top = math.min(top, port.position.y); bottom = math.max(bottom, port.position.y)
   }
+  // An isolated bootstrap claim cannot infer absence across unseen chunks.
+  if (isolated && !area_known_visible(actor.force, actor.surface, {
+    left_top: { x: left - 2, y: top - 2 }, right_bottom: { x: right + 2, y: bottom + 2 },
+  })) return unavailable('neighbour_scan_not_visible')
   const neighbours = find_world_entities(actor.surface, { area: [{ x: left - 2, y: top - 2 }, { x: right + 2, y: bottom + 2 }], limit: 65 })
   if (neighbours.length > 64) return unavailable('neighbour_scan_truncated')
   let matches = 0
@@ -1431,6 +1438,7 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
     if (!live.complete) return unavailable('neighbour_ports_incomplete')
     for (const from of live.ports) for (const to of ports) {
       if (!fluid_ports_join(from, to)) continue
+      if (isolated) return unavailable('isolated_candidate_would_connect')
       const join = candidate.connects_to!
       if (entity.unit_number !== join.unit_number || entity.force.index !== actor.force.index
         || entity.surface.index !== actor.surface.index || from.connected
@@ -1439,11 +1447,12 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
       matches += 1
     }
   }
-  if (matches !== 1) return unavailable('exact_single_join_unproven')
+  if (matches !== (isolated ? 0 : 1)) return unavailable('exact_single_join_unproven')
   return { version: 2, complete: true, tick: game.tick, generated_tick: set.generated_tick,
     actor_id: set.actor_id, surface_index: set.surface_index, force_index: set.force_index,
     candidate_set_id: set.id, candidate_id: candidate.id, entity_name: set.entity_name,
     entity_type: prototype.type, position: candidate.position, direction: candidate.direction,
+    ...(isolated ? { isolated: true } : {}),
     connects_to: candidate.connects_to, candidate_ports: ports, candidate_storages: storages, clears: [] }
 }
 
@@ -1451,7 +1460,7 @@ export function execute_placement_candidate(
   actor: ControlledActor,
   candidate_set_id: string,
   candidate_id: string,
-  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[]) => boolean,
+  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number, proof?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[], options?: { refuse_clearance?: boolean }) => boolean,
 ): [boolean, string] {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
   if (!resolved.ok) return [false, resolved.error]
@@ -1460,7 +1469,8 @@ export function execute_placement_candidate(
   const own = own_clear_unit_numbers(candidate)
   let accepted: boolean
   if (prototypes.entity[set.entity_name]?.type === 'offshore-pump' || candidate.preservation_guard) {
-    accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, { candidate_set_id, candidate_id }, protected_unit_numbers)
+    accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction, { candidate_set_id, candidate_id }, protected_unit_numbers, undefined,
+      candidate.preservation_guard ? { refuse_clearance: true } : undefined)
   }
   else if (own !== undefined) {
     // Only this path lets a placement take the NPC's own entities, and only the ones this candidate listed.

@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
 import { operationSignature } from '../../deploy/pterodactyl/runtime-v8/operation-reconciliation.mjs'
-import { parseOperation } from '../../deploy/pterodactyl/runtime-v8/structured-policy.mjs'
+import { parseExternalOperation as parseOperation } from './native-bridge.mjs'
 
 const MAX_RECORDS = 512
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024

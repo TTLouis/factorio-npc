@@ -110,7 +110,10 @@ test('explicit proven nonadmission is safely rejected and same key is never reus
 test('bounded receipt waits release the mutex so exact cancel can interrupt', async t => {
   const f = await fixture(t); const runtime = await f.open()
   const result = await runtime.submit({ request_id: 'interrupt', operation })
-  const waiting = runtime.get({ operation_id: result.operation_id, wait_ms: 1000 })
+  // Each poll persists a real journal. Windows durable replacement can exceed
+  // one second under suite load; keep the receipt open through cancellation.
+  // Holding the mutex for the whole wait still fails the cancelled assertion.
+  const waiting = runtime.get({ operation_id: result.operation_id, wait_ms: 30_000 })
   const cancelled = await runtime.cancel({ operation_id: result.operation_id })
   assert.equal(cancelled.state, 'cancelled'); assert.equal((await waiting).state, 'cancelled')
   assert.equal((await runtime.context()).reconciliation_required.length, 1)

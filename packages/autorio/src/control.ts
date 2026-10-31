@@ -698,6 +698,7 @@ remote.add_interface('autorio_operations', {
     return {
       ...task_manager.get_status_snapshot(),
       placement_no_clear_supported: true,
+      external_fluid_candidates_supported: 1,
       admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       basic_operation: basic_operation_controller.status(),

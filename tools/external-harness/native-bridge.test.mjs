@@ -38,6 +38,13 @@ function fixture() {
     }
     if (command.includes('local g=') && command.includes('configure')) return '{"ok":true}'
     if (command.includes('{guard=remote.call')) return JSON.stringify(state)
+    if (command.includes('\"fluid_preservation_candidate\"')) {
+      if (fake.freezeError) return JSON.stringify({ ok: false, code: fake.freezeError })
+      const encoded = command.match(/helpers\.json_to_table\('([^']*)'\)/)[1]
+      const context = JSON.parse(encoded)
+      return JSON.stringify({ ok: true, preservation_join: { version: 4, candidate_set_id: 'placement-1', candidate_id: 'candidate-1',
+        operation_key: fake.freezeKey ?? 'run/fluid', signature: context.signature, owner: context.owner, isolated: context.isolated === true } })
+    }
     if (command.includes('autorio_preflight') || command.includes('validation="not_required"')) return JSON.stringify(fake.preflight)
     return '{"example":true}'
   } }
@@ -256,4 +263,81 @@ test('atomic admission rejects native rollback or generation changes after prepa
   const command = f.calls.at(-1)
   assert.ok(command.includes('j.high_water~=4'))
   assert.ok(command.includes('s.batch_generation~=2'))
+})
+
+
+test('research observation and submission reuse canonical native contracts without goal completion', async () => {
+  const f = fixture()
+  const prepared = await f.bridge.prepare({ name: 'research_technology', args: { technology_name: 'automation' } }, 'run/research')
+  f.admission = row(prepared.pending)
+  await f.bridge.submit(prepared)
+  assert.match(f.calls.at(-1), /autorio_operations','research_technology','automation'/)
+  assert.match(f.calls.at(-1), /autorio_preflight/)
+  f.state.status.admission_journal = [row(prepared.pending, 'completed')]
+  assert.equal((await f.bridge.receipt(prepared.pending)).goal_verified, false)
+  await f.bridge.observe('getTechnology', { name: 'automation' })
+  assert.match(f.calls.at(-1), /autorio_research.*technology.*automation/)
+  await f.bridge.observe('getResearchStatus', {})
+  assert.match(f.calls.at(-1), /autorio_research.*status/)
+})
+
+test('harvest canonicalizes its bounded default and refuses extended work', () => {
+  assert.deepEqual(parseExternalOperation({ name: 'harvest_product', args: { product_name: 'wood' } }),
+    { name: 'harvest_product', args: { product_name: 'wood', count: 1, search_radius: 64 } })
+  for (const args of [{ product_name: 'wood', count: 101 }, { product_name: 'wood', search_radius: 65 }]) {
+    assert.throws(() => parseExternalOperation({ name: 'harvest_product', args }), { code: 'operation_limit' })
+  }
+})
+
+test('lab and pole use native fractional-grid footprints while fluid coordinate placement stays refused', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true
+  for (const entity_name of ['lab', 'small-electric-pole']) {
+    const operation = { name: 'place_entity', args: { entity_name, x: 0.5, y: -1.5 } }
+    assert.deepEqual((await f.bridge.prepare(operation, 'run/nonfluid')).operation, operation)
+    assert.match(f.calls.at(-1), /preservation_nonfluid_output/)
+    assert.match(f.calls.at(-1), /exact_grid_required/)
+    assert.match(renderExternalOperation(operation), /,true\)$/)
+  }
+  for (const entity_name of ['boiler', 'steam-engine', 'pipe', 'offshore-pump']) {
+    assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name, x: 0, y: 0 } }))
+  }
+})
+
+for (const isolated of [false, true]) {
+  test(`fluid ${isolated ? 'isolated source' : 'declared join'} freezes shared native claim and binds exact v2 owner`, async () => {
+    const f = fixture()
+    f.state.status.placement_no_clear_supported = true
+    f.state.status.external_fluid_candidates_supported = 1
+    f.preflight = { ok: true, ...(isolated ? { preservation_eligibility: { kind: 'relation_required' } }
+      : { preservation_join: { connects_to: { unit_number: 42 } } }) }
+    const operation = { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }
+    const prepared = await f.bridge.prepare(operation, 'run/fluid')
+    assert.equal(prepared.preservation.candidate.isolated, isolated)
+    assert.equal(prepared.preservation.owner.session, session)
+    assert.equal(prepared.pending.goal_id, session)
+    assert.equal(prepared.pending.step_id, 'run/fluid')
+    assert.match(f.calls[1], /external_candidate_unproven/)
+    assert.match(f.calls[1], /placement_footprint_occupied/)
+    assert.ok(f.calls[2].includes(isolated ? ',{},helpers.json_to_table' : ',{42},helpers.json_to_table'))
+    f.admission = row(prepared.pending)
+    await f.bridge.submit(prepared)
+    assert.match(f.calls.at(-1), /fluid_preservation/)
+    assert.match(f.calls.at(-1), /autorio_operation_admission","leave/)
+    assert.match(f.calls.at(-1), /external_fluid_candidates_supported~=1/)
+    assert.match(f.calls.at(-1), /autorio_operations','place_candidate','placement-1','candidate-1'/)
+    delete prepared.preservation
+    await assert.rejects(f.bridge.submit(prepared), { code: 'fluid_preservation_required' })
+  })
+}
+
+test('unknown fluid capability, native refusal and malformed relation cannot send admission', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true
+  const operation = { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }
+  await assert.rejects(f.bridge.prepare(operation, 'run/fluid'), { code: 'fluid_safety_capability_missing' })
+  f.state.status.external_fluid_candidates_supported = 1
+  await assert.rejects(f.bridge.prepare(operation, 'run/fluid'), { code: 'fluid_candidate_relation_unproven' })
+  f.preflight = { ok: true, preservation_join: { connects_to: { unit_number: 42 } } }
+  f.freezeError = 'preservation_guard_geometry_unproven'
+  await assert.rejects(f.bridge.prepare(operation, 'run/fluid'), error => error.code === 'fluid_preservation_refused' && error.notAdmitted)
+  assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
 })

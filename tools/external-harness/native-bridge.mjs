@@ -19,20 +19,23 @@ import {
 } from '../../deploy/pterodactyl/runtime-v8/structured-policy.mjs'
 
 // This is an intentionally smaller capability surface, not an alternate policy.
-// Advanced placement requires the autonomous runtime's preservation obligations.
-export const PLACEMENT_PROTOTYPES = Object.freeze(['stone-furnace', 'burner-mining-drill', 'wooden-chest'])
-export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity'])
+// Nonfluid sites require native zero-fluidbox witnesses. Fluid candidates use
+// the shared frozen native preservation claim and exact v2 admission owner.
+export const PLACEMENT_PROTOTYPES = Object.freeze(['stone-furnace', 'burner-mining-drill', 'wooden-chest', 'lab', 'small-electric-pole'])
+export const FLUID_PLACEMENT_PROTOTYPES = Object.freeze(['offshore-pump', 'boiler', 'steam-engine', 'pipe'])
+export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate'])
 export const OBSERVATION_NAMES = Object.freeze([
   'getActorStatus', 'getInventoryItems', 'getEquipmentStatus', 'getRecipeDetails',
   'getPrototypeDetails', 'discoverPrototypes', 'getNearbyEntities', 'getEntityStatus',
-  'getCraftingStatus', 'getNavigationStatus',
+  'getCraftingStatus', 'getNavigationStatus', 'getTechnology', 'getResearchStatus',
+  'getPlacementCandidates', 'getFluidSourceTiles',
 ])
 export const observationDefinitions = toolDefinitions.filter(tool => OBSERVATION_NAMES.includes(tool.function.name))
 export function capabilities() {
   return { operations: operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)),
     observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
       name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
-    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, placement_prototypes: [...PLACEMENT_PROTOTYPES], placement_requires_exact_grid: true, placement_clearing: false } }
+    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false } }
 }
 const MAX_REPLY_BYTES = 512 * 1024
 const PREFIX = '/silent-command '
@@ -71,7 +74,8 @@ function preflightExpression(operation) {
   if (!command) return '{ok=true,validation="not_required"}'
   check(command.startsWith(JSON_PREFIX) && command.endsWith('))'), 'preflight_renderer_changed')
   const expression = command.slice(JSON_PREFIX.length, -2)
-  if (operation.name !== 'place_entity') return expression
+  if (!['place_entity', 'place_candidate'].includes(operation.name)) return expression
+  if (operation.name === 'place_candidate') return `(function() local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or not (${FLUID_PLACEMENT_PROTOTYPES.map(name => `n==${luaString(name)}`).join(' or ')}) or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; local found=surface.find_entities_filtered({area=f.world_box,limit=129}); if #found>=129 then return {ok=false,code="placement_footprint_dense"} end; for _,e in pairs(found) do if e.valid and e.type~="resource" then return {ok=false,code="placement_footprint_occupied"} end end; return p end)()`
   const { entity_name: name, x, y, direction = 0 } = operation.args
   // Consume the same native footprint and nonfluid witness as the full runtime;
   // never infer dimensions, snapping or fluid ports from a vanilla name.
@@ -98,13 +102,17 @@ function normalizedStatus(status) {
 }
 
 export function parseExternalOperation(raw) {
-  const operation = parseOperation(raw)
+  const operation = parseOperation(raw?.name === 'harvest_product' && raw.args?.search_radius === undefined
+    ? { ...raw, args: { ...raw.args, search_radius: 64 } } : raw)
   check(OPERATION_NAMES.includes(operation.name), 'operation_not_supported', 'This external mode does not enable that operation')
   // The inherited parser is authoritative; these are additional experiment limits.
   if (operation.name === 'wait') check(operation.args.ticks <= 3600, 'operation_limit', 'wait is bounded to 3600 ticks')
   if (operation.name === 'craft_item' || operation.name === 'mine_resource_at') check(operation.args.count <= 100, 'operation_limit', 'count is bounded to 100')
   if (operation.name === 'place_entity') check(PLACEMENT_PROTOTYPES.includes(operation.args.entity_name)
     && Number.isFinite(operation.args.x) && Number.isFinite(operation.args.y), 'placement_not_supported', 'Use explicit coordinates for an allowed nonfluid prototype')
+  if (operation.name === 'harvest_product') {
+    check(operation.args.count <= 100 && operation.args.search_radius <= 64, 'operation_limit', 'Harvest is bounded to 100 items within 64 tiles')
+  }
   if (operation.name === 'move_items_exact') check(operation.args.max_count <= 1000, 'operation_limit', 'max_count is bounded to 1000')
   return operation
 }
@@ -173,7 +181,8 @@ export class NativeBridge {
     check(snapshot.status.task_state === 'idle' && snapshot.status.queue_length === 0 && !snapshot.status.active_batch, 'native_busy')
     check(!nativeAdmissionJournal(snapshot.status.admission_journal).unresolved, 'unresolved_native_operation')
     check(snapshot.high_water < Number.MAX_SAFE_INTEGER - 1, 'native_ordinal_exhausted')
-    if (operation.name === 'place_entity') check(snapshot.status.placement_no_clear_supported === true, 'placement_safety_capability_missing')
+    if (['place_entity', 'place_candidate'].includes(operation.name)) check(snapshot.status.placement_no_clear_supported === true, 'placement_safety_capability_missing')
+    if (operation.name === 'place_candidate') check(snapshot.status.external_fluid_candidates_supported === 1, 'fluid_safety_capability_missing')
     if (operation.name === 'walk_to_position') {
       const position = snapshot.actor.position
       check(Number.isFinite(position?.x) && Number.isFinite(position?.y)
@@ -183,8 +192,22 @@ export class NativeBridge {
     check(preflight?.ok === true, 'preflight_rejected', `Native preflight rejected: ${typeof preflight?.code === 'string' ? preflight.code : 'unknown'}`, { notAdmitted: true })
     const pending = buildPendingOperation({ requestId: key, operationKey: key, attemptId: key,
       ordinal: snapshot.high_water + 1, protocolVersion: 2, operations: [operation], actor: snapshot.actor,
-      baseline: batchWatermark(snapshot.status), now: Date.now(), surfaceIndex: snapshot.actor.surface_index })
-    return { operation, pending, preflight }
+      baseline: batchWatermark(snapshot.status), now: Date.now(), surfaceIndex: snapshot.actor.surface_index,
+      ...(operation.name === 'place_candidate' ? { goalId: this.session, planId: 'external-fluid', stepId: key } : {}) })
+    let preservation
+    if (operation.name === 'place_candidate') {
+      const target = preflight.preservation_join?.connects_to?.unit_number
+      const isolated = !positive(target)
+      check(!isolated || preflight.preservation_eligibility?.kind === 'relation_required', 'fluid_candidate_relation_unproven')
+      const owner = { goal_id: pending.goal_id, plan_id: pending.plan_id, plan_version: 1, step_id: pending.step_id,
+        semantic_step_id: pending.step_id, actor_id: pending.actor.actor_id, actor_epoch: pending.actor.epoch, session: this.session }
+      const context = { signature: pending.signature, owner, ...(isolated ? { isolated: true } : {}) }
+      const frozen = json(await this.rcon.command(`${JSON_PREFIX}remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(operation.args.candidate_set_id)},${luaString(operation.args.candidate_id)},${luaString(key)},{${isolated ? '' : target}},helpers.json_to_table(${luaString(JSON.stringify(context))}))))`))
+      check(frozen.ok === true && frozen.preservation_join?.version === 4, 'fluid_preservation_refused', `Native fluid preservation refused: ${frozen.code ?? 'unknown'}`, { notAdmitted: true })
+      preservation = { version: 2, operation_key: key, attempt_id: pending.attempt_id, ordinal: pending.ordinal,
+        signature: pending.signature, owner, candidate: frozen.preservation_join }
+    }
+    return { operation, pending, preflight, ...(preservation ? { preservation } : {}) }
   }
 
   // Caller MUST durably store prepared before this call. The transport is sent
@@ -199,18 +222,19 @@ export class NativeBridge {
     const session = luaString(this.session)
     const walkGate = operation.name === 'walk_to_position'
       ? `local p=s.actor and s.actor.position; if not p or (p.x-(${operation.args.x}))^2+(p.y-(${operation.args.y}))^2>16384 then return "walk_out_of_range" end; ` : ''
-    const placementGate = operation.name === 'place_entity' ? 'if s.placement_no_clear_supported~=true then return "placement_safety_capability_missing" end; ' : ''
+    const placementGate = ['place_entity', 'place_candidate'].includes(operation.name) ? `if s.placement_no_clear_supported~=true then return "placement_safety_capability_missing" end; ${operation.name === 'place_candidate' ? 'if s.external_fluid_candidates_supported~=1 then return "fluid_safety_capability_missing" end; ' : ''}` : ''
+    if (operation.name === 'place_candidate') check(prepared.preservation?.candidate?.owner?.session === this.session, 'fluid_preservation_required')
     const gate = `local g=remote.call("sgluna_deployment","status"); if g.session~=${session} or g.allowed~=true or g.actor_id~=${pending.actor.actor_id} or g.epoch~=${pending.actor.epoch} then return "session_or_actor_changed" end; if game.speed~=1 then return "nonstandard_game_speed" end; local s=remote.call("autorio_operations","status"); if s.task_state~="idle" or s.queue_length~=0 or s.active_batch then return "native_busy" end; if s.batch_generation~=${pending.baseline.generation} then return "native_generation_changed" end; ${walkGate}${placementGate}local j=remote.call("autorio_operation_admission","status"); if j.high_water~=${pending.ordinal - 1} then return "ordinal_not_fresh" end; for _,r in pairs(j.records) do if r.state=="admitting" or r.state=="admitted" or r.state=="uncertain" then return "unresolved_native_operation" end end; local p=${preflightExpression(operation)}; if p.ok~=true then return "preflight_rejected" end; return nil`
     const guardedRcon = { command: async command => {
       check(command.startsWith(PREFIX), 'batch_renderer_changed')
       return this.rcon.command(`${PREFIX}local refusal=(function() ${gate} end)(); if refusal then rcon.print(${luaString(ack)}..helpers.table_to_json({ok=false,result="external_guard_refused:"..refusal,prefix={}})) else ${command.slice(PREFIX.length)} end`)
     } }
     try {
-      const result = await executeAuthorizedBatch(guardedRcon, pending.actor.epoch, [renderExternalOperation(operation)], ack, pending)
+      const result = await executeAuthorizedBatch(guardedRcon, pending.actor.epoch, [renderExternalOperation(operation)], ack, pending, prepared.preservation)
       return { admitted: true, admission: result.admission }
     }
     catch (error) {
-      if (/^external_guard_refused:(?:session_or_actor_changed|nonstandard_game_speed|native_busy|ordinal_not_fresh|unresolved_native_operation|preflight_rejected|walk_out_of_range|placement_safety_capability_missing|native_generation_changed)$/.test(error.factorioError ?? '')
+      if (/^external_guard_refused:(?:session_or_actor_changed|nonstandard_game_speed|native_busy|ordinal_not_fresh|unresolved_native_operation|preflight_rejected|walk_out_of_range|placement_safety_capability_missing|fluid_safety_capability_missing|native_generation_changed)$/.test(error.factorioError ?? '')
         && !error.admission && (Array.isArray(error.results) ? error.results.length === 0 : object(error.results) && Object.keys(error.results).length === 0)) {
         error.notAdmitted = true
         error.code = error.factorioError.slice('external_guard_refused:'.length)
