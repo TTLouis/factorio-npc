@@ -103,7 +103,26 @@ try {
   assert.deepEqual(memory.snapshot().factory_placement_receipts, [evidence.retained_placement])
   assert.equal(events.filter(row => row.event === 'factory_cell.enrolled_from_production').length, 1)
   assert.equal(events.filter(row => row.event === 'factory_cell.enrollment_recovery_started').length, 0, 'Normal prevention spends no residual allowance')
-  evidence.native_product = await lua(`local a=game.get_entity_by_unit_number(${actor.actor_id});local f=game.get_entity_by_unit_number(${evidence.retained_placement.unit_number});assert(a and f);rcon.print(helpers.table_to_json({held=a.get_main_inventory().get_item_count(${luaString(output.name)}),products_finished=f.products_finished,recipe=f.get_recipe() and f.get_recipe().name,recipe_selected=f.get_recipe()~=nil,speed=game.speed,humans=#game.connected_players}))`)
+  const locator = evidence.retained_placement
+  evidence.final_identity = await deploymentStatus(rcon, { requireAllowed: true })
+  for (const key of ['actor_id', 'epoch', 'session', 'surface_index', 'force_index']) assert.equal(evidence.final_identity[key], actor[key], `Final actor ${key} changed`)
+  evidence.final_entity_status = await tool('getEntityStatus', { unit_number: locator.unit_number })
+  const status = evidence.final_entity_status
+  assert.equal(status.found, true); assert.equal(status.actor_id, actor.actor_id)
+  assert.equal(status.surface_index, locator.surface_index); assert.equal(status.force_index, locator.force_index)
+  assert.equal(status.unit_number, locator.unit_number); assert.equal(status.entity.unit_number, locator.unit_number)
+  assert.equal(status.entity.name, locator.name); assert.deepEqual(status.entity.position, locator.position)
+  // Ordinary buildings need not have the get-by-unit-number prototype flag.
+  // Match the native factory observer's bounded exact locator, never a replacement.
+  evidence.native_product = await lua(`local a=game.get_entity_by_unit_number(${actor.actor_id});assert(a and a.valid,"final actor unavailable");assert(a.surface.index==${locator.surface_index} and a.force.index==${locator.force_index},"final actor scope changed")
+    local s=game.surfaces[${locator.surface_index}];assert(s and s.valid,"final surface unavailable")
+    local candidates=s.find_entities_filtered{name=${luaString(locator.name)},position={${locator.position.x},${locator.position.y}},radius=0.25,force=${locator.force_index},limit=9};assert(#candidates<=8,"final locator scan truncated")
+    local f;local matched=0;for _,e in pairs(candidates)do if e.valid and e.unit_number==${locator.unit_number} and e.name==${luaString(locator.name)} and e.position.x==${locator.position.x} and e.position.y==${locator.position.y} and e.surface.index==${locator.surface_index} and e.force.index==${locator.force_index} then matched=matched+1;f=e end end;assert(matched==1 and f,"final exact producer identity unavailable or ambiguous")
+    local direct=game.get_entity_by_unit_number(${locator.unit_number});assert(not direct or direct==f,"global producer identity disagrees")
+    rcon.print(helpers.table_to_json({held=a.get_main_inventory().get_item_count(${luaString(output.name)}),products_finished=f.products_finished,recipe=f.get_recipe() and f.get_recipe().name,recipe_selected=f.get_recipe()~=nil,direct_lookup_found=direct~=nil,exact_locator_matches=matched,unit_number=f.unit_number,name=f.name,position=f.position,surface_index=f.surface.index,force_index=f.force.index,speed=game.speed,humans=#game.connected_players}))`)
+  assert.equal(evidence.native_product.exact_locator_matches, 1); assert.equal(evidence.native_product.unit_number, locator.unit_number)
+  assert.equal(evidence.native_product.name, locator.name); assert.deepEqual(evidence.native_product.position, locator.position)
+  assert.equal(evidence.native_product.surface_index, locator.surface_index); assert.equal(evidence.native_product.force_index, locator.force_index)
   evidence.native_product.expected_recipe = recipe.name
   evidence.native_product.output_item = output.name
   evidence.native_product.recipe ??= null // Actual unselected native recipe, not expected assignment.
