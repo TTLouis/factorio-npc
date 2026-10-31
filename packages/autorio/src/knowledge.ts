@@ -49,7 +49,7 @@ function sort_named<T extends { name: string }>(values: T[]) {
 
 // Prototype presence comes from the loaded game, not a base-game/expansion name list.
 // Enabled is deliberately separate: locked recipes remain useful research dependencies.
-function recipe_applicability(actor: ControlledActor, recipe: any) {
+export function recipe_applicability(actor: ControlledActor, recipe: any) {
   const surface = actor.surface
   const scope = { surface_index: surface?.index }
   if (!recipe.prototype) return { ...scope, state: 'unknown', reason: 'recipe_prototype_unavailable', surface_bound: true }

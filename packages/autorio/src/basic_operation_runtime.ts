@@ -4,13 +4,15 @@ import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
 import { layout_node_precheck, record_layout_node_placed } from './construction_layout'
 import { entity_last_user } from './entity_provenance'
-import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { remember_entity_reference, resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
 import { factory_world_identity } from './factory_cell_observation'
+import { execute_removal, inspect_removal } from './entity_removal_receipt'
+import { queued_removal_admission } from './operation_admission'
 import { record_hand_insert } from './hand_work'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { entity_role_inventories } from './inventory_roles'
 import type { InventoryRole } from './inventory_roles'
-import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
+import { MAX_MINING_START_REJECTIONS, is_placed_building_entity, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
 import { placement_candidate_matches, placement_preservation_execution_allowed } from './placement_candidates'
 import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
@@ -256,6 +258,64 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     controller.complete(actor, task)
   }
 
+  function state_exact_building_removal(actor: ControlledActor, task: PlayerParametersMineEntity, target: LuaEntity | undefined) {
+    actor.set_mining_state({ mining: false })
+    if (task.entity_removal && task.entity_removal.state !== 'prepared') { controller.fail(actor, task, 'entity_removal_uncertain'); return }
+    const record = queued_removal_admission(actor, task.removal_binding, manager.get_status_snapshot())
+    const world = factory_world_identity()
+    const refuse = (code: string, uncertain = false) => {
+      if (task.entity_removal) {
+        task.entity_removal.state = uncertain ? 'uncertain' : 'refused'
+        task.entity_removal.code = code; task.entity_removal.after_tick = game.tick
+      }
+      controller.fail(actor, task, uncertain ? 'entity_removal_uncertain' : 'entity_removal_refused')
+    }
+    if (!record || !world.ok || !world.world_id || !task.operation_id) { refuse('removal_owner_unproven', true); return }
+    // A retained terminal result is evidence, never a new permission to mine.
+    if (record.entity_removal && record.entity_removal !== task.entity_removal) {
+      controller.fail(actor, task, 'entity_removal_uncertain'); return
+    }
+    if (!task.entity_removal) {
+      task.entity_removal = { schema_version: 1, state: 'prepared', code: 'removal_prepared', world_id: world.world_id,
+        operation_id: task.operation_id, binding: { ...task.removal_binding! }, before_tick: game.tick, native_call: 'not_attempted' }
+      record.entity_removal = task.entity_removal
+    }
+    if (!target || !target.valid) { refuse('removal_target_disappeared', true); return }
+    if (target.unit_number !== task.target_unit_number || target.surface.index !== actor.surface.index || target.force.index !== actor.force.index) {
+      refuse('removal_target_scope_changed', true); return
+    }
+    if (task.entity_removal && task.entity_removal.world_id !== world.world_id) { refuse('removal_world_changed', true); return }
+    if (!within_mining_reach(actor, target)) {
+      task.removal_started_tick = undefined
+      reposition_for_mining(actor, target, task); return
+    }
+    const inventory = actor.get_main_inventory()
+    if (!inventory) { refuse('removal_inventory_unavailable'); return }
+    const checked = inspect_removal(target, inventory)
+    if (!checked.ok) { refuse(checked.code); return }
+    const ticks = clearing_mining_ticks(actor, target)
+    if (ticks === undefined || ticks !== ticks || ticks < 0 || ticks === math.huge) { refuse('removal_mining_duration_unknown'); return }
+    if (!task.entity_removal.before) {
+      task.entity_removal.before = checked.snapshot
+      task.entity_removal.actor_before = checked.actor
+      task.removal_required_ticks = ticks
+    }
+    else if (helpers.table_to_json(task.entity_removal.before) !== helpers.table_to_json(checked.snapshot)) {
+      refuse('removal_target_contents_changed'); return
+    }
+    task.removal_started_tick ??= game.tick
+    task.removal_required_ticks = math.max(task.removal_required_ticks ?? ticks, ticks)
+    if (game.tick - task.removal_started_tick < task.removal_required_ticks) return
+    // Fresh complete custody/capacity checks above run in the same synchronous
+    // callback as the only mine call; no queued native action can race between.
+    task.entity_removal.before_tick = game.tick
+    task.entity_removal.actor_before = checked.actor
+    execute_removal(actor, target, inventory, task.entity_removal)
+    log(`[AUTORIO] entity.removal operation_key=${record.operation_key} operation_id=${task.operation_id} state=${task.entity_removal.state} reason=${task.entity_removal.code}`)
+    if (task.entity_removal.state === 'verified') controller.complete(actor, task)
+    else controller.fail(actor, task, 'entity_removal_uncertain')
+  }
+
   function poll_standalone_mining(actor: ControlledActor) {
     const task = manager.player_state.parameters_mine_entity
     if (!task || !task.position || actor.status_snapshot().kind !== 'standalone_character') return false
@@ -309,6 +369,14 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (task.entity_name === undefined && task.target_unit_number === undefined) {
       controller.fail(actor, task, 'invalid_entity')
       return
+    }
+
+    if (task.target_unit_number !== undefined && actor.status_snapshot().kind === 'standalone_character') {
+      const exact = resolve_exact_entity(actor, task.target_unit_number)
+      if (task.entity_removal || exact?.valid && exact.type !== 'resource' && is_placed_building_entity(exact)) {
+        const visible = resolve_visible_entity_reference(actor, task.target_unit_number, 'actor_body')
+        state_exact_building_removal(actor, task, visible.entity); return
+      }
     }
 
     if (poll_standalone_mining(actor)) return

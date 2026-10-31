@@ -3,6 +3,7 @@ import type { LuaEntity, PathfinderWaypoint } from 'factorio:runtime'
 import type { ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import type { FluidQueuedBinding } from './operation_admission'
+import type { EntityRemovalReceipt, RemovalBinding } from './entity_removal_receipt'
 
 export enum TaskStates {
   IDLE = 'idle',
@@ -68,6 +69,10 @@ export interface PlayerParametersWalkingDirect {
 }
 
 export interface PlayerParametersMineEntity {
+  removal_binding?: RemovalBinding
+  entity_removal?: EntityRemovalReceipt
+  removal_started_tick?: number
+  removal_required_ticks?: number
   type: TaskStates.MINING
   owner_surface_index?: number
   operation_id?: number

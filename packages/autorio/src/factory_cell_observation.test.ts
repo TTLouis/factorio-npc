@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { bind_factory_world_id, factory_world_identity, observe_factory_cell } from './factory_cell_observation'
+import { bind_factory_world_id, FACTORY_STARTUP_LIMITS, factory_world_identity, observe_factory_cell } from './factory_cell_observation'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
@@ -8,6 +8,8 @@ const FOREIGN = 'b3161b9b-e637-4cb9-84eb-f0104d4b65f6'
 const G = globalThis as any
 const originalStorage = G.storage
 const originalPrototypes = G.prototypes
+const originalRemote = G.remote
+const originalDefines = G.defines
 let actor: any, machine: any, resource: any, surface: any, request: any, visible: boolean, scan: any
 beforeEach(() => {
   G.storage = {}
@@ -26,7 +28,7 @@ beforeEach(() => {
   request = { schema_version: 1, request_id: 'native-test', world_id: WORLD, actor_id: 4, surface_index: 1, force_index: 1,
     members: [{ unit_number: 7, name: 'test-drill', position: { x: 0, y: 0 }, surface_index: 1, force_index: 1 }] }
 })
-afterEach(() => { G.storage = originalStorage; G.prototypes = originalPrototypes })
+afterEach(() => { G.storage = originalStorage; G.prototypes = originalPrototypes; G.remote = originalRemote; G.defines = originalDefines })
 const observe = () => observe_factory_cell(actor, request, true) as any
 
 describe('persistent native factory world identity', () => {
@@ -49,6 +51,91 @@ describe('persistent native factory world identity', () => {
 })
 describe('bounded native factory cell facts', () => {
   beforeEach(() => { bind_factory_world_id(WORLD) })
+  describe('unselected native furnace startup candidates', () => {
+    const synthetic = (name = 'synthetic-recipe') => ({ name, enabled: true, category: 'fixture-smelting', additional_categories: [],
+      prototype: { surface_conditions: [] }, ingredients: [{ type: 'item', name: 'fixture-source', amount: 3 }],
+      products: [{ type: 'item', name: `product-${name}`, amount: 2 }] })
+    const facts = () => observe().members[0].startup_recipe_candidates
+    beforeEach(() => {
+      G.defines = { ...originalDefines, entity_status: { ...originalDefines.entity_status, working: 1 },
+        inventory: { ...originalDefines.inventory, furnace_source: 1, furnace_result: 2 } }
+      Object.assign(machine, { type: 'furnace', crafting_progress: 0, get_recipe: () => [undefined],
+        get_inventory: (index: number) => ({ valid: true, index, get_contents: () => [] }) })
+      machine.prototype.crafting_categories = { 'fixture-smelting': true }
+      actor.force.recipes = { fixture: synthetic() }
+    })
+    it('reads actual enabled category/surface candidates without selecting a recipe, mutating storage or claiming output', () => {
+      const before = JSON.stringify(G.storage)
+      const observed = observe().members[0]
+      expect(observed.recipe.state).toBe('none')
+      expect(observed.startup_recipe_candidates).toMatchObject({ state: 'known', coverage: 'complete', truncated: false,
+        selection: 'unselected', commissioning: 'unverified', multiplicity: 'single', scanned_recipes: 1,
+        candidates: [{ name: 'synthetic-recipe', ingredients: [{ type: 'item', name: 'fixture-source', amount: 3 }],
+          products: [{ type: 'item', name: 'product-synthetic-recipe', amount: 2 }] }] })
+      expect(JSON.stringify(G.storage)).toBe(before)
+      actor.force.recipes.fixture.products[0].name = 'fresh-native-product'
+      expect(facts().candidates[0].products[0].name).toBe('fresh-native-product')
+    })
+    it('returns multiple candidates explicitly and sorts deterministically without selecting one', () => {
+      actor.force.recipes = { z: synthetic('z'), a: synthetic('a') }
+      expect(facts()).toMatchObject({ state: 'known', coverage: 'complete', multiplicity: 'multiple', selection: 'unselected', candidates: [{ name: 'a' }, { name: 'z' }] })
+    })
+    it('excludes locked, unsupported-category and known surface-inapplicable recipes', () => {
+      actor.force.recipes = { locked: { ...synthetic('locked'), enabled: false }, wrong: { ...synthetic('wrong'), category: 'other' },
+        surface: { ...synthetic('surface'), prototype: { surface_conditions: [{ property: 'fixture-property', min: 2, max: 4 }] } } }
+      surface.get_property = () => 9
+      expect(facts()).toMatchObject({ state: 'known', coverage: 'complete', truncated: false, candidates: [], multiplicity: 'none' })
+      surface.get_property = () => 3
+      expect(facts().candidates.map((row: any) => row.name)).toEqual(['surface'])
+    })
+    it('retains partial unknown for an enabled candidate with unknown applicability, even beside a usable candidate', () => {
+      actor.force.recipes.unknown = { ...synthetic('unknown'), prototype: { surface_conditions: [{ property: 'missing', min: 2, max: 4 }] } }
+      expect(facts()).toMatchObject({ state: 'unknown', coverage: 'partial', truncated: false, code: 'startup_recipe_applicability_unknown', candidates: [{ name: 'synthetic-recipe' }] })
+      delete actor.force.recipes.unknown.prototype
+      expect(facts().coverage).toBe('partial')
+    })
+    it('distinguishes getter errors, missing categories, missing enablement and incomplete recipe rows', () => {
+      Object.defineProperty(actor.force.recipes.fixture, 'enabled', { get: () => { throw new Error('native getter failed') } })
+      expect(facts()).toMatchObject({ state: 'error', coverage: 'partial', code: 'startup_recipe_getter_failed' })
+      actor.force.recipes.fixture = { ...synthetic(), enabled: undefined }
+      expect(facts()).toMatchObject({ state: 'unknown', code: 'startup_recipe_enablement_unknown' })
+      actor.force.recipes.fixture = { ...synthetic(), products: undefined }
+      expect(facts()).toMatchObject({ state: 'unknown', code: 'startup_recipe_details_unknown' })
+      delete machine.prototype.crafting_categories
+      expect(facts()).toMatchObject({ state: 'unknown', code: 'startup_categories_unavailable' })
+    })
+    it('marks candidate, total scan and ingredient result caps as partial truncation', () => {
+      actor.force.recipes = Object.fromEntries(Array.from({ length: FACTORY_STARTUP_LIMITS.candidates + 1 }, (_, i) => [i, synthetic(`recipe-${i}`)]))
+      expect(facts()).toMatchObject({ state: 'unknown', coverage: 'partial', truncated: true, code: 'startup_candidates_truncated' })
+      actor.force.recipes = Object.fromEntries(Array.from({ length: FACTORY_STARTUP_LIMITS.scanned_recipes + 1 }, (_, i) => [i, { ...synthetic(), enabled: false }]))
+      expect(facts()).toMatchObject({ state: 'unknown', truncated: true, code: 'startup_recipe_scan_truncated' })
+      actor.force.recipes = { large: { ...synthetic(), ingredients: Array.from({ length: 25 }, () => ({ type: 'item', name: 'fixture-source' })) } }
+      expect(facts()).toMatchObject({ state: 'unknown', truncated: true, code: 'startup_recipe_details_truncated' })
+    })
+    it('requires empty readable inventories and no in-flight craft; already selected recipes remain selected only', () => {
+      machine.crafting_progress = 0.5
+      expect(facts()).toMatchObject({ state: 'not_applicable', code: 'startup_process_active' })
+      machine.crafting_progress = 0
+      machine.get_inventory = () => ({ valid: true, get_contents: () => [{ name: 'held', count: 1 }] })
+      expect(facts()).toMatchObject({ state: 'not_applicable', code: 'startup_inventory_not_empty' })
+      machine.get_inventory = () => undefined
+      expect(facts()).toMatchObject({ state: 'unknown', code: 'startup_inventory_unreadable' })
+      machine.get_recipe = () => [synthetic()]
+      expect(facts().state).toBe('not_applicable')
+    })
+    it('keeps hidden, stale-member, foreign-world and native-busy reads behind existing fences', () => {
+      const read = vi.fn(() => { throw new Error('fenced recipe read') })
+      Object.defineProperty(actor.force, 'recipes', { get: read })
+      visible = false
+      expect(observe().members[0].startup_recipe_candidates).toBeUndefined()
+      visible = true
+      request.members[0].unit_number = 999
+      expect(observe().members[0].startup_recipe_candidates).toBeUndefined()
+      expect((observe_factory_cell(actor, { ...request, world_id: FOREIGN }, true) as any).members).toBeUndefined()
+      expect((observe_factory_cell(actor, request, false) as any).members).toBeUndefined()
+      expect(read).not.toHaveBeenCalled()
+    })
+  })
   describe('fresh native burner fuel requirements', () => {
     const requirement = () => observe().members[0].burner_fuel_requirement
     beforeEach(() => {
@@ -176,7 +263,40 @@ describe('bounded native factory cell facts', () => {
     expect(observe().members[0]).toMatchObject({ state: 'unknown', code: 'member_not_visible' })
     expect(scan).not.toHaveBeenCalled()
     visible = true; machine.unit_number = 8
-    expect(observe().members[0]).toMatchObject({ state: 'unknown', code: 'member_not_found' })
+    expect(observe().members[0]).toMatchObject({ state: 'unknown', code: 'member_not_found',
+      absence_facts: { state: 'known', coverage: 'complete', scope: 'exact_locator', absent: true, truncated: false } })
+  })
+  it('projects real safe removal snapshots and aggregate capacity through the observer without mutating inventory', () => {
+    G.defines = { ...originalDefines, entity_status: { working: 1 } }
+    G.remote = { interfaces: { sgluna_deployment: { status: true } }, call: () => ({ allowed: true, actor_id: 4, epoch: 2, session: 'native-observer-test' }) }
+    machine.type = 'container'; machine.minable = true; machine.status = -1; machine.quality = { name: 'normal' }
+    machine.prototype.is_building = true
+    machine.prototype.mineable_properties = { minable: true, products: [{ type: 'item', name: 'native-building-item', amount: 1, probability: 1 }] }
+    G.prototypes.item = { 'native-building-item': { type: 'item', stack_size: 10 }, 'native-content': { type: 'item', stack_size: 10 } }
+    const contents: any = { valid: true, index: 1, length: 1, 0: { valid_for_read: true, name: 'native-content', count: 1, quality: { name: 'normal' }, type: 'item', health: 1, prototype: {} },
+      get_contents: () => [{ name: 'native-content', count: 1, quality: 'normal' }] }
+    machine.get_max_inventory_index = () => 1; machine.get_inventory = () => contents
+    const inventory: any = { valid: true, length: 2, 0: { valid_for_read: false }, 1: { valid_for_read: false },
+      supports_filters: () => false, supports_bar: () => false, get_insertable_count: () => 20 }
+    actor.get_main_inventory = vi.fn(() => inventory)
+    const before = JSON.stringify({ contents, inventory, storage: G.storage })
+    expect(observe().members[0].removal_readiness).toMatchObject({ state: 'known', recovery_capacity: 'verified', actor_inventory: [],
+      snapshot: { target: { unit_number: 7, quality: 'normal' }, contents: [{ name: 'native-content', count: 1 }], products: [{ name: 'native-building-item', count: 1 }], fluids_empty: true } })
+    expect(JSON.stringify({ contents, inventory, storage: G.storage })).toBe(before)
+    // One empty slot independently fits each item, but cannot fit both stacks.
+    inventory.length = 1; inventory.get_insertable_count = () => 10
+    expect(observe().members[0].removal_readiness).toMatchObject({ state: 'refused', code: 'removal_inventory_full', recovery_capacity: 'unknown' })
+    actor.get_main_inventory.mockImplementation(() => { throw new Error('native read failed') })
+    const failed = observe()
+    expect(failed.members[0].removal_readiness).toMatchObject({ state: 'unknown', recovery_capacity: 'unknown' })
+    expect(failed.actor_inventory).toMatchObject({ state: 'error', code: 'actor_inventory_getter_failed' })
+    visible = false; actor.get_main_inventory.mockClear()
+    const hidden = observe().members[0]
+    expect(hidden.removal_readiness).toBeUndefined(); expect(hidden.absence_facts).toBeUndefined()
+    // The visible actor's own inventory is independent of hidden member reads.
+    expect(actor.get_main_inventory).toHaveBeenCalledTimes(1)
+    visible = true; machine.unit_number = 8; actor.get_main_inventory.mockImplementation(() => inventory)
+    expect(observe()).toMatchObject({ actor_inventory: { state: 'known', items: [], binding: { world_id: WORLD, actor_id: 4, epoch: 2, session: 'native-observer-test', request_id: request.request_id } }, members: [{ absence_facts: { scope: 'exact_locator', absent: true } }] })
   })
   it('marks a resource area outside current visibility unknown before scanning it', () => {
     machine.prototype.mining_drill_radius = 32
@@ -185,7 +305,13 @@ describe('bounded native factory cell facts', () => {
     const result = observe().members[0]
     expect(result.state).toBe('observed')
     expect(result.source_resources).toMatchObject({ state: 'unknown', code: 'resource_area_not_visible' })
-    expect(scan).toHaveBeenCalledTimes(1)
+    expect(scan.mock.calls.filter(([query]: any) => query.type === 'resource')).toHaveLength(0)
+    expect(scan.mock.calls.filter(([query]: any) => query.name === machine.name)).toEqual([[{
+      position: machine.position, radius: 0.25, name: machine.name, force: actor.force, limit: 9,
+    }]])
+    expect(scan.mock.calls.filter(([query]: any) => Array.isArray(query.type))).toEqual([[{
+      type: expect.arrayContaining(['inserter', 'mining-drill', 'loader']), limit: 129,
+    }]])
   })
   it('reports resource and product truncation explicitly and excludes unsupported categories', () => {
     scan.mockImplementation((filter: any) => filter.type === 'resource' ? Array.from({ length: 65 }).fill(resource) : [machine])
@@ -259,6 +385,19 @@ describe('bounded native factory cell facts', () => {
     }
     expect(read).not.toHaveBeenCalled()
     expect(JSON.stringify(G.storage)).toBe(before)
+  })
+  it('keeps progress and consumer reads behind the same exact-member visibility and idle fences', () => {
+    machine.type = 'furnace'
+    const read = vi.fn(() => 3)
+    Object.defineProperty(machine, 'products_finished', { get: read })
+    expect(observe().members[0].progress_facts.products_finished).toMatchObject({ state: 'known', value: 3 })
+    read.mockClear()
+    visible = false
+    const hidden = observe().members[0]
+    expect(hidden.progress_facts).toBeUndefined(); expect(hidden.consumer_facts).toBeUndefined()
+    visible = true
+    expect((observe_factory_cell(actor, request, false) as any).members).toBeUndefined()
+    expect(read).not.toHaveBeenCalled()
   })
   it('does not disclose hidden or oversized belt neighbour positions or identities', () => {
     machine.type = 'transport-belt'

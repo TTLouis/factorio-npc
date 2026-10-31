@@ -17,6 +17,8 @@ import type { ClearableEntity, ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
 import { layout_node_failed } from './construction_layout'
+import type { EntityRemovalReceipt } from './entity_removal_receipt'
+import { capture_removal_binding } from './operation_admission'
 
 type BasicTask = PlayerParametersMineEntity | PlayerParametersPreparePumpSite | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
 type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
@@ -26,12 +28,14 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable' | 'construction_plan_blocked_no_clear' | 'layout_connection_unproven'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
+  | 'entity_removal_refused' | 'entity_removal_uncertain'
   | 'not_rotatable' | 'rotation_failed'
   | 'not_recipe_machine' | 'recipe_disabled' | 'incompatible_recipe' | 'set_recipe_failed'
   | 'not_rocket_silo' | 'rocket_not_ready' | 'launch_failed' | 'launch_not_confirmed'
   | 'pump_preparation_refused'
 
 export interface BasicOperationResult {
+  entity_removal?: EntityRemovalReceipt
   operation_id?: number
   type?: TaskStates
   accepted: boolean
@@ -231,6 +235,7 @@ function result_for(actor: ControlledActor | undefined, task: BasicTask | undefi
     ...(task?.type === TaskStates.PREPARING_PUMP_SITE ? { preparation_id: task.preparation_id, execution_strategy: 'actor' as const,
       removed_layers: task.removed_layers ?? 0, reclaimed_items: task.reclaimed_items } : {}),
     target_unit_number: task?.type === TaskStates.MINING || task?.type === TaskStates.MOVING_ITEMS || task?.type === TaskStates.SETTING_RECIPE || task?.type === TaskStates.ROTATING || task?.type === TaskStates.LAUNCHING_ROCKET ? task.target_unit_number : undefined,
+    ...(task?.type === TaskStates.MINING && task.entity_removal ? { entity_removal: task.entity_removal } : {}),
     recipe_name: task?.type === TaskStates.SETTING_RECIPE ? task.recipe_name : undefined,
     player_name: task?.type === TaskStates.MOVING_ITEMS ? task.player_name : undefined,
     item_name: task && 'item_name' in task ? task.item_name : undefined,
@@ -317,7 +322,9 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       count: 1,
       requested_count: 1,
     }
-    return queue(task, actor)
+    const accepted = queue(task, actor)
+    if (accepted) task.removal_binding = capture_removal_binding(actor, manager.get_status_snapshot())
+    return accepted
   }
 
   function submit_mining_at(resource_name: string, x: number, y: number, count: number = 1) {
@@ -585,6 +592,9 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
 
   function fail(actor: ControlledActor | undefined, task: BasicTask, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
     refusal_results = {}
+    if (task.type === TaskStates.MINING && task.entity_removal?.state === 'prepared') {
+      task.entity_removal.state = 'refused'; task.entity_removal.code = code; task.entity_removal.after_tick = game.tick
+    }
     suppress_cancel_receipt = true
     // A failed node leaves its layout unable to continue by itself; the layout record says so (first reason kept).
     if (task.type === TaskStates.PLACING) layout_node_failed(task.layout_node, code)
@@ -622,6 +632,9 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       const task = get_task()
       if (!task) return
       const actor = get_actor()
+      if (task.type === TaskStates.MINING && task.entity_removal?.state === 'prepared') {
+        task.entity_removal.state = 'refused'; task.entity_removal.code = 'cancelled'; task.entity_removal.after_tick = game.tick
+      }
       result_for(actor, task, false, false, 'cancelled')
     })
   }

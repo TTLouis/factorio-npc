@@ -1,7 +1,7 @@
 import { factoryMetadataDigest } from './factory-dependencies.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
 import { getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
-import { factoryUseFailureWitness, factoryStepRequirement } from './factory-cell-use.mjs'
+import { factoryUseFailureWitness, factoryStepRequirement, refreshFactoryUseFailure } from './factory-cell-use.mjs'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 
 const clone = value => structuredClone(value)
@@ -71,6 +71,7 @@ export async function recoverFactoryCellUse(agent, error) {
   if (!plan?.committed_at || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status) || state.goal?.status !== 'active' || state.run?.paused
     || !agent.memory.currentGoalGrant?.(key) || agent.batchInFlight || agent.memory.pendingOperations(key).length) return { handled: false }
   await agent.assertCurrent(); agent.assertCheckpointOwnerIdentity(owner)
+  await refreshFactoryUseFailure(error); agent.assertCheckpointOwnerIdentity(owner)
   const raw = await agent.readTaskStatusRaw(); agent.assertCheckpointOwnerIdentity(owner)
   const status = typeof raw === 'string' ? JSON.parse(raw) : raw
   const journal = nativeAdmissionJournal(status.admission_journal)
@@ -84,6 +85,7 @@ export async function recoverFactoryCellUse(agent, error) {
     request_id: agent.traceRequest.id, plan_id: plan.plan_id, code: witness.code, evidence_digest: factoryMetadataDigest(witness),
   })
   await agent.persistState({ strict: true }); agent.assertCheckpointOwnerIdentity(owner)
+  await refreshFactoryUseFailure(error); agent.assertCheckpointOwnerIdentity(owner)
   if (!allowance.allowed) {
     await agent.traceEvent('factory_cell.recovery_exhausted', { goal_id: state.goal.goal_id, plan_id: plan.plan_id, code: witness.code, ...allowance })
     fail('factory_cell_recovery_exhausted')
@@ -96,6 +98,7 @@ export async function recoverFactoryCellUse(agent, error) {
   agent.assertCheckpointOwnerIdentity(owner)
   await agent.traceEvent('factory_cell.recovery_started', { goal_id: state.goal.goal_id, plan_id: plan.plan_id, witness, ...allowance })
   agent.assertCheckpointOwnerIdentity(owner)
+  await refreshFactoryUseFailure(error); agent.assertCheckpointOwnerIdentity(owner)
   const proof = Object.freeze({ goal_id: state.goal.goal_id, plan_id: plan.plan_id, request_id: agent.traceRequest.id }); wakeProofs.add(proof)
   const result = await agent.wakePlannerForReplacement({ trigger: 'factory_cell_resolution', factoryWitness: proof })
   return result === undefined ? { handled: false } : { handled: true, result }
