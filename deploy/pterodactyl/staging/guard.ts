@@ -13,6 +13,11 @@ function state(): Store {
   return storage as unknown as Store
 }
 
+function valid_session(session: unknown): session is string {
+  // Lua treats '' as true: keep this predicate explicit across the TS/Lua boundary.
+  return typeof session === 'string' && session !== ''
+}
+
 function actor_status() {
   return remote.call('autorio_actor', 'status') as {
     mode?: ActorMode
@@ -40,7 +45,7 @@ function operation_status() {
 
 function current_matches_session() {
   const data = state()
-  if (!data.sgluna_deployment_session || !data.sgluna_deployment_mode || data.sgluna_deployment_actor_id === undefined || !data.sgluna_deployment_actor_kind) return false
+  if (!valid_session(data.sgluna_deployment_session) || !data.sgluna_deployment_mode || data.sgluna_deployment_actor_id === undefined || !data.sgluna_deployment_actor_kind) return false
   const status = actor_status()
   const actor = status.actor
   if (!actor || actor.valid !== true || actor.has_character !== true) return false
@@ -63,7 +68,7 @@ function cancel_tasks() {
 
 remote.add_interface('sgluna_deployment', {
   configure: (mode: ActorMode, session: string) => {
-    if ((mode !== 'npc' && mode !== 'player') || session === '') return false
+    if ((mode !== 'npc' && mode !== 'player') || !valid_session(session)) return false
 
     cancel_tasks()
     const changed = remote.call('autorio_actor', 'set_mode', mode) as [boolean, unknown]
