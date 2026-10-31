@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { LEVELED_SKILL_DEFINITIONS, LEVELED_KNOWLEDGE_DEFINITIONS, LEVELED_LIBRARY_DEFINITIONS } from './leveled_skill_library'
+import { LEVELED_SKILL_DEFINITIONS, LEVELED_KNOWLEDGE_DEFINITIONS, LEVELED_LIBRARY_DEFINITIONS, LEGACY_KNOWLEDGE_DEFINITIONS } from './leveled_skill_library'
 import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
 import {
-  canonicalize_skill_definition, curated_library_profile, ensure_basic_skill_definitions,
+  canonicalize_skill_definition, curated_library_profile, ensure_basic_skill_definitions, score_skill_for_goal,
   find_knowledge_references, get_knowledge_reference, get_procedural_skill, knowledge_reference, create_skill_remote_interface, export_skill, find_skill_definitions, generate_skill_markdown, get_skill_definition, list_skill_definitions,
   put_untrusted_skill_definition, select_curated_library, skill_cards_for_goal, trim_skill_text, normalize_skill_tag, goal_search_terms,
 } from './skills'
@@ -12,6 +12,62 @@ import { filtered_library_entries, skill_detail_rows } from './skills_window'
 beforeEach(() => { (globalThis as any).storage = {} })
 
 describe('leveled knowledge and skills as a selectable, honest method library', () => {
+  it('finds ordinary symptoms through authored aliases without query-specific rules or unrelated matches', () => {
+    select_curated_library('leveled')
+    const cases = [
+      ['The furnace is not making plates', 'knowledge-machine-state'],
+      ['These two buildings are next to each other but nothing transfers', 'knowledge-connection-geometry'],
+      ['This machine exists but can I actually use it here?', 'knowledge-available-capabilities'],
+      ['I have an empty inventory and cannot craft the missing material', 'knowledge-acquisition-paths'],
+      ['What comes first when research is blocked by a prerequisite?', 'knowledge-production-dependencies'],
+      ['The inventory is unchanged; is there enough production?', 'knowledge-rates-stocks-freshness'],
+      ['The machine stopped working and there is no output', 'knowledge-machine-state'],
+      ['A stopped producer may simply have nowhere to put the result', 'knowledge-machine-state'],
+      ['The inserter cannot pick up from the belt', 'knowledge-connection-geometry'],
+      ['Are the adjacent buildings not connected or facing the wrong direction?', 'knowledge-connection-geometry'],
+    ]
+    for (const [query, id] of cases) expect(find_knowledge_references(query, 3).map(row => row.id), query).toContain(id)
+    for (const query of ['banana poetry telescope', 'purple penguins', 'zzqvflorp']) expect(find_knowledge_references(query, 3)).toEqual([])
+    for (const entry of LEVELED_KNOWLEDGE_DEFINITIONS) {
+      const canonical = canonicalize_skill_definition(entry), reference = knowledge_reference(canonical)!
+      expect(reference.search_aliases).toEqual(entry.search_aliases)
+      expect(canonicalize_skill_definition(reference).search_aliases).toEqual(entry.search_aliases)
+      expect(reference.summary).not.toBe(`${entry.guidance.when_to_use} ${entry.guidance.completion[0]}`)
+      expect(reference.reference!.concepts.filter(text => text.startsWith('Contrast:'))).toHaveLength(1)
+      expect(JSON.stringify(reference)).not.toMatch(/executable_candidate|production_output|recipe_ids":\["/)
+    }
+    expect(() => canonicalize_skill_definition({ ...LEVELED_KNOWLEDGE_DEFINITIONS[0], search_aliases: Array(25).fill('alias') })).toThrow(/search_aliases/)
+  })
+
+  it('matches aliases alone using the same stopword and plural normalization as queries', () => {
+    for (const alias of ['what comes first', 'out of items', 'where to get', 'can use', 'boxes beside machines']) {
+      const entry = canonicalize_skill_definition({ id: 'alias-only', name: 'Neutral', summary: 'Reference metadata.', content_type: 'knowledge', search_aliases: [alias] })
+      expect(score_skill_for_goal(entry, goal_search_terms(alias)).tag_hits, alias).toBe(1)
+      expect(score_skill_for_goal(entry, goal_search_terms(`Please ${alias.toUpperCase()}?`)).tag_hits, alias).toBe(1)
+      expect(score_skill_for_goal(entry, goal_search_terms('banana poetry telescope')).tag_hits).toBe(0)
+      expect(score_skill_for_goal({ ...entry, search_aliases: [] }, goal_search_terms(alias)).tag_hits).toBe(0)
+    }
+    const empty = canonicalize_skill_definition({ id: 'alias-empty', name: 'Neutral', summary: 'Reference metadata.', search_aliases: ['the of a'] })
+    expect(score_skill_for_goal(empty, goal_search_terms('the of a')).tag_hits).toBe(0)
+  })
+
+  it('upgrades only exact historical knowledge copies while preserving unmarked personal variants, profiles and saved snapshots', () => {
+    select_curated_library('leveled')
+    const registry = (globalThis as any).storage.sgluna_skill_definitions
+    for (const old of LEGACY_KNOWLEDGE_DEFINITIONS) registry[old.id] = canonicalize_skill_definition(old)
+    expect(ensure_basic_skill_definitions().upgraded).toBe(6)
+    for (const entry of LEVELED_KNOWLEDGE_DEFINITIONS) expect(get_skill_definition(entry.id)).toEqual(canonicalize_skill_definition(entry))
+    const old = canonicalize_skill_definition(LEGACY_KNOWLEDGE_DEFINITIONS[0])
+    const personal = { ...old, summary: 'Owner-specific reference without a provenance edit marker', search_aliases: ['owner terminology'] }
+    registry[old.id] = personal
+    const personalBytes = JSON.stringify(personal)
+    expect(ensure_basic_skill_definitions().upgraded).toBe(0)
+    select_curated_library('basic')
+    ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+    select_curated_library('leveled')
+    expect(JSON.stringify(get_skill_definition(old.id))).toBe(personalBytes)
+  })
+
   it('trims complete whitespace characters without deleting Unicode content or corrupting tags and queries', () => {
     for (const text of ['并线', '煤蛇', '¿', '»', 'ÿ', 'A\u00A0B', 'A\uFEFFB']) {
       expect(trim_skill_text(`\uFEFF \t\u00A0${text}\u3000\u2009 \uFEFF`)).toBe(text)

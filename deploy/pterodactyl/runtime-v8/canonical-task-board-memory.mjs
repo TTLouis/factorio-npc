@@ -1,3 +1,4 @@
+import { AgentNotebookStore } from './agent-notebook.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 import { boardPlanAlignment, carriedPrefixLength } from './board-plan-alignment.mjs'
 export { boardPlanAlignment } from './board-plan-alignment.mjs'
@@ -677,6 +678,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.#factoryRegistry = new FactoryRegistryStore(options.expectedFactoryWorldId)
     this.planningByNpc = new Map()
     this.plannerSkillHandoffs = new Map()
+    this.notebooks = new AgentNotebookStore()
     // The pending intake retry (at most one: a new request or control cancels it). Durable.
     this.intakeRetryRecord = undefined
     // Board progress the reducer could not be brought up to on restore.
@@ -3190,6 +3192,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const snapshot = super.snapshot()
     return {
       ...snapshot,
+      agent_notebooks: this.notebooks.snapshot(),
       ...this.#factoryRegistry.snapshot(),
       ...this.#factoryUseRecovery.snapshot(),
       factory_control_revision: this.#factoryControlRevision,
@@ -3337,6 +3340,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   restore(snapshot) {
+    this.notebooks.restore(snapshot?.agent_notebooks)
     this.#factoryUseRecovery.restore(snapshot)
     const controlRevision = snapshot.factory_control_revision ?? 0
     if (!Number.isSafeInteger(controlRevision) || controlRevision < this.#factoryControlRevision) this.#factoryControlRevision = Number.MAX_SAFE_INTEGER

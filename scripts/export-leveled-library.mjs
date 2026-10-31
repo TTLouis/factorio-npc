@@ -9,6 +9,7 @@ const entries = module.LEVELED_LIBRARY_DEFINITIONS
 const knowledge = module.LEVELED_KNOWLEDGE_DEFINITIONS.map(entry => ({
   schema_version: 1, content_type: 'knowledge', id: entry.id, revision: entry.revision, name: entry.name, summary: entry.summary,
   level: entry.level,
+  ...(entry.search_aliases ? { search_aliases: entry.search_aliases } : {}),
   applicability: { when_to_use: entry.guidance.when_to_use, when_to_skip: entry.guidance.when_to_skip, live_checks: entry.guidance.live_checks, required_capabilities: entry.guidance.required_capabilities },
   reference: { concepts: entry.guidance.steps, interpretation_checks: entry.guidance.completion }, related_ids: entry.guidance.related_ids,
   known_failure_modes: entry.known_failure_modes, source: entry.source,

@@ -1,3 +1,4 @@
+import { notebookToolDefinitions, isNotebookTool, validateNotebookTool } from './agent-notebook.mjs'
 import { knowledgeToolDefinitions, isKnowledgeTool, knowledgeToolCommand } from './knowledge-retrieval.mjs'
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
@@ -1458,6 +1459,7 @@ const researchPathDefinition = {
 export const toolDefinitions = [
   ...base.toolDefinitions,
   ...knowledgeToolDefinitions,
+  ...notebookToolDefinitions,
   ...factoryCellToolDefinitions,
   ...reservationDefinitions,
   placementCandidatesDefinition,
@@ -1481,7 +1483,7 @@ export const toolDefinitions = [
 
 // Open typed requests may name any ordinary observation. This schema is shared
 // across phases; the runtime still restricts closed requests to targeted facts.
-plannerControlToolDefinitions[0].function.parameters.properties.observationRequest.properties.tool.enum = toolDefinitions.map(tool => tool.function.name)
+plannerControlToolDefinitions[0].function.parameters.properties.observationRequest.properties.tool.enum = toolDefinitions.map(tool => tool.function.name).filter(name => !isNotebookTool(name))
 
 export const providerToolDefinitions = [
   ...toolDefinitions,
@@ -1715,7 +1717,7 @@ const OBSERVATION_TOOL_FAMILIES = Object.freeze([
   'construction_state',
 ])
 
-const observationToolNames = toolDefinitions.map(tool => tool?.function?.name).filter(Boolean)
+const observationToolNames = toolDefinitions.map(tool => tool?.function?.name).filter(name => name && !isNotebookTool(name))
 for (const name of observationToolNames) {
   check(Object.hasOwn(OBSERVATION_TOOL_FAMILY, name), `Observation tool ${name} has no relevance family`)
 }
@@ -1747,11 +1749,12 @@ export function observationToolTier(name) {
 }
 
 export function isObservationToolName(name) {
-  return typeof name === 'string'
+  return typeof name === 'string' && !isNotebookTool(name)
     && toolDefinitions.some(tool => tool?.type === 'function' && tool.function?.name === name)
 }
 
 export function toolCommand(name, args) {
+  if (isNotebookTool(name)) { validateNotebookTool(name, args); return null }
   if (isKnowledgeTool(name)) return knowledgeToolCommand(name, args)
   if (isFactoryCellTool(name)) {
     validateFactoryCellTool(name, args)

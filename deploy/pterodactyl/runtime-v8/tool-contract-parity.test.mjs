@@ -69,6 +69,8 @@ function namesForSurface(definitions, surface) {
 }
 
 const toolSamples = {
+  readNotebook: { scope: 'goal' },
+  updateNotebook: { scope: 'persistent', expectedRevision: 0, text: 'Recheck historical observations.' },
   listFactoryCells: {},
   inspectFactoryCell: { cell_id: 'cell-1' },
   validateConstructionReservation: { goal_id: 'goal-1', plan_id: 'plan-1', x: 2, y: 2, width: 4, height: 4 },
@@ -153,9 +155,9 @@ test('runtime-v8 tool commands target the canonical Factorio remote interface/fu
   for (const name of namesForSurface(contract.tools, 'pterodactyl-runtime-v8')) {
     const expected = contract.tools[name]
     const command = runtime.toolCommand(name, toolSamples[name])
-    if (expected.execution === 'host-observation') {
+    if (['host-observation', 'host-context'].includes(expected.execution)) {
       assert.equal(command, null, `${name} must never expose an RCON marker`)
-      assert.equal(expected.host_handler, 'factory-cell-tools')
+      assert.equal(expected.host_handler, expected.execution === 'host-context' ? 'agent-notebook' : 'factory-cell-tools')
       assert.equal(Object.hasOwn(expected, 'remote'), false)
       assert.deepEqual(expected.surfaces, ['pterodactyl-runtime-v8'])
       continue
@@ -202,7 +204,9 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     'measureTransportThroughput',
     'planPlacement',
     'proposeConstructionLayout',
+    'readNotebook',
     'resumeConstructionLayout',
+    'updateNotebook',
     'validateConstructionPlan',
     'validateConstructionReservation',
   ])
