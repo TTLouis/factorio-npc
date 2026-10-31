@@ -16,7 +16,7 @@ const { toolCommand, luaString } = await load('runtime-v8/structured-policy.mjs'
 const { configureNpcSession, deploymentStatus } = await load('staging/supervisor-adapter.mjs')
 const { CanonicalTaskBoardMemory } = await load('runtime-v8/canonical-task-board-memory.mjs')
 const { NpcAgentLoop } = await load('runtime-v8/npc-agent-loop.mjs')
-const { getActivePlan } = await load('runtime-v8/planning-state.mjs')
+const { getActivePlan, PLAN_STATUS, RECEIPT_LEDGER_LIMITS } = await load('runtime-v8/planning-state.mjs')
 const { answersStepContract, planReply } = await load('runtime-v8/task-loop-fixtures.mjs')
 const KEY = 'npc:cross-step-native'
 const evidence = { status: 'failed', providers: 0, scripted_replies: 0, kind: 'finite_cross_step_native_canary',
@@ -132,7 +132,24 @@ try {
   const restored = new CanonicalTaskBoardMemory(); restored.restore(JSON.parse(await fs.readFile(stateFile, 'utf8')))
   assert.deepEqual(restored.getFactoryRegistry(), memory.getFactoryRegistry())
   assert.deepEqual(restored.snapshot().factory_placement_receipts, memory.snapshot().factory_placement_receipts)
-  assert.deepEqual(restored.planningState(KEY), memory.planningState(KEY))
+  assert.deepEqual(restored.snapshot().factory_use_recovery, memory.snapshot().factory_use_recovery)
+  const expectedPlanning = structuredClone(memory.planningState(KEY))
+  evidence.persisted_diagnostic_tails = []
+  for (const plan of expectedPlanning.plans) {
+    if (![PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(plan.status)) continue
+    for (const [stepId, receipts] of Object.entries(plan.execution.receipts)) {
+      const retained = receipts.slice(-RECEIPT_LEDGER_LIMITS.closedPlanPerStep)
+      if (retained.length !== receipts.length) evidence.persisted_diagnostic_tails.push({
+        plan_id: plan.plan_id, step_id: stepId, field: 'execution.receipts',
+        limit: RECEIPT_LEDGER_LIMITS.closedPlanPerStep,
+        original_sequences: receipts.map(row => row.seq), retained_sequences: retained.map(row => row.seq),
+      })
+      plan.execution.receipts[stepId] = retained
+    }
+  }
+  // Only closed-plan diagnostic receipt tails may differ. Goal, plan/step
+  // identity, progress, contracts, permissions and every other field stay exact.
+  assert.deepEqual(restored.planningState(KEY), expectedPlanning)
   evidence.final_snapshot = memory.snapshot(); assert.equal(evidence.providers, 0); evidence.status = 'passed'
 } catch (error) { evidence.error = String(error?.stack ?? error); process.exitCode = 1 }
 finally {
