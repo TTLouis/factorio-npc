@@ -9,6 +9,8 @@ interface Entry {
   revision?: number
   type?: 'knowledge' | 'skill'
   tags: string[]
+  aliases?: string[]
+  summary?: string
   use: string
   skip: string
   checks: string[]
@@ -18,6 +20,65 @@ interface Entry {
   requires?: string[]
   related?: string[]
 }
+
+// Exact prior catalog values: migrate only untouched copies; unknown variants stay personal.
+const LEGACY_KNOWLEDGE_ENTRIES: Entry[] = [
+  {
+    id: 'knowledge-available-capabilities', name: 'Available Capabilities', level: 0, type: 'knowledge',
+    tags: ['capability', 'surface', 'research', 'prototype', 'technology'],
+    use: 'Before selecting a method whose tools, technology or surface availability is uncertain.',
+    skip: 'Reuse still-current capability evidence when nothing relevant has changed.',
+    checks: ['Current actor/surface and admitted tool schema.', 'discoverPrototypes, getPrototypeDetails and getTechnology for the proposed capability; unsupported fields remain unknown.'],
+    steps: ['Name the capability needed by the next decision, not every possible feature.', 'Check native prototype presence separately from enabled research, recipe applicability and admitted tool support.', 'Choose an available method; if a needed action has no supported interface, report that exact capability gap without inventing a command.'],
+    done: 'The next method is supported by cited current facts, or the exact unavailable capability is identified.',
+    failures: ['Treating prototype presence as research completion.', 'Assuming owning a guide grants a tool or surface capability.'],
+  },
+  {
+    id: 'knowledge-acquisition-paths', name: 'Acquisition Paths', level: 0, type: 'knowledge',
+    tags: ['acquire', 'missing', 'inventory', 'craft', 'resource'],
+    use: 'A required item is absent from immediately usable inventory.', skip: 'The required unreserved item is already available for the next action.',
+    checks: ['getInventoryItems and nearby compatible reusable structures.', 'getRecipeDetails, getMiningDetails and getResearchPath for the requested target.'],
+    steps: ['Separate held stock, accessible placed equipment, native gathering and live crafting routes.', 'Inspect only the route needed to resolve the present shortfall, including reach and restrictions.', 'Return a grounded acquisition option and the remaining unknown facts; do not turn absence into an impossibility claim.'],
+    done: 'A feasible acquisition route or a specific evidenced prerequisite gap is known.',
+    failures: ['Crafting duplicates while usable equipment is already nearby.', 'Declaring a missing item unavailable without inspecting live routes.'], related: ['skill-reuse-before-building'],
+  },
+  {
+    id: 'knowledge-production-dependencies', name: 'Production Dependencies', level: 0, type: 'knowledge',
+    tags: ['dependency', 'recipe', 'bootstrap', 'science', 'research'],
+    use: 'A target requires production or unlock prerequisites that are not yet grounded.', skip: 'The relevant dependency results remain fresh and sufficient.',
+    checks: ['getRecipeDetails and getResearchPath for the target; getTechnology for actual enablement.', 'Current usable inventory, existing producers and goal restrictions.'],
+    steps: ['Read the target dependency information from the live game.', 'Expand a missing dependency only until the next executable acquisition or unlock action is found; identify cycles rather than recursing indefinitely.', 'Mark held, reusable, obtainable, locked and unknown requirements separately; keep the live bill outside reusable guide text.'],
+    done: 'The next prerequisite action has a supported live path and preserves the requested final result.',
+    failures: ['Following a remembered unlock sequence.', 'Expanding unrelated intermediate factories instead of the current dependency.'], related: ['knowledge-acquisition-paths', 'skill-trigger-aware-progression'],
+  },
+  {
+    id: 'knowledge-machine-state', name: 'Machine State Interpretation', level: 0, type: 'knowledge',
+    tags: ['machine', 'status', 'starved', 'blocked', 'power', 'fuel', 'stopped'],
+    use: 'A machine is idle or its output differs from expectation.', skip: 'The current question is already answered by a fresh authoritative receipt.',
+    checks: ['getEntityStatus, live recipe/capability details and getLogisticsTopology.', 'Input, output and fuel inventory roles; native energy and status fields when exposed.'],
+    steps: ['Inspect the machine identity and timestamp before interpreting its state.', 'Separate missing supply, blocked output, energy loss, incompatible configuration and a legitimately idle consumer.', 'If the API does not expose the distinguishing fact, retain uncertainty and request the smallest supported read instead of changing equipment.'],
+    done: 'The observed state has a supported interpretation or a precisely named missing observation.',
+    failures: ['Calling a machine broken when its destination is full.', 'Inferring working production from a placement receipt.'], related: ['skill-find-actual-bottleneck'],
+  },
+  {
+    id: 'knowledge-connection-geometry', name: 'Connection Geometry', level: 0, type: 'knowledge',
+    tags: ['geometry', 'placement', 'reach', 'belt', 'fluid', 'power'],
+    use: 'Choosing or validating a machine connection or construction position.', skip: 'A fresh supported candidate already proves the exact required relationship.',
+    checks: ['getEntityGeometry, getPlacementCandidates and getLogisticsTopology.', 'Current actor reach, occupancy and applicable construction reservation.', 'For fluid connections, both endpoints\' live fluid identity, flow role, filters and applicable temperature constraints; missing or truncated facts remain unknown.'],
+    steps: ['Identify the interface to satisfy: actual drop/pickup, fluid port, electrical connection or access corridor.', 'Request candidates anchored to the observed interface and inspect their returned footprints and validity.', 'Before joining fluid service, verify endpoint compatibility and preserve existing connected obligations; geometric adjacency alone is insufficient.', 'Recheck affected interfaces after placement or rotation and observe intended material reaching its consumer; do not claim compatibility when required fields are missing.'],
+    done: 'The intended relationship is established by current geometry/topology evidence.',
+    failures: ['Choosing downstream positions before observing the upstream output.', 'Guessing footprints or reach from a familiar screenshot.'], related: ['skill-place-observe-connect'],
+  },
+  {
+    id: 'knowledge-rates-stocks-freshness', name: 'Rates, Stocks and Freshness', level: 0, type: 'knowledge',
+    tags: ['rate', 'stock', 'throughput', 'production', 'measurement', 'freshness', 'stale'],
+    use: 'Estimating completion, comparing capacity or claiming ongoing production.', skip: 'A still-valid native measurement already covers the same boundary and load.',
+    checks: ['getRecipeDetails, getMiningDetails, getTransportCapacity and estimateProductionTime.', 'Available native counters, observation windows, actual consumption and initial inventory.'],
+    steps: ['Name the measured item, boundary, time window and intended rate/deadline from the goal.', 'Separate an inventory total, a tool-estimated potential rate and measured new native output.', 'Invalidate affected conclusions when actor/surface, recipe, equipment, supply, topology or load changes; unavailable telemetry stays unavailable.'],
+    done: 'Capacity and completion statements identify their source, scope and freshness without treating stock as throughput.',
+    failures: ['A full belt or stocked chest is mistaken for sustained supply.', 'A historical estimate is reused after the operating conditions changed.'], related: ['skill-prove-sustainment'],
+  },
+]
 
 const ENTRIES: Entry[] = [
   {
@@ -129,59 +190,70 @@ const ENTRIES: Entry[] = [
     failures: ['Installed machine count is reported as production capacity.', 'Expansion consumes the supply needed to keep the original cell working.'], related: ['starter-smelting-row', 'skill-find-actual-bottleneck', 'skill-choose-next-investment'],
   },
   {
-    id: 'knowledge-available-capabilities', name: 'Available Capabilities', level: 0, type: 'knowledge',
-    tags: ['capability', 'surface', 'research', 'prototype', 'technology'],
-    use: 'Before selecting a method whose tools, technology or surface availability is uncertain.',
-    skip: 'Reuse still-current capability evidence when nothing relevant has changed.',
-    checks: ['Current actor/surface and admitted tool schema.', 'discoverPrototypes, getPrototypeDetails and getTechnology for the proposed capability; unsupported fields remain unknown.'],
-    steps: ['Name the capability needed by the next decision, not every possible feature.', 'Check native prototype presence separately from enabled research, recipe applicability and admitted tool support.', 'Choose an available method; if a needed action has no supported interface, report that exact capability gap without inventing a command.'],
-    done: 'The next method is supported by cited current facts, or the exact unavailable capability is identified.',
-    failures: ['Treating prototype presence as research completion.', 'Assuming owning a guide grants a tool or surface capability.'],
+    id: 'knowledge-available-capabilities', name: 'Available Capabilities', level: 0, type: 'knowledge', revision: 2,
+    tags: ['capability', 'surface', 'research', 'prototype', 'technology', 'availability', 'tool', 'support'],
+    aliases: ['can use', 'usable', 'available here', 'machine exists', 'disabled', 'unsupported', 'locked'],
+    summary: 'Existence, availability, local applicability and tool admission are different claims.',
+    use: 'A known machine or process may not be usable in the current situation.', skip: 'Fresh evidence already establishes the exact capability needed.',
+    checks: ['Live prototype, recipe or technology details for the current force and surface.', 'Current entity context and the actual admitted tool contract.'],
+    steps: ['A prototype names a possibility; availability says whether this context enables it.', 'Applicability depends on the particular actor, surface and entity. Admission says whether the harness supports the requested action.', 'Contrast: recognizing a machine does not establish that its desired process is enabled or controllable here.'],
+    done: 'Keep existence, enabled state, local suitability and admitted control separate; missing evidence leaves the corresponding claim unknown.',
+    failures: ['Familiarity becomes permission or an assumed unlock.'], related: ['knowledge-production-dependencies'],
   },
   {
-    id: 'knowledge-acquisition-paths', name: 'Acquisition Paths', level: 0, type: 'knowledge',
-    tags: ['acquire', 'missing', 'inventory', 'craft', 'resource'],
-    use: 'A required item is absent from immediately usable inventory.', skip: 'The required unreserved item is already available for the next action.',
-    checks: ['getInventoryItems and nearby compatible reusable structures.', 'getRecipeDetails, getMiningDetails and getResearchPath for the requested target.'],
-    steps: ['Separate held stock, accessible placed equipment, native gathering and live crafting routes.', 'Inspect only the route needed to resolve the present shortfall, including reach and restrictions.', 'Return a grounded acquisition option and the remaining unknown facts; do not turn absence into an impossibility claim.'],
-    done: 'A feasible acquisition route or a specific evidenced prerequisite gap is known.',
-    failures: ['Crafting duplicates while usable equipment is already nearby.', 'Declaring a missing item unavailable without inspecting live routes.'], related: ['skill-reuse-before-building'],
+    id: 'knowledge-acquisition-paths', name: 'Acquisition Paths', level: 0, type: 'knowledge', revision: 2,
+    tags: ['acquire', 'missing', 'inventory', 'craft', 'resource', 'acquisition', 'reuse', 'obtain'],
+    aliases: ['out of items', 'cannot craft', 'empty inventory', 'where to get', 'already built', 'missing material'],
+    summary: 'Held, accessible, reusable, obtainable and unknown describe different acquisition states.',
+    use: 'Something needed by the next authorized action is absent or its source is unclear.', skip: 'The needed supply is already usable and unreserved.',
+    checks: ['Current inventory, reservations and accessible equipment with existing obligations.', 'Live acquisition options and their availability through supported tools.'],
+    steps: ['Held stock is not the same as available stock: reservations or access can matter.', 'Reusable equipment and obtainable supply are alternatives whose suitability still needs evidence and owner authority.', 'Contrast: an empty inventory does not prove an item is impossible to obtain; a nearby machine does not make it free to repurpose.'],
+    done: 'Name the evidenced acquisition state and unresolved requirement without inventing a recipe, route or quantity.',
+    failures: ['Absence in inventory is mistaken for impossibility.'], related: ['skill-reuse-before-building', 'missing-item-bootstrap'],
   },
   {
-    id: 'knowledge-production-dependencies', name: 'Production Dependencies', level: 0, type: 'knowledge',
-    tags: ['dependency', 'recipe', 'bootstrap', 'science', 'research'],
-    use: 'A target requires production or unlock prerequisites that are not yet grounded.', skip: 'The relevant dependency results remain fresh and sufficient.',
-    checks: ['getRecipeDetails and getResearchPath for the target; getTechnology for actual enablement.', 'Current usable inventory, existing producers and goal restrictions.'],
-    steps: ['Read the target dependency information from the live game.', 'Expand a missing dependency only until the next executable acquisition or unlock action is found; identify cycles rather than recursing indefinitely.', 'Mark held, reusable, obtainable, locked and unknown requirements separately; keep the live bill outside reusable guide text.'],
-    done: 'The next prerequisite action has a supported live path and preserves the requested final result.',
-    failures: ['Following a remembered unlock sequence.', 'Expanding unrelated intermediate factories instead of the current dependency.'], related: ['knowledge-acquisition-paths', 'skill-trigger-aware-progression'],
+    id: 'knowledge-production-dependencies', name: 'Production Dependencies', level: 0, type: 'knowledge', revision: 2,
+    tags: ['dependency', 'recipe', 'bootstrap', 'science', 'research', 'production', 'prerequisite', 'unlock'],
+    aliases: ['what comes first', 'cannot start recipe', 'missing ingredient', 'research blocked', 'prerequisite chain'],
+    summary: 'Material requirements and unlock prerequisites explain dependencies, not an executable next action.',
+    use: 'A desired result depends on unavailable inputs or research.', skip: 'A fresh bounded dependency view already explains the current blocker.',
+    checks: ['Live recipe inputs and products, research path and current enabled state.', 'Current supply, compatible machines and admitted acquisition or research controls.'],
+    steps: ['Material dependencies describe what a process consumes; unlock prerequisites describe what enables access to it.', 'A dependency graph can contain alternatives or cycles and does not itself establish accessible supply or permission to act.', 'Contrast: knowing a prerequisite explains why work is blocked, but does not prove the actor can perform that prerequisite now.'],
+    done: 'Use the live dependency and capability evidence to distinguish a missing requirement from a supported next action.',
+    failures: ['A remembered production chain substitutes for live dependency details.'], related: ['knowledge-available-capabilities', 'knowledge-acquisition-paths'],
   },
   {
-    id: 'knowledge-machine-state', name: 'Machine State Interpretation', level: 0, type: 'knowledge',
-    tags: ['machine', 'status', 'starved', 'blocked', 'power', 'fuel', 'stopped'],
-    use: 'A machine is idle or its output differs from expectation.', skip: 'The current question is already answered by a fresh authoritative receipt.',
-    checks: ['getEntityStatus, live recipe/capability details and getLogisticsTopology.', 'Input, output and fuel inventory roles; native energy and status fields when exposed.'],
-    steps: ['Inspect the machine identity and timestamp before interpreting its state.', 'Separate missing supply, blocked output, energy loss, incompatible configuration and a legitimately idle consumer.', 'If the API does not expose the distinguishing fact, retain uncertainty and request the smallest supported read instead of changing equipment.'],
-    done: 'The observed state has a supported interpretation or a precisely named missing observation.',
-    failures: ['Calling a machine broken when its destination is full.', 'Inferring working production from a placement receipt.'], related: ['skill-find-actual-bottleneck'],
+    id: 'knowledge-machine-state', name: 'Machine State', level: 0, type: 'knowledge', revision: 2,
+    tags: ['machine', 'status', 'starved', 'blocked', 'power', 'fuel', 'stopped', 'state', 'idle', 'starvation'],
+    aliases: ['furnace', 'not making plates', 'not producing', 'stopped working', 'nothing coming out', 'no output', 'not running', 'blocked output', 'output full', 'nowhere to put', 'stopped producer'],
+    summary: 'An idle or stalled machine is a symptom; input, output, energy and configuration evidence distinguish possible causes.',
+    use: 'An observed machine is not doing the expected work.', skip: 'Fresh status already identifies the relevant condition and its scope.',
+    checks: ['Exact entity identity, observation time, current status, recipe and inventory roles.', 'Live energy state, input availability, output space and actual connected service.'],
+    steps: ['Starved input, blocked output, absent energy and unsuitable configuration are different hypotheses, not interchangeable repairs.', 'An idle machine can be behaving consistently with its present demand or configuration; a status label alone does not authorize a change.', 'Contrast: adding input cannot establish a remedy when output removal is the unresolved constraint.'],
+    done: 'Keep the observed symptom separate from the evidenced cause and leave unsupported diagnoses unresolved.',
+    failures: ['A stale symptom is treated as proof of the current cause.'], related: ['skill-find-actual-bottleneck'],
   },
   {
-    id: 'knowledge-connection-geometry', name: 'Connection Geometry', level: 0, type: 'knowledge',
-    tags: ['geometry', 'placement', 'reach', 'belt', 'fluid', 'power'],
-    use: 'Choosing or validating a machine connection or construction position.', skip: 'A fresh supported candidate already proves the exact required relationship.',
-    checks: ['getEntityGeometry, getPlacementCandidates and getLogisticsTopology.', 'Current actor reach, occupancy and applicable construction reservation.', 'For fluid connections, both endpoints\' live fluid identity, flow role, filters and applicable temperature constraints; missing or truncated facts remain unknown.'],
-    steps: ['Identify the interface to satisfy: actual drop/pickup, fluid port, electrical connection or access corridor.', 'Request candidates anchored to the observed interface and inspect their returned footprints and validity.', 'Before joining fluid service, verify endpoint compatibility and preserve existing connected obligations; geometric adjacency alone is insufficient.', 'Recheck affected interfaces after placement or rotation and observe intended material reaching its consumer; do not claim compatibility when required fields are missing.'],
-    done: 'The intended relationship is established by current geometry/topology evidence.',
-    failures: ['Choosing downstream positions before observing the upstream output.', 'Guessing footprints or reach from a familiar screenshot.'], related: ['skill-place-observe-connect'],
+    id: 'knowledge-connection-geometry', name: 'Connection Geometry', level: 0, type: 'knowledge', revision: 2,
+    tags: ['geometry', 'placement', 'reach', 'belt', 'fluid', 'power', 'connection', 'interface', 'transfer', 'topology', 'adjacency'],
+    aliases: ['next to each other', 'nothing transfers', 'not connected', 'wrong direction', 'not reaching', 'side by side', 'adjacent buildings', 'inserter pickup', 'pick up', 'drop off', 'belt transfer'],
+    summary: 'Nearby placement, directional interface compatibility and actual delivery are separate properties.',
+    use: 'Components are nearby but their intended material, fluid or energy relationship is uncertain.', skip: 'Fresh geometry and delivery evidence already cover the exact interface.',
+    checks: ['Live footprints, directions, pickup/drop positions, ports and access corridors.', 'Current endpoint compatibility, connected obligations and evidence of intended delivery.'],
+    steps: ['Adjacency describes location; a working connection depends on the actual interfaces and their direction and roles.', 'Reachable endpoints can still be incompatible. Geometric validity does not establish flow or continuing service.', 'Contrast: buildings side by side can remain disconnected, while a valid connection can still lack supply.'],
+    done: 'Distinguish location, compatibility and observed delivery; unknown port or route fields remain unknown.',
+    failures: ['A familiar layout is mistaken for a verified connection.'], related: ['skill-place-observe-connect'],
   },
   {
-    id: 'knowledge-rates-stocks-freshness', name: 'Rates, Stocks and Freshness', level: 0, type: 'knowledge',
+    id: 'knowledge-rates-stocks-freshness', name: 'Rates, Stocks and Freshness', level: 0, type: 'knowledge', revision: 2,
     tags: ['rate', 'stock', 'throughput', 'production', 'measurement', 'freshness', 'stale'],
-    use: 'Estimating completion, comparing capacity or claiming ongoing production.', skip: 'A still-valid native measurement already covers the same boundary and load.',
-    checks: ['getRecipeDetails, getMiningDetails, getTransportCapacity and estimateProductionTime.', 'Available native counters, observation windows, actual consumption and initial inventory.'],
-    steps: ['Name the measured item, boundary, time window and intended rate/deadline from the goal.', 'Separate an inventory total, a tool-estimated potential rate and measured new native output.', 'Invalidate affected conclusions when actor/surface, recipe, equipment, supply, topology or load changes; unavailable telemetry stays unavailable.'],
-    done: 'Capacity and completion statements identify their source, scope and freshness without treating stock as throughput.',
-    failures: ['A full belt or stocked chest is mistaken for sustained supply.', 'A historical estimate is reused after the operating conditions changed.'], related: ['skill-prove-sustainment'],
+    aliases: ['chest full', 'inventory unchanged', 'slow output', 'enough production', 'how long', 'old measurement'],
+    summary: 'Stored inventory, measured new output and estimated capacity answer different questions and have different freshness limits.',
+    use: 'Interpreting progress, throughput, capacity or expected completion time.', skip: 'A still-valid measurement covers the same boundary, window and operating conditions.',
+    checks: ['Native counters or inventory evidence with item, boundary and observation window.', 'Live capacity estimates, consumption, supply and changes in equipment, recipe, topology or load.'],
+    steps: ['Stock is an amount at a boundary; throughput describes new flow over a window; estimated capacity depends on stated assumptions.', 'A conclusion belongs to its observed scope and conditions. A changed process or load can invalidate it without changing the stored number.', 'Contrast: unchanged stock can coexist with ongoing production and consumption, while a full chest does not prove sustained replenishment.'],
+    done: 'Label the quantity, source, scope and freshness; unavailable measurement is not zero output or proof of completion.',
+    failures: ['Historical stock or nominal capacity is presented as current measured production.'], related: ['skill-prove-sustainment'],
   },
   {
     id: 'skill-reuse-before-building', name: 'Reuse Before Building', level: 1,
@@ -582,7 +654,7 @@ const ENTRIES: Entry[] = [
   },
 ]
 
-export const LEVELED_LIBRARY_DEFINITIONS = ENTRIES.map(entry => ({
+const definition = (entry: Entry) => ({
   schema_version: 1,
   revision: entry.revision ?? 1,
   id: entry.id,
@@ -592,7 +664,8 @@ export const LEVELED_LIBRARY_DEFINITIONS = ENTRIES.map(entry => ({
   kind: 'utility',
   stage: 'pattern',
   status: 'candidate',
-  summary: `${entry.use} ${entry.done}`,
+  summary: entry.summary ?? `${entry.use} ${entry.done}`,
+  ...(entry.aliases ? { search_aliases: entry.aliases } : {}),
   goal_tags: entry.tags,
   source: { kind: 'manual', entity_unit_numbers: [], recipe_ids: [], evidence_refs: ['curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified'] },
   preconditions: [{ kind: 'custom', subject: 'live-applicability', description: 'Check live capability, current goal, actor/surface and tool availability; an entry does not grant execution or plan authority.' }],
@@ -608,7 +681,10 @@ export const LEVELED_LIBRARY_DEFINITIONS = ENTRIES.map(entry => ({
   known_failure_modes: entry.failures,
   confidence: { level: 'low', basis: ['Authored decision procedure; use requires live applicability and supported tools. Difficulty is independent of evidence. No autonomous gameplay capability is established.'] },
   examples: [],
-}))
+})
+
+export const LEVELED_LIBRARY_DEFINITIONS = ENTRIES.map(definition)
+export const LEGACY_KNOWLEDGE_DEFINITIONS = LEGACY_KNOWLEDGE_ENTRIES.map(definition)
 
 // Typed views share immutable authored records; persistence retains legacy bytes.
 export const LEVELED_SKILL_DEFINITIONS = LEVELED_LIBRARY_DEFINITIONS.filter(entry => entry.content_type === 'skill')

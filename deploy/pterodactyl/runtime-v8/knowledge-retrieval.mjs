@@ -1,5 +1,6 @@
 // Explicit authored-reference reads. No autoload, durable context, world-fact
 // handoff or physical skill verification. The cache lives only for one request.
+import { isNotebookTool, spendContextCalls } from './agent-notebook.mjs'
 import { PolicyError, luaString } from '../staging/structured-policy.mjs'
 import { compactLoadedSkill, sanitizeSkillCard } from './skill-offers.mjs'
 
@@ -47,6 +48,7 @@ export function compactKnowledge(raw, expectedId, detail = true) {
   if (Number.isInteger(value.level) && value.level >= 0 && value.level <= 7) result.level = value.level
   if (detail) {
     result.schema_version = 1
+    if (value.search_aliases !== undefined) result.search_aliases = texts(value.search_aliases)
     if (value.applicability && typeof value.applicability === 'object') result.applicability = {
       when_to_use: text(value.applicability.when_to_use), when_to_skip: text(value.applicability.when_to_skip),
       live_checks: texts(value.applicability.live_checks), required_capabilities: texts(value.applicability.required_capabilities),
@@ -101,6 +103,7 @@ export async function handleKnowledgeToolBatch(loop, message, prepared) {
   if (!loop.knowledgeReads || loop.knowledgeReads.request !== request) loop.knowledgeReads = { request, calls: 0, cache: new Map() }
   const state = loop.knowledgeReads
   if (state.calls + prepared.length > KNOWLEDGE_LIMITS.calls) refuse('knowledge_request_budget_exhausted')
+  spendContextCalls(loop, prepared.length)
   state.calls += prepared.length
   const generation = loop.generation, sequence = loop.agentContext.conversationSeq
   const lineage = loop.agentContext.lineageSequence, role = loop.agentContext.role
@@ -139,8 +142,8 @@ export async function handleKnowledgeToolBatch(loop, message, prepared) {
 // Preserve only matched world pairs; reference bodies never enter a digest.
 export function withoutKnowledgeExchange(messages) {
   const assistant = messages[0]
-  if (!Array.isArray(assistant?.tool_calls) || !assistant.tool_calls.some(call => isKnowledgeTool(call?.function?.name))) return messages
-  const calls = assistant.tool_calls.filter(call => !isKnowledgeTool(call?.function?.name))
+  if (!Array.isArray(assistant?.tool_calls) || !assistant.tool_calls.some(call => (isKnowledgeTool(call?.function?.name) || isNotebookTool(call?.function?.name)))) return messages
+  const calls = assistant.tool_calls.filter(call => !(isKnowledgeTool(call?.function?.name) || isNotebookTool(call?.function?.name)))
   if (calls.length === 0) return []
   const pairs = calls.map(call => ({ call, result: messages.slice(1).find(row => row.role === 'tool' && row.tool_call_id === call.id) }))
     .filter(pair => pair.result)

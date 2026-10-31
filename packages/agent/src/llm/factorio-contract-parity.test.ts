@@ -9,7 +9,7 @@ const operationsSource = readFileSync(operationsPath, 'utf8')
 
 type ContractSurface = 'ordinary-agent' | 'pterodactyl-runtime-v8'
 type OperationContract = { surfaces: ContractSurface[], pterodactyl_layer: 'staging-base' | 'runtime-v8-extension' }
-type ToolContract = { remote?: string[], execution?: 'host-observation', host_handler?: string, category: string, surfaces: ContractSurface[], surface_policy: 'shared' | 'runtime-v8-only' | 'ordinary-agent-only' }
+type ToolContract = { remote?: string[], execution?: 'host-observation' | 'host-context', host_handler?: string, category: string, surfaces: ContractSurface[], surface_policy: 'shared' | 'runtime-v8-only' | 'ordinary-agent-only' }
 const operationContract = contract.operations as Record<string, OperationContract>
 const toolContract = contract.tools as Record<string, ToolContract>
 
@@ -80,7 +80,9 @@ describe('canonical Factorio provider contract parity', () => {
       'measureTransportThroughput',
       'planPlacement',
       'proposeConstructionLayout',
+      'readNotebook',
       'resumeConstructionLayout',
+      'updateNotebook',
       'validateConstructionPlan',
       'validateConstructionReservation',
     ])

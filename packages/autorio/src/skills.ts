@@ -1,6 +1,6 @@
 import type { LuaForce, LuaGuiElement, LuaPlayer } from 'factorio:runtime'
 import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
-import { LEVELED_LIBRARY_DEFINITIONS } from './leveled_skill_library'
+import { LEVELED_LIBRARY_DEFINITIONS, LEGACY_KNOWLEDGE_DEFINITIONS } from './leveled_skill_library'
 import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
 import {
   analyze_factory_area,
@@ -149,6 +149,7 @@ export interface SkillDefinition {
   // smelting, science. Kept short; omitted when empty so older records keep
   // their canonical JSON.
   goal_tags?: string[]
+  search_aliases?: string[]
   // Optional so canonical legacy definitions and pinned snapshots stay byte-stable.
   content_type?: LibraryContentType
   level?: number
@@ -552,6 +553,8 @@ export function canonicalize_skill_definition(value: any): SkillDefinition {
     },
     examples: canonical_examples(value.examples),
   }
+  const aliases = string_list(value.search_aliases, 'search_aliases', 24)
+  if (aliases.length > 0) skill.search_aliases = aliases
   const goal_tags = canonical_goal_tags(value.goal_tags)
   if (goal_tags.length > 0) skill.goal_tags = goal_tags
   if (value.content_type !== undefined) skill.content_type = enum_value(value.content_type, ['knowledge', 'skill'] as const, 'content_type', 'skill')
@@ -642,7 +645,7 @@ function is_current_canonical_copy(stored: SkillDefinition) {
   for (const raw of BASIC_SKILL_DEFINITIONS) {
     if (raw.id === stored.id && same_curated_value(stored, canonicalize_skill_definition(raw))) return true
   }
-  for (const raw of LEVELED_LIBRARY_DEFINITIONS) {
+  for (const raw of [...LEVELED_LIBRARY_DEFINITIONS, ...LEGACY_KNOWLEDGE_DEFINITIONS]) {
     if (raw.id === stored.id && same_curated_value(stored, canonicalize_skill_definition(raw))) return true
   }
   return false
@@ -711,7 +714,7 @@ export function ensure_basic_skill_definitions() {
     }
     else if (is_unedited_curated_copy(stored)) {
       const same_family = stored.source.evidence_refs.join('\n') === skill.source.evidence_refs.join('\n')
-      if (!same_family && !is_current_canonical_copy(stored)) {
+      if ((!same_family || skill.content_type === 'knowledge') && !is_current_canonical_copy(stored)) {
         // Unknown historical copies may be imports without an edit marker.
         // Retain their bytes and durable protection across switch-back/reload.
         preserve_variant(skill.id)
@@ -805,6 +808,9 @@ export function derive_skill_tags(skill: SkillDefinition): SkillTag[] {
     result.push({ tag, source })
   }
   for (const tag of skill.goal_tags ?? []) add(tag, 'goal')
+  // Alias phrases and queries use the same stopword/singular normalization.
+  // Keep ordinary authored tags unchanged for existing procedural rankings.
+  for (const alias of skill.search_aliases ?? []) add(goal_search_terms(alias).words.join('-'), 'goal')
   for (const flow of skill.outputs) add(flow.item, 'output')
   for (const node of skill.topology.nodes) {
     add(node.entity_name, 'entity')
@@ -1134,6 +1140,7 @@ export function knowledge_reference(entry: SkillDefinition) {
   return {
     schema_version: 1, content_type: 'knowledge', id: entry.id, revision: entry.revision,
     name: entry.name, summary: entry.summary,
+    ...(entry.search_aliases ? { search_aliases: entry.search_aliases } : {}),
     ...(entry.level !== undefined ? { level: entry.level } : {}),
     ...(entry.guidance !== undefined ? {
       applicability: { when_to_use: entry.guidance.when_to_use, when_to_skip: entry.guidance.when_to_skip,

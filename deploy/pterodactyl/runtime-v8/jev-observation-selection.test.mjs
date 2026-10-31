@@ -75,7 +75,7 @@ test('every deterministic observation tool belongs to exactly one typed relevanc
   const families = observationToolFamilies()
   assert.deepEqual(families, observationRelevanceFamilies())
   const catalog = observationToolFamilyCatalog()
-  const names = toolDefinitions.map(tool => tool.function.name)
+  const names = toolDefinitions.map(tool => tool.function.name).filter(name => !['readNotebook', 'updateNotebook'].includes(name))
 
   assert.deepEqual(Object.keys(catalog).sort(), [...names].sort())
   for (const name of names) {

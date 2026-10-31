@@ -262,13 +262,14 @@ for (const [toolName, args] of [
 
 test('open typed schema advertises ordinary observations but never gameplay actions', () => {
   const schema = executorProviderToolDefinitions.find(row => row.function.name === 'submitPlan').function.parameters.properties.observationRequest
-  assert.deepEqual(schema.properties.tool.enum, toolDefinitions.map(row => row.function.name))
+  assert.deepEqual(schema.properties.tool.enum, toolDefinitions.map(row => row.function.name).filter(name => !['readNotebook', 'updateNotebook'].includes(name)))
   assert.equal(schema.properties.tool.enum.includes('place_candidate'), false)
 })
 
 for (const [toolName, args] of [
   ['place_candidate', { candidate_set_id: 's', candidate_id: 'c' }],
   ['submitPlan', {}], ['unknownRead', {}],
+  ['readNotebook', { scope: 'goal' }], ['updateNotebook', { scope: 'goal', expectedRevision: 0, text: 'External memory' }],
   ['getPlacementCandidates', { entity_name: 'burner-mining-drill', radius: 25 }],
   ['getNearbyEntities', { radius: 20, execute: 'unbounded' }],
 ]) test(`open typed request rejects non-observations or invalid arguments: ${toolName} ${JSON.stringify(args)}`, async () => {

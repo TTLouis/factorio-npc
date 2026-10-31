@@ -1,3 +1,4 @@
+import { isNotebookTool, isValidatedNotebookBatch, handleNotebookToolBatch } from './agent-notebook.mjs'
 import { isKnowledgeTool, isValidatedKnowledgeBatch, handleKnowledgeToolBatch, sanitizeLibraryToolOutput, withoutKnowledgeExchange } from './knowledge-retrieval.mjs'
 import { explicitResumeIdentity, resumeExplicitContinuation, settleExplicitResumeFailure } from './explicit-resume.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
@@ -5392,19 +5393,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async persistState({ strict = false, requiredSkillHandoff, requiredFactoryMetadata } = {}) {
+  async persistState({ strict = false, requiredSkillHandoff, requiredFactoryMetadata, requiredNotebook } = {}) {
     this.assertRequestAdmission()
     if (!this.stateFile || typeof this.memory.snapshot !== 'function') {
+      if (requiredNotebook) throw new AgentLoopError('notebook_persistence_unavailable')
       if (requiredFactoryMetadata) throw new AgentLoopError('factory_metadata_persistence_unavailable')
       if (requiredSkillHandoff && !this.allowEphemeralSkillHandoff) throw skillHandoffError('persistence_unavailable')
       return
     }
     const filename = this.stateFile
     const metadataFence = () => {
+      requiredNotebook?.fence()
       if (requiredFactoryMetadata) this.memory.assertFactoryMetadataPersistence(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase)
     }
     const capture = () => {
       const snapshot = this.memory.snapshot()
+      if (requiredNotebook) snapshot.agent_notebooks = requiredNotebook.snapshot()
       if (requiredFactoryMetadata) {
         for (const name of ['factory_registry', 'factory_registry_world_id', 'factory_metadata_pending', 'factory_cell_observations', 'factory_registry_fault']) delete snapshot[name]
         Object.assign(snapshot, this.memory.factoryMetadataPersistenceSnapshot(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase))
@@ -5425,7 +5429,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const temp = `${filename}.${process.pid}.tmp`
       // Retry ordinary snapshot churn in this queue, never by recursively
       // enqueueing a write. Capabilities/handoffs get no implicit retry.
-      const attempts = requiredFactoryMetadata || requiredSkillHandoff ? 1 : 3
+      const attempts = requiredFactoryMetadata || requiredSkillHandoff || requiredNotebook ? 1 : 3
       let persistedSnapshot
       for (let attempt = 1; ; attempt++) {
         this.assertRequestAdmission()
@@ -5443,6 +5447,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       await fsp.rename(temp, filename)
+      requiredNotebook?.commit(persistedSnapshot.agent_notebooks)
       this.memory.markFactoryLifecyclePersisted?.(persistedSnapshot)
       if (requiredFactoryMetadata) {
         this.memory.markFactoryMetadataPersisted(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase)
@@ -15468,7 +15473,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return checkpointBatchContradiction(plan.checkpoint, plan.operations)
   }
 
-  observationDecisionCost(prepared) { return isValidatedKnowledgeBatch(prepared) ? 0 : super.observationDecisionCost(prepared) }
+  observationDecisionCost(prepared) { return (isValidatedKnowledgeBatch(prepared) || isValidatedNotebookBatch(prepared)) ? 0 : super.observationDecisionCost(prepared) }
 
   assertExecutorSkillHandoffTools(calls) {
     if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE) return
@@ -15626,6 +15631,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Check again at dispatch: a caller-supplied prepared batch cannot bypass
     // the executor role boundary (including closed/targeted read paths).
     this.assertExecutorSkillHandoffTools([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)])
+    if ([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)].some(tool => isNotebookTool(tool?.function?.name))) {
+      return handleNotebookToolBatch(this, message, prepared)
+    }
     if ([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)].some(tool => isKnowledgeTool(tool?.function?.name))) {
       return handleKnowledgeToolBatch(this, message, prepared)
     }
