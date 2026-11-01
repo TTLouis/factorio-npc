@@ -21,7 +21,7 @@ export const assignedGuidance = () => ({ approach: 'Use the existing furnace to 
   materialSupply: { mode: 'manual_bootstrap', resource: 'iron-ore' } })
 
 export function assignedReviewFixture(stateFile, { onTrace, onProvider, onCommand, bypassCommitPrevention = false, repeatWrong = false,
-  operationForm = 'supply_entity', submissionForm = 'json', matchingFirst = false, alterProposal } = {}) {
+  operationForm = 'supply_entity', submissionForm = 'json', matchingFirst = false, alterProposal, plannerRevision = false } = {}) {
   const game = new FakeFactorio({ inventory: { 'iron-plate': 22, 'copper-plate': 0, 'iron-ore': 28, 'copper-ore': 1, coal: 16 } })
   game.status.connected_players = 0
   const memory = new CanonicalTaskBoardMemory(); memory.initializeFactoryRegistry(game.factoryWorldId)
@@ -69,7 +69,9 @@ export function assignedReviewFixture(stateFile, { onTrace, onProvider, onComman
         reply = plannerCalls === 1 ? planReply({ plan: ['Use the existing furnace to obtain at least 50 iron plates and one copper plate'], operations: [],
           goal: { scope: 'long_horizon', summary: ASSIGNED_OBJECTIVE, doneWhen: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 100 }] },
           stepCompletions: [{ kind: 'deterministic', checkpoint: ASSIGNED_CHECKPOINT }], executionGuidance: [assignedGuidance()] })
-          : planReply({ plan: ['Use the existing furnace to obtain at least 50 iron plates and one copper plate'], operations: [], chatMessage: 'Retain the stock checkpoint and all assigned jobs. Observe the registered iron producer 37 and propose only a compatible operation; preserve copper producer 36.' })
+          : planReply({ plan: [plannerRevision ? 'Use the compatible iron producer and preserve the copper job' : 'Use the existing furnace to obtain at least 50 iron plates and one copper plate'], operations: [],
+            ...(plannerRevision ? { workingPlanRevision: true, stepCompletions: [{ kind: 'deterministic', checkpoint: ASSIGNED_CHECKPOINT }],
+              executionGuidance: [{ ...assignedGuidance(), approach: 'Use the compatible iron producer; preserve the assigned copper producer.' }] } : {}), chatMessage: 'Retain the stock checkpoint and all assigned jobs. Observe the registered iron producer 37 and propose only a compatible operation; preserve copper producer 36.' })
       } else {
         executorCalls++; assert.ok(executorCalls <= 4, 'bounded original and post-review executor: ' + JSON.stringify(messages.slice(-4)))
         if ([1, 3].includes(executorCalls)) reply = { content: '', tool_calls: [{ id: `discover-assigned-${executorCalls}`, type: 'function', function: {

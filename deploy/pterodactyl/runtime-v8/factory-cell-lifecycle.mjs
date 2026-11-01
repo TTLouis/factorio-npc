@@ -1,4 +1,5 @@
 import { factoryMetadataDigest as digest } from './factory-dependencies.mjs'
+import { emptyFurnaceAssignment } from './factory-reassignment.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
 import { completedOperationReceipt, operationSignature, operationIdentity } from './operation-reconciliation.mjs'
 import { deriveFactoryPlacementReceipt } from './factory-placement-provenance.mjs'
@@ -157,7 +158,10 @@ function partialTerminal(witness, binding, operation, receipt) {
 }
 function reduce(state, event) {
   const p = event.payload
-  if (event.type === 'begin') {
+  if (event.type === 'reassign') {
+    if (state.transactions.some(tx => tx.transaction_id === p.transaction_id || !TERMINAL.has(tx.state))) fail('factory_lifecycle_duplicate_transaction')
+    state.transactions.push({ ...clone(p), original_owner: clone(p.owner), owner_history: [], state: 'installed', claims: [], operations: [], next_operation: 0, current_members: clone(p.members), physical_revision: p.previous_physical_revision + 1 })
+  } else if (event.type === 'begin') {
     if (state.transactions.some(tx => tx.transaction_id === p.transaction_id || tx.cell_id === p.cell_id && !TERMINAL.has(tx.state))) fail('factory_lifecycle_duplicate_transaction')
     state.transactions.push({ ...clone(p), original_owner: clone(p.owner), owner_history: [], state: 'degraded', claims: [], next_operation: 0, current_members: clone(p.members), physical_revision: p.previous_physical_revision + 1 })
   } else if (event.type === 'rebind') {
@@ -309,12 +313,17 @@ export class FactoryCellLifecycleStore {
   }
   project(cell) {
     this.#assert()
-    const tx = this.#state.transactions.filter(row => row.cell_id === cell.cell_id).at(-1)
+    const history = this.#state.transactions.filter(row => row.cell_id === cell.cell_id)
+    const tx = history.at(-1)
     if (!tx) return clone(cell)
-    if (!same(tx.assignment, cell.assignment)) fail('factory_lifecycle_assignment_changed')
+    let assignment = cell.assignment; let ports = cell.ports
+    for (const transition of history) {
+      if (!same(transition.assignment, assignment)) fail('factory_lifecycle_assignment_changed')
+      if (transition.kind === 'reassign') { assignment = transition.next_assignment; ports = transition.next_ports }
+    }
     const bindings = cell.port_bindings?.filter(binding => tx.current_members.some(member => exactMember(member, binding.member)))
     const durable = this.#durable === digest(this.#body())
-    return { ...clone(cell), members: clone(tx.current_members), ...(bindings ? { port_bindings: clone(bindings) } : {}),
+    return { ...clone(cell), assignment: clone(assignment), ports: clone(ports), members: clone(tx.current_members), ...(bindings ? { port_bindings: clone(bindings) } : {}),
       state: !durable ? 'degraded' : tx.state === 'installed' ? 'unverified' : tx.state === 'retired' ? 'retired' : 'degraded',
       physical_revision: tx.physical_revision, lifecycle_state: tx.state,
       lifecycle: { transaction_id: tx.transaction_id, kind: tx.kind, state: tx.state, revision: tx.physical_revision, commissioning: 'unverified' } }
@@ -336,6 +345,24 @@ export class FactoryCellLifecycleStore {
       if (!cell || cell.revision !== expected.revision || cell.cell_id !== tx.cell_id && digest(cell) !== expected.digest) fail('factory_lifecycle_cell_revision_stale')
       if (cell.cell_id === tx.cell_id && !same(cell.assignment, tx.assignment)) fail('factory_lifecycle_assignment_changed')
     }
+  }
+  reassign(change, registry, context, evidence) {
+    this.#assert(); this.assertDurable(); const scope = owner(context, true); safeData(change)
+    if (this.pending()) fail('factory_reassignment_pending')
+    this.#cas(change, registry)
+    const cell = registry.cells.find(row => row.cell_id === change.cell_id)
+    if (!cell || registry.world_id !== scope.world_id || cell.surface_index !== scope.surface_index || cell.force_index !== scope.force_index
+      || !token(change.transaction_id) || this.#state.transactions.some(tx => tx.transaction_id === change.transaction_id)
+      || registry.dependencies.some(edge => edge.consumer.cell_id === cell.cell_id || edge.supplier?.cell_id === cell.cell_id)) fail('factory_reassignment_consumers_or_scope')
+    evidenceFence(evidence, context, registry, cell.members); consumerFence(evidence, registry, cell.cell_id, true)
+    if (evidence.consumers.rows.length || evidence.authorized !== true || !token(evidence.evidence_ref)) fail('factory_reassignment_authority_missing')
+    const next = emptyFurnaceAssignment(cell, change.declaration, evidence.raw.observation)
+    if (!same(next, evidence.next)) fail('factory_reassignment_evidence_mismatch')
+    this.#worldId ??= scope.world_id
+    this.#append('reassign', { transaction_id: change.transaction_id, cell_id: cell.cell_id, kind: 'reassign', owner: scope,
+      authority_fingerprint: context.authority_fingerprint, assignment: clone(cell.assignment), next_assignment: next.assignment, next_ports: next.ports,
+      members: clone(cell.members), previous_physical_revision: cell.physical_revision ?? 0, evidence: clone(evidence) })
+    return this.current(change.transaction_id)
   }
   begin(change, registry, context, evidence) {
     this.#assert(); this.assertDurable(); const scope = owner(context, true); safeData(change)

@@ -201,12 +201,12 @@ test('factory use recovery allowance is durable per goal/requirement across requ
   assert.throws(() => restored.consume('goal', requirement, attempt(4)), { code: 'factory_use_recovery_fault' })
 })
 
-test('actual residual resolver consumes allowance before the existing guarded structural wake; goal and committed semantics stay immutable', async () => {
+test('actual residual resolver consumes shared goal effort before a revisable planner review; native facts do not mutate strategy', async () => {
   const w = await fixture().build(); await w.enroll()
   const original = clone(w.memory.planningState(KEY)); const plan = getActivePlan(original)
   w.memory.grantAuthorization(KEY, playerObjectiveGrant(original.goal.goal_id))
   w.agent.replacementWakeEnabled = true; w.agent.stateFile = '/synthetic/persistence-enabled'
-  w.agent.agentContext.role = 'planner'
+  w.agent.agentContext.role = 'executor'
   let wake
   w.agent.continueFromModMessage = async message => { wake = message; return { synthetic_planner_woken: true } }
   w.game.onObserve = response => { response.members[0].source_resources.resources[0].products[0].name = 'iron-ore' }
@@ -218,16 +218,17 @@ test('actual residual resolver consumes allowance before the existing guarded st
   assert.ok(w.memory.currentGoalGrant(KEY))
   const recovered = await recoverFactoryCellUse(w.agent, failure)
   assert.equal(recovered.handled, true, JSON.stringify({ state: getActivePlan(w.memory.planningState(KEY)).status, events: w.events.slice(-3) }))
-  assert.match(wake, /PLAN_BLOCKED/)
+  assert.match(wake, /EXECUTOR_REVIEW/)
   assert.match(wake, /factory_cell_resolution_required/)
-  assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
-  assert.ok(w.writes.some(row => row.factory_use_recovery?.records[0]?.attempts.length === 1))
+  assert.equal(w.memory.snapshot().factory_use_recovery.records.length, 0)
+  assert.equal(w.memory.planningState(KEY).goal.effort.blockers['factory:factory_cell_resolution_required'], 1)
+  assert.ok(w.writes.some(row => row.planning_states?.some(item => item.state.goal?.effort?.spent >= 1)))
   const after = w.memory.planningState(KEY)
   assert.equal(after.goal.goal_id, original.goal.goal_id); assert.equal(after.goal.requested_result, original.goal.requested_result)
   assert.deepEqual(getActivePlan(after).steps, plan.steps)
-  assert.equal(getActivePlan(after).status, 'BLOCKED')
+  assert.notEqual(getActivePlan(after).status, 'BLOCKED')
   assert.equal(w.memory.pendingOperations(KEY).length, 0)
-  assert.ok(w.events.some(row => row.event === 'plan.replacement_wake'))
+  assert.ok(w.events.some(row => row.event === 'planner.review_round'))
 })
 
 for (const kind of ['miner', 'assembler', 'repeated', 'power']) test(`general ${kind} block enrolls exact receipt roles through real pre-send/settlement/close`, async () => {

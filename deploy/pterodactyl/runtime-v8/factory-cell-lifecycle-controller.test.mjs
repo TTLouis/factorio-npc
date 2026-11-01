@@ -7,7 +7,9 @@ import { boardPlanAlignment, CanonicalTaskBoardMemory } from './canonical-task-b
 import { getActivePlan } from './planning-state.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { createFactoryRegistry, registerFactoryCell, factoryMetadataDigest as digest } from './factory-registry.mjs'
-import { beginFactoryCellLifecycle, projectFactoryLifecycleEvidence, captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles } from './factory-cell-lifecycle-controller.mjs'
+import { reassignEmptyFactoryFurnace, beginFactoryCellLifecycle, projectFactoryLifecycleEvidence, captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles } from './factory-cell-lifecycle-controller.mjs'
+
+import { playerObjectiveGrant } from './replacement-wake.mjs'
 
 const WORLD = '1f207b33-f2b7-4104-b04d-21bb089a304e'; const KEY = 'npc:lifecycle-controller'
 const clone = value => structuredClone(value)
@@ -223,4 +225,37 @@ test('ordinary discovery binds synthetic checkpoint hardware without bypassing s
   const after = await w.agent.completionFactsForContract(contract, undefined, [], { committedIdentity: true })
   assert.equal(after['exact-stock'].authoritative, true); assert.equal(after['exact-stock'].satisfied, true)
   assert.equal(w.game.calls.filter(text => text.includes('"autorio_tools","get_nearby_entities"')).length, 1)
+})
+
+
+test('empty furnace reassignment uses native ownership fences and durable lifecycle history', async () => {
+  const root = path.resolve('test-results/factory-reassignment'); await fs.mkdir(root, { recursive: true })
+  const directory = await fs.mkdtemp(path.join(root, 'state-'))
+  try {
+    for (const fault of [null, 'consumer', 'human', 'nonempty', 'cancelled']) {
+      const w = fixture(); w.agent.stateFile = path.join(directory, `${fault ?? 'valid'}.json`)
+      w.memory.grantAuthorization(KEY, playerObjectiveGrant(w.memory.planningState(KEY).goal.goal_id))
+      w.memory.recordNpcPlacement(KEY, { unit_number: 27, entity_name: 'fixture-machine', actor_id: 24, actor_epoch: 2 })
+      w.game.mutateRow = row => {
+        row.type = 'furnace'; row.recipe = { state: 'none' }
+        row.last_user_facts = { state: 'known', last_user: fault === 'human' ? { name: 'human-player' } : null }
+        row.inventories = ['input', 'output', 'fuel'].map(role => ({ role, state: 'known', truncated: false, items: [] }))
+        if (fault === 'nonempty') row.inventories[0].items.push({ name: 'held-item', count: 1 })
+        row.progress_facts = { crafting_progress: { state: 'known', truncated: false, value: 0 } }
+        row.startup_recipe_candidates = { schema_version: 1, state: 'known', truncated: false, coverage: 'complete', selection: 'unselected', basis: 'enabled_native_recipe_category_and_surface',
+          candidates: [{ name: 'fixture-new-recipe', ingredients: [{ type: 'item', name: 'fixture-input' }], products: [{ type: 'item', name: 'fixture-new-output' }], applicability: { state: 'available' } }] }
+        if (fault === 'consumer') row.consumer_facts.consumers.push({ state: 'connected', relation: 'inserter_pickup', consumer: { unit_number: 99 } })
+      }
+      if (fault === 'cancelled') w.game.onObserve = async () => { w.agent.generation++ }
+      const declaration = { cell_id: w.cell.cell_id, product: 'fixture-new-output', resource: 'fixture-input' }
+      if (fault) { await assert.rejects(reassignEmptyFactoryFurnace(w.agent, declaration)); assert.equal(w.memory.factoryLifecycleTransactions().length, 0); continue }
+      await reassignEmptyFactoryFurnace(w.agent, declaration)
+      assert.deepEqual(w.memory.getFactoryRegistry(), w.registry)
+      assert.equal(w.memory.getFactoryOperationalRegistry().cells[0].assignment.method, 'native_recipe:fixture-new-recipe')
+      const restored = new CanonicalTaskBoardMemory(); restored.restore(JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8')))
+      assert.equal(restored.getFactoryOperationalRegistry().cells[0].assignment.products[0], 'fixture-new-output')
+      assert.equal(restored.factoryLifecycleTransactions()[0].assignment.products[0], 'fixture-output')
+      assert.equal(w.game.calls.some(text => text.includes('autorio_operation_admission')), false, 'empty furnace selects its job on later legal input; transition makes no native mutation')
+    }
+  } finally { await fs.rm(directory, { recursive: true, force: true }) }
 })

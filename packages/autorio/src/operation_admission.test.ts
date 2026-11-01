@@ -93,7 +93,7 @@ describe('AR terminal partial gather accounting', () => {
   })
 })
 function actor() {
-  return { is_valid: true, character: { valid: true }, status_snapshot: () => ({ actor_id: 7 }) } as unknown as ControlledActor
+  return { is_valid: true, force: { index: 1 }, character: { valid: true }, status_snapshot: () => ({ actor_id: 7 }) } as unknown as ControlledActor
 }
 beforeEach(() => {
   ;(globalThis as any).storage = {}

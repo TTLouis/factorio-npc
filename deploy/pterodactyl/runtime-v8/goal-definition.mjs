@@ -26,6 +26,7 @@ export const GOAL_CONDITION_KINDS = Object.freeze([
   'entity_working',
   'electric_network_satisfied',
   'production_rate',
+  'automated_starter_base',
 ])
 
 // World-state kinds (plan 3.7): what is running now, not what was ever made.
@@ -132,6 +133,15 @@ function sanitizeCondition(raw, index, options = {}) {
     fail('invalid_goal_condition', `goal.doneWhen kind must be one of ${GOAL_CONDITION_KINDS.join(', ')}`)
   }
   const id = typeof raw.id === 'string' && /^[A-Za-z0-9_.-]{1,60}$/.test(raw.id) ? raw.id : `done_${index + 1}`
+  if (kind === 'automated_starter_base') {
+    const supply = raw.supply_items; const stocks = raw.construction_stocks
+    if (!Array.isArray(supply) || supply.length < 1 || supply.length > 8
+      || !Array.isArray(stocks) || stocks.length < 1 || stocks.length > 8) fail('invalid_goal_condition', 'automated_starter_base requires 1–8 live supply_items and construction_stocks')
+    return { id, kind, science_item: prototypeName(raw.science_item, 'science_item', kind, raw),
+      technology: prototypeName(raw.technology, 'technology', kind, raw),
+      supply_items: [...new Set(supply.map(item => prototypeName(item, 'supply_items', kind, raw)))],
+      construction_stocks: stocks.map(stock => ({ item_name: prototypeName(stock?.item_name, 'item_name', kind, stock), minimum: minimum(stock?.minimum, kind) })) }
+  }
   if (kind === 'research_completed') return { id, kind, technology: prototypeName(raw.technology, 'technology', kind, raw) }
   if (kind === 'rockets_launched') return withCounter({ id, kind, minimum: minimum(raw.minimum, kind) }, raw, options)
   if (kind === 'space_location_unlocked') return { id, kind, name: prototypeName(raw.name, 'name', kind, raw) }
@@ -214,6 +224,7 @@ export function goalConditionCommand(condition) {
 
 export function describeGoalCondition(condition) {
   switch (condition?.kind) {
+    case 'automated_starter_base': return `automated starter base: sustained power, extraction, smelting, transport, science delivery and research; replenished construction stocks (${condition.construction_stocks.map(row => `${row.minimum} × ${row.item_name}`).join(', ')}) without manual servicing`
     case 'research_completed': return `research "${condition.technology}" is completed`
     case 'rockets_launched': return condition.count_from === GOAL_COUNT_FROM.SAVE_START
       ? `at least ${condition.minimum} rocket${condition.minimum === 1 ? '' : 's'} launched in this save`
@@ -281,7 +292,8 @@ export async function evaluateGoalDefinition(definition, command, { samples = GO
   const results = []
   const baselines = {}
   for (const condition of definition?.done_when ?? []) {
-    let observation = await readGoalCondition(condition, command)
+    const request = condition.kind === 'automated_starter_base' ? { ...condition, bindings: definition.acceptance_bindings, acceptance_key: String(definition.acceptance_key ?? `${definition.defined_at ?? 0}:${condition.id}`) } : condition
+    let observation = await readGoalCondition(request, command)
     let votes
     let stalled = false
     if (GOAL_RUNNING_KINDS.includes(condition.kind) && samples > 1) {
@@ -294,6 +306,7 @@ export async function evaluateGoalDefinition(definition, command, { samples = GO
       kind: condition.kind,
       satisfied: ok && observation.satisfied === true,
       current,
+      ...(condition.kind === 'automated_starter_base' ? { native_evidence: observation, observation_reason: observation?.reason } : {}),
       error: ok ? undefined : String(observation?.error ?? 'unreadable_condition').slice(0, 120),
     }
     if (votes) {

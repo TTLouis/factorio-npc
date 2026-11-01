@@ -919,10 +919,10 @@ test('5b: a stale retry of a restage (the same lineage moved on) still clears th
 })
 
 // 5c: the silent stall. An active goal a restart finds with no plan at all.
-async function goalAdmittedNoPlan() {
+async function goalAdmittedNoPlan(options = {}) {
   const file = stateFile()
   const game = new FakeFactorio()
-  const first = harness({ game, script: [() => { throw new Error('fetch failed') }], agentOptions: { stateFile: file } })
+  const first = harness({ game, script: [() => { throw new Error('fetch failed') }], agentOptions: { stateFile: file, ...options } })
   await assert.rejects(first.say(), /fetch failed/)
   await first.agent.persistQueue
   const planning = first.memory.planningState(KEY)
@@ -1790,4 +1790,27 @@ test('nit: a deferred slice wake persists the state and tells the UI the goal is
   const update = liveAgentEvent('executor.slice_wake_deferred', activity.find(item => item.event === 'executor.slice_wake_deferred').data)
   assert.equal(update.phase, 'waiting')
   assert.match(update.detail, /waiting for Resume/)
+})
+
+
+test('reconciled restart actively redrives the same pre-plan goal while explicit pause stays stopped', async () => {
+  const { file, game, goalId, objective } = await goalAdmittedNoPlan({ replacementWake: true })
+  const second = harness({ game, script: [() => plannerSlice()], agentOptions: { stateFile: file, replacementWake: true } })
+  await second.agent.loadPersistentState()
+  const { session } = chatSession(second.agent)
+  session.session = 'reconciled-fixture'; session.startupReconciledSession = session.session
+  session.ensureAuthorization = async () => ({})
+  await session.announceStartupGoal('before_first_plan')
+  assert.equal(second.calls.length, 1)
+  assert.equal(second.memory.planningState(KEY).goal.goal_id, goalId)
+  assert.equal(second.memory.planningState(KEY).run.paused, false)
+  assert.ok(second.calls[0].messages.some(message => textOf(message) === `[CHAT] TTLouis: ${objective}`))
+  assert.equal(second.rows('runtime.active_goal_redriven').length, 1)
+  const third = harness({ game, script: [], agentOptions: { stateFile: file } })
+  await third.agent.loadPersistentState()
+  third.memory.pausePlan(KEY, 'operator_pause', { pause_class: 'operator_pause' })
+  const stopped = chatSession(third.agent).session
+  stopped.session = 'reconciled-fixture'; stopped.startupReconciledSession = stopped.session
+  assert.equal(stopped.queueStartupGoalNotice(), false)
+  assert.equal(third.calls.length, 0)
 })

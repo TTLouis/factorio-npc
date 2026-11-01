@@ -1245,7 +1245,7 @@ export const plannerControlToolDefinitions = [{
                   id: { type: 'string', maxLength: 60 },
                   kind: {
                     type: 'string',
-                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate'],
+                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate', 'automated_starter_base'],
                     description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); inventory_count {item_name, minimum} (SGLuna\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded: any non-fuel hand insert, even into a chest, delays it by a window, and a hand-fed machine keeps it void until its hand-fed input is used up). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
                   },
                   technology: { type: 'string', maxLength: 100 },
@@ -1253,6 +1253,9 @@ export const plannerControlToolDefinitions = [{
                   name: { type: 'string', maxLength: 100 },
                   minimum: { type: 'integer', minimum: 1 },
                   entity_name: { type: 'string', maxLength: 100 },
+                  science_item: { type: 'string', maxLength: 100 },
+                  supply_items: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', maxLength: 100 } },
+                  construction_stocks: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'object', additionalProperties: false, required: ['item_name', 'minimum'], properties: { item_name: { type: 'string', maxLength: 100 }, minimum: { type: 'integer', minimum: 1, maximum: 1000000 } } } },
                   per_minute: { type: 'number', exclusiveMinimum: 0, description: 'production_rate only: items per minute.' },
                   window_minutes: { type: 'integer', enum: [1, 10], description: 'production_rate only: the measured window, default 1.' },
                   countFrom: {
@@ -1265,6 +1268,9 @@ export const plannerControlToolDefinitions = [{
             },
           },
         },
+        workingPlanRevision: { type: 'boolean', enum: [true], description: 'Planner-only explicit revision of remaining working plan at a harness review boundary; preserve the user goal/acceptance and grant.' },
+        factoryReassignment: { type: 'object', additionalProperties: false, required: ['cell_id', 'product', 'resource'], properties: { cell_id: { type: 'string' }, product: { type: 'string' }, resource: { type: 'string' } }, description: 'Planner workingPlanRevision only: request validated reassignment of an empty unselected NPC-owned standalone furnace with no consumers. Live unique recipe and protection/custody fences apply; other transitions are refused.' },
+        starterBaseBindings: { type: 'object', description: 'Planner-only live facility binding for the already accepted automated_starter_base goal. members: at most 64 exact units; science:{producer,inserter,lab}; supplies:[{item_name,producer}]; stocks:[{item_name,producer,inserter,container}]. Direct producer-to-consumer native inserter links are currently required. This changes observation bindings, never targets or permissions.' },
         // LOD 1 guidance (roadmap 2 / 3). Deliberately NOT an object with steps
         // or operations: a shelf node says what should eventually be true and
         // why, and the runtime re-derives realization status from verified

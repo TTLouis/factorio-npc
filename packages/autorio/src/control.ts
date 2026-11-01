@@ -10,6 +10,7 @@ import type {
 
 import type { ControlledActor } from './actors/types'
 import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
+import { tick_starter_acceptance } from './starter_base_acceptance'
 import { new_output_delivery_proof_controller, tick_output_delivery_proofs } from './output_delivery_proof'
 import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
@@ -809,6 +810,7 @@ script.on_event(defines.events.on_tick, (_event) => {
   tick_sprint.tick()
   if (!setup_complete) setup()
   tick_output_delivery_proofs()
+  tick_starter_acceptance()
 
   const actor = get_controlled_actor()
   if (actor === undefined || actor.character === undefined || !actor.is_valid) {

@@ -189,85 +189,37 @@ const review = (reason, rationale = 'A strategic decision is needed.') => ({ mem
   ({ stepId: getActivePlan(memory.planningState(KEY)).steps[0].step_id, operations: [], plannerReview: { reason, rationale } })
 
 for (const reason of ['approach_infeasible', 'scope_change', 'local_recovery_exhausted']) {
-  test(`executor ${reason} gets one planner round, then a second review of the step takes a model_recoverable pause without blocker evidence or allowance reset`, async () => {
-    let before
-    const w = world([draft(), ctx => {
-      before = ctx.memory.planningState(KEY)
-      return review(reason)(ctx)
-    }, ({ messages, context }) => {
-      assert.equal(context.role, 'planner')
-      assert.equal(context.allowTools, true, 'the review round may read before replying')
-      const outgoing = messages.map(row => row.content ?? '').join('\n')
-      assert.match(outgoing, /\[EXECUTOR_REVIEW\]/)
-      assert.match(outgoing, /one planner review round for this step/)
-      return draft({ chatMessage: 'Planner notes: the step stands.', plan: ['A tempting different strategy'] })
-    }, ctx => {
-      assert.equal(ctx.context.role, 'executor')
-      return review(reason, 'Still blocked after the planner round.')(ctx)
-    }])
-    const result = await w.say()
-    assert.equal(result.blocker.class, 'planner_review_required')
-    assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'planner', 'executor'], 'one bounded planner round, no further cycle')
-    assert.equal(w.game.mutations.length, 0)
-    assert.equal(w.agent.agentContext.role, 'planner')
-    assert.ok(w.agent.messages.some(row => String(row.content).startsWith('[EXECUTOR_REVIEW]') && row.content.includes('Still blocked')))
-    assert.deepEqual(w.memory.planningState(KEY).goal.review_continuation_steps, [getActivePlan(before).steps[0].step_id])
-    assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 1)
-    assert.match(JSON.stringify(w.memory.snapshot()), /Executor advisory; unverified/)
-    assert.equal(w.memory.currentPlan(KEY).status, 'paused')
-    assert.equal(w.memory.pauseRecord(KEY).pause_class, 'model_recoverable', 'advisory review pauses resume within the model_recoverable caps')
-    assert.notEqual(w.plan().status, 'BLOCKED', 'model claim is not world proof')
-    assert.equal(w.plan().plan_id, getActivePlan(before).plan_id)
-    assert.deepEqual(w.plan().steps, getActivePlan(before).steps)
-    assert.equal(w.memory.planningState(KEY).goal.fresh_context_recovery_used, before.goal.fresh_context_recovery_used)
-    assert.equal(w.agent.providerBudgetGeneration, 1)
-    assert.ok(w.events.find(row => row.event === 'executor.planner_review_requested').data.request_id)
-    assert.equal(w.events.filter(row => row.event === 'plan.replacement_wake').length, 0)
+  test(`executor ${reason} may review again inside the same durable goal effort`, async () => {
+    const w = world([draft(), review(reason), plannerRound, review(reason), plannerRound, action])
+    await w.say()
+    assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'planner', 'executor', 'planner', 'executor'])
+    assert.equal(w.game.mutations.length, 1)
+    assert.equal(w.memory.currentPlan(KEY).status, 'active')
+    assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 2)
+    assert.equal(w.memory.planningState(KEY).goal.effort.blockers[`review:${reason}`], 2)
+    assert.notEqual(w.plan().status, 'BLOCKED', 'advisory rationale cannot establish a world blocker')
+    assert.equal(w.plan().plan_version, 1, 'ordinary advisory replies do not revise the canonical plan')
   })
 }
 
 const PLANNER_NOTES = 'Planner notes: read the furnace footprint first.'
 
-// Runs AD-AF (2026-10-19): the second review of a step was a guard pause and the unattended goal ended there. The pause is
-// model_recoverable now: the supervisor schedules its bounded resume and a fresh executor acts on the same step, goal active.
-test('a second executor review of the step is auto-resumed by the supervisor and the restaged executor acts on the same step', async t => {
-  let planId
-  const w = world([draft(), review('local_recovery_exhausted'), draft({ chatMessage: PLANNER_NOTES }),
-    review('local_recovery_exhausted', 'Still blocked after the planner round.'), ctx => {
-      assert.equal(ctx.context.role, 'executor')
-      // The restage replaced the conversation that held the planner's reply; the durable notes ride in the handoff packet.
-      const carried = ctx.messages.filter(message => typeof message.content === 'string' && message.content.includes(PLANNER_NOTES))
-      assert.ok(carried.length > 0, 'the resumed executor still sees the planner notes for this step')
-      assert.ok(carried.every(message => message.content.includes('planner_review_notes') && message.content.includes('advisory, not world evidence')))
-      assert.equal(ctx.memory.currentPlan(KEY).status, 'active', 'the resume reactivates the goal before the executor restage')
-      assert.equal(getActivePlan(ctx.memory.planningState(KEY)).plan_id, planId)
-      return action(ctx)
-    }])
+test('actual repeated review exhausts the goal effort and restart preserves exhaustion', async () => {
+  const w = world([draft(), ctx => {
+    for (let i = 0; i < 23; i++) assert.equal(ctx.memory.spendGoalEffort(KEY, 'prior_attempt'), true)
+    return review('scope_change')(ctx)
+  }, plannerRound, review('scope_change')])
   const result = await w.say()
-  assert.equal(result.blocker.class, 'planner_review_required')
-  planId = w.plan().plan_id
-  const stepId = w.plan().steps[0].step_id
-  const record = w.memory.pauseRecord(KEY)
-  assert.equal(record.pause_class, 'model_recoverable')
-  const chat = []
-  const session = Object.create(Session.prototype)
-  Object.assign(session, { agent: w.agent, npcId: 'sgluna', npcName: 'SGLuna', stopping: false, autoResume: null, modelResume: null,
-    lastPauseDecision: '', lastStatus: { actor_id: 18, epoch: 3 }, liveStatus: { actor_id: 18, epoch: 3 }, log: () => {},
-    printChat: async message => { chat.push(message) }, queueEvent: () => Promise.resolve(), eventQueue: Promise.resolve(),
-    rawStatus: async () => ({ ...session.liveStatus }), syncTaskBoardUi: async () => {}, ensureAuthorization: async () => ({}),
-    rcon: { command: async () => '' } })
-  t.after(() => { if (session.modelResume?.timer) clearTimeout(session.modelResume.timer) })
-  assert.equal(await session.considerPauseForAutoResume(), true)
-  assert.match(chat.at(-1), /Resuming automatically in 15 s with a fresh context \(attempt 1\/2 for this step, 1\/6 for this goal\)/)
-  clearTimeout(session.modelResume.timer)
-  await session.runModelRecoverableResume(session.modelResume.correlation, 1)
-  assert.deepEqual(w.calls.map(call => call.context.role), ['planner', 'executor', 'planner', 'executor', 'executor'])
-  assert.equal(w.game.mutations.length, 1, 'the resumed executor acted without a human')
-  assert.notEqual(w.memory.currentPlan(KEY).status, 'paused')
-  assert.equal(w.plan().plan_id, planId, 'no plan was created or replaced')
-  assert.equal(w.plan().steps[0].step_id, stepId)
-  assert.equal(w.memory.autoResumeAllowance(KEY).goal_attempts, 1, 'the resume is counted against the goal cap')
-  assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 1, 'the step keeps its one planner round')
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(w.memory.pauseRecord(KEY).pause_class, 'guard')
+  assert.equal(w.memory.currentPlan(KEY).status, 'paused')
+  assert.equal(w.memory.planningState(KEY).goal.effort.spent, 24)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.calls.length, 4)
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(w.memory.snapshot())
+  assert.equal(restored.planningState(KEY).goal.effort.spent, 24)
+  assert.equal(restored.spendGoalEffort(KEY, 'restart'), false)
+  assert.deepEqual(restored.planningState(KEY).goal.effort.blockers, w.memory.planningState(KEY).goal.effort.blockers)
 })
 
 // Run AC (2026-10-19, b1da8392): the executor's local_recovery_exhausted review ended the request in a guard pause and
@@ -618,21 +570,18 @@ test('Run AE: a refused review names what made it invalid', async () => {
   assert.equal(w.game.mutations.length, 1)
 })
 
-test('the review round allowance is durable, runtime-only and capped per goal', async () => {
-  const w = world([draft(), review('scope_change'), plannerRound, review('scope_change')])
+test('review history remains durable and runtime-only; it does not create a second effort allowance', async () => {
+  const w = world([draft(), review('scope_change'), plannerRound, action])
   await w.say()
-  const stepId = w.plan().steps[0].step_id
-  assert.deepEqual(w.memory.planningState(KEY).goal.review_continuation_steps, [stepId])
-  assert.equal(w.memory.claimReviewContinuation(KEY, stepId), false, 'the live round already spent it')
-  const restored = new CanonicalTaskBoardMemory()
-  restored.restore(w.memory.snapshot())
-  assert.equal(restored.claimReviewContinuation(KEY, stepId), false, 'a restart cannot mint a second round')
-  const state = restored.planningState(KEY)
-  const event = { type: PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED, goal_id: state.goal.goal_id, step_id: 'other-step' }
-  assert.equal(applyPlanningEvent(state, { ...event, source: 'main_planner' }), state, 'a model cannot claim a round')
-  for (let index = 1; index < MAX_REVIEW_CONTINUATIONS_PER_GOAL; index++) assert.equal(restored.claimReviewContinuation(KEY, `step-${index}`), true)
-  assert.equal(restored.claimReviewContinuation(KEY, 'one-step-too-many'), false)
-  assert.equal(restored.planningState(KEY).goal.review_continuation_steps.length, MAX_REVIEW_CONTINUATIONS_PER_GOAL)
+  const restored = new CanonicalTaskBoardMemory(); restored.restore(w.memory.snapshot())
+  const state = restored.planningState(KEY); const stepId = getActivePlan(state).steps[0].step_id
+  assert.deepEqual(state.goal.review_continuation_steps, [stepId])
+  const before = structuredClone(state.goal.effort)
+  assert.equal(restored.claimReviewContinuation(KEY, stepId), true)
+  assert.deepEqual(restored.planningState(KEY).goal.effort, before)
+  const event = { type: PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED, goal_id: state.goal.goal_id, step_id: stepId }
+  assert.equal(applyPlanningEvent(state, { ...event, source: 'main_planner' }), state)
+  assert.equal(restored.claimReviewContinuation(KEY, 'other-step'), false)
 })
 
 test('a stale executor review cannot pause or change a current step', async () => {
@@ -765,10 +714,10 @@ test('direct-feed drift refuses the whole batch before startup fuel or manual or
   const w = world([({ agent }) => supplyDraft(agent, 'direct_feed'), ctx => {
     before = structuredClone(ctx.memory.planningState(KEY))
     return drift(ctx)
-  }, plannerRound, drift])
+  }, plannerRound, drift, plannerRound, startFuel])
   const result = await w.say()
-  assert.equal(result.blocker.class, 'planner_review_required')
-  assert.equal(w.game.mutations.length, 0)
+  assert.equal(result.operations[0].args.resource_name, 'coal')
+  assert.equal(w.game.mutations.length, 1)
   assert.deepEqual(w.plan().steps, getActivePlan(before).steps)
   assert.equal(w.agent.providerBudgetGeneration, 1)
   assert.equal(w.memory.planningState(KEY).goal.fresh_context_recovery_used, before.goal.fresh_context_recovery_used)
@@ -777,7 +726,7 @@ test('direct-feed drift refuses the whole batch before startup fuel or manual or
   assert.ok(refused.data.request_id)
   assert.equal(w.events.filter(row => row.event === 'executor.planner_review_requested').length, 2)
   assert.equal(w.events.filter(row => row.event === 'observation.phase_reopened_for_review').length, 0)
-  assert.equal(w.calls.length, 4, 'one bounded planner round, no new model allowance or planner loop')
+  assert.equal(w.calls.length, 6, 'two bounded reviews then legal startup fuel')
 })
 
 // --- Run BB lane B: the planner's direct_feed cell must be buildable without the resource it forbids by hand --------------------
@@ -1074,14 +1023,14 @@ test('recorded Run AB legacy BLOCKED becomes one advisory review instead of seve
   const w = world([draft(), ctx => {
     before = structuredClone(ctx.memory.planningState(KEY))
     return legacy(ctx)
-  }, plannerRound, legacy])
+  }, plannerRound, legacy, plannerRound, action])
   let freshAttempts = 0
   w.agent.tryFreshContextActionRecovery = async () => { freshAttempts++; return { attempted: false } }
   const result = await w.say()
-  assert.equal(result.blocker.class, 'planner_review_required')
+  assert.equal(result.operations.length, 1)
   assert.equal(freshAttempts, 0)
-  assert.equal(w.calls.length, 4, 'one bounded planner round between the two reviews')
-  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.calls.length, 6, 'two reviews then lawful continuation')
+  assert.equal(w.game.mutations.length, 1)
   assert.deepEqual(w.plan().steps, getActivePlan(before).steps)
   assert.notEqual(w.plan().status, 'BLOCKED')
   assert.equal(w.memory.planningState(KEY).goal.fresh_context_recovery_used, before.goal.fresh_context_recovery_used)
@@ -1144,11 +1093,11 @@ test('actual act-or-review repair and the existing single fresh recovery both re
     assert.match(fresh.content, /plannerReview/)
     assert.doesNotMatch(fresh.content, /state BLOCKED:/)
     return { ...empty({ memory }), plannerReview: { reason: 'local_recovery_exhausted', rationale: 'No grounded next action in the existing recovery budget.' } }
-  }, plannerRound, review('local_recovery_exhausted', 'Still no grounded next action.')])
+  }, plannerRound, review('local_recovery_exhausted', 'Still no grounded next action.'), plannerRound, action])
   const result = await w.say()
-  assert.equal(result.blocker.class, 'planner_review_required')
-  assert.equal(w.calls.length, 6)
-  assert.equal(w.game.mutations.length, 0)
+  assert.equal(result.operations.length, 1)
+  assert.equal(w.calls.length, 8)
+  assert.equal(w.game.mutations.length, 1)
   assert.equal(w.events.filter(row => row.event === 'recovery.fresh_context_started').length, 1)
 })
 
@@ -1534,4 +1483,34 @@ test('the facts a fold carries are traced as a fold, not as a rebuilt context', 
   const carried = foldRows(w.events, 'context.executor_facts_carried')
   assert.equal(carried.at(-1).reason, 'review_handback_folded_into_the_step_close_conversation')
   assert.equal(carried.at(-1).checkpoint, 'C8')
+})
+
+
+test('bound starter observation waits and finishes through native goal reads without further model calls or effort', async () => {
+  const game = new FakeFactorio(); const command = game.command.bind(game); let satisfied = false; let bindingSeen = false; let stopped = false
+  game.command = async text => {
+    if (text.includes('automated_starter_base')) {
+      if (text.includes('stop_observation')) { stopped = true; return JSON.stringify({ ok: true, stopped: true }) }
+      if (text.includes('restart_measurement')) bindingSeen = true; return JSON.stringify({ ok: true, satisfied, tick: 100 })
+    }
+    return command(text)
+  }
+  const bindings = { members: [1, 2, 3], science: { producer: 1, inserter: 2, lab: 3 }, supplies: [{ item_name: 'fixture-supply', producer: 1 }], stocks: [{ item_name: 'fixture-stock', producer: 1, inserter: 2, container: 3 }] }
+  const w = world([draft({ goal: { scope: 'long_horizon', summary: 'Automated starter base', doneWhen: [{ kind: 'automated_starter_base', science_item: 'fixture-science', technology: 'fixture-tech', supply_items: ['fixture-supply'], construction_stocks: [{ item_name: 'fixture-stock', minimum: 10 }] }] } }), review('scope_change'), draft({ starterBaseBindings: bindings })], { game })
+  w.agent.stateFile = 'test-results/starter-wait-state.json'
+  await fs.mkdir('test-results', { recursive: true })
+  try {
+    await w.say()
+    assert.equal(bindingSeen, true)
+    assert.equal(w.calls.length, 3)
+    const effort = structuredClone(w.memory.planningState(KEY).goal.effort)
+    assert.equal((await w.agent.validateConditionWaitHealth()).healthy, true)
+    assert.equal((await w.agent.pollConditionWait()).action, 'waiting')
+    assert.deepEqual(w.memory.planningState(KEY).goal.effort, effort)
+    satisfied = true
+    assert.equal((await w.agent.pollConditionWait()).action, 'verified')
+    assert.equal(w.memory.planningState(KEY).goal.status, 'completed')
+    assert.equal(stopped, true, 'durable canonical completion closes the native sampler')
+    assert.equal(w.calls.length, 3)
+  } finally { await fs.rm(w.agent.stateFile, { force: true }) }
 })

@@ -1303,10 +1303,47 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return claimed
   }
 
+  spendGoalEffort(key, blocker) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.GOAL_EFFORT_SPENT, source: 'runtime',
+      goal_id: before?.goal?.goal_id, blocker, now: Date.now() })
+    return after !== before
+  }
+
+  creditNativeProgress(key, plan, step, facts) {
+    return this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.GOAL_NATIVE_PROGRESS, source: 'runtime',
+      plan_id: plan.plan_id, step_id: step.step_id, facts, now: Date.now() })
+  }
+
+  reviseWorkingPlan(key, draft, { current, requestId, nativeIdle }) {
+    const before = this.planningState(key); const prior = getActivePlan(before)
+    const grant = this.currentGoalGrant(key)
+    if (!grant || !prior) return { ok: false, reason: 'current_grant_missing' }
+    const grantCheck = { ...current, grant_id: grant.grant_id, grant_revision: grant.revision }
+    const after = applyPlanningEvent(before, { type: PLANNING_EVENT.WORKING_PLAN_REVISED, source: 'runtime',
+      plan_id: prior.plan_id, plan_version: prior.plan_version, step_id: prior.steps[prior.active_step_index]?.step_id,
+      steps: proposalSteps(draft.plan, draft.stepCompletions, 0, draft.executionGuidance),
+      native_idle: nativeIdle, runtime_validation: { passed: true }, grant_check: grantCheck,
+      request_id: requestId, now: Date.now() })
+    if (after === before) return { ok: false, reason: 'working_revision_fenced' }
+    const successor = getActivePlan(after)
+    const committed = applyPlanningEvent(after, { type: PLANNING_EVENT.PLAN_COMMITTED, source: 'runtime',
+      plan_id: successor.plan_id, runtime_validation: { passed: true, scope: 'completion_contracts' },
+      grant_check: grantCheck, now: Date.now() })
+    if (getActivePlan(committed)?.status !== PLAN_STATUS.COMMITTED) return { ok: false, reason: 'working_revision_commit_refused' }
+    const legacy = this.planByNpc.get(key)
+    if (!legacy) return { ok: false, reason: 'working_revision_legacy_missing' }
+    this.planningByNpc.set(key, committed)
+    legacy.plan = [...draft.plan]; legacy.current_step = 0; legacy.status = 'active'
+    legacy.task_board = createTaskBoard(draft.plan, 0, { goalId: before.goal.goal_id, now: Date.now() })
+    this.syncPlanningState(key, legacy)
+    return { ok: true, plan: getActivePlan(committed), state: committed }
+  }
+
   // One planner round per step after an executor review, durable across restarts.
   claimReviewContinuation(key, stepId, { now = Date.now(), requestId } = {}) {
     const before = this.planningState(key)
-    if (before?.goal?.status !== GOAL_STATUS.ACTIVE || typeof stepId !== 'string' || before.goal.review_continuation_steps?.includes(stepId)) return false
+    if (before?.goal?.status !== GOAL_STATUS.ACTIVE || typeof stepId !== 'string') return false
     const after = this.dispatchPlanningEvent(key, {
       type: PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED,
       source: 'runtime', goal_id: before.goal.goal_id, step_id: stepId, now,
@@ -3436,6 +3473,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         if (restored.authorization || restored.task_ledger) goallessWorld.push([item.key, restored])
         continue
       }
+      if (restored.goal?.effort?.migration === 'legacy_retained_counts_no_credit') {
+        const ledger = snapshot.factory_use_recovery
+        const attempts = ledger?.records?.filter(row => row.goal_id === restored.goal.goal_id).reduce((sum, row) => sum + (row.attempts?.length ?? 0), 0) ?? 0
+        const ambiguous = ledger && (ledger.schema_version !== 1 || ledger.fault || !Array.isArray(ledger.records))
+        const total = restored.goal.effort.total + attempts
+        restored.goal.effort = { ...restored.goal.effort, total: ambiguous ? Math.max(24, total) : total, spent: ambiguous ? 24 : Math.min(24, total), ...(ambiguous ? { fault: true } : {}) }
+      }
       this.planningByNpc.set(item.key, restored)
     }
 
@@ -3451,6 +3495,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       if (planning) this.#convergeReducerToBoardEvidence(key, state)
       if (!planning) {
         planning = this.ensurePlanningDraft(key, state, { now: state.updated_at, migrated: true })
+        if (planning?.goal) planning.goal.effort = { version: 1, spent: 24, total: 24, peaks: {}, raw_peaks: {}, blockers: {}, credits: 0, fault: true, migration: 'legacy_board_effort_unknown' }
         // Not a fresh admission: this plan was admitted by a previous run and
         // is being reconstructed from disk through the deterministic admission
         // boundary used by live plans.
