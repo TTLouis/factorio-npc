@@ -112,6 +112,10 @@ try {
       producers: facts.map((row, index) => ({ recipe_name: row.recipe.name, unit_number: receipts[index].unit_number })), fuel: { item_name: iron.fuel.name, count: fuelCount - 1 } } })
     assert.equal(plan.active_step_index, 3)
     if (!wrongIssued) {
+      const grant = memory.currentGoalGrant(KEY)
+      assert.ok(grant?.grant_id && Number.isSafeInteger(grant.revision), 'Production supervisor player-objective grant must exist before conflict')
+      assert.equal(grant.goal_id, memory.planningState(KEY).goal.goal_id)
+      evidence.before_conflict_grant = structuredClone(grant)
       const observed = await tool('getEntityStatus', { unit_number: receipts[0].unit_number }); assert.equal(observed.found, true)
       agent.recordLiveEntityToolResult('getEntityStatus', JSON.stringify(observed))
       evidence.before_conflict = { goal: structuredClone(memory.planningState(KEY).goal), plan_id: plan.plan_id, plan_version: plan.plan_version,
@@ -124,6 +128,9 @@ try {
     }
     assert.equal(reviews, 1); assert.equal(reviewedProposal, false); reviewedProposal = true
     assert.deepEqual(plan.steps, evidence.before_conflict.steps)
+    evidence.after_review_grant = memory.currentGoalGrant(KEY)
+    assert.equal(evidence.after_review_grant?.grant_id, evidence.before_conflict_grant.grant_id)
+    assert.equal(evidence.after_review_grant?.revision, evidence.before_conflict_grant.revision)
     const observed = await tool('getEntityStatus', { unit_number: receipts[1].unit_number }); assert.equal(observed.found, true)
     agent.recordLiveEntityToolResult('getEntityStatus', JSON.stringify(observed)); evidence.new_proposal_observation = observed
     evidence.new_executor_proposal = { stepId: step.step_id, operations: [], productionTask: {
@@ -131,7 +138,7 @@ try {
       fuel: { item_name: iron.fuel.name, count: 1 } } }
     return planReply(evidence.new_executor_proposal)
   })
-  agent = new NpcAgentLoop({ rcon, memory, npcId: 'assigned-producer-native', completionProtocolVersion: 3, jevCheckpoints: false,
+  agent = new NpcAgentLoop({ rcon, memory, npcId: 'assigned-producer-native', completionProtocolVersion: 3, jevCheckpoints: false, replacementWake: true,
     stateFile, traceFile: null, decisionTraceFile: null, systemPrompt: 'Scripted offline assigned-producer canary.',
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     provider: async (messages, context) => { const active = getActivePlan(memory.planningState(KEY)); const row = { role: context.role, trigger: context.triggerSource,

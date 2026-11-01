@@ -50,6 +50,14 @@ returns notes, then a new **executor-role** proposal targets the iron producer
 and the ordinary controller produces/collects additional iron. No live model
 selection or autonomous throughput claim is made by this scripted proof.
 
+The fixture enables the production supervisor's existing `replacementWake:true`
+setting so normal player-objective admission issues its goal-scoped grant. It
+asserts that grant exists before the wrong proposal and retains the same ID and
+revision after review. Native attempt 01 omitted this setting and correctly
+failed `factory_cell_conflict_authority_changed` before spending an allowance;
+its empty authorization grants and failed evidence remain preserved. This
+fixture correction neither synthesizes a grant nor relaxes the runtime fence.
+
 The driver checks original placements and both registry assignments, unchanged
 plan/steps, durable review/allowance state, actual native output, nullable native
 recipe and exact bounded spatial identity. As in the existing cross-step canary,
