@@ -59,17 +59,27 @@ export function factoryDirectFeedRecipe(row, products) {
 
 // An empty furnace has no selected recipe until native input arrives. A live
 // recipe/capability read permits only that exact receipt-backed startup job.
-export async function readFactoryProducerRecipe(agent, access, row, recipeName) {
+// Registered finite cells may also hold completed matching output after the
+// furnace clears its recipe; that separate capability never rewrites native facts.
+export async function readFactoryProducerRecipe(agent, access, row, recipeName, { retainedCell } = {}) {
   if (known(row?.recipe)) {
     if (row.recipe.name !== recipeName) fail('factory_cell_producer_job_mismatch')
     return row.recipe
   }
   const inventories = row?.inventories
+  const inventory = role => {
+    const matches = Array.isArray(inventories) ? inventories.filter(item => item.role === role) : []
+    return matches.length === 1 && known(matches[0]) ? nativeList(matches[0].items) : undefined
+  }
+  const input = inventory('input'); const output = inventory('output')
+  const dormantOutput = Boolean(output?.length)
+  const member = retainedCell?.members?.length === 1 && retainedCell.members[0]
   if (row?.state !== 'observed' || row.type !== 'furnace' || row.recipe?.state !== 'none'
-    || !Array.isArray(inventories) || !['input', 'output'].every(role => {
-      const matches = inventories.filter(item => item.role === role)
-      return matches.length === 1 && known(matches[0]) && nativeList(matches[0].items)?.length === 0
-    }) || !known(row.progress_facts?.crafting_progress) || row.progress_facts.crafting_progress.value !== 0) fail('factory_cell_producer_job_unknown')
+    || !input || input.length !== 0 || !output
+    || !known(row.progress_facts?.crafting_progress) || row.progress_facts.crafting_progress.value !== 0
+    || dormantOutput && (!member?.provenance?.receipt_id || retainedCell.assignment?.method !== `native_recipe:${recipeName}`
+      || ['unit_number', 'name', 'surface_index', 'force_index'].some(field => member[field] !== row.locator?.[field])
+      || member.position?.x !== row.locator?.position?.x || member.position?.y !== row.locator?.position?.y)) fail('factory_cell_producer_job_unknown')
   await access.refresh(); access.fence()
   const raw = String(await agent.rcon.command(agent.observationToolCommand('getRecipeDetails', { item_or_recipe: recipeName, requested_count: 1 })))
   access.fence(); await access.refresh()
@@ -82,9 +92,23 @@ export async function readFactoryProducerRecipe(agent, access, row, recipeName) 
     || !Array.isArray(recipe.crafting_machines) || !recipe.crafting_machines.some(machine => machine.name === row.locator.name)
     || !Array.isArray(recipe.products) || !recipe.products.length || recipe.products.length > 32 || !Array.isArray(recipe.ingredients)
     || [...recipe.products, ...recipe.ingredients].some(item => !['item', 'fluid'].includes(item.type) || typeof item.name !== 'string')) fail('factory_cell_recipe_capability_unproven')
-  await agent.traceEvent('factory_cell.startup_recipe_evidence', { unit_number: row.locator.unit_number, recipe_name: recipeName, native_response: detail, commissioning: 'unverified' })
+  // A finished furnace may clear its selected recipe while its output remains.
+  // Only an existing immutable finite assignment may use that dormant stock;
+  // new enrollment retains the empty-startup rule. This is capability/output
+  // reconciliation, never a claim that a recipe is selected or delivering.
+  if (dormantOutput) {
+    const products = recipe.products.filter(product => product.type === 'item').map(product => product.name)
+    if (output.some(item => typeof item.name !== 'string' || !Number.isSafeInteger(item.count) || item.count < 1 || !products.includes(item.name))
+      || retainedCell.assignment.products.some(product => !recipe.products.some(row => row.name === product))
+      || recipe.products.some(product => !retainedCell.assignment.products.includes(product.name))) fail('factory_cell_dormant_output_mismatch')
+  }
+  await agent.traceEvent(dormantOutput ? 'factory_cell.dormant_output_recipe_evidence' : 'factory_cell.startup_recipe_evidence', {
+    ...access.readContext(), unit_number: row.locator.unit_number, recipe_name: recipeName, native_response: detail, commissioning: 'unverified',
+    ...(dormantOutput ? { cell_id: retainedCell.cell_id, cell_revision: retainedCell.revision, native_recipe_state: row.recipe.state,
+      output: clone(output), disposition: 'retained_finite_job_capability_only' } : {}),
+  })
   access.fence()
-  const capability = { ...clone(recipe), state: 'known', truncated: false, basis: 'fresh_native_empty_furnace_capability' }
+  const capability = { ...clone(recipe), state: 'known', truncated: false, basis: dormantOutput ? 'fresh_native_dormant_furnace_output_capability' : 'fresh_native_empty_furnace_capability' }
   startupRecipes.set(row, capability)
   return capability
 }
@@ -358,12 +382,12 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
       access.fence()
       nativeByCell.set(cell.cell_id, observed.native)
       evidence.push({ cell_id: cell.cell_id, tick: observed.native.tick, state: observed.state })
-      let startup = false
+      let unselectedCompatible = false
       if (cell.assignment.method.startsWith('native_recipe:') && cell.members.length === 1 && cell.members[0].provenance?.receipt_id) {
         const recipeName = cell.assignment.method.slice('native_recipe:'.length)
         const row = observed.native.members[0]
-        await readFactoryProducerRecipe(agent, access, row, recipeName)
-        startup = row.recipe?.state === 'none' && cell.ports.filter(port => port.direction === 'output').every(port => factoryNativeOutput(row, port))
+        await readFactoryProducerRecipe(agent, access, row, recipeName, { retainedCell: !requirement || requirement.kind === 'producer_operation' ? cell : undefined })
+        unselectedCompatible = row.recipe?.state === 'none' && cell.ports.filter(port => port.direction === 'output').every(port => factoryNativeOutput(row, port))
       }
       if (requirement?.kind === 'direct_feed') {
         const match = matchingDirectFeed(snapshot, cell, observed.native, requirement)
@@ -376,7 +400,7 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
         }
       }
       else {
-        if (observed.state !== 'compatible' && !startup) continue
+        if (observed.state !== 'compatible' && !unselectedCompatible) continue
         if (requirement?.kind === 'operating_checkpoint' && !requirement.producers.some(producer => cell.members.some(member =>
           producer.unit_number === member.unit_number || producer.prototype === member.name))) continue
         // A finite producer must retain its cell's product, exact member and

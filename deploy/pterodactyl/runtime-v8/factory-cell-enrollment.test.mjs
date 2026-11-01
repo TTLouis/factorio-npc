@@ -277,7 +277,7 @@ test('original committed enrollment stays idempotent after additive metadata rev
   assert.equal(w.memory.getFactoryRegistry().cells[0].revision, 2)
   assert.deepEqual(w.memory.getFactoryRegistry().cells[0].enrollment, cell.enrollment)
 })
-function fixture({ intent = true, bound = true, materialSupply, registry, deferCommit = false, checkpoint = CHECKPOINT } = {}) {
+function fixture({ intent = true, bound = true, materialSupply, registry, deferCommit = false, checkpoint = CHECKPOINT, splitProduction = false, productionEntity = 'stone-furnace' } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   if (bound) memory.initializeFactoryRegistry(WORLD)
   const draft = { chatMessage: '', plan: ['Build and configure one dedicated copper pair'], currentStep: 0, operations: [],
@@ -286,6 +286,12 @@ function fixture({ intent = true, bound = true, materialSupply, registry, deferC
       ...(materialSupply ? { materialSupply } : {}),
       ...(intent ? { cellIntent: clone(typeof intent === 'object' ? intent : INTENT) } : {}) }],
     stepCompletions: [{ kind: 'deterministic', checkpoint }] }
+  if (splitProduction) {
+    draft.plan = ['Install the held stone furnace and obtain its fresh exact identity for supply and collection.', 'Smelt and collect 10 copper plates.']
+    draft.executionGuidance = draft.plan.map(() => ({ approach: 'Use the exact observed furnace for finite bootstrap', rationale: 'Native facts govern the job', constraints: [], skillIds: [], materialSupply: { mode: 'manual_bootstrap', resource: 'copper-ore' } }))
+    draft.stepCompletions = [{ kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ id: 'held', kind: 'entity_count', prototype: productionEntity, minimum: 1 }] } },
+      { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ id: 'plates', kind: 'inventory_count', item_name: 'copper-plate', minimum: 10 }] } }]
+  }
   memory.recordPlan(KEY, { sender: 'owner', text: 'Build dedicated copper production' }, draft, { validatedPlannerAdmission: true })
   if (registry) memory.restore({ ...memory.snapshot(), factory_registry: clone(registry) })
   if (bound && !deferCommit) memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
@@ -698,4 +704,160 @@ test('the wait that follows a delivery-window decline closes on a fresh read onc
     assert.deepEqual(other.deliveryWindowPending, owner, 'a non-wait batch leaves the decline for its own close')
   }
   assert.equal(NpcAgentLoop.prototype.deliveryWindowWaitCompleted.call({ captureCheckpointOwner: () => owner }, waited(['waiting'])), false, 'no decline, no fresh close')
+})
+
+// BI replay: preserve the exact producer unit, recipe, amount and split-step
+// topology. The native adapter/owner IDs are explicitly scripted substitutes;
+// the sealed original plan, submission and native receipt remain local evidence.
+async function splitFiniteProducer(productionEntity = 'stone-furnace') {
+  const w = fixture({ intent: false, splitProduction: true, productionEntity })
+  await w.place(productionEntity, 36)
+  const placement = clone(w.memory.snapshot().factory_placement_receipts[0])
+  const first = getActivePlan(w.memory.planningState(KEY))
+  const step = first.steps[0]
+  w.memory.dispatchPlanningEvent(KEY, { type: 'STEP_EVIDENCE_ACCEPTED', source: 'runtime', now: Date.now(), plan_id: first.plan_id,
+    step_id: step.step_id, evidence: { source: 'runtime', ref: placement.receipt_id, kind: 'deterministic_verification', satisfied_requirement_ids: ['held'] } })
+  w.memory.dispatchPlanningEvent(KEY, { type: 'STEP_COMPLETED', source: 'runtime', now: Date.now(), plan_id: first.plan_id, step_id: step.step_id })
+  assert.equal(getActivePlan(w.memory.planningState(KEY)).active_step_index, 1)
+  w.agent.stateFile = '/synthetic/strict-state'
+  const command = w.agent.rcon.command
+  w.agent.rcon.command = async text => text.includes('recipe_details') ? JSON.stringify({ found: true, truncated: false, recipes: [{
+    name: 'copper-plate', enabled: true, crafting_machines_truncated: false, crafting_machines: [{ name: 'stone-furnace' }],
+    ingredients: [{ name: 'copper-ore', type: 'item' }], products: [{ name: 'copper-plate', type: 'item' }] }] }) : command(text)
+  w.game.onObserve = response => { response.members = [{ locator: response.members[0].locator, state: 'observed', type: 'furnace',
+    recipe: { state: 'none', products: [], ingredients: [], truncated: false },
+    inventories: [{ role: 'input', index: 2, state: 'known', items: [], truncated: false }, { role: 'output', index: 3, state: 'known', items: [], truncated: false }],
+    progress_facts: { crafting_progress: { state: 'known', value: 0 } },
+    endpoint_facts: { schema_version: 1, inventories: { state: 'known', truncated: false, endpoints: [{ inventory_index: 3, state: 'known', roles: { state: 'known', values: ['output'] } }] } } }] }
+  return { ...w, placement, producer: { recipe_name: 'copper-plate', unit_number: 36 } }
+}
+
+test('BI split-step finite producer uses the retained completed placement without rewriting plan or receipt', async () => {
+  const w = await splitFiniteProducer()
+  const before = clone(w.memory.planningState(KEY))
+  const cells = await enrollFactoryProductionProducers(w.agent, [w.producer])
+  assert.equal(cells.length, 1)
+  assert.equal(cells[0].members[0].provenance.semantic_step_id, w.placement.semantic_step_id)
+  assert.notEqual(cells[0].origin.semantic_step_id, w.placement.semantic_step_id)
+  assert.deepEqual(w.memory.planningState(KEY), before)
+  assert.deepEqual(w.memory.snapshot().factory_placement_receipts, [w.placement])
+  assert.equal((await enrollFactoryProductionProducers(w.agent, [w.producer])).length, 0)
+})
+
+for (const fault of ['plan', 'version', 'step', 'semantic_step', 'goal', 'world', 'actor', 'ambiguous', 'uncompleted']) test(`BI split-step rejects ${fault} custody before publication`, async () => {
+  const w = await splitFiniteProducer()
+  const read = w.memory.factoryPlacementReceipts.bind(w.memory)
+  if (fault === 'uncompleted') getActivePlan(w.memory.planningState(KEY)).execution.step_progress[w.placement.step_id].status = 'active'
+  else if (fault === 'actor') {
+    const auth = w.memory.authorizationState(KEY)
+    auth.world.npc_placements.find(row => row.unit_number === 36).actor_id++
+  } else w.memory.factoryPlacementReceipts = args => {
+    const rows = read(args)
+    if (fault === 'ambiguous') return [...rows, ...rows]
+    const field = { plan: 'plan_id', version: 'plan_version', step: 'step_id', semantic_step: 'semantic_step_id', goal: 'goal_id', world: 'world_id' }[fault]
+    return rows.map(row => ({ ...row, [field]: fault === 'version' ? 999 : 'other' }))
+  }
+  await assert.rejects(enrollFactoryProductionProducers(w.agent, [w.producer]))
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+})
+
+for (const variant of ['configured_assembler', 'unknown_recipe', 'occupied_furnace', 'lost_native_identity']) test(`BI retained finite producer ${variant} uses fresh native evidence`, async () => {
+  const w = await splitFiniteProducer(variant === 'configured_assembler' ? 'assembling-machine-1' : 'stone-furnace')
+  const native = w.game.onObserve
+  w.game.onObserve = response => {
+    native(response)
+    const row = response.members[0]
+    if (variant === 'configured_assembler') {
+      row.type = 'assembling-machine'
+      row.recipe = { state: 'known', truncated: false, name: 'copper-plate', ingredients: [], products: [{ name: 'copper-plate', type: 'item' }] }
+    }
+    if (variant === 'unknown_recipe') row.recipe = { state: 'unknown' }
+    if (variant === 'occupied_furnace') row.inventories[0].items.push({ name: 'copper-ore', count: 1 })
+    if (variant === 'lost_native_identity') row.locator.unit_number++
+  }
+  if (variant === 'configured_assembler') assert.equal((await enrollFactoryProductionProducers(w.agent, [w.producer])).length, 1)
+  else { await assert.rejects(enrollFactoryProductionProducers(w.agent, [w.producer])); assert.equal(w.memory.getFactoryRegistry().cells.length, 0) }
+})
+
+async function dormantFiniteProducer() {
+  const w = await splitFiniteProducer()
+  await enrollFactoryProductionProducers(w.agent, [w.producer])
+  const observe = w.game.onObserve
+  w.game.onObserve = response => {
+    observe(response)
+    response.members[0].inventories.find(row => row.role === 'output').items = [{ name: 'copper-plate', count: 1, quality: 'normal' }]
+    response.members[0].progress_facts.products_finished = { state: 'known', value: 1 }
+  }
+  w.resolveDormant = options => reconcileFactoryCellUse(w.agent, { productionIntent: { producers: [w.producer] },
+    operations: [{ name: 'move_items_exact', args: { unit_number: 36, item_name: 'copper-plate', max_count: 1, to_entity: false } }], ...options })
+  return w
+}
+
+test('registered dormant output survives restore as unselected capability, never a fresh enrollment or operating proof', async () => {
+  const w = await dormantFiniteProducer()
+  const snapshot = clone(w.memory.snapshot()); w.memory.restore(snapshot)
+  const resolved = await w.resolveDormant()
+  assert.equal(resolved.ok, true); assert.equal(resolved.commissioning, 'unverified')
+  const event = w.events.find(row => row.event === 'factory_cell.dormant_output_recipe_evidence')
+  assert.equal(event.data.native_recipe_state, 'none')
+  assert.deepEqual(event.data.output, [{ name: 'copper-plate', count: 1, quality: 'normal' }])
+  assert.deepEqual(w.memory.getFactoryRegistry(), snapshot.factory_registry)
+  assert.deepEqual(w.memory.snapshot().factory_placement_receipts, snapshot.factory_placement_receipts)
+  for (const step of [{ execution_guidance: { materialSupply: { mode: 'direct_feed', resource: 'copper-ore' } } },
+    { completion_contract: { requirements: [{ kind: 'entity_state', unit_number: 36, expected: 'working' }] } }]) {
+    await assert.rejects(w.resolveDormant({ step }), { code: 'factory_cell_producer_job_unknown' })
+  }
+  const fresh = await splitFiniteProducer()
+  fresh.game.onObserve = w.game.onObserve
+  await assert.rejects(enrollFactoryProductionProducers(fresh.agent, [fresh.producer]), { code: 'factory_cell_producer_job_unknown' })
+  assert.equal(fresh.memory.getFactoryRegistry().cells.length, 0)
+})
+
+for (const fault of ['wrong_output', 'mixed_output', 'unknown_output', 'truncated_output', 'malformed_output', 'occupied_input', 'active_progress', 'foreign_recipe', 'unknown_recipe', 'foreign_identity', 'changed_products']) test(`registered dormant output refuses ${fault}`, async () => {
+  const w = await dormantFiniteProducer(); const before = clone(w.memory.getFactoryRegistry())
+  const observe = w.game.onObserve
+  w.game.onObserve = response => {
+    observe(response); const row = response.members[0]; const output = row.inventories.find(item => item.role === 'output')
+    if (fault === 'wrong_output') output.items[0].name = 'iron-plate'
+    if (fault === 'mixed_output') output.items.push({ name: 'iron-plate', count: 1 })
+    if (fault === 'unknown_output') output.state = 'unknown'
+    if (fault === 'truncated_output') output.truncated = true
+    if (fault === 'malformed_output') output.items[0].count = -1
+    if (fault === 'occupied_input') row.inventories.find(item => item.role === 'input').items = [{ name: 'copper-ore', count: 1 }]
+    if (fault === 'active_progress') row.progress_facts.crafting_progress.value = 0.5
+    if (fault === 'foreign_recipe') row.recipe = { state: 'known', name: 'iron-plate', ingredients: [], products: [], truncated: false }
+    if (fault === 'unknown_recipe') row.recipe.state = 'unknown'
+    if (fault === 'foreign_identity') row.locator.unit_number++
+  }
+  if (fault === 'changed_products') {
+    const command = w.agent.rcon.command
+    w.agent.rcon.command = async text => {
+      const raw = await command(text)
+      if (!text.includes('recipe_details')) return raw
+      const body = JSON.parse(raw); body.recipes[0].products = [{ type: 'item', name: 'iron-plate' }]; return JSON.stringify(body)
+    }
+  }
+  await assert.rejects(w.resolveDormant())
+  assert.deepEqual(w.memory.getFactoryRegistry(), before)
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
+  assert.equal(w.events.some(row => row.event === 'factory_cell.dormant_output_recipe_evidence'), false)
+})
+
+for (const fault of ['actor', 'epoch', 'request', 'cancel', 'native_busy']) test(`registered dormant output loses ${fault} during native capability await`, async () => {
+  const w = await dormantFiniteProducer(); const before = clone(w.memory.getFactoryRegistry())
+  const command = w.agent.rcon.command
+  w.agent.rcon.command = async text => {
+    const raw = await command(text)
+    if (text.includes('recipe_details')) {
+      if (fault === 'actor') w.agent.epoch = { ...w.agent.epoch, actor_id: 999 }
+      if (fault === 'epoch') w.agent.epoch = { ...w.agent.epoch, epoch: 999 }
+      if (fault === 'request') w.agent.requestAdmissionOwner = { replaced: true }
+      if (fault === 'cancel') w.agent.active = false
+      if (fault === 'native_busy') w.game.status.queue_length = 1
+    }
+    return raw
+  }
+  await assert.rejects(w.resolveDormant())
+  assert.deepEqual(w.memory.getFactoryRegistry(), before)
+  assert.equal(w.memory.pendingOperations(KEY).length, 0)
 })

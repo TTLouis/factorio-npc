@@ -12317,7 +12317,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the original request. This narrow capture path grants no gameplay authority,
   // updates no live usage ledger and never attributes a late reply to a new turn.
   captureFactoryObservationTrace(owner, event, data) {
-    if (!['factory_cell.native_evidence', 'factory_cell.tool_refused'].includes(event)) throw new AgentLoopError('Unsupported factory evidence event')
+    if (!['factory_cell.native_evidence', 'factory_cell.tool_refused', 'factory_cell.enrollment_recovery_failed'].includes(event)) throw new AgentLoopError('Unsupported factory evidence event')
     const record = { schema: 1, ts: new Date().toISOString(), event, request_id: owner.requestId,
       seq: owner.request?.id === owner.requestId && Number.isSafeInteger(owner.request.seq) ? ++owner.request.seq : 0,
       turn: owner.turn, actor_id: owner.actorId, epoch: owner.actorEpoch, session_id: owner.sessionId, data }
@@ -19967,7 +19967,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return await this.commitRecoveryRouteDraft(generation, message, roundBase, recoveryOwner, routed.route)
       }
       catch (error) {
-        if (preservationFailure(error) || error?.code === 'planner_skill_handoff_unavailable' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
+        if (error instanceof FactoryCellBoundaryError || preservationFailure(error) || error?.code === 'planner_skill_handoff_unavailable' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
         throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
       finally {

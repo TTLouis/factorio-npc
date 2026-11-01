@@ -9,7 +9,9 @@ import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './productio
 import { missingProductionBindings, resolveProductionBindings } from './bg-production-binding.mjs'
 import { STALE_REPLY_ERROR_CODE } from './agent-context.mjs'
 import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
-import { enrollFactoryProductionProducers } from './factory-cell-enrollment.mjs'
+import { factoryMetadataDigest } from './factory-dependencies.mjs'
+import { FactoryRegistryError } from './factory-registry.mjs'
+import { enrollFactoryProductionProducers, atFactoryCellBoundary } from './factory-cell-enrollment.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
 export function restoreProductionRecords(rows) {
@@ -50,9 +52,48 @@ export function effectiveProductionFactoryIntent(task) {
   return { ...task.intent, producers: productionBindings(task) }
 }
 async function reconcileProductionFactoryUse(agent, s, task, phase, operations = []) {
-  const productionIntent = effectiveProductionFactoryIntent(task)
-  await checked(agent, s.owner, enrollFactoryProductionProducers(agent, productionIntent.producers))
-  return checked(agent, s.owner, reconcileFactoryCellUse(agent, { step: s.step, phase, productionIntent, operations }))
+  return atFactoryCellBoundary(agent, phase, async () => {
+    const productionIntent = effectiveProductionFactoryIntent(task)
+    // An already admitted task with an unregistered producer is a residual
+    // miss. Reconcile exact custody and fresh native capability, then spend the
+    // existing durable same-goal factory allowance before publishing metadata.
+    // No task/plan/receipt is rewritten and no world operation is replayed.
+    const residual = agent.memory.productionTasks?.get(recordKey(s)) === task
+    let allowance
+    const traceOwner = { request: agent.traceRequest, requestId: agent.traceRequest?.id, actorId: agent.epoch?.actor_id,
+      actorEpoch: agent.epoch?.epoch, sessionId: agent.epoch?.session, turn: agent.continuations + 1 }
+    const detail = { request_id: s.owner.requestTrace?.id, goal_id: s.owner.goalId, plan_id: s.owner.planId,
+      plan_version: s.owner.planVersion, step_id: s.owner.stepId, actor_id: task.actor_id, actor_epoch: task.epoch,
+      reason: 'factory_cell_producer_registration_missing', mechanism: 'retained_finite_producer_enrollment', phase }
+    const beforeRegister = residual ? async evidence => {
+      await assertProductionOwner(agent, s.owner)
+      if (allowance) return
+      if (!agent.stateFile) throw new FactoryRegistryError('factory_enrollment_persistence_unavailable')
+      allowance = agent.memory.consumeFactoryUseRecovery(s.owner.key, {
+        kind: 'finite_producer_enrollment', owner: task.owner, producers: productionIntent.producers,
+      }, { request_id: agent.traceRequest.id, plan_id: s.owner.planId, code: detail.reason,
+        evidence_digest: factoryMetadataDigest(evidence) })
+      await checked(agent, s.owner, agent.persistState({ strict: true }))
+      await checked(agent, s.owner, agent.traceEvent(allowance.allowed ? 'factory_cell.enrollment_recovery_started' : 'factory_cell.enrollment_recovery_exhausted',
+        { ...detail, ...allowance, receipt_id: evidence.receipt.receipt_id, source_placement: evidence.receipt,
+          current_scope: evidence.scope, native_tick: evidence.native_tick }))
+      if (!allowance.allowed) throw new FactoryRegistryError('factory_cell_recovery_exhausted')
+    } : undefined
+    try {
+      const cells = await checked(agent, s.owner, enrollFactoryProductionProducers(agent, productionIntent.producers, { beforeRegister }))
+      const result = await checked(agent, s.owner, reconcileFactoryCellUse(agent, { step: s.step, phase, productionIntent, operations }))
+      if (allowance?.allowed) await checked(agent, s.owner, agent.traceEvent('factory_cell.enrollment_recovery_completed', {
+        ...detail, ...allowance, cell_ids: cells.map(cell => cell.cell_id), disposition: 'fresh_factory_use_resolved', world_operations_replayed: 0,
+      }))
+      return result
+    } catch (error) {
+      if (allowance?.allowed) await agent.captureFactoryObservationTrace(traceOwner, 'factory_cell.enrollment_recovery_failed', {
+        ...detail, ...allowance, code: error.code ?? error.message, disposition: 'no_continuation',
+        metadata_effects: 'inspect_registry_receipts', world_operations_replayed: 0,
+      })
+      throw error
+    }
+  })
 }
 function verifiedSetupReceipt(s) {
   const receipt = [...(s.plan.execution?.receipts?.[s.owner.stepId] ?? [])].reverse()
