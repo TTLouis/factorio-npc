@@ -387,6 +387,30 @@ A completed correction means fresh factory use resolved, not completed gameplay.
 Factory boundary errors retain their guard code through recovery-route commit;
 they are not provider failures.
 
+An executor's single raw `supply_entity` under committed `manual_bootstrap`
+guidance can enter the same finite controller. The shared parsed-reply boundary
+requires an explicit finite inventory output in the current step (including a
+step within a long-horizon goal), one exact retained producer, and one uniquely
+compatible fresh native recipe whose input matches the selected resource.
+Submitted fuel remains a maximum, established from complete native fuel facts.
+The harness does not infer a job from held stock, change the committed step,
+adopt unrelated machines, or turn bootstrap output into automated throughput.
+Mixed batches, ambiguous or incomplete capability, missing output/custody,
+uncertain work and stale authority refuse before world actions. Existing assigned
+cells retain their ordinary typed use checks; controller-generated supply does
+not normalize again.
+
+The commit boundary repeats this check if parsed-reply prevention was bypassed.
+It strictly persists consumption of the existing same-goal factory recovery
+allowance before returning a normalized finite intent. Restart and duplicate
+requests cannot renew it. `production.manual_bootstrap_normalized` and
+`production.manual_bootstrap_recovery_started`, `_resolved`, `_exhausted` retain
+original operations, derived intent, receipt/owner identity and allowance.
+`_resolved` means the raw form was reconciled and still needs ordinary finite
+controller admission; it does not mean registration, native execution or goal
+completion succeeded. The current step's research/preservation requirements and
+the independent overall goal remain authoritative after collection.
+
 A registered finite furnace may clear its active recipe after a completed cycle
 while its result slot still holds output. Continuation and exact collection can
 reconcile that dormant state only against the existing immutable native-recipe
