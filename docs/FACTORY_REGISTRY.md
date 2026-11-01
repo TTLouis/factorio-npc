@@ -501,3 +501,33 @@ failure. Later correction stages must satisfy
 miss, safe automatic continuation, native proof, restart and exhaustion. Native
 mechanics and autonomous production success are separate claims from this
 foundation's host-side persistence and enforcement.
+
+
+## Explicit production-block empty startup (BL repair)
+
+A typed `production_block` output role may establish compatibility for its exact
+receipt-backed empty furnace before the game selects a recipe. The shared
+observation/use check selects exactly one available recipe from the complete
+fresh native machine-capability candidates matching that role's typed outputs.
+It requires complete empty input/output inventories and zero crafting progress.
+Same-semantic-step completed placement custody, immutable intent and current
+world/actor/goal authority still govern enrollment. Neither supplied ore nor
+prose selects the job. Actual native `recipe.state = none` remains unchanged;
+compatibility does not establish commissioning, operation or throughput.
+
+The unchanged `production_block` assignment can subsequently pass ordinary
+finite-task or exact input admission using fresh native recipe/machine facts.
+Already registered matching completed output has a separate bounded collection
+proof; nonempty output never qualifies a new enrollment. Unknown, ambiguous,
+disabled, stale, busy, foreign or mixed facts fail closed.
+
+An eligible residual enrollment-close miss reobserves exact native facts and
+uses the existing strictly persisted, per-goal factory recovery allowance. It
+retries metadata reconciliation once, then returns to normal checkpoint closure;
+it never replays placement, supplies items, rewrites a plan or grants completion.
+`factory_cell.block_startup_compatible` records capability only. The
+`factory_cell.block_startup_recovery_started`, `_completed`, `_failed` and
+`_exhausted` events distinguish durable recovery and unresolved guards. Recovery
+completion means fresh enrollment/use resolution, not gameplay success.
+
+See [the scoped proof matrix](PRODUCTION_BLOCK_STARTUP_REPAIR.md).

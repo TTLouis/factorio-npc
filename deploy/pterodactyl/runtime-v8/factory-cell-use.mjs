@@ -2,7 +2,7 @@ import { factoryMetadataDigest } from './factory-dependencies.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { readFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
-import { validateFactoryCellObservation, validateFactoryMiningSource } from './factory-cell-observation.mjs'
+import { validateFactoryCellObservation, validateFactoryMiningSource, factoryBlockStartupRecipe } from './factory-cell-observation.mjs'
 import { prepareFactoryCellHost } from './factory-cell-tools.mjs'
 import { factoryLifecycleOperation } from './factory-cell-lifecycle-runtime.mjs'
 import { validateFactoryDelivery, factoryInputCoverage } from './factory-cell-delivery.mjs'
@@ -75,11 +75,13 @@ export async function readFactoryProducerRecipe(agent, access, row, recipeName, 
   }
   const input = inventory('input'); const output = inventory('output')
   const dormantOutput = Boolean(output?.length)
-  const member = retainedCell?.members?.length === 1 && retainedCell.members[0]
+  const blockRecipe = retainedCell && factoryBlockStartupRecipe(retainedCell, row, { retainedOutput: true })
+  const member = blockRecipe ? retainedCell.members.find(member => member.unit_number === row.locator.unit_number)
+    : retainedCell?.members?.length === 1 && retainedCell.members[0]
   if (row?.state !== 'observed' || row.type !== 'furnace' || row.recipe?.state !== 'none'
     || !input || input.length !== 0 || !output
     || !known(row.progress_facts?.crafting_progress) || row.progress_facts.crafting_progress.value !== 0
-    || dormantOutput && (!member?.provenance?.receipt_id || retainedCell.assignment?.method !== `native_recipe:${recipeName}`
+    || dormantOutput && (!member?.provenance?.receipt_id || !(retainedCell.assignment?.method === `native_recipe:${recipeName}` || blockRecipe?.name === recipeName)
       || ['unit_number', 'name', 'surface_index', 'force_index'].some(field => member[field] !== row.locator?.[field])
       || member.position?.x !== row.locator?.position?.x || member.position?.y !== row.locator?.position?.y)) fail('factory_cell_producer_job_unknown')
   await access.refresh(); access.fence()
@@ -100,9 +102,10 @@ export async function readFactoryProducerRecipe(agent, access, row, recipeName, 
   // reconciliation, never a claim that a recipe is selected or delivering.
   if (dormantOutput) {
     const products = recipe.products.filter(product => product.type === 'item').map(product => product.name)
+    const assignedProducts = blockRecipe ? blockRecipe.products.map(product => product.name) : retainedCell.assignment.products
     if (output.some(item => typeof item.name !== 'string' || !Number.isSafeInteger(item.count) || item.count < 1 || !products.includes(item.name))
-      || retainedCell.assignment.products.some(product => !recipe.products.some(row => row.name === product))
-      || recipe.products.some(product => !retainedCell.assignment.products.includes(product.name))) fail('factory_cell_dormant_output_mismatch')
+      || assignedProducts.some(product => !recipe.products.some(row => row.name === product))
+      || recipe.products.some(product => !assignedProducts.includes(product.name))) fail('factory_cell_dormant_output_mismatch')
   }
   await agent.traceEvent(dormantOutput ? 'factory_cell.dormant_output_recipe_evidence' : 'factory_cell.startup_recipe_evidence', {
     ...access.readContext(), unit_number: row.locator.unit_number, recipe_name: recipeName, native_response: detail, commissioning: 'unverified',
@@ -368,7 +371,9 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
   const existingIntent = intent && registry?.cells.some(cell => cell.enrollment?.goal_id === agent.memory.planningState(agent.activePlanKey())?.goal?.goal_id
     && cell.enrollment.intent_signature === factoryCellIntentSignature(step.execution_guidance ?? step))
   if (intent && !existingIntent && phase !== 'close' && !assignedTargets.length) return { ok: true, kind: 'establishment', required: clone(requirement) }
+  let startupFence
   return prepareFactoryCellHost(agent, async (observer, access) => {
+    const blockGrantChecks = []
     const scope = observer.runtime.readScope()
     if (partial) {
       observer.runtime.scope()
@@ -463,11 +468,41 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
     }
     for (const cell of candidates) {
       if (['retired', 'degraded'].includes(cell.lifecycle_state)) continue
+      const blockGrant = cell.assignment.method === 'production_block' ? JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) : undefined
       const observed = await observer.observe({ cell_id: cell.cell_id })
       access.fence()
       nativeByCell.set(cell.cell_id, observed.native)
       evidence.push({ cell_id: cell.cell_id, tick: observed.native.tick, state: observed.state })
       let unselectedCompatible = false
+      if (cell.assignment.method === 'production_block') {
+        const recipes = observed.native.members.map(row => factoryBlockStartupRecipe(cell, row,
+          { retainedOutput: Boolean(productionIntent?.producers?.some(producer => producer.unit_number === row.locator.unit_number)
+            || operations.some(operation => operation.name === 'move_items_exact' && operation.args?.to_entity === false
+              && operation.args.unit_number === row.locator.unit_number && cell.ports.some(port => port.direction === 'output' && port.kind === 'item' && port.resource === operation.args.item_name))) }))
+        for (const [index, recipe] of recipes.entries()) {
+          if (!recipe) continue
+          if (!agent.memory.currentGoalGrant(agent.activePlanKey())) fail('factory_block_startup_authority_missing')
+          blockGrantChecks.push(() => { if (JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) !== blockGrant) fail('factory_block_startup_authority_changed') })
+          startupFence = () => { access.fence(); for (const check of blockGrantChecks) check() }
+          startupFence()
+          const row = observed.native.members[index]
+          // Reuse the existing fresh recipe-machine and dormant-output read;
+          // the typed role proof above alone never grants operation authority.
+          await readFactoryProducerRecipe(agent, access, row, recipe.name, { retainedCell: cell })
+          access.fence()
+          if (JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) !== blockGrant) fail('factory_block_startup_authority_changed')
+          if (!cell.ports.filter(port => port.direction === 'output' && cell.enrollment.output_roles.some(output => output.port_id === port.port_id
+            && cell.enrollment.member_roles.some(role => role.role === output.role && cell.members.some(member => member.unit_number === row.locator.unit_number && member.provenance.receipt_id === role.receipt_id))))
+            .every(port => factoryNativeOutput(row, port))) fail('factory_block_startup_capability_changed')
+        }
+        unselectedCompatible = observed.native.members.every(row => row.recipe?.state !== 'none' || Boolean(producerRecipe(row)))
+          && cell.enrollment?.output_roles?.every(output => {
+            const role = cell.enrollment.member_roles.find(role => role.role === output.role)
+            const member = cell.members.find(member => member.provenance.receipt_id === role.receipt_id)
+            const row = observed.native.members.find(row => row.locator.unit_number === member.unit_number)
+            return Boolean(factoryNativeOutput(row, cell.ports.find(port => port.port_id === output.port_id)))
+          })
+      }
       if (cell.assignment.method.startsWith('native_recipe:') && cell.members.length === 1 && cell.members[0].provenance?.receipt_id) {
         const recipeName = cell.assignment.method.slice('native_recipe:'.length)
         const row = observed.native.members[0]
@@ -602,7 +637,7 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
     await agent.traceEvent('factory_cell.use_resolved', { ...scope, phase, requirement, resolution: selected, evidence })
     access.fence()
     const finalFence = () => {
-      access.fence(); constructionGrant?.()
+      access.fence(); startupFence?.(); constructionGrant?.()
       if (selected.kind === 'constructed' && activeTask()) fail('factory_cell_delivery_unverified')
     }
     finalFence()
@@ -611,11 +646,11 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
       let records = operationCertificates.get(agent.memory)
       if (!records) { records = new Map(); operationCertificates.set(agent.memory, records) }
       if (records.size >= 64) records.delete(records.keys().next().value)
-      records.set(`${agent.activePlanKey()}/${operationSignature(operations)}`, { scope: clone(scope), fence: access.fence, revision: revision(agent.memory),
+      records.set(`${agent.activePlanKey()}/${operationSignature(operations)}`, { scope: clone(scope), fence: startupFence ? finalFence : access.fence, revision: revision(agent.memory),
         physical: physicalRevision(agent.memory), generation: agent.memory.factoryWorldBinding().generation })
     }
     return { ok: true, ...selected }
-  }).execute().catch(error => {
+  }).execute().then(result => { startupFence?.(); return result }).catch(error => {
     certificates.delete(agent.memory); operationCertificates.delete(agent.memory)
     throw error
   })

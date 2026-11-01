@@ -5,8 +5,9 @@ import { placedEntityName } from './operation-reconciliation.mjs'
 import { prepareFactoryCellHost } from './factory-cell-tools.mjs'
 import { PAUSE_CLASS } from './pause-class.mjs'
 import { reconcileFactoryCellUse, readFactoryProducerRecipe, factoryNativeOutput, factoryEstablishmentGrant, factoryDirectFeedRecipe, factoryStepRequirement } from './factory-cell-use.mjs'
+import { factoryMetadataDigest } from './factory-dependencies.mjs'
 import { REFUSAL_CLASS } from './refusal-class.mjs'
-import { validateFactoryMiningSource } from './factory-cell-observation.mjs'
+import { validateFactoryMiningSource, factoryBlockStartupRecipe } from './factory-cell-observation.mjs'
 
 const fail = code => { throw new FactoryRegistryError(code, code) }
 const placement = op => ['place_entity', 'place_candidate'].includes(op?.name)
@@ -301,9 +302,15 @@ export async function ensureFactoryCellBeforeGoalCompletion(agent, owner) {
 }
 
 // All verified step-close routes call this before outcome authority. This only
-// enrolls the already configured pair; it never advances a step or repairs it.
-export async function ensureCommittedFactoryCellBeforeClose(agent, owner) {
+// enrolls receipt-backed compatible assignments; it never advances a step.
+// Empty explicit startup proves capability only, not selected recipe or output.
+export async function ensureCommittedFactoryCellBeforeClose(agent, owner, { residual = false } = {}) {
   const current = active(agent)
+  let recovered; let startupProofUsed = false
+  const startupGrant = JSON.stringify(agent.memory.currentGoalGrant?.(agent.activePlanKey()))
+  const checkStartupGrant = () => {
+    if (startupProofUsed && JSON.stringify(agent.memory.currentGoalGrant?.(agent.activePlanKey())) !== startupGrant) fail('factory_block_startup_authority_changed')
+  }
   if (!current.intent) return reconcileFactoryCellUse(agent, { phase: 'close' })
   bound(agent)
   agent.assertCheckpointOwnerIdentity(owner)
@@ -338,6 +345,42 @@ export async function ensureCommittedFactoryCellBeforeClose(agent, owner) {
       agent.assertCheckpointOwnerIdentity(owner); access.fence()
       fail(observation.state === 'mismatch' ? 'factory_enrollment_native_mismatch' : 'factory_enrollment_native_unverified')
     }
+    const startups = current.intent.kind === 'production_block' ? observation.native.members
+      .map(row => ({ row, recipe: factoryBlockStartupRecipe(declaration, row) })).filter(value => value.recipe) : []
+    if (residual && !startups.length) fail('factory_block_startup_recovery_unproven')
+    if (startups.length) {
+      startupProofUsed = true
+      if (!agent.stateFile) fail('factory_enrollment_persistence_unavailable')
+      if (!agent.memory.currentGoalGrant(agent.activePlanKey())) fail('factory_block_startup_authority_missing')
+      const grant = startupGrant
+      if (JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) !== grant) fail('factory_block_startup_authority_changed')
+      const check = () => {
+        agent.assertCheckpointOwnerIdentity(owner); access.fence(); runtime.assertScope(scope)
+        if (JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) !== grant) fail('factory_block_startup_authority_changed')
+      }
+      if (residual) {
+        recovered = agent.memory.consumeFactoryUseRecovery(agent.activePlanKey(), {
+          kind: 'explicit_block_startup_close', goal_id: scope.goal_id, semantic_step_id: scope.semantic_step_id,
+          intent_signature: current.signature, receipt_ids: enrollment.receipt_ids,
+        }, { request_id: scope.request_id, plan_id: scope.plan_id, code: 'factory_enrollment_native_unverified',
+          evidence_digest: factoryMetadataDigest({ enrollment, recipes: startups.map(value => value.recipe) }) })
+        await agent.persistState({ strict: true }); check()
+        await access.refresh(); check()
+        await agent.traceEvent(recovered.allowed ? 'factory_cell.block_startup_recovery_started' : 'factory_cell.block_startup_recovery_exhausted', {
+          ...scope, ...recovered, intent_signature: current.signature, receipt_ids: enrollment.receipt_ids,
+          native_tick: observation.native.tick, reason: 'explicit_output_empty_startup_capability', world_operations_replayed: 0 })
+        check()
+        if (!recovered.allowed) fail('factory_cell_recovery_exhausted')
+        const fresh = await observer.observeCandidate(declaration); check()
+        if (fresh.state !== 'compatible' || startups.some(({ row, recipe }) => factoryBlockStartupRecipe(declaration, fresh.native.members.find(member => member.locator.unit_number === row.locator.unit_number))?.name !== recipe.name)) fail('factory_block_startup_recovery_unproven')
+      }
+      await agent.traceEvent('factory_cell.block_startup_compatible', { ...scope, intent_signature: current.signature,
+        receipt_ids: enrollment.receipt_ids, native_tick: observation.native.tick,
+        members: startups.map(({ row, recipe }) => ({ unit_number: row.locator.unit_number, recipe_name: recipe.name, native_recipe_state: row.recipe.state })),
+        commissioning: 'unverified', disposition: 'assignment_capability_only' })
+      agent.assertCheckpointOwnerIdentity(owner); access.fence(); runtime.assertScope(scope)
+      check()
+    }
     // Final scope/revision check and publication are synchronous. The immutable
     // enrollment key is part of the cell, so no separate ledger can half-commit.
     const cell = runtime.registerCell(declaration, scope)
@@ -350,13 +393,37 @@ export async function ensureCommittedFactoryCellBeforeClose(agent, owner) {
       throw error
     }
     agent.assertCheckpointOwnerIdentity(owner); access.fence()
+    if (startups.length && JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) !== startupGrant) fail('factory_block_startup_authority_changed')
     await agent.traceEvent('factory_cell.enrolled', { request_id: scope.request_id, goal_id: scope.goal_id, plan_id: scope.plan_id, step_id: scope.step_id,
       cell_id: cell.cell_id, intent_signature: current.signature, receipt_ids: enrollment.receipt_ids, duplicate: Boolean(previous),
       native_tick: observation.native.tick, commissioning: 'unverified', throughput: 'unverified', dependencies: 'unverified' })
     agent.assertCheckpointOwnerIdentity(owner); access.fence()
     return { ok: true, applicable: true, cell_id: cell.cell_id, duplicate: Boolean(previous) }
   }).execute()
+  checkStartupGrant()
   await reconcileFactoryCellUse(agent, { phase: 'close' })
-  agent.assertCheckpointOwnerIdentity(owner)
+  agent.assertCheckpointOwnerIdentity(owner); checkStartupGrant()
+  if (recovered?.allowed) {
+    await agent.traceEvent('factory_cell.block_startup_recovery_completed', {
+      request_id: agent.traceRequest.id, goal_id: current.state.goal.goal_id, plan_id: current.plan.plan_id,
+      step_id: current.step.step_id, ...recovered, cell_id: result.cell_id,
+      disposition: 'enrolled_and_fresh_use_resolved_step_close_still_required', world_operations_replayed: 0 })
+    agent.assertCheckpointOwnerIdentity(owner); checkStartupGrant()
+  }
   return result
+}
+
+export async function recoverCommittedFactoryBlockClose(agent, error, owner) {
+  if (error?.code !== 'factory_enrollment_native_unverified' || active(agent).intent?.kind !== 'production_block') return false
+  try {
+    await ensureCommittedFactoryCellBeforeClose(agent, owner, { residual: true })
+    return true
+  } catch (failure) {
+    agent.assertCheckpointOwnerIdentity(owner)
+    await agent.traceEvent('factory_cell.block_startup_recovery_failed', { request_id: agent.traceRequest.id,
+      goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId, code: failure.code ?? failure.message,
+      disposition: 'no_continuation', world_operations_replayed: 0 })
+    agent.assertCheckpointOwnerIdentity(owner)
+    throw failure instanceof FactoryRegistryError ? new FactoryCellBoundaryError(failure, 'step_close_recovery') : failure
+  }
 }

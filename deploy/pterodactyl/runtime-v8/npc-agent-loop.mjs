@@ -18,7 +18,7 @@ import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEnt
 import { continueProductionTask, normalizeManualBootstrapProduction, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
-import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
+import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, recoverCommittedFactoryBlockClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
 import { reconcileFactoryCellUse, factoryDeliveryWindowPending, relevantFactoryAssignments, assignedFactoryConflict } from './factory-cell-use.mjs'
 import { recoverFactoryCellUse, validFactoryRecoveryWake } from './factory-cell-use-recovery.mjs'
 import { factoryLifecycleOperation, factoryLifecycleRuntime, claimFactoryLifecycleOperation, settleFactoryLifecycleOperation, retainUnsentFactoryLifecycleOperation, bindTemporaryFactoryPlacement } from './factory-cell-lifecycle-runtime.mjs'
@@ -3135,6 +3135,8 @@ export function restatedPlanVerdict(incoming, committed, activeIndex = 0) {
 }
 
 export class NpcAgentLoop extends BaseNpcAgentLoop {
+  ensureFactoryCellClose(owner) { return ensureCommittedFactoryCellBeforeClose(this, owner) }
+
   constructor(options) {
     // Programmatic v1 callers can replay historical packets; deployed supervisors always select v2.
     const memory = options.memory ?? new NpcDialogueMemory()
@@ -9015,25 +9017,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           results = evaluation.results
         }
       }
-      await ensureCommittedFactoryCellBeforeClose(this, closeOwner)
+      await this.ensureFactoryCellClose(closeOwner)
     }
     catch (error) {
-      this.assertCheckpointOwnerIdentity(closeOwner)
-      const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
-      if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
-      const reason = error.code ?? 'factory_enrollment_failed'
-      // Only the first frame of the delivery window exists; the step stays open
-      // unpaused and the executor is told that a native wait completes it.
-      if (factoryDeliveryWindowPending(error)) {
-        this.deliveryWindowPending = { goalId: closeOwner.goalId, planId: closeOwner.planId, stepId: closeOwner.stepId }
-        return this.declineStepClose(trigger, reason, { active_step_id: step.id,
-          observation: error.details.selected.delivery.observation.code, goal_id: closeOwner.goalId, plan_id: closeOwner.planId })
+      if (!await recoverCommittedFactoryBlockClose(this, error, closeOwner)) {
+        this.assertCheckpointOwnerIdentity(closeOwner)
+        const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
+        if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
+        const reason = error.code ?? 'factory_enrollment_failed'
+        // Only the first frame of the delivery window exists; the step stays open
+        // unpaused and the executor is told that a native wait completes it.
+        if (factoryDeliveryWindowPending(error)) {
+          this.deliveryWindowPending = { goalId: closeOwner.goalId, planId: closeOwner.planId, stepId: closeOwner.stepId }
+          return this.declineStepClose(trigger, reason, { active_step_id: step.id,
+            observation: error.details.selected.delivery.observation.code, goal_id: closeOwner.goalId, plan_id: closeOwner.planId })
+        }
+        await this.traceEvent('factory_cell.enrollment_close_refused', { request_id: requestId, trigger, reason,
+          observation: error.details?.selected?.delivery?.observation?.code,
+          goal_id: closeOwner.goalId, plan_id: closeOwner.planId, step_id: closeOwner.stepId })
+        this.assertCheckpointOwnerIdentity(closeOwner)
+        return { closed: false, reason, contractPause: await this.pauseForStepContract({ reason, owner: closeOwner }) }
       }
-      await this.traceEvent('factory_cell.enrollment_close_refused', { request_id: requestId, trigger, reason,
-        observation: error.details?.selected?.delivery?.observation?.code,
-        goal_id: closeOwner.goalId, plan_id: closeOwner.planId, step_id: closeOwner.stepId })
-      this.assertCheckpointOwnerIdentity(closeOwner)
-      return { closed: false, reason, contractPause: await this.pauseForStepContract({ reason, owner: closeOwner }) }
     }
     await this.assertCheckpointOwnerCurrent(closeOwner)
     const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
