@@ -1033,11 +1033,12 @@ const manualRaw = w => ({ chatMessage: '', stepId: activeStepId(w), operations: 
 async function observeManualMachine(w) {
   w.agent.recordLiveEntityToolResult('getEntityStatus', await w.game.command(w.agent.observationToolCommand('getEntityStatus', { unit_number: 45 })))
 }
-for (const form of ['assistant_json', 'submitPlan']) for (const residual of [false, true]) for (const manualGoalScope of residual ? ['long_horizon'] : ['long_horizon', 'finite']) {
-  test(`BJ raw ${form} ${residual ? 'residual' : 'prevention'} completes finite step within ${manualGoalScope} goal without model repair`, async () => {
+for (const form of ['assistant_json', 'submitPlan']) for (const residual of [false, true]) for (const redundantCheckpoint of [false, true]) for (const manualGoalScope of residual || redundantCheckpoint ? ['long_horizon'] : ['long_horizon', 'finite']) {
+  test(`BJ raw ${form} ${residual ? 'residual' : 'prevention'} ${redundantCheckpoint ? 'matching checkpoint' : 'no checkpoint'} completes finite step within ${manualGoalScope} goal without model repair`, async () => {
     let script
-    const w = scripted({ ...manualOptions, manualGoalScope }, w => script ??= [form === 'assistant_json' ? { content: JSON.stringify(manualRaw(w)) }
-      : { tool_calls: [{ id: 'manual-first-supply', type: 'function', function: { name: 'submitPlan', arguments: JSON.stringify(manualRaw(w)) } }] }])
+    const reply = w => ({ ...manualRaw(w), ...(redundantCheckpoint ? { checkpoint: structuredClone(w.held().steps[w.held().active_step_index].completion_contract) } : {}) })
+    const w = scripted({ ...manualOptions, manualGoalScope }, w => script ??= [form === 'assistant_json' ? { content: JSON.stringify(reply(w)) }
+      : { tool_calls: [{ id: 'manual-first-supply', type: 'function', function: { name: 'submitPlan', arguments: JSON.stringify(reply(w)) } }] }])
     await observeManualMachine(w)
     const original = structuredClone(w.held().steps); const goal = structuredClone(w.memory.planningState(an.key).goal.definition)
     const receipts = structuredClone(w.memory.snapshot().factory_placement_receipts)
@@ -1049,6 +1050,9 @@ for (const form of ['assistant_json', 'submitPlan']) for (const residual of [fal
     assert.equal(w.providers.length, 1)
     assert.equal(w.events.filter(row => row.event === 'production.manual_bootstrap_normalized').length, residual ? 0 : 1)
     assert.equal(w.events.filter(row => row.event === 'production.manual_bootstrap_recovery_started').length, residual ? 1 : 0)
+    const normalization = w.events.find(row => row.event === `production.manual_bootstrap_${residual ? 'recovery_resolved' : 'normalized'}`).data
+    assert.equal(normalization.checkpoint_disposition, redundantCheckpoint ? 'identical_committed_contract_retained' : undefined)
+    if (redundantCheckpoint) assert.equal(w.agent.contractSignature(normalization.original_checkpoint), w.agent.contractSignature(original.find(step => step.step_id === normalization.step_id).completion_contract))
     try { for (let i = 0; i < 65 && w.held().status !== 'COMPLETED'; i++) await w.agent.completed() }
     catch (error) { error.message += JSON.stringify({ inventory: w.game.inventory, research: [...w.game.researched], events: w.events.slice(-16) }); throw error }
     assert.equal(w.held().status, 'COMPLETED', JSON.stringify({ inventory: w.game.inventory, pause: w.memory.pauseRecord(an.key), events: w.events.slice(-12) }))
@@ -1068,6 +1072,21 @@ function changeManualFixtureStep(w, change) {
   const plan = getActivePlan(state); change(plan.steps[plan.active_step_index])
   w.memory.restore(snapshot)
 }
+for (const residual of [false, true]) for (const change of ['different quantity', 'missing research', 'extra outcome', 'any mode', 'malformed', 'unbound', 'semantic']) test(`BJ raw checkpoint ${change} refuses ${residual ? 'residual' : 'prevention'} without authority or effects`, async () => {
+  const w = world(manualOptions); const p = manualRaw(w)
+  p.checkpoint = structuredClone(w.held().steps[w.held().active_step_index].completion_contract)
+  if (change === 'different quantity') p.checkpoint.requirements.find(row => row.kind === 'inventory_count').minimum++
+  if (change === 'missing research') p.checkpoint.requirements = p.checkpoint.requirements.filter(row => row.kind !== 'research_completed')
+  if (change === 'extra outcome') p.checkpoint.requirements.push({ id: 'extra', kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 })
+  if (change === 'any mode') p.checkpoint.mode = 'any'
+  if (change === 'malformed') p.checkpoint.requirements = 'not a contract'
+  if (change === 'unbound') changeManualFixtureStep(w, step => { delete step.completion_contract })
+  if (change === 'semantic') p.semanticCompletion = { stepId: p.stepId, summary: 'claim without proof' }
+  const before = w.memory.snapshot(); const original = structuredClone(p)
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(p, { residual }), /checkpoint_mismatch|scope_unproven/)
+  assert.deepEqual(p, original); assert.deepEqual(w.memory.snapshot(), before); assert.deepEqual(w.ops, [])
+  assert.equal(w.providers.length, 0); assert.equal(w.events.some(row => row.event.startsWith('production.manual_bootstrap_')), false)
+})
 for (const [name, change, expected] of [
   ['mixed operations', (w, p) => p.operations.push({ name: 'wait', args: { ticks: 30 } }), /mixed_operations/],
   ['wrong step', (w, p) => { p.stepId = w.held().steps[0].step_id }, /scope_unproven/],

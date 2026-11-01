@@ -402,6 +402,12 @@ not normalize again. Eligibility is checked before new-producer restrictions:
 already assigned cells and private harness-owned entity-refresh/collection
 continuations retain their existing validators, checkpoint handling and durable
 limits. An unchanged proposal is not permission to replay its supply operation.
+An unassigned raw supply may repeat a supported checkpoint only when its normalized
+signature equals the already-bound canonical current-step contract. The targets
+still come solely from that canonical contract. The redundant field is retained
+in the normalization trace and removed from the generated finite-task envelope;
+an explicit model-authored `productionTask` still cannot carry a checkpoint.
+Mismatched, malformed or unbound echoes and semantic completion claims refuse.
 
 The commit boundary repeats this check if parsed-reply prevention was bypassed.
 It strictly persists consumption of the existing same-goal factory recovery

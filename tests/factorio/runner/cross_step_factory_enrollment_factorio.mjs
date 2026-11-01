@@ -101,8 +101,9 @@ try {
       assert.equal(observed.found, true); assert.equal(observed.entity.unit_number, receipt.unit_number)
       agent.recordLiveEntityToolResult('getEntityStatus', JSON.stringify(observed))
       evidence.raw_supply_observation = observed
+      evidence.raw_checkpoint_echo = structuredClone(step.completion_contract)
       return planReply({ stepId: step.step_id, operations: [{ name: 'supply_entity', args: { unit_number: receipt.unit_number,
-        items: [{ item_name: input.name, count: inputCount }, { item_name: fuel.name, count: fuelCount }] } }] })
+        items: [{ item_name: input.name, count: inputCount }, { item_name: fuel.name, count: fuelCount }] } }], checkpoint: evidence.raw_checkpoint_echo })
     }
     return planReply({ stepId: step.step_id, operations: [], productionTask: { targets: [{ item_name: output.name, count: targetCount }],
       producers: [{ recipe_name: recipe.name, unit_number: receipt.unit_number }], fuel: { item_name: fuel.name, count: fuelCount } } })
@@ -135,6 +136,11 @@ try {
   assert.equal(memory.planningState(KEY).goal.status, goalScope === 'long_horizon' ? 'active' : 'completed')
   if (technology) { evidence.final_technology = await tool('getTechnology', { name: technology.name }); assert.equal(evidence.final_technology.researched, true) }
   assert.equal(events.filter(row => row.event === 'production.manual_bootstrap_normalized').length, executionForm === 'raw' ? 1 : 0)
+  if (executionForm === 'raw') {
+    const normalized = events.find(row => row.event === 'production.manual_bootstrap_normalized').data
+    assert.equal(normalized.checkpoint_disposition, 'identical_committed_contract_retained')
+    assert.equal(agent.contractSignature(normalized.original_checkpoint), agent.contractSignature(evidence.raw_checkpoint_echo))
+  }
   assert.equal(events.filter(row => row.event.startsWith('production.manual_bootstrap_recovery_')).length, 0)
   const cells = memory.getFactoryRegistry().cells
   assert.equal(cells.length, 1); assert.equal(cells[0].members[0].unit_number, evidence.retained_placement.unit_number)
