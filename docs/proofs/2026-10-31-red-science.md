@@ -9,6 +9,8 @@ infrastructure already existed.
 Tested source: [`9eff3407680e5f5633d8c94ffe4b1603236dce85`](https://github.com/TTLouis/factorio-npc/commit/9eff3407680e5f5633d8c94ffe4b1603236dce85).
 Later knowledge-library and electric-miner changes were not part of this trial.
 
+---
+
 ## Observed result
 
 - Two burner miners supplied new furnaces. Assemblers and automatic item
@@ -24,6 +26,8 @@ Later knowledge-library and electric-miner changes were not part of this trial.
   and existing boiler during construction. No gameplay changes were made during
   the measurement window; those prefilled supplies kept the line running.
   Continuing fuel replenishment was not automated.
+
+---
 
 ## Limits and acceptance
 
@@ -44,6 +48,8 @@ owner-local; this page is a summary, not a replacement for those records.
 The preserved save's SHA-256 is
 `6d577ec9e163e6f6d45c0fc6109ca2f81223f95304342cecefe0ab98f1472438`.
 
+---
+
 ## In-game screenshots
 
 Captured November 1, 2026 with Factorio 2.0.77 from a separate inspection copy of
@@ -55,6 +61,8 @@ these pictures, and no additional autonomous trial was run.
 These images document the layout after the trial. The production counts above
 come from the original measurement window, not from this paused inspection.
 
+---
+
 ### Science production and iron supply
 
 ![Science and gear assemblers, iron miner and furnace, and science output chest](images/2026-10-31/science-and-iron.jpg)
@@ -63,12 +71,16 @@ The science assembler sends output through an inserter to a chest. Nearby gear
 production and the iron miner/furnace feed the line. The burner machines and
 inserters depend on the agent's earlier manual fuel loads.
 
+---
+
 ### Material transport overview
 
 ![Overview of the science line and long copper supply belt](images/2026-10-31/material-network.jpg)
 
 The long belt links the distant copper source to science production. This is
 the preserved trial layout, including its inefficient transport distance.
+
+---
 
 ### Copper mining and smelting
 
@@ -77,6 +89,8 @@ the preserved trial layout, including its inefficient transport distance.
 A burner miner and stone furnace supply the copper belt. Their fuel supply was
 not automated. This is the furnace whose changing recipe observation caused
 the formal acceptance failure described above.
+
+---
 
 ### Existing electricity and separate lab
 

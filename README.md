@@ -4,6 +4,8 @@
 standalone character with real inventory, crafting and mining, and can operate
 on a headless server with nobody connected.
 
+---
+
 ## Connect your AI assistant to Factorio
 
 The `main` branch lets a local AI harness control your
@@ -38,6 +40,8 @@ Repeatable autonomous science production remains unproven. Read the
 [current status and exact-commit evidence](docs/NPC_AGENT_HARNESS_STATUS.md) before
 choosing a checkpoint; newer development is not automatically a stable release.
 
+---
+
 ## Latest demonstrated progress
 
 **Semi-automated red science — October 31, 2026:** **12 new packs in two
@@ -49,6 +53,8 @@ See the [latest proofs](docs/proofs/README.md) for in-game screenshots, measured
 results and limitations. This single-run milestone is not a full-automation
 pass; the formal trial failed a furnace observation check.
 
+---
+
 ## Start here
 
 | Your goal | Next step |
@@ -58,6 +64,8 @@ pass; the formal trial failed a furnace observation check.
 | Help with a bug, test or explanation | [Contributing](CONTRIBUTING.md) |
 | Understand the design | [Project contract](SPEC.md) and [documentation index](docs/README.md) |
 | Work with a coding agent | [AGENTS.md](AGENTS.md) |
+
+---
 
 ## What is in the project?
 
@@ -75,6 +83,8 @@ for acceptance criteria and the status page for current limits.
 
 Single-NPC reliability and grounded production are the current focus. Wider
 swarm coordination, vehicles/trains/platforms and optional vision are later work.
+
+---
 
 ## Optional built-in planner server
 
@@ -117,6 +127,8 @@ user mods and non-secret configuration across completed releases.
 SGLuna uses `SGLUNA_*` settings, `sgluna-config.json` and `!luna` chat input.
 Legacy AIRI settings/input aliases are documented in the deployment guide.
 
+---
+
 ## Contribute
 
 External-harness development integrates into **`main`**. The internal
@@ -131,6 +143,8 @@ defines scope, evidence and review. [Authorized live trials](docs/LIVE_E2E.md)
 are separate from ordinary tests. The opt-in
 [desktop operator adapter](tools/desktop-rcon-operator.mjs) is an operator/test
 surface, not autonomous provider operation.
+
+---
 
 ## Origin, license and credits
 
