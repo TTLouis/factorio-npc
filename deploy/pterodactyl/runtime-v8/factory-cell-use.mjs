@@ -2,7 +2,7 @@ import { factoryMetadataDigest } from './factory-dependencies.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { readFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
-import { validateFactoryCellObservation, validateFactoryMiningSource } from './factory-cell-observation.mjs'
+import { validateFactoryCellObservation, validateFactoryMiningSource, factoryBlockStartupRecipe, factoryBlockOutputPorts } from './factory-cell-observation.mjs'
 import { prepareFactoryCellHost } from './factory-cell-tools.mjs'
 import { factoryLifecycleOperation } from './factory-cell-lifecycle-runtime.mjs'
 import { validateFactoryDelivery, factoryInputCoverage } from './factory-cell-delivery.mjs'
@@ -75,21 +75,36 @@ export async function readFactoryProducerRecipe(agent, access, row, recipeName, 
   }
   const input = inventory('input'); const output = inventory('output')
   const dormantOutput = Boolean(output?.length)
-  const member = retainedCell?.members?.length === 1 && retainedCell.members[0]
+  const blockOutputs = retainedCell && factoryBlockOutputPorts(retainedCell, row)
+  const member = blockOutputs ? retainedCell.members.find(member => member.unit_number === row.locator.unit_number)
+    : retainedCell?.members?.length === 1 && retainedCell.members[0]
   if (row?.state !== 'observed' || row.type !== 'furnace' || row.recipe?.state !== 'none'
     || !input || input.length !== 0 || !output
     || !known(row.progress_facts?.crafting_progress) || row.progress_facts.crafting_progress.value !== 0
-    || dormantOutput && (!member?.provenance?.receipt_id || retainedCell.assignment?.method !== `native_recipe:${recipeName}`
+    || dormantOutput && (!member?.provenance?.receipt_id || !(retainedCell.assignment?.method === `native_recipe:${recipeName}` || blockOutputs?.length)
       || ['unit_number', 'name', 'surface_index', 'force_index'].some(field => member[field] !== row.locator?.[field])
       || member.position?.x !== row.locator?.position?.x || member.position?.y !== row.locator?.position?.y)) fail('factory_cell_producer_job_unknown')
+  // A retained typed output identifies the lookup; held stock and supplied ore
+  // do not. Native intentionally omits empty-startup candidates for full outputs.
+  const outputLookup = dormantOutput && blockOutputs
+  if (!recipeName && !outputLookup) fail('factory_cell_producer_job_unknown')
+  if (outputLookup && row.inventories.some(inventory => ['input', 'output'].includes(inventory.role) && inventory.truncated !== false)) fail('factory_cell_producer_job_unknown')
   await access.refresh(); access.fence()
-  const raw = String(await agent.rcon.command(agent.observationToolCommand('getRecipeDetails', { item_or_recipe: recipeName, requested_count: 1 })))
+  const raw = String(await agent.rcon.command(agent.observationToolCommand('getRecipeDetails', { item_or_recipe: outputLookup ? blockOutputs[0].resource : recipeName, requested_count: 1 })))
   access.fence(); await access.refresh()
   if (raw.length > 262144) fail('factory_cell_recipe_body_limit')
   let detail
   try { detail = JSON.parse(raw) } catch { fail('factory_cell_recipe_unreadable') }
-  const matches = detail.recipes?.filter(recipe => recipe.name === recipeName)
-  const recipe = matches?.length === 1 && matches[0]
+  const compatible = recipe => typeof recipe?.name === 'string' && recipe.name.length > 0 && recipe.enabled === true && recipe.crafting_machines_truncated === false
+    && Array.isArray(recipe.crafting_machines) && recipe.crafting_machines.some(machine => machine.name === row.locator.name)
+    && Array.isArray(recipe.products) && blockOutputs.every(port => recipe.products.some(product => product.type === port.kind && product.name === port.resource
+      && (product.probability === undefined || Number.isFinite(product.probability) && product.probability > 0 && product.probability <= 1)))
+    && recipe.products.every(product => blockOutputs.some(port => product.type === port.kind && product.name === port.resource))
+    && recipe.applicability?.state === 'available'
+  const matches = Array.isArray(detail.recipes) ? detail.recipes.filter(recipe => outputLookup ? compatible(recipe) : recipe.name === recipeName) : []
+  const recipe = matches.length === 1 && matches[0]
+  if (outputLookup && (detail.truncated !== false || !recipe || recipeName && recipe.name !== recipeName)) fail('factory_cell_dormant_output_mismatch')
+  recipeName ??= recipe?.name
   if (detail.found !== true || detail.truncated === true || !recipe || recipe.enabled !== true || recipe.crafting_machines_truncated === true
     || !Array.isArray(recipe.crafting_machines) || !recipe.crafting_machines.some(machine => machine.name === row.locator.name)
     || !Array.isArray(recipe.products) || !recipe.products.length || recipe.products.length > 32 || !Array.isArray(recipe.ingredients)
@@ -100,14 +115,15 @@ export async function readFactoryProducerRecipe(agent, access, row, recipeName, 
   // reconciliation, never a claim that a recipe is selected or delivering.
   if (dormantOutput) {
     const products = recipe.products.filter(product => product.type === 'item').map(product => product.name)
+    const assignedProducts = blockOutputs ? blockOutputs.map(port => port.resource) : retainedCell.assignment.products
     if (output.some(item => typeof item.name !== 'string' || !Number.isSafeInteger(item.count) || item.count < 1 || !products.includes(item.name))
-      || retainedCell.assignment.products.some(product => !recipe.products.some(row => row.name === product))
-      || recipe.products.some(product => !retainedCell.assignment.products.includes(product.name))) fail('factory_cell_dormant_output_mismatch')
+      || assignedProducts.some(product => !recipe.products.some(row => row.name === product))
+      || recipe.products.some(product => !assignedProducts.includes(product.name))) fail('factory_cell_dormant_output_mismatch')
   }
   await agent.traceEvent(dormantOutput ? 'factory_cell.dormant_output_recipe_evidence' : 'factory_cell.startup_recipe_evidence', {
     ...access.readContext(), unit_number: row.locator.unit_number, recipe_name: recipeName, native_response: detail, commissioning: 'unverified',
     ...(dormantOutput ? { cell_id: retainedCell.cell_id, cell_revision: retainedCell.revision, native_recipe_state: row.recipe.state,
-      output: clone(output), disposition: 'retained_finite_job_capability_only' } : {}),
+      output: clone(output), disposition: blockOutputs ? 'retained_typed_block_output_capability_only' : 'retained_finite_job_capability_only' } : {}),
   })
   access.fence()
   const capability = { ...clone(recipe), state: 'known', truncated: false, basis: dormantOutput ? 'fresh_native_dormant_furnace_output_capability' : 'fresh_native_empty_furnace_capability' }
@@ -368,7 +384,9 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
   const existingIntent = intent && registry?.cells.some(cell => cell.enrollment?.goal_id === agent.memory.planningState(agent.activePlanKey())?.goal?.goal_id
     && cell.enrollment.intent_signature === factoryCellIntentSignature(step.execution_guidance ?? step))
   if (intent && !existingIntent && phase !== 'close' && !assignedTargets.length) return { ok: true, kind: 'establishment', required: clone(requirement) }
+  let startupFence
   return prepareFactoryCellHost(agent, async (observer, access) => {
+    const blockGrantChecks = []
     const scope = observer.runtime.readScope()
     if (partial) {
       observer.runtime.scope()
@@ -463,11 +481,43 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
     }
     for (const cell of candidates) {
       if (['retired', 'degraded'].includes(cell.lifecycle_state)) continue
+      const blockGrant = cell.assignment.method === 'production_block' ? JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) : undefined
       const observed = await observer.observe({ cell_id: cell.cell_id })
       access.fence()
       nativeByCell.set(cell.cell_id, observed.native)
       evidence.push({ cell_id: cell.cell_id, tick: observed.native.tick, state: observed.state })
       let unselectedCompatible = false
+      if (cell.assignment.method === 'production_block') {
+        for (const row of observed.native.members) {
+          const recipe = factoryBlockStartupRecipe(cell, row)
+          const retainedOutput = factoryBlockOutputPorts(cell, row)
+            && row.inventories?.some(inventory => inventory.role === 'output' && nativeList(inventory.items)?.length)
+            && (productionIntent?.producers?.some(producer => producer.unit_number === row.locator.unit_number)
+              || operations.some(operation => operation.name === 'move_items_exact' && operation.args?.to_entity === false
+                && operation.args.unit_number === row.locator.unit_number && cell.ports.some(port => port.direction === 'output' && port.kind === 'item' && port.resource === operation.args.item_name)))
+          if (!recipe && !retainedOutput) continue
+          if (!agent.memory.currentGoalGrant(agent.activePlanKey())) fail('factory_block_startup_authority_missing')
+          blockGrantChecks.push(() => { if (JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) !== blockGrant) fail('factory_block_startup_authority_changed') })
+          startupFence = () => { access.fence(); for (const check of blockGrantChecks) check() }
+          startupFence()
+          // Reuse the existing fresh recipe-machine and dormant-output read;
+          // the typed role proof above alone never grants operation authority.
+          await readFactoryProducerRecipe(agent, { ...access, fence: startupFence, refresh: async () => { await access.refresh(); startupFence() } },
+            row, recipe?.name, { retainedCell: cell })
+          access.fence()
+          if (JSON.stringify(agent.memory.currentGoalGrant(agent.activePlanKey())) !== blockGrant) fail('factory_block_startup_authority_changed')
+          if (!cell.ports.filter(port => port.direction === 'output' && cell.enrollment.output_roles.some(output => output.port_id === port.port_id
+            && cell.enrollment.member_roles.some(role => role.role === output.role && cell.members.some(member => member.unit_number === row.locator.unit_number && member.provenance.receipt_id === role.receipt_id))))
+            .every(port => factoryNativeOutput(row, port))) fail('factory_block_startup_capability_changed')
+        }
+        unselectedCompatible = observed.native.members.every(row => row.recipe?.state !== 'none' || Boolean(producerRecipe(row)))
+          && cell.enrollment?.output_roles?.every(output => {
+            const role = cell.enrollment.member_roles.find(role => role.role === output.role)
+            const member = cell.members.find(member => member.provenance.receipt_id === role.receipt_id)
+            const row = observed.native.members.find(row => row.locator.unit_number === member.unit_number)
+            return Boolean(factoryNativeOutput(row, cell.ports.find(port => port.port_id === output.port_id)))
+          })
+      }
       if (cell.assignment.method.startsWith('native_recipe:') && cell.members.length === 1 && cell.members[0].provenance?.receipt_id) {
         const recipeName = cell.assignment.method.slice('native_recipe:'.length)
         const row = observed.native.members[0]
@@ -602,7 +652,7 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
     await agent.traceEvent('factory_cell.use_resolved', { ...scope, phase, requirement, resolution: selected, evidence })
     access.fence()
     const finalFence = () => {
-      access.fence(); constructionGrant?.()
+      access.fence(); startupFence?.(); constructionGrant?.()
       if (selected.kind === 'constructed' && activeTask()) fail('factory_cell_delivery_unverified')
     }
     finalFence()
@@ -611,11 +661,11 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
       let records = operationCertificates.get(agent.memory)
       if (!records) { records = new Map(); operationCertificates.set(agent.memory, records) }
       if (records.size >= 64) records.delete(records.keys().next().value)
-      records.set(`${agent.activePlanKey()}/${operationSignature(operations)}`, { scope: clone(scope), fence: access.fence, revision: revision(agent.memory),
+      records.set(`${agent.activePlanKey()}/${operationSignature(operations)}`, { scope: clone(scope), fence: startupFence ? finalFence : access.fence, revision: revision(agent.memory),
         physical: physicalRevision(agent.memory), generation: agent.memory.factoryWorldBinding().generation })
     }
     return { ok: true, ...selected }
-  }).execute().catch(error => {
+  }).execute().then(result => { startupFence?.(); return result }).catch(error => {
     certificates.delete(agent.memory); operationCertificates.delete(agent.memory)
     throw error
   })

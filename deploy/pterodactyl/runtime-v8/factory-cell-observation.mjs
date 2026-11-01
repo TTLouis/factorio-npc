@@ -59,6 +59,49 @@ function assignedOutput(row, product, kind) {
     && source.resources.length <= 64 && source.resources.some(entry => entry?.products_truncated === false && matches(entry.products))
 }
 
+// Explicit output roles select capability, never a recipe inferred from supplied
+// ore or prose. This does not change the observed recipe or commission a block.
+// Publication/use callers separately own current authority and retained custody.
+export function factoryBlockOutputPorts(cell, row) {
+  if (cell?.assignment?.method !== 'production_block' || row?.state !== 'observed' || row.type !== 'furnace'
+    || row.recipe?.state !== 'none' || row.recipe.truncated !== false) return undefined
+  const member = cell.members.find(member => identity(row.locator, member))
+  const role = cell.enrollment?.member_roles?.find(role => role.receipt_id === member?.provenance?.receipt_id)
+  if (!member?.provenance?.receipt_id || !role) return undefined
+  const outputs = cell.enrollment.output_roles.filter(output => output.role === role.role)
+    .map(output => cell.ports.find(port => port.port_id === output.port_id))
+  if (!outputs.length || outputs.some(port => port?.direction !== 'output' || port.kind !== 'item' || !token(port.resource))) return undefined
+  return outputs
+}
+
+export function factoryBlockStartupRecipe(cell, row) {
+  const outputs = factoryBlockOutputPorts(cell, row)
+  if (!outputs) return undefined
+  const candidates = row.startup_recipe_candidates
+  if (candidates?.schema_version !== 1 || candidates.state !== 'known' || candidates.truncated !== false
+    || candidates.coverage !== 'complete' || candidates.selection !== 'unselected'
+    || candidates.basis !== 'enabled_native_recipe_category_and_surface' || !Array.isArray(candidates.candidates)
+    || candidates.candidates.length > 16 || !Array.isArray(row.inventories)
+    || row.progress_facts?.crafting_progress?.state !== 'known' || row.progress_facts.crafting_progress.value !== 0) return undefined
+  const inventory = role => {
+    const rows = row.inventories.filter(value => value.role === role)
+    if (rows.length !== 1 || rows[0].state !== 'known' || rows[0].truncated !== false) return undefined
+    const items = rows[0].items
+    return Array.isArray(items) ? items : items && typeof items === 'object' && Object.keys(items).length === 0 ? [] : undefined
+  }
+  const input = inventory('input'); const output = inventory('output')
+  if (!input || input.length || !output || output.length) return undefined
+  const matches = candidates.candidates.filter(recipe => token(recipe?.name) && Array.isArray(recipe.ingredients)
+    && recipe.ingredients.length <= 32 && Array.isArray(recipe.products) && recipe.products.length > 0 && recipe.products.length <= 32
+    && [...recipe.ingredients, ...recipe.products].every(item => token(item?.name) && ['item', 'fluid'].includes(item.type))
+    && outputs.every(port => recipe.products.some(product => product.type === port.kind && product.name === port.resource
+      && (product.probability === undefined || product.probability > 0 && product.probability <= 1)))
+    && recipe.products.every(product => outputs.some(port => port.kind === product.type && port.resource === product.name)))
+  if (matches.length !== 1 || matches[0].applicability?.state !== 'available'
+    || output.some(item => !Number.isSafeInteger(item?.count) || item.count < 1 || !outputs.some(port => port.resource === item.name))) return undefined
+  return { ...copy(matches[0]), state: 'known', truncated: false, basis: candidates.basis }
+}
+
 function recordedLocation(cell) {
   const points = cell.members.map(member => member.position)
   return { state: 'historical_unverified', anchor: copy(points[0]), member_position_bounds: {
@@ -121,7 +164,7 @@ export function validateFactoryCellObservation({ registry, cell, native, binding
       const port = cell.ports.find(port => port.port_id === output.port_id)
       const found = row?.state === 'observed' && (port.kind === 'power'
         ? row.progress_facts?.electricity_production?.state === 'known' && row.progress_facts.electricity_production.producer === true
-        : assignedOutput(row, port.resource, port.kind))
+        : assignedOutput(row, port.resource, port.kind) || Boolean(factoryBlockStartupRecipe(cell, row)))
       checks.push(found ? verdict('compatible', 'assigned_role_native_capability', { role: output.role, port_id: port.port_id })
         : { ...unknown('assigned_role_capability_unverified'), role: output.role, port_id: port.port_id })
     }
