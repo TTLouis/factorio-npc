@@ -3,15 +3,18 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { parseInventoryCounts } from './handoff-packet.mjs'
 import { materialOwnerKey } from './material-ledger.mjs'
 import { normalizeCounts, recipeForItem } from './quantity-compiler.mjs'
-import { restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
+import { completionContractSupported } from './step-completion.mjs'
+import { REFRESHED_ENTITY_PLAN, restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
 import { advanceProductionTask, bindProductionFuelSource, bindProductionProducers, createProductionTask, finiteInventoryTargets, machineFacts, normalizeProductionIntent, productionBindings, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, PRODUCTION_RESOURCE_BINDINGS_MAX, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 import { missingProductionBindings, resolveProductionBindings } from './bg-production-binding.mjs'
 import { STALE_REPLY_ERROR_CODE } from './agent-context.mjs'
-import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
+import { reconcileFactoryCellUse, readFactoryProducerRecipe } from './factory-cell-use.mjs'
+import { prepareFactoryCellHost } from './factory-cell-tools.mjs'
+import { authorizationOf, checkGrant, evaluateOperationAdmission } from './authorization.mjs'
 import { factoryMetadataDigest } from './factory-dependencies.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
-import { enrollFactoryProductionProducers, atFactoryCellBoundary } from './factory-cell-enrollment.mjs'
+import { enrollFactoryProductionProducers, finiteProductionPlacementReceipts, atFactoryCellBoundary } from './factory-cell-enrollment.mjs'
 
 export const PRODUCTION_RECORD_LIMIT = 128
 export function restoreProductionRecords(rows) {
@@ -46,6 +49,123 @@ function scope(agent) {
   } }
 }
 function recordKey(s) { return `${s.owner.key}/${materialOwnerKey(s.materialOwner)}` }
+
+// A raw supply is an execution form, not a new production strategy. Resolve it
+// from the committed finite output and fresh native capability, never from stock.
+// The existing finite controller owns all supply/wait/collection after this seam.
+export async function normalizeManualBootstrapProduction(agent, plan, { residual = false } = {}) {
+  if (agent.completionProtocolVersion < 3 || agent.productionAdmission || agent.entityRefreshAdmission || plan[REFRESHED_ENTITY_PLAN]
+    || plan.productionTask || plan.plannerReview || agent.agentContext.role !== 'executor') return plan
+  const operations = plan.operations ?? []
+  const supplies = operations.filter(op => op.name === 'supply_entity')
+  if (!supplies.length) return plan
+  // This seam owns new unassigned producers only. Existing assignments and
+  // private refresh capabilities retain their ordinary guarded continuation;
+  // returning the original proposal grants neither replay nor collection.
+  if (agent.memory.factoryRegistryStatus?.().status === 'initialized'
+    && supplies.every(op => agent.memory.getFactoryOperationalRegistry().cells.some(cell => cell.members.some(member => member.unit_number === op.args?.unit_number)))) return plan
+  const s = scope(agent); const supply = s.step?.execution_guidance?.materialSupply
+  if (supply?.mode !== 'manual_bootstrap') return plan
+  return atFactoryCellBoundary(agent, residual ? 'manual_bootstrap_residual' : 'manual_bootstrap_normalization', async () => {
+    const fail = reason => { const code = `factory_cell_manual_bootstrap_${reason}`; throw new FactoryRegistryError(code, code) }
+    if (!isActiveStep(agent, s, plan.stepId) || plan.semanticCompletion
+      || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(s.plan?.status)) fail('scope_unproven')
+    // Raw operation replies may repeat a bound checkpoint. It supplies no
+    // authority or target: only an equivalent canonical contract is redundant.
+    if (plan.checkpoint !== undefined) {
+      const context = agent.currentContractContext()
+      if (!completionContractSupported(s.step.completion_contract, context) || !completionContractSupported(plan.checkpoint, context)
+        || agent.contractSignature(plan.checkpoint) !== agent.contractSignature(s.step.completion_contract)) fail('checkpoint_mismatch')
+    }
+    if (operations.length !== 1 || operations[0].name !== 'supply_entity') fail('mixed_operations')
+    const operation = operations[0]; const unit = operation.args?.unit_number; const items = operation.args?.items
+    if (!Number.isSafeInteger(unit) || !Array.isArray(items) || !items.length || items.length > 16
+      || new Set(items.map(row => row.item_name)).size !== items.length
+      || items.some(row => typeof row.item_name !== 'string' || !Number.isSafeInteger(row.count) || row.count <= 0)) fail('supply_invalid')
+    if (agent.memory.productionTasks?.has(recordKey(s))) fail('production_already_owned')
+    const targets = [...finiteInventoryTargets(s.step.completion_contract)]
+    if (!targets.length || targets.length > 16) fail('finite_target_required')
+    if (agent.memory.factoryRegistryStatus?.().status !== 'initialized') fail('world_unbound')
+    if (!agent.stateFile) fail('persistence_unavailable')
+    const original = JSON.stringify(plan); const committed = JSON.stringify(s.step)
+    const grant = agent.memory.currentGoalGrant?.(s.owner.key)
+    const authority = () => {
+      const state = agent.memory.planningState(s.owner.key)
+      return evaluateOperationAdmission(state, { operations, actor: { actor_id: agent.epoch?.actor_id, actor_epoch: agent.epoch?.epoch } }).ok
+        && (!grant || checkGrant(authorizationOf(state), state.goal, { grant_id: grant.grant_id, grant_revision: grant.revision,
+          actor_id: agent.epoch?.actor_id, actor_epoch: agent.epoch?.epoch }).ok)
+    }
+    if (!authority()) fail('authority_unproven')
+    const fence = async () => {
+      await assertProductionOwner(agent, s.owner)
+      if (!authority()) fail('authority_changed')
+      if (JSON.stringify(plan) !== original || JSON.stringify(getActivePlan(agent.memory.planningState(s.owner.key))?.steps[s.plan.active_step_index]) !== committed) fail('scope_changed')
+    }
+    await fence()
+    const result = await prepareFactoryCellHost(agent, async (observer, access) => {
+      const runtime = observer.runtime; const current = runtime.scope()
+      const receipts = finiteProductionPlacementReceipts(agent).filter(row => row.unit_number === unit)
+      if (receipts.length !== 1) fail('placement_unproven')
+      const receipt = receipts[0]
+      if (agent.memory.factoryTemporaryAssets().some(asset => asset.receipt_id === receipt.receipt_id)) fail('temporary_asset')
+      const member = runtime.recordPlacement({ unit_number: unit, name: receipt.name, position: receipt.position,
+        surface_index: receipt.surface_index, force_index: receipt.force_index, provenance: { receipt_id: receipt.receipt_id } }, current)
+      const observed = await observer.observeCandidate({ surface_index: current.surface_index, force_index: current.force_index,
+        assignment: { products: ['placement-proof'], purpose: 'Inspect explicit manual bootstrap target', method: 'runtime receipt' },
+        members: [member], ports: [], origin: runtime.origin() })
+      access.fence(); await fence()
+      const row = observed.native.members[0]; const candidates = []
+      for (const [item_name, count] of targets) {
+        const detail = await admissionJson(agent, s, 'getRecipeDetails', { item_or_recipe: item_name, requested_count: count })
+        access.fence(); await fence()
+        if (detail?.found !== true || detail.truncated !== false || !Array.isArray(detail.recipes)) fail('recipe_unknown')
+        for (const recipe of detail.recipes) {
+          if (!recipe || recipe.enabled !== true || typeof recipe.name !== 'string' || recipe.crafting_machines_truncated === true || !Array.isArray(recipe.crafting_machines)
+            || !Array.isArray(recipe.ingredients) || !Array.isArray(recipe.products)) fail('recipe_incomplete')
+          if (!recipe.crafting_machines.some(machine => machine?.name === receipt.name)
+            || !recipe.products.some(product => product?.type === 'item' && product.name === item_name)
+            || !recipe.ingredients.some(input => input?.type === 'item' && input.name === supply.resource)) continue
+          candidates.push({ item_name, count, recipe_name: recipe.name })
+        }
+      }
+      if (candidates.length !== 1) fail(candidates.length ? 'recipe_ambiguous' : 'recipe_unmatched')
+      const selected = candidates[0]
+      const recipe = await readFactoryProducerRecipe(agent, access, row, selected.recipe_name)
+      await fence(); access.fence()
+      const material = recipe.ingredients?.filter(input => input.type === 'item') ?? []
+      if (material.length !== 1 || material[0].name !== supply.resource || recipe.ingredients.length !== 1
+        || !items.some(item => item.item_name === supply.resource)) fail('resource_mismatch')
+      const fuelItems = items.filter(item => item.item_name !== supply.resource)
+      if (fuelItems.length > 1 || fuelItems.some(item => row.fuel_item_facts?.state !== 'known'
+        || row.fuel_item_facts.coverage !== 'complete' || row.burner_fuel_requirement?.state !== 'known' || row.burner_fuel_requirement.truncated !== false
+        || row.fuel_item_facts.truncated !== false || !row.fuel_item_facts.items?.some(fuel => fuel.name === item.item_name && fuel.fuel_value > 0
+          && row.burner_fuel_requirement?.fuel_categories?.includes(fuel.category)))) fail('fuel_unproven')
+      const intent = normalizeProductionIntent({ targets: [{ item_name: selected.item_name, count: selected.count }],
+        producers: [{ recipe_name: selected.recipe_name, unit_number: unit }],
+        ...(fuelItems.length ? { fuel: { item_name: fuelItems[0].item_name, count: fuelItems[0].count } } : {}) })
+      const detail = { request_id: current.request_id, goal_id: current.goal_id, plan_id: current.plan_id, plan_version: current.plan_version,
+        step_id: current.step_id, source_placement: receipt, original_operations: operations, production_intent: intent,
+        ...(plan.checkpoint !== undefined ? { original_checkpoint: plan.checkpoint, checkpoint_disposition: 'identical_committed_contract_retained' } : {}),
+        reason: 'authorized_manual_supply_requires_finite_producer_binding', world_operations_replayed: 0, native_tick: observed.native.tick }
+      let allowance
+      if (residual) {
+        allowance = agent.memory.consumeFactoryUseRecovery(s.owner.key, { kind: 'manual_bootstrap_production', owner: s.materialOwner, unit_number: unit },
+          { request_id: current.request_id, plan_id: current.plan_id, code: detail.reason, evidence_digest: factoryMetadataDigest({ receipt, intent }) })
+        await agent.persistState({ strict: true }); access.fence(); await fence()
+        await agent.traceEvent(allowance.allowed ? 'production.manual_bootstrap_recovery_started' : 'production.manual_bootstrap_recovery_exhausted', { ...detail, ...allowance })
+        access.fence(); await fence()
+        if (!allowance.allowed) fail('recovery_exhausted')
+      }
+      await agent.traceEvent(residual ? 'production.manual_bootstrap_recovery_resolved' : 'production.manual_bootstrap_normalized',
+        { ...detail, ...allowance, disposition: 'finite_controller_admission_required' })
+      access.fence(); await fence()
+      const { checkpoint: _redundantCheckpoint, ...envelope } = plan
+      return { ...envelope, operations: [], productionTask: intent }
+    }).execute()
+    await fence()
+    return result
+  })
+}
 // Restored/adopted bindings are executable authority too. Never resolve just
 // the immutable model intent while silently omitting the durable correction.
 export function effectiveProductionFactoryIntent(task) {

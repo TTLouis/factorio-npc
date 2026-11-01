@@ -62,9 +62,26 @@ test('unconfigured assemblers cannot receive production materials and a running 
   assert.deepEqual(result.operation, { name: 'wait', args: { ticks: 120 } })
 })
 
-function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, fuelFacts = false, lostAck, provider, priorPlacement = false, dormantOutput = false } = {}) {
+function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = false, fuelFacts = false, lostAck, provider, priorPlacement = false, dormantOutput = false, manualBootstrap = false, manualGoalScope = 'long_horizon' } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  memory.restore(structuredClone(iron ? an.iron_memory : an.memory))
+  const fixture = structuredClone(iron ? an.iron_memory : an.memory)
+  if (manualBootstrap) {
+    // BJ's public W6/W18 shape; identities/geometry use this existing native fixture.
+    const state = fixture.planning_states.find(row => row.key === an.key).state
+    const plan = getActivePlan(state); const step = plan.steps[plan.active_step_index]
+    step.description = 'Smelt and collect ten copper plates and verify electronics.'
+    step.completion_contract = { mode: 'all', confidence: 0, requirements: [
+      { id: 'plates', kind: 'inventory_count', item_name: 'copper-plate', minimum: 10 },
+      { id: 'electronics', kind: 'research_completed', technology: 'electronics' },
+    ] }
+    step.execution_guidance = { approach: 'Supply the exact retained furnace for the finite bootstrap.', rationale: 'The committed manual method enables later automation.', constraints: [], skillIds: [], materialSupply: { mode: 'manual_bootstrap', resource: 'copper-ore' } }
+    if (manualGoalScope === 'finite') state.goal.definition = { ...state.goal.definition, scope: 'finite', done_when: structuredClone(step.completion_contract.requirements) }
+    const legacy = fixture.plans.find(row => row.key === an.key).state
+    legacy.plan[legacy.current_step] = step.description
+    const boardStep = legacy.task_board.steps[legacy.task_board.active_index]
+    boardStep.description = step.description; boardStep.completion_contract = structuredClone(step.completion_contract)
+  }
+  memory.restore(fixture)
   pinLegacyFixtureSkillContext(memory)
   const held = () => getActivePlan(memory.planningState(an.key))
   const game = new FakeFactorio({ inventory: { wood: 1, 'copper-plate': 1, coal: 10, lab: 1, 'offshore-pump': 1, boiler: 1, 'steam-engine': 1, pipe: 10 } })
@@ -91,12 +108,16 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
     game.inventory['copper-ore'] = 1
     game.inventory.coal = 11 // Ten are protected by the AN kit checkpoint.
   }
+  if (manualBootstrap) {
+    game.inventory = { 'copper-ore': 10, 'copper-plate': 0, coal: 5 }
+    game.knownTechnologies.add('electronics')
+  }
   const machine = { unit_number: 45, name: 'stone-furnace', type: 'furnace', energy_source: 'burner', status_name: 'no_fuel', working: false,
     position: { x: 18, y: 109 }, crafting_progress: 0, inventories: [1, 2, 3].map(index => ({ index, items: [] })), inventories_truncated: false, inventory_items_truncated: false }
   if (iron) Object.assign(machine, { unit_number: 44, position: { x: -44, y: 59 }, recipe: 'iron-plate' })
   const drill = { ...structuredClone(machine), unit_number: 43, name: 'burner-mining-drill', type: 'mining-drill', position: { x: -43, y: 61 },
     spatial: { item_io: { drop_target: { unit_number: 44 } } } }
-  let producedIron = 0
+  let producedIron = 0; let producedCopper = 0
   const native = game.command.bind(game)
   const admissionJournal = game.admissionJournal.bind(game)
   game.admissionJournal = () => {
@@ -245,7 +266,7 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
       if (text.includes("item_name='coal'")) { machine.inventories[0].items = [{ name: 'coal', count: 1 }]; machine.status_name = 'no_ingredients'; game.inventory.coal-- }
       else { machine.inventories[1].items = [{ name: 'copper-ore', count: 1 }]; machine.recipe = 'copper-plate'; machine.working = true; machine.status_name = 'working'; game.inventory['copper-ore']-- }
     }
-    if (op === 'wait') { machine.inventories[1].items = []; machine.inventories[2].items = [{ name: 'copper-plate', count: 1 }]; machine.working = false; machine.status_name = 'no_ingredients'; if (dormantOutput) delete machine.recipe }
+    if (op === 'wait') { machine.inventories[1].items = []; machine.inventories[2].items = [{ name: 'copper-plate', count: 1 }]; machine.working = false; machine.status_name = 'no_ingredients'; if (dormantOutput) delete machine.recipe; if (manualBootstrap && ++producedCopper >= 10) game.researched.add('electronics') }
     if (op === 'move_items_exact') { machine.inventories[2].items = []; game.inventory['copper-plate']++ }
   }
   const intent = iron ? { targets: [{ item_name: 'iron-plate', count: 58 }], producers: [{ recipe_name: 'iron-plate', unit_number: 44 }],
@@ -254,6 +275,17 @@ function world({ inject = 0, onRead, furnace = false, losePlate = false, iron = 
   const start = () => agent.commitPlan({ chatMessage: '', stepId: held().steps[held().active_step_index].step_id, plan: [], currentStep: 0, operations: [], productionTask: intent })
   return { agent, game, memory, held, start, intent, ops, events, providers, machine, drill, preflights: () => preflights }
 }
+
+test('BJ manual bootstrap raw supply enters finite production under the unchanged long-horizon goal', async () => {
+  const w = world({ furnace: true, priorPlacement: true, dormantOutput: true, manualBootstrap: true, fuelFacts: true })
+  assert.equal(w.memory.planningState(an.key).goal.definition.scope, 'long_horizon')
+  const step = w.held().steps[w.held().active_step_index]
+  w.agent.recordLiveEntityToolResult('getEntityStatus', await w.game.command(w.agent.observationToolCommand('getEntityStatus', { unit_number: 45 })))
+  await w.agent.commitPlan({ chatMessage: '', plan: [], currentStep: 0, stepId: step.step_id,
+    operations: [{ name: 'supply_entity', args: { unit_number: 45, items: [{ item_name: 'copper-ore', count: 10 }, { item_name: 'coal', count: 5 }] } }] })
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 1)
+  assert.equal(w.providers.length, 0)
+})
 
 test('recorded AN excessive cable intent is refused by the unchanged native preflight boundary', async () => {
   const w = world()
@@ -992,4 +1024,186 @@ test('native dormant output completes real collection and subsequent controller 
   assert.equal(w.providers.length, 0)
   assert.deepEqual(w.held().steps, before)
   assert.ok(w.events.some(row => row.event === 'factory_cell.dormant_output_recipe_evidence' && row.data.commissioning === 'unverified'))
+})
+
+const manualOptions = { furnace: true, priorPlacement: true, dormantOutput: true, manualBootstrap: true, fuelFacts: true }
+const manualRaw = w => ({ chatMessage: '', stepId: activeStepId(w), operations: [
+  { name: 'supply_entity', args: { unit_number: 45, items: [{ item_name: 'copper-ore', count: 10 }, { item_name: 'coal', count: 5 }] } },
+] })
+async function observeManualMachine(w) {
+  w.agent.recordLiveEntityToolResult('getEntityStatus', await w.game.command(w.agent.observationToolCommand('getEntityStatus', { unit_number: 45 })))
+}
+for (const form of ['assistant_json', 'submitPlan']) for (const residual of [false, true]) for (const redundantCheckpoint of [false, true]) for (const manualGoalScope of residual || redundantCheckpoint ? ['long_horizon'] : ['long_horizon', 'finite']) {
+  test(`BJ raw ${form} ${residual ? 'residual' : 'prevention'} ${redundantCheckpoint ? 'matching checkpoint' : 'no checkpoint'} completes finite step within ${manualGoalScope} goal without model repair`, async () => {
+    let script
+    const reply = w => ({ ...manualRaw(w), ...(redundantCheckpoint ? { checkpoint: structuredClone(w.held().steps[w.held().active_step_index].completion_contract) } : {}) })
+    const w = scripted({ ...manualOptions, manualGoalScope }, w => script ??= [form === 'assistant_json' ? { content: JSON.stringify(reply(w)) }
+      : { tool_calls: [{ id: 'manual-first-supply', type: 'function', function: { name: 'submitPlan', arguments: JSON.stringify(reply(w)) } }] }])
+    await observeManualMachine(w)
+    const original = structuredClone(w.held().steps); const goal = structuredClone(w.memory.planningState(an.key).goal.definition)
+    const receipts = structuredClone(w.memory.snapshot().factory_placement_receipts)
+    if (residual) {
+      const normalize = w.agent.normalizeManualBootstrapProduction.bind(w.agent)
+      w.agent.normalizeManualBootstrapProduction = (plan, options) => options?.residual ? normalize(plan, options) : plan
+    }
+    await w.agent.runTurn()
+    assert.equal(w.providers.length, 1)
+    assert.equal(w.events.filter(row => row.event === 'production.manual_bootstrap_normalized').length, residual ? 0 : 1)
+    assert.equal(w.events.filter(row => row.event === 'production.manual_bootstrap_recovery_started').length, residual ? 1 : 0)
+    const normalization = w.events.find(row => row.event === `production.manual_bootstrap_${residual ? 'recovery_resolved' : 'normalized'}`).data
+    assert.equal(normalization.checkpoint_disposition, redundantCheckpoint ? 'identical_committed_contract_retained' : undefined)
+    if (redundantCheckpoint) assert.equal(w.agent.contractSignature(normalization.original_checkpoint), w.agent.contractSignature(original.find(step => step.step_id === normalization.step_id).completion_contract))
+    try { for (let i = 0; i < 65 && w.held().status !== 'COMPLETED'; i++) await w.agent.completed() }
+    catch (error) { error.message += JSON.stringify({ inventory: w.game.inventory, research: [...w.game.researched], events: w.events.slice(-16) }); throw error }
+    assert.equal(w.held().status, 'COMPLETED', JSON.stringify({ inventory: w.game.inventory, pause: w.memory.pauseRecord(an.key), events: w.events.slice(-12) }))
+    assert.equal(w.game.inventory['copper-plate'], 10); assert.equal(w.game.researched.has('electronics'), true)
+    assert.equal(w.memory.planningState(an.key).goal.status, manualGoalScope === 'finite' ? 'completed' : 'active')
+    assert.deepEqual(w.memory.planningState(an.key).goal.definition, goal); assert.deepEqual(w.held().steps, original)
+    assert.deepEqual(w.memory.snapshot().factory_placement_receipts, receipts)
+    assert.equal(w.ops.filter(op => op === 'move_items_exact').length, 10)
+    assert.equal(w.ops.includes('place_entity'), false); assert.equal(w.providers.length, 1)
+    assert.equal(w.events.filter(row => row.event.startsWith('production.manual_bootstrap_')).length, residual ? 2 : 1, 'controller supply never renormalizes')
+  })
+}
+
+function changeManualFixtureStep(w, change) {
+  const snapshot = w.memory.snapshot()
+  const state = snapshot.planning_states.find(row => row.key === an.key).state
+  const plan = getActivePlan(state); change(plan.steps[plan.active_step_index])
+  w.memory.restore(snapshot)
+}
+for (const residual of [false, true]) for (const change of ['different quantity', 'missing research', 'extra outcome', 'any mode', 'malformed', 'unbound', 'semantic']) test(`BJ raw checkpoint ${change} refuses ${residual ? 'residual' : 'prevention'} without authority or effects`, async () => {
+  const w = world(manualOptions); const p = manualRaw(w)
+  p.checkpoint = structuredClone(w.held().steps[w.held().active_step_index].completion_contract)
+  if (change === 'different quantity') p.checkpoint.requirements.find(row => row.kind === 'inventory_count').minimum++
+  if (change === 'missing research') p.checkpoint.requirements = p.checkpoint.requirements.filter(row => row.kind !== 'research_completed')
+  if (change === 'extra outcome') p.checkpoint.requirements.push({ id: 'extra', kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 })
+  if (change === 'any mode') p.checkpoint.mode = 'any'
+  if (change === 'malformed') p.checkpoint.requirements = 'not a contract'
+  if (change === 'unbound') changeManualFixtureStep(w, step => { delete step.completion_contract })
+  if (change === 'semantic') p.semanticCompletion = { stepId: p.stepId, summary: 'claim without proof' }
+  const before = w.memory.snapshot(); const original = structuredClone(p)
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(p, { residual }), /checkpoint_mismatch|scope_unproven/)
+  assert.deepEqual(p, original); assert.deepEqual(w.memory.snapshot(), before); assert.deepEqual(w.ops, [])
+  assert.equal(w.providers.length, 0); assert.equal(w.events.some(row => row.event.startsWith('production.manual_bootstrap_')), false)
+})
+for (const [name, change, expected] of [
+  ['mixed operations', (w, p) => p.operations.push({ name: 'wait', args: { ticks: 30 } }), /mixed_operations/],
+  ['wrong step', (w, p) => { p.stepId = w.held().steps[0].step_id }, /scope_unproven/],
+  ['missing finite output', w => changeManualFixtureStep(w, step => { step.completion_contract.requirements = [{ kind: 'research_completed', technology: 'electronics' }] }), /finite_target_required/],
+  ['wrong resource', w => changeManualFixtureStep(w, step => { step.execution_guidance.materialSupply.resource = 'iron-ore' }), /recipe_unmatched/],
+  ['foreign producer', (w, p) => { p.operations[0].args.unit_number = 999 }, /placement_unproven/],
+  ['mixed material', (w, p) => p.operations[0].args.items.push({ item_name: 'iron-ore', count: 1 }), /fuel_unproven/],
+  ['missing selected material', (w, p) => { p.operations[0].args.items = [{ item_name: 'coal', count: 5 }] }, /resource_mismatch/],
+  ['state file missing', w => { w.agent.stateFile = null }, /persistence_unavailable/],
+  ['pending native batch', w => { w.agent.batchInFlight = true }, /not_idle/],
+  ['cancelled owner', w => { w.agent.active = false }, /cancelled|superseded|stale/i],
+  ['wrong placement plan', w => { const snapshot = w.memory.snapshot(); snapshot.factory_placement_receipts[0].plan_id = 'foreign-plan'; w.memory.restore(snapshot) }, /factory_placement_store_fault/],
+]) test(`BJ manual normalization refuses ${name} without metadata or native effects`, async () => {
+  const w = world(manualOptions); const p = manualRaw(w); change(w, p)
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(p), expected)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0); assert.deepEqual(w.ops, [])
+  assert.equal(w.memory.snapshot().factory_use_recovery.records.length, 0)
+})
+for (const change of ['ambiguous', 'truncated', 'unknown', 'wrong machine']) test(`BJ manual normalization refuses ${change} live recipe evidence`, async () => {
+  const w = world(manualOptions); const command = w.game.command
+  w.game.command = async text => {
+    const raw = await command(text)
+    if (!text.includes('"recipe_details"')) return raw
+    const detail = JSON.parse(raw)
+    if (change === 'ambiguous') detail.recipes.push({ ...detail.recipes[0], name: 'alternative-live-recipe' })
+    if (change === 'truncated') detail.truncated = true
+    if (change === 'unknown') return '{}'
+    if (change === 'wrong machine') detail.recipes[0].crafting_machines = [{ name: 'different-machine' }]
+    return JSON.stringify(detail)
+  }
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w)), /recipe_(ambiguous|unknown|unmatched)/)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0); assert.deepEqual(w.ops, [])
+})
+for (const change of ['actor', 'epoch', 'goal', 'request', 'conversation', 'role', 'cancel']) test(`BJ manual normalization fences ${change} change across native recipe await`, async () => {
+  let fired = false
+  const w = world({ ...manualOptions, onRead: ({ agent, memory, text }) => {
+    if (fired || !text.includes('"recipe_details"')) return
+    fired = true
+    if (change === 'actor') agent.epoch.actor_id++
+    if (change === 'epoch') agent.epoch.epoch++
+    if (change === 'goal') memory.planningState(an.key).goal.goal_id = 'replacement-goal'
+    if (change === 'request') agent.traceRequest = { id: 'replacement-request' }
+    if (change === 'conversation') agent.agentContext.conversationSeq++
+    if (change === 'role') agent.agentContext.role = 'planner'
+    if (change === 'cancel') agent.active = false
+  } })
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w)))
+  assert.equal(fired, true); assert.equal(w.memory.getFactoryRegistry().cells.length, 0); assert.deepEqual(w.ops, [])
+  assert.equal(w.memory.snapshot().factory_use_recovery.records.length, 0)
+})
+test('BJ manual residual persistence failure cannot publish a producer or send supply', async () => {
+  const w = world(manualOptions)
+  w.agent.persistState = async () => { throw new Error('injected durable save failure') }
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w), { residual: true }), /injected durable save failure/)
+  assert.equal(w.memory.getFactoryRegistry().cells.length, 0); assert.deepEqual(w.ops, [])
+  assert.equal(w.events.some(row => row.event === 'production.manual_bootstrap_recovery_resolved'), false)
+})
+test('BJ manual residual allowance survives restart and visibly exhausts without replay', async () => {
+  const w = world(manualOptions)
+  for (let i = 0; i < 3; i++) {
+    w.agent.traceRequest = { id: `manual-residual-${i}` }
+    await w.agent.normalizeManualBootstrapProduction(manualRaw(w), { residual: true })
+    const snapshot = JSON.parse(JSON.stringify(w.memory.snapshot()))
+    w.memory.restore(snapshot)
+    assert.deepEqual(w.memory.snapshot().factory_use_recovery, snapshot.factory_use_recovery)
+  }
+  w.agent.traceRequest = { id: 'manual-residual-exhausted' }
+  let failure
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w), { residual: true }), error => {
+    failure = error; return error.code === 'factory_cell_manual_bootstrap_recovery_exhausted' && error.pause_class === 'guard'
+  })
+  await pauseStrandedPlanAfterRequestError({ agent: w.agent, currentPlanState: () => w.memory.currentPlan(an.key) }, failure)
+  assert.equal(w.memory.pauseRecord(an.key).pause_class, 'guard')
+  assert.equal(w.events.find(row => row.event === 'production.manual_bootstrap_recovery_exhausted').data.used, 3)
+  assert.deepEqual(w.ops, []); assert.equal(w.providers.length, 0)
+})
+
+test('BJ manual normalization refuses a replacement plan without its required grant', async () => {
+  const w = world(manualOptions)
+  w.held().replacement = { grant_id: 'missing-grant', grant_revision: 1 }
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w)), /authority_unproven/)
+  assert.deepEqual(w.ops, []); assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+})
+for (const edge of ['native busy', 'uncertain journal', 'foreign world']) test(`BJ manual normalization refuses ${edge}`, async () => {
+  const w = world(manualOptions)
+  if (edge === 'foreign world') {
+    const command = w.game.command
+    w.game.command = async text => text.includes("'sgluna_factory','world_identity'")
+      ? JSON.stringify({ schema_version: 1, ok: true, code: 'ok', world_id: '4c4d1254-2433-45ea-98f2-2e6d97d6cbd9' }) : command(text)
+  } else {
+    const read = w.agent.readTaskStatusRaw.bind(w.agent)
+    w.agent.readTaskStatusRaw = async () => {
+      const status = JSON.parse(await read())
+      if (edge === 'native busy') Object.assign(status, { task_state: 'working', queue_length: 1, queue_empty: false })
+      else status.admission_journal = null
+      return JSON.stringify(status)
+    }
+  }
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w)), /factory_/)
+  assert.deepEqual(w.ops, []); assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+})
+for (const boundary of ['persist', 'trace']) test(`BJ manual residual fences cancellation during ${boundary} and cannot renew spent allowance`, async () => {
+  const w = world(manualOptions); const original = w.agent[boundary === 'persist' ? 'persistState' : 'traceEvent'].bind(w.agent)
+  const method = boundary === 'persist' ? 'persistState' : 'traceEvent'
+  w.agent[method] = async (...args) => {
+    const result = await original(...args)
+    if (boundary === 'persist' || args[0] === 'production.manual_bootstrap_recovery_started') w.agent.active = false
+    return result
+  }
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w), { residual: true }))
+  assert.deepEqual(w.ops, []); assert.equal(w.memory.getFactoryRegistry().cells.length, 0)
+  const snapshot = JSON.parse(JSON.stringify(w.memory.snapshot()))
+  assert.equal(snapshot.factory_use_recovery.records[0].attempts.length, 1)
+  w.memory.restore(snapshot); w.agent.active = true; w.agent[method] = original
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(manualRaw(w), { residual: true }), /recovery_exhausted/)
+  const exhausted = w.events.find(row => row.event === 'production.manual_bootstrap_recovery_exhausted')
+  assert.equal(exhausted.data.duplicate, true); assert.equal(exhausted.data.used, 1)
+  assert.deepEqual(w.memory.snapshot().factory_use_recovery, snapshot.factory_use_recovery)
+  assert.deepEqual(w.ops, [])
 })

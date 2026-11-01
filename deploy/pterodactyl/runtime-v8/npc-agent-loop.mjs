@@ -15,7 +15,7 @@ import { normalizeProductionIntent } from './production-task.mjs'
 import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
 import { activeStockDependencyBarrier, bindStockDependencyAdmission, continueStockDependencyBarrier, startStockDependencyBarrier } from './bg-stock-dependency.mjs'
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
-import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
+import { continueProductionTask, normalizeManualBootstrapProduction, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
 import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
@@ -15342,6 +15342,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Refused here, an intent the active step cannot admit is an ordinary plan_category correction; refused only in
     // commitPlan, it failed the request (Run AZ lane A: intermediate target). A refusal the harness can answer from the
     // committed step and fresh game facts passes here; commitPlan repairs it again from fresher facts and reports it.
+    plan = await this.normalizeManualBootstrapProduction(plan)
     if (plan.productionTask) await screenProductionTask(this, plan, this.productionRepairOptions(plan))
     const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
@@ -17727,6 +17728,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  normalizeManualBootstrapProduction(plan, options) {
+    return normalizeManualBootstrapProduction(this, plan, options)
+  }
+
   async reportProductionRepairs(plan, repairs) {
     const requestId = this.traceRequest?.id
     const owner = this.captureCheckpointOwner()
@@ -17815,7 +17820,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Backstop for programmatic callers: never silently drop planner actions.
     this.validatePlannerRoleOutput(plan)
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
-    const productionStepId = plan.productionTask ? plan.stepId : undefined
+    let productionStepId = plan.productionTask ? plan.stepId : undefined
     const harnessDefaults = plan.defaults
     const miningStepId = plan.stepId
     await this.validatePreflightCorrectionScope(plan)
@@ -17829,6 +17834,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
+    const normalizedSupply = refreshed ? plan : await this.normalizeManualBootstrapProduction({ ...plan, stepId: miningStepId }, { residual: true })
+    if (normalizedSupply.productionTask && !plan.productionTask) { plan = normalizedSupply; productionStepId = miningStepId }
     if (!plan.productionTask && !plan.plannerReview) {
       const supplyReview = await this.reviewExecutorSupplyDrift(plan)
       if (supplyReview !== undefined) return supplyReview
