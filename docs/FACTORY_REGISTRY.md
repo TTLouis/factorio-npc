@@ -398,7 +398,10 @@ adopt unrelated machines, or turn bootstrap output into automated throughput.
 Mixed batches, ambiguous or incomplete capability, missing output/custody,
 uncertain work and stale authority refuse before world actions. Existing assigned
 cells retain their ordinary typed use checks; controller-generated supply does
-not normalize again.
+not normalize again. Eligibility is checked before new-producer restrictions:
+already assigned cells and private harness-owned entity-refresh/collection
+continuations retain their existing validators, checkpoint handling and durable
+limits. An unchanged proposal is not permission to replay its supply operation.
 
 The commit boundary repeats this check if parsed-reply prevention was bypassed.
 It strictly persists consumption of the existing same-goal factory recovery

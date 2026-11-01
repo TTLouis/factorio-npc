@@ -17834,7 +17834,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
-    const normalizedSupply = await this.normalizeManualBootstrapProduction({ ...plan, stepId: miningStepId }, { residual: true })
+    const normalizedSupply = refreshed ? plan : await this.normalizeManualBootstrapProduction({ ...plan, stepId: miningStepId }, { residual: true })
     if (normalizedSupply.productionTask && !plan.productionTask) { plan = normalizedSupply; productionStepId = miningStepId }
     if (!plan.productionTask && !plan.plannerReview) {
       const supplyReview = await this.reviewExecutorSupplyDrift(plan)

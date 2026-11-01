@@ -3,7 +3,7 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { parseInventoryCounts } from './handoff-packet.mjs'
 import { materialOwnerKey } from './material-ledger.mjs'
 import { normalizeCounts, recipeForItem } from './quantity-compiler.mjs'
-import { restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
+import { REFRESHED_ENTITY_PLAN, restoredCollectionFence, validateRefreshedEntity } from './entity-refresh.mjs'
 import { advanceProductionTask, bindProductionFuelSource, bindProductionProducers, createProductionTask, finiteInventoryTargets, machineFacts, normalizeProductionIntent, productionBindings, productionScopeMatches, productionScopeMismatch, PRODUCTION_LIMITS, PRODUCTION_RESOURCE_BINDINGS_MAX, recoverProductionTask, restoreProductionTask } from './production-task.mjs'
 import { chooseBurnerFuel, fuelAllowanceCount, repairTargets } from './production-repair.mjs'
 import { missingProductionBindings, resolveProductionBindings } from './bg-production-binding.mjs'
@@ -53,9 +53,16 @@ function recordKey(s) { return `${s.owner.key}/${materialOwnerKey(s.materialOwne
 // from the committed finite output and fresh native capability, never from stock.
 // The existing finite controller owns all supply/wait/collection after this seam.
 export async function normalizeManualBootstrapProduction(agent, plan, { residual = false } = {}) {
-  if (agent.completionProtocolVersion < 3 || agent.productionAdmission || plan.productionTask || plan.plannerReview || agent.agentContext.role !== 'executor') return plan
+  if (agent.completionProtocolVersion < 3 || agent.productionAdmission || agent.entityRefreshAdmission || plan[REFRESHED_ENTITY_PLAN]
+    || plan.productionTask || plan.plannerReview || agent.agentContext.role !== 'executor') return plan
   const operations = plan.operations ?? []
-  if (!operations.some(op => op.name === 'supply_entity')) return plan
+  const supplies = operations.filter(op => op.name === 'supply_entity')
+  if (!supplies.length) return plan
+  // This seam owns new unassigned producers only. Existing assignments and
+  // private refresh capabilities retain their ordinary guarded continuation;
+  // returning the original proposal grants neither replay nor collection.
+  if (agent.memory.factoryRegistryStatus?.().status === 'initialized'
+    && supplies.every(op => agent.memory.getFactoryOperationalRegistry().cells.some(cell => cell.members.some(member => member.unit_number === op.args?.unit_number)))) return plan
   const s = scope(agent); const supply = s.step?.execution_guidance?.materialSupply
   if (supply?.mode !== 'manual_bootstrap') return plan
   return atFactoryCellBoundary(agent, residual ? 'manual_bootstrap_residual' : 'manual_bootstrap_normalization', async () => {
@@ -71,7 +78,6 @@ export async function normalizeManualBootstrapProduction(agent, plan, { residual
     const targets = [...finiteInventoryTargets(s.step.completion_contract)]
     if (!targets.length || targets.length > 16) fail('finite_target_required')
     if (agent.memory.factoryRegistryStatus?.().status !== 'initialized') fail('world_unbound')
-    if (agent.memory.getFactoryOperationalRegistry().cells.some(cell => cell.members.some(member => member.unit_number === unit))) return plan
     if (!agent.stateFile) fail('persistence_unavailable')
     const original = JSON.stringify(plan); const committed = JSON.stringify(s.step)
     const grant = agent.memory.currentGoalGrant?.(s.owner.key)
