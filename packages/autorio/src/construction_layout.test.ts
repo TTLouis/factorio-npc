@@ -418,7 +418,7 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
       expect(code([SRC, { ...INS, slot: 'src' }], [FEED])).toMatchObject({ ok: false, error: { code: 'INVALID_CONNECTION', slot: 'src', placement_index: 1 } })
       expect(code([{ ...SRC, slot: 'Bad Slot' }, INS], [FEED])).toMatchObject({ ok: false, error: { code: 'INVALID_PLACEMENT', index: 0 } })
       expect(code([{ ...SRC, slot: 'x'.repeat(41) }, INS], [FEED])).toMatchObject({ ok: false, error: { code: 'INVALID_PLACEMENT', index: 0 } })
-      expect(code([SRC, INS], new Array(9).fill(FEED))).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } })
+      expect(code([SRC, INS], Array.from({ length: 9 }, () => FEED))).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } })
       const seven = Array.from({ length: 7 }, (_, index) => ({ entity_name: 'test-chest', x: 0.5 + index, y: -3.5 }))
       expect(code([...seven.slice(0, 4), SRC, INS], [FEED])).toMatchObject({ ok: true })
       expect(code([...seven, SRC, INS], [FEED])).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } })
@@ -805,7 +805,7 @@ describe('connected construction layouts (milestone 4 L2/L3)', () => {
     })
 
     it('keeps at most 32 records, dropping the oldest complete ones first', () => {
-      const f = build()
+      build()
       const record = (layout_id: number, state: 'running' | 'complete' | 'paused') => {
         const created = create_layout_record({
           layout_id,

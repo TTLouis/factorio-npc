@@ -668,11 +668,10 @@ describe('entity geometry knowledge', () => {
     // A synthetic fluid-capable drill reuses the same complete geometry proof.
     // The identical unlisted machine remains unsupported by preservation.
     expect(preservation_geometry_for_actor(actor, 77)).toBeUndefined()
-    chemicalPlant.name = 'electric-mining-drill'
-    chemicalPlant.type = 'mining-drill'
+    const electricDrill = { ...chemicalPlant, name: 'electric-mining-drill', type: 'mining-drill', drop_position: { x: 20, y: 19 } }
+    ;(globalThis as any).game.get_entity_by_unit_number = () => electricDrill
     expect(preservation_geometry_for_actor(actor, 77)).toMatchObject({ found: true, entity: { name: 'electric-mining-drill' }, fluid_box_count: 2 })
-    chemicalPlant.name = 'chemical-plant'
-    chemicalPlant.type = 'assembling-machine'
+    ;(globalThis as any).game.get_entity_by_unit_number = () => chemicalPlant
     expect(result.fluid_storages).toHaveLength(2)
     expect(result.fluid_storages[0]).toMatchObject({
       index: 1,

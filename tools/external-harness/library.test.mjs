@@ -103,14 +103,16 @@ test('actual runtime library calls do not read bridge/world or modify execution 
 })
 
 test('MCP paired streams deliver typed library content and validate enum before runtime', async t => {
-  const input = new PassThrough(), output = new PassThrough(), replies = []
+  const input = new PassThrough()
+  const output = new PassThrough()
+  const replies = []
   let buffer = ''
   output.on('data', chunk => { buffer += chunk; while (buffer.includes('\n')) { const n = buffer.indexOf('\n'); replies.push(JSON.parse(buffer.slice(0, n))); buffer = buffer.slice(n + 1) } })
   const runtime = Object.fromEntries(['capabilities', 'context', 'observe', 'submit', 'get', 'cancel', 'resume'].map(key => [key, () => { throw new Error(`Forbidden ${key}`) }]))
   runtime.library = readLibrary
   const server = startMcpServer({ runtime, input, output, error: new PassThrough() })
   t.after(server.stop)
-  const send = message => input.write(JSON.stringify(message) + '\n')
+  const send = message => input.write(`${JSON.stringify(message)}\n`)
   send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'library-test', version: '1' } } })
   send({ jsonrpc: '2.0', method: 'notifications/initialized' })
   send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'knowledge', action: 'get', id: OWNER_REQUIREMENT_ID } } })

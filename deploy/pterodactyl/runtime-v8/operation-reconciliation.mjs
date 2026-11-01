@@ -14,6 +14,31 @@ import { createHash } from 'node:crypto'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { strictTaskTypesForOperation } from './step-completion.mjs'
 
+export const RECONCILE_VERDICT = Object.freeze({
+  ADMITTED_IN_FLIGHT: 'admitted_in_flight',
+  ADMITTED_COMPLETED: 'admitted_completed',
+  ADMITTED_PARTIAL: 'admitted_partial',
+  ADMITTED_CANCELLED: 'admitted_cancelled',
+  NOT_ADMITTED: 'not_admitted',
+  // The mod proved each refused operation changed nothing (a validation refusal, or the engine refusing the batch's
+  // first task before it created anything). Operations that completed synchronously before it did happen.
+  REFUSED_BEFORE_MUTATION: 'refused_before_mutation',
+  STALE_ACTOR: 'stale_actor',
+  GENERATION_CHANGED: 'generation_changed',
+  UNKNOWN: 'unknown',
+})
+
+// What the world may look like after each verdict. `happened` and `in_flight` mean the effect is real or on its way;
+// `unknown` and `partial_unknown` mean it may be; only `not_happened` allows the same operation to be issued again.
+export const EFFECT = Object.freeze({
+  HAPPENED: 'happened',
+  IN_FLIGHT: 'in_flight',
+  PARTIAL_UNKNOWN: 'partial_unknown',
+  PARTIAL_KNOWN: 'partial_known',
+  UNKNOWN: 'unknown',
+  NOT_HAPPENED: 'not_happened',
+})
+
 export const PENDING_OPERATION_LIMITS = Object.freeze({
   operations: 16,
   // The mod admission journal accepts at most 192 characters (operation_admission.ts).
@@ -323,31 +348,6 @@ export const PENDING_STATE = Object.freeze({
   UNRECONCILED: 'unreconciled',
   // Reconciliation proved the batch reached the game (in flight, completed or cancelled).
   ADMITTED: 'admitted',
-})
-
-export const RECONCILE_VERDICT = Object.freeze({
-  ADMITTED_IN_FLIGHT: 'admitted_in_flight',
-  ADMITTED_COMPLETED: 'admitted_completed',
-  ADMITTED_PARTIAL: 'admitted_partial',
-  ADMITTED_CANCELLED: 'admitted_cancelled',
-  NOT_ADMITTED: 'not_admitted',
-  // The mod proved each refused operation changed nothing (a validation refusal, or the engine refusing the batch's
-  // first task before it created anything). Operations that completed synchronously before it did happen.
-  REFUSED_BEFORE_MUTATION: 'refused_before_mutation',
-  STALE_ACTOR: 'stale_actor',
-  GENERATION_CHANGED: 'generation_changed',
-  UNKNOWN: 'unknown',
-})
-
-// What the world may look like after each verdict. `happened` and `in_flight` mean the effect is real or on its way;
-// `unknown` and `partial_unknown` mean it may be; only `not_happened` allows the same operation to be issued again.
-export const EFFECT = Object.freeze({
-  HAPPENED: 'happened',
-  IN_FLIGHT: 'in_flight',
-  PARTIAL_UNKNOWN: 'partial_unknown',
-  PARTIAL_KNOWN: 'partial_known',
-  UNKNOWN: 'unknown',
-  NOT_HAPPENED: 'not_happened',
 })
 
 function isRecord(value) {

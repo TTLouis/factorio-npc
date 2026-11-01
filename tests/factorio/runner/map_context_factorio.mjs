@@ -112,7 +112,6 @@ const sideEffects = () => lua('local charted=0; local generated=0; '
   + 'rcon.print(helpers.table_to_json({charted=charted,generated=generated,explored=k.explored_chunks,revision=k.revision,'
   + 'window=c and {surface_index=c.surface_index,x=c.x,y=c.y} or nil,reservations=#remote.call("autorio_reservations","status").reservations,standing=standing}))')
 
-const START = { x: -60.5, y: -16.5 }        // chunk (-2, -1): window x -4..0; within build reach of PLAN_AT
 const ONE_OVER = { x: -20.5, y: -16.5 }     // chunk (-1, -1): window x -3..1; chunk x=-4 leaves the window
 const FAR = { x: 40.5, y: 20.5 }            // chunk (1, 0): window x -1..3, y -2..2; the fixture chunk (-3, -1) is fogged
 const FRAME = { position: { x: -48, y: -16 }, radius: 3 }  // one crop frame for every comparison: chunks x -5..1, y -4..2

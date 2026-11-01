@@ -20,6 +20,8 @@
 // (recovery.pause_unclassified) so the producer that forgot to declare a class gets fixed.
 import { createHash } from 'node:crypto'
 
+const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{2,80}$/
+
 export const PAUSE_CLASS = Object.freeze({
   TRANSPORT: 'transport',
   MODEL_RECOVERABLE: 'model_recoverable',
@@ -249,8 +251,6 @@ export function classifyRequestFailure(failure) {
   if (byCode) return { pause_class: byCode, pause_subkind: '', code, source: 'failure_code' }
   return { pause_class: PAUSE_CLASS.GUARD, pause_subkind: '', code: 'request_failed', source: 'fallback' }
 }
-
-const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{2,80}$/
 
 // Whether a pause came from the provider/request layer (the goal.paused trace's provider_failure). Decided from the pause's declared
 // class and the failure CODE that prefixes its reason, never from a text search of the reason: a harness guard's detail text may

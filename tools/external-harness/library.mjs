@@ -43,6 +43,8 @@ function validate(input) {
     || !['knowledge', 'skill'].includes(input.kind) || !['search', 'get'].includes(input.action)) fail('invalid_library_arguments')
   if (input.action === 'search') {
     if (input.id !== undefined || typeof input.query !== 'string' || input.query.length > MAX_QUERY
+      // Reject control characters at the external input boundary.
+      // eslint-disable-next-line no-control-regex
       || /[\u0000-\u001F\u007F]/u.test(input.query) || !normalize(input.query)
       || input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_LIMIT)) fail('invalid_library_arguments')
   }
@@ -88,7 +90,8 @@ export async function readLibrary(input) {
     result = { ...base, entry: view(entry, overlay) }
   }
   else {
-    const query = normalize(input.query), terms = query.split(' ')
+    const query = normalize(input.query)
+    const terms = query.split(' ')
     const matches = entries.map(entry => {
       const title = [entry.id, entry.name].map(normalize)
       const primary = [...title, ...(entry.search_aliases ?? []).map(normalize), ...(entry.goal_tags ?? []).map(normalize)]

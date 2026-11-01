@@ -594,7 +594,7 @@ try {
       assert.match(into.error?.message ?? '', /no-automated-item-insertion/, JSON.stringify(into))
       assert.equal(into.validation_id, undefined)
       assert.equal(from.planning_status, 'spatially_valid', JSON.stringify(from))
-      assert.ok(!(from.eligibility_blockers ?? []).some(blocker => /^CONNECTION_/.test(blocker.code)), JSON.stringify(from))
+      assert.ok(!(from.eligibility_blockers ?? []).some(blocker => blocker.code.startsWith('CONNECTION_')), JSON.stringify(from))
       assert.deepEqual(quiet(after).inventory, quiet(before).inventory, 'validation spends nothing')
       assert.equal(after.status.queue_length, 0)
       assert.equal(gone.pads, 0)
