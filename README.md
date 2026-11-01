@@ -38,6 +38,17 @@ Repeatable autonomous science production remains unproven. Read the
 [current status and exact-commit evidence](docs/NPC_AGENT_HARNESS_STATUS.md) before
 choosing a checkpoint; newer development is not automatically a stable release.
 
+## Latest demonstrated progress
+
+**Semi-automated red science — October 31, 2026:** **12 new packs in two
+minutes** at normal game speed, collected in a chest rather than fed to a lab.
+The agent manually supplied fuel to individual burner machines and the boiler;
+continued fuel servicing was not automated.
+
+See the [latest proofs](docs/proofs/README.md) for in-game screenshots, measured
+results and limitations. This single-run milestone is not a full-automation
+pass; the formal trial failed a furnace observation check.
+
 ## Start here
 
 | Your goal | Next step |

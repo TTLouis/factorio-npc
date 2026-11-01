@@ -10,6 +10,7 @@ contracts; the status page and dated evidence establish what has been verified.
 | Understand SGLuna and its limits | [Project overview](../README.md), [current status](NPC_AGENT_HARNESS_STATUS.md) |
 | Run a server | [Docker](../deploy/docker/README.md) or [Pterodactyl](../deploy/pterodactyl/README.md) |
 | Set up an external AI harness | [Portable automatic setup](EXTERNAL_HARNESS_SETUP.md), [local MCP runtime/tools](EXTERNAL_HARNESS.md) |
+| See demonstrated external-harness progress | [Latest proofs and in-game screenshots](proofs/README.md) |
 | Make a first contribution or report a bug | [Contributing](../CONTRIBUTING.md) |
 | Work with a coding agent | [AGENTS.md](../AGENTS.md) |
 | Choose tests and a supported environment | [Testing](TESTING.md) |
