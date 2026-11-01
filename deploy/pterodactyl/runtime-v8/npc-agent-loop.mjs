@@ -19,7 +19,7 @@ import { continueProductionTask, normalizeManualBootstrapProduction, prepareProd
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
 import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
 import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
-import { reconcileFactoryCellUse, factoryDeliveryWindowPending } from './factory-cell-use.mjs'
+import { reconcileFactoryCellUse, factoryDeliveryWindowPending, relevantFactoryAssignments, assignedFactoryConflict } from './factory-cell-use.mjs'
 import { recoverFactoryCellUse, validFactoryRecoveryWake } from './factory-cell-use-recovery.mjs'
 import { factoryLifecycleOperation, factoryLifecycleRuntime, claimFactoryLifecycleOperation, settleFactoryLifecycleOperation, retainUnsentFactoryLifecycleOperation, bindTemporaryFactoryPlacement } from './factory-cell-lifecycle-runtime.mjs'
 import { captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles, isFactoryLifecycleControllerActive, validateFactoryLifecycleOperation } from './factory-cell-lifecycle-controller.mjs'
@@ -3630,7 +3630,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.runTurn()
   }
 
-  async handlePlannerReview(plan, stepId, { harnessRaised = false } = {}) {
+  async handlePlannerReview(plan, stepId, { harnessRaised = false, strictPersistence = false } = {}) {
     const review = normalizePlannerReview(plan.plannerReview)
     if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE || plan.operations?.length !== 0 || plan.semanticCompletion || plan.checkpoint) {
       throw this.roleContractError('invalid_planner_review', 'plannerReview must be an executor decision with empty operations and no completion claim')
@@ -3729,7 +3729,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : `Execution paused for planner review (${review.reason}): ${review.rationale}`
     this.memory.remember(key, this.requestInfo.turnId, { sender: this.requestInfo.sender, user: this.requestInfo.text,
       assistant: `[Executor advisory; unverified] ${chatMessage}`, operations: [] })
-    await this.persistState()
+    await this.persistState({ strict: strictPersistence })
     await assertReviewCurrent()
     // Fold C3 into C8: an executor restaged at a step close that has done nothing since is kept through the round, so the
     // handback resumes it (foldReviewHandback) instead of rebuilding the same packet. Its review request is its last turn.
@@ -3738,10 +3738,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId,
       ...(kept ? { keepExecutor: { meta: kept, reply: JSON.stringify(plan) } } : {}) })
     await assertReviewCurrent()
-    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review, ...(harnessRaised && plan.progressAuditEvidence ? { harness_progress_audit: plan.progressAuditEvidence } : {}) })}`
+    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review, ...(harnessRaised && plan.progressAuditEvidence ? { harness_progress_audit: plan.progressAuditEvidence } : {}), ...(harnessRaised && plan.factoryAssignmentEvidence ? { factory_assignment_conflict: plan.factoryAssignmentEvidence } : {}) })}`
     try {
       if (continuing && returned.returned) {
-        this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true }
+        this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true,
+          strict_persistence: strictPersistence }
         await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
           reason: review.reason, bound: 'one_planner_round_per_step', authority: 'advisory_only' })
         await assertReviewCurrent()
@@ -3757,7 +3758,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (continuing) {
       pause()
       chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
-      await this.persistState()
+      await this.persistState({ strict: strictPersistence })
       await assertReviewCurrent()
     }
     if (returned.returned) this.messages.push({ role: 'user', content: reviewMessage })
@@ -3823,6 +3824,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const state = skillIds.length > 0 && held.loaded_skill_ids === undefined ? { ...held, loaded_skill_ids: skillIds } : held
     return buildHandoffPacket({
       planningState: state,
+      factoryAssignments: relevantFactoryAssignments(this, state),
       role: packetRole,
       checkpoint,
       reason,
@@ -17891,6 +17893,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Durable before the handoff: a later restage of this step (the supervisor's resume after a second review) rebuilds the
       // executor from the planning state and would otherwise lose them with the conversation.
       if (notes) this.memory.recordReviewNotes?.(this.activePlanKey(), review.step_id, notes)
+      if (reviewRound && review.strict_persistence === true) {
+        const notesOwner = this.captureCheckpointOwner()
+        await this.persistState({ strict: true })
+        await this.assertCheckpointOwnerCurrent(notesOwner)
+      }
       if (reviewRound) await completeProgressReview(this, plan.chatMessage)
       // Fold C3 into C8: an executor restaged at the step close that asked for this review and has done nothing since resumes its own
       // conversation (one packet, one restage); every other handback restages as C3.
@@ -19453,6 +19460,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // review off: a held draft there would run a full planner turn inside the
   // recovery and could turn a recovery that commits into a failed one.
   async recoverPlan(generation, reason, roundBase) {
+    // A private, freshly observed assignment conflict belongs to the bounded
+    // advisory route in runTurn, not model-owned format/admission retries.
+    if (assignedFactoryConflict(reason)) throw reason
     if (reason?.code === 'preservation_capture_superseded') throw reason
     if (preservationFailure(reason)?.category === 'unsupported' || preservationFailure(reason)?.stage === 'capture_recovery') throw reason
     this.recoveryCommitDepth = (this.recoveryCommitDepth ?? 0) + 1

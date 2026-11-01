@@ -1810,7 +1810,7 @@ export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS
   return ['[HARNESS] Executor facts refreshed after the batch receipt landed (live reads taken now, same labels as the handoff packet; facts only):', ...records.map(record => record.text)].join('\n')
 }
 
-function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults }) {
+function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults, factoryAssignments }) {
   const records = [
     { key: 'restage', block: 'step', text: `restage: role=${role} checkpoint=${checkpoint}${reason ? ` reason=${oneLine(reason, limits.reasonChars)}` : ''}` },
   ]
@@ -1844,6 +1844,8 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
       if (role === 'executor' && step.execution_guidance) records.push({ key: 'execution_brief', block: 'step',
         text: `execution_guidance (planner choice; revalidate live facts): ${JSON.stringify(step.execution_guidance)}` })
       if (contract) records.push({ key: 'contract', block: 'step', drop: 'contract', text: `active_step_contract: ${contract}` })
+      if (factoryAssignments) records.push({ key: 'factory_assignments', block: 'step', drop: 'historical_entities',
+        text: `factory_assignments (retained jobs; reobserve exact members; not stock, live compatibility or permission): ${JSON.stringify(factoryAssignments)}` })
       const reviewNotes = role === 'executor' ? plannerReviewNotesRecord(state?.goal?.review_notes?.[step.step_id], limits.reviewNotesChars) : undefined
       if (reviewNotes) records.push(reviewNotes)
       const held = plan.execution?.receipts?.[step.step_id]
@@ -1921,7 +1923,7 @@ export function estimateTokens(chars) {
  * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
  * @param {object} [args.harnessDefaults] the executor's own standing defaults ({burner_fuel}), shown in its step block
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults, previousContextChars, now, sequence, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults, factoryAssignments, previousContextChars, now, sequence, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -1934,7 +1936,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...goalRecords(planningState, limits),
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
-    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults }),
+    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults, factoryAssignments }),
     ...shelfCandidateRecords(shelfCandidates, limits),
   ]
 

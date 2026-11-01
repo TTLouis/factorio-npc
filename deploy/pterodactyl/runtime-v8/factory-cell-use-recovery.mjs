@@ -1,8 +1,9 @@
 import { factoryMetadataDigest } from './factory-dependencies.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
 import { getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
-import { factoryUseFailureWitness, factoryStepRequirement, refreshFactoryUseFailure } from './factory-cell-use.mjs'
+import { factoryUseFailureWitness, factoryStepRequirement, refreshFactoryUseFailure, assignedFactoryConflict } from './factory-cell-use.mjs'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
+import { FactoryCellBoundaryError } from './factory-cell-enrollment.mjs'
 
 const clone = value => structuredClone(value)
 const fail = code => { throw new FactoryRegistryError(code, code) }
@@ -58,10 +59,53 @@ export class FactoryUseRecoveryStore {
 const wakeProofs = new WeakSet()
 export const validFactoryRecoveryWake = proof => proof && wakeProofs.has(proof)
 
+async function reviewAssignedConflict(agent, error, witness) {
+  if (!agent.stateFile || agent.agentContext.role !== 'executor') return { handled: false }
+  const owner = agent.captureCheckpointOwner(); const key = agent.activePlanKey()
+  const state = agent.memory.planningState(key); const plan = getActivePlan(state)
+  const step = plan?.steps?.[plan.active_step_index]
+  if (!plan?.committed_at || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)
+    || state.goal?.status !== 'active' || state.run?.paused || agent.batchInFlight || agent.memory.pendingOperations(key).length
+    || witness.scope.goal_id !== state.goal.goal_id || witness.scope.plan_id !== plan.plan_id || witness.scope.plan_version !== plan.plan_version
+    || witness.scope.step_id !== step?.step_id || witness.scope.request_id !== agent.traceRequest?.id) return { handled: false }
+  const current = async () => {
+    await agent.assertCheckpointOwnerCurrent(owner)
+    if (!agent.memory.currentGoalGrant(key)) fail('factory_cell_conflict_authority_changed')
+    await refreshFactoryUseFailure(error)
+    agent.assertCheckpointOwnerIdentity(owner)
+    if (!agent.memory.currentGoalGrant(key)) fail('factory_cell_conflict_authority_changed')
+  }
+  await current()
+  const allowance = agent.memory.consumeFactoryUseRecovery(key, witness.requirement, {
+    request_id: agent.traceRequest.id, plan_id: plan.plan_id, code: witness.code, evidence_digest: factoryMetadataDigest(witness),
+  })
+  // This same goal ledger is shared with the existing factory repairs. Neither
+  // restart, restage, a different cell nor a new plan slice grants a fresh cap.
+  await agent.persistState({ strict: true }); await current()
+  const detail = { ...witness.scope, code: witness.code, witness, ...allowance,
+    mechanism: 'assigned_producer_advisory_review', authority: 'advisory_only', world_blocker_proven: false,
+    current_batch_sent: false, world_operations_replayed: 0, prior_world_effects: 'not_reclassified' }
+  if (!allowance.allowed || state.goal.review_continuation_steps?.includes(step.step_id)) {
+    await agent.traceEvent('factory_cell.assigned_review_exhausted', { ...detail, reason: allowance.allowed ? 'step_review_already_used' : 'factory_allowance_unavailable' })
+    await current()
+    throw new FactoryCellBoundaryError(new FactoryRegistryError('factory_cell_assigned_review_exhausted', 'factory_cell_assigned_review_exhausted'), 'assigned_review')
+  }
+  agent.memory.recordBoardEvidence(key, { kind: 'factory_assignment_conflict', ref: `${agent.traceRequest.id}/assigned_factory`, summary: JSON.stringify(witness) })
+  await agent.persistState({ strict: true }); await current()
+  await agent.traceEvent('factory_cell.assigned_review_started', detail); await current()
+  const result = await agent.handlePlannerReview({ operations: [], plannerReview: { reason: 'approach_infeasible',
+    rationale: `Fresh assigned producer ${witness.facts.member.unit_number} retains job ${witness.facts.assignment.method}; the proposed ${witness.facts.selected_resource} use conflicts. Review the same stock step without changing assignments, plan or completion authority.` },
+    factoryAssignmentEvidence: witness,
+  }, step.step_id, { harnessRaised: true, strictPersistence: true })
+  return { handled: true, result }
+}
+
 /** A residual miss consumes a durable same-goal allowance before the existing
  * guarded structural-successor route. The model authors the successor; the
  * canonical commit and every admission recheck its typed use independently. */
 export async function recoverFactoryCellUse(agent, error) {
+  const conflict = assignedFactoryConflict(error)
+  if (conflict) return reviewAssignedConflict(agent, error, conflict)
   const witness = factoryUseFailureWitness(error)
   if (!witness || !agent.replacementWakeEnabled || !agent.stateFile) return { handled: false }
   const owner = agent.captureCheckpointOwner(); const key = agent.activePlanKey()
