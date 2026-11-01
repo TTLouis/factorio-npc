@@ -1051,7 +1051,7 @@ for (const form of ['assistant_json', 'submitPlan']) for (const residual of [fal
     assert.equal(w.events.filter(row => row.event === 'production.manual_bootstrap_normalized').length, residual ? 0 : 1)
     assert.equal(w.events.filter(row => row.event === 'production.manual_bootstrap_recovery_started').length, residual ? 1 : 0)
     const normalization = w.events.find(row => row.event === `production.manual_bootstrap_${residual ? 'recovery_resolved' : 'normalized'}`).data
-    assert.equal(normalization.checkpoint_disposition, redundantCheckpoint ? 'identical_committed_contract_retained' : undefined)
+    assert.equal(normalization.checkpoint_disposition, redundantCheckpoint ? 'inline_checkpoint_ignored_canonical_retained' : undefined)
     if (redundantCheckpoint) assert.equal(w.agent.contractSignature(normalization.original_checkpoint), w.agent.contractSignature(original.find(step => step.step_id === normalization.step_id).completion_contract))
     try { for (let i = 0; i < 65 && w.held().status !== 'COMPLETED'; i++) await w.agent.completed() }
     catch (error) { error.message += JSON.stringify({ inventory: w.game.inventory, research: [...w.game.researched], events: w.events.slice(-16) }); throw error }
@@ -1072,18 +1072,14 @@ function changeManualFixtureStep(w, change) {
   const plan = getActivePlan(state); change(plan.steps[plan.active_step_index])
   w.memory.restore(snapshot)
 }
-for (const residual of [false, true]) for (const change of ['different quantity', 'missing research', 'extra outcome', 'any mode', 'malformed', 'unbound', 'semantic']) test(`BJ raw checkpoint ${change} refuses ${residual ? 'residual' : 'prevention'} without authority or effects`, async () => {
+for (const residual of [false, true]) for (const change of ['unbound', 'unsupported canonical', 'semantic']) test(`BJ raw checkpoint ${change} refuses ${residual ? 'residual' : 'prevention'} without authority or effects`, async () => {
   const w = world(manualOptions); const p = manualRaw(w)
   p.checkpoint = structuredClone(w.held().steps[w.held().active_step_index].completion_contract)
-  if (change === 'different quantity') p.checkpoint.requirements.find(row => row.kind === 'inventory_count').minimum++
-  if (change === 'missing research') p.checkpoint.requirements = p.checkpoint.requirements.filter(row => row.kind !== 'research_completed')
-  if (change === 'extra outcome') p.checkpoint.requirements.push({ id: 'extra', kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 })
-  if (change === 'any mode') p.checkpoint.mode = 'any'
-  if (change === 'malformed') p.checkpoint.requirements = 'not a contract'
   if (change === 'unbound') changeManualFixtureStep(w, step => { delete step.completion_contract })
+  if (change === 'unsupported canonical') changeManualFixtureStep(w, step => { step.completion_contract.requirements = [{ kind: 'unproven_predicate' }] })
   if (change === 'semantic') p.semanticCompletion = { stepId: p.stepId, summary: 'claim without proof' }
   const before = w.memory.snapshot(); const original = structuredClone(p)
-  await assert.rejects(w.agent.normalizeManualBootstrapProduction(p, { residual }), /checkpoint_mismatch|scope_unproven/)
+  await assert.rejects(w.agent.normalizeManualBootstrapProduction(p, { residual }), /canonical_contract_unproven|scope_unproven/)
   assert.deepEqual(p, original); assert.deepEqual(w.memory.snapshot(), before); assert.deepEqual(w.ops, [])
   assert.equal(w.providers.length, 0); assert.equal(w.events.some(row => row.event.startsWith('production.manual_bootstrap_')), false)
 })
@@ -1206,4 +1202,53 @@ for (const boundary of ['persist', 'trace']) test(`BJ manual residual fences can
   assert.equal(exhausted.data.duplicate, true); assert.equal(exhausted.data.used, 1)
   assert.deepEqual(w.memory.snapshot().factory_use_recovery, snapshot.factory_use_recovery)
   assert.deepEqual(w.ops, [])
+})
+
+
+// BM W38/W40: inline entity37 or omitted preservation cannot replace canonical
+// entity36. The existing isolated fixture uses producer45; contract fields and
+// actual caller forms below reproduce BM, with synthetic fresh iron facts.
+for (const form of ['submitPlan', 'assistant_json']) test(`BM raw ${form} ignores conflicting echo and keeps canonical iron58 research and entity36`, async () => {
+  const w = world(manualOptions)
+  changeManualFixtureStep(w, step => {
+    step.completion_contract = { mode: 'all', requirements: [
+      { id: 'obligation_1', kind: 'inventory_count', item_name: 'iron-plate', minimum: 58 },
+      { id: 'obligation_2', kind: 'research_completed', technology: 'steam-power' },
+      { id: 'obligation_3', kind: 'entity_exists', unit_number: 36 },
+    ] }
+    step.execution_guidance.materialSupply.resource = 'iron-ore'
+  })
+  const native = w.game.command.bind(w.game)
+  w.game.command = async text => text.includes('recipe_details') ? JSON.stringify({ found: true, truncated: false, recipes: [{
+    name: 'iron-plate', enabled: true, crafting_machines_truncated: false, crafting_machines: [{ name: 'stone-furnace' }],
+    ingredients: [{ type: 'item', name: 'iron-ore', amount: 1 }], products: [{ type: 'item', name: 'iron-plate', amount: 1 }],
+  }] }) : native(text)
+  const canonical = structuredClone(w.held().steps[w.held().active_step_index].completion_contract)
+  const raw = { ...manualRaw(w), checkpoint: structuredClone(canonical) }
+  raw.operations[0].args.items = [{ item_name: 'iron-ore', count: 50 }, { item_name: 'coal', count: 4 }]
+  if (form === 'submitPlan') raw.checkpoint.requirements[2].unit_number = 37
+  else raw.checkpoint.requirements.pop()
+  const original = structuredClone(raw); const steps = structuredClone(w.held().steps)
+  const message = form === 'submitPlan' ? { tool_calls: [{ type: 'function', id: 'bm-echo', function: { name: 'submitPlan', arguments: JSON.stringify(raw) } }] } : { content: JSON.stringify(raw) }
+  const payload = form === 'submitPlan' ? plannerControlPayloadFromMessage(message) : JSON.parse(message.content)
+  const originalPayload = structuredClone(payload)
+  const normalized = await w.agent.normalizeManualBootstrapProduction(payload, { residual: form === 'assistant_json' })
+  assert.deepEqual(payload, originalPayload)
+  assert.deepEqual(normalized.productionTask.targets, [{ item_name: 'iron-plate', count: 58 }])
+  assert.equal(normalized.checkpoint, undefined)
+  assert.deepEqual(w.held().steps, steps); assert.deepEqual(raw, original)
+  const evidence = w.events.find(row => row.event === `production.manual_bootstrap_${form === 'assistant_json' ? 'recovery_resolved' : 'normalized'}`).data
+  assert.deepEqual(evidence.original_checkpoint, JSON.parse(JSON.stringify(original.checkpoint)))
+  assert.deepEqual(evidence.canonical_checkpoint, canonical)
+  assert.equal(evidence.checkpoint_disposition, 'inline_checkpoint_ignored_canonical_retained')
+  assert.deepEqual(w.ops, []); assert.equal(w.providers.length, 0)
+})
+test('raw echo cannot supply a missing canonical target, even when echo is absent or supplies a valid replacement', async () => {
+  for (const echo of [undefined, { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 }] }]) {
+    const w = world(manualOptions); const raw = { ...manualRaw(w), ...(echo ? { checkpoint: echo } : {}) }
+    changeManualFixtureStep(w, step => { delete step.completion_contract })
+    const before = structuredClone(w.memory.snapshot())
+    await assert.rejects(w.agent.normalizeManualBootstrapProduction(raw), /canonical_contract_unproven/)
+    assert.deepEqual(w.memory.snapshot(), before); assert.deepEqual(w.ops, []); assert.equal(w.providers.length, 0)
+  }
 })

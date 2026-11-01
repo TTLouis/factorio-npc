@@ -70,13 +70,10 @@ export async function normalizeManualBootstrapProduction(agent, plan, { residual
     const fail = reason => { const code = `factory_cell_manual_bootstrap_${reason}`; throw new FactoryRegistryError(code, code) }
     if (!isActiveStep(agent, s, plan.stepId) || plan.semanticCompletion
       || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(s.plan?.status)) fail('scope_unproven')
-    // Raw operation replies may repeat a bound checkpoint. It supplies no
-    // authority or target: only an equivalent canonical contract is redundant.
-    if (plan.checkpoint !== undefined) {
-      const context = agent.currentContractContext()
-      if (!completionContractSupported(s.step.completion_contract, context) || !completionContractSupported(plan.checkpoint, context)
-        || agent.contractSignature(plan.checkpoint) !== agent.contractSignature(s.step.completion_contract)) fail('checkpoint_mismatch')
-    }
+    // Match ordinary committed-step binding: an inline checkpoint is only an
+    // echo. It cannot replace targets or preservation, even when it differs.
+    if (s.step.contract_status !== 'bound'
+      || !completionContractSupported(s.step.completion_contract, agent.currentContractContext())) fail('canonical_contract_unproven')
     if (operations.length !== 1 || operations[0].name !== 'supply_entity') fail('mixed_operations')
     const operation = operations[0]; const unit = operation.args?.unit_number; const items = operation.args?.items
     if (!Number.isSafeInteger(unit) || !Array.isArray(items) || !items.length || items.length > 16
@@ -145,7 +142,7 @@ export async function normalizeManualBootstrapProduction(agent, plan, { residual
         ...(fuelItems.length ? { fuel: { item_name: fuelItems[0].item_name, count: fuelItems[0].count } } : {}) })
       const detail = { request_id: current.request_id, goal_id: current.goal_id, plan_id: current.plan_id, plan_version: current.plan_version,
         step_id: current.step_id, source_placement: receipt, original_operations: operations, production_intent: intent,
-        ...(plan.checkpoint !== undefined ? { original_checkpoint: plan.checkpoint, checkpoint_disposition: 'identical_committed_contract_retained' } : {}),
+        ...(plan.checkpoint !== undefined ? { original_checkpoint: plan.checkpoint, canonical_checkpoint: s.step.completion_contract, checkpoint_disposition: 'inline_checkpoint_ignored_canonical_retained' } : {}),
         reason: 'authorized_manual_supply_requires_finite_producer_binding', world_operations_replayed: 0, native_tick: observed.native.tick }
       let allowance
       if (residual) {
