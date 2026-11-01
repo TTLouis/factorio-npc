@@ -684,7 +684,7 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
   if (!raw.found || raw.fluid_storages_truncated !== false || raw.fluid_box_count > 16
     || raw.surface_index !== raw.actor_surface_index || raw.force_index !== raw.actor_force_index) return undefined
   if (raw.fluid_box_count > 0) {
-    if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe'].includes(raw.entity.name)
+    if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'].includes(raw.entity.name)
       || raw.non_fluidbox_storage_count !== 0) return undefined
     const storages: any[] = raw.fluid_storages ?? []
     if (storages.length !== raw.fluid_box_count) return undefined

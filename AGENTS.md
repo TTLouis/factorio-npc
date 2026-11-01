@@ -18,6 +18,25 @@ save/ledger state. Report only unavoidable prerequisite/permission blockers.
 This installation path stays on the requested feature branch and does not start
 the internal planner/Jev or use the ordinary server installers below.
 
+For a gameplay goal, search `factorio_library` separately for knowledge references
+and skill methods, then read the relevant full entries. This local library is
+advisory content, not an unlock, native proof or operation authority; obtain
+recipes, sizing, availability and geometry from current game tools.
+
+For this owner's full-automation goals, read
+`knowledge-owner-electrical-first-automation`: automate centralized electricity
+and its service first, use electric mining and electric transfers where live
+availability permits, then separated smelting arrays with automatic feed, output
+and service. No agent fuel runs to individual machines; manual priming is a
+declared finite bootstrap only. Central power fuel and smelting fuel, if required
+by live machines, need automatic supply. Check the admitted placement catalog
+before a future goal; never silently substitute a burner line if a required
+electric miner is unsupported. Electric miners reuse `getPlacementCandidates`
+and `place_candidate` with native fluid-port preservation, not the nonfluid
+coordinate shortcut. A short run on prefilled fuel is not
+full automation. See the [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
+This guidance does not authorize gameplay, tool expansion or another trial.
+
 ## Start here
 
 1. Identify the requested outcome, affected subsystem and acceptance evidence.
@@ -81,9 +100,14 @@ together. Preserve intentional provider differences; see
   On this shared Windows workspace, dependency directories are WSL symlinks:
   never run host `pnpm`, `vitest`, `eslint`, `tstl` or dependency/hook installation.
   Use the existing Docker runner and its reviewed mounts.
-- Run the offline gate `bash scripts/test-local.sh all` for implementation work
-  and before integration. Documentation changes also need link, command and
-  diff review. Keep full logs and real exit codes; do not hide failures with pipes.
+- Build first and use the smallest meaningful focused checks for changed
+  behavior, regressions and material failure cases. Reuse valid results for
+  unchanged code. Do not repeat or broaden checks without a specific failure,
+  unresolved material risk, explicit owner request or required release/CI gate.
+  The full offline gate is not the default for each implementation iteration.
+  Preserve required native, recovery and release gates when their claims apply.
+  Documentation changes need focused link, command and diff review. Keep full
+  logs and real exit codes; do not hide failures with pipes.
 - Unit/type checks protect contracts. Engine claims require deterministic real
   Factorio coverage under `tests/factorio/`, with the exact version and layout.
   Never weaken an assertion to obtain a pass or give models unmeasured transport,

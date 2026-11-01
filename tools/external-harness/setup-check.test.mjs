@@ -24,6 +24,7 @@ const directory = process.env.EXTERNAL_HARNESS_STATE_DIR;
 const context = ${JSON.stringify(context)};
 const calls = [];
 const runtime = {
+ library: async () => { calls.push('library'); return {kind:'knowledge',entry:{id:'knowledge-owner-electrical-first-automation',content_type:'knowledge'},authority:{native_verified:false,operation_authority:false}} },
  context: async () => { calls.push('context'); return context },
  capabilities: async () => { calls.push('capabilities'); return { operations: [{name:'wait'}], observation_schemas:[{name:'getActorStatus',inputSchema:{type:'object'}}] } },
  observe: async value => { calls.push('observe'); return { mode:'npc',actor:{kind:'standalone_character',valid:true,actor_id:context.actor.actor_id},connected_players:0 } },
@@ -50,7 +51,7 @@ test('fresh setup checks full live schemas and read-only calls over two clean co
   assert.deepEqual(result.checks[0].tools, MCP_TOOLS)
   assert.equal(JSON.stringify(result).includes(options.env.SGLUNA_RCON_PASSWORD), false)
   const calls = (await fs.readFile(path.join(options.directory, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
-  assert.deepEqual(calls, [['context', 'capabilities', 'observe'], ['context', 'capabilities', 'observe']])
+  assert.deepEqual(calls, [['context', 'capabilities', 'observe', 'library'], ['context', 'capabilities', 'observe', 'library']])
 })
 
 test('ordinary readiness retains settled history while fresh proof refuses it', async t => {
@@ -69,7 +70,7 @@ for (const [name, change, code] of [
   ['reconciliation fence', 'context.reconciliation_required=[{operation_id:"old"}];', 'setup_not_idle'],
   ['wrong session', 'context.session="wrong";', 'setup_actor_invalid'],
   ['lost ownership', 'context.actor.allowed=false;', 'setup_actor_invalid'],
-  ['missing full input schema', 'delete MCP_TOOLS[3].inputSchema.properties.operation;', 'setup_tool_schema_mismatch'],
+  ['missing full input schema', 'delete MCP_TOOLS.find(tool=>tool.name==="factorio_submit").inputSchema.properties.operation;', 'setup_tool_schema_mismatch'],
   ['read-only tool failure', 'runtime.observe=async()=>{throw new Error("private-test-credential-not-for-output")};', 'setup_tool_failed'],
 ]) {
   test(`readiness refuses ${name} without gameplay`, async t => {

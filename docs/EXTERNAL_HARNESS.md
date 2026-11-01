@@ -52,7 +52,10 @@ capability marker. The flag is not model-selectable. Discover and inspect the
 actual placed entity before supplying it; placement alone proves no production.
 
 `place_candidate` supports only the native preservation path's bounded fluid
-prototype set: `offshore-pump`, `boiler`, `steam-engine` and `pipe`. First discover
+prototype set: `offshore-pump`, `boiler`, `steam-engine`, `pipe` and
+`electric-mining-drill`. Electric miners reuse this same candidate/constructor
+path because their native prototypes can have fluid ports; they are not admitted
+through the zero-fluidbox `place_entity` shortcut. First discover
 current prototype, source-tile and placement facts with `getPrototypeDetails`,
 `getFluidSourceTiles` and `getPlacementCandidates`. A candidate without a declared
 relation is accepted only when a complete native scan proves zero possible fluid
@@ -248,6 +251,7 @@ only game connection is to the explicitly configured local RCON service.
 | Tool | Purpose |
 | --- | --- |
 | `factorio_capabilities` | Read the supported operation/observation schemas and limits |
+| `factorio_library` | Search/get typed knowledge or skill guidance on demand; local advisory content, no game calls |
 | `factorio_context` | Get a compact actor and execution summary; not a full-world dump |
 | `factorio_observe` | Fetch one approved, argument-bounded native detail |
 | `factorio_submit` | Validate and admit one operation, using a stable caller `request_id` |
@@ -288,6 +292,47 @@ positive item transfer can be smaller than requested: inspect actual moved
 counts and destination state. Prove a crafting/mining quantity from native
 result/inventory evidence, navigation from the observed position, and production
 from actual output, not merely a placed machine.
+
+## Read-only method library
+
+`factorio_library` exposes separate `knowledge` references and `skill` methods.
+Use `action: "search"` with a nonempty `query` and optional `limit` (1–8), then
+`action: "get"` with the exact `id` for full guidance. Search cards are bounded;
+full entries are returned intact or refused above 7 KiB. A get call does not
+accept query/limit, and a search does not accept an ID. No full catalog is added
+to context automatically.
+
+```json
+{"kind":"knowledge","action":"search","query":"individual refueling"}
+{"kind":"knowledge","action":"get","id":"knowledge-owner-electrical-first-automation"}
+{"kind":"skill","action":"search","query":"smelting"}
+```
+
+The donor catalog preserves the committed Jev library at
+`20cdcd072b512c814c8af071f4f9ad1fe087f942`: six knowledge references and 54 skills,
+including foundations. The additional owner requirement is an external overlay;
+the donor bytes remain unchanged. Provenance and source IDs are retained in
+[the local library](../tools/external-harness/library/README.md). Full skill
+`guidance` is preserved; executable templates and native verification fields are
+not exposed as authority. All entries remain untrusted advisory content, not
+current availability, live facts, native mastery or permission to act.
+
+For this owner, the default full-automation progression is centralized,
+automatically sustained electricity first; electric mining and electric transfers
+where available; then separated smelting arrays with automatic feed, output and
+service. The agent must not fuel individual machines as the operating design.
+Initial manual priming is a declared finite bootstrap phase only. Automatically
+supply central power fuel and any smelting fuel required by live machines.
+Prefilled burner stocks or a short production demonstration do not establish
+full automation. Relevant fuel/power/mining/smelting/sustainment method views link
+to this requirement; burner methods may serve bootstrap without becoming the
+finished architecture.
+
+Read current prototype/technology/recipe and tool facts first, including the
+admitted electric-miner candidate capability. Library guidance does not add
+operations or prove an unlock. Surface any missing capability before a future
+goal rather than silently substitute burner miners. This update does not deploy
+or launch a model trial.
 
 ## Automatic production tools
 

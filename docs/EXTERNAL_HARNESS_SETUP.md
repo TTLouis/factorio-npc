@@ -180,7 +180,8 @@ node tools/external-harness/setup-check.mjs --fresh --output /absolute/private/p
 ```
 
 The helper launches the actual stdio CLI twice, negotiates MCP, compares all
-seven full tool schemas, reads context/capabilities/actor status, and checks
+the complete current tool schemas, reads context/capabilities/actor status and
+the owner automation knowledge reference, and checks
 native idle/empty queues, ownership, zero native high-water/ledger records and
 stable actor/epoch/session after clean reconnect. It never binds, submits,
 cancels or starts a model. Its receipt says `local_stdio_ready` and explicitly
@@ -211,6 +212,7 @@ session/ledger. Use it sequentially; do not run it beside another ledger owner.
 node tools/external-harness/mcp-call.mjs --list
 node tools/external-harness/mcp-call.mjs --call factorio_context --arguments '{}'
 node tools/external-harness/mcp-call.mjs --call factorio_capabilities --arguments '{}'
+node tools/external-harness/mcp-call.mjs --call factorio_library --arguments '{"kind":"knowledge","action":"get","id":"knowledge-owner-electrical-first-automation"}'
 node tools/external-harness/mcp-call.mjs --call factorio_observe --arguments '{"name":"getActorStatus","args":{}}'
 ```
 

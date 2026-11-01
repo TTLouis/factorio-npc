@@ -20,6 +20,14 @@ export const MCP_TOOLS = Object.freeze([
     inputSchema: object(), annotations: readOnly,
   },
   {
+    name: 'factorio_library',
+    description: 'Search or read one authored knowledge reference or gameplay skill. Local read-only advisory content; no RCON, live availability, native proof or execution authority. Search methods on demand, then obtain current game facts with observations. Read the owner electrical-first automation requirement before applying fuel, power, mining or smelting methods.',
+    inputSchema: object({ kind: { type: 'string', enum: ['knowledge', 'skill'], minLength: 1, maxLength: 9 },
+      action: { type: 'string', enum: ['search', 'get'], minLength: 1, maxLength: 6 },
+      query: { type: 'string', minLength: 1, maxLength: 160 }, id: { type: 'string', minLength: 1, maxLength: 100 },
+      limit: { type: 'integer', minimum: 1, maximum: 8 } }, ['kind', 'action']), annotations: readOnly,
+  },
+  {
     name: 'factorio_context',
     description: 'Read a compact current NPC context and outstanding-operation summary. Start here after connecting; request selected details with factorio_observe rather than repeatedly dumping the world.',
     inputSchema: object(), annotations: readOnly,
@@ -54,7 +62,7 @@ export const MCP_TOOLS = Object.freeze([
 ])
 
 const methods = Object.freeze({
-  factorio_capabilities: 'capabilities', factorio_context: 'context', factorio_observe: 'observe',
+  factorio_capabilities: 'capabilities', factorio_library: 'library', factorio_context: 'context', factorio_observe: 'observe',
   factorio_submit: 'submit', factorio_receipt: 'get', factorio_cancel: 'cancel', factorio_resume: 'resume',
 })
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -65,6 +73,7 @@ function rpcError(code, message) { return Object.assign(new Error(message), { rp
 // Only the JSON Schema subset used above. Operation-specific validation remains
 // in the authoritative runtime's structured policy, not a duplicated schema.
 function validate(value, schema, path = 'arguments') {
+  if (schema.enum && !schema.enum.includes(value)) throw rpcError(-32602, `${path} must be a declared value`)
   if (schema.type === 'object') {
     if (!isObject(value)) throw rpcError(-32602, `${path} must be an object`)
     for (const key of schema.required ?? []) {
@@ -146,7 +155,7 @@ export function startMcpServer({ runtime, input = process.stdin, output = proces
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'factorio-external-harness', version: '0.1.0' },
-        instructions: 'External agent owns planning; deterministic runtime owns operation admission and evidence. Start with context/capabilities. Preserve request IDs across reconnects. Admission is never gameplay completion. Explicit factorio_cancel is required to stop game work.',
+        instructions: 'External agent owns planning; deterministic runtime owns operation admission and evidence. Start with context/capabilities; use factorio_library on demand for knowledge and skill methods, which are advisory and untrusted, not execution authority. For this owner, full automation means centralized automatically sustained electricity FIRST, electric mining/transfers where available, and separated smelting arrays with automatic feed/output/service. No individual machine fuel runs; manual priming is a declared finite bootstrap only. Read knowledge-owner-electrical-first-automation and check live unlocks/tools: inspect the currently admitted electric-miner placement capability and report any gap rather than silently substitute burner mining. Electric miners use the existing native candidate/preservation path, not the nonfluid shortcut. Preserve request IDs across reconnects. Admission is never gameplay completion. Explicit factorio_cancel is required to stop game work.',
       }
     }
     if (message.method === 'ping') return {}

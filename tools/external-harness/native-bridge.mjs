@@ -22,7 +22,7 @@ import {
 // Nonfluid sites require native zero-fluidbox witnesses. Fluid candidates use
 // the shared frozen native preservation claim and exact v2 admission owner.
 export const PLACEMENT_PROTOTYPES = Object.freeze(['stone-furnace', 'burner-mining-drill', 'wooden-chest', 'lab', 'small-electric-pole', 'assembling-machine-1', 'transport-belt', 'inserter', 'burner-inserter'])
-export const FLUID_PLACEMENT_PROTOTYPES = Object.freeze(['offshore-pump', 'boiler', 'steam-engine', 'pipe'])
+export const FLUID_PLACEMENT_PROTOTYPES = Object.freeze(['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'])
 export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate', 'set_machine_recipe'])
 export const OBSERVATION_NAMES = Object.freeze([
   'getActorStatus', 'getInventoryItems', 'getEquipmentStatus', 'getRecipeDetails',

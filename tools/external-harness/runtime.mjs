@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { operationSignature } from '../../deploy/pterodactyl/runtime-v8/operation-reconciliation.mjs'
 import { parseExternalOperation as parseOperation } from './native-bridge.mjs'
+import { libraryMetadata, readLibrary } from './library.mjs'
 
 const MAX_RECORDS = 512
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024
@@ -204,7 +205,8 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
   }
 
   const runtime = {
-    capabilities: () => bridge.capabilities(),
+    capabilities: () => ({ ...bridge.capabilities(), library: libraryMetadata() }),
+    library: readLibrary,
     context: () => serialized(async () => {
       for (const row of ledger.records.filter(row => !row.terminal)) await refresh(row)
       if (ledger.records.at(-1)?.terminal) await refresh(ledger.records.at(-1))

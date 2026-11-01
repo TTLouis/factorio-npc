@@ -154,11 +154,11 @@ describe('placement candidates that join a live fluid port', () => {
     ] }])
   }
 
-  it('freezes an isolated external fluid site with the same durable claim, admission and queued fences', () => {
+  it.each(['boiler', 'electric-mining-drill'])('freezes isolated %s with the same durable claim, admission and queued fences', (entityName) => {
     const actor = actor_at(10, 20)
     actor.character = { valid: true }
     ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
-    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    ;(globalThis as any).prototypes.entity[entityName] = { ...boiler, name: entityName, type: entityName === 'electric-mining-drill' ? 'mining-drill' : 'boiler', items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
     actor.get_main_inventory = () => ({ get_item_count: () => 1 })
     actor.surface.find_entities_filtered = () => Object.values(world)
     const manager = new_task_manager(() => actor)
@@ -174,7 +174,7 @@ describe('placement candidates that join a live fluid port', () => {
         : scope === 'autorio_crafting' ? { task_active: false, native_queue: [] }
           : method === 'authorize' ? true : ({ allowed: true, actor_id: 18, epoch: 3, session: owner.session }) }
     try {
-      const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', radius: 1, limit: 1 })
+      const set: any = create_placement_candidate_set(actor, { entity_name: entityName, radius: 1, limit: 1 })
       const candidate = set.candidates[0]
       const freeze = (extra: any = {}) => freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/isolated', [], { ...context, ...extra })
       expect(freeze({ isolated: false })).toMatchObject({ ok: false, code: 'preservation_guard_invalid' })
@@ -220,21 +220,21 @@ describe('placement candidates that join a live fluid port', () => {
     }
   })
 
-  it('certifies the exact native candidate join only while every nearby possible connection is proved', () => {
+  it.each(['boiler', 'electric-mining-drill'])('certifies %s join only while every nearby possible connection is proved', (entityName) => {
     build_pump()
     ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
-    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    ;(globalThis as any).prototypes.entity[entityName] = { ...boiler, name: entityName, type: entityName === 'electric-mining-drill' ? 'mining-drill' : 'boiler', items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
     const actor = actor_at(0, 0)
     actor.is_valid = true
     actor.status_snapshot = () => ({ actor_id: 18 })
     actor.get_main_inventory = () => ({ get_item_count: () => 1 })
     actor.surface.find_entities_filtered = () => Object.values(world)
-    const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+    const set: any = create_placement_candidate_set(actor, { entity_name: entityName, connects_to: { unit_number: 100 } })
     const read = () => placement_candidate_preflight(actor, set.candidate_set_id, 'candidate-1') as any
     try {
       expect(read()).toMatchObject({ ok: true, preservation_join: { version: 2, complete: true,
         candidate_storages: [{ index: 1, production_type: 'input-output', filter: 'water' }, { index: 2, production_type: 'output', filter: 'steam' }],
-        actor_id: 18, surface_index: 1, force_index: 1, entity_name: 'boiler',
+        actor_id: 18, surface_index: 1, force_index: 1, entity_name: entityName,
         connects_to: { unit_number: 100, target_port: { storage_index: 1, connection_index: 1 } } } })
       // The other boiler water port must not silently join an existing object.
       world[101] = live_entity(101, 'pipe', [{ filter: 'water', ports: [
@@ -248,6 +248,21 @@ describe('placement candidates that join a live fluid port', () => {
       const original = world[100].fluidbox.get_pipe_connections
       world[100].fluidbox.get_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
       expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_ports_incomplete' })
+    } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
+  })
+
+  it('refuses an unlisted fluid miner even when its synthetic port shape matches an allowed candidate', () => {
+    build_pump()
+    const entityName = 'unlisted-fluid-miner'
+    ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity[entityName] = { ...boiler, name: entityName, type: 'mining-drill', items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    const actor = actor_at(0, 0)
+    actor.get_main_inventory = () => ({ get_item_count: () => 1 })
+    actor.surface.find_entities_filtered = () => Object.values(world)
+    try {
+      const set: any = create_placement_candidate_set(actor, { entity_name: entityName, connects_to: { unit_number: 100 } })
+      const result: any = placement_candidate_preflight(actor, set.candidate_set_id, set.candidates[0].id)
+      expect(result.preservation_join).toMatchObject({ complete: false, reason: 'candidate_storage_constraints_unproven' })
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
   })
 

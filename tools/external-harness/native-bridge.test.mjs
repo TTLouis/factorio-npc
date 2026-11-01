@@ -347,7 +347,7 @@ test('lab and pole use native fractional-grid footprints while fluid coordinate 
     assert.match(f.calls.at(-1), /exact_grid_required/)
     assert.match(renderExternalOperation(operation), /,true\)$/)
   }
-  for (const entity_name of ['boiler', 'steam-engine', 'pipe', 'offshore-pump']) {
+  for (const entity_name of ['boiler', 'steam-engine', 'pipe', 'offshore-pump', 'electric-mining-drill']) {
     assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name, x: 0, y: 0 } }))
   }
 })
@@ -366,6 +366,8 @@ for (const isolated of [false, true]) {
     assert.equal(prepared.pending.goal_id, session)
     assert.equal(prepared.pending.step_id, 'run/fluid')
     assert.match(f.calls[1], /external_candidate_unproven/)
+    assert.ok(f.calls[1].includes('electric-mining-drill'))
+    assert.ok(capabilities().limits.fluid_candidate_prototypes.includes('electric-mining-drill'))
     assert.match(f.calls[1], /placement_footprint_occupied/)
     assert.ok(f.calls[2].includes(isolated ? ',{},helpers.json_to_table' : ',{42},helpers.json_to_table'))
     f.admission = row(prepared.pending)

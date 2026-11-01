@@ -1400,7 +1400,7 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   const unavailable = (reason: string) => ({ version: 1, complete: false, reason })
   const prototype = prototypes.entity[set.entity_name]
   const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
-  if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe'].includes(set.entity_name)
+  if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'].includes(set.entity_name)
     || fluidboxes.length < 1 || fluidboxes.length > 16 || fluidboxes.some((storage, index) => storage.index !== index + 1
       || !(storage.volume > 0 && storage.volume < math.huge)
       || !['input', 'output', 'input-output', 'none'].includes(storage.production_type))) return unavailable('candidate_storage_constraints_unproven')

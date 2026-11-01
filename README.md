@@ -24,7 +24,9 @@ assistant prepare a private game, connect your harness and verify it is ready.
 They cover different local harnesses and explain what remote-only clients need.
 Setup requires local runtime permissions and authorized Factorio access; it does
 not start gameplay. For manual setup and the tool contract, see the
-[runtime guide](docs/EXTERNAL_HARNESS.md).
+[runtime guide](docs/EXTERNAL_HARNESS.md). The assistant can also consult the
+[knowledge and gameplay method library](docs/EXTERNAL_HARNESS.md#read-only-method-library)
+on demand before planning your goal.
 
 The runtime gives models structured game observations and bounded actions.
 Deterministic code handles game facts, validation and recovery; Factorio remains
