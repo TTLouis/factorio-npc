@@ -92,6 +92,7 @@ export class FactoryRegistryStore {
         control_revision: memory.factoryControlRevision() }
     }
     return Object.freeze({
+      reassign: (change, evidence) => this.#lifecycle.reassign(change, this.operational(), context(), evidence),
       begin: (change, evidence) => this.#lifecycle.begin(change, this.operational(), context(), evidence),
       rebind: (id, evidence) => this.#lifecycle.rebind(id, this.operational(), context(), evidence),
       claim: (id, pending) => this.#lifecycle.claim(id, pending, this.operational(), context()),

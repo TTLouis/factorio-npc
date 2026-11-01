@@ -1,3 +1,4 @@
+import { note_starter_servicing } from './starter_base_acceptance'
 import type { ControlledActor } from './actors/types'
 import type { LayoutRecord } from './construction_layout_record'
 import type { TaskBatchIdentity, TaskBatchReceipt } from './task_manager'
@@ -595,6 +596,7 @@ export function new_operation_admission(
       ? tasks_added - record.work_mark : undefined
     record.work_mark = tasks_added
     const error = typeof raw.error === 'string' ? raw.error.slice(0, 512) : undefined
+    if (!['wait_ticks', 'wait_condition'].includes(raw.operation ?? 'unknown')) note_starter_servicing(actor_provider()!.force.index)
     record.slots.push({
       index, ok: raw.ok, result, operation: typeof raw.operation === 'string' ? raw.operation.slice(0, 64) : undefined,
       mutation_unknown: raw.ok ? undefined : !refused,

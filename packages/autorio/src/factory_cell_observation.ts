@@ -344,6 +344,7 @@ export function observe_factory_cell(actor: ControlledActor | undefined, request
     const routes = protected_read(() => item_routes(actor, entity)) ?? { state: 'unknown', code: 'item_routes_unreadable', routes: [], truncated: false }
     return { locator, state: 'observed', ...identity(entity), status: entity.status,
       recipe: current_recipe, inventories: current_inventories,
+      last_user_facts: { state: 'known', last_user: entity.last_user ? { name: entity.last_user.name } : null },
       startup_recipe_candidates: startup_recipe_candidates(actor, entity, current_recipe, current_inventories, startup_budget),
       burner_fuel_requirement: burner, input_requirements: factory_input_requirements(entity, burner, resources),
       fuel_item_facts: factory_native_fuels(burner),

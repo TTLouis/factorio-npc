@@ -1,3 +1,5 @@
+import { emptyFurnaceAssignment } from './factory-reassignment.mjs'
+import { authorizationOf, checkGrant, entityProtection, activeReservations } from './authorization.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
 import { factoryMetadataDigest as digest } from './factory-dependencies.mjs'
 import { prepareFactoryCellHost, prepareFactoryCellReconciliationHost } from './factory-cell-tools.mjs'
@@ -209,6 +211,48 @@ async function persisted(agent, action) {
   await agent.persistState({ strict: true }); agent.assertCheckpointOwnerIdentity(owner)
   return result
 }
+export async function reassignEmptyFactoryFurnace(agent, declaration) {
+  const owner = agent.captureCheckpointOwner()
+  if (agent.agentContext.role !== 'planner' || !agent.stateFile) fail('factory_reassignment_planner_required')
+  const proof = await prepareFactoryCellHost(agent, async (observer, access) => {
+    const scope = access.readContext(); const registry = agent.memory.getFactoryOperationalRegistry()
+    const cell = registry.cells.find(row => row.cell_id === declaration?.cell_id)
+    if (!cell) fail('factory_cell_unknown')
+    const observation = await observer.observe({ cell_id: cell.cell_id })
+    const native = observation.native; const next = emptyFurnaceAssignment(cell, declaration, native)
+    const row = native.members[0]; const member = cell.members[0]
+    if (directConsumers(row, native.tick).length || registry.dependencies.some(edge => edge.consumer.cell_id === cell.cell_id || edge.supplier?.cell_id === cell.cell_id)) fail('factory_reassignment_consumers_present')
+    // A narrow metadata transition still needs current native identity and user
+    // grant, placement custody, protected-asset and reservation admission.
+    const authorize = () => {
+      const state = agent.memory.planningState(agent.activePlanKey()); const auth = authorizationOf(state)
+      const grant = agent.memory.currentGoalGrant(agent.activePlanKey())
+      const receipt = auth.world.npc_placements.find(item => item.unit_number === member.unit_number)
+      if (!grant || !checkGrant(auth, state.goal, { grant_id: grant.grant_id, grant_revision: grant.revision, actor_id: scope.actor_id, actor_epoch: scope.actor_epoch }).ok
+        || !receipt || receipt.entity_name !== member.name || row.last_user_facts?.state !== 'known'
+        || entityProtection(auth, { unit_number: member.unit_number, last_user: row.last_user_facts.last_user }, { goalId: state.goal.goal_id }).protected
+        || activeReservations(auth).some(item => item.unit_number === member.unit_number)
+        || auth.grants.some(item => item.status === 'active' && item.protected_materials.some(material => material.container_unit_number === member.unit_number))
+        || getActivePlan(state)?.steps?.some(step => step.obligations?.preserve?.includes(member.unit_number))) fail('factory_reassignment_authority_missing')
+      return { grant_id: grant.grant_id, grant_revision: grant.revision, placement: clone(receipt) }
+    }
+    const authorization = authorize()
+    await access.refresh(); access.fence(); await agent.assertCheckpointOwnerCurrent(owner); authorize()
+    const evidence = { ...scope, registry_revision: registry.revision, fresh: true, truncated: false, native_idle: true, pending: false, uncertain: false,
+      tick: native.tick, members: clone(cell.members), consumers: { coverage: 'complete', truncated: false, unresolved: false, rows: [] },
+      authorized: true, authorization, next, evidence_ref: `native/${scope.request_id}/${native.tick}/${digest(native)}`, raw: { observation: native } }
+    const change = { cell_id: cell.cell_id, transaction_id: `reassign/${scope.request_id}/${cell.cell_id}`, declaration,
+      expected_registry_revision: registry.revision, expected_lifecycle_revision: agent.memory.factoryLifecycleRevision(),
+      expected_cells: [{ cell_id: cell.cell_id, revision: cell.revision, digest: digest(cell) }] }
+    return { change, evidence, assert: () => { access.fence(); authorize() } }
+  }).execute()
+  await agent.assertCheckpointOwnerCurrent(owner)
+  const result = await persisted(agent, () => { proof.assert(); return factoryLifecycleRuntime(agent, { idle: true }).reassign(proof.change, proof.evidence) })
+  await agent.traceEvent('factory_lifecycle.reassigned', { transaction_id: result.transaction_id, cell_id: result.cell_id, previous_assignment: result.assignment, assignment: result.next_assignment, native_tick: proof.evidence.tick })
+  agent.assertCheckpointOwnerIdentity(owner)
+  return result
+}
+
 export async function beginFactoryCellLifecycle(agent, change, options) {
   const proof = await acquire(agent, change, options)
   return persisted(agent, () => factoryLifecycleRuntime(agent, { idle: true }).begin(change, proof.evidence))

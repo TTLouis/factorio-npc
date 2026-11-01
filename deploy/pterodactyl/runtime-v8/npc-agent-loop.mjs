@@ -22,7 +22,7 @@ import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommitt
 import { reconcileFactoryCellUse, factoryDeliveryWindowPending, relevantFactoryAssignments, assignedFactoryConflict } from './factory-cell-use.mjs'
 import { recoverFactoryCellUse, validFactoryRecoveryWake } from './factory-cell-use-recovery.mjs'
 import { factoryLifecycleOperation, factoryLifecycleRuntime, claimFactoryLifecycleOperation, settleFactoryLifecycleOperation, retainUnsentFactoryLifecycleOperation, bindTemporaryFactoryPlacement } from './factory-cell-lifecycle-runtime.mjs'
-import { captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles, isFactoryLifecycleControllerActive, validateFactoryLifecycleOperation } from './factory-cell-lifecycle-controller.mjs'
+import { reassignEmptyFactoryFurnace, captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles, isFactoryLifecycleControllerActive, validateFactoryLifecycleOperation } from './factory-cell-lifecycle-controller.mjs'
 import { captureFactoryPlacementContext, deriveFactoryPlacementReceipt } from './factory-placement-provenance.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
@@ -358,7 +358,7 @@ const PRODUCTION_REPAIR_LIMIT = 1
 const REVIEW_READ_REOPEN_STEP_LIMIT = 64
 const REVIEW_NOTES_CHARS = MAX_REVIEW_NOTES_CHARS
 // What the planner's one review round can do (handlePlannerReview). Facts about the harness, not strategy advice.
-const REVIEW_ROUND_FACT = '[HARNESS] This is the one planner review round for this step. The committed plan and its execution_guidance cannot change in it. A reply with operations:[] returns the same active step to a fresh executor, and that reply\'s chatMessage reaches the executor as planner notes. Read tools are available before replying. Another review of this step pauses the goal.'
+const REVIEW_ROUND_FACT = '[HARNESS] Review the structured refusal and current facts. You may revise the working plan, its objectives and executor boundaries inside the unchanged user goal/grant. To revise, return workingPlanRevision:true, operations:[], currentStep:0, the remaining plan, aligned stepCompletions and executionGuidance. Omit goal: acceptance and permissions cannot change. Return the unchanged plan without new declarations to send advisory notes. Native assignments/protections/reservations still apply; no unsettled action may be replayed. Replanning does not refresh goal effort.'
 // Board evidence kind for an executed operation the engine refused in a way the
 // planner can correct (a placement refused at its chosen coordinate). The board
 // memory records it instead of freezing the plan and blocks once the bounded
@@ -932,7 +932,7 @@ function safeConditionWait(value) {
   if (!value || typeof value !== 'object' || value.state !== 'active') return undefined
   const condition = value.condition
   if (!condition || typeof condition !== 'object') return undefined
-  if (!['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(condition.kind)) return undefined
+  if (!['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'starter_acceptance'].includes(condition.kind)) return undefined
   if (['entity_inventory_count', 'entity_exists', 'entity_state'].includes(condition.kind)
     && (!Number.isSafeInteger(condition.unit_number) || condition.unit_number < 1)) return undefined
   if (['inventory_count', 'entity_inventory_count'].includes(condition.kind)
@@ -953,6 +953,7 @@ function safeConditionWait(value) {
     step_id: cleanMemoryText(value.step_id, 80),
     actor_id: value.actor_id,
     actor_epoch: value.actor_epoch,
+    ...(condition.kind === 'starter_acceptance' ? { actor_session: cleanMemoryText(value.actor_session, 160), observation_id: cleanMemoryText(value.observation_id, 160) } : {}),
     mode: value.mode === 'passive_progress' ? 'passive_progress' : 'completion',
     condition: safeCondition,
     state: 'active',
@@ -3573,7 +3574,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       'The planner chooses strategy and completion conditions, never gameplay operations. Resubmit operations:[] with the plan and aligned executionGuidance; the executor chooses actions after commit.')
     if (plan.plannerReview !== undefined) throw this.roleContractError('invalid_planner_review', 'Only an executor may request plannerReview')
     const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
-    if (Array.isArray(plan.plan) && plan.plan.length > 0 && !FROZEN_PLAN_STATUSES.has(held?.status) && plan.assessmentOnly !== true) {
+    if (Array.isArray(plan.plan) && plan.plan.length > 0 && (!FROZEN_PLAN_STATUSES.has(held?.status) || this.workingRevisionCandidate(plan)) && plan.assessmentOnly !== true) {
       let guidance
       try { guidance = normalizeExecutionGuidance(plan.executionGuidance, plan.plan.length) }
       catch (cause) { throw this.roleContractError('invalid_execution_guidance', cause.message) }
@@ -3716,6 +3717,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Runs AD-AF: that pause was guard, which nothing resumes, so an unattended goal ended about 8 minutes in. A review is
     // advisory model output, not world evidence, so the pause is model_recoverable: the supervisor's bounded auto-resume
     // (MODEL_RECOVERABLE_RESUME_LIMITS, per step and per goal) restages a fresh executor onto the same step.
+    const effortClaimed = this.memory.spendGoalEffort?.(key, plan.factoryAssignmentEvidence
+      ? `assignment:${plan.factoryAssignmentEvidence.code}:${plan.factoryAssignmentEvidence.facts?.member?.unit_number}:${plan.factoryAssignmentEvidence.facts?.selected_resource}`
+      : plan.factoryFailureEvidence ? `factory:${plan.factoryFailureEvidence.code}` : `review:${review.reason}`) !== false
+    if (!effortClaimed) return this.pauseForExecutorCorrection('goal_no_progress_exhausted', activeStep.step_id, 'Goal effort exhausted without new relevant native progress; the goal and blocker history are preserved.')
     const continuing = held.status !== PLAN_STATUS.BLOCKED
       && this.memory.claimReviewContinuation?.(key, activeStep.step_id, { requestId }) === true
     const pause = () => {
@@ -3746,7 +3751,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true,
           strict_persistence: strictPersistence }
         await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
-          reason: review.reason, bound: 'one_planner_round_per_step', authority: 'advisory_only' })
+          reason: review.reason, bound: 'durable_goal_no_progress_effort', authority: 'advisory_only' })
         await assertReviewCurrent()
         const continued = await this.continueFromModMessage(`${reviewMessage}\n${REVIEW_ROUND_FACT}`, 'planner.review_round_continuation', { withinTurn: true })
         if (continued !== null) return continued
@@ -7880,7 +7885,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!state || state.status !== 'active' || !rawWait || rawWait.state !== 'active') {
       return { action: 'absent', healthy: false, state }
     }
-    const factoryUse = await atFactoryCellBoundary(this, 'wait_poll', () => reconcileFactoryCellUse(this, { phase: 'wait_poll' }))
+    const factoryUse = rawWait.condition?.kind === 'starter_acceptance' ? {}
+      : await atFactoryCellBoundary(this, 'wait_poll', () => reconcileFactoryCellUse(this, { phase: 'wait_poll' }))
 
     const wait = safeConditionWait(rawWait)
     const identity = {
@@ -7924,7 +7930,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         },
       }
     }
-    if (!conditionWaitLifecycleMatches(wait, before)) {
+    if (!conditionWaitLifecycleMatches(wait, before) || wait.condition.kind === 'starter_acceptance' && wait.actor_session !== before.session) {
       return {
         action: 'failed',
         healthy: false,
@@ -7941,7 +7947,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     let observation
     try {
-      observation = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(wait.condition))).trim())
+      if (wait.condition.kind === 'starter_acceptance') {
+        const result = await this.evaluateGoalCompletion({ record: false })
+        observation = { ok: true, satisfied: result?.satisfied === true }
+      } else observation = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(wait.condition))).trim())
     }
     catch (error) {
       observation = { error: `condition_transport_error:${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}` }
@@ -7973,7 +7982,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || current.condition_wait?.id !== identity.wait_id) {
       return { action: 'stale', healthy: false, state: current, wait, identity }
     }
-    if (!conditionWaitLifecycleMatches(wait, after)) {
+    if (!conditionWaitLifecycleMatches(wait, after) || wait.condition.kind === 'starter_acceptance' && wait.actor_session !== after.session) {
       return {
         action: 'failed',
         healthy: false,
@@ -8023,7 +8032,64 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async pollStarterAcceptance(wait) {
+    const key = this.activePlanKey()
+    const current = () => this.memory.currentPlan?.(key)
+    const planning = this.memory.planningState?.(key)
+    if (planning?.run?.paused || planning?.goal?.status !== 'active' || current()?.condition_wait?.id !== wait.id) return { action: 'stale' }
+    const actor = await this.captureEpoch()
+    if (!conditionWaitLifecycleMatches(wait, actor) || wait.actor_session !== actor.session
+      || this.memory.pendingOperation?.(key) || actor.idle !== true) {
+      this.memory.clearConditionWait(key, wait.id)
+      await this.persistState({ strict: true })
+      return { action: 'failed', wait_id: wait.id, reason: 'starter_acceptance_reconciliation_required', state: current() }
+    }
+    this.epoch = actor
+    const evaluation = await this.evaluateGoalCompletion({ record: false })
+    if (current()?.condition_wait?.id !== wait.id || this.memory.planningState?.(key)?.run?.paused) return { action: 'stale' }
+    if (evaluation?.satisfied) {
+      // Finalization owns this bounded native-only turn; no model request or
+      // effort allowance is created by waiting. Factory close guards require an active owner.
+      if (this.active) return { action: 'stale' }
+      this.active = true
+      const generation = this.generation
+      try {
+        const finished = await this.finishIfGoalMet({ chatMessage: '' }, current())
+        if (finished?.goalStatus === 'completed') {
+          const completed = this.memory.planByNpc.get(key)
+          await this.persistState({ strict: true })
+          if (this.generation !== generation) return { action: 'stale' }
+          try {
+            const stopped = JSON.parse(String(await this.rcon.command(goalConditionCommand({ kind: 'automated_starter_base', acceptance_key: wait.goal_id, observation_id: wait.observation_id, stop_observation: true }))))
+            if (stopped?.stopped !== true) throw new Error(stopped?.error ?? 'native_stop_unconfirmed')
+          } catch (error) {
+            // The native ten-minute TTL independently ends this bounded sampler.
+            await this.traceEvent('goal.starter_observation_stop_failed', { goal_id: wait.goal_id, reason: String(error.message ?? error).slice(0, 160) })
+          }
+          if (this.generation !== generation) return { action: 'stale' }
+          return { action: 'verified', wait_id: wait.id, state: completed, chat_message: finished.chatMessage }
+        }
+      } finally { if (this.generation === generation) this.active = false }
+    }
+    const checks = wait.checks + 1
+    if (Date.now() - wait.registered_at >= wait.timeout_ms || checks >= wait.max_checks) {
+      this.memory.clearConditionWait(key, wait.id)
+      await this.persistState({ strict: true })
+      await this.traceEvent('goal.starter_observation_exhausted', { goal_id: wait.goal_id, wait_id: wait.id, results: evaluation?.results })
+      return { action: 'timeout', wait_id: wait.id, reason: 'starter_acceptance_unmet', state: current() }
+    }
+    const state = this.memory.updateConditionWait(key, { ...wait, checks, updated_at: Date.now() })
+    await this.persistState({ strict: true })
+    return { action: 'waiting', wait_id: wait.id, state }
+  }
+
   async pollConditionWait() {
+    const starterWait = this.memory.currentPlan?.(this.activePlanKey())?.condition_wait
+    if (starterWait?.state === 'active' && starterWait.condition?.kind === 'starter_acceptance') {
+      if (this.conditionPollPromise) return this.conditionPollPromise
+      this.conditionPollPromise = this.pollStarterAcceptance(starterWait)
+      try { return await this.conditionPollPromise } finally { this.conditionPollPromise = null }
+    }
     if (this.conditionPollPromise) return this.conditionPollPromise
     this.conditionPollPromise = (async () => {
       const generation = this.generation // the slice-progress credit for a satisfied wait belongs to this lineage only
@@ -8693,7 +8759,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && (completedSliceRecovery || (!this.actionOmissionRepairActive && !this.freshContextRecoveryInProgress))
   }
 
-  async validateStepCompletionDeclarations(plan) {
+  async validateStepCompletionDeclarations(plan, { revising = false } = {}) {
     const planning = this.memory.planningState?.(this.activePlanKey())
     const held = getActivePlanningPlan(planning)
     if (held?.status === PLAN_STATUS.BLOCKED && this.agentContext.role === EXECUTOR_ROLE) {
@@ -8705,7 +8771,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       return
     }
-    if (FROZEN_PLAN_STATUSES.has(held?.status)) {
+    if (!revising && FROZEN_PLAN_STATUSES.has(held?.status)) {
       const step = held.steps?.[held.active_step_index]
       const declaredTransition = plan.semanticCompletion?.stepId === step?.step_id
         && held.steps?.[held.active_step_index + 1]?.completion_mode === 'deterministic'
@@ -8729,7 +8795,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'missing_step_completions'
       throw error
     }
-    const plannerOnlyDraft = this.plannerOnlyDraftCandidate(plan)
+    const plannerOnlyDraft = revising || this.plannerOnlyDraftCandidate(plan)
     if (this.requireTypedObligations && plan.assessmentOnly !== true
       && plan.stepCompletions.some(row => row.kind === 'deterministic' && !row.obligations)) {
       const error = new AgentLoopError('typed_step_obligations_required: declare obligations {outcome:{mode:"all",requirements:[...]},preserve:[exact unit numbers]} for each deterministic step. Outcomes describe intended results; preserve identifies existing structures and cannot be replaced by added global counts. No draft was committed.')
@@ -9671,6 +9737,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async completionFactsForContract(contract, verification, operationNames, { committedIdentity = false } = {}) {
     const facts = {}
+    const progressOwner = this.captureCheckpointOwner()
     const normalized = sanitizeStepCompletionContract(contract, this.currentContractContext())
     const planning = this.memory.planningState?.(this.activePlanKey())
     const receiptPlan = getActivePlanningPlan(planning)
@@ -9802,6 +9869,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         }
       }
+    }
+    if (receiptPlan?.steps?.[receiptPlan.active_step_index]?.completion_contract
+      && completionContractSignature(normalized) === completionContractSignature(receiptPlan.steps[receiptPlan.active_step_index].completion_contract)
+      && getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey())) === receiptPlan) {
+      await this.assertCheckpointOwnerCurrent(progressOwner)
+      this.memory.creditNativeProgress?.(this.activePlanKey(), receiptPlan, receiptPlan.steps[receiptPlan.active_step_index], facts)
     }
     return facts
   }
@@ -11172,7 +11245,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     // A bare Resume/continue on the goal a restart paused before its first plan re-drives that goal.
-    const redriveGoal = isBareContinuation(text) ? this.redrivableGoalWithoutPlan(memoryKey) : undefined
+    const redriveGoal = isBareContinuation(text) ? this.redrivableGoalWithoutPlan(memoryKey, { startupRecovery: options.startupRecovery === true }) : undefined
     if (redriveGoal) routed.route = { ...routed.route, intent: 'continue_current', queue_conflict: false, reply: '' }
     // An intake retry (supervisor.mjs) re-sends the objective whose first planner call failed on transport: the same intent it was
     // received under, whatever the router would now say about the text.
@@ -11617,10 +11690,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Resume of that pause: the goal is re-driven from its own objective (no plan exists to
   // continue, and a bare "continue" must never become the objective of a new goal).
-  redrivableGoalWithoutPlan(key) {
+  redrivableGoalWithoutPlan(key, { startupRecovery = false } = {}) {
     const planning = this.memory.planningState?.(key)
     if (!planning?.goal || planning.goal.status !== GOAL_STATUS.ACTIVE || getActivePlanningPlan(planning)) return undefined
     if (this.memory.currentPlan?.(key)) return undefined
+    if (startupRecovery && planning.run?.paused !== true && this.memory.currentGoalGrant?.(key)
+      && !(planning.authorization?.questions ?? []).some(question => question.status === 'pending')
+      && !(planning.operation_ledger?.records?.length > 0)) return planning.goal
     if (planning.run?.paused !== true || planning.run.pause_reason !== RESTART_BEFORE_FIRST_PLAN_PAUSE) return undefined
     return planning.goal
   }
@@ -12078,7 +12154,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     fence.actor = await this.goalEvaluationActor(definition)
     if (!this.goalEvaluationMatches(fence)) await this.assertGoalEvaluationCurrent(fence)
-    const evaluation = await evaluateGoalDefinition(definition, async command => {
+    const evaluation = await evaluateGoalDefinition({ ...definition, acceptance_key: fence.goalId, acceptance_bindings: this.memory.planningState?.(key)?.goal?.acceptance_bindings }, async command => {
       await this.assertGoalEvaluationCurrent(fence)
       const result = await this.rcon.command(command)
       await this.assertGoalEvaluationCurrent(fence)
@@ -15009,6 +15085,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let plannerReview
     let productionTask
     let harnessDefaults
+    let starterBaseBindings
+    let factoryReassignment
+    let workingPlanRevision
     let reviewCheckpointIgnored = false
     let baseMessage = message
     if (typeof message?.content === 'string') {
@@ -15017,6 +15096,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         this.validatePlannerRoleOutput(raw)
+        if (Object.hasOwn(raw, 'workingPlanRevision')) {
+          if (raw.workingPlanRevision !== true || this.agentContext.role !== PLANNER_ROLE) throw this.roleContractError('invalid_working_revision', 'workingPlanRevision:true is planner-only at a harness review boundary.')
+          workingPlanRevision = true
+          const { workingPlanRevision: _revision, ...rest } = raw
+          raw = rest
+          baseMessage = providerMessageWith(message, { content: JSON.stringify(raw) })
+        }
         if (Object.hasOwn(raw, 'productionTask')) {
           try { productionTask = normalizeProductionIntent(raw.productionTask) }
           catch (cause) { throw this.roleContractError('invalid_production_task', cause.message) }
@@ -15024,6 +15110,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             || !raw.stepId || raw.checkpoint || raw.semanticCompletion || raw.plannerReview || raw.observationRequest) {
             throw this.roleContractError('invalid_production_task', 'productionTask requires an executor stepId, empty operations and no completion/review/read request')
           }
+        }
+        if (Object.hasOwn(raw, 'factoryReassignment')) {
+          if (this.agentContext.role !== PLANNER_ROLE || JSON.stringify(raw.factoryReassignment).length > 1000) throw this.roleContractError('factory_reassignment_planner_required', 'Only the planner may request a bounded validated job transition.')
+          factoryReassignment = structuredClone(raw.factoryReassignment)
+          const { factoryReassignment: _reassignment, ...rest } = raw
+          raw = rest; baseMessage = providerMessageWith(message, { content: JSON.stringify(raw) })
+        }
+        if (Object.hasOwn(raw, 'starterBaseBindings')) {
+          if (this.agentContext.role !== PLANNER_ROLE || JSON.stringify(raw.starterBaseBindings).length > 12000) throw this.roleContractError('invalid_starter_bindings', 'Only the planner may bind bounded existing factory identities.')
+          starterBaseBindings = structuredClone(raw.starterBaseBindings)
+          const { starterBaseBindings: _bindings, ...rest } = raw
+          raw = rest
+          baseMessage = providerMessageWith(message, { content: JSON.stringify(raw) })
         }
         if (Object.hasOwn(raw, 'defaults')) {
           if (this.agentContext.role !== EXECUTOR_ROLE) throw this.roleContractError('invalid_defaults', 'defaults are written by the step executor')
@@ -15186,6 +15285,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (plannerReview) plan.plannerReview = plannerReview
     if (productionTask) plan.productionTask = productionTask
     if (harnessDefaults) plan.defaults = harnessDefaults
+    if (factoryReassignment) plan.factoryReassignment = factoryReassignment
+    if (starterBaseBindings) plan.starterBaseBindings = starterBaseBindings
+    if (workingPlanRevision) plan.workingPlanRevision = true
     if (reviewCheckpointIgnored) plan.reviewCheckpointIgnored = true
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
@@ -17816,7 +17918,93 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async bindStarterBaseAcceptance(bindings) {
+    const owner = this.captureCheckpointOwner(); const key = this.activePlanKey()
+    const state = this.memory.planningState?.(key)
+    const condition = state?.goal?.definition?.done_when?.find(row => row.kind === 'automated_starter_base')
+    const grant = this.memory.currentGoalGrant?.(key)
+    if (!condition || !grant || this.agentContext.role !== PLANNER_ROLE || this.batchInFlight || this.memory.pendingOperation?.(key)) throw this.roleContractError('starter_binding_authority_missing', 'Bind facilities only for the existing starter-base acceptance at an idle planner boundary.')
+    const native = await this.assertCurrent()
+    if (native.idle !== true) throw this.roleContractError('starter_binding_native_busy', 'Reconcile active work first.')
+    const evidence = JSON.parse(String(await this.rcon.command(goalConditionCommand({ ...condition, acceptance_key: state.goal.goal_id, bindings, observation_id: this.traceRequest?.id, restart_measurement: true }))))
+    await this.assertCheckpointOwnerCurrent(owner)
+    if (evidence?.ok !== true) throw this.roleContractError('starter_binding_refused', evidence?.error ?? 'native_binding_unavailable')
+    this.memory.dispatchPlanningEvent(key, { type: PLANNING_EVENT.GOAL_ACCEPTANCE_BOUND, source: 'runtime', goal_id: state.goal.goal_id,
+      bindings, native_validated: true, grant_check: { grant_id: grant.grant_id, grant_revision: grant.revision,
+        actor_id: native.actor_id, actor_epoch: native.epoch }, now: Date.now() })
+    if (JSON.stringify(this.memory.planningState(key)?.goal?.acceptance_bindings) !== JSON.stringify(bindings)) throw this.roleContractError('starter_binding_authority_changed', 'The current goal grant no longer accepts these bindings.')
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    await this.traceEvent('goal.starter_facilities_bound', { request_id: this.traceRequest?.id, goal_id: state.goal.goal_id,
+      bindings, acceptance: condition, evidence })
+    await this.assertCheckpointOwnerCurrent(owner)
+    const legacy = this.memory.currentPlan(key)
+    const waiting = this.memory.registerConditionWait(key, { id: `starter_${this.traceRequest?.id}`, goal_id: state.goal.goal_id,
+      step_id: legacy.task_board.active_step_id, actor_id: native.actor_id, actor_epoch: native.epoch, actor_session: native.session, observation_id: this.traceRequest?.id,
+      condition: { kind: 'starter_acceptance' }, state: 'active', mode: 'completion', checks: 0, max_checks: 360, timeout_ms: 600000,
+      registered_at: Date.now(), updated_at: Date.now() })
+    if (!waiting) throw this.roleContractError('starter_wait_refused', 'Canonical goal cannot register acceptance observation.')
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    this.active = false
+    await this.traceEvent('request.waiting', { request_id: this.traceRequest?.id, reason: 'starter_acceptance_native_observation', wait_id: waiting.condition_wait.id })
+    return { chatMessage: 'Observing the selected factory without manual servicing; the harness will verify acceptance and hand back.', operations: [],
+      goalId: state.goal.goal_id, goalStatus: 'active', conditionWait: waiting.condition_wait, taskBoard: visibleTaskBoard(waiting.task_board) }
+  }
+
+  workingRevisionCandidate(plan) {
+    const review = this.reviewContinuation
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    return plan.workingPlanRevision === true && this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
+      && review?.request_id === this.traceRequest?.id && review?.plan_id === held?.plan_id
+      && review?.step_id === held?.steps?.[held.active_step_index]?.step_id
+      && Array.isArray(plan.stepCompletions) && plan.stepCompletions.length > 0
+      && Array.isArray(plan.executionGuidance) && plan.executionGuidance.length === plan.stepCompletions.length
+  }
+
+  async applyWorkingRevision(plan) {
+    if (!this.workingRevisionCandidate(plan)) return undefined
+    if (plan.operations.length || plan.currentStep !== 0 || !plan.plan.length || plan.semanticCompletion || plan.assessmentOnly
+      || plan.goalDefinition) throw this.roleContractError('working_revision_invalid', 'Revise remaining deterministic work at currentStep:0 with empty operations; preserve the goal definition.')
+    const owner = this.captureCheckpointOwner()
+    const before = await this.assertCurrent()
+    if (before.idle !== true || this.batchInFlight || this.memory.pendingOperation?.(owner.key)
+      || this.currentPendingAmendment()) throw this.roleContractError('working_revision_not_idle', 'Reconcile native work and pending authority before revision.')
+    await this.validateStepCompletionDeclarations(plan, { revising: true })
+    if (plan.factoryReassignment) await reassignEmptyFactoryFurnace(this, plan.factoryReassignment)
+    await atFactoryCellBoundary(this, 'draft', () => validateFactoryCellDraft(this, plan))
+    await this.assertCheckpointOwnerCurrent(owner)
+    const after = await this.assertCurrent()
+    if (after.idle !== true || this.batchInFlight || this.memory.pendingOperation?.(owner.key)) throw this.roleContractError('working_revision_not_idle', 'Native state changed during revision.')
+    const result = this.memory.reviseWorkingPlan?.(owner.key, plan, { current: { actor_id: after.actor_id, actor_epoch: after.epoch },
+      requestId: this.traceRequest?.id, nativeIdle: true })
+    if (!result?.ok) throw this.roleContractError('working_revision_refused', result?.reason ?? 'working_revision_unavailable')
+    this.reviewContinuation = null
+    this.agentContext.dropParkedExecutor()
+    const pinned = capturePlannerSkillHandoff(owner.key, result.state, this.loadedSkillContext, this.memory.plannerSkillHandoffs)
+    this.memory.plannerSkillHandoffs ??= new Map()
+    if (pinned) this.memory.plannerSkillHandoffs.set(owner.key, pinned)
+    else this.memory.plannerSkillHandoffs.delete(owner.key)
+    const revisedOwner = this.captureCheckpointOwner()
+    await this.persistState({ strict: true, requiredSkillHandoff: pinned })
+    await this.assertCheckpointOwnerCurrent(revisedOwner)
+    await this.traceEvent('plan.working_revision_committed', { request_id: this.traceRequest?.id,
+      goal_id: revisedOwner.goalId, predecessor_plan_id: owner.planId, plan_id: result.plan.plan_id,
+      plan_version: result.plan.plan_version, effort: result.state.goal.effort, authority: 'unchanged_user_grant' })
+    await this.assertCheckpointOwnerCurrent(revisedOwner)
+    const handoff = await this.startExecutorAtCommit({ planId: result.plan.plan_id, requestId: this.traceRequest?.id })
+    if (!handoff.restaged || handoff.decision_started === false) throw this.roleContractError('working_revision_handoff_refused', handoff.reason ?? 'superseded')
+    return this.runTurn()
+  }
+
   async commitPlan(plan) {
+    if (this.agentContext.role === EXECUTOR_ROLE && !plan.plannerReview && this.memory.spendGoalEffort
+      && this.memory.planningState?.(this.activePlanKey())?.goal?.status === 'active') {
+      const effortOwner = this.captureCheckpointOwner()
+      if (!this.memory.spendGoalEffort(this.activePlanKey(), 'executor_decision')) {
+        return this.pauseForExecutorCorrection('goal_no_progress_exhausted', plan.stepId, 'Goal effort exhausted without new relevant native progress; preserved the goal and blocker history.')
+      }
+      await this.persistState({ strict: true })
+      await this.assertCheckpointOwnerCurrent(effortOwner)
+    }
     if (!this.stockDependencyAdmission && activeStockDependencyBarrier(this)) return continueStockDependencyBarrier(this)
     let refreshed = plan[REFRESHED_ENTITY_PLAN]
     if (refreshed && !refreshed.current()) throw new AgentLoopError('Entity refresh plan was cancelled or superseded')
@@ -17825,6 +18013,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (refreshed && refreshed.action !== 'bound') return refreshed.result
     // Backstop for programmatic callers: never silently drop planner actions.
     this.validatePlannerRoleOutput(plan)
+    if (plan.starterBaseBindings) return this.bindStarterBaseAcceptance(plan.starterBaseBindings)
+    if (plan.factoryReassignment && !this.workingRevisionCandidate(plan)) throw this.roleContractError('factory_reassignment_review_required', 'Declare reassignment only inside an explicit working plan revision.')
+    const revised = await this.applyWorkingRevision(plan)
+    if (revised !== undefined) return revised
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
     let productionStepId = plan.productionTask ? plan.stepId : undefined
     const harnessDefaults = plan.defaults

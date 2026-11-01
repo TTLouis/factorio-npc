@@ -1,6 +1,6 @@
 import { factoryMetadataDigest } from './factory-dependencies.mjs'
 import { FactoryRegistryError } from './factory-registry.mjs'
-import { getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
+import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { factoryUseFailureWitness, factoryStepRequirement, refreshFactoryUseFailure, assignedFactoryConflict } from './factory-cell-use.mjs'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { FactoryCellBoundaryError } from './factory-cell-enrollment.mjs'
@@ -76,16 +76,14 @@ async function reviewAssignedConflict(agent, error, witness) {
     if (!agent.memory.currentGoalGrant(key)) fail('factory_cell_conflict_authority_changed')
   }
   await current()
-  const allowance = agent.memory.consumeFactoryUseRecovery(key, witness.requirement, {
-    request_id: agent.traceRequest.id, plan_id: plan.plan_id, code: witness.code, evidence_digest: factoryMetadataDigest(witness),
-  })
+  const allowance = { allowed: (state.goal.effort?.spent ?? 0) < 24, used: state.goal.effort?.spent ?? 0, limit: 24 }
   // This same goal ledger is shared with the existing factory repairs. Neither
   // restart, restage, a different cell nor a new plan slice grants a fresh cap.
   await agent.persistState({ strict: true }); await current()
   const detail = { ...witness.scope, code: witness.code, witness, ...allowance,
     mechanism: 'assigned_producer_advisory_review', authority: 'advisory_only', world_blocker_proven: false,
     current_batch_sent: false, world_operations_replayed: 0, prior_world_effects: 'not_reclassified' }
-  if (!allowance.allowed || state.goal.review_continuation_steps?.includes(step.step_id)) {
+  if (!allowance.allowed) {
     await agent.traceEvent('factory_cell.assigned_review_exhausted', { ...detail, reason: allowance.allowed ? 'step_review_already_used' : 'factory_allowance_unavailable' })
     await current()
     throw new FactoryCellBoundaryError(new FactoryRegistryError('factory_cell_assigned_review_exhausted', 'factory_cell_assigned_review_exhausted'), 'assigned_review')
@@ -94,7 +92,7 @@ async function reviewAssignedConflict(agent, error, witness) {
   await agent.persistState({ strict: true }); await current()
   await agent.traceEvent('factory_cell.assigned_review_started', detail); await current()
   const result = await agent.handlePlannerReview({ operations: [], plannerReview: { reason: 'approach_infeasible',
-    rationale: `Fresh assigned producer ${witness.facts.member.unit_number} retains job ${witness.facts.assignment.method}; the proposed ${witness.facts.selected_resource} use conflicts. Review the same stock step without changing assignments, plan or completion authority.` },
+    rationale: `Fresh assigned producer ${witness.facts.member.unit_number} retains job ${witness.facts.assignment.method}; the proposed ${witness.facts.selected_resource} use conflicts. Revise the working approach inside the unchanged user grant; preserve assignment guards and acceptance.` },
     factoryAssignmentEvidence: witness,
   }, step.step_id, { harnessRaised: true, strictPersistence: true })
   return { handled: true, result }
@@ -107,7 +105,7 @@ export async function recoverFactoryCellUse(agent, error) {
   const conflict = assignedFactoryConflict(error)
   if (conflict) return reviewAssignedConflict(agent, error, conflict)
   const witness = factoryUseFailureWitness(error)
-  if (!witness || !agent.replacementWakeEnabled || !agent.stateFile) return { handled: false }
+  if (!witness || agent.agentContext.role !== 'executor' || !agent.replacementWakeEnabled || !agent.stateFile) return { handled: false }
   const owner = agent.captureCheckpointOwner(); const key = agent.activePlanKey()
   const state = agent.memory.planningState(key); const plan = getActivePlan(state)
   const requirement = factoryStepRequirement(plan?.steps?.[plan.active_step_index])
@@ -125,25 +123,18 @@ export async function recoverFactoryCellUse(agent, error) {
     || witness.scope.session_id !== agent.epoch?.session || witness.scope.plan_id !== plan.plan_id || witness.scope.plan_version !== plan.plan_version
     || witness.registry_revision !== agent.memory.getFactoryRegistry().revision
     || witness.physical_revision !== agent.memory.factoryLifecycleRevision()) return { handled: false }
-  const allowance = agent.memory.consumeFactoryUseRecovery(key, witness.requirement, {
-    request_id: agent.traceRequest.id, plan_id: plan.plan_id, code: witness.code, evidence_digest: factoryMetadataDigest(witness),
-  })
+  // The refusal is authoritative evidence, but choosing another strategy is a
+  // planner working-plan revision under the same goal effort. Historical factory
+  // recovery rows remain intact; a replan/restart never renews their allowance.
+  agent.memory.recordBoardEvidence(key, { kind: 'factory_cell_resolution', ref: `${agent.traceRequest.id}/factory_use`, summary: JSON.stringify(witness) })
   await agent.persistState({ strict: true }); agent.assertCheckpointOwnerIdentity(owner)
   await refreshFactoryUseFailure(error); agent.assertCheckpointOwnerIdentity(owner)
-  if (!allowance.allowed) {
-    await agent.traceEvent('factory_cell.recovery_exhausted', { goal_id: state.goal.goal_id, plan_id: plan.plan_id, code: witness.code, ...allowance })
-    fail('factory_cell_recovery_exhausted')
-  }
-  agent.memory.recordBoardEvidence(key, { kind: 'factory_cell_resolution', ref: `${agent.traceRequest.id}/factory_use`, summary: JSON.stringify(witness) })
-  agent.memory.dispatchPlanningEvent(key, { type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED, source: 'runtime', now: Date.now(), plan_id: plan.plan_id,
-    reason_code: witness.code, detail: 'Fresh exact factory facts cannot support the committed production requirement; assigned jobs remain unchanged.',
-    evidence_refs: [`${agent.traceRequest.id}/factory_use`] })
-  await agent.persistState({ strict: true })
-  agent.assertCheckpointOwnerIdentity(owner)
-  await agent.traceEvent('factory_cell.recovery_started', { goal_id: state.goal.goal_id, plan_id: plan.plan_id, witness, ...allowance })
-  agent.assertCheckpointOwnerIdentity(owner)
-  await refreshFactoryUseFailure(error); agent.assertCheckpointOwnerIdentity(owner)
-  const proof = Object.freeze({ goal_id: state.goal.goal_id, plan_id: plan.plan_id, request_id: agent.traceRequest.id }); wakeProofs.add(proof)
-  const result = await agent.wakePlannerForReplacement({ trigger: 'factory_cell_resolution', factoryWitness: proof })
-  return result === undefined ? { handled: false } : { handled: true, result }
+  await agent.traceEvent('factory_cell.recovery_started', { goal_id: state.goal.goal_id, plan_id: plan.plan_id, witness,
+    mechanism: 'canonical_working_plan_review', spent: state.goal.effort?.spent ?? 0, limit: 24 })
+  await agent.assertCheckpointOwnerCurrent(owner)
+  const result = await agent.handlePlannerReview({ operations: [], plannerReview: { reason: 'approach_infeasible',
+    rationale: `Fresh native factory evidence refused the current approach (${witness.code}). Revise the remaining working plan inside the unchanged goal grant; keep assignment, protection and native uncertainty guards.` },
+    factoryFailureEvidence: witness,
+  }, plan.steps[plan.active_step_index].step_id, { harnessRaised: true, strictPersistence: true })
+  return { handled: true, result }
 }

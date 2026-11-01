@@ -25,6 +25,7 @@
 // numbers and strings only).
 
 import type { LuaEntity, LuaSurface, SurfaceIndex } from 'factorio:runtime'
+import { note_starter_servicing } from './starter_base_acceptance'
 import { note_output_proof_hand_craft, note_output_proof_manual_mutation } from './output_delivery_proof'
 import { entity_role_inventories, has_separate_output } from './inventory_roles'
 import { find_world_entities } from './npc_vision'
@@ -107,6 +108,7 @@ function force_work(force_index: number): ForceHandWork {
  * that produces items. Everything else is hand feeding.
  */
 export function record_hand_insert(force_index: number, item_name: string, entity_name: string, entity_type: string, into_fuel: boolean, entity?: LuaEntity) {
+  note_starter_servicing(force_index)
   note_output_proof_manual_mutation(entity, into_fuel)
   if (into_fuel || NON_PRODUCING_TYPES[entity_type]) return
   const work = force_work(force_index)
@@ -193,6 +195,7 @@ function prune_fed(work: ForceHandWork) {
 }
 
 export function record_hand_crafted_tick(force_index: number, item_name: string) {
+  note_starter_servicing(force_index)
   note_output_proof_hand_craft(force_index, item_name)
   const work = force_work(force_index)
   const crafted = work.crafted_tick ?? {}
@@ -202,6 +205,7 @@ export function record_hand_crafted_tick(force_index: number, item_name: string)
 
 /** A player on the force mined an item by hand (on_player_mined_item). */
 export function record_hand_mined_item(force_index: number, item_name: string) {
+  note_starter_servicing(force_index)
   const work = force_work(force_index)
   const mined = work.mined_tick ?? {}
   work.mined_tick = mined

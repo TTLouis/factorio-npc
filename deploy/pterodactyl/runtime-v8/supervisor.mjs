@@ -3897,6 +3897,19 @@ export class Session {
   }
 
   async announceStartupGoal(kind) {
+    const key = `npc:${this.npcId}`
+    const planning = this.agent.memory?.planningState?.(key)
+    const goal = this.agent.redrivableGoalWithoutPlan?.(key, { startupRecovery: true })
+    if (goal && planning?.run?.paused !== true && this.startupReconciledSession === this.session) {
+      await this.ensureAuthorization()
+      const native = await this.agent.readInteractionTaskStatus()
+      if (native?.task_state === 'idle' && native.queue_length === 0
+        && !this.agent.memory.pendingOperation?.(key) && !this.agent.active
+        && this.agent.redrivableGoalWithoutPlan?.(key, { startupRecovery: true })?.goal_id === goal.goal_id) {
+        await this.agent.traceEvent?.('runtime.active_goal_redriven', { goal_id: goal.goal_id, reason: kind, reconciled: true })
+        return this.agent.request('continue', { sender: goal.owner, startupRecovery: true })
+      }
+    }
     const requestId = `recovery_${Date.now().toString(36)}`
     const goalId = this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id
     if (kind === 'before_first_plan') {
