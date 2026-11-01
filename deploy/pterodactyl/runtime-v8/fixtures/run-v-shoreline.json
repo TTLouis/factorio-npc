@@ -1,0 +1,171 @@
+{
+  "source": "Run V 2026-10-16, exact native water result and sanitized final chronology",
+  "candidate": "4cc7b57eecbd563a8765b6096aaecd9bd2a3f90b",
+  "water": {
+    "ts": "2026-10-16T15:48:12.582Z",
+    "request_id": "req_mvb4des7_1",
+    "args": {
+      "fluid_name": "water",
+      "limit": 8,
+      "search_radius": 128
+    },
+    "result": {
+      "ok": true,
+      "fluid_name": "water",
+      "actor_position": {
+        "x": -102.35546875,
+        "y": 25.5703125
+      },
+      "surface_index": 1,
+      "observed_tick": 112605,
+      "search_radius": 128,
+      "coverage": "generated_bounding_square",
+      "coverage_complete": false,
+      "checked_chunks": 81,
+      "generated_chunk_count": 72,
+      "ungenerated_chunk_count": 9,
+      "ungenerated_chunks": [
+        {
+          "x": -8,
+          "y": 0,
+          "center": {
+            "x": -240,
+            "y": 16
+          }
+        },
+        {
+          "x": -8,
+          "y": 1,
+          "center": {
+            "x": -240,
+            "y": 48
+          }
+        },
+        {
+          "x": -8,
+          "y": -1,
+          "center": {
+            "x": -240,
+            "y": -16
+          }
+        },
+        {
+          "x": -8,
+          "y": 2,
+          "center": {
+            "x": -240,
+            "y": 80
+          }
+        },
+        {
+          "x": -8,
+          "y": -2,
+          "center": {
+            "x": -240,
+            "y": -48
+          }
+        },
+        {
+          "x": -8,
+          "y": 3,
+          "center": {
+            "x": -240,
+            "y": 112
+          }
+        },
+        {
+          "x": -8,
+          "y": -3,
+          "center": {
+            "x": -240,
+            "y": -80
+          }
+        },
+        {
+          "x": -8,
+          "y": 4,
+          "center": {
+            "x": -240,
+            "y": 144
+          }
+        }
+      ],
+      "ungenerated_chunks_truncated": true,
+      "empty_result_is_conclusive": false,
+      "matching_tile_prototypes": 16,
+      "samples": {},
+      "returned_count": 0,
+      "truncated": false,
+      "scanned_tile_limit": 256,
+      "scan_truncated": false,
+      "ordering": "nearest_first"
+    }
+  },
+  "pump_reads_before_pause": 0,
+  "replies": [
+    {
+      "ts": "2026-10-16T15:48:21.495Z",
+      "request_id": "req_mvb4des7_1",
+      "round": 2,
+      "model": "gpt-6-luna",
+      "reply": "{\"chatMessage\":\"BLOCKED: The available actor-centered water scan found no water tiles, and its terrain coverage was incomplete. I can’t identify a legal shoreline placement site from the current evidence.\",\"stepId\":\"goal_01zf04a_1_p4_v1_s2_1xzl6p6\",\"operations\":[]}"
+    },
+    {
+      "ts": "2026-10-16T15:48:25.939Z",
+      "request_id": "req_mvb4des7_1",
+      "round": 0,
+      "model": "gpt-6-luna",
+      "reply": "{\"chatMessage\":\"BLOCKED: I can't verify a legal shoreline site or place the water-to-steam chain from the available current facts. No construction action can be safely proposed without confirming the site and placement geometry.\",\"stepId\":\"goal_01zf04a_1_p4_v1_s2_1xzl6p6\",\"operations\":[]}"
+    },
+    {
+      "ts": "2026-10-16T15:49:03.573Z",
+      "request_id": "recovery_mvb574rm",
+      "round": 1,
+      "model": "gpt-6-luna",
+      "reply": "{\"chatMessage\":\"I’ll attempt to place the offshore pump locally; the boiler and steam engine still need placement based on verified fluid connections.\",\"stepId\":\"goal_01zf04a_1_p4_v1_s2_1xzl6p6\",\"operations\":[{\"name\":\"place_entity\",\"args\":{\"entity_name\":\"offshore-pump\"}}],\"checkpoint\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"entity_count\",\"prototype\":\"offshore-pump\",\"minimum\":1},{\"kind\":\"entity_count\",\"prototype\":\"boiler\",\"minimum\":1},{\"kind\":\"entity_count\",\"prototype\":\"steam-engine\",\"minimum\":1}]}}"
+    }
+  ],
+  "pause_at": "2026-10-16T15:48:26.263Z",
+  "pause_class": "model_recoverable",
+  "pause_reason": "provider_action_omission_repair_failed: unverified_blocker_recovery_exhausted; no authoritative world blocker was established",
+  "auto_resume": [
+    {
+      "ts": "2026-10-16T15:48:26.284Z",
+      "event": "recovery.auto_resume_scheduled",
+      "request_id": "req_mvb4des7_1",
+      "attempt": 1,
+      "goal_attempt": 1,
+      "reason": "provider_action_omission_repair_failed: provider_action_omission_repair_failed: unverified_blocker_recovery_exhausted; no authoritative world blocker was estab…"
+    },
+    {
+      "ts": "2026-10-16T15:48:41.315Z",
+      "event": "recovery.auto_resume_started",
+      "request_id": "recovery_mvb574rm",
+      "attempt": 1,
+      "goal_attempt": 1,
+      "reason": null
+    },
+    {
+      "ts": "2026-10-16T15:48:41.375Z",
+      "event": "recovery.auto_resume_plan_resumed",
+      "request_id": "recovery_mvb574rm",
+      "attempt": null,
+      "goal_attempt": null,
+      "reason": "auto_resume_after_model_recoverable_pause"
+    }
+  ],
+  "prestop_pause_cleared_at": "2026-10-16T15:49:08.386Z",
+  "prestop_paused": false,
+  "native_refusal": {
+    "operation_id": 19,
+    "entity": "offshore-pump",
+    "code": "not_placeable",
+    "accepted": false,
+    "completed": false,
+    "position": {
+      "x": -103.5,
+      "y": 24.5
+    }
+  },
+  "parent_stop_submitted": "2026-10-16T15:49:08.393Z"
+}

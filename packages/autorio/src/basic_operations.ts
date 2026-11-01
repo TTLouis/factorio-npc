@@ -1,7 +1,10 @@
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
+import { batch_task_index } from './task_state_runtime'
 import type {
+  PlayerParametersLaunchRocket,
   PlayerParametersMineEntity,
+  PlayerParametersPreparePumpSite,
   PlayerParametersMoveItems,
   PlayerParametersPlaceEntity,
   PlayerParametersRotateEntity,
@@ -9,15 +12,24 @@ import type {
   PlayerParametersWaiting,
 } from './types'
 import { TaskStates } from './types'
+import { placement_candidate_matches, placement_preservation_queue_binding } from './placement_candidates'
+import type { ClearableEntity, ClearedEntity } from './placement_clearing'
+import type { GroundItem } from './placement_ground_items'
+import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
+import { layout_node_failed } from './construction_layout'
 
-type BasicTask = PlayerParametersMineEntity | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersWaiting
+type BasicTask = PlayerParametersMineEntity | PlayerParametersPreparePumpSite | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
 type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'no_actor' | 'invalid_count' | 'invalid_ticks' | 'invalid_max_count' | 'invalid_position' | 'invalid_direction' | 'invalid_unit_number' | 'invalid_recipe' | 'invalid_reverse'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
-  | 'invalid_entity' | 'item_missing' | 'no_position' | 'not_placeable' | 'create_failed'
+  | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
+  | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable' | 'construction_plan_blocked_no_clear' | 'layout_connection_unproven'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
+  | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
   | 'not_recipe_machine' | 'recipe_disabled' | 'incompatible_recipe' | 'set_recipe_failed'
+  | 'not_rocket_silo' | 'rocket_not_ready' | 'launch_failed' | 'launch_not_confirmed'
+  | 'pump_preparation_refused'
 
 export interface BasicOperationResult {
   operation_id?: number
@@ -36,18 +48,114 @@ export interface BasicOperationResult {
   item_name?: string
   requested_count?: number
   moved_count?: number
+  /** Extraction: total removed before insertion/rollback. Zero proves no source was changed. */
+  source_removed_count?: number
   to_entity?: boolean
   to_player?: boolean
   requested_ticks?: number
   requested_position?: { x: number, y: number }
   direction?: number
+  placed_unit_number?: number
+  placed_entity_type?: string
+  placed_position?: { x: number, y: number }
+  placed_surface_index?: number
+  placed_direction?: number
+  placed_last_user?: string
+  preservation_binding?: PlayerParametersPlaceEntity['preservation_binding']
+  placement_footprint?: {
+    tile_width: number
+    tile_height: number
+    tile_box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+    world_box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+  }
+  placement_grid?: { x_offset: number, y_offset: number, nearest_valid_center?: { x: number, y: number } }
+  placement_blockers?: Array<{ name: string, type: string, unit_number?: number, position: { x: number, y: number } }>
+  /** A placement of a connected construction layout: the node it builds, and why a refusal found its connections unproven. */
+  layout_node?: { layout_id: number, index: number }
+  layout_refusal?: string
+  // Ground items a placement picked up from its footprint, and one that did not fit.
+  ground_items_picked_up?: GroundItem[]
+  ground_item_left?: GroundItem
+  /** A picked-up stack's ground entity remained; the item count may be duplicated. */
+  ground_item_pickup_uncertain?: boolean
+  /** Entities a placement mined out of its footprint (natural obstructions, the NPC's own idle entities), with what the inventory gained. */
+  entities_cleared?: ClearedEntity[]
+  /** The blocker a refused clearing stopped at. */
+  clearing_left?: ClearableEntity
   previous_direction?: number
   reverse?: boolean
+  rocket_silo_status?: number
+  rocket_parts?: number
+  rocket_parts_required?: number
+  rockets_launched?: number
+  /** Item moves: how many of the item the NPC held when the move ran. */
+  held_count?: number
+  /** Refused item moves: the concrete reason the target took none. */
+  refusal_cause?: TransferRefusalCause
+  /** Refused item moves: the target's inventories and what occupies them. */
+  target_inventories?: TransferInventorySnapshot[]
+  /** A refused move's receipt is republished when its batch closes; this is the tick it was refused. */
+  refusal_tick?: number
+  /** Present on a republished refusal: how many operations of its batch were refused. */
+  batch_refused_count?: number
+  preparation_id?: string
+  preparation_reason?: string
+  execution_strategy?: 'actor'
+  removed_layers?: number
+  reclaimed_items?: Record<string, number>
+}
+
+/**
+ * Why a to-entity item move moved nothing although the NPC held the item.
+ * - target_full: an inventory that takes the item already holds it and has no room left.
+ * - input_slot_holds_other_item: the inventory that would take the item is filled by another item
+ *   (for example copper ore in a furnace source slot when iron ore is supplied).
+ * - no_input_inventory_for_item: the entity has no input inventory for this item at all
+ *   (for example ore into a boiler, whose only input is fuel).
+ * - target_rejects_item: an input inventory has free slots but still rejects the item.
+ */
+export type TransferRefusalCause = 'target_full' | 'input_slot_holds_other_item' | 'no_input_inventory_for_item' | 'target_rejects_item'
+
+export interface TransferInventorySnapshot {
+  unit_number?: number
+  index?: number
+  name?: string
+  /** input and fuel inventories are insert targets; output and burnt_result never are. */
+  role: 'input' | 'fuel' | 'output' | 'burnt_result'
+  slot_count: number
+  empty_slots: number
+  can_insert: boolean
+  contents: Array<{ name: string, quality?: string, count: number }>
+}
+
+/**
+ * One-line cause of a refused item move for logs and the runtime's error
+ * text: cause, item, target, held and requested counts, and what occupies the
+ * target's input/fuel slots.
+ */
+export function transfer_refusal_summary(result: BasicOperationResult) {
+  const parts = [
+    `cause=${result.refusal_cause ?? 'unknown'}`,
+    `item=${result.item_name ?? 'unknown'}`,
+    `target=${result.target_unit_number ?? result.entity_name ?? 'unknown'}`,
+    `held=${result.held_count ?? 'unknown'}`,
+    `requested=${result.requested_count ?? 'unknown'}`,
+  ]
+  const slots: string[] = []
+  for (const inventory of result.target_inventories ?? []) {
+    if ((inventory.role !== 'input' && inventory.role !== 'fuel') || inventory.slot_count <= 0) continue
+    const contents = inventory.contents.length > 0
+      ? inventory.contents.map(item => `${item.name} x${item.count}`).join(',')
+      : 'empty'
+    slots.push(`${inventory.name ?? `inventory_${inventory.index ?? 'unknown'}`}[${contents}]`)
+  }
+  if (slots.length > 0) parts.push(`slots=${slots.join(' ')}`)
+  return parts.join(' ')
 }
 
 declare const storage: {
-  airi_next_basic_operation_id?: number
-  airi_last_basic_operation_result?: BasicOperationResult
+  sgluna_next_basic_operation_id?: number
+  sgluna_last_basic_operation_result?: BasicOperationResult
 }
 
 function owner(task: BasicTask) {
@@ -71,8 +179,8 @@ function valid_name(value: string) {
 }
 
 function next_operation_id() {
-  const next = (storage.airi_next_basic_operation_id ?? 0) + 1
-  storage.airi_next_basic_operation_id = next
+  const next = (storage.sgluna_next_basic_operation_id ?? 0) + 1
+  storage.sgluna_next_basic_operation_id = next
   return next
 }
 
@@ -85,6 +193,7 @@ function bind(task: BasicTask, actor: ControlledActor) {
   task.owner_actor_id = identity.actor_id
   task.owner_actor_kind = identity.kind
   task.owner_force_index = actor.force.index
+  if (task.type === TaskStates.MINING) task.owner_surface_index = actor.surface.index
   return true
 }
 
@@ -96,6 +205,7 @@ export function basic_identity_matches(actor: ControlledActor, task: BasicTask) 
   return identity.actor_id === task.owner_actor_id
     && identity.kind === task.owner_actor_kind
     && actor.force.index === task.owner_force_index
+    && (task.type !== TaskStates.MINING || task.owner_surface_index === undefined || actor.surface.index === task.owner_surface_index)
 }
 
 function result_for(actor: ControlledActor | undefined, task: BasicTask | undefined, accepted: boolean, completed: boolean, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
@@ -112,11 +222,17 @@ function result_for(actor: ControlledActor | undefined, task: BasicTask | undefi
     actor_kind: bound?.actor_kind ?? identity?.kind,
     force_index: bound?.force_index ?? (actor?.is_valid ? actor.force.index : undefined),
     entity_name: task && 'entity_name' in task ? task.entity_name : undefined,
-    target_unit_number: task?.type === TaskStates.MINING || task?.type === TaskStates.MOVING_ITEMS || task?.type === TaskStates.SETTING_RECIPE || task?.type === TaskStates.ROTATING ? task.target_unit_number : undefined,
+    ...(task?.type === TaskStates.PREPARING_PUMP_SITE ? { preparation_id: task.preparation_id, execution_strategy: 'actor' as const,
+      removed_layers: task.removed_layers ?? 0, reclaimed_items: task.reclaimed_items } : {}),
+    target_unit_number: task?.type === TaskStates.MINING || task?.type === TaskStates.MOVING_ITEMS || task?.type === TaskStates.SETTING_RECIPE || task?.type === TaskStates.ROTATING || task?.type === TaskStates.LAUNCHING_ROCKET ? task.target_unit_number : undefined,
     recipe_name: task?.type === TaskStates.SETTING_RECIPE ? task.recipe_name : undefined,
     player_name: task?.type === TaskStates.MOVING_ITEMS ? task.player_name : undefined,
     item_name: task && 'item_name' in task ? task.item_name : undefined,
-    requested_count: task?.type === TaskStates.MINING ? (task.requested_count ?? task.count) : undefined,
+    requested_count: task?.type === TaskStates.MINING
+      ? (task.requested_count ?? task.count)
+      : task?.type === TaskStates.MOVING_ITEMS
+        ? task.max_count
+        : undefined,
     to_entity: task?.type === TaskStates.MOVING_ITEMS ? task.to_entity : undefined,
     to_player: task?.type === TaskStates.MOVING_ITEMS ? task.to_player : undefined,
     requested_ticks: task?.type === TaskStates.WAITING ? (task.requested_ticks ?? task.remaining_ticks) : undefined,
@@ -129,7 +245,7 @@ function result_for(actor: ControlledActor | undefined, task: BasicTask | undefi
     reverse: task?.type === TaskStates.ROTATING ? task.reverse : undefined,
     ...details,
   }
-  storage.airi_last_basic_operation_result = result
+  storage.sgluna_last_basic_operation_result = result
   return result
 }
 
@@ -169,6 +285,17 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       requested_count: count,
     }
     return queue(task, actor)
+  }
+
+  function submit_prepare_pump_site(preparation_id: string) {
+    const actor = actor_for_submission()
+    if (!actor) return false
+    const checked = pump_site_preflight(actor, preparation_id)
+    if (!checked.ok) {
+      result_for(actor, undefined, false, false, 'pump_preparation_refused', { preparation_id, preparation_reason: checked.code })
+      return false
+    }
+    return queue({ type: TaskStates.PREPARING_PUMP_SITE, preparation_id, owner_surface_index: actor.surface.index }, actor)
   }
 
   function submit_mining_exact(target_unit_number: number) {
@@ -217,7 +344,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue(task, actor)
   }
 
-  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number) {
+  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[], options?: { refuse_clearance?: boolean, layout_node?: { layout_id: number, index: number } }) {
     const has_x = x !== undefined
     const has_y = y !== undefined
     if (has_x !== has_y || (has_x && (!valid_coordinate(x!) || !valid_coordinate(y!)))) {
@@ -230,13 +357,39 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     }
     const actor = actor_for_submission()
     if (!actor) return false
+    if ((prototypes.entity[entity_name]?.type === 'offshore-pump' || placement_candidate)
+      && (!placement_candidate || !placement_candidate_matches(actor, placement_candidate, entity_name, x, y, direction))) {
+      result_for(actor, undefined, false, false, 'placement_candidate_required')
+      return false
+    }
+    const preservation = placement_preservation_queue_binding(actor, entity_name, x, y, direction, placement_candidate)
+    if (preservation.required && !preservation.binding) {
+      result_for(actor, undefined, false, false, 'placement_candidate_required')
+      return false
+    }
     const task: PlayerParametersPlaceEntity = {
       type: TaskStates.PLACING,
+      placement_candidate,
+      protected_unit_numbers: protected_unit_numbers !== undefined && protected_unit_numbers.length > 0 ? protected_unit_numbers : undefined,
+      allowed_own_clears: allowed_own_clears !== undefined && allowed_own_clears.length > 0 ? allowed_own_clears : undefined,
+      refuse_clearance: options?.refuse_clearance === true ? true : undefined,
+      layout_node: options?.layout_node,
       entity_name,
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,
     }
-    return queue(task, actor)
+    const accepted = queue(task, actor)
+    if (accepted && preservation.binding) {
+      const batch = manager.get_status_snapshot().active_batch
+      if (!batch || typeof batch.batch_generation !== 'number' || typeof batch.batch_id !== 'number' || typeof batch.batch_ref !== 'string') {
+        manager.cancel_all_tasks('preservation_batch_binding_missing')
+        result_for(actor, task, false, false, 'placement_candidate_unavailable')
+        return false
+      }
+      task.preservation_binding = { ...preservation.binding, batch_id: batch.batch_id,
+        batch_generation: batch.batch_generation, batch_ref: batch.batch_ref }
+    }
+    return accepted
   }
 
   function submit_rotate_exact(target_unit_number: number, reverse: boolean = false): [boolean, string] {
@@ -319,6 +472,21 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return [true, 'Task started']
   }
 
+  function submit_launch_rocket_exact(target_unit_number: number): [boolean, string] {
+    if (!valid_integer(target_unit_number, 1, 9007199254740991)) {
+      result_for(get_actor(), undefined, false, false, 'invalid_unit_number')
+      return [false, 'unit_number must be a positive safe integer']
+    }
+    const actor = actor_for_submission()
+    if (!actor) return [false, 'No controlled actor']
+    const task: PlayerParametersLaunchRocket = {
+      type: TaskStates.LAUNCHING_ROCKET,
+      target_unit_number,
+    }
+    if (!queue(task, actor)) return [false, 'No controlled actor']
+    return [true, 'Task started']
+  }
+
   function submit_player_move(item_name: string, player_name: string, max_count: number, to_player: boolean): [boolean, string] {
     if (!valid_integer(max_count, 1, 100000)) {
       result_for(get_actor(), undefined, false, false, 'invalid_max_count')
@@ -363,15 +531,86 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     manager.next_task()
   }
 
+  // Full receipts of refused operations in the active batch, keyed by
+  // operation_id, republished when the batch closes.
+  let refusal_results: Record<number, BasicOperationResult> = {}
+
+  /**
+   * A to-entity item move the target refused: nothing moved and the items are
+   * still held, so no later operation lost anything it needed. Record the
+   * receipt and advance to the next queued operation instead of cancelling
+   * the batch; the batch closes as refused once it drains.
+   */
+  function refuse(actor: ControlledActor, task: PlayerParametersMoveItems, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
+    const result = result_for(actor, task, false, false, code, details)
+    const recorded = manager.record_refusal({
+      operation_id: task.operation_id,
+      type: task.type,
+      code,
+      cause: details.refusal_cause,
+      item_name: task.item_name,
+      target_unit_number: task.target_unit_number,
+      held_count: details.held_count,
+      tick: result.tick,
+    })
+    if (!recorded) {
+      fail(actor, task, code, details)
+      return
+    }
+    if (task.operation_id !== undefined) refusal_results[task.operation_id] = result
+    log(`[AUTORIO] ${task.type} refused: ${code}; ${transfer_refusal_summary(result)}; independent operations in the batch continue`)
+    manager.reset_task_state()
+    manager.next_task()
+  }
+
+  manager.register_refused_batch_handler((refusals, receipt) => {
+    const first = refusals[0]
+    const original = first.operation_id !== undefined ? refusal_results[first.operation_id] : undefined
+    refusal_results = {}
+    // The batch receipt closes on this tick; republish the first refusal so
+    // the runtime correlates it with the batch (task type, tick, actor).
+    const published: BasicOperationResult | undefined = original
+      ? { ...original, tick: game.tick, refusal_tick: original.tick, batch_refused_count: refusals.length }
+      : undefined
+    if (published) storage.sgluna_last_basic_operation_result = published
+    const summary = published ? transfer_refusal_summary(published) : `cause=${first.cause ?? 'unknown'}`
+    log(`[AUTORIO] [ERROR] ${first.type} refused: ${first.code}; ${summary}; ${refusals.length} of ${receipt.task_count} operations refused, ${receipt.completed_count ?? 0} completed; independent operations were not cancelled`)
+  })
+
   function fail(actor: ControlledActor | undefined, task: BasicTask, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
+    refusal_results = {}
     suppress_cancel_receipt = true
-    manager.cancel_all_tasks(`${task.type}:${code}`)
+    // A failed node leaves its layout unable to continue by itself; the layout record says so (first reason kept).
+    if (task.type === TaskStates.PLACING) layout_node_failed(task.layout_node, code)
+    // A placement is only created after every check passes, so a placing
+    // failure (including create_failed, which creates nothing) changed nothing
+    // in the world unless the task picked up ground items from its footprint
+    // first. Those pickups live on the task, so every failure after one
+    // reports them and gives no proof that nothing changed.
+    const placement_mutated = task.type === TaskStates.PLACING
+      && ((task.ground_items_picked_up?.length ?? 0) > 0 || task.ground_item_pickup_uncertain === true || (task.entities_cleared?.length ?? 0) > 0)
+    if (placement_mutated) {
+      details = { ...details, ground_items_picked_up: task.ground_items_picked_up, entities_cleared: task.entities_cleared }
+      if (task.ground_item_pickup_uncertain === true) details.ground_item_pickup_uncertain = true
+    }
+    // entity_targets refuses a legacy move with no local match before touching
+    // any inventory. This proves only this task changed nothing; the admission
+    // journal still requires started_count === 1 to settle a whole batch.
+    const local_transfer_miss = task.type === TaskStates.MOVING_ITEMS && code === 'no_target'
+      && task.target_unit_number === undefined && task.player_name === undefined && task.entity_name !== undefined
+    // A zero delivery count alone is insufficient: extraction may have removed
+    // items before a failed insertion/rollback. Only the measured zero-removal
+    // path proves this failed task had no inventory effect.
+    const empty_extraction = task.type === TaskStates.MOVING_ITEMS && code === 'nothing_moved'
+      && task.to_entity === false && task.player_name === undefined
+      && details.moved_count === 0 && details.source_removed_count === 0
+    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: (task.type === TaskStates.PLACING && !placement_mutated) || local_transfer_miss || empty_extraction, task_index: batch_task_index(task) })
     suppress_cancel_receipt = false
     result_for(actor, task, false, false, code, details)
     log(`[AUTORIO] [ERROR] ${task.type} failed: ${code}; dependent operations cancelled`)
   }
 
-  function register_cancel(state: TaskStates.MINING | TaskStates.PLACING | TaskStates.ROTATING | TaskStates.MOVING_ITEMS | TaskStates.SETTING_RECIPE | TaskStates.WAITING, get_task: () => BasicTask | undefined) {
+  function register_cancel(state: TaskStates.MINING | TaskStates.PLACING | TaskStates.ROTATING | TaskStates.MOVING_ITEMS | TaskStates.SETTING_RECIPE | TaskStates.LAUNCHING_ROCKET | TaskStates.WAITING, get_task: () => BasicTask | undefined) {
     manager.register_cancel_handler(state, () => {
       if (suppress_cancel_receipt) return
       const task = get_task()
@@ -382,21 +621,29 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
   }
 
   register_cancel(TaskStates.MINING, () => manager.player_state.parameters_mine_entity)
+  manager.register_cancel_handler(TaskStates.PREPARING_PUMP_SITE, () => {
+    const task = manager.player_state.parameters_prepare_pump_site
+    if (!task) return
+    cleanup_pump_preparation(task)
+    if (!suppress_cancel_receipt) result_for(get_actor(), task, false, false, 'cancelled')
+  })
   register_cancel(TaskStates.PLACING, () => manager.player_state.parameters_place_entity)
   register_cancel(TaskStates.ROTATING, () => manager.player_state.parameters_rotate_entity)
   register_cancel(TaskStates.MOVING_ITEMS, () => manager.player_state.parameters_move_items)
   register_cancel(TaskStates.SETTING_RECIPE, () => manager.player_state.parameters_set_recipe)
+  register_cancel(TaskStates.LAUNCHING_ROCKET, () => manager.player_state.parameters_launch_rocket)
   register_cancel(TaskStates.WAITING, () => manager.player_state.parameters_waiting)
 
   function status() {
     return {
-      last_result: storage.airi_last_basic_operation_result,
-      next_operation_id: storage.airi_next_basic_operation_id ?? 0,
+      last_result: storage.sgluna_last_basic_operation_result,
+      next_operation_id: storage.sgluna_next_basic_operation_id ?? 0,
     }
   }
 
   return {
     submit_mining,
+    submit_prepare_pump_site,
     submit_mining_exact,
     submit_mining_at,
     submit_placement,
@@ -404,10 +651,12 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     submit_move,
     submit_move_exact,
     submit_set_recipe_exact,
+    submit_launch_rocket_exact,
     submit_player_move,
     submit_wait,
     complete,
     fail,
+    refuse,
     status,
     identity_matches: basic_identity_matches,
   }

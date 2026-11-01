@@ -1,74 +1,133 @@
 # Factorio NPC
 
-## Control your NPC with Codex or Claude
+**SGLuna is an AI teammate that lives inside a Factorio world.** It controls a
+standalone character with real inventory, crafting and mining, and can operate
+on a headless server with nobody connected.
 
-Want to use Codex, Claude, or another MCP-compatible assistant to control your
-standalone Factorio NPC? Try the experimental
-[`feat/external-harness-mcp` branch](https://github.com/TTLouis/factorio-npc/tree/feat/external-harness-mcp).
-Your external assistant plans the work and directs the NPC through native game
-actions. This mode is separate from the built-in autonomous planner.
+## Connect your AI assistant to Factorio
 
-Switch to that branch and follow its
-[setup guide](https://github.com/TTLouis/factorio-npc/blob/feat/external-harness-mcp/docs/EXTERNAL_HARNESS.md)
-for Windows or Docker.
+The `main` branch lets a local AI harness control your
+standalone Factorio NPC through MCP. Your assistant
+plans the work and directs native game actions through a local connection.
 
-An AI teammate that lives inside a Factorio world, with its own character,
-inventory and native game actions.
+This mode is experimental and separate from the built-in autonomous planner.
+For an assistant with local command access and automatic setup enabled, use:
 
-> [!IMPORTANT]
-> **For the current project, use
-> [`experiment/jev-agent-architecture`](https://github.com/TTLouis/factorio-npc/tree/experiment/jev-agent-architecture).**
-> That branch contains the current SGLuna runtime, documentation and development.
-> **Jev is optional on that branch:** it also runs without a Jev/TypeSafe key.
-> For Docker, leave `JEV_TYPESAFE_API_KEY` blank; your main LLM provider is still
-> required. The branch name does not mean you must enable Jev.
-
-`main` retains an older AIRI-era runtime snapshot. This documentation update does
-not promote the newer runtime to `main`. Its settings, scripts and evidence differ
-from current development, so follow the documentation on the branch you run.
-
-## Start with current development
-
-```sh
-git clone --branch experiment/jev-agent-architecture https://github.com/TTLouis/factorio-npc.git
-cd factorio-npc
+```text
+Set up https://github.com/TTLouis/factorio-npc/tree/main
+for this harness. Follow the repository setup instructions and stop when ready
+for my goal.
 ```
 
-| Your goal | Current guide on the Jev branch |
+The [portable setup instructions](docs/EXTERNAL_HARNESS_SETUP.md) let the
+assistant prepare a private game, connect your harness and verify it is ready.
+They cover different local harnesses and explain what remote-only clients need.
+Setup requires local runtime permissions and authorized Factorio access; it does
+not start gameplay. For manual setup and the tool contract, see the
+[runtime guide](docs/EXTERNAL_HARNESS.md). The assistant can also consult the
+[knowledge and gameplay method library](docs/EXTERNAL_HARNESS.md#read-only-method-library)
+on demand before planning your goal.
+
+The runtime gives models structured game observations and bounded actions.
+Deterministic code handles game facts, validation and recovery; Factorio remains
+the source of truth. Computer vision is not required.
+
+**Status: experimental and under active development.** Runtime operations and
+deterministic tests do not establish reliable autonomous factory building.
+Repeatable autonomous science production remains unproven. Read the
+[current status and exact-commit evidence](docs/NPC_AGENT_HARNESS_STATUS.md) before
+choosing a checkpoint; newer development is not automatically a stable release.
+
+## Start here
+
+| Your goal | Next step |
 | --- | --- |
-| Run a server | [Docker](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/deploy/docker/README.md) or [Pterodactyl](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/deploy/pterodactyl/README.md) |
-| Make a first contribution | [Contributing](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/CONTRIBUTING.md) |
-| Understand the design | [Project contract](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/SPEC.md) and [documentation index](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/docs/README.md) |
-| Check demonstrated behavior and limits | [Current status](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/docs/NPC_AGENT_HARNESS_STATUS.md) |
+| Connect an external AI harness | [Portable setup](docs/EXTERNAL_HARNESS_SETUP.md), [runtime/tool guide](docs/EXTERNAL_HARNESS.md) |
+| Run SGLuna on your own server | [Docker setup](deploy/docker/README.md) or [Pterodactyl setup](deploy/pterodactyl/README.md) |
+| Help with a bug, test or explanation | [Contributing](CONTRIBUTING.md) |
+| Understand the design | [Project contract](SPEC.md) and [documentation index](docs/README.md) |
+| Work with a coding agent | [AGENTS.md](AGENTS.md) |
 
-## What the project does
+## What is in the project?
 
-The NPC uses structured game observations and bounded operations, rather than
-screenshots or a connected human player's body. Deterministic code owns game
-facts, admission, receipts and recovery; Factorio remains the simulation authority.
-Computer vision is not required. The runtime supports standalone actors, inventory,
-navigation, crafting, research and combat operations, with server deployment and
-saved state.
+- A standalone NPC body, independent of a connected human player.
+- Structured inventory, navigation, crafting, research, combat and construction
+  operations, with actor/operation correlation and validated admission.
+- Deterministic recipe, production-planning and transport-capacity helpers.
+- A planning harness and in-game task/plan UI, provider budgets and behavior traces.
+- Persistent saves, managed release rollback, and Docker/Pterodactyl deployment.
 
-The project is experimental. Operation admission, placement and passing static
-tests do not prove reliable autonomous factory building. Check exact-commit
-native evidence before relying on a capability. Single-NPC reliability and grounded
-production remain the focus; swarm coordination and optional vision are later work.
+Capability is verified in stages: contract tests, deterministic real-engine lanes,
+then an explicitly frozen provider-backed trial. Successful placement is not proof
+of production. See the [production validation ladder](docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md)
+for acceptance criteria and the status page for current limits.
 
-## Working with this main snapshot
+Single-NPC reliability and grounded production are the current focus. Wider
+swarm coordination, vehicles/trains/platforms and optional vision are later work.
 
-For existing deployments pinned to `main`, the local
-[documentation index](docs/README.md) links its retained setup, architecture and
-evidence. This snapshot uses `AIRI_*`, `airi-config.json` and the older deployment
-files. Do not mix current SGLuna settings or test commands into it.
+## Optional built-in planner server
 
-New development and ordinary contributions target the Jev branch.
-[CONTRIBUTING.md](CONTRIBUTING.md) explains the branch distinction, and
-[AGENTS.md](AGENTS.md) provides coding-agent rules for this snapshot.
+The external-harness setup above starts only the game and MCP connection. The
+ordinary Docker/Pterodactyl paths below start the built-in planner instead. For
+the separate Jev experiment, explicitly select `experiment/jev-agent-architecture`.
 
-## Origin and license
+For the built-in planner, you need Docker or a Pterodactyl host, a compatible Factorio setup, and credentials
+for your chosen model provider. Provider-backed operation may incur API charges.
+Offline contribution/tests do not require production credentials.
+
+For Docker, follow the full [setup guide](deploy/docker/README.md). Its basic
+startup, after configuration, is:
+
+```sh
+cp .env.example .env
+# Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
+# Main is the default source; pin SGLUNA_SOURCE_REF to an exact main SHA for reproduction.
+docker compose up -d --build
+```
+
+The Compose build defaults to `main`. Set `SGLUNA_SOURCE_REF` deliberately for a
+development build, or pin a full commit SHA for reproduction. Keep credentials
+outside Git, and use your own persistent data directory.
+
+For Pterodactyl, choose a channel and follow its
+[configuration and update guide](deploy/pterodactyl/README.md):
+
+| Egg | Default source | Purpose |
+| --- | --- | --- |
+| [Main](deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Main built-in planner package |
+| [NPC E2E / Jev Experiment](deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json) | `experiment/jev-agent-architecture` | Experimental development |
+
+Restart keeps the installed code. Pterodactyl reinstall resolves the selected
+ref again. Docker can reuse its source layer; use an exact SHA or the Docker
+guide's `SGLUNA_SOURCE_NONCE` procedure to pick up a branch update.
+Managed Pterodactyl installs provide `rollback-sgluna.sh` and preserve saves,
+user mods and non-secret configuration across completed releases.
+
+SGLuna uses `SGLUNA_*` settings, `sgluna-config.json` and `!luna` chat input.
+Legacy AIRI settings/input aliases are documented in the deployment guide.
+
+## Contribute
+
+External-harness development integrates into **`main`**. The internal
+planner/Jev experiment remains separate on `experiment/jev-agent-architecture`. See [CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
+bug reports and pull requests, and [TESTING.md](docs/TESTING.md) for commands.
+The shared Windows checkout requires Docker tests because its dependency
+folders are WSL symlinks; do not run a Windows host package install there.
+
+Useful starting areas are setup feedback, clearer documentation and deterministic
+regressions for reproducible failures. The [development workflow](docs/DEVELOPMENT_WORKFLOW.md)
+defines scope, evidence and review. [Authorized live trials](docs/LIVE_E2E.md)
+are separate from ordinary tests. The opt-in
+[desktop operator adapter](tools/desktop-rcon-operator.mjs) is an operator/test
+surface, not autonomous provider operation.
+
+## Origin, license and credits
 
 Factorio NPC originated from [moeru-ai/airi-factorio](https://github.com/moeru-ai/airi-factorio)
-and the original `autorio` work. Git history and upstream attribution are preserved
-under the [MIT license](LICENSE). The retained
-[migration tracker](docs/PROJECT_MIGRATION_TRACKER.md) records the earlier identity work.
+and the original `autorio` work, and has since diverged into a standalone NPC
+runtime. Git history and upstream attribution are preserved under the
+[MIT license](LICENSE). The [migration tracker](docs/PROJECT_MIGRATION_TRACKER.md)
+records the identity transition.
+
+The [provider avatars](packages/autorio/graphics/icons/provider/) are AI-generated
+character art, not human illustrations or official vendor artwork.

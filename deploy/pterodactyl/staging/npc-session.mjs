@@ -24,14 +24,26 @@ export function parseChatPlayers(value) {
   return { mode: 'allowlist', names }
 }
 
+function hasEnv(env, key) {
+  return Object.prototype.hasOwnProperty.call(env, key)
+}
+
 export function stagingConfiguration(raw = {}, env = process.env) {
-  check(raw && typeof raw === 'object' && !Array.isArray(raw), 'airi-config.json must be an object')
-  const actorMode = env.AIRI_ACTOR_MODE ?? raw.actorMode ?? 'player'
-  check(actorMode === 'npc' || actorMode === 'player', 'AIRI_ACTOR_MODE must be npc or player')
+  check(raw && typeof raw === 'object' && !Array.isArray(raw), 'sgluna-config.json must be an object')
+  const actorMode = hasEnv(env, 'SGLUNA_ACTOR_MODE') ? env.SGLUNA_ACTOR_MODE : hasEnv(env, 'AIRI_ACTOR_MODE') ? env.AIRI_ACTOR_MODE : raw.actorMode ?? 'player'
+  check(actorMode === 'npc' || actorMode === 'player', 'SGLUNA_ACTOR_MODE must be npc or player')
 
   const legacyPlayer = cleanName(env.AIRI_PLAYER ?? raw.player ?? '', 'AIRI_PLAYER')
   const legacySingle = cleanName(env.AIRI_CHAT_PLAYER ?? raw.chatPlayer ?? (actorMode === 'npc' ? legacyPlayer : ''), 'AIRI_CHAT_PLAYER')
-  const chatPlayersSource = cleanName(env.AIRI_CHAT_PLAYERS ?? raw.chatPlayers ?? legacySingle, 'AIRI_CHAT_PLAYERS', 512)
+  const chatPlayersSource = cleanName(
+    hasEnv(env, 'SGLUNA_CHAT_PLAYERS') ? env.SGLUNA_CHAT_PLAYERS
+      : hasEnv(env, 'AIRI_CHAT_PLAYERS') ? env.AIRI_CHAT_PLAYERS
+        : hasEnv(env, 'AIRI_CHAT_PLAYER') ? env.AIRI_CHAT_PLAYER
+          : (actorMode === 'npc' && hasEnv(env, 'AIRI_PLAYER')) ? env.AIRI_PLAYER
+            : raw.chatPlayers ?? legacySingle,
+    'SGLUNA_CHAT_PLAYERS',
+    512,
+  )
 
   return {
     actorMode,
@@ -45,9 +57,11 @@ export function stagingConfiguration(raw = {}, env = process.env) {
 
 export function seedStagingConfigFromEnv(env = process.env) {
   const config = {}
-  if (env.AIRI_ACTOR_MODE) config.actorMode = env.AIRI_ACTOR_MODE
-  if (env.AIRI_CHAT_PLAYERS) config.chatPlayers = env.AIRI_CHAT_PLAYERS
-  else if (env.AIRI_CHAT_PLAYER) config.chatPlayers = env.AIRI_CHAT_PLAYER
+  if (hasEnv(env, 'SGLUNA_ACTOR_MODE')) config.actorMode = env.SGLUNA_ACTOR_MODE
+  else if (hasEnv(env, 'AIRI_ACTOR_MODE')) config.actorMode = env.AIRI_ACTOR_MODE
+  if (hasEnv(env, 'SGLUNA_CHAT_PLAYERS')) config.chatPlayers = env.SGLUNA_CHAT_PLAYERS
+  else if (hasEnv(env, 'AIRI_CHAT_PLAYERS')) config.chatPlayers = env.AIRI_CHAT_PLAYERS
+  else if (hasEnv(env, 'AIRI_CHAT_PLAYER')) config.chatPlayers = env.AIRI_CHAT_PLAYER
   if (env.AIRI_PLAYER) config.player = env.AIRI_PLAYER
   return config
 }

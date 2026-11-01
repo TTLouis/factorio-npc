@@ -1,6 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersCraftItem } from './types'
+import { craft_queue_totals, credit_finished_crafts, credit_craft_trigger_statistics } from './crafted_items'
 import { TaskStates } from './types'
 
 const MAX_CRAFT_COUNT = 1000
@@ -37,8 +38,8 @@ interface OwnedCraftingMarker {
 }
 
 declare const storage: {
-  airi_last_crafting_result?: CraftingResult
-  airi_owned_crafting?: OwnedCraftingMarker
+  sgluna_last_crafting_result?: CraftingResult
+  sgluna_owned_crafting?: OwnedCraftingMarker
 }
 
 function valid_count(count: number) {
@@ -83,7 +84,7 @@ function record(actor: ControlledActor | undefined, task: PlayerParametersCraftI
     output_count_after: actor && task ? output_count(actor, task.item_name) : undefined,
     native_queue_remaining: actor?.get_crafting_queue().length,
   }
-  storage.airi_last_crafting_result = result
+  storage.sgluna_last_crafting_result = result
   return result
 }
 
@@ -91,7 +92,7 @@ function persist_owned_marker(task: PlayerParametersCraftItem) {
   if (task.owner_actor_id === undefined || task.owner_actor_kind === undefined || task.owner_force_index === undefined || task.started_tick === undefined) {
     return
   }
-  storage.airi_owned_crafting = {
+  storage.sgluna_owned_crafting = {
     actor_id: task.owner_actor_id,
     actor_kind: task.owner_actor_kind,
     force_index: task.owner_force_index,
@@ -102,20 +103,43 @@ function persist_owned_marker(task: PlayerParametersCraftItem) {
 }
 
 function clear_owned_marker(task: PlayerParametersCraftItem) {
-  const marker = storage.airi_owned_crafting
+  const marker = storage.sgluna_owned_crafting
   if (!marker) {
     return
   }
   if (marker.actor_id === task.owner_actor_id && marker.actor_kind === task.owner_actor_kind && marker.force_index === task.owner_force_index) {
-    storage.airi_owned_crafting = undefined
+    storage.sgluna_owned_crafting = undefined
   }
 }
 
 export function new_crafting_controller(get_actor: () => ControlledActor | undefined, manager: ReturnType<typeof new_task_manager>) {
+  // Credit the crafts the engine finished since the last look. Runs every tick
+  // and again just before this request cancels its own queue, so crafts that
+  // finished before the cancellation count and the cancelled ones never do.
+  //
+  // Only while this request still owns a live native queue: once it has cancelled
+  // that queue (or never had one) an empty queue means "cancelled", not
+  // "finished". Only the standalone character is credited; a connected player's
+  // hand crafting is already in the force production statistics.
+  function credit_finished(actor: ControlledActor, task: PlayerParametersCraftItem) {
+    if (task.owns_native_queue !== true || task.queue_snapshot === undefined || task.owner_force_index === undefined) {
+      return
+    }
+    if (task.owner_actor_kind !== 'standalone_character') {
+      return
+    }
+    const current = craft_queue_totals(actor.get_crafting_queue())
+    credit_finished_crafts(task.owner_force_index, task.queue_snapshot, current, (item_name, count) => {
+      credit_craft_trigger_statistics(actor.force, actor.surface, item_name, count, `native_craft/${task.owner_actor_id}/${task.started_tick}`)
+    })
+    task.queue_snapshot = current
+  }
+
   function cancel_owned_native_queue(actor: ControlledActor, task: PlayerParametersCraftItem) {
     if (!task.owns_native_queue) {
       return 0
     }
+    credit_finished(actor, task)
 
     // Admission requires an empty native queue. Therefore every queue entry
     // created by begin_crafting for this request (including prerequisites) is
@@ -132,6 +156,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
       cancelled += item.count
     }
     task.owns_native_queue = false
+    // The queue is gone by our hand: nothing left to compare against.
+    task.queue_snapshot = undefined
     return cancelled
   }
 
@@ -238,6 +264,7 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
     task.started_tick = game.tick
     task.expected_output_delta = task.started
     task.owns_native_queue = task.started > 0 && actor.get_crafting_queue().length > 0
+    task.queue_snapshot = craft_queue_totals(actor.get_crafting_queue())
 
     if (task.started <= 0) {
       fail(actor, task, 'could_not_start', false)
@@ -271,6 +298,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
       }
     }
 
+    credit_finished(actor, task)
+
     const before = task.output_count_before ?? 0
     const expected = task.expected_output_delta ?? task.started ?? task.count
     const produced = math.max(0, output_count(actor, task.item_name) - before)
@@ -295,13 +324,12 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
 
   function status() {
     const actor = get_actor()
-    const task = manager.player_state.parameters_craft_item
     return {
       task_active: manager.player_state.task_state === TaskStates.CRAFTING,
       actor: actor?.status_snapshot(),
       native_queue: actor?.get_crafting_queue().slice(0, 16),
-      persisted_owner: storage.airi_owned_crafting,
-      last_result: storage.airi_last_crafting_result,
+      persisted_owner: storage.sgluna_owned_crafting,
+      last_result: storage.sgluna_last_crafting_result,
     }
   }
 
@@ -315,6 +343,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
     if (!actor || !identity_matches(actor, task)) {
       return
     }
+
+    credit_finished(actor, task)
 
     const before = task.output_count_before ?? output_count(actor, task.item_name)
     const expected = task.expected_output_delta ?? task.started ?? task.count

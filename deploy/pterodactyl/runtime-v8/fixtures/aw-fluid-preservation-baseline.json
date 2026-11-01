@@ -1,0 +1,83 @@
+{
+  "baseline_functions": "function entityIdentity(raw) {\n  if (!raw || !Number.isSafeInteger(raw.unit_number) || raw.unit_number < 1 || typeof raw.name !== 'string' || typeof raw.type !== 'string'\n    || !Number.isSafeInteger(raw.direction) || raw.direction < 0 || raw.direction > 15\n    || !Number.isFinite(raw.position?.x) || !Number.isFinite(raw.position?.y)) throw new Error('preservation_identity_unreadable')\n  return { unit_number: raw.unit_number, name: raw.name, type: raw.type, position: { x: raw.position.x, y: raw.position.y },\n    ...(raw.direction !== undefined ? { direction: raw.direction } : {}) }\n}\nfunction point(raw) {\n  if (!Number.isFinite(raw?.x) || !Number.isFinite(raw?.y)) throw new Error('preservation_geometry_unreadable')\n  return { x: raw.x, y: raw.y }\n}\n// Geometry contains no changing fuel/output counters. Preserve engine-known\n// item routes and reject unsupported fluid topology instead of guessing it.\nexport function preservationGeometry(raw, unitNumber) {\n  if (raw?.found !== true || raw.entity?.unit_number !== unitNumber || raw.fluid_storages_truncated === true\n    || !Number.isSafeInteger(raw.fluid_box_count) || raw.fluid_box_count !== 0\n    || !Number.isSafeInteger(raw.surface_index) || !Number.isSafeInteger(raw.force_index)\n    || !Number.isSafeInteger(raw.actor_id) || raw.actor_surface_index !== raw.surface_index\n    || raw.actor_force_index !== raw.force_index) throw new Error('preservation_geometry_unproven')\n  const entity = entityIdentity(raw.entity)\n  if (!['furnace', 'mining-drill', 'inserter'].includes(entity.type)) throw new Error('preservation_type_unsupported')\n  let item_io\n  if (['mining-drill', 'inserter'].includes(entity.type)) {\n    if (!raw.item_io) throw new Error('preservation_item_route_unreadable')\n    item_io = { drop_position: point(raw.item_io.drop_position),\n      drop_target: raw.item_io.drop_target ? entityIdentity(raw.item_io.drop_target) : null }\n    if (entity.type === 'inserter') Object.assign(item_io, { pickup_position: point(raw.item_io.pickup_position),\n      pickup_target: raw.item_io.pickup_target ? entityIdentity(raw.item_io.pickup_target) : null })\n  }\n  return { entity, actor_id: raw.actor_id, surface_index: raw.surface_index, force_index: raw.force_index, ...(item_io ? { item_io } : {}) }\n}\n",
+  "baseline_function_sha256": "46c032827ac548daf4f47fbd03b679647887bd17e7e0edafb72ea1b6f90e3691",
+  "source": "134fac9e3e249341445e36c8304070b5eb93e579",
+  "lanes": [
+    {
+      "obligations": {
+        "outcome": {
+          "mode": "all",
+          "requirements": [
+            {
+              "kind": "entity_count",
+              "prototype": "boiler",
+              "minimum": 1,
+              "anchor": {
+                "x": 48,
+                "y": -0.5
+              },
+              "radius": 4
+            }
+          ]
+        },
+        "preserve": [
+          31
+        ]
+      },
+      "tap": "tap_69",
+      "wire_sha256": "1b7cf76c030d0ea4b1e0aef5a063ba52ab8c31079fd79d7d68a8c20decca3a59",
+      "lane": "a",
+      "pump": 31,
+      "native_read": "NOT RETAINED: unit tests substitute complete open normal-fluid native projection; not an original response",
+      "original_error": "provider_jev_recovery_route_failed: preservation_geometry_unproven",
+      "pre_stop": {
+        "goal_status": "active",
+        "active_plan_id": "goal_1qurc42_1_p7",
+        "plan_status": "COMPLETED",
+        "exact_line_sha256": "55f6d54f7b0d0594b88361c56c36a8d89ef6fe3b70201bc64886ab33a6e7600c",
+        "timestamp": "2026-10-25T10:28:40.289Z",
+        "has_p8": false,
+        "paused": false
+      }
+    },
+    {
+      "obligations": {
+        "outcome": {
+          "mode": "all",
+          "requirements": [
+            {
+              "kind": "entity_count",
+              "prototype": "boiler",
+              "minimum": 1,
+              "anchor": {
+                "x": 52,
+                "y": 5.5
+              },
+              "radius": 4
+            }
+          ]
+        },
+        "preserve": [
+          30
+        ]
+      },
+      "tap": "tap_72",
+      "wire_sha256": "c9d1caad739bdb27c4714d0ffc06f3937f17ff31e2ec4d45dc570fed4060129c",
+      "lane": "b",
+      "pump": 30,
+      "native_read": "NOT RETAINED: unit tests substitute complete open normal-fluid native projection; not an original response",
+      "original_error": "provider_jev_recovery_route_failed: preservation_geometry_unproven",
+      "pre_stop": {
+        "goal_status": "active",
+        "active_plan_id": "goal_0ug4b5j_1_p7",
+        "plan_status": "COMPLETED",
+        "exact_line_sha256": "e892893fa0b16802578569a9a3d70a8ae73ea481327491ad7937421c85ec9bae",
+        "timestamp": "2026-10-25T10:28:40.771Z",
+        "has_p8": false,
+        "paused": false
+      }
+    }
+  ],
+  "extraction": "Exact original entityIdentity/point/preservationGeometry functions; LF source bytes; no changed guard or API",
+  "fixture_sha256": "68dd3323fb255b9624e1088c02ac24a7e9b3068d61f47ed05f7904755d3f0317"
+}

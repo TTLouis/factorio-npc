@@ -8,6 +8,19 @@ const MAX_INGREDIENTS = 16
 type ResearchPathStatus = 'already_researched' | 'ready' | 'blocked_by_prerequisites' | 'disabled' | 'research_disabled'
 type ResearchPathMode = 'trigger' | 'science'
 
+function array_length<T>(values: T[] | undefined): number {
+  return values ? values.length : 0
+}
+
+function bounded_array<T>(values: T[] | undefined, limit: number): T[] {
+  const result: T[] = []
+  if (!values) return result
+  for (let index = 0; index < array_length(values) && index < limit; index++) {
+    result.push(values[index])
+  }
+  return result
+}
+
 function valid_name(name: string) {
   if (typeof name !== 'string' || name.length < 1 || name.length > 200) return false
   for (let i = 0; i < name.length; i++) {
@@ -44,7 +57,7 @@ function node_summary(actor: ControlledActor, technology: any) {
   const unresolved_prerequisites = prerequisites.filter(name => !actor.force.technologies[name]?.researched)
   const trigger = research_trigger_summary(technology.name)
   const mode: ResearchPathMode = trigger ? 'trigger' : 'science'
-  const ingredients = trigger ? [] : technology.research_unit_ingredients
+  const ingredients: any[] = trigger ? [] : (technology.research_unit_ingredients ?? [])
   return {
     name: technology.name,
     level: technology.level,
@@ -61,8 +74,8 @@ function node_summary(actor: ControlledActor, technology: any) {
       : {
           count: technology.research_unit_count,
           energy: technology.research_unit_energy,
-          ingredients: ingredients.slice(0, MAX_INGREDIENTS).map((item: any) => ({ name: item.name, amount: item.amount })),
-          ingredients_truncated: ingredients.length > MAX_INGREDIENTS,
+          ingredients: bounded_array(ingredients, MAX_INGREDIENTS).map((item: any) => ({ name: item.name, amount: item.amount })),
+          ingredients_truncated: array_length(ingredients) > MAX_INGREDIENTS,
         },
     required_action: technology.researched
       ? 'none'

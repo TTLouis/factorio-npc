@@ -9,7 +9,7 @@ LANES_ROOT="$TEST_ROOT/lanes"
 BASE_SAVE="$SAVES/npc-test-base.zip"
 MAP_GEN_SETTINGS="$TEST_ROOT/fixtures/map-gen-settings.json"
 PARALLEL="${NPC_TEST_PARALLEL:-1}"
-LANE_FILTER="${NPC_TEST_LANES:-core,research-combat,resilience}"
+LANE_FILTER="${NPC_TEST_LANES:-core,research-combat,resilience,production}"
 GAME_PORT_BASE="${GAME_PORT_BASE:-34197}"
 RCON_PORT_BASE="${RCON_PORT_BASE:-27015}"
 export PYTHONUNBUFFERED=1
@@ -78,7 +78,18 @@ prepare_lane() {
   local lane="$1"
   local lane_root="$LANES_ROOT/$lane"
   mkdir -p "$lane_root/results"
-  cp "$BASE_SAVE" "$lane_root/npc-test.zip"
+  if [[ "$lane" == water-reach-approach ]]; then
+    # The 18ab map: default generation at the live seed instead of the shared 256x256 base world.
+    if ! "$FACTORIO_BIN" --create "$lane_root/npc-test.zip" \
+      --map-gen-settings "$TEST_ROOT/fixtures/map-gen-settings-water-reach.json" \
+      >"$RESULTS/$lane-create.log" 2>&1; then
+      printf '[npc-test] Save creation failed for lane %s.\n' "$lane" >&2
+      cat "$RESULTS/$lane-create.log" >&2
+      return 1
+    fi
+  else
+    cp "$BASE_SAVE" "$lane_root/npc-test.zip"
+  fi
 }
 
 launch_lane() {
@@ -104,6 +115,40 @@ lane_offset() {
     core) printf '0' ;;
     research-combat) printf '1' ;;
     resilience) printf '2' ;;
+    production) printf '3' ;;
+    provenance) printf '4' ;;
+    requirements) printf '5' ;;
+    craft-trigger) printf '6' ;;
+    vision) printf '7' ;;
+    trigger-ladder) printf '8' ;;
+    entity-observation) printf '9' ;;
+    native-admission) printf '10' ;;
+    steam-lab) printf '11' ;;
+    recovery-loop) printf '12' ;;
+    queued-craft) printf '13' ;;
+    invalid-reference) printf '14' ;;
+    shoreline-recovery) printf '15' ;;
+    observation-baseline) printf '16' ;;
+    step-contract) printf '17' ;;
+    closed-action) printf '18' ;;
+    targeted-water) printf '19' ;;
+    local-transfer-target) printf '20' ;;
+    normal-observation) printf '21' ;;
+    fresh-topology) printf '22' ;;
+    partial-transfer) printf '23' ;;
+    offshore-water-first) printf '24' ;;
+    pump-landfill-removal) printf '25' ;;
+    zero-transfer) printf '26' ;;
+    direct-feed-observation) printf '27' ;;
+    ground-item-pickup) printf '28' ;;
+    placement-clearing) printf '29' ;;
+    water-reach-approach) printf '30' ;;
+    area-reservations) printf '31' ;;
+    production-task) printf '32' ;;
+    entity-refresh) printf '34' ;;
+    map-context) printf '35' ;;
+    resume-water) printf '36' ;;
+    tick-sprint) printf '33' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

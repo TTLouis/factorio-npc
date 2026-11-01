@@ -25,7 +25,7 @@ function make_actor(surface: LuaSurface, charted: Set<string>, visible: Set<stri
     surface,
     force,
     position: { x: 0, y: 0 },
-    status_snapshot: () => ({ kind: 'standalone_character', valid: true, name: 'AIRI', position: { x: 0, y: 0 }, has_character: true }),
+    status_snapshot: () => ({ kind: 'standalone_character', valid: true, name: 'SGLuna', position: { x: 0, y: 0 }, has_character: true }),
   } as unknown as ControlledActor
 }
 
@@ -53,6 +53,9 @@ function make_entity(surface: LuaSurface, overrides: Partial<LuaEntity> = {}) {
     get_inventory: vi.fn(() => empty_inventory()),
     ...overrides,
   }
+  // A live entity carries its bounds, and an observation hint keeps them (M3).
+  const at = entity.position as { x: number, y: number }
+  ;(entity as any).bounding_box ??= { left_top: { x: at.x - 1.5, y: at.y - 1.5 }, right_bottom: { x: at.x + 1.5, y: at.y + 1.5 } }
   return entity as unknown as LuaEntity
 }
 
@@ -122,6 +125,18 @@ describe('map-first remote control', () => {
     expect(surface.find_entities_filtered).toHaveBeenCalledTimes(2)
   })
 
+  it('records observed entities so their unit numbers resolve for later map operations', () => {
+    const surface = make_surface()
+    const actor = make_actor(surface, new Set(['0,0']), new Set(['0,0']))
+    const entity = make_entity(surface, { position: { x: 8, y: 8 }, unit_number: 77 })
+    ;(surface.find_entities_filtered as any).mockReturnValue([entity])
+    ;(globalThis as any).game.get_surface.mockReturnValue(surface)
+
+    expect(query_charted_entities(actor, 1, 8, 8, 8, 8).ok).toBe(true)
+    // game.get_entity_by_unit_number() misses ordinary buildings.
+    expect(inspect_charted_entity(actor, 77)).toMatchObject({ ok: true, entity: { unit_number: 77 } })
+  })
+
   it('refuses exact entity inspection for charted but currently invisible entities', () => {
     const surface = make_surface()
     const actor = make_actor(surface, new Set(['0,0']), new Set())
@@ -141,7 +156,7 @@ describe('map-first remote control', () => {
     ;(actor.force.recipes as any)['electronic-circuit'] = {
       name: 'electronic-circuit',
       enabled: true,
-      categories: ['crafting'],
+      category: 'crafting', additional_categories: [],
     }
     const entity = make_entity(surface)
     let recipe: { name: string } | undefined
@@ -172,7 +187,7 @@ describe('map-first remote control', () => {
     ;(actor.force.recipes as any)['electronic-circuit'] = {
       name: 'electronic-circuit',
       enabled: true,
-      categories: ['crafting'],
+      category: 'crafting', additional_categories: [],
     }
     const entity = make_entity(surface, {
       get_inventory: vi.fn(() => ({ is_empty: vi.fn(() => false) }) as any),
@@ -196,7 +211,7 @@ describe('map-first remote control', () => {
     ;(actor.force.recipes as any)['electronic-circuit'] = {
       name: 'electronic-circuit',
       enabled: true,
-      categories: ['crafting'],
+      category: 'crafting', additional_categories: [],
     }
     const entity = make_entity(surface)
     let recipe: { name: string } | undefined

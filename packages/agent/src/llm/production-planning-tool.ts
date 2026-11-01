@@ -45,7 +45,7 @@ export function renderProductionSolveRequest(raw: unknown) {
 
 export const solveProductionTool = {
   name: 'solveProduction',
-  description: 'Deterministically solve a bounded production target from live enabled Factorio recipes. Returns recipe rates, external-input rates, optional explicit machine sizing, warnings, and evidence IDs. This does not validate inserter, belt-lane, or stacking transfer capacity.',
+  description: 'Deterministically solve a bounded production target from live enabled Factorio recipes. Returns exact recipe/external-input rates, optional explicit machine sizing, bounded alternative recipe routes, and compact topology strategy candidates. Route/topology candidate ordering is canonical, not a ranking: the model chooses among them. Topology candidates are not executable layouts and their requires_validation fields remain blockers until the matching transport/adjacency checks are satisfied.',
   schema: solveProductionSchema,
   fn: async ({ parameters }: { parameters: unknown }) => {
     const request = solveProductionSchema.parse(parameters)

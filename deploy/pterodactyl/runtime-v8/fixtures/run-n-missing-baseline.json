@@ -1,0 +1,457 @@
+{
+  "source_candidate": "77e65f4b579be8bae180516a8ea3ed82997926ee",
+  "request_id": "recovery_mv9paqb0",
+  "recipe": {
+    "found": true,
+    "query": "lab",
+    "truncated": false,
+    "rate_basis": "from prototypes; excludes modules, beacons, quality and recipe productivity research; assumes inputs and fuel never run out",
+    "recipes": [
+      {
+        "name": "lab",
+        "enabled": true,
+        "applicability": {
+          "state": "available",
+          "reason": "no_surface_conditions",
+          "surface_bound": false
+        },
+        "requested_crafts": 1,
+        "craftable_now_count": 0,
+        "craftable_now": false,
+        "inventory_overlay": {
+          "outputs": [
+            {
+              "type": "item",
+              "name": "lab",
+              "required": 1,
+              "held": 0
+            }
+          ],
+          "ingredients": [
+            {
+              "type": "item",
+              "name": "iron-gear-wheel",
+              "required": 10,
+              "held": 10,
+              "missing": 0,
+              "status": "already_satisfied"
+            },
+            {
+              "type": "item",
+              "name": "electronic-circuit",
+              "required": 10,
+              "held": 0,
+              "missing": 10,
+              "status": "needs_crafting"
+            },
+            {
+              "type": "item",
+              "name": "transport-belt",
+              "required": 4,
+              "held": 0,
+              "missing": 4,
+              "status": "needs_crafting"
+            }
+          ]
+        },
+        "bootstrap": {
+          "dependencies": [
+            {
+              "type": "item",
+              "name": "iron-gear-wheel",
+              "required": 10,
+              "held": 10,
+              "missing": 0,
+              "status": "already_satisfied",
+              "role": "ingredient"
+            },
+            {
+              "type": "item",
+              "name": "electronic-circuit",
+              "required": 10,
+              "held": 0,
+              "missing": 10,
+              "status": "needs_crafting",
+              "resolution": {
+                "kind": "crafting",
+                "recipe_name": "electronic-circuit",
+                "categories": [
+                  "electronics"
+                ],
+                "crafts_needed": 10,
+                "producer_candidates": [
+                  "electronic-circuit"
+                ]
+              },
+              "dependencies": [
+                {
+                  "type": "item",
+                  "name": "iron-plate",
+                  "required": 10,
+                  "held": 16,
+                  "missing": 0,
+                  "status": "already_satisfied",
+                  "role": "ingredient"
+                },
+                {
+                  "type": "item",
+                  "name": "copper-cable",
+                  "required": 30,
+                  "held": 20,
+                  "missing": 10,
+                  "status": "needs_crafting",
+                  "resolution": {
+                    "kind": "crafting",
+                    "recipe_name": "copper-cable",
+                    "categories": [
+                      "electronics"
+                    ],
+                    "crafts_needed": 5,
+                    "producer_candidates": [
+                      "copper-cable"
+                    ]
+                  },
+                  "dependencies": [
+                    {
+                      "type": "item",
+                      "name": "copper-plate",
+                      "required": 5,
+                      "held": 0,
+                      "missing": 5,
+                      "status": "needs_acquisition/processing",
+                      "resolution": {
+                        "kind": "processing",
+                        "recipe_name": "copper-plate",
+                        "categories": [
+                          "smelting"
+                        ],
+                        "crafts_needed": 5,
+                        "producer_candidates": [
+                          "copper-plate"
+                        ]
+                      },
+                      "machine_dependency": {
+                        "required": 1,
+                        "held": 0,
+                        "status": "already_satisfied",
+                        "satisfaction_scope": "placed_instance",
+                        "placed_instance_required": false,
+                        "matched_count": 3,
+                        "truncated": false,
+                        "candidates": [
+                          {
+                            "name": "electric-furnace",
+                            "type": "furnace",
+                            "held_count": 0,
+                            "place_items": [
+                              {
+                                "name": "electric-furnace",
+                                "count": 1
+                              }
+                            ]
+                          },
+                          {
+                            "name": "steel-furnace",
+                            "type": "furnace",
+                            "held_count": 0,
+                            "place_items": [
+                              {
+                                "name": "steel-furnace",
+                                "count": 1
+                              }
+                            ]
+                          },
+                          {
+                            "name": "stone-furnace",
+                            "type": "furnace",
+                            "held_count": 0,
+                            "place_items": [
+                              {
+                                "name": "stone-furnace",
+                                "count": 1
+                              }
+                            ]
+                          }
+                        ],
+                        "placed_count": 1,
+                        "placed_working_count": 0,
+                        "placed_marked_for_deconstruction_count": 0,
+                        "placed_truncated": false,
+                        "placed_search_radius": 128,
+                        "placed": [
+                          {
+                            "unit_number": 13,
+                            "name": "stone-furnace",
+                            "position": {
+                              "x": 72,
+                              "y": -50
+                            },
+                            "distance": 9.6,
+                            "working": false,
+                            "readiness": "no_ingredients",
+                            "status_code": 18,
+                            "previous_recipe_name": "iron-plate"
+                          }
+                        ]
+                      },
+                      "dependencies": [
+                        {
+                          "type": "item",
+                          "name": "copper-ore",
+                          "required": 5,
+                          "held": 10,
+                          "missing": 0,
+                          "status": "already_satisfied",
+                          "role": "ingredient"
+                        }
+                      ],
+                      "role": "ingredient"
+                    }
+                  ],
+                  "role": "ingredient"
+                }
+              ],
+              "role": "ingredient"
+            },
+            {
+              "type": "item",
+              "name": "transport-belt",
+              "required": 4,
+              "held": 0,
+              "missing": 4,
+              "status": "needs_crafting",
+              "resolution": {
+                "kind": "crafting",
+                "recipe_name": "transport-belt",
+                "categories": [
+                  "pressing"
+                ],
+                "crafts_needed": 2,
+                "producer_candidates": [
+                  "transport-belt"
+                ]
+              },
+              "dependencies": [
+                {
+                  "type": "item",
+                  "name": "iron-plate",
+                  "required": 2,
+                  "held": 16,
+                  "missing": 0,
+                  "status": "already_satisfied",
+                  "role": "ingredient"
+                },
+                {
+                  "type": "item",
+                  "name": "iron-gear-wheel",
+                  "required": 2,
+                  "held": 10,
+                  "missing": 0,
+                  "status": "already_satisfied",
+                  "role": "ingredient"
+                }
+              ],
+              "role": "ingredient"
+            }
+          ],
+          "first_unresolved": {
+            "type": "item",
+            "name": "copper-plate",
+            "required": 5,
+            "held": 0,
+            "missing": 5,
+            "status": "needs_acquisition/processing",
+            "resolution": {
+              "kind": "processing",
+              "recipe_name": "copper-plate",
+              "categories": [
+                "smelting"
+              ],
+              "crafts_needed": 5,
+              "producer_candidates": [
+                "copper-plate"
+              ]
+            },
+            "machine_dependency": {
+              "required": 1,
+              "held": 0,
+              "status": "already_satisfied",
+              "satisfaction_scope": "placed_instance",
+              "placed_instance_required": false,
+              "matched_count": 3,
+              "truncated": false,
+              "candidates": [
+                {
+                  "name": "electric-furnace",
+                  "type": "furnace",
+                  "held_count": 0,
+                  "place_items": [
+                    {
+                      "name": "electric-furnace",
+                      "count": 1
+                    }
+                  ]
+                },
+                {
+                  "name": "steel-furnace",
+                  "type": "furnace",
+                  "held_count": 0,
+                  "place_items": [
+                    {
+                      "name": "steel-furnace",
+                      "count": 1
+                    }
+                  ]
+                },
+                {
+                  "name": "stone-furnace",
+                  "type": "furnace",
+                  "held_count": 0,
+                  "place_items": [
+                    {
+                      "name": "stone-furnace",
+                      "count": 1
+                    }
+                  ]
+                }
+              ],
+              "placed_count": 1,
+              "placed_working_count": 0,
+              "placed_marked_for_deconstruction_count": 0,
+              "placed_truncated": false,
+              "placed_search_radius": 128,
+              "placed": [
+                {
+                  "unit_number": 13,
+                  "name": "stone-furnace",
+                  "position": {
+                    "x": 72,
+                    "y": -50
+                  },
+                  "distance": 9.6,
+                  "working": false,
+                  "readiness": "no_ingredients",
+                  "status_code": 18,
+                  "previous_recipe_name": "iron-plate"
+                }
+              ]
+            },
+            "dependencies": [
+              {
+                "type": "item",
+                "name": "copper-ore",
+                "required": 5,
+                "held": 10,
+                "missing": 0,
+                "status": "already_satisfied",
+                "role": "ingredient"
+              }
+            ]
+          }
+        },
+        "hidden": false,
+        "energy": 2,
+        "categories": [
+          "crafting"
+        ],
+        "hand_craftable_category": true,
+        "hand_crafting": {
+          "crafting_speed": 1,
+          "seconds_per_craft": 2
+        },
+        "hidden_from_player_crafting": false,
+        "allow_as_intermediate": true,
+        "allow_intermediates": true,
+        "ingredients": [
+          {
+            "type": "item",
+            "name": "iron-gear-wheel",
+            "amount": 10
+          },
+          {
+            "type": "item",
+            "name": "electronic-circuit",
+            "amount": 10
+          },
+          {
+            "type": "item",
+            "name": "transport-belt",
+            "amount": 4
+          }
+        ],
+        "products": [
+          {
+            "type": "item",
+            "name": "lab",
+            "amount": 1
+          }
+        ],
+        "crafting_machine_count": 3,
+        "crafting_machines": [
+          {
+            "name": "assembling-machine-1",
+            "type": "assembling-machine",
+            "placed_by_item": "assembling-machine-1",
+            "crafting_speed": 0.5,
+            "seconds_per_craft": 4,
+            "crafts_per_second": 0.25,
+            "products_per_minute": [
+              {
+                "type": "item",
+                "name": "lab",
+                "per_minute": 15
+              }
+            ],
+            "energy_source": "electric",
+            "energy_watts": 75000
+          },
+          {
+            "name": "assembling-machine-2",
+            "type": "assembling-machine",
+            "placed_by_item": "assembling-machine-2",
+            "crafting_speed": 0.75,
+            "seconds_per_craft": 2.6667,
+            "crafts_per_second": 0.375,
+            "products_per_minute": [
+              {
+                "type": "item",
+                "name": "lab",
+                "per_minute": 22.5
+              }
+            ],
+            "energy_source": "electric",
+            "energy_watts": 150000
+          },
+          {
+            "name": "assembling-machine-3",
+            "type": "assembling-machine",
+            "placed_by_item": "assembling-machine-3",
+            "crafting_speed": 1.25,
+            "seconds_per_craft": 1.6,
+            "crafts_per_second": 0.625,
+            "products_per_minute": [
+              {
+                "type": "item",
+                "name": "lab",
+                "per_minute": 37.5
+              }
+            ],
+            "energy_source": "electric",
+            "energy_watts": 375000
+          }
+        ],
+        "crafting_machines_truncated": false
+      }
+    ]
+  },
+  "entity_status": {
+    "observation_mode": "unchanged",
+    "source": "live_factorio_entity_status",
+    "reference": "entity:13",
+    "query": {
+      "name": "",
+      "radius": 8
+    }
+  },
+  "blocker": "I need a fresh live read of an available furnace's current recipe and identity before I can safely smelt the copper plates required for the lab. The existing furnace observation does not provide its current state, and I cannot safely configure or feed it from historical data."
+}

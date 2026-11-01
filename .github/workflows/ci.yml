@@ -4,32 +4,72 @@ on:
   push:
     branches:
       - main
-      - feat/npc-transition-work
+      - experiment/jev-agent-architecture
 
   pull_request:
     branches:
       - main
+      - experiment/jev-agent-architecture
 
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  typecheck-typescript:
+  tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Paired freezer regressions inspect the immediate parent source.
+          fetch-depth: 2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check offline local runner behavior
+        run: bash tests/tooling/test-local.test.sh
+      - name: Check native CI evidence and cleanup behavior
+        run: bash tests/tooling/test-factorio-ci.test.sh
+      - name: Check native suite failure aggregation
+        run: bash tests/tooling/test-factorio-suite.test.sh
+      - name: Check paired harness contracts and rendered module syntax
+        run: |
+          command -v pwsh >/dev/null || { echo 'PowerShell is required by the offline paired-harness tests' >&2; exit 1; }
+          node --experimental-vm-modules --test scripts/e2e-pair/*.test.mjs
+
+  lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: lts/*
-          cache: pnpm
+      - uses: ./.github/actions/setup-workspace
+      - name: Lint
+        run: pnpm run lint
 
-      - name: Install
-        run: pnpm install
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-workspace
+      - name: Test ordinary agent and Autorio contracts
+        run: pnpm run test --run
+
+  typescript-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-workspace
 
       - name: Typecheck
         run: pnpm run build && pnpm run typecheck
@@ -40,12 +80,8 @@ jobs:
           sudo apt-get install -y -qq luajit
           luajit -b packages/autorio/dist/control.lua /tmp/autorio-control.luac
 
-      - name: Reject raw JavaScript slice calls in generated Lua
-        run: |
-          if grep -n ':slice(' packages/autorio/dist/control.lua; then
-            echo 'Generated Lua contains a raw JavaScript .slice() method call; use typed/Lua-safe iteration instead.'
-            exit 1
-          fi
+      - name: Reject untyped JavaScript semantics in generated Lua
+        run: pnpm --filter autorio.ts run check:lua
 
       - name: Compile native NPC Pterodactyl guard
         run: |
@@ -53,24 +89,22 @@ jobs:
           pnpm --filter autorio.ts run typecheck
           pnpm --filter autorio.ts run build
 
-  test-typescript:
+  # Preserve the existing required-check name while letting every underlying
+  # check report its own result even when another one fails.
+  typescript-quality:
+    if: ${{ always() }}
+    needs: [tooling, lint, unit-tests, typescript-build]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: lts/*
-          cache: pnpm
+      - name: Require all TypeScript quality checks
+        run: |
+          test "${{ needs.tooling.result }}" = success
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.unit-tests.result }}" = success
+          test "${{ needs.typescript-build.result }}" = success
 
-      - name: Install
-        run: pnpm install
-
-      - name: Test
-        run: pnpm run test
-
-  pterodactyl-npc-staging:
+  pterodactyl-runtime:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -78,6 +112,73 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+
+      - name: Validate local Compose RCON secret boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .env
+          trap 'rm -f .env' EXIT
+
+          if env -u FACTORIO_RCON_PASSWORD docker compose -f compose.devcontainer.yml config >/tmp/devcontainer-missing-password.log 2>&1; then
+            echo 'compose.devcontainer.yml accepted a missing FACTORIO_RCON_PASSWORD'
+            exit 1
+          fi
+          grep -F 'set FACTORIO_RCON_PASSWORD in repo-root .env' /tmp/devcontainer-missing-password.log
+
+          cat > .env <<'EOF'
+          FACTORIO_RCON_PASSWORD=ci-rcon-sentinel
+          OPENAI_API_KEY=ci-openai-must-not-leak
+          OPENAI_API_BASEURL=https://example.invalid/v1
+          OPENAI_MODEL=ci-model
+          FACTORIO_USERNAME=ci-factorio-user-must-not-leak
+          FACTORIO_TOKEN=ci-factorio-token-must-not-leak
+          JEV_TYPESAFE_API_KEY=ci-jev-sentinel
+          DESKTOP_OPERATOR_TOKEN=ci-desktop-operator-sentinel
+          EOF
+
+          docker compose -f compose.devcontainer.yml config --format json > /tmp/devcontainer-compose.json
+          docker compose -f compose.yml -f compose.e2e.yml -f compose.desktop-operator.yml --profile desktop-operator config --format json > /tmp/e2e-compose.json
+
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import fs from 'node:fs'
+
+          const dev = JSON.parse(fs.readFileSync('/tmp/devcontainer-compose.json', 'utf8'))
+          const rconApi = dev.services['rcon-api']
+          assert.deepEqual(Object.keys(rconApi.environment).sort(), [
+            'FACTORIO_RCON_HOST',
+            'FACTORIO_RCON_PASSWORD',
+            'FACTORIO_RCON_PORT',
+          ])
+          assert.equal(rconApi.environment.FACTORIO_RCON_PASSWORD, 'ci-rcon-sentinel')
+          assert.equal(rconApi.environment.FACTORIO_RCON_HOST, 'localhost')
+          assert.equal(rconApi.network_mode, 'host')
+          assert.equal(rconApi.ports, undefined)
+          for (const key of ['OPENAI_API_KEY', 'OPENAI_API_BASEURL', 'OPENAI_MODEL', 'FACTORIO_USERNAME', 'FACTORIO_TOKEN', 'TYPESAFE_API_KEY']) {
+            assert.equal(Object.hasOwn(rconApi.environment, key), false)
+          }
+
+          const apiConfigMount = rconApi.volumes.find(volume => volume.target === '/app/api-server/config/config.yaml')
+          assert.ok(apiConfigMount, 'missing factorio-rcon-api loopback config mount')
+          assert.equal(apiConfigMount.read_only, true)
+          const apiConfig = fs.readFileSync('.devcontainer/factorio-rcon-api.yml', 'utf8')
+          assert.match(apiConfig, /^\s*http_server_addr:\s*["']127\.0\.0\.1:24180["']\s*$/m)
+          assert.match(apiConfig, /^\s*grpc_server_addr:\s*["']127\.0\.0\.1:24181["']\s*$/m)
+          assert.doesNotMatch(apiConfig, /0\.0\.0\.0/)
+
+          const local = JSON.parse(fs.readFileSync('/tmp/e2e-compose.json', 'utf8'))
+          assert.equal(local.services['sgluna-factorio'].environment.SGLUNA_RCON_PASSWORD, 'ci-rcon-sentinel')
+          assert.equal(local.services['desktop-operator'].environment.SGLUNA_RCON_PASSWORD, 'ci-rcon-sentinel')
+
+          const rconPort = local.services['sgluna-factorio'].ports.find(port => Number(port.target) === 27015)
+          assert.ok(rconPort, 'missing local E2E RCON port')
+          assert.equal(rconPort.host_ip, '127.0.0.1')
+
+          const operatorPort = local.services['desktop-operator'].ports.find(port => Number(port.target) === 24181)
+          assert.ok(operatorPort, 'missing desktop operator port')
+          assert.equal(operatorPort.host_ip, '127.0.0.1')
+          NODE
 
       - name: Check generated egg artifacts
         run: |
@@ -87,5 +188,37 @@ jobs:
       - name: Test payload verifier portability
         run: node --test deploy/pterodactyl/build-payload.test.mjs
 
+      # No --test-force-exit: it exits a file's child process before its report
+      # is flushed, which silently dropped the tail of planning-state.test.mjs
+      # (842 of 849 tests reported, still green). The step timeout covers a
+      # leaked handle instead.
       - name: Test standalone-NPC deployment protocol and production runtime
-        run: node --test --test-force-exit deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
+        timeout-minutes: 10
+        run: node --test deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
+
+      - name: Test external-harness contracts, MCP and local method library
+        run: node --test tools/external-harness/contract.test.mjs tools/external-harness/mcp-server.test.mjs tools/external-harness/library.test.mjs
+
+  factorio-npc-deterministic:
+    if: github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.base_ref == 'experiment/jev-agent-architecture'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NPC_TEST_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build deterministic Factorio NPC image once
+        run: docker build -f tests/factorio/Dockerfile -t factorio-npc-test .
+
+      - name: Run all deterministic Factorio regressions
+        run: bash scripts/test-factorio-suite.sh
+
+      - name: Preserve deterministic native evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: factorio-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/factorio-ci/
+          if-no-files-found: warn
+          retention-days: 14

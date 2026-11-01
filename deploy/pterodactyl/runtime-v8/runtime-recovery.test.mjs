@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  AIRI_CONFIG_DEFAULTS,
+  SGLUNA_CONFIG_DEFAULTS,
   configuration,
   migrateConfig,
   recoverInterruptedAgentPlan,
@@ -17,9 +17,9 @@ const env = {
 }
 
 test('provider timeout is a migrated non-secret config with a Pterodactyl env override', () => {
-  assert.equal(AIRI_CONFIG_DEFAULTS.providerTimeoutMs, 120000)
-  assert.equal(migrateConfig({}, {}).providerTimeoutMs, 120000)
-  assert.equal(configuration({}, env).providerTimeoutMs, 120000)
+  assert.equal(SGLUNA_CONFIG_DEFAULTS.providerTimeoutMs, 300000)
+  assert.equal(migrateConfig({}, {}).providerTimeoutMs, 300000)
+  assert.equal(configuration({}, env).providerTimeoutMs, 300000)
   assert.equal(configuration({}, { ...env, PROVIDER_TIMEOUT_MS: '90000' }).providerTimeoutMs, 90000)
 })
 
@@ -72,6 +72,49 @@ test('chat provider failure is reported in game and the event queue remains usab
   assert.ok(commands.some(command => command.includes('Recovered.')))
 })
 
+test('a request failure that leaves the goal paused ends the chat line with the Resume hint, but not for a transient pause that resumes itself', async () => {
+  for (const [status, expectHint, pauseReason] of [['paused', true, 'request_failed'], ['active', false, undefined], ['paused', false, 'provider_transient: Provider returned HTTP 500']]) {
+    const { session, commands } = sessionFixture()
+    session.agent = {
+      active: false,
+      request: async () => { throw new Error('Provider returned HTTP 500') },
+      completed: async () => null,
+      cancel: () => {},
+      memory: { currentPlan: () => ({ status, pause_reason: pauseReason }) },
+    }
+
+    session.onGameLine('2026-09-14 20:00:00 [CHAT] Louis: !airi first')
+    await session.eventQueue
+    const line = commands.find(command => command.includes('Request failed: Provider returned HTTP 500'))
+    assert.ok(line, 'the failure is still reported in chat')
+    assert.equal(line.includes('Press Resume or say continue to retry from the verified task state.'), expectHint, `${status} ${pauseReason}`)
+  }
+})
+
+test('a request failure traces the chat line the player got (length and hint flag, not the error text)', async () => {
+  const { session, commands } = sessionFixture()
+  const traced = []
+  session.agent = {
+    active: false,
+    request: async () => { throw new Error('Provider returned HTTP 500 secret-ish') },
+    completed: async () => null,
+    cancel: () => {},
+    lastTerminalRequestId: 'req_x_1',
+    traceEvent: async (event, data, options) => { traced.push({ event, data, options }) },
+    memory: { currentPlan: () => ({ status: 'paused', pause_reason: 'request_failed' }) },
+  }
+
+  session.onGameLine('2026-09-14 20:00:00 [CHAT] Louis: !airi first')
+  await session.eventQueue
+  assert.ok(commands.some(command => command.includes('Request failed:')))
+  const reported = traced.filter(entry => entry.event === 'chat.request_failed_reported')
+  assert.equal(reported.length, 1)
+  assert.equal(reported[0].data.resume_hint_included, true)
+  assert.ok(reported[0].data.chat_line_length > 20)
+  assert.equal(reported[0].options.requestId, 'req_x_1')
+  assert.ok(!JSON.stringify(reported[0].data).includes('secret-ish'))
+})
+
 test('!airi stop cancels an in-flight model turn immediately and reports that the plan is paused', async () => {
   const { session, commands } = sessionFixture()
   let cancelled = 0
@@ -88,8 +131,8 @@ test('!airi stop cancels an in-flight model turn immediately and reports that th
   assert.equal(cancelled, 1)
   releaseQueue()
   await session.eventQueue
-  assert.ok(commands.some(command => command.includes('airi_deployment')))
-  assert.ok(commands.some(command => command.includes('Paused the current AIRI plan')))
+  assert.ok(commands.some(command => command.includes('sgluna_deployment')))
+  assert.ok(commands.some(command => command.includes('Paused the current SGLuna plan')))
 })
 
 test('only active or infrastructure-interrupted plans are eligible for automatic recovery', () => {
@@ -115,13 +158,13 @@ test('interrupted-plan recovery creates a continuation turn that requires live r
   }
   let observed
   const agent = {
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'NPC recovery prompt',
     active: true,
     turnSequence: 4,
     traceRequest: null,
     memory: {
-      currentPlan: key => key === 'npc:airi' ? state : undefined,
+      currentPlan: key => key === 'npc:sgluna' ? state : undefined,
       context: () => '[PLAN_STATE] {"status":"active","current_step_text":"Place furnace"}',
     },
     loadPersistentState: async () => {},
@@ -131,7 +174,11 @@ test('interrupted-plan recovery creates a continuation turn that requires live r
     },
     captureEpoch: async () => ({ actor_id: 99, epoch: 8 }),
     traceEvent: async () => {},
-    runGuarded: async function () {
+    replaceConversation({ baseMessages }) {
+      this.baseMessages = baseMessages
+      this.messages = baseMessages.map(message => ({ ...message }))
+    },
+    async runGuarded() {
       observed = {
         messages: this.messages,
         requestInfo: this.requestInfo,

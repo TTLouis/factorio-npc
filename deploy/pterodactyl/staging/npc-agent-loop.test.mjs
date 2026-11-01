@@ -4,7 +4,7 @@ import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 
 function deployment(actorId = 18, epoch = 3) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: actorId,
@@ -30,7 +30,7 @@ class FakeRcon {
   async command(text) {
     this.commands.push(text)
     if (this.onCommand) await this.onCommand(text, this)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_actor","status")')) {
       return JSON.stringify({
         mode: 'npc',
@@ -40,10 +40,10 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
-      const admissions = [...text.matchAll(/local r\d+=remote\.call/g)].length
+      const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
       const result = Array.from({ length: admissions }, () => [true, 'Task started'])
       return `${marker}${JSON.stringify({ ok: true, result })}`
     }
@@ -59,6 +59,17 @@ function toolMessage(id, name, args = {}) {
       type: 'function',
       function: { name, arguments: JSON.stringify(args) },
     }],
+  }
+}
+
+function toolBatchMessage(prefix, count, name = 'getActorStatus') {
+  return {
+    content: null,
+    tool_calls: Array.from({ length: count }, (_, index) => ({
+      id: `${prefix}-${index + 1}`,
+      type: 'function',
+      function: { name, arguments: '{}' },
+    })),
   }
 }
 
@@ -94,21 +105,22 @@ test('scripted provider can observe actor then submit an epoch-authorized struct
   assert.equal(result.epoch, 3)
   assert.equal(result.operations[0].name, 'wait')
   assert.equal(rcon.mutations.length, 1)
-  assert.match(rcon.mutations[0], /airi_deployment","authorize",3/)
+  assert.match(rcon.mutations[0], /sgluna_deployment","authorize",3/)
   assert.match(rcon.mutations[0], /autorio_operations','wait',60/)
   assert.equal(reservations.length, 2)
   assert.ok(agent.messages.some(message => message.role === 'tool'))
   assert.ok(agent.messages.some(message => message.role === 'user' && message.content === '[CHAT] TTLouis: wait briefly'))
 })
 
-test('default observation budget allows eleven distinct tool rounds before the final plan', async () => {
+test('distinct read-only tools receive decision pressure before exhausting the observation budget', async () => {
   const rcon = new FakeRcon()
   let calls = 0
   const agent = new NpcAgentLoop({
     rcon,
-    provider: async () => {
+    provider: async (messages) => {
       calls++
-      if (calls < 12) return toolMessage(`tool-${calls}`, 'getRecipe', { item: `test-item-${calls}` })
+      if (calls <= 3) return toolMessage(`tool-${calls}`, 'getRecipe', { item: `test-item-${calls}` })
+      assert.match(messages.map(message => String(message.content ?? '')).join('\n'), /Decision pressure after 3 consecutive observation-only rounds/)
       return planMessage([{ name: 'wait', args: { ticks: 1 } }])
     },
     systemPrompt: 'NPC test prompt',
@@ -116,7 +128,7 @@ test('default observation budget allows eleven distinct tool rounds before the f
 
   const result = await agent.request('observe before acting')
 
-  assert.equal(calls, 12)
+  assert.equal(calls, 4)
   assert.equal(result.operations[0].name, 'wait')
   assert.equal(rcon.mutations.length, 1)
 })
@@ -146,24 +158,59 @@ test('tool-budget exhaustion gets up to three no-tool recovery attempts', async 
   assert.equal(contexts[2].recoveryAttempt, 1)
 })
 
-test('duplicate observation loops reuse cached output and fail after three retries', async () => {
+test('duplicate observation exhaustion gets one bounded no-tool decision without forcing mutation', async () => {
   const rcon = new FakeRcon()
+  const contexts = []
   let calls = 0
   const agent = new NpcAgentLoop({
     rcon,
     maxToolRounds: 12,
-    maxToolLoopRetries: 3,
-    provider: async () => {
+    provider: async (_messages, context) => {
+      contexts.push(context)
       calls++
+      if (context.allowTools === false) return planMessage([], 'No safe mutation is grounded from the current evidence.')
       return toolMessage(`tool-${calls}`, 'getActorStatus')
     },
     systemPrompt: 'NPC test prompt',
   })
 
-  await assert.rejects(() => agent.request('keep looking'), /Repeated tool observation loop after 3 retries/)
+  const result = await agent.request('keep looking')
   const actorReads = rcon.commands.filter(command => command.includes('remote.call("autorio_actor","status")'))
+  assert.equal(result.chatMessage, 'No safe mutation is grounded from the current evidence.')
+  assert.equal(result.operations.length, 0)
+  assert.equal(rcon.mutations.length, 0)
   assert.equal(actorReads.length, 1)
-  assert.equal(calls, 5)
+  assert.equal(calls, 4)
+  assert.equal(contexts.slice(0, 3).every(context => context.allowTools === true), true)
+  assert.equal(contexts[3].allowTools, false)
+  assert.ok(agent.messages.some(message => message.role === 'tool' && /"actor_id":18/.test(message.content)))
+  assert.ok(agent.messages.some(message => message.role === 'user' && /duplicate result was suppressed/i.test(message.content)))
+  assert.ok(agent.messages.some(message => message.role === 'user' && /Observation retries are exhausted/i.test(message.content)))
+})
+
+test('two consecutive five-tool observation batches get bounded tools-on validation recovery', async () => {
+  const rcon = new FakeRcon()
+  const contexts = []
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon,
+    provider: async (_messages, context) => {
+      contexts.push(context)
+      calls++
+      if (calls <= 2) return toolBatchMessage(`oversized-${calls}`, 5)
+      if (calls === 3) return toolBatchMessage('valid', 2)
+      return planMessage([], 'Observed enough; no mutation required.')
+    },
+    systemPrompt: 'NPC test prompt',
+  })
+
+  const result = await agent.request('observe safely')
+  assert.equal(result.chatMessage, 'Observed enough; no mutation required.')
+  assert.equal(rcon.mutations.length, 0)
+  assert.equal(calls, 4)
+  assert.ok(contexts.every(context => context.allowTools === true))
+  assert.equal(rcon.commands.filter(command => command.includes('remote.call("autorio_actor","status")')).length, 1)
+  assert.ok(agent.messages.some(message => message.role === 'user' && /at most 4 observation tool calls/.test(message.content)))
 })
 
 test('dialogue memory belongs to the logical NPC and survives body replacement', async () => {
@@ -171,7 +218,7 @@ test('dialogue memory belongs to the logical NPC and survives body replacement',
   const observed = []
   const agent = new NpcAgentLoop({
     rcon,
-    npcId: 'airi-primary',
+    npcId: 'sgluna-primary',
     provider: async messages => {
       observed.push(messages)
       return planMessage([], 'Acknowledged.')
@@ -195,7 +242,7 @@ test('shared dialogue memory remains isolated by logical NPC id', async () => {
   const first = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory,
-    npcId: 'airi-one',
+    npcId: 'sgluna-one',
     provider: async messages => {
       firstObserved.push(messages)
       return planMessage([], 'First NPC.')
@@ -205,7 +252,7 @@ test('shared dialogue memory remains isolated by logical NPC id', async () => {
   const second = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory,
-    npcId: 'airi-two',
+    npcId: 'sgluna-two',
     provider: async messages => {
       secondObserved.push(messages)
       return planMessage([], 'Second NPC.')
@@ -290,7 +337,7 @@ test('dependent operations are admitted in one mutation with no inter-operation 
   assert.equal(result.operations.length, 2)
   assert.equal(rcon.mutations.length, 1)
   const command = rcon.mutations[0]
-  assert.equal((command.match(/airi_deployment","authorize",3/g) ?? []).length, 1)
+  assert.equal((command.match(/sgluna_deployment","authorize",3/g) ?? []).length, 1)
   const first = command.indexOf("autorio_operations','mine_entity'")
   const second = command.indexOf("autorio_operations','wait'")
   assert.ok(first >= 0 && second > first)
@@ -314,7 +361,7 @@ test('actor replacement after atomic batch admission cancels continuation withou
 
   await assert.rejects(() => agent.request('two steps'), /epoch changed/)
   assert.equal(rcon.mutations.length, 1)
-  assert.equal((rcon.mutations[0].match(/local r\d+=remote\.call/g) ?? []).length, 2)
+  assert.equal((rcon.mutations[0].match(/return remote\.call\('autorio_operations'/g) ?? []).length, 2)
 })
 
 test('completion continuation stays on the captured actor and is bounded', async () => {
@@ -344,10 +391,103 @@ test('malformed tool arguments and arbitrary tool names fail before RCON tool ex
   ]) {
     const rcon = new FakeRcon()
     const baseline = rcon.commands.length
-    const agent = new NpcAgentLoop({ rcon, provider: async () => message, systemPrompt: 'NPC test prompt' })
-    await assert.rejects(() => agent.request('bad tool'))
+    const contexts = []
+    const agent = new NpcAgentLoop({
+      rcon,
+      provider: async (_messages, context) => {
+        contexts.push(context)
+        return message
+      },
+      systemPrompt: 'NPC test prompt',
+    })
+    const result = await agent.request('bad tool')
+    assert.equal(result.blocked, true)
+    assert.equal(result.blocker.class, 'tool_validation')
     assert.equal(rcon.mutations.length, 0)
     assert.ok(rcon.commands.length > baseline)
     assert.equal(rcon.commands.some(command => command.includes('autorio_tools')), false)
+    assert.ok(contexts.every(context => context.allowTools === true))
   }
+})
+
+
+test('observation decision pressure can allow a bounded multi-observation window', async () => {
+  const rcon = new FakeRcon()
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon,
+    provider: async (messages) => {
+      calls++
+      if (calls <= 3) return toolMessage(`tool-${calls}`, 'getRecipe', { item: `test-item-${calls}` })
+      if (calls === 4) {
+        assert.match(messages.map(message => String(message.content ?? '')).join('\n'), /up to 2 additional targeted observation call/)
+        return toolMessage('tool-4', 'getRecipe', { item: 'needed-four' })
+      }
+      if (calls === 5) {
+        assert.match(messages.map(message => String(message.content ?? '')).join('\n'), /1 targeted observation call\(s\) remain/)
+        return planMessage([{ name: 'wait', args: { ticks: 1 } }])
+      }
+      throw new Error('unexpected provider call')
+    },
+    systemPrompt: 'NPC test prompt',
+  })
+  agent.observationDecisionPressureBudget = () => 2
+  const result = await agent.request('observe two more facts before acting')
+  assert.equal(calls, 5)
+  assert.equal(result.operations[0].name, 'wait')
+})
+
+
+test('observation budget exhaustion becomes a normal no-tools decision round', async () => {
+  const rcon = new FakeRcon()
+  let calls = 0
+  const contexts = []
+  const agent = new NpcAgentLoop({
+    rcon,
+    provider: async (messages, context) => {
+      calls++
+      contexts.push({ ...context })
+      if (calls <= 4) return toolMessage(`tool-${calls}`, 'getRecipe', { item: `decision-item-${calls}` })
+      assert.equal(context.allowTools, false)
+      assert.equal(context.recoveryAttempt, 0)
+      assert.match(messages.map(message => String(message.content ?? '')).join('\n'), /observation phase for this decision is now closed/i)
+      return planMessage([{ name: 'wait', args: { ticks: 1 } }])
+    },
+    systemPrompt: 'NPC test prompt',
+  })
+
+  const result = await agent.request('observe until the bounded decision budget closes')
+  assert.equal(calls, 5)
+  assert.equal(contexts[4].allowTools, false)
+  assert.equal(result.operations[0].name, 'wait')
+})
+
+test('oversized final observation batch closes the observation phase without entering recovery', async () => {
+  const rcon = new FakeRcon()
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon,
+    provider: async (_messages, context) => {
+      calls++
+      if (calls <= 3) return toolMessage(`tool-${calls}`, 'getRecipe', { item: `pressure-item-${calls}` })
+      if (calls === 4) {
+        return {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            { id: 'too-many-1', type: 'function', function: { name: 'getRecipe', arguments: JSON.stringify({ item: 'a' }) } },
+            { id: 'too-many-2', type: 'function', function: { name: 'getRecipe', arguments: JSON.stringify({ item: 'b' }) } },
+          ],
+        }
+      }
+      assert.equal(context.allowTools, false)
+      assert.equal(context.recoveryAttempt, 0)
+      return planMessage([{ name: 'wait', args: { ticks: 1 } }])
+    },
+    systemPrompt: 'NPC test prompt',
+  })
+
+  const result = await agent.request('do not convert observation pressure into recovery')
+  assert.equal(calls, 5)
+  assert.equal(result.operations[0].name, 'wait')
 })

@@ -1,8 +1,10 @@
-import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { drain_push_queue, KNOWLEDGE_CHUNK_RADIUS, observe_window, pull_engine_chart, queue_full_push } from './map_knowledge'
+import { new_npc_vision_controller } from './npc_vision'
 
-const RADAR_NAME = 'airi-npc-awareness-radar'
-const RADAR_CHUNK_RADIUS = 1
+// How often to look for newly connected players and pull the engine chart.
+const SYNC_CHECK_INTERVAL = 60
+const PULL_INTERVAL = 3600
 
 interface AwarenessChunkState {
   surface_index: number
@@ -11,80 +13,63 @@ interface AwarenessChunkState {
 }
 
 declare const storage: {
-  airi_awareness_chunk?: AwarenessChunkState
-  airi_awareness_radar?: LuaEntity
+  sgluna_awareness_chunk?: AwarenessChunkState
+  sgluna_map_sync_players?: number
+  sgluna_map_sync_pulled_tick?: number
 }
 
 function chunk_coordinate(value: number) {
   return math.floor(value / 32)
 }
 
-function destroy_radar() {
-  const radar = storage.airi_awareness_radar
-  if (radar?.valid) radar.destroy()
-  storage.airi_awareness_radar = undefined
+// Sync the NPC's map knowledge with the force chart players see. Nothing is
+// charted while no player is connected, so both directions wait for one.
+function sync_with_players(actor: ControlledActor) {
+  if (game.tick % SYNC_CHECK_INTERVAL === 0) {
+    const players = actor.force.connected_players.length
+    const previous = storage.sgluna_map_sync_players ?? 0
+    storage.sgluna_map_sync_players = players
+    if (players > 0) {
+      if (players > previous) queue_full_push()
+      const pulled = storage.sgluna_map_sync_pulled_tick
+      if (players > previous || pulled === undefined || game.tick - pulled >= PULL_INTERVAL) {
+        pull_engine_chart(actor.force, actor.surface)
+        storage.sgluna_map_sync_pulled_tick = game.tick
+      }
+    }
+  }
+  drain_push_queue(actor.force)
 }
 
-function create_radar(actor: ControlledActor) {
-  const radar = actor.surface.create_entity({
-    name: RADAR_NAME,
-    position: actor.position,
-    force: actor.force,
-  })
-  if (!radar) return undefined
-  radar.destructible = false
-  radar.minable_flag = false
-  radar.operable = false
-  storage.airi_awareness_radar = radar
-  return radar
-}
-
-export function new_awareness_controller() {
+export function new_awareness_controller(vision = new_npc_vision_controller()) {
   function tick(actor: ControlledActor) {
     const identity = actor.status_snapshot()
     if (identity.kind !== 'standalone_character') {
-      destroy_radar()
-      storage.airi_awareness_chunk = undefined
+      storage.sgluna_awareness_chunk = undefined
+      vision.tick(actor, identity, false)
       return false
     }
 
+    sync_with_players(actor)
+
     const chunk_x = chunk_coordinate(actor.position.x)
     const chunk_y = chunk_coordinate(actor.position.y)
-    const previous = storage.airi_awareness_chunk
+    const previous = storage.sgluna_awareness_chunk
     const changed_chunk = !previous
       || previous.surface_index !== actor.surface.index
       || previous.chunk_x !== chunk_x
       || previous.chunk_y !== chunk_y
-
-    let radar = storage.airi_awareness_radar
-    if (radar?.valid && radar.surface.index !== actor.surface.index) {
-      radar.destroy()
-      radar = undefined
-      storage.airi_awareness_radar = undefined
-    }
-
-    if (!radar?.valid) {
-      radar = create_radar(actor)
-    }
-    else if (changed_chunk) {
-      // Radar visibility is chunk based. Moving it inside the same 32x32 chunk
-      // cannot change the 3x3 nearby-sector footprint, so avoid a LuaEntity
-      // teleport every simulation tick. Reposition only when the footprint can
-      // actually change.
-      radar.teleport(actor.position)
-    }
-
+    // The hidden vision vehicle follows the NPC (live exploration around it).
+    vision.tick(actor, identity, changed_chunk)
     if (!changed_chunk) return false
 
-    // The hidden RadarPrototype handles the actual continuously refreshed 3x3
-    // fog-of-war visibility. Chunk generation remains an explicit bounded
-    // safety net because a radar cannot reveal terrain that does not exist yet,
-    // and standalone characters do not get the normal LuaPlayer exploration
-    // generation bubble.
-    actor.surface.request_to_generate_chunks(actor.position, RADAR_CHUNK_RADIUS)
-    actor.surface.force_generate_chunk_requests()
+    // Load the 5x5 window around the NPC the way a player's character does.
+    // Queue it and let the engine amortize it: force_generate_chunk_requests()
+    // can block a whole simulation frame on chunk-boundary crossings.
+    actor.surface.request_to_generate_chunks(actor.position, KNOWLEDGE_CHUNK_RADIUS)
+    observe_window(actor.force, actor.surface, chunk_x, chunk_y)
 
-    storage.airi_awareness_chunk = {
+    storage.sgluna_awareness_chunk = {
       surface_index: actor.surface.index,
       chunk_x,
       chunk_y,
@@ -92,5 +77,5 @@ export function new_awareness_controller() {
     return true
   }
 
-  return { tick }
+  return { tick, vision }
 }

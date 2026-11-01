@@ -52,7 +52,7 @@ export async function prepareMods(root, app, workspace) {
   return destination
 }
 
-export async function prepareServerSettings(root, game, factorio = { username: '', token: '', public: false }) {
+export async function prepareServerSettings(root, game, factorio = { username: '', token: '', public: false }, { pausedStartup = false } = {}) {
   const data = path.join(root, 'data')
   await directory(data)
   const filename = path.join(data, 'server-settings.json')
@@ -65,17 +65,20 @@ export async function prepareServerSettings(root, game, factorio = { username: '
   }
   else {
     current = JSON.parse(await fsp.readFile(path.join(game, 'data', 'server-settings.example.json'), 'utf8'))
-    current.name = 'AIRI Factorio NPC'
-    current.description = 'AIRI standalone NPC Factorio server'
+    current.name = 'SGLuna Factorio NPC'
+    current.description = 'SGLuna standalone NPC Factorio server'
   }
 
   // Factorio refuses to start a public game unless require_user_verification
   // is also true (CommandLineMultiplayer.cpp), so this tracks visibility.public
   // exactly rather than being an independently configurable setting.
+  // The NPC must keep playing with zero connected humans, so the server never
+  // auto-pauses; Factorio's example settings ship with auto_pause=true.
   const next = {
     ...current,
     visibility: { ...current.visibility, public: factorio.public, lan: false },
     require_user_verification: factorio.public,
+    auto_pause: pausedStartup,
     username: factorio.username,
     token: factorio.token,
   }
@@ -118,12 +121,12 @@ export async function selectSave(root, requested = '') {
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename))
   if (candidates.length) return { filename: candidates[0].filename, create: false }
-  return { filename: path.join(saves, 'airi-world.zip'), create: true }
+  return { filename: path.join(saves, 'sgluna-world.zip'), create: true }
 }
 
 export async function createSave(filename, game, modDir, configFile, root, log = () => {}) {
   check(!(await stat(filename)), 'Refusing to overwrite an existing save')
-  const tempDir = await fsp.mkdtemp(path.join(root, '.airi', 'create-'))
+  const tempDir = await fsp.mkdtemp(path.join(root, '.sgluna', 'create-'))
   try {
     const temp = path.join(tempDir, 'world.zip')
     await runProcess(path.join(game, 'bin', 'x64', 'factorio'), [

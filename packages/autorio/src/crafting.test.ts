@@ -1,5 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { crafted_item_count } from './crafted_items'
 import { new_crafting_controller } from './crafting'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
@@ -8,6 +9,7 @@ function make_context() {
   const inventory_counts: Record<string, number> = { 'iron-gear-wheel': 0, 'iron-plate': 100 }
   let queue: Array<{ index: number, recipe: string, count: number, prerequisite: boolean }> = []
   let actor_id = 1
+  let actor_kind = 'standalone_character'
   let begin_count: number | undefined
 
   const actor = {
@@ -16,6 +18,7 @@ function make_context() {
     surface: {},
     force: {
       index: 1,
+      technologies: {},
       recipes: {
         'iron-gear-wheel': { enabled: true },
       },
@@ -54,9 +57,9 @@ function make_context() {
     entity_build_args: vi.fn(() => ({ force: { index: 1 } })),
     status_snapshot: vi.fn(() => ({
       actor_id,
-      kind: 'standalone_character',
+      kind: actor_kind,
       valid: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
       has_character: true,
     })),
@@ -74,6 +77,7 @@ function make_context() {
     get queue() { return queue },
     set queue(value) { queue = value },
     set actor_id(value: number) { actor_id = value },
+    set actor_kind(value: string) { actor_kind = value },
     set begin_count(value: number | undefined) { begin_count = value },
   }
 }
@@ -121,6 +125,29 @@ describe('bounded crafting controller', () => {
       output_count_before: 0,
     })
     expect(controller.status().last_result?.code).toBe('started')
+  })
+
+  it('finishes an in-flight native craft identically after a peer reload with no duplicate admission', () => {
+    const context = make_context()
+    ;(globalThis as any).prototypes.recipe = { 'iron-gear-wheel': { products: [{ type: 'item', name: 'iron-gear-wheel', amount: 1 }] } }
+    context.controller.submit('iron-gear-wheel', 2)
+    context.controller.tick(context.actor)
+    const saved = JSON.parse(JSON.stringify((globalThis as any).storage))
+    const run_completion = (reload: boolean) => {
+      ;(globalThis as any).storage = JSON.parse(JSON.stringify(saved))
+      const manager = reload ? new_task_manager(() => context.actor) : context.manager
+      const controller = reload ? new_crafting_controller(() => context.actor, manager) : context.controller
+      context.queue = []
+      context.inventory_counts['iron-gear-wheel'] = 2
+      ;(globalThis as any).game.tick = 61
+      controller.tick(context.actor)
+      return JSON.parse(JSON.stringify({ storage: (globalThis as any).storage, status: manager.get_status_snapshot() }))
+    }
+    const uninterrupted = run_completion(false)
+    expect(run_completion(true)).toEqual(uninterrupted)
+    expect(context.actor.begin_crafting).toHaveBeenCalledTimes(1)
+    expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(2)
+    expect(uninterrupted.status.last_completed_batch).toMatchObject({ tick: 61, batch_ref: 'batch-g1-1' })
   })
 
   it('requires real output after the owned native queue drains', () => {
@@ -187,6 +214,142 @@ describe('bounded crafting controller', () => {
     expect(context.queue).toHaveLength(0)
     expect(context.manager.get_status_snapshot()).toMatchObject({ task_state: TaskStates.IDLE, queue_empty: true, queue_length: 0 })
     expect(context.controller.status().last_result?.code).toBe('partial_start')
+  })
+
+  describe('hand-crafted item counter', () => {
+    beforeEach(() => {
+      ;(globalThis as any).prototypes = {
+        ...(globalThis as any).prototypes,
+        recipe: {
+          'iron-gear-wheel': { products: [{ type: 'item', name: 'iron-gear-wheel', amount: 1 }] },
+          'transport-belt': { products: [{ type: 'item', name: 'transport-belt', amount: 2 }] },
+        },
+      }
+    })
+
+    it('credits a craft only when the engine takes it off the native queue', () => {
+      const context = make_context()
+      context.controller.submit('iron-gear-wheel', 3)
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(0)
+
+      // The order alone (queue still full) counts nothing.
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(0)
+
+      context.queue = [{ index: 1, recipe: 'iron-gear-wheel', count: 2, prerequisite: false }]
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(1)
+
+      // Ticking again on the same queue does not double count.
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(1)
+
+      context.queue = []
+      context.inventory_counts['iron-gear-wheel'] = 3
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(3)
+      expect(context.controller.status().last_result?.code).toBe('completed')
+    })
+
+    it('multiplies by the recipe yield and credits prerequisite crafts as what they produce', () => {
+      const context = make_context()
+      ;(context.actor.force as any).recipes['transport-belt'] = { enabled: true }
+      context.controller.submit('transport-belt', 2)
+      context.controller.tick(context.actor)
+      context.queue = [
+        { index: 1, recipe: 'iron-gear-wheel', count: 2, prerequisite: true },
+        { index: 2, recipe: 'transport-belt', count: 2, prerequisite: false },
+      ]
+      // begin_crafting queued only the belt in the mock; re-take the snapshot as
+      // the engine would have after queueing prerequisites.
+      context.manager.player_state.parameters_craft_item!.queue_snapshot = { 'iron-gear-wheel': 2, 'transport-belt': 2 }
+
+      context.queue = [{ index: 1, recipe: 'transport-belt', count: 2, prerequisite: false }]
+      context.controller.tick(context.actor)
+
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(2)
+      expect(crafted_item_count(1, 'transport-belt')).toBe(0)
+    })
+
+    it('does not credit crafts the request cancels, but keeps those finished before the cancel', () => {
+      const context = make_context()
+      context.controller.submit('iron-gear-wheel', 5)
+      context.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 120 })
+      context.controller.tick(context.actor)
+
+      // Two crafts finish, then the goal is cancelled before the next tick.
+      context.queue = [{ index: 1, recipe: 'iron-gear-wheel', count: 3, prerequisite: false }]
+      context.manager.cancel_all_tasks()
+
+      expect(context.actor.cancel_crafting).toHaveBeenCalledWith({ index: 1, count: 3 })
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(2)
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(2)
+    })
+
+    it('credits nothing when a partial native start is cancelled through fail()', () => {
+      const context = make_context()
+      context.begin_count = 1
+      context.controller.submit('iron-gear-wheel', 2)
+      context.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 120 })
+
+      context.controller.tick(context.actor)
+
+      expect(context.controller.status().last_result?.code).toBe('partial_start')
+      expect(context.queue).toHaveLength(0)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(0)
+    })
+
+    it('credits nothing when a timeout cancels the queue through fail(), and keeps crafts finished before it', () => {
+      const context = make_context()
+      context.controller.submit('iron-gear-wheel', 5)
+      context.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 120 })
+      context.controller.tick(context.actor)
+      context.queue = [{ index: 1, recipe: 'iron-gear-wheel', count: 4, prerequisite: false }]
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(1)
+
+      ;(globalThis as any).game.tick = 100000
+      context.controller.tick(context.actor)
+
+      expect(context.controller.status().last_result?.code).toBe('timeout')
+      expect(context.queue).toHaveLength(0)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(1)
+      expect(context.manager.player_state.parameters_craft_item?.queue_snapshot).toBeUndefined()
+    })
+
+    it('does not credit a connected player\'s crafts, which the engine already counts', () => {
+      const context = make_context()
+      context.actor_kind = 'connected_player'
+      context.controller.submit('iron-gear-wheel', 2)
+      context.controller.tick(context.actor)
+      context.queue = []
+      context.inventory_counts['iron-gear-wheel'] = 2
+      context.controller.tick(context.actor)
+
+      expect(context.controller.status().last_result?.code).toBe('completed')
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(0)
+    })
+
+    it('credits nothing for a craft that never started', () => {
+      const context = make_context()
+      context.controller.submit('iron-gear-wheel', 2)
+      context.manager.cancel_all_tasks()
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(0)
+    })
+
+    it('keeps one count per force', () => {
+      const context = make_context()
+      context.controller.submit('iron-gear-wheel', 1)
+      context.controller.tick(context.actor)
+      context.queue = []
+      context.inventory_counts['iron-gear-wheel'] = 1
+      context.controller.tick(context.actor)
+
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(1)
+      expect(crafted_item_count(2, 'iron-gear-wheel')).toBe(0)
+    })
   })
 
   it('does not let an actor replacement inherit or cancel the old body native queue', () => {

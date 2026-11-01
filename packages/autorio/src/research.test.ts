@@ -316,3 +316,19 @@ describe('serialized asynchronous research requests', () => {
     expect(force.add_research).not.toHaveBeenCalled()
   })
 })
+
+describe('technology progress', () => {
+  it('reads the current research progress from the force and any other technology from saved_progress', () => {
+    const { force, tech, controller } = world()
+    const other = { ...tech, name: 'logistics', saved_progress: 0.25, prerequisites: {}, prototype: {} }
+    force.technologies.logistics = other
+    // The technology is the current research at 60%: saved_progress belongs to a technology that is not current and reads 0.
+    force.current_research = tech
+    force.research_progress = 0.6
+    tech.saved_progress = 0
+    expect(controller.technology('automation')).toMatchObject({ found: true, is_current_research: true, progress: 0.6, saved_progress: 0 })
+    expect(controller.technology('logistics')).toMatchObject({ is_current_research: false, progress: 0.25, saved_progress: 0.25 })
+    force.current_research = undefined
+    expect(controller.technology('automation')).toMatchObject({ is_current_research: false, progress: 0 })
+  })
+})

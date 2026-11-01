@@ -1,16 +1,26 @@
-FROM node:22-bookworm AS build
+FROM node:22-bookworm AS deps
 
 ENV CI=true
 RUN corepack enable
 WORKDIR /src
+# Fetch the pinned pnpm once, in a layer keyed on the root package.json, and keep
+# the package store in a BuildKit cache, so a source-only change downloads nothing.
+COPY package.json ./
+RUN corepack install
 COPY . .
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=npc-test-pnpm-store,target=/pnpm/store \
+  pnpm install --frozen-lockfile --prefer-offline --store-dir /pnpm/store
+
+FROM deps AS build
 RUN pnpm test:prompt
 RUN pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build
 RUN pnpm --filter autorio.ts run test
+RUN node deploy/pterodactyl/staging/source-preparer.mjs . deploy/pterodactyl/staging/guard.ts
 RUN pnpm --filter autorio.ts run typecheck
 RUN pnpm --filter autorio.ts run build
 RUN cp packages/autorio/info.json packages/autorio/dist/info.json
+RUN cat tests/factorio/fixtures/area-reservation-fixture.lua packages/autorio/dist/control.lua > /tmp/test-control.lua \
+  && cp /tmp/test-control.lua packages/autorio/dist/control.lua
 
 FROM debian:bookworm-slim
 
@@ -20,7 +30,7 @@ ENV FACTORIO_ROOT=/opt/factorio
 ENV TEST_ROOT=/test
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl python3 xz-utils \
+  && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 python3 xz-utils \
   && rm -rf /var/lib/apt/lists/* \
   && curl -fsSL "https://factorio.com/get-download/${FACTORIO_VERSION}/headless/linux64" -o /tmp/factorio.tar.xz \
   && mkdir -p /opt \
@@ -28,7 +38,12 @@ RUN apt-get update \
   && rm /tmp/factorio.tar.xz
 
 RUN mkdir -p /opt/factorio/mods /test/results /test/saves
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
+RUN node --version
 COPY --from=build /src/packages/autorio/dist /opt/factorio/mods/autorio_0.1.0
+COPY tests/factorio/fixtures/visibility-link-prototypes.lua /opt/factorio/mods/autorio_0.1.0/data-final-fixes.lua
+COPY --from=build /src/deploy/pterodactyl/staging /test/pterodactyl/staging
+COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/pterodactyl/runtime-v8
 COPY tests/factorio/runner /test/runner
 COPY tests/factorio/fixtures /test/fixtures
 COPY tests/factorio/run.sh /test/run.sh

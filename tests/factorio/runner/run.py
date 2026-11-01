@@ -152,12 +152,12 @@ def run(client: Rcon, results: Path) -> None:
     # response for the rejected first attempt, which previously looked like a
     # JSON parsing failure. Use a harmless, identical probe twice and require the
     # expected marker before running any test commands.
-    lua_probe = '/silent-command rcon.print("AIRI_RCON_READY")'
+    lua_probe = '/silent-command rcon.print("SGLUNA_RCON_READY")'
     probe_response = command(lua_probe)
-    if probe_response != 'AIRI_RCON_READY':
+    if probe_response != 'SGLUNA_RCON_READY':
         probe_response = command(lua_probe)
     assert_true(
-        probe_response == 'AIRI_RCON_READY',
+        probe_response == 'SGLUNA_RCON_READY',
         f'Factorio Lua console handshake failed over RCON: {probe_response!r}',
     )
 
@@ -187,6 +187,21 @@ def run(client: Rcon, results: Path) -> None:
     # exercises character-safe actor inspection in zero-player NPC mode.
     response = command(lua_text(remote_call('autorio_operations', 'log_actor_info')))
     assert_true(response == 'true', f'actor diagnostics failed in zero-player mode: {response!r}')
+
+    response = command(lua_json(remote_call(
+        'autorio_preflight',
+        'operation',
+        repr('gather_resource'),
+        "{resource_name='sgluna-missing-resource',count=1,search_radius=32}",
+    )))
+    preflight = decode_json(response, 'autorio_preflight.operation')
+    assert_true(preflight.get('ok') is False, f'unknown resource preflight unexpectedly passed: {preflight!r}')
+    assert_true(preflight.get('code') == 'unknown_prototype', f'wrong preflight code: {preflight!r}')
+    assert_true(preflight.get('operation') == 'gather_resource', f'preflight lost operation identity: {preflight!r}')
+    after_preflight = operation_status('autorio_operations.status (after preflight rejection)')
+    assert_true(after_preflight.get('task_state') == 'idle', f'preflight rejection started work: {after_preflight!r}')
+    assert_true(after_preflight.get('queue_empty') is True and after_preflight.get('queue_length') == 0,
+                f'preflight rejection queued work: {after_preflight!r}')
 
     # Exercise the real control.ts on_tick dispatcher with the simplest bounded
     # task. If control.ts still resolved game.connected_players[0], this task
@@ -236,7 +251,7 @@ def run(client: Rcon, results: Path) -> None:
     )
 
     # NPC-native mining: remove the movement target and place a single resource
-    # entity inside AIRI's reach. Capture its actual engine position: resources
+    # entity inside SGLuna's reach. Capture its actual engine position: resources
     # may snap to tile centers, so the requested position is not a safe lookup.
     mining_fixture = (
         "/silent-command "

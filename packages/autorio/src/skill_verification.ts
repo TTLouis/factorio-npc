@@ -1,5 +1,7 @@
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { validate_construction_execution_plan, type ConstructionExecutionPlacement } from './construction_execution'
+import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import {
   analyze_factory_area,
   get_factory_area_analysis,
@@ -12,12 +14,15 @@ import {
   list_learning_verification_queue,
   skill_novelty_key,
   update_learning_opportunity,
+  type LearningVerificationQueueItem,
+  type LearningVerificationQueueState,
 } from './learning_opportunities'
 import {
   get_skill_definition,
   put_skill_definition,
   type SkillDefinition,
 } from './skills'
+import { find_world_entities } from './npc_vision'
 
 export type SkillVerificationRunState
   = | 'validating'
@@ -93,6 +98,8 @@ export interface SkillVerificationRun {
   input_routes: VerificationInputRoute[]
   built_entities: VerificationBuiltEntity[]
   active_batch_id?: number
+  active_batch_generation?: number
+  active_batch_ref?: string
   baseline_output_counts: Record<string, number>
   observed_output_counts: Record<string, number>
   output_deadline_tick?: number
@@ -104,23 +111,13 @@ export interface SkillVerificationRun {
   completed_tick?: number
 }
 
-interface VerificationQueueRecord {
-  opportunity_id: string
-  skill_id: string
-  state: 'queued' | 'running' | 'blocked'
-  created_tick: number
-  estimated_cost: 'cheap' | 'moderate' | 'expensive'
-  risk: 'safe' | 'moderate' | 'dangerous'
-  reason: string
-}
-
 declare const storage: {
-  airi_skill_instance_templates?: Record<string, SkillInstanceTemplate>
-  airi_skill_verification_runs?: Record<string, SkillVerificationRun>
-  airi_skill_verification_run_order?: string[]
-  airi_skill_verification_next_id?: number
-  airi_skill_verification_active_run_id?: string
-  airi_learning_verification_queue?: VerificationQueueRecord[]
+  sgluna_skill_instance_templates?: Record<string, SkillInstanceTemplate>
+  sgluna_skill_verification_runs?: Record<string, SkillVerificationRun>
+  sgluna_skill_verification_run_order?: string[]
+  sgluna_skill_verification_next_id?: number
+  sgluna_skill_verification_active_run_id?: string
+  sgluna_learning_verification_queue?: LearningVerificationQueueItem[]
 }
 
 const MAX_TEMPLATE_ENTITIES = 16
@@ -136,19 +133,19 @@ const POSITION_EPSILON = 0.2
 let runtime_registered = false
 
 function templates() {
-  if (storage.airi_skill_instance_templates === undefined) storage.airi_skill_instance_templates = {}
-  return storage.airi_skill_instance_templates
+  if (storage.sgluna_skill_instance_templates === undefined) storage.sgluna_skill_instance_templates = {}
+  return storage.sgluna_skill_instance_templates
 }
 
 function runs() {
-  if (storage.airi_skill_verification_runs === undefined) storage.airi_skill_verification_runs = {}
-  if (storage.airi_skill_verification_run_order === undefined) storage.airi_skill_verification_run_order = []
-  return storage.airi_skill_verification_runs
+  if (storage.sgluna_skill_verification_runs === undefined) storage.sgluna_skill_verification_runs = {}
+  if (storage.sgluna_skill_verification_run_order === undefined) storage.sgluna_skill_verification_run_order = []
+  return storage.sgluna_skill_verification_runs
 }
 
 function queue_records() {
-  if (storage.airi_learning_verification_queue === undefined) storage.airi_learning_verification_queue = []
-  return storage.airi_learning_verification_queue
+  if (storage.sgluna_learning_verification_queue === undefined) storage.sgluna_learning_verification_queue = []
+  return storage.sgluna_learning_verification_queue
 }
 
 function unique_strings(values: string[], limit = MAX_EVIDENCE_REFS) {
@@ -162,19 +159,19 @@ function unique_strings(values: string[], limit = MAX_EVIDENCE_REFS) {
 }
 
 function next_run_id() {
-  const next = storage.airi_skill_verification_next_id ?? 1
-  storage.airi_skill_verification_next_id = next + 1
+  const next = storage.sgluna_skill_verification_next_id ?? 1
+  storage.sgluna_skill_verification_next_id = next + 1
   return `skill-verification-${next}`
 }
 
 function store_run(run: SkillVerificationRun) {
   const registry = runs()
-  const order = storage.airi_skill_verification_run_order as string[]
+  const order = storage.sgluna_skill_verification_run_order as string[]
   registry[run.id] = run
   if (!order.includes(run.id)) order.push(run.id)
   while (order.length > MAX_RUN_HISTORY) {
     const removed = order.shift()
-    if (removed !== undefined && removed !== storage.airi_skill_verification_active_run_id) delete registry[removed]
+    if (removed !== undefined && removed !== storage.sgluna_skill_verification_active_run_id) delete registry[removed]
   }
   return run
 }
@@ -195,8 +192,8 @@ function update_run(run: SkillVerificationRun, patch: Partial<SkillVerificationR
 }
 
 function active_run() {
-  const id = storage.airi_skill_verification_active_run_id
-  return id !== undefined ? (storage.airi_skill_verification_runs ?? {})[id] : undefined
+  const id = storage.sgluna_skill_verification_active_run_id
+  return id !== undefined ? (storage.sgluna_skill_verification_runs ?? {})[id] : undefined
 }
 
 function queue_item(opportunity_id: string) {
@@ -209,7 +206,7 @@ function remove_queue_item(opportunity_id: string) {
   for (let index = queue.length - 1; index >= 0; index--) if (queue[index].opportunity_id === opportunity_id) queue.splice(index, 1)
 }
 
-function set_queue_state(opportunity_id: string, state: VerificationQueueRecord['state'], reason: string) {
+function set_queue_state(opportunity_id: string, state: LearningVerificationQueueState, reason: string) {
   const item = queue_item(opportunity_id)
   if (!item) return
   item.state = state
@@ -226,7 +223,7 @@ function block_run(run: SkillVerificationRun, reason: string, evidence_refs: str
     evidence_refs: refs,
     reason: `Verification blocked: ${reason}`,
   })
-  storage.airi_skill_verification_active_run_id = undefined
+  storage.sgluna_skill_verification_active_run_id = undefined
   return next
 }
 
@@ -240,7 +237,7 @@ export function fail_skill_verification_run(run: SkillVerificationRun, failure_k
     evidence_refs: refs,
     reason: `Verification ${failure_kind} failure: ${reason}`,
   })
-  storage.airi_skill_verification_active_run_id = undefined
+  storage.sgluna_skill_verification_active_run_id = undefined
   return next
 }
 
@@ -320,7 +317,7 @@ export function capture_skill_instance_template_from_block(skill_id: string, ski
 }
 
 export function get_skill_instance_template(skill_id: string) {
-  return (storage.airi_skill_instance_templates ?? {})[skill_id]
+  return (storage.sgluna_skill_instance_templates ?? {})[skill_id]
 }
 
 function source_block_ref(skill: SkillDefinition) {
@@ -493,17 +490,74 @@ function operation_result(method: string, ...args: any[]) {
   return { ok: result === true, message: result === true ? 'accepted' : 'operation rejected' }
 }
 
-function active_batch_id() {
-  const status = operations_status()
-  return typeof status?.active_batch?.batch_id === 'number' ? status.active_batch.batch_id : undefined
+interface ActiveOperationBatchIdentity {
+  batch_id: number
+  batch_generation: number
+  batch_ref: string
 }
 
-function batch_state(batch_id: number | undefined) {
-  if (batch_id === undefined) return 'missing' as const
+function active_batch_identity(): ActiveOperationBatchIdentity | undefined {
   const status = operations_status()
-  if (status?.last_cancelled_batch?.batch_id === batch_id) return 'cancelled' as const
-  if (status?.last_completed_batch?.batch_id === batch_id) return 'completed' as const
-  return 'pending' as const
+  const batch = status?.active_batch
+  if (typeof batch?.batch_id !== 'number'
+    || typeof batch?.batch_generation !== 'number'
+    || typeof batch?.batch_ref !== 'string'
+    || batch.batch_ref === '') return undefined
+  return {
+    batch_id: batch.batch_id,
+    batch_generation: batch.batch_generation,
+    batch_ref: batch.batch_ref,
+  }
+}
+
+function batch_receipt_matches(receipt: any, run: SkillVerificationRun) {
+  return receipt
+    && receipt.batch_id === run.active_batch_id
+    && receipt.batch_generation === run.active_batch_generation
+    && receipt.batch_ref === run.active_batch_ref
+}
+
+function batch_state(run: SkillVerificationRun) {
+  if (run.active_batch_id === undefined) {
+    return { state: 'missing' as const, reason: 'verification run has no submitted operation batch identity; explicit retry required' }
+  }
+  if (run.active_batch_generation === undefined || typeof run.active_batch_ref !== 'string' || run.active_batch_ref === '') {
+    return { state: 'legacy' as const, reason: `legacy pending batch ${run.active_batch_id} has no restart-safe identity; explicit retry required` }
+  }
+
+  const status = operations_status()
+  if (typeof status?.batch_generation !== 'number') {
+    return { state: 'missing' as const, reason: `runtime did not expose a batch generation for ${run.active_batch_ref}; explicit retry required` }
+  }
+  if (status.batch_generation !== run.active_batch_generation) {
+    return {
+      state: 'stale' as const,
+      reason: `execution identity was interrupted by runtime reload: expected generation ${run.active_batch_generation}, current generation ${status.batch_generation}; explicit retry required`,
+    }
+  }
+  if (batch_receipt_matches(status?.last_cancelled_batch, run)) return { state: 'cancelled' as const }
+  if (batch_receipt_matches(status?.last_completed_batch, run)) return { state: 'completed' as const }
+  if (batch_receipt_matches(status?.active_batch, run)) return { state: 'pending' as const }
+  return {
+    state: 'missing' as const,
+    reason: `operation batch ${run.active_batch_ref} is no longer active and has no matching completion/cancellation receipt; explicit retry required`,
+  }
+}
+
+function batch_identity_patch(batch: ActiveOperationBatchIdentity) {
+  return {
+    active_batch_id: batch.batch_id,
+    active_batch_generation: batch.batch_generation,
+    active_batch_ref: batch.batch_ref,
+  }
+}
+
+function clear_batch_identity() {
+  return {
+    active_batch_id: undefined,
+    active_batch_generation: undefined,
+    active_batch_ref: undefined,
+  }
 }
 
 function resolve_built_entities(actor: ControlledActor, run: SkillVerificationRun, template: SkillInstanceTemplate) {
@@ -511,13 +565,14 @@ function resolve_built_entities(actor: ControlledActor, run: SkillVerificationRu
   for (let index = 0; index < run.placements.length; index++) {
     const placement = run.placements[index]
     const template_entity = template.entities[index]
-    const matches = actor.surface.find_entities_filtered({ position: { x: placement.x, y: placement.y }, radius: POSITION_EPSILON, name: placement.entity_name })
+    const matches = find_world_entities(actor.surface, { position: { x: placement.x, y: placement.y }, radius: POSITION_EPSILON, name: placement.entity_name })
     let unit_number: number | undefined
     for (const entity of matches) {
       if (!entity.valid) continue
       if (entity.force?.index !== undefined && entity.force.index !== actor.force.index) continue
       if (entity.unit_number !== undefined) {
         unit_number = entity.unit_number as number
+        remember_entity_reference(entity)
         break
       }
     }
@@ -537,7 +592,7 @@ function power_block_reason(run: SkillVerificationRun, template: SkillInstanceTe
     if (!template_entity.requires_power) continue
     const unit_number = unit_for(run, template_entity.template_id)
     if (unit_number === undefined) return `rebuilt powered entity ${template_entity.entity_name} has no stable unit number`
-    const entity: any = game.get_entity_by_unit_number(unit_number as any)
+    const entity = built_entity(unit_number)
     if (!entity || !entity.valid) return `rebuilt powered entity ${template_entity.entity_name} disappeared`
     if (entity.electric_network_id === undefined) return `rebuilt ${template_entity.entity_name} is not connected to electric power in the verification area`
   }
@@ -558,7 +613,7 @@ function queue_configuration(run: SkillVerificationRun, template: SkillInstanceT
     }
     queued++
   }
-  return { ok: true as const, queued, batch_id: queued > 0 ? active_batch_id() : undefined }
+  return { ok: true as const, queued, batch: queued > 0 ? active_batch_identity() : undefined }
 }
 
 function queue_inputs(run: SkillVerificationRun) {
@@ -573,7 +628,7 @@ function queue_inputs(run: SkillVerificationRun) {
     }
     queued++
   }
-  return { ok: true as const, queued, batch_id: queued > 0 ? active_batch_id() : undefined }
+  return { ok: true as const, queued, batch: queued > 0 ? active_batch_identity() : undefined }
 }
 
 function add_contents(total: Record<string, number>, contents: any) {
@@ -585,31 +640,41 @@ function add_contents(total: Record<string, number>, contents: any) {
   }
 }
 
+const BELT_TYPES = ['transport-belt', 'underground-belt', 'splitter', 'loader', 'loader-1x1', 'linked-belt']
+const CONTAINER_TYPES = ['container', 'logistic-container', 'infinity-container']
+
+// Each read is gated by entity type: the engine raises on held_stack outside
+// inserters and on transport lines outside belts. crafter_output and
+// furnace_result are the same inventory id, so one read per machine.
+function output_inventory_id(entity: LuaEntity) {
+  if (entity.type === 'furnace') return defines.inventory.furnace_result
+  if (entity.type === 'assembling-machine' || entity.type === 'rocket-silo') return defines.inventory.crafter_output
+  if (CONTAINER_TYPES.includes(entity.type)) return defines.inventory.chest
+  return undefined
+}
+
 function count_output_items(run: SkillVerificationRun, skill: SkillDefinition) {
   const wanted: Record<string, boolean> = {}
   for (const output of skill.outputs) wanted[output.item] = true
   const total: Record<string, number> = {}
-  const inventory_defines: any = defines.inventory as any
   for (const rebuilt of run.built_entities) {
-    const entity: any = game.get_entity_by_unit_number(rebuilt.unit_number as any)
+    const entity = built_entity(rebuilt.unit_number)
     if (!entity || !entity.valid) continue
-    if (typeof entity.get_inventory === 'function') {
-      const ids = [inventory_defines.crafter_output, inventory_defines.furnace_result, inventory_defines.chest]
-      for (const id of ids) {
-        if (id === undefined) continue
-        const inventory = entity.get_inventory(id)
-        if (inventory?.valid !== false && inventory && typeof inventory.get_contents === 'function') add_contents(total, inventory.get_contents())
-      }
+    const inventory_id = output_inventory_id(entity)
+    if (inventory_id !== undefined) {
+      const inventory = entity.get_inventory(inventory_id)
+      if (inventory?.valid) add_contents(total, inventory.get_contents())
     }
-    if (typeof entity.get_max_transport_line_index === 'function' && typeof entity.get_transport_line === 'function') {
+    if (BELT_TYPES.includes(entity.type)) {
       const max_line = entity.get_max_transport_line_index()
       for (let line_index = 1; line_index <= max_line; line_index++) {
         const line = entity.get_transport_line(line_index)
-        if (line?.valid && typeof line.get_contents === 'function') add_contents(total, line.get_contents())
+        if (line.valid) add_contents(total, line.get_contents())
       }
     }
-    if (entity.held_stack?.valid_for_read && typeof entity.held_stack.name === 'string' && typeof entity.held_stack.count === 'number') {
-      total[entity.held_stack.name] = (total[entity.held_stack.name] ?? 0) + entity.held_stack.count
+    if (entity.type === 'inserter') {
+      const held = entity.held_stack
+      if (held.valid_for_read) total[held.name] = (total[held.name] ?? 0) + held.count
     }
   }
   const result: Record<string, number> = {}
@@ -639,7 +704,9 @@ export function evaluate_live_topology(skill: SkillDefinition, analysis_id: stri
       const observed = skill_candidate_definition_from_block(analysis.id, block.id, 1)
       if (skill_novelty_key(observed) === expected) return { match: true, block_id: block.id }
     }
-    catch (_) {}
+    catch {
+      // Ignore blocks that cannot be reconstructed as reusable skill candidates.
+    }
   }
   return { match: false, reason: `no live block matched reusable topology across ${analysis.blocks.length} observed block(s)` }
 }
@@ -707,7 +774,7 @@ export function promote_verified_skill(run: SkillVerificationRun) {
   })
 }
 
-function finish_verified(run: SkillVerificationRun) {
+export function finish_verified(run: SkillVerificationRun) {
   const promoted = promote_verified_skill(run)
   const refs = unique_strings([...run.evidence_refs, placement_evidence(run), topology_evidence(run), ...promoted.verification.acceptance_conditions.flatMap(condition => condition.evidence_refs)])
   const next = update_run(run, { state: 'verified', reason: `Verified ${promoted.id} revision ${promoted.revision}.`, evidence_refs: refs, completed_tick: game.tick })
@@ -718,7 +785,7 @@ function finish_verified(run: SkillVerificationRun) {
     evidence_refs: refs,
     reason: `Verified by translated rebuild, live topology match, and bounded output delta in ${run.id}.`,
   })
-  storage.airi_skill_verification_active_run_id = undefined
+  storage.sgluna_skill_verification_active_run_id = undefined
   return next
 }
 
@@ -727,9 +794,10 @@ function begin_supply(run: SkillVerificationRun, skill: SkillDefinition) {
   const supplied = queue_inputs(run)
   if (!supplied.ok) return fail_skill_verification_run(run, 'execution', supplied.error)
   if (supplied.queued === 0) {
-    return begin_reobservation(update_run(run, { state: 'supplying', baseline_output_counts: baseline, active_batch_id: undefined }), skill)
+    return begin_reobservation(update_run(run, { state: 'supplying', baseline_output_counts: baseline, ...clear_batch_identity() }), skill)
   }
-  return update_run(run, { state: 'supplying', baseline_output_counts: baseline, active_batch_id: supplied.batch_id, reason: 'External candidate inputs queued through normal NPC item-transfer operations.' })
+  if (!supplied.batch) return block_run(run, 'queued input provisioning did not expose restart-safe operation identity; explicit retry required')
+  return update_run(run, { state: 'supplying', baseline_output_counts: baseline, ...batch_identity_patch(supplied.batch), reason: `External candidate inputs queued through normal NPC item-transfer batch ${supplied.batch.batch_ref}.` })
 }
 
 function begin_reobservation(run: SkillVerificationRun, skill: SkillDefinition) {
@@ -745,20 +813,29 @@ function begin_reobservation(run: SkillVerificationRun, skill: SkillDefinition) 
     live_analysis_id: observed.analysis_id,
     topology_match: topology.match,
     output_deadline_tick: game.tick + OUTPUT_OBSERVATION_TICKS,
-    active_batch_id: undefined,
+    ...clear_batch_identity(),
     evidence_refs: refs,
     reason: topology.match ? 'Live topology matched; observing bounded real output delta.' : `${topology.reason}; observing output window to classify semantic failure.`,
   })
 }
 
-function get_controlled_actor_for_run(run: SkillVerificationRun) {
+let verification_actor_getter: (() => ControlledActor | undefined) | undefined
+
+// game.get_entity_by_unit_number only indexes prototypes flagged
+// get-by-unit-number, which ordinary buildings are not; resolve_built_entities
+// records a hint so the same identity resolves here.
+function built_entity(unit_number: number): LuaEntity | undefined {
+  const actor = verification_actor_getter?.()
+  if (!actor || !actor.is_valid) return undefined
+  return resolve_exact_entity(actor, unit_number)
+}
+
+function get_controlled_actor_for_run(_run: SkillVerificationRun) {
   const status = remote.call('autorio_operations', 'status') as any
   const actor_id = status?.actor?.actor_id
   if (actor_id === undefined) return undefined
   return verification_actor_getter?.()
 }
-
-let verification_actor_getter: (() => ControlledActor | undefined) | undefined
 
 function process_run_tick(run: SkillVerificationRun) {
   const skill = get_skill_definition(run.skill_id)
@@ -768,41 +845,45 @@ function process_run_tick(run: SkillVerificationRun) {
   if (!template) return block_run(run, 'source example is no longer available to seed a translated verification instance')
 
   if (run.state === 'constructing') {
-    const state = batch_state(run.active_batch_id)
-    if (state === 'pending') return run
-    if (state === 'cancelled' || state === 'missing') return fail_skill_verification_run(run, 'execution', 'normal NPC construction batch did not complete')
+    const batch = batch_state(run)
+    if (batch.state === 'pending') return run
+    if (batch.state === 'cancelled') return fail_skill_verification_run(run, 'execution', 'normal NPC construction batch did not complete')
+    if (batch.state !== 'completed') return block_run(run, batch.reason)
     const actor = verification_actor_getter?.()
     if (!actor || !actor.is_valid || actor.surface.index !== run.target_surface_index) return fail_skill_verification_run(run, 'execution', 'controlled actor changed surface or became unavailable after construction')
     const resolved = resolve_built_entities(actor, run, template)
     if (!resolved.ok) return fail_skill_verification_run(run, 'execution', resolved.error)
-    let next = update_run(run, { built_entities: resolved.entities, active_batch_id: undefined })
+    const next = update_run(run, { built_entities: resolved.entities, ...clear_batch_identity() })
     const power_reason = power_block_reason(next, template)
     if (power_reason) return block_run(next, power_reason)
     const configured = queue_configuration(next, template)
     if (!configured.ok) return fail_skill_verification_run(next, 'execution', configured.error)
-    if (configured.queued === 0) return begin_supply(update_run(next, { state: 'configuring', active_batch_id: undefined }), skill)
-    return update_run(next, { state: 'configuring', active_batch_id: configured.batch_id, reason: 'Machine recipes queued through normal NPC recipe operations.' })
+    if (configured.queued === 0) return begin_supply(update_run(next, { state: 'configuring', ...clear_batch_identity() }), skill)
+    if (!configured.batch) return block_run(next, 'queued recipe configuration did not expose restart-safe operation identity; explicit retry required')
+    return update_run(next, { state: 'configuring', ...batch_identity_patch(configured.batch), reason: `Machine recipes queued through normal NPC batch ${configured.batch.batch_ref}.` })
   }
 
   if (run.state === 'configuring') {
-    const state = batch_state(run.active_batch_id)
-    if (state === 'pending') return run
-    if (state === 'cancelled' || state === 'missing') return fail_skill_verification_run(run, 'execution', 'machine recipe configuration batch did not complete')
-    return begin_supply(update_run(run, { active_batch_id: undefined }), skill)
+    const batch = batch_state(run)
+    if (batch.state === 'pending') return run
+    if (batch.state === 'cancelled') return fail_skill_verification_run(run, 'execution', 'machine recipe configuration batch did not complete')
+    if (batch.state !== 'completed') return block_run(run, batch.reason)
+    return begin_supply(update_run(run, { ...clear_batch_identity() }), skill)
   }
 
   if (run.state === 'supplying') {
     if (run.active_batch_id !== undefined) {
-      const state = batch_state(run.active_batch_id)
-      if (state === 'pending') return run
-      if (state === 'cancelled' || state === 'missing') return fail_skill_verification_run(run, 'execution', 'external input provisioning batch did not complete')
+      const batch = batch_state(run)
+      if (batch.state === 'pending') return run
+      if (batch.state === 'cancelled') return fail_skill_verification_run(run, 'execution', 'external input provisioning batch did not complete')
+      if (batch.state !== 'completed') return block_run(run, batch.reason)
     }
-    return begin_reobservation(update_run(run, { active_batch_id: undefined }), skill)
+    return begin_reobservation(update_run(run, { ...clear_batch_identity() }), skill)
   }
 
   if (run.state === 'observing_output') {
     const current = count_output_items(run, skill)
-    let next = update_run(run, { observed_output_counts: current })
+    const next = update_run(run, { observed_output_counts: current })
     if (output_delta_satisfied(skill, run.baseline_output_counts, current)) {
       if (run.topology_match !== true) return fail_skill_verification_run(next, 'semantic', 'production output appeared, but the live topology did not match the reusable candidate authority', [topology_evidence(next)])
       return finish_verified(next)
@@ -825,7 +906,7 @@ function verification_position(value: any) {
   return { x: value.x, y: value.y }
 }
 
-function create_run(item: VerificationQueueRecord, skill: SkillDefinition) {
+function create_run(item: LearningVerificationQueueItem, skill: SkillDefinition) {
   const run: SkillVerificationRun = {
     schema_version: 1,
     id: next_run_id(),
@@ -844,7 +925,7 @@ function create_run(item: VerificationQueueRecord, skill: SkillDefinition) {
     reason: 'Validating a translated candidate instance against the live world.',
   }
   store_run(run)
-  storage.airi_skill_verification_active_run_id = run.id
+  storage.sgluna_skill_verification_active_run_id = run.id
   set_queue_state(item.opportunity_id, 'running', 'Verification run is active.')
   update_learning_opportunity(item.opportunity_id, { verification_run_id: run.id, reason: `Verification running: ${run.id}` })
   return run
@@ -854,7 +935,7 @@ export function start_next_skill_verification(get_actor: () => ControlledActor |
   if (active_run() !== undefined) return { ok: false as const, error: 'another skill verification run is already active', run: active_run() }
   verification_actor_getter = get_actor
   const requested_opportunity = typeof request?.opportunity_id === 'string' ? request.opportunity_id : undefined
-  let item: VerificationQueueRecord | undefined
+  let item: LearningVerificationQueueItem | undefined
   for (const candidate of queue_records()) {
     if (candidate.state !== 'queued') continue
     if (requested_opportunity !== undefined && candidate.opportunity_id !== requested_opportunity) continue
@@ -905,9 +986,12 @@ export function start_next_skill_verification(get_actor: () => ControlledActor |
   })
   const executed = operation_result('execute_construction_plan', selected.validation.validation_id, selected.validation.placement_count)
   if (!executed.ok) return { ok: false as const, run: fail_skill_verification_run(next, 'execution', `validated construction was rejected: ${executed.message}`) }
-  const batch_id = active_batch_id()
-  if (batch_id === undefined) return { ok: false as const, run: fail_skill_verification_run(next, 'execution', 'validated construction did not create a normal NPC task batch') }
-  next = update_run(next, { active_batch_id: batch_id, reason: `Normal NPC construction batch ${batch_id} is running.` })
+  const batch = active_batch_identity()
+  if (!batch) {
+    operation_result('cancel_all_tasks')
+    return { ok: false as const, run: block_run(next, 'validated construction did not expose restart-safe operation identity; explicit retry required') }
+  }
+  next = update_run(next, { ...batch_identity_patch(batch), reason: `Normal NPC construction batch ${batch.batch_ref} is running.` })
   return { ok: true as const, run: next }
 }
 
@@ -922,12 +1006,12 @@ export function retry_blocked_skill_verification(opportunity_id: string) {
 }
 
 export function list_skill_verification_runs(limit = MAX_RUN_HISTORY) {
-  const registry = storage.airi_skill_verification_runs ?? {}
-  const order = storage.airi_skill_verification_run_order ?? []
+  const registry = storage.sgluna_skill_verification_runs ?? {}
+  const order = storage.sgluna_skill_verification_run_order ?? []
   const result: SkillVerificationRun[] = []
   for (let index = order.length - 1; index >= 0 && result.length < limit; index--) {
     const run = registry[order[index]]
-    if (run) result.push(run)
+    if (run !== undefined) result.push(run)
   }
   return result
 }
@@ -952,7 +1036,7 @@ export function register_skill_verification_runtime(get_actor: () => ControlledA
 
 export function maybe_start_autonomous_bounded_verification(get_actor: () => ControlledActor | undefined) {
   if (get_learning_policy() !== 'autonomous_bounded' || active_run() !== undefined) return undefined
-  for (const item of list_learning_verification_queue() as any[]) {
+  for (const item of list_learning_verification_queue()) {
     if (item.state !== 'queued') continue
     if (item.risk !== 'safe') continue
     return start_next_skill_verification(get_actor, { opportunity_id: item.opportunity_id })

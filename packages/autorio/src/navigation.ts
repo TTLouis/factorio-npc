@@ -1,11 +1,13 @@
-import type { LuaEntity, OnScriptPathRequestFinishedEvent, PathfinderWaypoint, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, OnScriptPathRequestFinishedEvent, PathfinderWaypoint } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersWalkToEntity } from './types'
 import { select_navigation_escape_point } from './construction_planning'
+import { resolve_entity_reference } from './entity_reference'
 import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { distance } from './utils/math'
+import { find_world_entities } from './npc_vision'
 
 const MAX_SEARCH_RADIUS = 4096
 const MAX_NAVIGATION_TICKS = 10 * 60 * 60
@@ -67,8 +69,8 @@ type NavigationTask = PlayerParametersWalkToEntity & {
 }
 
 declare const storage: {
-  airi_last_navigation_result?: NavigationResult
-  airi_follow_state?: {
+  sgluna_last_navigation_result?: NavigationResult
+  sgluna_follow_state?: {
     active?: boolean
     player_name?: string
   }
@@ -170,7 +172,7 @@ function record(actor: ControlledActor | undefined, raw_task: PlayerParametersWa
     recovery_stage: task?.recovery_stage,
     spatial_observation: task?.last_spatial_observation,
   }
-  storage.airi_last_navigation_result = result
+  storage.sgluna_last_navigation_result = result
   return result
 }
 
@@ -179,7 +181,9 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     if (actor?.is_valid) actor.set_walking_state({ walking: false, direction: defines.direction.north })
     record(actor, task, false, false, code)
     rendering.clear()
-    if (actor && identity_matches(actor, task)) manager.cancel_all_tasks()
+    if (actor && identity_matches(actor, task)) {
+      manager.cancel_all_tasks(task.persistent_follow ? `follow_${code}` : `navigation_${code}`)
+    }
     else manager.discard_all_tasks_after_actor_loss()
     log(`[AUTORIO] [ERROR] Navigation task failed: ${code}; queued operations cancelled`)
   }
@@ -275,7 +279,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     }
     const resolved = actor_for_submission()
     if (!resolved || resolved.identity.actor_id === undefined) return [false, 'No controlled actor']
-    const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+    const entity = resolve_entity_reference(resolved.actor, unit_number, 'map_visible')
     if (!entity || !entity.valid) {
       record(resolved.actor, undefined, false, false, 'target_gone')
       return [false, `Entity unit ${unit_number} not found`]
@@ -286,6 +290,9 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     }
     const task = make_task(resolved.actor, resolved.identity, entity.name, 1, undefined, reach_distance, 'exact_entity')
     task.target_unit_number = unit_number
+    // Keep the resolved entity: ordinary buildings are not indexed by
+    // game.get_entity_by_unit_number(), so acquire must not look it up again.
+    task.target = entity
     manager.add_task(task)
     return [true, 'Task started']
   }
@@ -325,7 +332,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       return [false, 'Player is on a different surface']
     }
     const task = make_task(resolved.actor, resolved.identity, player.character.name, MAX_SEARCH_RADIUS, player_name, reach_distance, 'player')
-    const follow = storage.airi_follow_state
+    const follow = storage.sgluna_follow_state
     task.persistent_follow = follow?.active === true && follow.player_name === player_name
     manager.add_task(task)
     return [true, 'Task started']
@@ -438,7 +445,9 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       target = player.character
     }
     else if (task.target_kind === 'exact_entity' && task.target_unit_number !== undefined) {
-      target = game.get_entity_by_unit_number(task.target_unit_number as UnitNumber)
+      target = task.target?.valid && task.target.unit_number === task.target_unit_number
+        ? task.target
+        : resolve_entity_reference(actor, task.target_unit_number, 'map_visible')
       if (!target || !target.valid) {
         fail(actor, task, 'target_gone')
         return false
@@ -449,7 +458,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       }
     }
     else {
-      target = nearest(actor, actor.surface.find_entities_filtered({ position: actor.position, radius: task.search_radius, name: task.entity_name }))
+      target = nearest(actor, find_world_entities(actor.surface, { position: actor.position, radius: task.search_radius, name: task.entity_name }))
     }
     if (!target) {
       fail(actor, task, 'no_target')
@@ -612,7 +621,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
 
   function persistent_follow_disabled(task: NavigationTask) {
     if (!task.persistent_follow) return false
-    const follow = storage.airi_follow_state
+    const follow = storage.sgluna_follow_state
     return follow?.active !== true || follow.player_name !== task.target_player_name
   }
 
@@ -699,7 +708,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     const target = task?.target
     const destination = task ? navigation_destination(task) : undefined
     const active = manager.player_state.task_state === TaskStates.WALKING_TO_ENTITY
-    const last = storage.airi_last_navigation_result
+    const last = storage.sgluna_last_navigation_result
     const blocked = !active && last !== undefined && ['unreachable', 'path_timeout', 'stuck', 'path_busy'].indexOf(last.code) >= 0
     return {
       task_active: active,

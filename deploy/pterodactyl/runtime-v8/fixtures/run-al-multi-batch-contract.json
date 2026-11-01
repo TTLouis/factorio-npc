@@ -1,0 +1,293 @@
+{
+  "source_run": "Run AL 2026-10-22",
+  "source_sha": "695eea0223015e7b0557747d5d71979249f7c280",
+  "source_result_sha256": "46d2ad01dc97fca959eea9af122ad08d0e6e352491335f0a09ebdc557d731c49",
+  "goal": {
+    "scope": "long_horizon",
+    "summary": "Build a fully automated factory producing at least one automation-science-pack per game minute from natural resources.",
+    "done_when": [
+      {
+        "id": "done_1",
+        "kind": "production_rate",
+        "item_name": "automation-science-pack",
+        "per_minute": 1,
+        "window_minutes": 1
+      }
+    ],
+    "source": "main_planner",
+    "defined_at": 1792686839630
+  },
+  "roadmap": [
+    {
+      "id": "iron-bootstrap",
+      "ready_since": 1792686839617,
+      "intent": "Bootstrap iron and unlock steam-power",
+      "why_it_matters": "Produce 50 new iron plates through the enabled smelting recipe to satisfy the exact steam-power trigger. This technology has no unresolved prerequisites. Preserve the eight held plates for construction.",
+      "status": "ready_to_refine",
+      "depends_on": [],
+      "resolved_by": [],
+      "assumptions": [],
+      "first_seen_revision_id": "goal_0bsah5e_1_r2",
+      "verified_results": [],
+      "capability_frontier": null
+    },
+    {
+      "id": "copper-bootstrap",
+      "ready_since": null,
+      "intent": "Smelt copper and unlock electronics",
+      "why_it_matters": "Produce 10 copper plates through the enabled smelting recipe to satisfy the exact electronics trigger. Compare reuse of the iron equipment against a dedicated copper cell using fresh costs and rates.",
+      "status": "tentative",
+      "depends_on": [
+        "iron-bootstrap"
+      ],
+      "resolved_by": [],
+      "assumptions": [],
+      "first_seen_revision_id": "goal_0bsah5e_1_r2",
+      "verified_results": [],
+      "capability_frontier": null
+    },
+    {
+      "id": "science-unlock",
+      "ready_since": null,
+      "intent": "Unlock automation science packs",
+      "why_it_matters": "After both electronics and steam-power are researched, verify the lab recipe is enabled and produce one lab to satisfy the exact automation-science-pack technology trigger.",
+      "status": "tentative",
+      "depends_on": [
+        "copper-bootstrap"
+      ],
+      "resolved_by": [],
+      "assumptions": [],
+      "first_seen_revision_id": "goal_0bsah5e_1_r2",
+      "verified_results": [],
+      "capability_frontier": null
+    },
+    {
+      "id": "steam-electricity",
+      "ready_since": null,
+      "intent": "Establish working steam electricity",
+      "why_it_matters": "After verifying equipment unlocks and material costs, install water intake, connect a boiler and establish steam, connect an engine, then verify electrical operation under load. Preserve observation boundaries between these connections.",
+      "status": "tentative",
+      "depends_on": [
+        "science-unlock"
+      ],
+      "resolved_by": [],
+      "assumptions": [],
+      "first_seen_revision_id": "goal_0bsah5e_1_r2",
+      "verified_results": [],
+      "capability_frontier": null
+    },
+    {
+      "id": "assembly-unlock",
+      "ready_since": null,
+      "intent": "Research automation before building assemblers",
+      "why_it_matters": "After the science-pack recipe unlocks, bootstrap the 10 automation-science-pack required by automation research, power and supply the lab, and verify automation completes before crafting assembling-machine-1. Do not assume higher-tier assemblers are unlocked.",
+      "status": "tentative",
+      "depends_on": [
+        "steam-electricity"
+      ],
+      "resolved_by": [],
+      "assumptions": [],
+      "first_seen_revision_id": "goal_0bsah5e_1_r2",
+      "verified_results": [],
+      "capability_frontier": null
+    },
+    {
+      "id": "automatic-resources",
+      "ready_since": null,
+      "intent": "Automate mining, fuel and smelting",
+      "why_it_matters": "Verify any further machinery prerequisites before construction. Establish automatic iron and copper supply, furnace fuel delivery and power-generation fuel delivery from natural resources, sized using live rates.",
+      "status": "tentative",
+      "depends_on": [
+        "assembly-unlock"
+      ],
+      "resolved_by": [],
+      "assumptions": [],
+      "first_seen_revision_id": "goal_0bsah5e_1_r2",
+      "verified_results": [],
+      "capability_frontier": null
+    },
+    {
+      "id": "automatic-science",
+      "ready_since": null,
+      "intent": "Automate and verify science production",
+      "why_it_matters": "Build automatic gear and science assembly with unblocked output storage. Validate actual logistics connections and sustainable transport capacity, then verify at least one automation-science-pack per minute over a full window without hand-fed ingredients.",
+      "status": "tentative",
+      "depends_on": [
+        "automatic-resources"
+      ],
+      "resolved_by": [],
+      "assumptions": [],
+      "first_seen_revision_id": "goal_0bsah5e_1_r2",
+      "verified_results": [],
+      "capability_frontier": null
+    }
+  ],
+  "coal_step": {
+    "step_id": "goal_0bsah5e_1_p3_v1_s1_01h74ba",
+    "description": "Gather a bootstrap reserve of at least 20 coal.",
+    "completion_contract": {
+      "mode": "all",
+      "requirements": [
+        {
+          "id": "requirement_1",
+          "kind": "inventory_count",
+          "item_name": "coal",
+          "minimum": 20
+        }
+      ],
+      "confidence": 0
+    },
+    "execution_guidance": {
+      "approach": "Hand-mine enough natural coal to hold 20 for the iron bootstrap.",
+      "rationale": "The complete inventory contains no fuel. Live drill and furnace rates imply about 15.6 coal for 50 plates; 20 provides startup margin without building a separate fuel-production cell yet.",
+      "constraints": [
+        "Finish with at least 20 coal held.",
+        "Preserve the eight held iron plates.",
+        "Permanent fuel automation remains required later."
+      ],
+      "skillIds": [],
+      "materialSupply": {
+        "mode": "manual_bootstrap",
+        "resource": "coal"
+      }
+    },
+    "completion_mode": "deterministic",
+    "contract_status": "bound",
+    "completion_confidence": "grounded",
+    "reduced_confidence": false
+  },
+  "failed_step": {
+    "step_id": "goal_0bsah5e_1_p3_v1_s4_09mt86b",
+    "description": "Fuel the connected iron cell, produce and collect at least 50 new iron plates, verify steam-power is researched, and retain at least 58 iron plates.",
+    "completion_contract": {
+      "mode": "all",
+      "requirements": [
+        {
+          "id": "requirement_1",
+          "kind": "authoritative_operation_receipt",
+          "operation_name": "supply_entity"
+        },
+        {
+          "id": "requirement_2",
+          "kind": "authoritative_operation_receipt",
+          "operation_name": "move_items_exact"
+        },
+        {
+          "id": "requirement_3",
+          "kind": "inventory_count",
+          "item_name": "iron-plate",
+          "minimum": 58
+        },
+        {
+          "id": "requirement_4",
+          "kind": "research_completed",
+          "technology": "steam-power"
+        }
+      ],
+      "confidence": 0
+    },
+    "execution_guidance": {
+      "approach": "Fuel both exact machines, verify operation, and collect 50 newly smelted plates while preserving the original eight.",
+      "rationale": "The ideal drill-limited production time is 200 seconds, excluding travel and setup. Direct feeding avoids manual ore transfers and supports later demand; extra cells are optional, not necessary for this trigger.",
+      "constraints": [
+        "Require steam-power researched and at least 58 held plates.",
+        "Fuel both machines; direct ore feed does not supply fuel.",
+        "Use output checkpoints and recheck the exact trigger."
+      ],
+      "skillIds": [
+        "direct-miner-smelting"
+      ],
+      "materialSupply": {
+        "mode": "direct_feed",
+        "resource": "iron-ore"
+      }
+    },
+    "completion_mode": "deterministic",
+    "contract_status": "bound",
+    "completion_confidence": "grounded",
+    "reduced_confidence": false,
+    "contract_binding": {
+      "binding": "just_in_time",
+      "request_id": "req_mvjrdlg8_1",
+      "bound_at": 1792686971078
+    }
+  },
+  "failed_proposal": {
+    "schema": 1,
+    "ts": "2026-10-22T16:37:06.708Z",
+    "seq": 271,
+    "event": "plan.accepted",
+    "request_id": "req_mvjrdlg8_1",
+    "turn": 4,
+    "actor_id": 14,
+    "epoch": 1,
+    "data": {
+      "trigger_source": "post_step_observe",
+      "chat_message": "",
+      "plan": [
+        "Gather a bootstrap reserve of at least 20 coal.",
+        "Install the held burner-mining-drill over iron ore; observe its new identity and actual output geometry before choosing furnace placement.",
+        "Install the held stone-furnace to receive the drill’s observed output; observe the furnace identity and verify the direct-feed connection before fueling.",
+        "Fuel the connected iron cell, produce and collect at least 50 new iron plates, verify steam-power is researched, and retain at least 58 iron plates."
+      ],
+      "current_step": 3,
+      "operations": [
+        {
+          "trace_operation_id": "req_mvjrdlg8_1/op_1",
+          "name": "supply_entity",
+          "args": {
+            "unit_number": 37,
+            "items": [
+              {
+                "item_name": "coal",
+                "count": 1
+              }
+            ]
+          }
+        },
+        {
+          "trace_operation_id": "req_mvjrdlg8_1/op_2",
+          "name": "supply_entity",
+          "args": {
+            "unit_number": 38,
+            "items": [
+              {
+                "item_name": "coal",
+                "count": 1
+              }
+            ]
+          }
+        }
+      ],
+      "checkpoint": {
+        "mode": "all",
+        "requirements": [
+          {
+            "id": "requirement_1",
+            "kind": "authoritative_operation_receipt",
+            "operation_name": "supply_entity"
+          },
+          {
+            "id": "requirement_2",
+            "kind": "authoritative_operation_receipt",
+            "operation_name": "move_items_exact"
+          },
+          {
+            "id": "requirement_3",
+            "kind": "inventory_count",
+            "item_name": "iron-plate",
+            "minimum": 58
+          },
+          {
+            "id": "requirement_4",
+            "kind": "research_completed",
+            "technology": "steam-power"
+          }
+        ],
+        "confidence": 0,
+        "source": "planner_semantic_checkpoint"
+      }
+    },
+    "_source": "data/logs/sgluna-behavior.jsonl:271"
+  }
+}

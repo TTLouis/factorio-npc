@@ -1,6 +1,6 @@
 {
   "name": "factorio-npc",
-  "dockerComposeFile": ["./docker-compose.yml"],
+  "dockerComposeFile": ["../compose.devcontainer.yml"],
   "service": "factorio-npc",
   "shutdownAction": "none",
   "workspaceFolder": "/workspace/",

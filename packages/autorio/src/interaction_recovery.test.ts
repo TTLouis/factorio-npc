@@ -41,7 +41,7 @@ function fixture() {
       kind: 'standalone_character',
       valid: true,
       has_character: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
     }),
   } as unknown as ControlledActor
@@ -179,7 +179,7 @@ describe('generic interaction range recovery', () => {
     })
   })
 
-  it('steps AIRI aside and resumes the same placement when its own body is the likely blocker', () => {
+  it('steps SGLuna aside and resumes the same placement when its own body is the likely blocker', () => {
     const f = fixture()
     f.surface.can_place_entity.mockReturnValue(false)
 
@@ -202,7 +202,7 @@ describe('generic interaction range recovery', () => {
     expect(f.manager.get_status_snapshot().queued_task_types).toEqual([TaskStates.PLACING])
   })
 
-  it('does not wander away for a blocked placement when AIRI is already outside the requested footprint', () => {
+  it('does not wander away for a blocked placement when SGLuna is already outside the requested footprint', () => {
     const f = fixture()
     f.surface.can_place_entity.mockReturnValue(false)
 

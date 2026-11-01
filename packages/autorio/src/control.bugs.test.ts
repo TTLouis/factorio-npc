@@ -6,7 +6,7 @@ import { TaskStates } from './types'
 
 beforeEach(() => {
   ;(globalThis as any).game.connected_players = []
-  ;(globalThis as any).storage.airi_actor_mode = 'player'
+  ;(globalThis as any).storage.sgluna_actor_mode = 'player'
   task_manager.cancel_all_tasks()
 })
 
@@ -99,7 +99,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
       {
         valid: true,
         index,
-        name: 'AIRI',
+        name: 'SGLuna',
         character: {},
         position: { x: 0, y: 0 },
         surface: { find_entities_filtered: () => [] },
@@ -120,6 +120,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
       entity_name: 'iron-ore',
       count,
       requested_count: count,
+      position: { x: 0, y: 0 },
     })
   }
 
@@ -161,7 +162,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     add_owned_mining(3)
 
     const on_player_mined_entity = get_handler('on_player_mined_entity')
-    on_player_mined_entity({ player_index: 2 })
+    on_player_mined_entity({ player_index: 2, entity: { name: 'iron-ore', position: { x: 0, y: 0 } } })
 
     expect(task_manager.player_state.parameters_mine_entity?.count).toBe(3)
   })
@@ -171,13 +172,37 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     add_owned_mining(3)
 
     const on_player_mined_entity = get_handler('on_player_mined_entity')
-    on_player_mined_entity({ player_index: 1 })
+    on_player_mined_entity({ player_index: 1, entity: { name: 'iron-ore', position: { x: 0, y: 0 } } })
 
     expect(task_manager.player_state.parameters_mine_entity?.count).toBe(2)
   })
 
+  it('does not let an unrelated entity event advance exact-identity mining', () => {
+    connect_controlled_actor(1)
+    task_manager.add_task({
+      type: TaskStates.MINING,
+      operation_id: 1,
+      owner_actor_id: 1,
+      owner_actor_kind: 'connected_player',
+      owner_force_index: 1,
+      target_unit_number: 91,
+      count: 1,
+      requested_count: 1,
+      position: { x: 0, y: 0 },
+    })
+
+    const on_player_mined_entity = get_handler('on_player_mined_entity')
+    on_player_mined_entity({
+      player_index: 1,
+      entity: { unit_number: 92, name: 'steel-chest', position: { x: 0, y: 0 } },
+    })
+
+    expect(task_manager.player_state.task_state).toBe(TaskStates.MINING)
+    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(1)
+  })
+
   it('does not let any LuaPlayer mining event advance an NPC task', () => {
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     const force = {
       name: 'player',
       index: 1,
@@ -222,7 +247,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     })
 
     const on_player_mined_entity = get_handler('on_player_mined_entity')
-    on_player_mined_entity({ player_index: 1 })
+    on_player_mined_entity({ player_index: 1, entity: { name: 'iron-ore', position: { x: 0, y: 0 } } })
 
     expect(task_manager.player_state.parameters_mine_entity?.count).toBe(3)
   })
@@ -254,7 +279,7 @@ describe('Bug 4 (fixed): ATTACKING is dispatched through the bounded combat cont
     const fake_player = {
       valid: true,
       index: 1,
-      name: 'AIRI',
+      name: 'SGLuna',
       character,
       position: { x: 0, y: 0 },
       surface,

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import prompt from './prompt.md?raw'
 import productionPlanningPrompt from './production-planning-prompt.md?raw'
+import spatialPlacementPrompt from './spatial-placement-prompt.md?raw'
 
-const systemPrompt = `${prompt}\n\n${productionPlanningPrompt}`
+const systemPrompt = `${prompt}\n\n${productionPlanningPrompt}\n\n${spatialPlacementPrompt}`
 
 const mocks = vi.hoisted(() => ({
   call: vi.fn(),

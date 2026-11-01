@@ -1,8 +1,8 @@
-# AIRI Factorio — Swarm Coordination Architecture
+# SGLuna Factorio — Swarm Coordination Architecture
 
 **Status:** Planned architecture. Not implemented. No multi-agent engine validation is claimed.
 
-This document records the working design for AIRI's future swarm coordination layer. It is a companion to `NPC_AGENT_HARNESS_PLAN.md` and does not replace the single-NPC reliability gates there.
+This document records the working design for SGLuna's future swarm coordination layer. It is a companion to `NPC_AGENT_HARNESS_PLAN.md` and does not replace the single-NPC reliability gates there.
 
 The first swarm version should focus on shared operational state, adaptive work claiming, and mission tracking. More sophisticated inference/API routing is intentionally deferred; the coordination model must work even if all agents initially use the existing simple harness/provider setup.
 
@@ -12,7 +12,7 @@ The first swarm version should focus on shared operational state, adaptive work 
 
 Agents do not own permanent jobs. Agents temporarily own commitments.
 
-A standalone AIRI character remains a general-purpose engineer. Mining, building, delivering, defending, surveying, and planning describe current activity, not permanent identity.
+A standalone SGLuna character remains a general-purpose engineer. Mining, building, delivering, defending, surveying, and planning describe current activity, not permanent identity.
 
 The swarm should adapt through world state and useful work:
 
@@ -99,7 +99,7 @@ Initial record families:
 Natural-language text is presentation, not authority. For example, the GUI may render:
 
 ```text
-AIRI-3 needs 40 transport belts at Green Circuit Block #2.
+SGLuna-3 needs 40 transport belts at Green Circuit Block #2.
 ```
 
 but the authoritative record should identify the requested item/count, destination, requester, project, priority, status, revision, and creation tick.

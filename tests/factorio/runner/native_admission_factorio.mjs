@@ -1,0 +1,678 @@
+#!/usr/bin/env node
+// Real-engine fixtures for the native admission preflights and natural-only
+// harvest selection. Each refusal asserts the native `code` AND that the world
+// is untouched (inventory, actor position, queue, task state, admission
+// high-water). Executed work runs through the OG batch wrapper
+// (executeAuthorizedBatch, commands rendered by the production structured
+// policy) or the OG agent loop with a scripted provider. Declared fixture
+// stock only, game.speed=1, zero connected players. No provider, no inference.
+import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
+import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
+import { parseOperation, renderOperation } from '../pterodactyl/runtime-v8/structured-policy.mjs'
+import { configureNpcSession, deploymentStatus, executeAuthorizedBatch } from '../pterodactyl/staging/supervisor-adapter.mjs'
+
+function arg(name) {
+  const index = process.argv.indexOf(`--${name}`)
+  assert.ok(index >= 0 && process.argv[index + 1], `missing --${name}`)
+  return process.argv[index + 1]
+}
+
+const results = path.resolve(arg('results'))
+const key = 'npc:sgluna'
+const transcript = []
+const evidence = {}
+let connection
+
+const ACTOR = 'local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); '
+const rcon = { command: async (command, options) => {
+  const response = await connection.command(command, options)
+  transcript.push({ command: command.slice(0, 600), response: String(response).slice(0, 1200) })
+  return response
+} }
+const lua = async body => {
+  const raw = await rcon.command(`/silent-command ${ACTOR}${body}`)
+  try { return JSON.parse(raw) }
+  catch { throw new Error(`Lua command did not return JSON: ${String(raw).slice(0, 800)}\nCommand: ${body.slice(0, 400)}`) }
+}
+const preflight = (name, argsLua) => lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation","${name}",${argsLua})))`)
+const MAIN = 'a.get_inventory(defines.inventory.character_main)'
+// Everything a refusal must leave alone, read from the engine.
+const snapshot = () => lua('local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+  + `rcon.print(helpers.table_to_json({inventory=${MAIN}.get_contents(),position={x=a.position.x,y=a.position.y},queue_length=o.queue_length,`
+  + 'task_state=o.task_state,tasks_added=o.tasks_added,high_water=d.high_water,humans=#game.connected_players,speed=game.speed}))')
+const noEffect = (before, after, label) => {
+  assert.deepEqual(after, before, `${label}: refusal must leave inventory, position, queue, task state and admission high-water unchanged`)
+  assert.equal(after.humans, 0, label)
+  assert.equal(after.speed, 1, label)
+}
+const clearStock = () => lua(`${MAIN}.clear(); rcon.print(helpers.table_to_json({ok=true}))`)
+const insertStock = stock => lua(`${MAIN}.clear(); local added={}; for name,count in pairs(${stockLua(stock)}) do added[name]=a.insert{name=name,count=count} end; rcon.print(helpers.table_to_json(added))`)
+const stockLua = stock => `{${Object.entries(stock).map(([name, count]) => `["${name}"]=${count}`).join(',')}}`
+// Remove natural trees and rocks around the actor so each geometry fixture owns its neighbourhood.
+const clearNaturals = (radius = 24) => lua(`local n=0; for _,e in pairs(a.surface.find_entities_filtered{position=a.position,radius=${radius},type={"tree","simple-entity"},force="neutral"}) do e.destroy(); n=n+1 end; rcon.print(helpers.table_to_json({destroyed=n}))`)
+const furnaceNear = (varName, dx) => `local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+(${dx}),a.position.y},16,0.5); assert(p); local ${varName}=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(${varName}); `
+
+async function untilIdle(label, timeoutMs = 90000) {
+  const until = Date.now() + timeoutMs
+  for (;;) {
+    const status = await lua('local o=remote.call("autorio_operations","status"); rcon.print(helpers.table_to_json({task_state=o.task_state,queue_length=o.queue_length,last_cancelled=o.last_cancelled_batch}))')
+    if (status.task_state === 'idle' && status.queue_length === 0) return status
+    assert.ok(Date.now() < until, `${label}: native work did not finish`)
+    await delay(250)
+  }
+}
+
+// One production-rendered command through the OG authorized-batch wrapper.
+async function runOperation(name, args) {
+  const status = await deploymentStatus(rcon, { requireAllowed: true })
+  const command = renderOperation(parseOperation({ name, args }))
+  const batch = await executeAuthorizedBatch(rcon, status.epoch, [command])
+  assert.equal(batch.results.length, 1)
+  assert.notEqual(batch.results[0]?.[0], false, `${name} was refused natively: ${JSON.stringify(batch.results[0])}`)
+  return untilIdle(name)
+}
+
+// OG agent loop with a scripted provider and the real mod behind rcon.
+function agentHarness(label, memory = new CanonicalTaskBoardMemory()) {
+  const traceFile = path.join(results, `${label}-behavior.jsonl`)
+  const script = []
+  const calls = []
+  const agent = new NpcAgentLoop({
+    rcon, memory, npcId: 'sgluna', stateFile: null, traceFile, decisionTraceFile: null, systemPrompt: 'Scripted native admission fixture',
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    provider: async messages => {
+      calls.push(messages.length)
+      const next = script.shift()
+      assert.ok(next, `${label}: unscripted provider call ${calls.length}`)
+      return typeof next === 'function' ? next(messages) : next
+    },
+  })
+  const plan = (operations, plan = ['Do the current step']) => ({ content: JSON.stringify({ chatMessage: '', plan, currentStep: 0, operations }) })
+  const observe = (name, type) => ({ content: null, tool_calls: [{ id: 'observe', type: 'function',
+    function: { name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 32, name, ...(type ? { type } : {}), limit: 4 }) } }] })
+  return {
+    agent, memory, script, calls, plan, observe,
+    rows: async () => (await fsp.readFile(traceFile, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse),
+  }
+}
+const worldRefusalPausedBy = (result, code, harness, rows) => {
+  assert.equal(harness.calls.length, 2, 'one correction turn, then the pause')
+  assert.equal(result.blocker, undefined, JSON.stringify(result.blocker))
+  assert.equal(result.recoverableFailure?.reason, 'preflight_world_refusal_uncorrected')
+  const recoverable = rows.filter(row => row.event === 'operations.preflight_recoverable')
+  assert.equal(recoverable.length, 1, 'exactly one correction turn')
+  assert.equal((recoverable[0].data ?? recoverable[0]).preflight.code, code, 'the correction carries the native code unchanged')
+  const rejected = rows.find(row => row.event === 'operations.preflight_rejected')
+  assert.ok(rejected, 'the OG rejection trace row exists')
+  assert.equal((rejected.data ?? rejected).preflight.code, code, 'the OG record carries the native code unchanged')
+  assert.ok(rejected.request_id, 'the OG rejection trace row carries request_id')
+  const goalPaused = rows.filter(row => row.event === 'goal.paused')
+  assert.equal(goalPaused.length, 1)
+  assert.equal((goalPaused[0].data ?? goalPaused[0]).pause_class, 'model_recoverable')
+  const board = harness.memory.currentPlan(key)
+  assert.equal(board.status, 'paused', 'paused, not silently blocked')
+  assert.ok(board.task_board.evidence.some(row => row.kind === 'operation_preflight_recoverable' && row.ref?.endsWith(`/${code}`)), 'durable correction evidence names the code')
+}
+
+async function main() {
+  await fsp.mkdir(results, { recursive: true })
+  connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') })
+  await connection.connect()
+  await configureNpcSession(rcon, 'native-admission-engine-0001')
+  const baseline = await lua(`game.speed=1; ${MAIN}.clear(); rcon.print(helpers.table_to_json({humans=#game.connected_players,speed=game.speed}))`)
+  assert.equal(baseline.humans, 0)
+  assert.equal(baseline.speed, 1)
+
+  // 12efe768: a known resource prototype with no source in the radius.
+  {
+    const before = await snapshot()
+    const result = await preflight('gather_resource', '{resource_name="uranium-ore",count=75,search_radius=1}')
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'resource_source_not_found')
+    assert.equal(result.search_radius, 1)
+    noEffect(before, await snapshot(), 'gather_resource absent source')
+    evidence.resource_absent = { before, result }
+  }
+
+  // 50e4ec03: a known entity prototype with no navigation target in the radius.
+  {
+    const before = await snapshot()
+    const result = await preflight('walk_to_entity', '{entity_name="uranium-ore",search_radius=1}')
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'navigation_target_not_found')
+    noEffect(before, await snapshot(), 'walk_to_entity absent target')
+    evidence.navigation_absent = { before, result }
+  }
+
+  // a6e58a94: a walk_to_position centre deep inside a furnace collision box.
+  {
+    const before = await snapshot()
+    const collision = await lua(`${furnaceNear('e', 3)} local tight=remote.call("autorio_preflight","operation","walk_to_position",{x=e.position.x,y=e.position.y,reach_distance=0.75}); `
+      + 'local wide=remote.call("autorio_preflight","operation","walk_to_position",{x=e.position.x,y=e.position.y,reach_distance=2}); assert(e.destroy()); rcon.print(helpers.table_to_json({tight=tight,wide=wide}))')
+    assert.equal(collision.tight.ok, false)
+    assert.equal(collision.tight.code, 'navigation_position_inside_furnace_collision')
+    assert(collision.tight.minimum_collision_clearance > 0.75)
+    assert.equal(collision.wide.ok, true)
+    noEffect(before, await snapshot(), 'walk_to_position furnace collision')
+    evidence.furnace_collision = collision
+  }
+
+  // 56cc1391: a furnace is not a recipe machine; an assembler is. Also the engine fact that
+  // grounds the shared-slot refusal: an occupied furnace input slot accepts no other ore.
+  {
+    await insertStock({ wood: 22, 'iron-ore': 12 })
+    const before = await snapshot()
+    const probe = await lua(`${furnaceNear('f', 3)} remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); `
+      + 'local recipe=remote.call("autorio_preflight","operation","set_machine_recipe",{unit_number=f.unit_number,recipe_name="iron-plate"}); '
+      + 'local input=f.get_inventory(defines.inventory.furnace_source); assert(input.insert{name="iron-ore",count=12}==12); '
+      + 'local mixed={iron=input.get_item_count("iron-ore"),copper_can_insert=input.can_insert{name="copper-ore"},copper_room=input.get_insertable_count{name="copper-ore"}}; assert(f.destroy()); '
+      + 'local p2=a.surface.find_non_colliding_position("assembling-machine-1",{a.position.x+6,a.position.y},16,0.5); assert(p2); '
+      + 'local m=a.surface.create_entity{name="assembling-machine-1",position=p2,force=a.force}; assert(m); remote.call("autorio_tools","get_nearby_entities",32,"assembling-machine-1","assembling-machine",16); '
+      + 'local assembler=remote.call("autorio_preflight","operation","set_machine_recipe",{unit_number=m.unit_number,recipe_name="iron-gear-wheel"}); assert(m.destroy()); '
+      + 'rcon.print(helpers.table_to_json({recipe=recipe,mixed=mixed,assembler=assembler}))')
+    assert.equal(probe.recipe.ok, false)
+    assert.equal(probe.recipe.code, 'not_recipe_machine')
+    assert.equal(probe.recipe.observed_type, 'furnace')
+    assert.equal(probe.recipe.expected_type, 'assembling-machine')
+    assert.equal(probe.mixed.iron, 12)
+    assert.equal(probe.mixed.copper_can_insert, false)
+    assert.equal(probe.mixed.copper_room, 0)
+    assert.equal(probe.assembler.ok, true)
+    assert.equal(probe.assembler.target.name, 'assembling-machine-1')
+    noEffect(before, await snapshot(), 'set_machine_recipe on a furnace')
+    evidence.recipe_machine = probe
+  }
+
+  // One OG agent and operation ledger for every fixture that admits work, as in production: a fresh
+  // ledger would restart operation ordinals below the native admission high-water.
+  const natural = agentHarness('og-admitted')
+  // 56cc1391 through the OG loop: supply, furnace recipe, wait. The whole batch is refused before
+  // admission, so the earlier supply never runs. A recipe sent to a furnace is an argument error:
+  // the native code reaches one bounded correction turn, and the corrected batch is admitted.
+  {
+    await insertStock({ wood: 22, 'iron-ore': 12 })
+    const setup = await lua(`${furnaceNear('f', 3)} rcon.print(helpers.table_to_json({unit_number=f.unit_number}))`)
+    const before = await snapshot()
+    const world = natural
+    let correction
+    world.script.push(world.observe('stone-furnace', 'furnace'), world.plan([
+      { name: 'supply_entity', args: { unit_number: setup.unit_number, items: [{ item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 }] } },
+      { name: 'set_machine_recipe', args: { unit_number: setup.unit_number, recipe_name: 'iron-plate' } },
+      { name: 'wait', args: { ticks: 1200 } },
+    ]), messages => {
+      correction = messages.map(message => String(message.content ?? '')).filter(content => content.startsWith('[HARNESS]')).at(-1)
+      return world.plan([{ name: 'wait', args: { ticks: 60 } }])
+    })
+    const result = await world.agent.request('load the furnace and set its recipe', { sender: 'tester' })
+    const rows = await world.rows()
+    assert.match(correction ?? '', /rejected operation 2 \(set_machine_recipe\).*code not_recipe_machine/s, 'the correction turn carries the native code')
+    const recoverable = rows.filter(row => row.event === 'operations.preflight_recoverable')
+    assert.equal(recoverable.length, 1)
+    assert.equal((recoverable[0].data ?? recoverable[0]).failure_class, 'model_correctable_not_recipe_machine')
+    assert.ok(recoverable[0].request_id, 'the recoverable trace row carries request_id')
+    assert.deepEqual(result.operations.map(operation => operation.name), ['wait'])
+    await untilIdle('corrected recipe-guard batch')
+    const after = await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; rcon.print(helpers.table_to_json({wood=f.get_fuel_inventory().get_item_count("wood"),iron=f.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),inventory=${MAIN}.get_contents()}))`)
+    assert.equal(after.wood, 0, 'the refused batch never supplied the furnace')
+    assert.equal(after.iron, 0)
+    assert.deepEqual(after.inventory, before.inventory)
+    await lua('for _,e in pairs(a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}) do e.destroy() end; rcon.print(helpers.table_to_json({ok=true}))')
+    evidence.recipe_guard_og = { correction, before, after }
+  }
+
+  // 3562d0bd / b02caea7: available iron followed by absent coal. The whole supply is refused so
+  // the earlier transfer cannot run; the available item still reports its expected movement.
+  {
+    await insertStock({ 'iron-ore': 12 })
+    const setup = await lua(`${furnaceNear('f', 3)} remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); rcon.print(helpers.table_to_json({unit_number=f.unit_number}))`)
+    const before = await snapshot()
+    const result = await preflight('supply_entity', `{unit_number=${setup.unit_number},items={{item_name="iron-ore",count=12},{item_name="coal",count=38}}}`)
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'supply_missing')
+    assert.equal(result.transfer.items[0].expected_moved, 12)
+    assert.equal(result.transfer.items[1].source_count, 0)
+    noEffect(before, await snapshot(), 'supply_missing mixed')
+    // Occupied iron input plus copper and usable wood: zero-transfer item refuses the whole supply.
+    await insertStock({ 'copper-ore': 75, wood: 18 })
+    await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; assert(f.get_inventory(defines.inventory.furnace_source).insert{name="iron-ore",count=42}==42); rcon.print(helpers.table_to_json({ok=true}))`)
+    const before2 = await snapshot()
+    const full = await preflight('supply_entity', `{unit_number=${setup.unit_number},items={{item_name="copper-ore",count=75},{item_name="wood",count=18}}}`)
+    assert.equal(full.ok, false)
+    assert.equal(full.code, 'destination_full')
+    assert.equal(full.transfer.items[0].expected_moved, 0)
+    assert.equal(full.transfer.items[0].refusal_cause, 'input_slot_holds_other_item')
+    assert.equal(full.transfer.items[1].expected_moved, 18)
+    noEffect(before2, await snapshot(), 'destination_full mixed')
+    const furnace = await lua('local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; local r={iron=f.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),wood=f.get_fuel_inventory().get_item_count("wood"),coal=f.get_fuel_inventory().get_item_count("coal")}; assert(f.destroy()); rcon.print(helpers.table_to_json(r))')
+    assert.equal(furnace.iron, 42)
+    assert.equal(furnace.wood, 0)
+    assert.equal(furnace.coal, 0)
+    evidence.supply_mixed = { missing: result, destination_full: full }
+  }
+
+  // b70c5eb9: two ore kinds that each fit an empty single-slot input individually, but not together.
+  {
+    await insertStock({ 'iron-ore': 188, 'copper-ore': 5, coal: 20 })
+    const setup = await lua(`${furnaceNear('f', 3)} remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); rcon.print(helpers.table_to_json({unit_number=f.unit_number}))`)
+    const before = await snapshot()
+    const positive = await preflight('supply_entity', `{unit_number=${setup.unit_number},items={{item_name="coal",count=20},{item_name="copper-ore",count=5}}}`)
+    assert.equal(positive.ok, true, JSON.stringify(positive))
+    const conflict = await preflight('supply_entity', `{unit_number=${setup.unit_number},items={{item_name="coal",count=20},{item_name="copper-ore",count=5},{item_name="iron-ore",count=120}}}`)
+    assert.equal(conflict.ok, false)
+    assert.equal(conflict.code, 'supply_destination_conflict')
+    assert.equal(conflict.transfer.destination_conflict.inventory_index, 2)
+    assert.equal(conflict.transfer.destination_conflict.slot_count, 1)
+    assert.deepEqual(conflict.transfer.destination_conflict.item_names, ['copper-ore', 'iron-ore'])
+    assert(conflict.transfer.items.every(item => item.expected_moved > 0))
+    noEffect(before, await snapshot(), 'supply_destination_conflict')
+    const furnace = await lua('local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; local i=f.get_inventory(defines.inventory.furnace_source); local r={coal=f.get_fuel_inventory().get_item_count("coal"),iron=i.get_item_count("iron-ore"),copper=i.get_item_count("copper-ore")}; assert(f.destroy()); rcon.print(helpers.table_to_json(r))')
+    assert.deepEqual(furnace, { coal: 0, iron: 0, copper: 0 })
+    evidence.supply_shared_slot = { positive, conflict }
+  }
+
+  // 402f8d66: the NPC display name is not a human LuaPlayer identity.
+  {
+    await clearStock()
+    const before = await snapshot()
+    const probe = await lua('assert(game.get_player("SGLuna")==nil); rcon.print(helpers.table_to_json({craft=remote.call("autorio_preflight","operation","craft_item",{item_name="iron-gear-wheel",count=1}),'
+      + 'transfer=remote.call("autorio_preflight","operation","move_items_with_player",{player_name="SGLuna",item_name="copper-ore",max_count=74,to_player=true})}))')
+    assert.equal(probe.transfer.ok, false)
+    assert.equal(probe.transfer.code, 'player_unavailable')
+    assert.equal(probe.transfer.identity, 'SGLuna')
+    noEffect(before, await snapshot(), 'move_items_with_player absent player')
+    evidence.absent_player = probe
+  }
+
+  // 44b5e241 / 1efbdefc: harvest_product needs an eligible natural source inside the radius.
+  {
+    await clearStock()
+    const before = await snapshot()
+    const result = await preflight('harvest_product', '{product_name="stone",search_radius=1}')
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'natural_harvest_source_not_found')
+    assert.equal(result.search_radius, 1)
+    assert(result.source_names.length > 0)
+    noEffect(before, await snapshot(), 'harvest_product absent natural source')
+    // Unit 12: a declared world refusal gets one correction turn with its facts; the same batch refused again pauses the plan
+    // as model_recoverable instead of ending blocked with nothing to wake the NPC.
+    const world = agentHarness('absent-harvest')
+    const batch = () => world.plan([
+      { name: 'harvest_product', args: { product_name: 'stone', count: 5, search_radius: 1 } },
+      { name: 'wait', args: { ticks: 1200 } },
+    ])
+    world.script.push(batch(), batch())
+    const paused = await world.agent.request('harvest five stone nearby', { sender: 'tester' })
+    worldRefusalPausedBy(paused, 'natural_harvest_source_not_found', world, await world.rows())
+    noEffect(before, await snapshot(), 'OG absent natural harvest batch')
+    evidence.absent_harvest = { result, pause: paused.recoverableFailure }
+  }
+
+  // 1efbdefc: a built entity that yields the product when mined is never a harvest source, and a
+  // natural tree is still harvested through the OG admission path. (A player-touched natural entity cannot be
+  // fabricated with zero connected players, so the last_user and force guards stay unit-tested only.)
+  {
+    await clearNaturals()
+    await clearStock()
+    const setup = await lua(`${furnaceNear('f', -4)} `
+      + 'local t=a.surface.create_entity{name="tree-01",position=a.surface.find_non_colliding_position("tree-01",{a.position.x+2,a.position.y},8,0.5),force="neutral"}; assert(t); '
+      + 'local ok,u=pcall(function() return t.last_user end); '
+      + 'storage.native_admission_fixture={furnace=f,tree=t}; '
+      + 'rcon.print(helpers.table_to_json({tree_force=t.force.name,last_user_readable=ok,has_last_user=u~=nil,wood=a.get_item_count("wood"),stone=a.get_item_count("stone")}))')
+    assert(setup.last_user_readable && !setup.has_last_user)
+    assert.equal(setup.tree_force, 'neutral')
+    const before = await snapshot()
+    const built = await preflight('harvest_product', '{product_name="stone-furnace",search_radius=64}')
+    assert.equal(built.ok, false)
+    assert.equal(built.code, 'no_natural_harvest_source')
+    const native = await lua('rcon.print(helpers.table_to_json({submitted=remote.call("autorio_operations","harvest_product","stone-furnace",1,64)}))')
+    assert.equal(native.submitted[0], false)
+    const noRock = await preflight('harvest_product', '{product_name="stone",search_radius=8}')
+    assert.equal(noRock.ok, false)
+    assert.equal(noRock.code, 'natural_harvest_source_not_found')
+    noEffect(before, await snapshot(), 'built and non-neutral harvest sources')
+    // Submitting directly (bypassing preflight) with no eligible natural source cancels without mining anything.
+    await lua('rcon.print(helpers.table_to_json({submitted=remote.call("autorio_operations","harvest_product","stone",1,8)}))')
+    const cancelled = await untilIdle("harvest without a natural source")
+    assert.match(cancelled.last_cancelled?.reason ?? '', /harvest:no_target/)
+    const intact = await lua('local f=storage.native_admission_fixture; rcon.print(helpers.table_to_json({furnace=f.furnace.valid,tree=f.tree.valid,stone=a.get_item_count("stone")}))')
+    assert.deepEqual(intact, { furnace: true, tree: true, stone: 0 })
+    // The natural tree harvests through the OG loop, and the reconciled admission record completes.
+    const present = await preflight('harvest_product', '{product_name="wood",search_radius=64}')
+    assert.equal(present.ok, true)
+    assert.deepEqual(present.source_search, { radius: 64, target_present: true })
+    assert.equal(present.natural_source.name, 'tree-01')
+    natural.script.push(natural.plan([{ name: 'harvest_product', args: { product_name: 'wood', count: 1, search_radius: 64 } }], ['Harvest one wood']))
+    const admitted = await natural.agent.request('harvest one wood from a natural tree', { sender: 'tester' })
+    assert.deepEqual(admitted.operations.map(operation => operation.name), ['harvest_product'])
+    await untilIdle('natural wood harvest')
+    const final = await lua('local f=storage.native_admission_fixture; local d=remote.call("autorio_operation_admission","status"); '
+      + 'rcon.print(helpers.table_to_json({wood=a.get_item_count("wood"),furnace=f.furnace.valid,tree=f.tree.valid,records=d.records,humans=#game.connected_players,speed=game.speed}))')
+    assert(final.wood >= setup.wood + 1)
+    assert.equal(final.furnace, true)
+    assert.equal(final.tree, false, 'the natural tree was the harvested entity')
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    const record = final.records.at(-1)
+    assert.equal(record.state, 'completed', JSON.stringify(record))
+    await lua('local f=storage.native_admission_fixture; f.furnace.destroy(); storage.native_admission_fixture=nil; rcon.print(helpers.table_to_json({ok=true}))')
+    evidence.natural_only = { setup, built, noRock, present, final }
+  }
+
+  // b84919aa: a pole prototype and its ingredients are not a held pole (both native placement paths).
+  const placementEvidence = []
+  for (const pathName of ['place_entity', 'place_candidate']) {
+    await clearNaturals(12)
+    const before0 = await lua(`${MAIN}.clear(); assert(${MAIN}.insert{name="wood",count=1}==1); assert(${MAIN}.insert{name="copper-cable",count=2}==2); `
+      + 'local choices=remote.call("autorio_tools","get_placement_candidates",{entity_name="small-electric-pole",center={x=a.position.x+3,y=a.position.y},radius=2,limit=1}); '
+      + 'assert(choices.ok and #choices.candidates==1, serpent.line(choices)); rcon.print(helpers.table_to_json({choices=choices}))')
+    const args = pathName === 'place_entity' ? '{entity_name="small-electric-pole"}'
+      : `{candidate_set_id="${before0.choices.candidate_set_id}",candidate_id="${before0.choices.candidates[0].id}"}`
+    const before = await snapshot()
+    const refusal = await preflight(pathName, args)
+    assert.equal(refusal.ok, false)
+    assert.equal(refusal.code, 'placement_item_missing')
+    assert.deepEqual(refusal.placement_item, { entity_name: 'small-electric-pole', item_name: 'small-electric-pole', count: 1, held_count: 0 })
+    noEffect(before, await snapshot(), `${pathName} missing held item`)
+    // A genuinely held pole passes the preflight and is consumed by the native placement.
+    await lua(`assert(${MAIN}.insert{name="small-electric-pole",count=1}==1); rcon.print(helpers.table_to_json({ok=true}))`)
+    const positive = await preflight(pathName, args)
+    assert.equal(positive.ok, true, JSON.stringify(positive))
+    assert.equal(positive.placement_item.held_count, 1)
+    const poles = await lua('rcon.print(helpers.table_to_json({count=a.surface.count_entities_filtered{name="small-electric-pole",position=a.position,radius=12}}))')
+    if (pathName === 'place_entity') await runOperation('place_entity', { entity_name: 'small-electric-pole' })
+    else await runOperation('place_candidate', { candidate_set_id: before0.choices.candidate_set_id, candidate_id: before0.choices.candidates[0].id })
+    const final = await lua(`local list=a.surface.find_entities_filtered{name="small-electric-pole",position=a.position,radius=12}; local r={placed=#list,held=a.get_item_count("small-electric-pole"),wood=a.get_item_count("wood"),cable=a.get_item_count("copper-cable"),humans=#game.connected_players,speed=game.speed}; for _,e in pairs(list) do e.destroy() end; ${MAIN}.clear(); rcon.print(helpers.table_to_json(r))`)
+    assert.equal(final.placed, poles.count + 1)
+    assert.equal(final.held, 0)
+    assert.equal(final.wood, 1)
+    assert.equal(final.cable, 2)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    placementEvidence.push({ path: pathName, refusal, positive, final })
+  }
+  evidence.placement_item = placementEvidence
+
+  // OG batch dependency: a craft of the placement item earlier in the same batch defers the
+  // held-item snapshot; the real engine crafts the chest and then places it.
+  {
+    await clearNaturals(12)
+    await insertStock({ wood: 2 })
+    const snapshotPreflight = await preflight('place_entity', '{entity_name="wooden-chest"}')
+    assert.equal(snapshotPreflight.code, 'placement_item_missing', 'the pre-craft snapshot is a refusal on its own')
+    const before = await snapshot()
+    natural.script.push(natural.plan([
+      { name: 'craft_item', args: { item_name: 'wooden-chest', count: 1 } },
+      { name: 'place_entity', args: { entity_name: 'wooden-chest' } },
+    ], ['Craft and place a chest']))
+    const result = await natural.agent.request('craft and place a wooden chest', { sender: 'tester' })
+    assert.deepEqual(result.operations.map(operation => operation.name), ['craft_item', 'place_entity'], JSON.stringify({ result, events: (await natural.rows()).map(row => row.event).slice(-14) }).slice(0, 2500))
+    const rows = await natural.rows()
+    const deferred = rows.find(row => row.event === 'placement.preflight_item_deferred')
+    assert.ok(deferred, 'the deferral is traced')
+    assert.ok(deferred.request_id)
+    assert.equal((deferred.data ?? deferred).code, 'placement_item_missing')
+    await untilIdle('craft then place')
+    const final = await lua('local list=a.surface.find_entities_filtered{name="wooden-chest",position=a.position,radius=16}; '
+      + 'local r={placed=#list,held=a.get_item_count("wooden-chest"),crafted_per_recipe=prototypes.recipe["wooden-chest"].products[1].amount,humans=#game.connected_players,speed=game.speed}; for _,e in pairs(list) do e.destroy() end; '
+      + `${MAIN}.clear(); rcon.print(helpers.table_to_json(r))`)
+    assert.equal(final.placed, 1)
+    assert.equal(final.held, final.crafted_per_recipe - 1)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    assert.equal(before.high_water + 1, (await snapshot()).high_water)
+    evidence.craft_then_place = { snapshotPreflight, final }
+  }
+
+  // 5ebebdbc / 7129b529: exact ore under an overlapping tree selection box; exact amount beyond a finite tile refused.
+  {
+    await clearNaturals()
+    await clearStock()
+    const setup = await lua('local s=a.surface; local e=s.create_entity{name="copper-ore",position={math.floor(a.position.x)+1.5,math.floor(a.position.y)+0.5},amount=10}; assert(e); '
+      + 'local t=s.create_entity{name="tree-05",position={e.position.x-0.0625,e.position.y+1.9375},force="neutral"}; assert(t); storage.native_admission_overlap={resource=e,tree=t}; '
+      + 'a.update_selected_entity(e.position); rcon.print(helpers.table_to_json({position=e.position,amount=e.amount,centre_selects_tree=a.selected==t,copper=a.get_item_count("copper-ore"),wood=a.get_item_count("wood")}))')
+    assert.equal(setup.centre_selects_tree, true)
+    const before = await snapshot()
+    const refusal = await preflight('mine_resource_at', `{resource_name="copper-ore",x=${setup.position.x},y=${setup.position.y},count=${setup.amount + 1}}`)
+    assert.equal(refusal.ok, false)
+    assert.equal(refusal.code, 'resource_source_insufficient')
+    assert.equal(refusal.resource_target.amount, setup.amount)
+    noEffect(before, await snapshot(), 'mine_resource_at beyond tile amount')
+    const accepted = await preflight('mine_resource_at', `{resource_name="copper-ore",x=${setup.position.x},y=${setup.position.y},count=1}`)
+    assert.equal(accepted.ok, true, JSON.stringify(accepted))
+    await runOperation('mine_resource_at', { resource_name: 'copper-ore', count: 1, x: setup.position.x, y: setup.position.y })
+    const final = await lua('local o=storage.native_admission_overlap; local r={amount=o.resource.valid and o.resource.amount or 0,tree=o.tree.valid,copper=a.get_item_count("copper-ore"),wood=a.get_item_count("wood"),humans=#game.connected_players,speed=game.speed}; '
+      + 'if o.resource.valid then o.resource.destroy() end; o.tree.destroy(); storage.native_admission_overlap=nil; rcon.print(helpers.table_to_json(r))')
+    assert.equal(final.copper, setup.copper + 1)
+    assert.equal(final.amount, setup.amount - 1)
+    assert.equal(final.wood, setup.wood)
+    assert.equal(final.tree, true)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    evidence.exact_ore_under_tree = { setup, refusal, final }
+  }
+
+  // aa44967e: nearest natural tree under another tree's selection box; its neighbour must survive.
+  {
+    await clearNaturals()
+    await clearStock()
+    const setup = await lua('local s=a.surface; local t=s.create_entity{name="tree-01",position={a.position.x-1.25,a.position.y},force="neutral"}; assert(t); '
+      + 'local n=s.create_entity{name="tree-01",position={t.position.x-0.5,t.position.y+1.25},force="neutral"}; assert(n); storage.native_admission_trees={target=t,neighbour=n}; '
+      + 'a.update_selected_entity(t.position); rcon.print(helpers.table_to_json({centre_selects_neighbour=a.selected==n,wood=a.get_item_count("wood"),actor={x=a.position.x,y=a.position.y}}))')
+    assert.equal(setup.centre_selects_neighbour, true)
+    await runOperation('harvest_product', { product_name: 'wood', count: 4, search_radius: 8 })
+    const final = await lua('local o=storage.native_admission_trees; local r={target=o.target.valid,neighbour=o.neighbour.valid,wood=a.get_item_count("wood"),actor={x=a.position.x,y=a.position.y},humans=#game.connected_players,speed=game.speed}; '
+      + 'if o.neighbour.valid then o.neighbour.destroy() end; storage.native_admission_trees=nil; rcon.print(helpers.table_to_json(r))')
+    assert.equal(final.target, false)
+    assert.equal(final.neighbour, true)
+    assert.equal(final.wood, setup.wood + 4)
+    assert.deepEqual(final.actor, setup.actor)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    evidence.tree_on_tree = { setup, final }
+  }
+
+  // 37c776bb: a natural target whose selection box is covered by a neighbour at every probe point.
+  {
+    await clearNaturals()
+    await clearStock()
+    const setup = await lua('local s=a.surface; local p={x=a.position.x-0.29296875,y=a.position.y+2.40234375}; local t=s.create_entity{name="dry-hairy-tree",position=p,force="neutral"}; '
+      + 'local n=s.create_entity{name="tree-06",position={x=p.x+0.25,y=p.y+1.0625},force="neutral"}; assert(t and n); storage.native_admission_occluded={target=t,neighbour=n}; '
+      + 'local exact=0; local function probe(q) a.update_selected_entity(q); if a.selected==t then exact=exact+1 end end; probe(t.position); '
+      + 'local b=t.selection_box; local c={x=(b.left_top.x+b.right_bottom.x)/2,y=(b.left_top.y+b.right_bottom.y)/2}; local dx=(b.right_bottom.x-b.left_top.x)*0.4; local dy=(b.right_bottom.y-b.left_top.y)*0.4; '
+      + 'for _,v in pairs({{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}}) do probe{x=c.x+dx*v[1],y=c.y+dy*v[2]} end; a.mining_state={mining=false}; '
+      + 'rcon.print(helpers.table_to_json({exact_probe_count=exact,wood=a.get_item_count("wood"),inventory=a.get_main_inventory().get_contents(),actor={x=a.position.x,y=a.position.y}}))')
+    assert.equal(setup.exact_probe_count, 0, 'the fixture must occlude all nine probes natively')
+    await runOperation('harvest_product', { product_name: 'wood', count: 2, search_radius: 8 })
+    const final = await lua('local o=storage.native_admission_occluded; local op=remote.call("autorio_operations","status"); '
+      + 'local r={target=o.target.valid,neighbour=o.neighbour.valid,wood=a.get_item_count("wood"),inventory=a.get_main_inventory().get_contents(),actor={x=a.position.x,y=a.position.y},queue_length=op.queue_length,humans=#game.connected_players,speed=game.speed}; '
+      + 'if o.neighbour.valid then o.neighbour.destroy() end; storage.native_admission_occluded=nil; rcon.print(helpers.table_to_json(r))')
+    assert.equal(final.target, false)
+    assert.equal(final.neighbour, true)
+    assert.equal(final.wood, setup.wood + 2)
+    assert.deepEqual(final.actor, setup.actor)
+    assert.equal(final.queue_length, 0)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    evidence.occluded_tree = { setup, final }
+  }
+
+  // 1efbdefc: stone comes from rocks, so a neutral simple-entity must pass the same last_user and
+  // force guards as a tree and be harvested natively.
+  {
+    await clearNaturals()
+    await clearStock()
+    const setup = await lua('local name; for _,n in pairs({"big-rock","huge-rock","big-sand-rock"}) do if prototypes.entity[n] then name=n break end end; assert(name); '
+      + 'local s=a.surface; local p=s.find_non_colliding_position(name,{a.position.x+3,a.position.y},8,0.5); assert(p); local r=s.create_entity{name=name,position=p,force="neutral"}; assert(r); '
+      + 'local ok,u=pcall(function() return r.last_user end); storage.native_admission_rock=r; '
+      + 'local pr=prototypes.entity[name]; rcon.print(helpers.table_to_json({name=name,type=r.type,is_building=pr.is_building,products=pr.mineable_properties.products,force=r.force.name,last_user_readable=ok,has_last_user=u~=nil,stone=a.get_item_count("stone")}))')
+    assert.equal(setup.type, 'simple-entity')
+    assert.equal(setup.force, 'neutral')
+    assert(setup.last_user_readable && !setup.has_last_user, JSON.stringify(setup))
+    const present = await preflight('harvest_product', '{product_name="stone",search_radius=8}')
+    assert.equal(present.ok, true, JSON.stringify({ present, setup }))
+    assert.equal(present.natural_source.name, setup.name)
+    await runOperation('harvest_product', { product_name: 'stone', count: 1, search_radius: 8 })
+    const final = await lua('local r=storage.native_admission_rock; local out={rock=r.valid,stone=a.get_item_count("stone"),humans=#game.connected_players,speed=game.speed}; '
+      + `if r.valid then r.destroy() end; storage.native_admission_rock=nil; ${MAIN}.clear(); rcon.print(helpers.table_to_json(out))`)
+    assert.equal(final.rock, false, 'the natural rock was the harvested entity')
+    assert(final.stone >= setup.stone + 1)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    evidence.natural_rock = { setup, present, final }
+
+  // 12364d63 (OG form): native machine power facts reach the planner through getEntityStatus. The lab stays
+  // empty: declared native solar power changes its current facts, never science stock or research progress.
+  // Read-only turns use their own scripted agent; they admit nothing, so they never touch the shared ledger.
+  const readOnlyTurn = async (label, reads, objective) => {
+    const world = agentHarness(label)
+    const seen = []
+    world.script.push({ content: null, tool_calls: reads.map((read, index) => ({ id: `${label}-${index}`, type: 'function',
+      function: { name: read.name, arguments: JSON.stringify(read.args) } })) }, messages => {
+      for (let index = 0; index < reads.length; index++) {
+        const tool = messages.find(message => message.role === 'tool' && message.tool_call_id === `${label}-${index}`)
+        seen.push(tool ? JSON.parse(tool.content) : undefined)
+      }
+      return { content: JSON.stringify({ chatMessage: 'Reads complete.', plan: [], currentStep: 0, operations: [] }) }
+    })
+    await world.agent.request(objective, { sender: 'tester' })
+    await world.agent.completed()
+    return { seen, rows: await world.rows() }
+  }
+  const factRow = (rows, event) => rows.filter(row => row.event === event).map(row => ({ request_id: row.request_id, ...(row.data ?? row) }))
+  const requestIdOf = rows => rows.find(row => row.event === 'tool.call')?.request_id
+  {
+    await clearStock()
+    const setup = await lua('local s=a.surface; local p=s.find_non_colliding_position("lab",{a.position.x+8,a.position.y+6},8,0.5); assert(p); local e=s.create_entity{name="lab",position=p,force=a.force}; assert(e); '
+      + 'storage.native_admission_power={lab=e,daytime=s.daytime,freeze_daytime=s.freeze_daytime}; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'rcon.print(helpers.table_to_json({unit_number=e.unit_number,science=e.get_inventory(defines.inventory.lab_input).get_item_count("automation-science-pack"),inventory=a.get_inventory(defines.inventory.character_main).get_contents(),'
+      + 'position={x=a.position.x,y=a.position.y},high_water=d.high_water,tasks_added=o.tasks_added,researched=a.force.technologies["logistic-science-pack"].researched}))')
+    const read = [{ name: 'getEntityStatus', args: { name: 'lab', radius: 32 } }, { name: 'getPrototypeDetails', args: { name: 'lab' } }]
+    const unpowered = await readOnlyTurn('og-power-off', read, 'read the status of the lab')
+    const off = unpowered.seen[0].entity
+    assert.equal(off.unit_number, setup.unit_number, JSON.stringify(unpowered.seen[0]))
+    assert.equal(off.energy_source, 'electric')
+    assert(['no_power', 'not_plugged_in_electric_network', 'low_power'].includes(off.status_name), JSON.stringify(off))
+    assert.equal(off.working, false)
+    assert.equal(off.energy, 0)
+    assert.equal(unpowered.seen[1].entity.energy_source, 'electric', 'prototype details carry the native energy source')
+    await lua('local f=storage.native_admission_power; local e=f.lab; local s=e.surface; s.freeze_daytime=true; s.daytime=0; f.solar=s.create_entity{name="solar-panel",position={e.position.x+5,e.position.y},force=e.force}; '
+      + 'f.pole=s.create_entity{name="small-electric-pole",position={e.position.x+2.5,e.position.y+2.5},force=e.force}; assert(f.solar and f.pole); rcon.print(helpers.table_to_json({ok=true}))')
+    const poweredBy = Date.now() + 60000
+    for (;;) {
+      const status = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",nil,nil,${setup.unit_number})))`)
+      if (status.entity?.energy > 0) break
+      assert.ok(Date.now() < poweredBy, `the declared solar panel never powered the lab: ${JSON.stringify(status.entity)}`)
+      await delay(500)
+    }
+    const powered = await readOnlyTurn('og-power-on', [read[0]], 'read the status of the lab after power was connected')
+    const on = powered.seen[0].entity
+    assert.equal(on.unit_number, setup.unit_number)
+    assert.equal(on.energy_source, 'electric')
+    assert(!['no_power', 'not_plugged_in_electric_network', 'low_power'].includes(on.status_name), JSON.stringify(on))
+    assert(on.energy > 0, JSON.stringify(on))
+    assert(Number.isSafeInteger(on.electric_network_id) && on.electric_network_id > 0, JSON.stringify(on))
+    const final = await lua('local f=storage.native_admission_power; local e=f.lab; local s=e.surface; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'local r={science=e.get_inventory(defines.inventory.lab_input).get_item_count("automation-science-pack"),inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position={x=a.position.x,y=a.position.y},'
+      + 'high_water=d.high_water,tasks_added=o.tasks_added,queue_length=o.queue_length,researched=a.force.technologies["logistic-science-pack"].researched,humans=#game.connected_players,speed=game.speed}; '
+      + 'assert(e.destroy()); assert(f.solar.destroy()); assert(f.pole.destroy()); s.daytime=f.daytime; s.freeze_daytime=f.freeze_daytime; storage.native_admission_power=nil; rcon.print(helpers.table_to_json(r))')
+    assert.equal(final.science, 0)
+    assert.equal(final.researched, setup.researched)
+    assert.deepEqual(final.inventory, setup.inventory)
+    assert.deepEqual(final.position, setup.position)
+    assert.equal(final.high_water, setup.high_water)
+    assert.equal(final.tasks_added, setup.tasks_added)
+    assert.equal(final.queue_length, 0)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    assert.equal((await lua('rcon.print(helpers.table_to_json({labs=#a.surface.find_entities_filtered{name="lab"}}))')).labs, 0, 'the fixture lab was removed')
+    assert.ok(requestIdOf(unpowered.rows) && requestIdOf(powered.rows) && requestIdOf(unpowered.rows) !== requestIdOf(powered.rows), 'each status read is traced under its own request_id')
+    evidence.machine_power = { setup, off, on, final }
+  }
+
+  // e9fcfcc7 (OG form): bounded fluid-terrain read plus the getNearbyEntities refusal for a fluid name. Terrain
+  // is declared (and chunk coverage generated) before the reads, never during them.
+  {
+    await clearStock()
+    const setup = await lua('local s=a.surface; s.request_to_generate_chunks(a.position,5); s.force_generate_chunk_requests(); assert(prototypes.tile.water.fluid.name=="water"); local old={}; local wet={}; '
+      + 'for y=20,27 do for x=20,27 do local p={x=math.floor(a.position.x)+x,y=math.floor(a.position.y)+y}; table.insert(old,{name=s.get_tile(p).name,position=p}); table.insert(wet,{name="water",position=p}) end end; '
+      + 'storage.native_admission_fluid_tiles=old; s.set_tiles(wet,false,false,false,false); local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'rcon.print(helpers.table_to_json({chunks=chunks,surface_index=s.index,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position={x=a.position.x,y=a.position.y},high_water=d.high_water,tasks_added=o.tasks_added}))')
+    const turn = await readOnlyTurn('og-fluid', [{ name: 'getNearbyEntities', args: { name: 'water', radius: 64, limit: 5 } },
+      { name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 128, limit: 8 } }], 'find water for an offshore pump')
+    const [refused, sources] = turn.seen
+    assert.equal(refused.ok, false, JSON.stringify(refused))
+    assert.equal(refused.code, 'unknown_entity_prototype')
+    assert.equal(refused.identity, 'water')
+    assert.equal(refused.observation_tool, 'getFluidSourceTiles')
+    assert.equal(refused.entities, undefined, 'the refusal is not reported as an empty scan')
+    assert.equal(sources.ok, true, JSON.stringify(sources))
+    assert.equal(sources.coverage, 'generated_bounding_square')
+    assert.equal(sources.returned_count, 8)
+    assert.equal(sources.samples.length, 8)
+    assert.equal(sources.truncated, true)
+    // The world may hold natural water beyond the declared 64 tiles, so the native scan can hit its cap; the label must say which.
+    assert.equal(sources.ordering, sources.scan_truncated ? 'nearest_first_among_scanned_tiles' : 'nearest_first')
+    assert.equal(sources.scanned_tile_limit, 256)
+    assert.equal(sources.coverage_complete, true, 'every chunk of the declared search square was generated')
+    assert.equal(sources.ungenerated_chunk_count, 0)
+    assert.equal(sources.generated_chunk_count, sources.checked_chunks)
+    assert.equal(sources.empty_result_is_conclusive, !sources.scan_truncated)
+    const sampleDistances = sources.samples.map(row => row.distance)
+    assert.deepEqual(sampleDistances, [...sampleDistances].sort((a, b) => a - b), 'samples are ordered nearest the actor first')
+    assert.equal(sources.surface_index, setup.surface_index)
+    assert(sources.samples.every(row => row.fluid_name === 'water' && row.surface_index === setup.surface_index
+      && Number.isInteger(row.position.x) && Number.isInteger(row.position.y)))
+    assert.equal(sources.candidates, undefined)
+    const sampleList = `{${sources.samples.map(row => `{name="${row.name}",x=${row.position.x},y=${row.position.y}}`).join(',')}}`
+    const sampleCheck = await lua(`local bad={}; for _,p in pairs(${sampleList}) do local t=a.surface.get_tile(p.x,p.y); `
+      + 'if t.name~=p.name or not t.prototype.fluid or t.prototype.fluid.name~="water" then table.insert(bad,p) end end; rcon.print(helpers.table_to_json({bad_count=#bad}))')
+    assert.equal(sampleCheck.bad_count, 0, 'every returned sample is a real water tile on the actor surface')
+    const final = await lua('local s=a.surface; local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'local r={chunks=chunks,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position={x=a.position.x,y=a.position.y},high_water=d.high_water,tasks_added=o.tasks_added,queue_length=o.queue_length,task_state=o.task_state,humans=#game.connected_players,speed=game.speed}; '
+      + 's.set_tiles(storage.native_admission_fluid_tiles,false,false,false,false); local restored=true; for _,t in pairs(storage.native_admission_fluid_tiles) do if s.get_tile(t.position).name~=t.name then restored=false end end; '
+      + 'r.restored=restored; storage.native_admission_fluid_tiles=nil; rcon.print(helpers.table_to_json(r))')
+    assert.equal(final.restored, true, 'the declared water tiles were restored')
+    assert.equal(final.chunks, setup.chunks, 'the read generated no terrain')
+    assert.deepEqual(final.inventory, setup.inventory)
+    assert.deepEqual(final.position, setup.position)
+    assert.equal(final.high_water, setup.high_water)
+    assert.equal(final.tasks_added, setup.tasks_added)
+    assert.equal(final.queue_length, 0)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    const requestId = requestIdOf(turn.rows)
+    assert.ok(requestId)
+    const fluidTrace = factRow(turn.rows, 'observation.fluid_sources_observed')
+    assert.equal(fluidTrace.length, 1)
+    assert.equal(fluidTrace[0].request_id, requestId)
+    assert.equal(fluidTrace[0].reason, 'bounded_native_fluid_tile_read')
+    assert.equal(fluidTrace[0].returned_count, 8)
+    assert.equal(fluidTrace[0].truncated, true)
+    const refusalTrace = factRow(turn.rows, 'observation.entity_read_refused')
+    assert.equal(refusalTrace.length, 1)
+    assert.equal(refusalTrace[0].request_id, requestId)
+    assert.equal(refusalTrace[0].reason, 'native_unknown_entity_prototype')
+    assert.equal(refusalTrace[0].observation_tool, 'getFluidSourceTiles')
+    evidence.fluid_sources = { setup, refused, sources, final }
+  }
+  }
+
+  await fsp.writeFile(path.join(results, 'native-admission-engine.json'), JSON.stringify({
+    status: 'pass', scenario: 'native-admission-preflights-natural-harvest-and-native-facts', candidate_sha: process.env.NPC_TEST_CANDIDATE_SHA,
+    provider_mode: 'scripted', evidence,
+  }, null, 2))
+  console.log('PASS: native admission refusals left the real world untouched and reached the OG record unchanged; natural-only harvest, exact selection and held-item placement ran in the real engine; native machine power facts and bounded fluid-terrain reads reached the OG planner')
+}
+
+main().catch(async error => {
+  await fsp.mkdir(results, { recursive: true })
+  await fsp.writeFile(path.join(results, 'native-admission-error.txt'), `${error.stack ?? error}\n`)
+  await fsp.writeFile(path.join(results, 'native-admission-transcript.json'), JSON.stringify(transcript.slice(-60), null, 2)).catch(() => {})
+  console.error(error)
+  process.exitCode = 1
+}).finally(() => connection?.close())

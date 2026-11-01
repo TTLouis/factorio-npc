@@ -1,17 +1,47 @@
+import { reservation_intersection } from './area_reservations'
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import type { new_basic_operation_controller } from './basic_operations'
-import { resolve_exact_entity } from './entity_reference'
+import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
+import { layout_node_precheck, record_layout_node_placed } from './construction_layout'
+import { entity_last_user } from './entity_provenance'
+import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { record_hand_insert } from './hand_work'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
+import { entity_role_inventories } from './inventory_roles'
+import type { InventoryRole } from './inventory_roles'
+import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
+import { resolve_entity_placement_item } from './placement_item'
+import { placement_candidate_matches, placement_preservation_execution_allowed } from './placement_candidates'
+import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
+import { clear_blocker, clearing_mining_ticks, placement_clearance, yields_fit, type ClearBlocker } from './placement_clearing'
+import { type GroundItem, pick_up_ground_items } from './placement_ground_items'
 import type { new_task_manager } from './task_manager'
-import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
+import type { PlayerParametersMineEntity, PlayerParametersPlaceEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
+import { find_world_entities } from './npc_vision'
 
 type Manager = ReturnType<typeof new_task_manager>
 type BasicController = ReturnType<typeof new_basic_operation_controller>
 
 const MINING_TARGET_SEARCH_RADIUS = 5
-const MINING_REACH_MARGIN = 0.25
+const MAX_CLEARING_REPOSITIONS = 6
+
+function placement_blocker_summaries(actor: ControlledActor, box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) {
+  const matches = find_world_entities(actor.surface, { area: box })
+  const result: Array<{ name: string, type: string, unit_number?: number, position: { x: number, y: number } }> = []
+  for (const entity of matches) {
+    if (!entity.valid) continue
+    result.push({
+      name: entity.name,
+      type: entity.type,
+      unit_number: entity.unit_number,
+      position: { x: entity.position.x, y: entity.position.y },
+    })
+    if (result.length >= 8) break
+  }
+  return result
+}
+
 
 function nearest_entity(actor: ControlledActor, entities: LuaEntity[]) {
   let min_distance = math.huge
@@ -30,55 +60,114 @@ function squared_distance(a: { x: number, y: number }, b: { x: number, y: number
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
 
-function mining_reach_distance(actor: ControlledActor, entity: LuaEntity) {
-  const character = actor.character
-  if (!character) return 0.5
-  const raw = entity.type === 'resource'
-    ? character.resource_reach_distance
-    : character.reach_distance
-  const reach = typeof raw === 'number' && raw === raw && raw > 0 && raw < math.huge ? raw : 2.5
-  return math.max(0.5, reach - MINING_REACH_MARGIN)
-}
-
-function within_mining_reach(actor: ControlledActor, entity: LuaEntity) {
-  const reach = mining_reach_distance(actor, entity)
-  return squared_distance(actor.position, entity.position) <= reach ** 2
-}
-
-function mining_reposition_task(actor: ControlledActor, entity: LuaEntity): PlayerParametersWalkToEntity | undefined {
+function mining_reposition_task(actor: ControlledActor, entity: LuaEntity, rejected_starts: number = 0): PlayerParametersWalkToEntity | undefined {
   const identity = actor.status_snapshot()
   if (identity.actor_id === undefined) return undefined
+  const target_position = { x: entity.position.x, y: entity.position.y }
   return {
     type: TaskStates.WALKING_TO_ENTITY,
     entity_name: entity.name,
     search_radius: MINING_TARGET_SEARCH_RADIUS,
-    reach_distance: mining_reach_distance(actor, entity),
+    target_kind: 'position',
+    requested_position: target_position,
+    reach_distance: mining_navigation_reach(actor, entity, rejected_starts),
     path: null,
     path_drawn: false,
     path_index: 1,
     calculating_path: false,
-    target_position: { x: entity.position.x, y: entity.position.y },
-    target: entity,
-    target_unit_number: entity.unit_number,
+    target_position,
+    target: null,
+    target_unit_number: undefined,
     owner_actor_id: identity.actor_id,
     owner_actor_kind: identity.kind,
     owner_force_index: actor.force.index,
     path_attempts: 0,
-    started_tick: game.tick,
+    started_tick: undefined,
     last_progress_tick: game.tick,
   }
 }
 
+const MAX_SNAPSHOT_TARGETS = 3
+const MAX_SNAPSHOT_ITEMS = 4
+
+function is_insert_role(role: InventoryRole) {
+  return role === 'input' || role === 'fuel'
+}
+
+/**
+ * Inventories an item move may use. Inserting (to_entity) uses input and fuel
+ * inventories only, in inventory order, never a result/output or burnt-result
+ * slot, the way a player's hand insert works. Taking items may read every
+ * inventory, as a player can.
+ */
 function entity_inventories(entity: LuaEntity, item_name: string, require_insert: boolean) {
   const inventories: LuaInventory[] = []
-  const max_index = entity.get_max_inventory_index()
-  for (let i = 1; i <= max_index; i++) {
-    const inventory = entity.get_inventory(i)
-    if (!inventory) continue
-    if (require_insert && !inventory.can_insert({ name: item_name })) continue
+  if (!require_insert) {
+    const max_index = entity.get_max_inventory_index()
+    for (let i = 1; i <= max_index; i++) {
+      const inventory = entity.get_inventory(i)
+      if (inventory) inventories.push(inventory)
+    }
+    return inventories
+  }
+  for (const { inventory, role } of entity_role_inventories(entity)) {
+    if (!is_insert_role(role) || !inventory.can_insert({ name: item_name })) continue
     inventories.push(inventory)
   }
   return inventories
+}
+
+function inventory_snapshot(entity: LuaEntity, inventory: LuaInventory, role: InventoryRole, item_name: string): TransferInventorySnapshot {
+  const contents: TransferInventorySnapshot['contents'] = []
+  for (const item of inventory.get_contents()) {
+    if (contents.length >= MAX_SNAPSHOT_ITEMS) break
+    contents.push({ name: item.name, quality: item.quality, count: item.count })
+  }
+  return {
+    unit_number: entity.unit_number,
+    index: inventory.index,
+    name: inventory.name,
+    role,
+    slot_count: inventory.length,
+    empty_slots: inventory.count_empty_stacks(),
+    can_insert: is_insert_role(role) && inventory.can_insert({ name: item_name }),
+    contents,
+  }
+}
+
+function is_fuel_item(item_name: string) {
+  const prototype = prototypes.item[item_name]
+  return prototype !== undefined && (prototype.fuel_value ?? 0) > 0
+}
+
+/**
+ * Explain a to-entity move that moved nothing although the NPC held the item.
+ * Only inventories that could take this item count as candidates (the fuel
+ * slot only for a fuel item). Read from the engine's inventory state.
+ */
+export function transfer_refusal_diagnostics(targets: LuaEntity[], item_name: string) {
+  const fuel_item = is_fuel_item(item_name)
+  const target_inventories: TransferInventorySnapshot[] = []
+  let has_candidate = false
+  let full_of_same = false
+  let full_of_other = false
+  for (let t = 0; t < targets.length && t < MAX_SNAPSHOT_TARGETS; t++) {
+    const entity = targets[t]
+    for (const { inventory, role } of entity_role_inventories(entity)) {
+      const snapshot = inventory_snapshot(entity, inventory, role, item_name)
+      target_inventories.push(snapshot)
+      if (!is_insert_role(role) || snapshot.slot_count <= 0 || (role === 'fuel' && !fuel_item)) continue
+      has_candidate = true
+      if (snapshot.empty_slots > 0) continue
+      if (inventory.get_item_count(item_name) > 0) full_of_same = true
+      else if (snapshot.contents.length > 0) full_of_other = true
+    }
+  }
+  let refusal_cause: TransferRefusalCause = 'target_rejects_item'
+  if (!has_candidate) refusal_cause = 'no_input_inventory_for_item'
+  else if (full_of_same) refusal_cause = 'target_full'
+  else if (full_of_other) refusal_cause = 'input_slot_holds_other_item'
+  return { refusal_cause, target_inventories }
 }
 
 export function new_basic_operation_runtime(manager: Manager, controller: BasicController) {
@@ -87,9 +176,37 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (!task) return
     task.position = { x: entity.position.x, y: entity.position.y }
     task.last_target_amount = entity.type === 'resource' ? entity.amount : undefined
-    actor.update_selected_entity(entity.position)
+    if (!select_exact_mining_target(actor, entity)) {
+      reposition_after_rejected_mining_start(actor, entity, task)
+      return
+    }
     actor.set_mining_state({ mining: true, position: entity.position })
+    task.mining_attempted = true
+    if (!actor.get_mining_state().mining) {
+      reposition_after_rejected_mining_start(actor, entity, task)
+      return
+    }
     log(`[AUTORIO] Started mining ${entity.name} at position: ${serpent.line(entity.position)}`)
+  }
+
+  function reposition_after_rejected_mining_start(actor: ControlledActor, entity: LuaEntity, task: PlayerParametersMineEntity) {
+    actor.set_mining_state({ mining: false })
+    task.mining_attempted = false
+    task.mining_rejects = (task.mining_rejects ?? 0) + 1
+    if (task.mining_rejects > MAX_MINING_START_REJECTIONS) {
+      controller.fail(actor, task, 'mining_rejected')
+      return false
+    }
+
+    const navigation = mining_reposition_task(actor, entity, task.mining_rejects)
+    const reach = navigation?.reach_distance ?? 0
+    if (!navigation || !mining_navigation_requires_movement(actor, entity, reach)
+      || !manager.interrupt_current_with(navigation, task)) {
+      controller.fail(actor, task, 'mining_rejected')
+      return false
+    }
+    log(`[AUTORIO] Mining start rejected for ${entity.name}; moving toward the mining target before retry ${task.mining_rejects}/${MAX_MINING_START_REJECTIONS}`)
+    return true
   }
 
   function current_mining_target(actor: ControlledActor) {
@@ -101,7 +218,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return exact
     }
     if (!task.position || !task.entity_name) return undefined
-    return actor.surface.find_entities_filtered({
+    return find_world_entities(actor.surface, {
       position: task.position,
       radius: 0.25,
       name: task.entity_name,
@@ -120,6 +237,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     actor.set_mining_state({ mining: false })
     task.position = undefined
     task.last_target_amount = undefined
+    task.mining_attempted = false
+    task.mining_rejects = 0
     if (!manager.interrupt_current_with(navigation, task)) {
       controller.fail(actor, task, 'too_far')
       return false
@@ -145,6 +264,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       task.count -= 1
       task.position = undefined
       task.last_target_amount = undefined
+      task.mining_attempted = false
+      task.mining_rejects = 0
       actor.set_mining_state({ mining: false })
       log(`[AUTORIO] Standalone actor completed mining cycle, remaining: ${task.count}`)
     }
@@ -157,6 +278,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
         const mined = math.min(task.count, task.last_target_amount - amount)
         task.count -= mined
         task.last_target_amount = amount
+        task.mining_rejects = 0
         log(`[AUTORIO] Standalone actor mined ${mined} ${target.name}, remaining: ${task.count}`)
       }
     }
@@ -203,11 +325,17 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (task.position) {
       const existing = current_mining_target(actor)
       if (existing) {
+        if (task.mining_attempted) {
+          reposition_after_rejected_mining_start(actor, existing, task)
+          return
+        }
         start_mining(actor, existing)
         return
       }
       task.position = undefined
       task.last_target_amount = undefined
+      task.mining_attempted = false
+      task.mining_rejects = 0
     }
 
     let target: LuaEntity | undefined
@@ -223,7 +351,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       }
     }
     else if (task.requested_position !== undefined && task.entity_name !== undefined) {
-      target = actor.surface.find_entities_filtered({
+      target = find_world_entities(actor.surface, {
         position: task.requested_position,
         radius: 0.25,
         name: task.entity_name,
@@ -234,7 +362,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       }
     }
     else if (task.entity_name !== undefined) {
-      const entities = actor.surface.find_entities_filtered({
+      const entities = find_world_entities(actor.surface, {
         position: actor.position,
         radius: MINING_TARGET_SEARCH_RADIUS,
         name: task.entity_name,
@@ -257,7 +385,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     start_mining(actor, target)
   }
 
-  function on_player_mined_entity(actor: ControlledActor, player_index: number) {
+  function on_player_mined_entity(actor: ControlledActor, player_index: number, mined_entity?: LuaEntity) {
     if (!actor.owns_player_index(player_index) || manager.player_state.task_state !== TaskStates.MINING) return
     const task = manager.player_state.parameters_mine_entity
     if (!task) return
@@ -265,11 +393,86 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       controller.fail(actor, task, 'actor_changed')
       return
     }
+    if (mined_entity) {
+      if (task.target_unit_number !== undefined) {
+        if (mined_entity.unit_number !== task.target_unit_number) return
+      }
+      else {
+        if (!task.position || !task.entity_name
+          || mined_entity.name !== task.entity_name
+          || squared_distance(mined_entity.position, task.position) > 0.25 ** 2) return
+      }
+    }
     task.count -= 1
     task.position = undefined
     task.last_target_amount = undefined
+    task.mining_attempted = false
+    task.mining_rejects = 0
     log(`[AUTORIO] Controlled player completed mining cycle, remaining: ${task.count}`)
     if (task.count <= 0) finish_mining(actor)
+  }
+
+  /**
+   * Hand-mines the footprint's clearable entities into the actor inventory. A
+   * blocker beyond hand-mining reach sends the actor walking to it first (the
+   * same placement resumes afterwards). Once every blocker is in reach the
+   * native mining time elapses before the native mine call, as pump preparation
+   * does; a combined yield (blockers and ground items) that does not fit the
+   * inventory is refused before any waiting or mining.
+   * pending: nothing more this tick; failed: the task was failed; cleared: done.
+   */
+  function clear_footprint_blockers(actor: ControlledActor, inventory: LuaInventory, task: PlayerParametersPlaceEntity, blockers: ClearBlocker[], ground_items: GroundItem[]) {
+    // Checked before waiting starts and again before mining, never once per waiting tick.
+    const refuse_if_unfit = () => {
+      if (yields_fit(inventory, blockers, ground_items)) return undefined
+      controller.fail(actor, task, 'clearing_inventory_full', { clearing_left: blockers[0].info })
+      return { state: 'failed' as const, message: `Cannot clear ${blockers[0].info.name} lying in the footprint: actor inventory cannot take everything the footprint yields` }
+    }
+    if (task.clearing_started_tick === undefined) {
+      const first = refuse_if_unfit()
+      if (first !== undefined) return first
+    }
+    for (const blocker of blockers) {
+      if (within_mining_reach(actor, blocker.entity)) continue
+      task.clearing_started_tick = undefined
+      task.clearing_repositions = (task.clearing_repositions ?? 0) + 1
+      const navigation = mining_reposition_task(actor, blocker.entity)
+      if (task.clearing_repositions > MAX_CLEARING_REPOSITIONS || !navigation
+        || !mining_navigation_requires_movement(actor, blocker.entity, navigation.reach_distance ?? 0)
+        || !manager.interrupt_current_with(navigation, task)) {
+        controller.fail(actor, task, 'clearing_unreachable', { clearing_left: blocker.info })
+        return { state: 'failed' as const, message: `Cannot reach ${blocker.info.name} lying in the footprint to clear it` }
+      }
+      log(`[AUTORIO] Placement blocker ${blocker.info.name} at ${serpent.line(blocker.info.position)} is outside hand-mining reach; walking to it before clearing (${task.clearing_repositions}/${MAX_CLEARING_REPOSITIONS})`)
+      return { state: 'pending' as const }
+    }
+    let required = 0
+    for (const blocker of blockers) {
+      const ticks = clearing_mining_ticks(actor, blocker.entity)
+      if (ticks === undefined) {
+        controller.fail(actor, task, 'clearing_failed', { clearing_left: blocker.info })
+        return { state: 'failed' as const, message: `Cannot clear ${blocker.info.name}: the actor mining rate is unavailable` }
+      }
+      required += ticks
+    }
+    task.clearing_started_tick ??= game.tick
+    if (game.tick - task.clearing_started_tick < required) return { state: 'pending' as const }
+    const unfit = refuse_if_unfit()
+    if (unfit !== undefined) return unfit
+    for (const blocker of blockers) {
+      const result = clear_blocker(actor, inventory, blocker)
+      if (!result.ok) {
+        // A failed call can still have moved items or destroyed the entity: record it before failing, so no
+        // no-mutation proof is claimed.
+        if (result.partial !== undefined) task.entities_cleared = [...(task.entities_cleared ?? []), result.partial]
+        controller.fail(actor, task, result.code, { clearing_left: blocker.info })
+        return { state: 'failed' as const, message: `Could not clear ${blocker.info.name} at (${blocker.info.position.x}, ${blocker.info.position.y}): ${result.code}` }
+      }
+      task.entities_cleared = [...(task.entities_cleared ?? []), result.cleared]
+      log(`[AUTORIO] Placement cleared ${blocker.info.name} (${blocker.info.reason}) at ${serpent.line(blocker.info.position)}`)
+    }
+    task.clearing_started_tick = undefined
+    return { state: 'cleared' as const }
   }
 
   function state_placing(actor: ControlledActor) {
@@ -290,16 +493,16 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return [false, 'Cannot access actor inventory']
     }
 
-    const prototype = prototypes.entity[task.entity_name]
-    if (!prototype || !prototype.items_to_place_this || !prototype.items_to_place_this[0]) {
-      controller.fail(actor, task, 'invalid_entity')
-      return [false, 'Invalid entity name']
+    const placement_item = resolve_entity_placement_item(task.entity_name)
+    if (!placement_item.ok) {
+      controller.fail(actor, task, placement_item.code)
+      return [false, `Cannot resolve placement item for ${task.entity_name}: ${placement_item.code}`]
     }
-
-    const [item_stack] = inventory.find_item_stack(task.entity_name)
-    if (!item_stack) {
+    const requirement = placement_item.requirement
+    const available = inventory.get_item_count(requirement.item_name)
+    if (available < requirement.count) {
       controller.fail(actor, task, 'item_missing')
-      return [false, 'Entity not found in inventory']
+      return [false, `Requires ${requirement.count} ${requirement.item_name}, but only ${available} available`]
     }
 
     const build_reach = build_interaction_reach(actor)
@@ -308,27 +511,142 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return [false, 'Requested placement position is out of build range']
     }
 
+    const prototype = prototypes.entity[task.entity_name]
+    if (!prototype) {
+      controller.fail(actor, task, 'unknown_entity')
+      return [false, `Unknown entity prototype ${task.entity_name}`]
+    }
+
+    if ((prototype.type === 'offshore-pump' || task.placement_candidate) && (!task.placement_candidate
+      || !placement_candidate_matches(actor, task.placement_candidate, task.entity_name, task.position?.x, task.position?.y, task.direction))) {
+      controller.fail(actor, task, 'placement_candidate_unavailable')
+      return [false, 'Placement requires its current validated candidate and preservation guard']
+    }
+    if (!placement_preservation_execution_allowed(actor, task.entity_name, task.position?.x, task.position?.y, task.direction,
+      task.placement_candidate, task.preservation_binding, manager.get_status_snapshot())) {
+      controller.fail(actor, task, 'placement_candidate_unavailable')
+      return [false, 'Queued placement admission owner or preserved footprint is unproven']
+    }
+
     if (!task.position) {
-      task.position = surface.find_non_colliding_position(task.entity_name, actor.position, 1, 1)
-      if (!task.position) {
+      // The engine searches in whole steps from its origin, so start on the
+      // entity's grid and snap the answer onto it.
+      const origin = snap_placement_center(prototype, actor.position, task.direction)
+      const found = surface.find_non_colliding_position(task.entity_name, origin, 1, 1)
+      if (!found) {
         controller.fail(actor, task, 'no_position')
         return [false, 'Could not find a valid position to place the entity']
       }
+      task.position = snap_placement_center(prototype, found, task.direction)
     }
 
-    if (!surface.can_place_entity({
+    // Factorio snaps every scripted placement onto the entity's tile grid:
+    // create_entity lands there and the default can_place_entity checks there
+    // (probed on 2.0: odd sizes take the tile under the point, even sizes the
+    // nearest tile corner). An off-grid centre is not an error; snap it with the
+    // same rule so the check, diagnostics and receipt describe the real tiles.
+    // requested_position keeps what was asked for.
+    const position = snap_placement_center(prototype, task.position, task.direction)
+    const footprint = placement_footprint(prototype, position, task.direction)
+    if (reservation_intersection(surface, footprint.world_box)) {
+      controller.fail(actor, task, 'npc_area_reserved')
+      return [false, 'npc_area_reserved']
+    }
+    const grid = placement_grid_rule(prototype, task.direction)
+
+    // create_entity itself does not test collisions, so every placement is
+    // gated here. placement_check_args adds the manual build check where the
+    // default (script) check is too loose, e.g. offshore pumps off the shore.
+    const placeable = () => surface.can_place_entity({
       name: task.entity_name,
-      position: task.position,
+      position,
       direction: task.direction,
       force: actor.force,
-    })) {
-      controller.fail(actor, task, 'not_placeable')
-      return [false, 'Requested placement is blocked or otherwise not placeable']
+      ...placement_check_args(task.entity_name),
+    })
+    let can_place = placeable()
+    // A validated construction placement is placement-only (its fluid-preservation witness says so): when the footprint is
+    // no longer placeable (a tree, rock or ground item that appeared after validation, or anything else) it fails here,
+    // before any pickup, mining or destruction, and so keeps the no-mutation proof.
+    if (!can_place && task.refuse_clearance === true) {
+      const blockers = placement_blocker_summaries(actor, footprint.world_box)
+      controller.fail(actor, task, 'construction_plan_blocked_no_clear', {
+        placement_footprint: {
+          tile_width: footprint.tile_width,
+          tile_height: footprint.tile_height,
+          tile_box: footprint.tile_box,
+          world_box: footprint.world_box,
+        },
+        placement_blockers: blockers,
+      })
+      return [false, `Validated construction placement of ${task.entity_name} at (${position.x}, ${position.y}) is blocked and clearing is refused for construction plans`]
+    }
+    // Like a player's build, what placement_clearance says a footprint may lose
+    // is cleared rather than blocking it: ground items are picked up and
+    // natural or idle own entities are mined into the actor inventory, then the
+    // native check decides again. What was cleared is kept on the task, so every
+    // later failure reports it and controller.fail withholds the no-mutation
+    // proof.
+    const clearance = can_place ? undefined : placement_clearance(actor, prototype, task.entity_name, position, task.direction, task.protected_unit_numbers, undefined, task.allowed_own_clears ?? [])
+    if (clearance !== undefined) {
+      if (clearance.blockers.length > 0) {
+        const cleared = clear_footprint_blockers(actor, inventory, task, clearance.blockers, clearance.ground_items)
+        if (cleared.state === 'pending') return
+        if (cleared.state === 'failed') return [false, cleared.message]
+      }
+      if (clearance.ground_items.length > 0) {
+        const pickup = pick_up_ground_items(actor, inventory, prototype, position, task.direction)
+        if (pickup.picked_up.length > 0) task.ground_items_picked_up = [...(task.ground_items_picked_up ?? []), ...pickup.picked_up]
+        if (!pickup.ok && pickup.uncertain) {
+          task.ground_item_pickup_uncertain = true
+          controller.fail(actor, task, 'ground_item_pickup_failed', { ground_item_left: pickup.left })
+          return [false, `Picked up ${pickup.left.count} ${pickup.left.name} but its ground item remained`]
+        }
+        if (!pickup.ok) {
+          controller.fail(actor, task, 'ground_items_inventory_full', { ground_item_left: pickup.left })
+          return [false, `Cannot pick up ${pickup.left.count} ${pickup.left.name} lying in the footprint: actor inventory is full`]
+        }
+      }
+      can_place = placeable()
+    }
+    if (!can_place) {
+      const blockers = placement_blocker_summaries(actor, footprint.world_box)
+      controller.fail(actor, task, 'not_placeable', {
+        placement_footprint: {
+          tile_width: footprint.tile_width,
+          tile_height: footprint.tile_height,
+          tile_box: footprint.tile_box,
+          world_box: footprint.world_box,
+        },
+        placement_grid: {
+          x_offset: grid.x_offset,
+          y_offset: grid.y_offset,
+          nearest_valid_center: position,
+        },
+        placement_blockers: blockers,
+      })
+      const blocker_text = blockers.length > 0
+        ? blockers.map(blocker => `${blocker.name}@(${blocker.position.x},${blocker.position.y})`).join(', ')
+        : 'no entity blocker reported in footprint'
+      return [false, `Requested placement is not placeable at grid center (${position.x}, ${position.y}); footprint=${serpent.line(footprint.world_box)}; blockers=${blocker_text}`]
     }
 
+    if (task.placement_candidate && !placement_candidate_matches(actor, task.placement_candidate, task.entity_name, position.x, position.y, task.direction)
+      || !placement_preservation_execution_allowed(actor, task.entity_name, position.x, position.y, task.direction,
+        task.placement_candidate, task.preservation_binding, manager.get_status_snapshot())) {
+      controller.fail(actor, task, 'placement_candidate_unavailable')
+      return [false, 'Queued placement preservation guard changed before native create']
+    }
+    // A node of a connected construction layout: its connections to the entities already built must still hold against the
+    // actual entities. Refused here, before the native create, so a failed proof keeps the no-mutation receipt.
+    const layout_refusal = layout_node_precheck(actor, task.layout_node, task.entity_name, position, task.direction)
+    if (layout_refusal !== undefined) {
+      controller.fail(actor, task, 'layout_connection_unproven', { layout_node: task.layout_node, layout_refusal })
+      return [false, layout_refusal]
+    }
     const create_entity_args: SurfaceCreateEntity = {
       name: task.entity_name,
-      position: task.position,
+      position,
       direction: task.direction,
       raise_built: true,
       ...actor.entity_build_args(),
@@ -339,9 +657,34 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return [false, 'Failed to place entity']
     }
 
-    item_stack.count = item_stack.count - 1
-    log(`[AUTORIO] Entity placed successfully: ${task.entity_name} at ${serpent.line(task.position)} direction=${task.direction ?? 'default'}`)
-    controller.complete(actor, task)
+    // Remember what we just built. game.get_entity_by_unit_number() can return nil
+    // for an entity created this tick even though find_entities_filtered returns it
+    // with that exact unit_number, so resolve_exact_entity falls through to the hint
+    // map. Only the observation tools populated that map, which meant every exact
+    // operation on a freshly placed entity failed with target_gone unless an
+    // unrelated observation happened to scan it first.
+    remember_entity_reference(entity)
+    // The same tick, before the task completes: bind the entity to its layout node and verify the layout's connections.
+    record_layout_node_placed(actor, task.layout_node, entity)
+
+    const removed = inventory.remove({ name: requirement.item_name, count: requirement.count })
+    if (removed !== requirement.count) {
+      log(`[AUTORIO] ERROR placement item accounting mismatch after creating ${task.entity_name}: required=${requirement.count} ${requirement.item_name}, removed=${removed}`)
+    }
+    log(`[AUTORIO] Entity placed successfully: ${task.entity_name} using ${requirement.count} ${requirement.item_name} at ${serpent.line(position)} direction=${task.direction ?? 'default'}`)
+    controller.complete(actor, task, {
+      placed_unit_number: entity.unit_number,
+      placed_entity_type: entity.type,
+      placed_position: { x: entity.position.x, y: entity.position.y },
+      placed_surface_index: entity.surface.index,
+      placed_direction: entity.direction,
+      preservation_binding: task.preservation_binding,
+      // MW1: the engine's last_user right after placement (nil for the standalone
+      // NPC). A later human last_user on this entity means a player changed it.
+      placed_last_user: entity_last_user(entity)?.name,
+      ground_items_picked_up: task.ground_items_picked_up,
+      entities_cleared: task.entities_cleared,
+    })
     return [true, 'Entity placed successfully', entity]
   }
 
@@ -372,23 +715,25 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
 
     let moved = 0
+    // Bounded by the whole held count, not by the first matching stack: a
+    // 200-plate transfer used to stop at one 100-plate stack.
     if (task.to_player) {
-      const [item_stack] = actor_inventory.find_item_stack(task.item_name)
-      if (!item_stack) {
+      const available = actor_inventory.get_item_count(task.item_name)
+      if (available <= 0) {
         controller.fail(actor, task, 'item_missing')
         return 0
       }
-      const to_move = math.min(item_stack.count, task.max_count)
+      const to_move = math.min(available, task.max_count)
       moved = player_inventory.insert({ name: task.item_name, count: to_move })
       if (moved > 0) actor_inventory.remove({ name: task.item_name, count: moved })
     }
     else {
-      const [item_stack] = player_inventory.find_item_stack(task.item_name)
-      if (!item_stack) {
+      const available = player_inventory.get_item_count(task.item_name)
+      if (available <= 0) {
         controller.fail(actor, task, 'item_missing')
         return 0
       }
-      const to_move = math.min(item_stack.count, task.max_count)
+      const to_move = math.min(available, task.max_count)
       if (actor_inventory.can_insert({ name: task.item_name, count: to_move })) {
         const removed = player_inventory.remove({ name: task.item_name, count: to_move })
         if (removed > 0) {
@@ -438,7 +783,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return undefined
     }
 
-    const nearby = actor.surface.find_entities_filtered({
+    const nearby = find_world_entities(actor.surface, {
       position: actor.position,
       radius: reach,
       name: task.entity_name,
@@ -474,26 +819,32 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
 
     let moved_total = 0
+    let source_removed_total = 0
+    let held_count = 0
     if (task.to_entity) {
-      const [item_stack] = actor_inventory.find_item_stack(task.item_name)
-      if (!item_stack) {
+      const available = actor_inventory.get_item_count(task.item_name)
+      held_count = available
+      if (available <= 0) {
         controller.fail(actor, task, 'item_missing')
         return 0
       }
 
-      targets
-        .map(entity => entity_inventories(entity, task.item_name, true))
-        .flat()
-        .forEach((inventory) => {
-          if (moved_total >= task.max_count) return
-          const to_move = math.min(item_stack.count, task.max_count - moved_total)
-          if (to_move <= 0) return
+      for (const entity of targets) {
+        const fuel_inventory = entity.get_fuel_inventory()
+        for (const inventory of entity_inventories(entity, task.item_name, true)) {
+          if (moved_total >= task.max_count) break
+          const to_move = math.min(available - moved_total, task.max_count - moved_total)
+          if (to_move <= 0) break
           const moved = inventory.insert({ name: task.item_name, count: to_move })
           if (moved > 0) {
             actor_inventory.remove({ name: task.item_name, count: moved })
             moved_total += moved
+            // Hand feeding voids a production_rate window; refuelling does not.
+            const into_fuel = fuel_inventory !== undefined && fuel_inventory.index === inventory.index
+            record_hand_insert(actor.force.index, task.item_name, entity.name, entity.type, into_fuel, entity)
           }
-        })
+        }
+      }
     }
     else {
       targets
@@ -504,6 +855,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
           if (!actor_inventory.can_insert({ name: task.item_name })) return
           const removed = inventory.remove({ name: task.item_name, count: task.max_count - moved_total })
           if (removed <= 0) return
+          source_removed_total += removed
           const inserted = actor_inventory.insert({ name: task.item_name, count: removed })
           if (inserted < removed) inventory.insert({ name: task.item_name, count: removed - inserted })
           moved_total += inserted
@@ -511,12 +863,25 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
 
     if (moved_total <= 0) {
-      controller.fail(actor, task, 'nothing_moved', { moved_count: 0 })
+      if (task.to_entity) {
+        // The target refused the item and the world is unchanged: the items
+        // are still in the NPC's inventory. Report why, and let the batch's
+        // independent operations (moves into other entities) still run.
+        const diagnostics = transfer_refusal_diagnostics(targets, task.item_name)
+        controller.refuse(actor, task, 'nothing_moved', {
+          moved_count: 0,
+          held_count,
+          refusal_cause: diagnostics.refusal_cause,
+          target_inventories: diagnostics.target_inventories,
+        })
+        return 0
+      }
+      controller.fail(actor, task, 'nothing_moved', { moved_count: 0, source_removed_count: source_removed_total })
       return 0
     }
     const target_label = task.target_unit_number !== undefined ? ` entity unit ${task.target_unit_number}` : ''
     log(`[AUTORIO] Moved a total of ${moved_total} ${task.item_name}${target_label}`)
-    controller.complete(actor, task, { moved_count: moved_total })
+    controller.complete(actor, task, task.to_entity ? { moved_count: moved_total, held_count } : { moved_count: moved_total })
     return moved_total
   }
 

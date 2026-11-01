@@ -1,16 +1,16 @@
-# AIRI Factorio — Autonomous Character Architecture
+# SGLuna Factorio — Autonomous Character Architecture
 
 This note records the body/actor decision for the NPC transition on `feat/npc-transition-work`.
 
 ## Decision
 
-AIRI should be represented in-world as a standalone Factorio `character` entity controlled by the mod, not as:
+SGLuna should be represented in-world as a standalone Factorio `character` entity controlled by the mod, not as:
 
 - a connected human `LuaPlayer`;
 - a generic Factorio `unit`; or
 - a custom fake actor that reimplements character mechanics outside the engine.
 
-This keeps AIRI visually and mechanically consistent with another engineer living in the Factorio world while still allowing zero-player operation and later multi-agent/swarm behavior.
+This keeps SGLuna visually and mechanically consistent with another engineer living in the Factorio world while still allowing zero-player operation and later multi-agent/swarm behavior.
 
 Official API references:
 
@@ -36,13 +36,13 @@ Using a `unit` would make movement simpler but would force this project to recre
 - character-specific speed modifiers;
 - normal character death/corpse behavior.
 
-For AIRI, preserving those mechanics is more important than gaining `LuaCommandable`.
+For SGLuna, preserving those mechanics is more important than gaining `LuaCommandable`.
 
 ## Why a standalone character still works
 
 Factorio exposes many character/player operations through `LuaControl`, which is shared by `LuaPlayer` and character `LuaEntity` objects. The official documentation explicitly notes that player-related `LuaControl` functions accessed through `LuaEntity` work when that entity is a `character`.
 
-That gives the standalone AIRI character real engine-backed mechanics without requiring a connected player.
+That gives the standalone SGLuna character real engine-backed mechanics without requiring a connected player.
 
 Conceptually:
 
@@ -55,14 +55,14 @@ Conceptually:
                                    |
                                character
                                    |
-                                AIRI NPC
+                                SGLuna NPC
 ```
 
 The existing `ControlledActor` / `StandaloneCharacterActor` work on this branch is therefore the correct foundation.
 
 ## Inventory must stay physical
 
-AIRI should use the character's actual inventory through the shared control/inventory API.
+SGLuna should use the character's actual inventory through the shared control/inventory API.
 
 This means each future agent has its own real inventory and resource scarcity remains meaningful.
 
@@ -90,7 +90,7 @@ This becomes important once the swarm/message-board work begins.
 The desired flow is:
 
 ```text
-AIRI inventory
+SGLuna inventory
     |
     v
 begin_crafting(recipe, count)
@@ -99,7 +99,7 @@ begin_crafting(recipe, count)
 Factorio crafting queue
     |
     v
-output returns to AIRI inventory
+output returns to SGLuna inventory
 ```
 
 Do not replace this with:
@@ -130,9 +130,9 @@ A standalone character does not expose every `LuaPlayer` convenience method, so 
 
 A correct build operation should:
 
-1. resolve the AIRI character;
+1. resolve the SGLuna character;
 2. verify the entity/item exists;
-3. verify AIRI owns the required item;
+3. verify SGLuna owns the required item;
 4. verify destination/reach constraints;
 5. verify placement is valid;
 6. create the entity with the correct force and orientation;
@@ -187,6 +187,87 @@ The character controller should eventually track:
 
 A stuck character should repath rather than fall back forever to blind direct walking.
 
+## Map knowledge (owner decision, 2026-09-25)
+
+A player's character loads and reveals the map around it. The standalone NPC
+should behave the same way. Factorio's own chart state is unusable when nobody
+is online: on 2.0.77 with zero connected players, the NPC's force had 0 charted
+chunks, even with the awareness radar running and 2,000 ticks after an explicit
+`force.chart` over generated chunks. Map operations gated on that state always
+returned `area_uncharted`.
+
+- The hidden awareness radar is removed.
+- Around the NPC, the mod requests generation of the 5×5 chunks (like a player
+  loading its surroundings) and calls `force.chart` on them, so players who join
+  later see the map.
+- The mod keeps its own map knowledge, saved with the game:
+  - visible: the 5×5 chunks around the NPC right now;
+  - explored: every chunk that was ever inside that 5×5 area.
+- Map operations treat a chunk as visible if it's visible in the mod's record or
+  in Factorio's (when a player is online), and as charted if it's explored or
+  charted. The NPC still can't act on places it has never been near.
+- The NPC's map and the players' map are synced periodically in both directions,
+  like a team sharing one map:
+  - push: chunks the NPC explored are charted for the force, so a player sees
+    where the NPC has been. This happens when a player joins (the whole explored
+    record) and on a periodic tick (only new chunks);
+  - pull: chunks Factorio has charted for the force, for example by a player
+    exploring, are added to the NPC's explored record;
+  - the work per tick is bounded (a queue drained a few chunks at a time), and
+    a sync does nothing while no player is online, because the engine charts
+    nothing then.
+
+### Live vision vehicle (hidden)
+
+A character prototype has no `chunk_exploration_radius`, so continuous map vision
+needs a separate entity. A hidden car, `sgluna-npc-vision`, follows the NPC and
+charts a 5×5 chunk window around itself the way a spidertron does
+(`chunk_exploration_radius = 2`, the same size as `KNOWLEDGE_CHUNK_RADIUS`; do not
+grow it). It exists only so the NPC's force charts and sees the area around the
+NPC. It must not interact with the world at all.
+
+- **Prototype** (`packages/autorio/data.lua`): hidden; no item, recipe, technology
+  unlock, `placeable_by` or `minable`; an empty collision mask and a zero collision
+  box, so it never blocks placement, walking, belts, inserters, vehicles, trains,
+  biters or projectiles; not selectable and no selection box; not a military
+  target and a trigger target mask nothing matches; no passengers, no guns, no
+  inventory, a void energy source (no fuel, no emissions); no graphics, light,
+  sound, corpse or explosion; flags that remove map, blueprint, copy-paste,
+  deconstruction, upgrade, repair, kill-statistics and fire interaction.
+  `deploy/pterodactyl/staging/source-preparer.mjs` refuses a package that drops
+  one of these.
+- **Lifecycle** (`packages/autorio/src/npc_vision.ts`, driven from the awareness
+  tick, so only for a standalone NPC): at most one vehicle per NPC actor, same
+  force, built with `raise_built = false` and without disturbing ghosts or
+  corpses under it. Right after creation it is made indestructible, unminable,
+  inoperable and unrotatable. It teleports to the NPC when the NPC changes chunk
+  or surface and is corrected every 60 ticks. It is destroyed when the actor is
+  replaced, dies, is removed or is not a standalone NPC, and rebuilt only for the
+  current live actor. `on_init` and `on_configuration_changed` (and every create)
+  sweep all vehicles on all surfaces and keep only the one stored for the current
+  actor. Each create, destroy, failed create and sweep writes an
+  `npc.vision.*` log line with the actor id and a reason.
+- **Invisible to the NPC**: every entity scan in the mod goes through
+  `find_world_entities` / `count_world_entities`, which drop the vehicle (and
+  match nothing when asked for it by name), and exact unit-number references to
+  it do not resolve. Placement checks never see an obstacle because the collision
+  mask is empty. A unit test fails on any direct engine entity scan.
+- **Why `destructible = false` matters**: an enemy told to hunt an area attacks
+  any destructible entity of the player force, military target or not (a plain
+  chest dies the same way), so the prototype flags alone do not stop it. The real
+  engine lane shows a destructible instance dying to a hunting biter and the
+  runtime-flagged live one being ignored.
+- **Scans**: the helpers are also exact for `limit` (the engine applies it before
+  the vehicle is dropped, so a limited scan asks for one extra result per vehicle),
+  `invert`, and counts.
+- **Zero connected players**: Factorio charts nothing for a force without a
+  connected player: not `LuaForce.chart`, not a powered radar, and not this
+  vehicle (active or inactive). The vehicle therefore adds live vision for
+  connected observers; the mod's own map knowledge above still covers the
+  zero-player case. Whether `active = false` would suppress exploration with a
+  player connected cannot be observed headless, so the vehicle stays active (zero
+  fuel and no driver, so it cannot move).
+
 ## Controller boundary
 
 The long-term API should remain semantic and actor-oriented.
@@ -194,7 +275,7 @@ The long-term API should remain semantic and actor-oriented.
 Conceptually:
 
 ```text
-AiriCharacterController
+SglunaCharacterController
 |- walk_to(...)
 |- mine(...)
 |- craft(...)
@@ -215,7 +296,7 @@ The external agent/harness chooses goals and actions. The Factorio mod owns dete
 Once single-character reliability is proven, multiple autonomous characters can be represented independently:
 
 ```text
-                     AIRI coordinator
+                     SGLuna coordinator
                            |
             +--------------+--------------+
             |              |              |
@@ -265,10 +346,10 @@ This is preferable to giving all agents one shared magical inventory.
 
 Unless a real engine limitation forces a fallback:
 
-- do not bind AIRI back to `game.connected_players[0]`;
-- do not require a connected human player for AIRI to exist;
+- do not bind SGLuna back to `game.connected_players[0]`;
+- do not require a connected human player for SGLuna to exist;
 - do not create fake player accounts just to get inventory/crafting behavior;
-- do not replace AIRI with a generic `unit` solely for easier movement;
+- do not replace SGLuna with a generic `unit` solely for easier movement;
 - do not simulate character inventory outside Factorio;
 - do not instant-craft items;
 - do not make the LLM issue tick-level movement commands;
@@ -303,6 +384,6 @@ Only after that foundation is reliable should the project enable multi-character
 
 ## Architectural rule
 
-**AIRI is an autonomous Factorio character first, and an AI agent second.**
+**SGLuna is an autonomous Factorio character first, and an AI agent second.**
 
 The agent may reason at a high level, but actions should continue to respect the physical mechanics, inventory, crafting, movement, reach, and persistence of the in-world character wherever Factorio exposes those mechanics natively.

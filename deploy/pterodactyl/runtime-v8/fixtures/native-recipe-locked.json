@@ -1,0 +1,78 @@
+{
+  "ok": false,
+  "code": "recipe_locked",
+  "operation": "craft_item",
+  "field": "item_name",
+  "identity": "automation-science-pack",
+  "recipe_name": "automation-science-pack",
+  "unlock": {
+    "unlocked_by": "automation-science-pack",
+    "pending_count": 3,
+    "next_actionable": {
+      "name": "electronics",
+      "mode": "trigger",
+      "status": "ready",
+      "trigger": {
+        "type": "craft-item",
+        "item": "copper-plate",
+        "count": 10
+      },
+      "trigger_crafting": {
+        "item": "copper-plate",
+        "recipes": [
+          {
+            "recipe": "copper-plate",
+            "enabled": true,
+            "categories": [
+              "smelting"
+            ],
+            "categories_truncated": false,
+            "hand_craftable": false,
+            "hand_craftable_reason": "category_unsupported",
+            "machines": [
+              {
+                "entity": "stone-furnace",
+                "item": "stone-furnace",
+                "status": "craftable"
+              },
+              {
+                "entity": "steel-furnace",
+                "item": "steel-furnace",
+                "status": "locked",
+                "unlocked_by": "advanced-material-processing"
+              },
+              {
+                "entity": "electric-furnace",
+                "item": "electric-furnace",
+                "status": "locked",
+                "unlocked_by": "advanced-material-processing-2"
+              }
+            ],
+            "machines_truncated": false
+          },
+          {
+            "recipe": "casting-copper",
+            "enabled": false,
+            "categories": [
+              "metallurgy"
+            ],
+            "categories_truncated": false,
+            "hand_craftable": false,
+            "hand_craftable_reason": "recipe_locked",
+            "machines": [
+              {
+                "entity": "foundry",
+                "item": "foundry",
+                "status": "locked",
+                "unlocked_by": "foundry"
+              }
+            ],
+            "machines_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "requires": {}
+    }
+  }
+}

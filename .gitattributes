@@ -4,9 +4,23 @@
 # their shebangs even when the repository is checked out on Windows.
 *.sh text eol=lf
 
+# ES module scripts may start with a shebang; with CRLF the Vitest transform
+# rejects the `#!...\r` line, so a test importing one fails to load on Windows.
+*.mjs text eol=lf
+
+# Reviewed E2E template/baseline byte hashes must survive Windows/Linux checkout.
+scripts/e2e-pair/templates/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
 # Installer source is hashed byte-for-byte by the generated immutable loader,
 # so normalize it consistently across Windows and Linux checkouts.
 deploy/pterodactyl/payload-src/installer.sh text eol=lf
 
 # Generated Pterodactyl artifacts are compared deterministically across hosts.
-deploy/pterodactyl/egg-airi-factorio-server.json text eol=lf
+deploy/pterodactyl/egg-sgluna-factorio-*.json text eol=lf
+
+# Retained live failure evidence is tested by its original byte hash.
+deploy/pterodactyl/runtime-v8/fixtures/luna-draft-state-2026-10-07.json -text
+deploy/pterodactyl/runtime-v8/fixtures/luna-draft-replies-2026-10-07.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# The external method library verifies the exact upstream catalog bytes.
+tools/external-harness/library/jev-catalog.json -text

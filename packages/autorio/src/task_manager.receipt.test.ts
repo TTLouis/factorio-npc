@@ -14,7 +14,25 @@ function actor() {
   } as unknown as ControlledActor
 }
 
+function persistent_follow_task() {
+  return {
+    type: TaskStates.WALKING_TO_ENTITY,
+    entity_name: 'character',
+    search_radius: 4096,
+    target_kind: 'player' as const,
+    target_player_name: 'TTLouis',
+    reach_distance: 4,
+    persistent_follow: true,
+    path: null,
+    path_drawn: false,
+    path_index: 1,
+    calculating_path: false,
+    target_position: null,
+  }
+}
+
 beforeEach(() => {
+  ;(globalThis as any).storage = {}
   ;(globalThis as any).game.tick = 100
   ;(globalThis as any).game.print = vi.fn()
   ;(globalThis as any).log = vi.fn()
@@ -66,6 +84,43 @@ describe('Autorio task batch receipts', () => {
     )
   })
 
+  it('keeps routine persistent-follow batches out of the player console while retaining receipts and logs', () => {
+    const manager = new_task_manager(() => actor())
+    manager.add_task(persistent_follow_task())
+
+    expect((globalThis as any).game.print).not.toHaveBeenCalled()
+    expect((globalThis as any).log).toHaveBeenCalledWith(
+      '[AUTORIO] Operation batch started: batch=1, first_task=walking_to_entity, tick=100',
+    )
+
+    manager.reset_task_state()
+    ;(globalThis as any).game.tick = 120
+    manager.next_task()
+
+    expect((globalThis as any).game.print).not.toHaveBeenCalled()
+    expect(manager.get_status_snapshot().last_completed_batch).toMatchObject({
+      batch_id: 1,
+      task_count: 1,
+      task_types: [TaskStates.WALKING_TO_ENTITY],
+    })
+    expect((globalThis as any).log).toHaveBeenCalledWith(
+      '[AUTORIO] All operations completed: batch=1, task_count=1, tasks=walking_to_entity, tick=120',
+    )
+  })
+
+  it('still promotes a persistent-follow failure cancellation to the player console', () => {
+    const manager = new_task_manager(() => actor())
+    manager.add_task(persistent_follow_task())
+
+    ;(globalThis as any).game.tick = 130
+    manager.cancel_all_tasks('follow_stuck')
+
+    expect((globalThis as any).game.print).toHaveBeenCalledTimes(1)
+    expect((globalThis as any).game.print).toHaveBeenCalledWith(
+      '[AUTORIO] Operation batch cancelled: batch=1, task_count=1, tasks=walking_to_entity, tick=130, reason=follow_stuck',
+    )
+  })
+
   it('prints and retains a cancelled batch receipt with the cancellation reason', () => {
     const manager = new_task_manager(() => actor())
     manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60, requested_ticks: 60 })
@@ -102,4 +157,89 @@ describe('Autorio task batch receipts', () => {
       '[AUTORIO] Operation batch cancelled: batch=1, task_count=1, tasks=waiting, tick=145, reason=actor_loss',
     )
   })
+  it('persists sequence across peer reload and rotates generation only at server startup', () => {
+    const first = new_task_manager(() => actor())
+    first.add_task({ type: TaskStates.WAITING, remaining_ticks: 1, requested_ticks: 1 })
+
+    expect(first.get_status_snapshot()).toMatchObject({
+      batch_generation: 1,
+      active_batch: {
+        batch_id: 1,
+        batch_generation: 1,
+        batch_ref: 'batch-g1-1',
+      },
+    })
+
+    first.reset_task_state()
+    ;(globalThis as any).game.tick = 110
+    first.next_task()
+    expect(first.get_status_snapshot().last_completed_batch).toMatchObject({
+      batch_id: 1,
+      batch_generation: 1,
+      batch_ref: 'batch-g1-1',
+    })
+
+    const second = new_task_manager(() => actor())
+    expect(second.get_status_snapshot()).toMatchObject({ batch_generation: 1 })
+    second.reconcile_startup('server-restarted')
+    expect(second.get_status_snapshot()).toMatchObject({ batch_generation: 2 })
+    second.add_task({ type: TaskStates.WAITING, remaining_ticks: 1, requested_ticks: 1 })
+    expect(second.get_status_snapshot().active_batch).toMatchObject({
+      batch_id: 2,
+      batch_generation: 2,
+      batch_ref: 'batch-g2-2',
+    })
+
+    second.cancel_all_tasks('reload-test')
+    expect(second.get_status_snapshot().last_cancelled_batch).toMatchObject({
+      batch_id: 2,
+      batch_generation: 2,
+      batch_ref: 'batch-g2-2',
+      reason: 'reload-test',
+    })
+    expect((globalThis as any).storage).toMatchObject({
+      sgluna_task_batch_sequence: 2,
+      sgluna_task_batch_generation: 2,
+    })
+  })
+
+  it('counts a resumed task once and names the task whose pre-mutation failure cancelled the batch (Run Z batch 21)', () => {
+    const manager = new_task_manager(() => actor())
+    const boiler = { type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 43.5, y: -49 }, direction: 4 } as any
+    const engine = { type: TaskStates.PLACING, entity_name: 'steam-engine', position: { x: 42.5, y: -48.5 }, direction: 4 } as any
+    manager.add_task(boiler)
+    manager.add_task(engine)
+    // Interaction recovery: an approach walk, then the same boiler task resumes and completes.
+    expect(manager.interrupt_current_with({ type: TaskStates.WALKING_DIRECT, target_position: { x: 40, y: -45 } } as any, boiler)).toBe(true)
+    manager.reset_task_state()
+    manager.next_task()
+    expect(manager.player_state.parameters_place_entity).toBe(boiler)
+    manager.reset_task_state()
+    manager.next_task()
+    expect(manager.player_state.parameters_place_entity).toBe(engine)
+    manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 1 })
+
+    expect(manager.get_status_snapshot().last_cancelled_batch).toMatchObject({
+      task_count: 2, task_types: [TaskStates.PLACING, TaskStates.PLACING],
+      started_count: 4, tasks_started: 2, failed_before_mutation: true, failed_task_index: 1,
+    })
+  })
+
+  it('names no failing task when the proof does not identify the task that is running', () => {
+    const manager = new_task_manager(() => actor())
+    manager.add_task({ type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 0.5, y: 0.5 } } as any)
+    manager.add_task({ type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 4.5, y: 0.5 } } as any)
+    manager.reset_task_state()
+    manager.next_task()
+    manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true, task_index: 0 })
+    const receipt = manager.get_status_snapshot().last_cancelled_batch
+    expect(receipt).toMatchObject({ tasks_started: 2, failed_before_mutation: true })
+    expect(receipt?.failed_task_index).toBeUndefined()
+
+    manager.add_task({ type: TaskStates.PLACING, entity_name: 'boiler', position: { x: 0.5, y: 0.5 } } as any)
+    manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true })
+    expect(manager.get_status_snapshot().last_cancelled_batch).toMatchObject({ tasks_started: 1, started_count: 1 })
+    expect(manager.get_status_snapshot().last_cancelled_batch?.failed_task_index).toBeUndefined()
+  })
+
 })

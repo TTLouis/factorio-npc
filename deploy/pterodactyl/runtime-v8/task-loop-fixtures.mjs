@@ -1,0 +1,467 @@
+// Shared fixtures for driving the real NpcAgentLoop through whole task loops.
+//
+// Unlike the reducer tests, these go through `request()` / `completed()` /
+// `failed()` exactly as the supervisor does, against a fake Factorio that
+// speaks the real RCON protocol, and a Jev that answers in the shape the live
+// TypeSafe decision provider produces (one `choice`/`score`/`noul` per
+// question, never the retired aggregate `multi_choice` shape).
+
+import assert from 'node:assert/strict'
+import { after } from 'node:test'
+import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
+import { capturePlannerSkillHandoff } from './skill-offers.mjs'
+import { getActivePlan } from './planning-state.mjs'
+
+// Old controller/production replays predate durable skill handoffs and do not
+// contain the original skill detail payloads. Supply explicitly synthetic,
+// native-shaped test metadata without changing their recorded plan semantics.
+// This is test setup only, never a production migration or an engine claim.
+export function pinLegacyFixtureSkillContext(memory) {
+  for (const [key, planning] of memory.planningByNpc ?? []) {
+    if (memory.plannerSkillHandoffs.has(key)) continue
+    const ids = [...new Set(getActivePlan(planning)?.steps.flatMap(step => step.execution_guidance?.skillIds ?? []) ?? [])]
+    if (ids.length === 0) continue
+    const details = new Map(ids.map(id => [id, { id, revision: 1, stage: 'pattern', status: 'candidate',
+      summary: 'Synthetic replay guide: this isolated harness test does not evaluate the original skill instructions.' }]))
+    memory.plannerSkillHandoffs.set(key, capturePlannerSkillHandoff(key, planning, details))
+  }
+}
+
+// Fake decision providers bypass the real TypeSafe adapter, so a request the
+// live adapter would reject still "works" in unit tests. That is how every live
+// Jev call fell back on 2026-09-24 while CI stayed green. Every fixture Jev
+// therefore runs the real request normalizer, with production limits, on the
+// exact state/questions the runtime built. The loop swallows provider errors
+// into fallbacks, so violations are also collected and fail the file.
+const LIVE_DECISION_CONTRACT = Object.freeze({ ...DECISION_PROVIDER_DEFAULTS, key: 'fixture-contract-check' })
+export const jevContractLog = []
+
+after(() => {
+  const violations = jevContractLog.filter(entry => !entry.ok)
+  assert.deepEqual(violations, [], 'a Jev boundary built a request the live TypeSafe adapter rejects')
+})
+
+export function contractCheckedJev(provider) {
+  const checked = async (state, questions, context) => {
+    const keys = Object.keys(questions ?? {})
+    try {
+      normalizeDecisionProviderRequest(LIVE_DECISION_CONTRACT, state, questions)
+      jevContractLog.push({ keys, ok: true })
+    }
+    catch (error) {
+      jevContractLog.push({ keys, ok: false, error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+    return provider(state, questions, context)
+  }
+  return Object.assign(checked, provider)
+}
+
+export function deployment(overrides = {}) {
+  return {
+    revision: 'sgluna-deploy-v8-npc-staging',
+    session: '0123456789abcdef0123456789abcdef',
+    mode: 'npc',
+    actor_id: 18,
+    actor_kind: 'standalone_character',
+    connected_players: 1,
+    allowed: true,
+    idle: true,
+    epoch: 3,
+    actor_interface: true,
+    operations: true,
+    tools: true,
+    ...overrides,
+  }
+}
+
+// Mirrors the strict receipt task types Autorio reports per admitted operation.
+const TASK_TYPES_BY_OPERATION = {
+  gather_resource: ['walking_to_entity', 'mining'],
+  mine_entity: ['mining'],
+  harvest_product: ['harvesting'],
+  craft_item: ['crafting'],
+  place_entity: ['placing'],
+  move_items: ['moving_items'],
+  move_items_exact: ['moving_items'],
+  supply_entity: ['moving_items'],
+  walk_to_entity: ['walking_to_entity'],
+  launch_rocket: ['launching_rocket'],
+}
+
+export class FakeFactorio {
+  constructor({ inventory = {}, preflight } = {}) {
+    this.status = deployment()
+    this.inventory = { ...inventory }
+    this.preflight = preflight ?? (() => ({ ok: true }))
+    this.mutations = []
+    this.batchId = 0
+    this.admissions = []
+    // Scripted synchronous refusal for the next admitted batch: { slot, operation, error, proven? }.
+    this.syncRefusal = undefined
+    // Scripted admission begin() refusal code for the next batch (nothing recorded, nothing run).
+    this.beginRefusal = undefined
+    this.lastTaskTypes = []
+    this.taskState = 'idle'
+    this.queueLength = 0
+    this.unknown = []
+    // Force-level facts for goal done_when conditions.
+    this.rocketsLaunched = 0
+    this.researched = new Set()
+    this.produced = {}
+    // World-state goal readings (plan 3.7), keyed "kind:name": each read takes
+    // the next reading and the last one repeats, so sampling can be scripted.
+    // Every read advances the fake game tick.
+    this.worldReadings = {}
+    this.gameTick = 1000
+    this.knownTechnologies = new Set(['automation', 'logistics', 'rocket-silo', 'electronics'])
+    this.progressFactsAvailable = true
+    // autorio_planning.goal_requirements (goal-requirements.mjs): nothing locked unless a scenario scripts it.
+    // An object or function(request) answers; 'throw' fails the RCON call; every request is recorded.
+    this.requirements = undefined
+    this.requirementsRequests = []
+    // Optional hook run on every admitted batch, for scenarios whose world
+    // changes because of what was admitted (a launch raising the rocket count).
+    this.onMutation = null
+    // What getNearbyEntities reports, so a scenario can bind an exact
+    // unit_number through a live observation.
+    this.nearby = { actor_position: { x: 0, y: 0 }, entities: [] }
+    // Overrides the basic-operation receipt, for a scenario whose operation fails.
+    this.lastBasicResult = undefined
+    // The batch Autorio cancelled on a failure (see failLastBatch).
+    this.cancelledBatch = undefined
+    // What autorio_skills.get returns per skill id, so getSkillDetails can
+    // load task-local skill context.
+    this.skills = {}
+  }
+
+  // Fails the last admitted batch the way Autorio reports it: the failing
+  // operation's result (correlated to the batch by tick and actor) and the
+  // cancelled batch with its dependent operations. failedTaskIndex: the task
+  // that failed is a later one (every earlier task completed), as the mod's
+  // receipt records it (tasks_started, failed_task_index).
+  failLastBatch(result, reason = `${result.type}:${result.code}`, { failedTaskIndex } = {}) {
+    const tick = 600 + this.batchId
+    // Like the mod (basic_operations.ts fail): only a placement failure claims it changed nothing, and the receipt records how
+    // many tasks had started. A failing first task with that claim proves no task of the batch had any effect. A placement
+    // that picked up ground items or cleared entities first changed the world, so it makes no claim.
+    const placing = result.type === 'placing' && !(result.ground_items_picked_up?.length > 0) && !(result.entities_cleared?.length > 0) && result.ground_item_pickup_uncertain !== true
+    this.cancelledBatch = { batch_id: this.batchId, batch_generation: this.generation ?? 1, batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}`,
+      task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick, reason,
+      started_count: this.lastTaskTypes.length > 0 && this.lastTaskTypes[0] === result.type ? 1 : 2,
+      ...(placing ? { failed_before_mutation: true } : {}) }
+    if (Number.isSafeInteger(failedTaskIndex)) {
+      Object.assign(this.cancelledBatch, { started_count: failedTaskIndex + 1, tasks_started: failedTaskIndex + 1,
+        ...(placing ? { failed_task_index: failedTaskIndex } : {}) })
+    }
+    this.lastBasicResult = { operation_id: this.batchId, tick, actor_id: this.status.actor_id, accepted: true, completed: false, ...result }
+    this.taskState = 'idle'
+    this.queueLength = 0
+    return reason
+  }
+
+  // Mirrors autorio_tools.goal_progress_facts.
+  goalProgressFacts(request) {
+    if (!this.progressFactsAvailable) throw new Error('Unknown interface: goal_progress_facts')
+    const milestones = {}
+    for (const name of request.technologies ?? []) {
+      if (this.knownTechnologies.has(name)) milestones[name] = this.researched.has(name)
+    }
+    return {
+      ok: true,
+      rockets_launched: this.rocketsLaunched,
+      researched_technologies: this.researched.size,
+      enabled_technologies: this.knownTechnologies.size,
+      milestones,
+      space_age: false,
+    }
+  }
+
+  // Mirrors autorio_tools.evaluate_condition for goal-level kinds.
+  evaluateGoalCondition(request) {
+    if (request.kind === 'rockets_launched') {
+      return { ok: true, kind: request.kind, satisfied: this.rocketsLaunched >= request.minimum, current: this.rocketsLaunched, minimum: request.minimum }
+    }
+    if (request.kind === 'research_completed') {
+      if (!this.knownTechnologies.has(request.technology)) return { ok: false, error: 'unknown_technology', technology: request.technology }
+      return { ok: true, kind: request.kind, satisfied: this.researched.has(request.technology), technology: request.technology }
+    }
+    if (['entity_working', 'electric_network_satisfied', 'production_rate'].includes(request.kind)) {
+      const queue = this.worldReadings[`${request.kind}:${request.entity_name ?? request.item_name}`]
+      this.gameTick += 60
+      if (!queue || queue.length === 0) return { ok: true, kind: request.kind, satisfied: false, current: 0, tick: this.gameTick }
+      const reading = queue.length > 1 ? queue.shift() : queue[0]
+      return { ok: true, kind: request.kind, tick: this.gameTick, ...reading }
+    }
+    if (request.kind === 'items_produced') {
+      const current = this.produced[request.item_name] ?? 0
+      return { ok: true, kind: request.kind, satisfied: current >= request.minimum, current, minimum: request.minimum }
+    }
+    return undefined
+  }
+
+  async command(text) {
+    if (text.includes('projection="next_slice_ownership_v1"')) {
+      // All four existing status getters are sampled synchronously before any
+      // promise resumes, mirroring one native read-only event.
+      const commands = ['sgluna_deployment', 'autorio_operations', 'autorio_crafting', 'autorio_follow']
+      const reads = commands.map(name => FakeFactorio.prototype.command.call(this, `/silent-command rcon.print(helpers.table_to_json(remote.call("${name}","status")))`))
+      const [deployment, operations, crafting, follow] = await Promise.all(reads.map(async read => JSON.parse(await read)))
+      return JSON.stringify({ projection: 'next_slice_ownership_v1', tick: this.gameTick, deployment, operations, crafting, follow })
+    }
+
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("autorio_operations","status")')) {
+      return JSON.stringify({
+        task_state: this.taskState,
+        batch_generation: this.generation ?? 1,
+        receipt_journal: this.cancelledBatch ? [{ ...this.cancelledBatch, state: 'cancelled' }] : [],
+        queue_empty: this.queueLength === 0,
+        queue_length: this.queueLength,
+        admission_journal: this.admissionJournal(),
+        last_completed_batch: this.batchId > 0 && this.cancelledBatch?.batch_id !== this.batchId
+          ? { batch_id: this.batchId, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick: 600 + this.batchId }
+          : undefined,
+        last_cancelled_batch: this.cancelledBatch,
+        basic_operation: this.batchId > 0 ? { last_result: this.lastBasicResult ?? { operation_id: this.batchId, code: 'completed', completed: true } } : undefined,
+      })
+    }
+    if (text.includes('remote.call("autorio_tools","get_inventory_items")')) return JSON.stringify(Object.entries(this.inventory).map(([name, count]) => ({ name, count })))
+    if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
+    if (text.includes('remote.call("autorio_skills","get"')) {
+      const id = /remote\.call\("autorio_skills","get",'([^']+)'\)/.exec(text)?.[1]
+      return JSON.stringify(this.skills[id] ?? { ok: false, error: 'unknown_skill' })
+    }
+    if (text.includes('remote.call("autorio_crafting","status")')) {
+      return JSON.stringify(this.craftingStatus ?? { task_active: false, native_queue: {}, persisted_owner: null })
+    }
+    if (text.includes('remote.call("autorio_follow","status")')) {
+      return JSON.stringify(this.followStatus ?? { active: false, healthy: false, controller_live: false, state: 'idle' })
+    }
+    if (text.includes('remote.call("autorio_preflight","operation"')) {
+      return JSON.stringify(this.preflight(text))
+    }
+    if (text.includes('"goal_progress_facts"')) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      return JSON.stringify(this.goalProgressFacts(JSON.parse(encoded.replace(/\\(.)/g, '$1'))))
+    }
+    if (text.includes('"goal_requirements"')) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      const request = JSON.parse(encoded.replace(/\\(.)/g, '$1'))
+      this.requirementsRequests.push(request)
+      if (this.requirements === 'throw') throw new Error('Unknown interface function: goal_requirements')
+      const scripted = typeof this.requirements === 'function' ? this.requirements(request) : this.requirements
+      return typeof scripted === 'string'
+        ? scripted
+        : JSON.stringify(scripted ?? { ok: true, tick: this.gameTick, locked: [], research: {}, machines: [], unknown: [], counts: { locked: 0, recipes_walked: 1, unlocked_recipes: 0, raw_items: 0 }, truncated: {} })
+    }
+    if (text.includes('"evaluate_condition"') || text.includes("'evaluate_condition'")) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      if (encoded) {
+        const request = JSON.parse(encoded.replace(/\\(.)/g, '$1'))
+        const goalResult = this.evaluateGoalCondition(request)
+        if (goalResult) return JSON.stringify(goalResult)
+      }
+      const item = /item_name\s*=\s*["']([^"']+)["']/.exec(text)?.[1]
+        ?? /"item_name"\s*:\s*"([^"]+)"/.exec(text)?.[1]
+      const minimum = Number(/minimum\s*=\s*(\d+)/.exec(text)?.[1] ?? /"minimum"\s*:\s*(\d+)/.exec(text)?.[1] ?? 1)
+      const current = this.inventory[item] ?? 0
+      return JSON.stringify({ ok: true, satisfied: current >= minimum, current, minimum, item_name: item })
+    }
+    if (text.includes('local ok,result=pcall') && text.includes('"authorize"')) {
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
+      this.mutations.push(text)
+      this.batchId++
+      const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
+      if (encoded) {
+        const identity = JSON.parse(JSON.parse(encoded))
+        const refusal = this.syncRefusal
+        this.syncRefusal = undefined
+        if (this.beginRefusal) {
+          // operation_admission.begin refused before any journal record: the Lua error carries the code and no admission.
+          const code = this.beginRefusal
+          this.beginRefusal = undefined
+          this.batchId--
+          return `${marker}${JSON.stringify({ ok: false, result: `admission_begin_refused:${code}`, prefix: [] })}`
+        }
+        if (refusal) {
+          // The mod's shape for a returned (not thrown) refusal from a validate-then-queue operation: no batch was created.
+          this.batchId--
+          const proven = refusal.proven !== false
+          const slots = Array.from({ length: Math.min(refusal.slot, identity.operation_count) }, (_, index) => index + 1 === refusal.slot
+            ? (proven
+                ? { index: refusal.slot, ok: false, error: refusal.error, operation: refusal.operation, mutation_unknown: false, refused_before_mutation: true, refusal_code: refusal.error, batch_refs: [] }
+                : { index: refusal.slot, ok: false, error: refusal.error, operation: refusal.operation, mutation_unknown: true, batch_refs: [] })
+            : { index: index + 1, ok: true, batch_refs: [] })
+          const record = { ...identity, tick: this.gameTick, generation: this.generation ?? 1, state: proven ? 'failed' : 'uncertain', ...(proven ? { proven_refusal: true } : {}), ok: false, error: `autorio rejected operation ${refusal.slot}`, slots }
+          this.admissions.push(record)
+          return `${marker}${JSON.stringify({ ok: false, result: `autorio rejected operation ${refusal.slot}: ${refusal.error}`, prefix: [], admission: record })}`
+        }
+        const names = [...text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'/g)].map(([, name]) => name)
+        this.admissions.push({ ...identity, tick: this.gameTick, generation: this.generation ?? 1, batch_id: this.batchId, state: 'admitted',
+          slots: Array.from({ length: identity.operation_count }, (_, index) => ({ index: index + 1, ok: true, operation: names[index],
+            queued_tasks: (TASK_TYPES_BY_OPERATION[names[index]] ?? ['waiting']).length,
+            batch_refs: [{ batch_id: this.batchId, batch_generation: this.generation ?? 1, batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}` }] })) })
+      }
+      this.lastBasicResult = undefined
+      this.lastTaskTypes = [...text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'/g)]
+        .flatMap(([, name]) => TASK_TYPES_BY_OPERATION[name] ?? ['waiting'])
+      const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
+      this.onMutation?.(text)
+      return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
+    }
+    this.unknown.push(text.slice(0, 160))
+    return '{}'
+  }
+
+  admissionJournal() {
+    // Mirrors operation_admission.ts refresh(): a cancelled batch is exact only with the mod's first-task proof.
+    return this.admissions.map((record) => {
+      if (record.state === 'uncertain' || record.state === 'failed') return record
+      if (this.cancelledBatch?.batch_id === record.batch_id) {
+        const cancelled = this.cancelledBatch
+        const proven = cancelled.started_count === 1 && cancelled.failed_before_mutation === true
+        // cancelled_slot_prefix: the failing task is the first task of a slot and the batch holds exactly these slots' tasks.
+        let first = 0
+        const starts = record.slots.map(slot => { const start = first; first += slot.queued_tasks; return start })
+        const applied = cancelled.failed_before_mutation === true && cancelled.task_count === first
+          && cancelled.tasks_started === (cancelled.failed_task_index ?? -2) + 1 ? starts.indexOf(cancelled.failed_task_index) : -1
+        // Terminal states are retained by the mod's journal.
+        Object.assign(record, proven ? { state: 'failed', ok: false, proven_refusal: true, error: 'refused_before_mutation' }
+          : applied >= 0 ? { state: 'failed', ok: false, proven_refusal: true, applied_slot_count: applied, error: 'refused_before_mutation' }
+            : { state: 'uncertain', error: 'batch_reconciliation_required' })
+        return record
+      }
+      return { ...record, state: this.taskState === 'idle' && record.batch_id <= this.batchId ? 'completed' : 'admitted' }
+    })
+  }
+}
+
+// Preferred live answers for every choice question family Jev can be asked.
+const PREFERRED_CHOICES = [
+  'actionable', 'none', 'advances_current', 'checkpoint_here', 'candidate_1',
+  'vertical', 'new_goal', 'normal', 'checkpoint', 'maintain',
+]
+
+// Jev's blind goal reading defaults to "no opinion" so it never challenges a
+// planner in tests that do not script it.
+const NEUTRAL_ANSWERS = {
+  goal_scope: { choice: 'unclear', confidence: 0.9 },
+  goal_family: { choice: 'other', confidence: 0.9 },
+}
+
+export function liveShapedAnswer(questions, overrides = {}) {
+  const answers = {}
+  for (const [id, question] of Object.entries(questions ?? {})) {
+    if (Object.hasOwn(overrides, id)) {
+      answers[id] = overrides[id]
+      continue
+    }
+    if (Object.hasOwn(NEUTRAL_ANSWERS, id)) {
+      answers[id] = NEUTRAL_ANSWERS[id]
+      continue
+    }
+    const criteria = question?.criteria
+    if (question?.type === 'score') {
+      const length = Array.isArray(criteria) ? criteria.length : Object.keys(criteria ?? {}).length
+      answers[id] = { score: Math.max(0, length - 1) }
+      continue
+    }
+    if (question?.type === 'noul') {
+      answers[id] = { noul: 0.1 }
+      continue
+    }
+    const keys = Array.isArray(criteria) ? criteria : Object.keys(criteria ?? {})
+    const choice = PREFERRED_CHOICES.find(value => keys.includes(value)) ?? keys[0]
+    answers[id] = { choice, confidence: 0.9 }
+  }
+  return { answers, provider: 'fixture-jev', model: 'fixture-live-shape' }
+}
+
+// A Jev that answers every question family in the live provider shape and
+// records what it was asked. `script(state, questions, call)` may return a
+// full response, a partial `overrides` object via { overrides }, or throw.
+export function recordingJev(script) {
+  const calls = []
+  const provider = contractCheckedJev(async (state, questions, context) => {
+    const call = { index: calls.length, keys: Object.keys(questions ?? {}), state }
+    calls.push(call)
+    const scripted = script ? await script(state, questions, call, context) : undefined
+    if (scripted?.answers) return scripted
+    return liveShapedAnswer(questions, scripted?.overrides ?? {})
+  })
+  provider.calls = calls
+  provider.callsWith = key => calls.filter(call => call.keys.includes(key))
+  return provider
+}
+
+export function planReply({ chatMessage = 'Working.', plan, currentStep = 0, operations = [], checkpoint, ...rest }) {
+  return {
+    content: JSON.stringify({
+      chatMessage,
+      plan,
+      currentStep,
+      operations,
+      ...(checkpoint ? { checkpoint } : {}),
+      ...rest,
+    }),
+  }
+}
+
+export function inventoryCheckpoint(itemName, minimum) {
+  return {
+    mode: 'all',
+    requirements: [{ id: `${itemName}_target`, kind: 'inventory_count', item_name: itemName, minimum }],
+  }
+}
+
+export function gather(resourceName, count = 10) {
+  return { name: 'gather_resource', args: { resource_name: resourceName, count, search_radius: 32 } }
+}
+
+// Step contracts are authored when each step is about to start (docs/NPC_PLANNING_ROADMAP.md, "One-step contract
+// prediction"), so a scenario that scripts a whole slice with a checkpoint for every step now sees one contract call per
+// later step. This wrapper keeps such a scenario's meaning: it answers a [STEP_CONTRACT_REQUEST] call with the checkpoint the
+// scenario ORIGINALLY declared for that step, and delegates every other call untouched (so its call-by-call script and
+// counters never see the contract calls). The declared checkpoints are learned from the replies the wrapped provider
+// returns (stepCompletions aligned with plan), or given up front by step id or description in `contracts`.
+// `wrapped.contractCalls` records each contract call it answered; `wrapped.declared` is what it learned.
+export function answersStepContract(provider, { contracts = {} } = {}) {
+  const declared = new Map(Object.entries(contracts))
+  const contractCalls = []
+  const remember = (reply) => {
+    const bodies = []
+    if (typeof reply?.content === 'string') bodies.push(reply.content)
+    for (const call of Array.isArray(reply?.tool_calls) ? reply.tool_calls : []) {
+      if (typeof call?.function?.arguments === 'string') bodies.push(call.function.arguments)
+    }
+    for (const body of bodies) {
+      let parsed
+      try { parsed = JSON.parse(body) }
+      catch { continue }
+      if (!Array.isArray(parsed?.plan) || !Array.isArray(parsed?.stepCompletions)) continue
+      parsed.stepCompletions.forEach((entry, index) => {
+        if (entry?.kind === 'deterministic' && entry.checkpoint && typeof parsed.plan[index] === 'string') declared.set(parsed.plan[index], entry.checkpoint)
+      })
+    }
+  }
+  const wrapped = async (messages, context) => {
+    if (context?.triggerSource === 'step_contract') {
+      const request = [...messages].reverse().find(message => message?.role === 'user' && String(message.content).startsWith('[STEP_CONTRACT_REQUEST]'))
+      assert.ok(request, 'a step_contract call carries a [STEP_CONTRACT_REQUEST] message')
+      const text = String(request.content)
+      const packet = JSON.parse(text.slice(text.indexOf(' {"goal"') + 1))
+      const target = packet.target
+      const checkpoint = declared.get(target.step_id) ?? declared.get(target.description)
+      assert.ok(checkpoint, `answersStepContract: no checkpoint was declared for step "${target.description}" (${target.step_id})`)
+      contractCalls.push({ messages, context, packet, checkpoint })
+      return { content: JSON.stringify({ stepId: target.step_id, checkpoint }) }
+    }
+    const reply = await provider(messages, context)
+    remember(reply)
+    return reply
+  }
+  wrapped.contractCalls = contractCalls
+  wrapped.declared = declared
+  return wrapped
+}

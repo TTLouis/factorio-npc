@@ -1,22 +1,37 @@
-import type { LuaEntity, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, LuaEntityPrototype, LuaFluidBox, SurfaceCondition } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { recipe_bootstrap_for_actor } from './bootstrap_planning'
+import { resolve_visible_entity_reference } from './entity_reference'
+import { area_known_visible } from './map_knowledge'
+import * as estimate from './production_estimate_live'
+import * as rates from './production_rates'
+import { recipe_categories } from './recipe_categories'
+import { find_world_entities } from './npc_vision'
+import { natural_harvest_source_names } from './prototype_knowledge'
+import type { SeenArea } from './visible_reads'
+import { belt_link_area, entity_area, pipe_link_area, point_area, seen_link, seen_now } from './visible_reads'
 
 const MAX_RECIPE_MATCHES = 8
-const MAX_MACHINE_MATCHES = 32
+const MAX_MACHINE_MATCHES = 8
 const MAX_FLUID_STORAGES = 16
 const MAX_PIPE_CONNECTIONS = 16
 const MAX_TOPOLOGY_RADIUS = 16
 const MAX_TOPOLOGY_INSERTERS = 64
+// Retain the local scan margin; each linked route is separately bounded before reading its endpoints.
+const TOPOLOGY_MIN_REACH = 12
+const NOT_VISIBLE_ERROR = 'entity is in a chunk the NPC does not see now; observe it again from nearby'
+const NOT_VISIBLE_AREA_ERROR = 'the area around the entity reaches chunks the NPC does not see now; observe it again from nearby'
 const MAX_TOPOLOGY_RELATIONS = 64
 
 interface RecipeCandidate {
   name: string
   recipe: any
+  applicability: ReturnType<typeof recipe_applicability>
 }
 
 interface MachineCandidate {
   name: string
-  prototype: any
+  prototype: LuaEntityPrototype
 }
 
 function sort_named<T extends { name: string }>(values: T[]) {
@@ -32,37 +47,100 @@ function sort_named<T extends { name: string }>(values: T[]) {
   }
 }
 
+// Prototype presence comes from the loaded game, not a base-game/expansion name list.
+// Enabled is deliberately separate: locked recipes remain useful research dependencies.
+function recipe_applicability(actor: ControlledActor, recipe: any) {
+  const surface = actor.surface
+  const scope = { surface_index: surface?.index }
+  if (!recipe.prototype) return { ...scope, state: 'unknown', reason: 'recipe_prototype_unavailable', surface_bound: true }
+  const conditions = recipe.prototype.surface_conditions as SurfaceCondition[] | undefined
+  if (!conditions || conditions.length === 0) return { state: 'available', reason: 'no_surface_conditions', surface_bound: false }
+  if (surface?.ignore_surface_conditions === true) return { ...scope, state: 'available', reason: 'surface_conditions_ignored', surface_bound: true }
+  if (!surface) return { ...scope, state: 'unknown', reason: 'actor_surface_unavailable', surface_bound: true }
+  try {
+    for (const condition of conditions) {
+      const value = surface.get_property(condition.property)
+      if (typeof value !== 'number' || value !== value || typeof condition.min !== 'number' || typeof condition.max !== 'number') {
+        return { ...scope, state: 'unknown', reason: 'surface_property_unavailable', surface_bound: true }
+      }
+      if (value < condition.min || value > condition.max) return { ...scope, state: 'unavailable', reason: 'surface_condition_mismatch', surface_bound: true }
+    }
+    return { ...scope, state: 'available', reason: 'surface_conditions_satisfied', surface_bound: true }
+  }
+  catch { return { ...scope, state: 'unknown', reason: 'surface_property_unavailable', surface_bound: true } }
+}
+
 function recipe_candidates(actor: ControlledActor, item_or_recipe: string) {
   const direct = actor.force.recipes[item_or_recipe]
-  if (direct !== undefined) {
-    return { candidates: [{ name: direct.name, recipe: direct }], truncated: false }
+  const direct_applicability = direct && recipe_applicability(actor, direct)
+  if (direct !== undefined && direct_applicability?.state !== 'unavailable') {
+    return { candidates: [{ name: direct.name, recipe: direct, applicability: direct_applicability! }], truncated: false }
   }
 
   const candidates: RecipeCandidate[] = []
   for (const [name, recipe] of pairs(actor.force.recipes)) {
     for (const product of recipe.products) {
       if (product.name === item_or_recipe) {
-        candidates.push({ name, recipe })
+        candidates.push({ name, recipe, applicability: recipe_applicability(actor, recipe) })
         break
       }
     }
   }
   sort_named(candidates)
+  // Irrelevant surface recipes must not fill the bounded response ahead of valid alternatives.
+  const ordered = [...candidates.filter(candidate => candidate.applicability.state !== 'unavailable'),
+    ...candidates.filter(candidate => candidate.applicability.state === 'unavailable')]
+  if (direct && !candidates.some(candidate => candidate.name === direct.name)) {
+    ordered.push({ name: direct.name, recipe: direct, applicability: direct_applicability! })
+  }
   return {
-    candidates: candidates.slice(0, MAX_RECIPE_MATCHES),
-    truncated: candidates.length > MAX_RECIPE_MATCHES,
+    candidates: ordered.slice(0, MAX_RECIPE_MATCHES),
+    truncated: ordered.length > MAX_RECIPE_MATCHES,
+  }
+}
+
+function sort_strings(values: string[]) {
+  for (let i = 0; i < values.length; i++) {
+    for (let j = i + 1; j < values.length; j++) {
+      if (values[j] < values[i]) {
+        const tmp = values[i]
+        values[i] = values[j]
+        values[j] = tmp
+      }
+    }
   }
 }
 
 function categories_for(recipe: any): string[] {
-  const categories: string[] = []
-  for (const category of recipe.categories ?? []) {
-    categories.push(category)
-  }
+  // Reading the shape is recipe_categories' job -- see that module for why
+  // `recipe.categories` is fatal rather than merely wrong. This was a fourth
+  // hand-rolled copy of that read; it happened to be correct, but its existence
+  // is what made three of the other copies survive unnoticed.
+  //
+  // The sort stays here: this is the only caller that needs a deterministic
+  // order, because these categories reach the model as observation text.
+  const categories = recipe_categories(recipe)
+  sort_strings(categories)
   return categories
 }
 
-function machine_summaries(categories: string[]) {
+// The item whose placement creates this machine, read from the prototype (name-sorted when several do), or undefined.
+// A fresh executor needs it to count how many of the machine the actor holds without assuming entity and item share a name.
+function placed_by_item(prototype: LuaEntityPrototype): string | undefined {
+  const names: string[] = []
+  try {
+    for (const stack of (prototype as any).items_to_place_this ?? []) {
+      if (typeof stack?.name === 'string') names.push(stack.name)
+    }
+  }
+  catch {
+    // An unreadable placing-item list leaves the machine item unnamed rather than failing the whole recipe read.
+  }
+  sort_strings(names)
+  return names[0]
+}
+
+function machine_summaries(categories: string[], recipe: any, fuel_name: string | undefined) {
   const seen: Record<string, boolean> = {}
   const candidates: MachineCandidate[] = []
 
@@ -79,13 +157,25 @@ function machine_summaries(categories: string[]) {
 
   sort_named(candidates)
   return {
+    matched_count: candidates.length,
     truncated: candidates.length > MAX_MACHINE_MATCHES,
     machines: candidates.slice(0, MAX_MACHINE_MATCHES).map(({ name, prototype }) => ({
       name,
       type: prototype.type,
-      crafting_speed: prototype.crafting_speed,
-      crafting_categories: prototype.crafting_categories,
+      placed_by_item: placed_by_item(prototype),
+      ...rates.machine_craft_rate(prototype, recipe, fuel_name),
     })),
+  }
+}
+
+// Seconds per craft by hand for this actor, only when its hands can make the recipe.
+function hand_crafting_summary(actor: ControlledActor, recipe: any, hand_craftable: boolean) {
+  if (!hand_craftable || recipe.prototype?.hidden_from_player_crafting === true) return undefined
+  const crafting_speed = rates.hand_crafting_speed(actor)
+  if (crafting_speed === undefined || !(crafting_speed > 0) || !(recipe.energy > 0)) return undefined
+  return {
+    crafting_speed: rates.round_rate(crafting_speed),
+    seconds_per_craft: rates.round_rate(recipe.energy / crafting_speed),
   }
 }
 
@@ -123,6 +213,18 @@ function product_summary(product: any) {
   }
 }
 
+function ingredient_summaries(recipe: any) {
+  const result: Array<Record<string, unknown>> = []
+  for (const ingredient of recipe.ingredients ?? []) result.push(ingredient_summary(ingredient))
+  return result
+}
+
+function product_summaries(recipe: any) {
+  const result: Array<Record<string, unknown>> = []
+  for (const product of recipe.products ?? []) result.push(product_summary(product))
+  return result
+}
+
 function squared_distance(a: { x: number, y: number }, b: { x: number, y: number }) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
@@ -153,6 +255,7 @@ function fluidbox_prototype_summary(value: any) {
     result.push({
       index: prototype.index,
       production_type: prototype.production_type,
+      volume: prototype.volume,
       filter: prototype.filter?.name,
       minimum_temperature: prototype.minimum_temperature,
       maximum_temperature: prototype.maximum_temperature,
@@ -161,7 +264,15 @@ function fluidbox_prototype_summary(value: any) {
   return result
 }
 
-function fluid_storage_summary(entity: LuaEntity, index: number) {
+// A linked neighbour in a chunk the NPC does not see now (M3): unknown, not absent.
+const NOT_VISIBLE_TARGET = { not_visible: true }
+
+function linked_summary(seen: SeenArea, position: { x: number, y: number } | undefined, read: () => LuaEntity | undefined) {
+  const link = seen_link(seen, position ? point_area(position) : undefined, read)
+  return link.seen ? entity_summary(link.entity) : NOT_VISIBLE_TARGET
+}
+
+function fluid_storage_summary(entity: LuaEntity, index: number, seen: SeenArea) {
   const fluidbox = entity.fluidbox
   const prototypes_for_storage = fluidbox_prototype_summary(fluidbox.get_prototype(index))
   const connections = fluidbox.get_pipe_connections(index) ?? []
@@ -170,6 +281,7 @@ function fluid_storage_summary(entity: LuaEntity, index: number) {
   return {
     index,
     capacity: fluidbox.get_capacity(index),
+    local_volume: prototypes_for_storage.reduce((total, prototype) => total + (prototype.volume as number), 0),
     current_fluid: current_fluid
       ? {
           name: current_fluid.name,
@@ -177,17 +289,40 @@ function fluid_storage_summary(entity: LuaEntity, index: number) {
           temperature: current_fluid.temperature,
         }
       : undefined,
-    prototypes: prototypes_for_storage,
+    prototypes: prototypes_for_storage.slice(0, MAX_FLUID_STORAGES),
+    prototypes_truncated: prototypes_for_storage.length > MAX_FLUID_STORAGES,
     pipe_connections_truncated: connections.length > MAX_PIPE_CONNECTIONS,
-    pipe_connections: connections.slice(0, MAX_PIPE_CONNECTIONS).map(connection => ({
+    pipe_connections: connections.slice(0, MAX_PIPE_CONNECTIONS).map((connection, connection_index) => pipe_connection_summary(entity, connection, connection_index, index, seen)),
+  }
+}
+
+type PipeConnection = ReturnType<LuaFluidBox['get_pipe_connections']>[number]
+
+function pipe_connection_summary(entity: LuaEntity, connection: PipeConnection, connection_index: number, fluidbox_index: number, seen: SeenArea) {
+  // Whether and to what it connects would be read from a chunk the NPC does not see now: unknown, not disconnected.
+  if (!seen_link(seen, pipe_link_area(entity, connection, fluidbox_index), () => connection.target?.owner).seen) {
+    return {
+      connection_index: connection_index + 1,
+      target_not_visible: true,
       flow_direction: connection.flow_direction,
       connection_type: connection.connection_type,
       position: connection.position,
       target_position: connection.target_position,
-      target: entity_summary(connection.target?.owner),
-      target_fluidbox_index: connection.target_fluidbox_index,
-      target_pipe_connection_index: connection.target_pipe_connection_index,
-    })),
+    }
+  }
+  return {
+    connection_index: connection_index + 1,
+    connected: connection.target !== undefined,
+    target_valid: connection.target === undefined || connection.target.owner?.valid === true,
+    flow_direction: connection.flow_direction,
+    connection_type: connection.connection_type,
+    position: connection.position,
+    target_position: connection.target_position,
+    target: entity_summary(connection.target?.owner),
+    target_surface_index: connection.target?.owner?.valid ? connection.target.owner.surface.index : undefined,
+    target_force_index: connection.target?.owner?.valid ? connection.target.owner.force.index : undefined,
+    target_fluidbox_index: connection.target_fluidbox_index,
+    target_pipe_connection_index: connection.target_pipe_connection_index,
   }
 }
 
@@ -224,49 +359,246 @@ function push_relation(relations: Array<Record<string, unknown>>, relation: Reco
   if (relations.length < MAX_TOPOLOGY_RELATIONS) relations.push(relation)
 }
 
-function add_inserter_route(relations: Array<Record<string, unknown>>, inserter: LuaEntity) {
+function add_inserter_route(relations: Array<Record<string, unknown>>, inserter: LuaEntity, seen: SeenArea, center?: LuaEntity) {
+  if (!seen(entity_area(inserter))) return false
+  const pickup = seen_link(seen, inserter.pickup_position !== undefined ? point_area(inserter.pickup_position) : undefined, () => inserter.pickup_target)
+  const drop = seen_link(seen, inserter.drop_position !== undefined ? point_area(inserter.drop_position) : undefined, () => inserter.drop_target)
+  if (!pickup.seen || !drop.seen) return false
+  if (center && !same_entity(pickup.entity, center) && !same_entity(drop.entity, center)) return true
   push_relation(relations, {
     kind: 'item_transfer',
-    from: entity_summary(inserter.pickup_target),
+    from: entity_summary(pickup.entity),
     via: entity_summary(inserter),
-    to: entity_summary(inserter.drop_target),
+    to: entity_summary(drop.entity),
     pickup_position: inserter.pickup_position,
     drop_position: inserter.drop_position,
   })
+  return true
 }
 
-export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe: string) {
+interface ResourceCandidate {
+  name: string
+  prototype: LuaEntityPrototype
+}
+
+function resource_yields(resource: LuaEntityPrototype, item_name: string) {
+  for (const product of (resource.mineable_properties as any).products ?? []) {
+    if (product.name === item_name) return true
+  }
+  return false
+}
+
+// Resource prototypes named `resource_or_item`, or whose mining yields it.
+function resources_yielding(resource_or_item: string) {
+  const result: ResourceCandidate[] = []
+  const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'resource' }])
+  for (const [name, prototype] of pairs(matches)) {
+    if (name === resource_or_item || resource_yields(prototype, resource_or_item)) result.push({ name, prototype })
+  }
+  sort_named(result)
+  return result
+}
+
+// Resource prototypes whose mining yields `item_name` as a product, by prototype data only. Unlike resources_yielding it
+// does not match a resource merely named like the query: the answer says what is MINED as this item.
+function resources_mining_product(item_name: string) {
+  const result: ResourceCandidate[] = []
+  const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'resource' }])
+  for (const [name, prototype] of pairs(matches)) {
+    if (resource_yields(prototype, item_name)) result.push({ name, prototype })
+  }
+  sort_named(result)
+  return result
+}
+
+// Bounded, deterministic (name-sorted) resource names that mine into the queried item; undefined when none do.
+function mined_from_names(item_name: string) {
+  const names = resources_mining_product(item_name).map(resource => resource.name)
+  return names.length > 0 ? names.slice(0, MAX_RECIPE_MATCHES) : undefined
+}
+
+// Bounded, deterministic (name-sorted) natural entity prototypes -- trees and rocks the harvest operation mines -- whose mining
+// yields the item; undefined when none do. Same source set harvest_product searches (prototype_knowledge.ts), so a name listed
+// here is one the native operation can actually harvest. Resources are `mined_from`, not listed here.
+function harvested_from_names(item_name: string) {
+  const names = natural_harvest_source_names(item_name)
+  return names.length > 0 ? names.slice(0, MAX_RECIPE_MATCHES) : undefined
+}
+
+// Fuel facts for burner machines, from item and resource prototypes only: every item whose fuel category a burner
+// accepts (with its fuel value), the resources whose mining yields it (`mined_from`) and the trees and rocks whose mining yields
+// it (`harvested_from`). The list is complete, so the harness can choose among all accepted fuels. Items some natural source
+// yields come first, then name order. An item with neither has no derived source, which is not a claim that nothing yields it.
+function burner_fuel_summary(categories: string[]) {
+  const accepted: Record<string, boolean> = {}
+  for (const category of categories) accepted[category] = true
+  const sourced: Array<{ name: string, category: string, fuel_value: number, mined_from: string[] | undefined, harvested_from: string[] | undefined }> = []
+  const unsourced: Array<{ name: string, category: string, fuel_value: number, mined_from: undefined, harvested_from: undefined }> = []
+  for (const [name, prototype] of pairs(prototypes.item)) {
+    const category = (prototype as any).fuel_category as string | undefined
+    const fuel_value = (prototype as any).fuel_value as number | undefined
+    if (category === undefined || accepted[category] !== true || typeof fuel_value !== 'number' || !(fuel_value > 0)) continue
+    const mined_from = mined_from_names(name)
+    const harvested_from = harvested_from_names(name)
+    if (mined_from !== undefined || harvested_from !== undefined) sourced.push({ name, category, fuel_value, mined_from, harvested_from })
+    else unsourced.push({ name, category, fuel_value, mined_from: undefined, harvested_from: undefined })
+  }
+  sort_named(sourced)
+  sort_named(unsourced)
+  return {
+    categories,
+    items: [...sourced, ...unsourced],
+  }
+}
+
+function drill_summaries(actor: ControlledActor, resource: LuaEntityPrototype, category: string, fuel_name: string | undefined) {
+  const candidates: MachineCandidate[] = []
+  const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'mining-drill' }])
+  for (const [name, prototype] of pairs(matches)) {
+    if (prototype.resource_categories?.[category] === true) candidates.push({ name, prototype })
+  }
+  sort_named(candidates)
+  return {
+    matched_count: candidates.length,
+    truncated: candidates.length > MAX_MACHINE_MATCHES,
+    drills: candidates.slice(0, MAX_MACHINE_MATCHES).map(({ name, prototype }) => ({
+      name,
+      ...rates.drill_mining_rate(actor.force, prototype, resource, fuel_name),
+    })),
+  }
+}
+
+function hand_mining_summary(actor: ControlledActor, resource: LuaEntityPrototype, category: string, required_fluid: unknown) {
+  const categories = actor.character?.prototype.resource_categories
+  if (categories === undefined || categories[category] !== true || required_fluid !== undefined) return undefined
+  const mining_speed = rates.hand_mining_speed(actor)
+  const mining_time = rates.resource_mining_time(resource)
+  if (mining_speed === undefined || !(mining_speed > 0) || !(mining_time > 0)) return undefined
+  const cycles_per_second = mining_speed / mining_time
+  return {
+    mining_speed: rates.round_rate(mining_speed),
+    seconds_per_cycle: rates.round_rate(mining_time / mining_speed),
+    products_per_minute: rates.product_rates_per_minute((resource.mineable_properties as any).products, cycles_per_second),
+  }
+}
+
+// Mining facts for a resource (or the resources that yield an item): mining
+// time, and per compatible drill its speed and output per minute. Facts only;
+// how many drills to place is the planner's decision.
+export function mining_details_for_actor(actor: ControlledActor, resource_or_item: string, fuel_name?: string) {
+  const resources = resources_yielding(resource_or_item)
+  if (resources.length === 0) {
+    return { found: false, query: resource_or_item, error: 'no resource has this name or yields this item/fluid' }
+  }
+  return {
+    found: true,
+    query: resource_or_item,
+    rate_basis: rates.RATE_BASIS,
+    truncated: resources.length > MAX_RECIPE_MATCHES,
+    resources: resources.slice(0, MAX_RECIPE_MATCHES).map(({ name, prototype }) => {
+      const mineable = prototype.mineable_properties as any
+      const category = prototype.resource_category ?? 'basic-solid'
+      const infinite = prototype.infinite_resource === true
+      const drill_result = drill_summaries(actor, prototype, category, fuel_name)
+      return {
+        name,
+        category,
+        mining_time: mineable.mining_time,
+        products: product_summaries(mineable),
+        required_fluid: mineable.required_fluid,
+        fluid_amount: mineable.fluid_amount,
+        infinite,
+        // An infinite resource's yield scales with its current amount; the rates
+        // below are for the prototype's normal amount (100% yield).
+        normal_resource_amount: infinite ? prototype.normal_resource_amount : undefined,
+        drill_count: drill_result.matched_count,
+        drills: drill_result.drills,
+        drills_truncated: drill_result.truncated,
+        hand_mining: hand_mining_summary(actor, prototype, category, mineable.required_fluid),
+      }
+    }),
+  }
+}
+
+export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe: string, requested_count: number = 1, fuel_name?: string) {
   const { candidates, truncated } = recipe_candidates(actor, item_or_recipe)
   if (candidates.length === 0) {
     return {
       found: false,
       query: item_or_recipe,
+      // Declared by the producer so the harness never matches the sentence: the game has no recipe for this name.
+      code: 'no_recipe',
       error: 'no recipe produces this item/fluid and no recipe has this name',
+      mined_from: mined_from_names(item_or_recipe),
+      harvested_from: harvested_from_names(item_or_recipe),
     }
   }
+
+  const recipes = candidates.map(({ name, recipe, applicability }) => {
+    const categories = categories_for(recipe)
+    const machine_result = machine_summaries(categories, recipe, fuel_name)
+    const hand_craftable = character_can_craft(actor, categories)
+    const bootstrap = recipe_bootstrap_for_actor(actor, recipe, requested_count)
+    return {
+      name,
+      enabled: recipe.enabled,
+      applicability,
+      requested_crafts: bootstrap.requested_crafts,
+      craftable_now_count: bootstrap.craftable_now_count,
+      craftable_now: bootstrap.craftable_now,
+      inventory_overlay: bootstrap.inventory_overlay,
+      bootstrap: {
+        dependencies: bootstrap.dependencies,
+        first_unresolved: bootstrap.first_unresolved,
+      },
+      hidden: recipe.hidden,
+      energy: recipe.energy,
+      categories,
+      hand_craftable_category: hand_craftable,
+      hand_crafting: hand_crafting_summary(actor, recipe, hand_craftable),
+      hidden_from_player_crafting: recipe.prototype?.hidden_from_player_crafting,
+      allow_as_intermediate: recipe.prototype?.allow_as_intermediate,
+      allow_intermediates: recipe.prototype?.allow_intermediates,
+      ingredients: ingredient_summaries(recipe),
+      products: product_summaries(recipe),
+      crafting_machine_count: machine_result.matched_count,
+      crafting_machines: machine_result.machines,
+      crafting_machines_truncated: machine_result.truncated,
+    }
+  })
 
   return {
     found: true,
     query: item_or_recipe,
     truncated,
-    recipes: candidates.map(({ name, recipe }) => {
-      const categories = categories_for(recipe)
-      const machine_result = machine_summaries(categories)
-      return {
-        name,
-        enabled: recipe.enabled,
-        hidden: recipe.hidden,
-        energy: recipe.energy,
-        categories,
-        hand_craftable_category: character_can_craft(actor, categories),
-        hidden_from_player_crafting: recipe.prototype?.hidden_from_player_crafting,
-        ingredients: recipe.ingredients.map(ingredient_summary),
-        products: recipe.products.map(product_summary),
-        crafting_machines: machine_result.machines,
-        crafting_machines_truncated: machine_result.truncated,
-      }
-    }),
+    // Present whenever the queried item is also the mining product of a resource prototype: such an item is a raw leaf
+    // (acquired by mining), whatever recycling or crushing recipes also list it as a product.
+    mined_from: mined_from_names(item_or_recipe),
+    // Present whenever a tree or rock the harvest operation mines yields the queried item (wood from trees, stone from rocks).
+    harvested_from: harvested_from_names(item_or_recipe),
+    rate_basis: rates.RATE_BASIS,
+    // Present only when some listed crafting machine burns fuel: the fuels its categories accept, and which resources mine them.
+    burner_fuels: burner_fuels_of(recipes),
+    recipes,
   }
+}
+
+function burner_fuels_of(recipes: Array<{ crafting_machines: Array<Record<string, unknown>> }>) {
+  const categories: string[] = []
+  const seen: Record<string, boolean> = {}
+  for (const recipe of recipes) {
+    for (const machine of recipe.crafting_machines) {
+      if (machine.energy_source !== 'burner') continue
+      for (const category of (machine.fuel_categories as string[] | undefined) ?? []) {
+        if (seen[category] === true) continue
+        seen[category] = true
+        categories.push(category)
+      }
+    }
+  }
+  if (categories.length === 0) return undefined
+  sort_strings(categories)
+  return burner_fuel_summary(categories)
 }
 
 export function entity_geometry_for_actor(actor: ControlledActor, unit_number: number) {
@@ -278,19 +610,24 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     }
   }
 
-  const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  // Facts about a model-named entity cover only chunks the NPC sees now (M3).
+  const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') {
+    return { found: false, unit_number, error: NOT_VISIBLE_ERROR, code: 'entity_not_visible' }
+  }
+  if (resolved.code === 'wrong_surface') {
+    return {
+      found: false,
+      unit_number,
+      error: 'entity is on another surface',
+    }
+  }
+  const entity = resolved.entity
   if (!entity || !entity.valid) {
     return {
       found: false,
       unit_number,
       error: 'entity not found',
-    }
-  }
-  if (entity.surface.index !== actor.surface.index) {
-    return {
-      found: false,
-      unit_number,
-      error: 'entity is on another surface',
     }
   }
 
@@ -299,8 +636,10 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
   const fluid_box_count = entity.fluidbox.length
   const returned_fluid_storages = math.min(fluid_box_count, MAX_FLUID_STORAGES)
   const fluid_storages: Array<Record<string, unknown>> = []
+  // Neighbours linked to this entity are read only where the NPC sees now.
+  const seen = seen_now(actor.force, entity.surface)
   for (let index = 1; index <= returned_fluid_storages; index++) {
-    fluid_storages.push(fluid_storage_summary(entity, index))
+    fluid_storages.push(fluid_storage_summary(entity, index, seen))
   }
 
   const inserter = entity.type === 'inserter'
@@ -310,25 +649,64 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     found: true,
     distance: math.sqrt(squared_distance(actor.position, entity.position)),
     entity: entity_summary(entity),
+    surface_index: entity.surface.index,
+    force_index: entity.force.index,
+    actor_id: actor.status_snapshot().actor_id,
+    actor_surface_index: actor.surface.index,
+    actor_force_index: actor.force.index,
     item_io: inserter
       ? {
           pickup_position: entity.pickup_position,
           drop_position: entity.drop_position,
-          pickup_target: entity_summary(entity.pickup_target),
-          drop_target: entity_summary(entity.drop_target),
+          pickup_target: linked_summary(seen, entity.pickup_position, () => entity.pickup_target),
+          drop_target: linked_summary(seen, entity.drop_position, () => entity.drop_target),
         }
       : mining_drill
         ? {
             drop_position: entity.drop_position,
-            drop_target: entity_summary(entity.drop_target),
+            drop_target: linked_summary(seen, entity.drop_position, () => entity.drop_target),
           }
         : undefined,
     fluid_storage_count: entity.fluids_count,
+    fluid_geometry_version: 3,
     fluid_box_count,
     non_fluidbox_storage_count: math.max(0, entity.fluids_count - fluid_box_count),
     fluid_storages_truncated: fluid_box_count > MAX_FLUID_STORAGES,
     fluid_storages,
   }
+}
+
+// Stable native facts for a queued preservation guard. Fluid contents, distance
+// and production counters may change; identity/scope/layout/roles/filters/edges
+// may not. This is a read, never a replacement or placement authorization.
+export function preservation_geometry_for_actor(actor: ControlledActor, unit_number: number): any | undefined {
+  const raw: any = entity_geometry_for_actor(actor, unit_number)
+  if (!raw.found || raw.fluid_storages_truncated !== false || raw.fluid_box_count > 16
+    || raw.surface_index !== raw.actor_surface_index || raw.force_index !== raw.actor_force_index) return undefined
+  if (raw.fluid_box_count > 0) {
+    if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'].includes(raw.entity.name)
+      || raw.non_fluidbox_storage_count !== 0) return undefined
+    const storages: any[] = raw.fluid_storages ?? []
+    if (storages.length !== raw.fluid_box_count) return undefined
+    for (const storage of storages) {
+      if (storage.pipe_connections_truncated !== false || storage.prototypes_truncated !== false) return undefined
+      if (!(storage.local_volume > 0 && storage.local_volume < math.huge)) return undefined
+      const ports: any[] = storage.pipe_connections ?? []
+      for (const port of ports) {
+        if (port.connection_type !== 'normal' || port.target_valid !== true) return undefined
+      }
+    }
+  } else if (!['furnace', 'mining-drill', 'inserter'].includes(raw.entity.type)) return undefined
+  // A route end in a chunk the NPC does not see now cannot prove preservation.
+  if (raw.item_io?.pickup_target?.not_visible === true || raw.item_io?.drop_target?.not_visible === true) return undefined
+  const storages: any[] = raw.fluid_storages ?? []
+  return { found: raw.found, entity: raw.entity, surface_index: raw.surface_index, force_index: raw.force_index,
+    actor_id: raw.actor_id, actor_surface_index: raw.actor_surface_index, actor_force_index: raw.actor_force_index,
+    item_io: raw.item_io, fluid_geometry_version: raw.fluid_geometry_version, fluid_box_count: raw.fluid_box_count,
+    non_fluidbox_storage_count: raw.non_fluidbox_storage_count, fluid_storages_truncated: raw.fluid_storages_truncated,
+    fluid_storages: storages.map(storage => ({ index: storage.index, local_volume: storage.local_volume,
+      prototypes: storage.prototypes, prototypes_truncated: storage.prototypes_truncated,
+      pipe_connections: storage.pipe_connections, pipe_connections_truncated: storage.pipe_connections_truncated })) }
 }
 
 export function logistics_topology_for_actor(actor: ControlledActor, unit_number: number, radius: number = 8) {
@@ -339,34 +717,55 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     return { found: false, unit_number, radius, error: `radius must be an integer from 1 to ${MAX_TOPOLOGY_RADIUS}` }
   }
 
-  const center = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+  if (resolved.code === 'not_visible') return { found: false, unit_number, error: NOT_VISIBLE_ERROR, code: 'entity_not_visible' }
+  if (resolved.code === 'wrong_surface') return { found: false, unit_number, error: 'entity is on another surface' }
+  const center = resolved.entity
   if (!center || !center.valid) return { found: false, unit_number, error: 'entity not found' }
-  if (center.surface.index !== actor.surface.index) return { found: false, unit_number, error: 'entity is on another surface' }
+  // Refuse before the local scan unless its whole area is seen. Linked endpoints have their own native bounds below;
+  // this margin alone cannot bound modded underground pipes or custom inserter vectors.
+  const reach = math.max(radius, TOPOLOGY_MIN_REACH)
+  const box = center.bounding_box ?? { left_top: center.position, right_bottom: center.position }
+  const scan_area = {
+    left_top: { x: box.left_top.x - reach, y: box.left_top.y - reach },
+    right_bottom: { x: box.right_bottom.x + reach, y: box.right_bottom.y + reach },
+  }
+  if (!area_known_visible(actor.force, center.surface, scan_area)) {
+    return { found: false, unit_number, radius, error: NOT_VISIBLE_AREA_ERROR, code: 'area_not_visible' }
+  }
 
   const relations: Array<Record<string, unknown>> = []
+  const seen = seen_now(actor.force, center.surface)
+  const unreadable = () => ({ found: false as const, unit_number, radius, error: NOT_VISIBLE_AREA_ERROR, code: 'area_not_visible' as const })
 
   if (belt_connectable(center)) {
+    const area = belt_link_area(center)
+    if (!area || !seen(area)) return unreadable()
     const neighbours = center.belt_neighbours
     for (const input of neighbours.inputs) {
+      if (!seen(entity_area(input))) return unreadable()
       push_relation(relations, { kind: 'belt_input', from: entity_summary(input), to: entity_summary(center) })
     }
     for (const output of neighbours.outputs) {
+      if (!seen(entity_area(output))) return unreadable()
       push_relation(relations, { kind: 'belt_output', from: entity_summary(center), to: entity_summary(output) })
     }
   }
 
-  if (center.type === 'inserter') add_inserter_route(relations, center)
+  if (center.type === 'inserter' && !add_inserter_route(relations, center, seen)) return unreadable()
 
-  if (center.type === 'mining-drill' && center.drop_target?.valid) {
-    push_relation(relations, {
+  if (center.type === 'mining-drill') {
+    const drop = seen_link(seen, center.drop_position !== undefined ? point_area(center.drop_position) : undefined, () => center.drop_target)
+    if (!drop.seen) return unreadable()
+    if (drop.entity?.valid) push_relation(relations, {
       kind: 'direct_item_output',
       from: entity_summary(center),
-      to: entity_summary(center.drop_target),
+      to: entity_summary(drop.entity),
       drop_position: center.drop_position,
     })
   }
 
-  const nearby_inserters = center.surface.find_entities_filtered({
+  const nearby_inserters = find_world_entities(center.surface, {
     position: center.position,
     radius,
     type: 'inserter',
@@ -374,10 +773,9 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     limit: MAX_TOPOLOGY_INSERTERS,
   })
   for (const inserter of nearby_inserters) {
+    if (!seen(entity_area(inserter))) return unreadable()
     if (same_entity(inserter, center)) continue
-    if (same_entity(inserter.pickup_target, center) || same_entity(inserter.drop_target, center)) {
-      add_inserter_route(relations, inserter)
-    }
+    if (!add_inserter_route(relations, inserter, seen, center)) return unreadable()
   }
 
   const fluid_box_count = math.min(center.fluidbox.length, MAX_FLUID_STORAGES)
@@ -385,11 +783,13 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     const prototypes_for_storage = fluidbox_prototype_summary(center.fluidbox.get_prototype(index))
     const connections = center.fluidbox.get_pipe_connections(index) ?? []
     for (const connection of connections.slice(0, MAX_PIPE_CONNECTIONS)) {
-      if (connection.target?.owner?.valid) {
+      const link = seen_link(seen, pipe_link_area(center, connection, index), () => connection.target?.owner)
+      if (!link.seen) return unreadable()
+      if (link.entity?.valid) {
         push_relation(relations, {
           kind: 'fluid_connection',
           center: entity_summary(center),
-          neighbour: entity_summary(connection.target.owner),
+          neighbour: entity_summary(link.entity),
           fluidbox_index: index,
           production_types: prototypes_for_storage.map(prototype => prototype.production_type),
           flow_direction: connection.flow_direction,
@@ -416,7 +816,7 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
 
 export function create_knowledge_remote_interface(get_actor: () => ControlledActor | undefined) {
   remote.add_interface('autorio_knowledge', {
-    recipe_details: (item_or_recipe: string) => {
+    recipe_details: (item_or_recipe: string, requested_count: number = 1, fuel_name?: string) => {
       const actor = get_actor()
       if (!actor || !actor.is_valid) {
         return {
@@ -425,7 +825,19 @@ export function create_knowledge_remote_interface(get_actor: () => ControlledAct
           error: 'no controlled actor',
         }
       }
-      return recipe_details_for_actor(actor, item_or_recipe)
+      return recipe_details_for_actor(actor, item_or_recipe, requested_count, fuel_name)
+    },
+    mining_details: (resource_or_item: string, fuel_name?: string) => {
+      const actor = get_actor()
+      if (!actor || !actor.is_valid) {
+        return { found: false, query: resource_or_item, error: 'no controlled actor' }
+      }
+      return mining_details_for_actor(actor, resource_or_item, fuel_name)
+    },
+    production_estimate: (request: estimate.LiveEstimateRequest) => {
+      const actor = get_actor()
+      if (!actor || !actor.is_valid) return { ok: false, error: 'no controlled actor' }
+      return estimate.estimate_production_for_actor(actor, request)
     },
     entity_geometry: (unit_number: number) => {
       const actor = get_actor()

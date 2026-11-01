@@ -1,5 +1,6 @@
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, LuaForce, LuaSurface } from 'factorio:runtime'
+import { mining_targets_at, note_hand_mining } from '../hand_work'
 import type { ActorCraftingQueueItem, ActorEntityBuildArgs, ActorMiningState, ActorShootingState, ActorStatusSnapshot, ActorWalkingState, ControlledActor } from './types'
 
 export interface StandaloneNpcIdentity {
@@ -25,6 +26,15 @@ const NPC_NAMES = [
   'Rook',
   'Vale',
 ]
+
+// Temporary vanilla-character tint until the NPC gets its own character art.
+// Keep this identity-level rather than provider-level: switching models should
+// not make the companion's body suddenly change color.
+const DEFAULT_NPC_CHARACTER_COLOR = { r: 0.35, g: 0.65, b: 1, a: 1 }
+
+function apply_default_character_color(entity: LuaEntity) {
+  entity.color = DEFAULT_NPC_CHARACTER_COLOR
+}
 
 export function allocate_standalone_npc_identity(): StandaloneNpcIdentity {
   const serial = storage.standalone_npc_identity_serial ?? 1
@@ -53,6 +63,18 @@ function ensure_identity(): StandaloneNpcIdentity {
  * with explicit persisted identities without mutating the legacy primary-body
  * storage keys.
  */
+// The NPC body may be on any surface once it travels (another planet, a space
+// platform). Look it up by unit_number game-wide first; searching only the
+// home surface re-spawned a second body on Nauvis after a save load and left
+// the real one, with its inventory, stranded where it was.
+function find_npc_character(home_surface: LuaSurface, unit_number: number): LuaEntity | undefined {
+  const anywhere = game.get_entity_by_unit_number(unit_number as any)
+  if (anywhere !== undefined && anywhere.valid && anywhere.name === 'character') return anywhere
+  return home_surface
+    .find_entities_filtered({ name: 'character' })
+    .find(candidate => candidate.unit_number === unit_number)
+}
+
 export class StandaloneCharacterActor implements ControlledActor {
   private constructor(
     private readonly character_entity: LuaEntity,
@@ -68,6 +90,7 @@ export class StandaloneCharacterActor implements ControlledActor {
 
     if (!entity) return undefined
 
+    apply_default_character_color(entity)
     const identity = ensure_identity()
     storage.standalone_character_unit_number = entity.unit_number
     return new StandaloneCharacterActor(entity, identity)
@@ -85,6 +108,7 @@ export class StandaloneCharacterActor implements ControlledActor {
       force,
     })
     if (!entity) return undefined
+    apply_default_character_color(entity)
     return new StandaloneCharacterActor(entity, identity)
   }
 
@@ -97,12 +121,12 @@ export class StandaloneCharacterActor implements ControlledActor {
     const unit_number = storage.standalone_character_unit_number
     if (unit_number === undefined) return undefined
 
-    const entity = surface
-      .find_entities_filtered({ name: 'character' })
-      .find(candidate => candidate.unit_number === unit_number)
+    const entity = find_npc_character(surface, unit_number)
 
     if (!entity) return undefined
 
+    // Also migrates an already-running save onto the nicer companion tint.
+    apply_default_character_color(entity)
     return new StandaloneCharacterActor(entity, ensure_identity())
   }
 
@@ -116,9 +140,7 @@ export class StandaloneCharacterActor implements ControlledActor {
     const identity = storage.standalone_npc_identity
     if (unit_number === undefined || identity === undefined) return undefined
 
-    const entity = surface
-      .find_entities_filtered({ name: 'character' })
-      .find(candidate => candidate.unit_number === unit_number)
+    const entity = find_npc_character(surface, unit_number)
 
     if (!entity) return undefined
 
@@ -163,6 +185,17 @@ export class StandaloneCharacterActor implements ControlledActor {
 
   set_mining_state(state: ActorMiningState) {
     this.character_entity.mining_state = state
+    // The engine counts what the character mines as force production, so a
+    // production_rate window must not contain it (hand_work.ts).
+    note_hand_mining(this.character_entity.force.index, state.mining === true, state.mining ? this.mining_target(state) : undefined)
+  }
+
+  // What the body mines is where the mining state points, not whatever
+  // `selected` happens to be; unknown targets void every rate (hand_work.ts).
+  private mining_target(state: ActorMiningState) {
+    const at_position = mining_targets_at(this.character_entity.surface, state.position, this.character_entity)
+    if (at_position.length > 0) return at_position
+    return state.position === undefined ? this.character_entity.selected : undefined
   }
 
   set_walking_state(state: ActorWalkingState) {
@@ -182,7 +215,7 @@ export class StandaloneCharacterActor implements ControlledActor {
   }
 
   cancel_crafting(params: { index: number, count: number }) {
-    this.character_entity.cancel_crafting(params)
+    return this.character_entity.cancel_crafting(params)
   }
 
   get_crafting_queue(): ActorCraftingQueueItem[] {

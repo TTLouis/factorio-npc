@@ -1,3 +1,7 @@
+import { inspectNextSliceLiveness, nextSliceControlView, nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice } from './next-slice-liveness.mjs'
+import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
+import { inspectControllerLiveness } from './controller-liveness.mjs'
+import { initializeSprintStartupClock, pauseSprintStartup, persistSprintLedger, resumeSprintStartup, STARTUP_CLOCK_COMMAND, TickSprintController } from './tick-sprint.mjs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -7,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import {
   atomicWrite,
   Child,
+  confirmLuaConsoleReady,
   Rcon,
   chatAuthorized,
   check,
@@ -26,71 +31,209 @@ import {
   safeInteger,
   withTimeout,
 } from './common.mjs'
-import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { CanonicalTaskBoardMemory, completionFinalizationDecision } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { providerEndpoint, providerRequest } from './provider.mjs'
+import { resolveAgentRole } from './agent-roles.mjs'
+import { CONTINUATION_WORDS, NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
+import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
+import { formatGoalReadingNote } from './goal-reading.mjs'
+import { lockedRecipeSummary } from './goal-requirements.mjs'
+import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
+import { ACK_EVENT, ResponsivenessTracker } from './responsiveness.mjs'
+import {
+  AI_API_METHOD_IDS,
+  checkApiMethodUrlRule,
+  decisionProviderConfiguration,
+  decisionProviderRequest,
+  profileForApiMethod,
+  providerEndpoint,
+  providerRequest,
+} from './provider.mjs'
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
+import { executeReserveCommand, parseReserveCommand } from './reserve-command.mjs'
+import { reconciliationGuidance } from './operation-reconciliation.mjs'
+import {
+  classifyRequestFailure,
+  failureCauseCode,
+  harnessStateFaultCode,
+  isAutoResumable,
+  MODEL_RECOVERABLE_RESUME_DELAY_MS,
+  PAUSE_CLASS,
+  pauseClassOf,
+  REVIEW_BLOCKER_UNCHANGED_REASON,
+  transportFailureOf,
+} from './pause-class.mjs'
 
-const UI_CONTROL_MARKER = '[AIRI_UI_CONTROL]'
-const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow'])
-const UI_PROMPT_MARKER = '[AIRI_UI_PROMPT]'
+// Pause-reason prefix for temporary provider failures that resume on their own
+// (see transientProviderFailure).
+export const TRANSIENT_PAUSE_PREFIX = 'provider_transient'
+const TRANSPORT_FALLBACK_SUBKIND = 'transport'
+const UI_CONTROL_MARKER = '[SGLUNA_UI_CONTROL]'
+const GOAL_UI_REFRESH_MS = 30_000
+const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow', 'new_task', 'keep_paused', 'revise', 'cancel'])
+const UI_PROMPT_MARKER = '[SGLUNA_UI_PROMPT]'
 const UI_PROMPT_MAX_CHARS = 4000
 const UI_INPUT_POLL_MS = 250
 const UI_HEARTBEAT_MS = 2000
-// luaString refuses payloads past 16 KiB. That refusal used to surface only as a
-// generic caught failure, so one long plan froze the console for as long as the
-// plan stayed long. Stay under the limit by trimming instead of sending nothing.
 const UI_SNAPSHOT_MAX_BYTES = 15360
-// The console is drained four times a second, so a persistent fault would
-// otherwise repeat the same line forever.
 const UI_FAILURE_LOG_INTERVAL_MS = 60000
 const SYSTEM_RECOVERY_PAUSE_REASONS = new Set(['npc_identity_or_session_changed', 'actor_replaced'])
 const UI_AGENT_PHASES = new Set(['idle', 'thinking', 'observing', 'executing', 'waiting', 'error'])
 const UI_LIVE_ACTIVITY_LIMIT = 14
-// The console's activity pane is sized from the player's display and now
-// absorbs whatever the plan tracker does not need, so a taller screen can show
-// more history than the old fixed twelve. Oversized snapshots are still trimmed
-// from the front by taskBoardUiJson, so this raises the ceiling, not the
-// guaranteed wire size.
 const UI_ACTIVITY_LIMIT = 18
+const UI_CONVERSATION_LIMIT = 64
 const UI_SYNC_BATCH_MS = 50
 const UI_STALE_THINKING_MS = 5000
 
-const RUNTIME_RELIABILITY_GUIDANCE = `
+export const RUNTIME_RELIABILITY_GUIDANCE = `
 ## Runtime reliability additions
 
 For a multi-technology goal, use getResearchPath on the exact target instead of reconstructing the prerequisite graph from remembered Factorio knowledge. Follow its dependency-first pending_path and next_actionable entry. Trigger technologies require the exact returned research_trigger; science technologies use research_technology and still require verification after submission.
 
 getTechnology returns an exact research_trigger object for gameplay-trigger technologies when Factorio exposes one. Use the returned trigger fields such as item/count, entity, or fluid/amount; do not guess a trigger from remembered Factorio knowledge. After performing an exact gameplay trigger, re-read getTechnology. If it is still incomplete, re-observe the trigger/state or report a blocker instead of repeatedly waiting and hoping the trigger registers.
 
-Natural navigation obstacle clearing is controlled deterministically by the runtime. It is enabled by default for trees and natural rocks only, and is disabled for a request when the human explicitly asks AIRI not to cut trees, mine rocks, or auto-clear obstacles. Never reinterpret this as permission to remove player-built structures.
+At the start of a goal the harness may add a [SKILL_OFFERS] message: up to five skill cards matched to the goal, each with what it produces, what it needs, and why it matched (unmet needs included). Read it before planning; it is a list of cards, not loaded skills. When a task resembles a common gameplay, bootstrap, production, or logistics pattern and the strategy is uncertain, pick from those cards or use findSkills with a short description of the actual goal, then getSkillDetails for at most one promising match. Treat skill content as reusable experienced-player guidance, not live-world truth or mutation authority. Validate recipe, prototype, inventory, geometry, placement, and mutable world facts with the appropriate live tools before acting. Once a useful pattern and enough current evidence are available, commit the next executable plan instead of repeatedly searching skills or making unrelated observations.
+
+Machine rates come from game data, not memory: getRecipeDetails gives each compatible machine's crafts per second and output per minute and the NPC's hand-craft seconds per craft; getMiningDetails gives each drill's output per minute and fuel burn. To see how long a production goal takes with the machine counts you have in mind, and what one more machine on the slowest step would save, use estimateProductionTime. It only does the arithmetic; choosing how many machines to build is yours.
+
+Observation budget: a decision allows only about 3 rounds of fresh read-only calls, at most 4 calls per turn; a repeat of a cached result is free, and [DECISION_ENVELOPE] observation_budget_remaining shows what is left. When it runs out the harness closes tools and you must answer with submitPlan or a BLOCKED plan, so request the reads you need together in one turn. gather_resource, harvest_product and walk_to_entity find their own target within search_radius: on a cold start, do not spend observations locating a resource before using them.
+
+Natural navigation obstacle clearing is controlled deterministically by the runtime. It is enabled by default for trees and natural rocks only, and is disabled for a request when the human explicitly asks SGLuna not to cut trees, mine rocks, or auto-clear obstacles. Never reinterpret this as permission to remove player-built structures.
 `.trim()
 
-export function configuration(raw = {}, env = process.env) {
-  check(raw && typeof raw === 'object' && !Array.isArray(raw), 'airi-config.json must be an object')
-  const actorMode = env.AIRI_ACTOR_MODE ?? raw.actorMode ?? 'npc'
-  check(actorMode === 'npc', 'This v8 egg currently supports AIRI_ACTOR_MODE=npc only')
+function hasEnv(env, key) {
+  return Object.prototype.hasOwnProperty.call(env, key)
+}
 
-  const legacyChat = env.AIRI_PLAYER ?? raw.player ?? ''
-  const legacySingleChatPlayer = env.AIRI_CHAT_PLAYER ?? raw.chatPlayer ?? legacyChat
-  const chatPlayersSource = env.AIRI_CHAT_PLAYERS ?? raw.chatPlayers ?? legacySingleChatPlayer
+function preferredEnv(env, primary, compatibility, fallback) {
+  if (hasEnv(env, primary)) return env[primary]
+  if (hasEnv(env, compatibility)) return env[compatibility]
+  return fallback
+}
+
+function chatPlayersValue(env, raw = {}, fallback = '') {
+  if (hasEnv(env, 'SGLUNA_CHAT_PLAYERS')) return env.SGLUNA_CHAT_PLAYERS
+  if (hasEnv(env, 'AIRI_CHAT_PLAYERS')) return env.AIRI_CHAT_PLAYERS
+  if (hasEnv(env, 'AIRI_CHAT_PLAYER')) return env.AIRI_CHAT_PLAYER
+  if (hasEnv(env, 'AIRI_PLAYER')) return env.AIRI_PLAYER
+  return raw.chatPlayers ?? raw.chatPlayer ?? raw.player ?? fallback
+}
+
+// `validate: false` (used once a method has already won, see migrateConfig
+// below) skips the enum check: the value is being carried through/persisted
+// only, not used to pick a capability, so a stale or unrelated legacy value
+// already on disk must never block startup.
+function providerProfileValue(env, raw = {}, fallback = 'auto', { validate = true } = {}) {
+  const value = cleanString(env.PROVIDER_PROFILE ?? raw.providerProfile ?? fallback, 'PROVIDER_PROFILE', 40).toLowerCase()
+  if (validate) check(['auto', 'generic', 'deepseek', 'openai-reasoning'].includes(value), 'PROVIDER_PROFILE must be auto, generic, deepseek, or openai-reasoning')
+  return value
+}
+
+// AI_API_METHOD (plan 1.10) replaces a hand-picked PROVIDER_PROFILE. It is
+// read directly from the environment only (never persisted/mirrored), same
+// as the deployment-env-is-authoritative rule already applied to decision
+// provider credentials: unset means "keep today's PROVIDER_PROFILE-driven
+// behaviour", including an explicit PROVIDER_PROFILE, exactly as before.
+function aiApiMethodValue(env) {
+  const raw = String(env.AI_API_METHOD ?? '').trim().toLowerCase()
+  if (!raw) return undefined
+  check(AI_API_METHOD_IDS.includes(raw), 'AI_API_METHOD must be direct, router, local, or cli-proxy')
+  return raw
+}
+
+// Same identifier shape providerRequest (provider.mjs) already requires of
+// a single model, applied to every entry of the list below.
+const MODEL_IDENTIFIER = /^[a-zA-Z0-9._:/-]{1,200}$/
+
+// OPENAI_MODEL is a comma-separated list (plan 1.10): [0] is the main agent
+// model, used exactly as the single OPENAI_MODEL value always was; [1] is
+// the subagent/plan-agent model reserved for 3.1. Extra entries are
+// validated and carried here (config.models) but nothing yet reads past
+// index 1.
+function modelListValue(env, raw = {}, fallback = 'replace-me') {
+  const source = cleanString(env.OPENAI_MODEL ?? raw.model ?? fallback, 'OPENAI_MODEL', 200)
+  const entries = source.split(',').map(entry => entry.trim())
+  check(entries.every(entry => MODEL_IDENTIFIER.test(entry)), 'OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers')
+  return entries
+}
+
+function aiApiHostname(base) {
+  try { return new URL(base).hostname.toLowerCase() }
+  catch { return '' }
+}
+
+// Startup log line and Debug window line (plan 1.10). Never includes a key.
+export function aiApiMethodLine(config) {
+  const method = config.aiApiMethod ?? `unset(profile=${config.profile})`
+  const subagent = config.subagentModel ?? 'none'
+  return `AI: method=${method} host=${aiApiHostname(config.base)} main=${config.model} subagent=${subagent}`
+}
+
+export function deploymentCompatibilityWarnings(env = process.env) {
+  const warnings = []
+  for (const [primary, compatibility] of [
+    ['SGLUNA_ACTOR_MODE', 'AIRI_ACTOR_MODE'],
+    ['SGLUNA_CHAT_PLAYERS', 'AIRI_CHAT_PLAYERS'],
+  ]) {
+    if (!hasEnv(env, primary) || !hasEnv(env, compatibility)) continue
+    const preferred = String(env[primary] ?? '')
+    const legacy = String(env[compatibility] ?? '')
+    if (preferred && legacy && preferred !== legacy) warnings.push(`${primary} overrides conflicting compatibility value ${compatibility}.`)
+  }
+  return warnings
+}
+
+export function configuration(raw = {}, env = process.env) {
+  check(raw && typeof raw === 'object' && !Array.isArray(raw), 'sgluna-config.json must be an object')
+  const actorMode = preferredEnv(env, 'SGLUNA_ACTOR_MODE', 'AIRI_ACTOR_MODE', raw.actorMode ?? 'npc')
+  check(actorMode === 'npc', 'This v8 egg currently supports SGLUNA_ACTOR_MODE=npc only')
+
+  const chatPlayersSource = chatPlayersValue(env, raw, 'none')
 
   const factorioUsername = cleanString(env.FACTORIO_USERNAME ?? '', 'FACTORIO_USERNAME', 128)
   const factorioToken = cleanString(env.FACTORIO_TOKEN ?? '', 'FACTORIO_TOKEN', 128)
   check((factorioUsername === '') === (factorioToken === ''), 'FACTORIO_USERNAME and FACTORIO_TOKEN must both be set or both left blank')
 
+  const modelList = modelListValue(env, raw, 'replace-me')
+  const base = env.OPENAI_API_BASEURL ?? raw.providerUrl ?? 'https://provider.invalid/v1'
+  const aiApiMethod = aiApiMethodValue(env)
+  // A profile worth overriding can come from either the env var or a value
+  // already saved in sgluna-config.json (raw.providerProfile) by an earlier
+  // run or egg version; either one is reported to the operator when a
+  // method wins over it.
+  const overriddenProviderProfile = hasEnv(env, 'PROVIDER_PROFILE')
+    ? String(env.PROVIDER_PROFILE)
+    : (typeof raw.providerProfile === 'string' && raw.providerProfile.trim() !== '' ? raw.providerProfile : undefined)
+  const aiApiMethodOverridesProfile = Boolean(aiApiMethod) && overriddenProviderProfile !== undefined
+  // With AI_API_METHOD unset, resolution stays exactly the legacy
+  // PROVIDER_PROFILE path (including an explicit PROVIDER_PROFILE, from env
+  // or from sgluna-config.json); when set, it wins outright and an
+  // invalid/irrelevant PROVIDER_PROFILE value is never even looked at here.
+  // migrateConfig separately stops validating it once a method is set (see
+  // there), so a stale invalid value already on disk cannot block startup.
+  const profile = aiApiMethod ? profileForApiMethod(aiApiMethod) : providerProfileValue(env, raw, 'auto')
+  checkApiMethodUrlRule(aiApiMethod, base)
+
   const config = {
     actorMode,
-    chatPlayers: parseChatPlayers(cleanString(chatPlayersSource, 'AIRI_CHAT_PLAYERS', 512)),
+    executorProgressAudit: String(env.SGLUNA_EXECUTOR_PROGRESS_AUDIT ?? raw.executorProgressAudit ?? 'false') === 'true',
+    chatPlayers: parseChatPlayers(cleanString(chatPlayersSource, 'SGLUNA_CHAT_PLAYERS', 512)),
     save: cleanString(env.SAVE_NAME ?? raw.save ?? '', 'SAVE_NAME', 160),
-    model: cleanString(env.OPENAI_MODEL ?? raw.model ?? 'replace-me', 'OPENAI_MODEL', 200),
-    base: env.OPENAI_API_BASEURL ?? raw.providerUrl ?? 'https://provider.invalid/v1',
+    model: modelList[0],
+    models: modelList,
+    subagentModel: modelList[1],
+    base,
+    profile,
+    aiApiMethod,
+    aiApiMethodOverridesProfile,
+    overriddenProviderProfile: aiApiMethodOverridesProfile ? overriddenProviderProfile : undefined,
     key: env.OPENAI_API_KEY ?? '',
-    providerTimeoutMs: safeInteger(env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? 120000, 'PROVIDER_TIMEOUT_MS', 1000, 600000),
+    decisionProvider: decisionProviderConfiguration(env),
+    providerTimeoutMs: safeInteger(env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? 300000, 'PROVIDER_TIMEOUT_MS', 1000, 600000),
     gamePort: safeInteger(env.SERVER_PORT ?? raw.gamePort ?? 34197, 'SERVER_PORT', 1024, 65535),
     budget: safeInteger(env.MAX_PROVIDER_REQUESTS_PER_HOUR ?? raw.maxProviderRequestsPerHour ?? 30, 'MAX_PROVIDER_REQUESTS_PER_HOUR', 1, 1200),
+    maxProviderOutputUnits: safeInteger(env.MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN ?? raw.maxProviderOutputTokensPerTurn ?? 100000, 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN', 1000, 200000),
     stopMs: safeInteger(env.SHUTDOWN_TIMEOUT_MS ?? raw.shutdownTimeoutMs ?? 60000, 'SHUTDOWN_TIMEOUT_MS', 1000, 300000),
     factorio: {
       username: factorioUsername,
@@ -103,54 +246,93 @@ export function configuration(raw = {}, env = process.env) {
   return config
 }
 
-export const AIRI_CONFIG_DEFAULTS = {
+export function jevStatusLine(config) {
+  return `Jev: ${config.decisionProvider ? 'on' : 'off (no key)'}`
+}
+
+// Docker normally keeps the generated RCON listener private inside the
+// container.  This opt-in configuration exists for local integration tests;
+// callers must still publish the port explicitly in their Compose override.
+export function rconConfiguration(env = process.env) {
+  const requestedPort = String(env.SGLUNA_RCON_PORT ?? '').trim()
+  const port = requestedPort === '' ? null : safeInteger(requestedPort, 'SGLUNA_RCON_PORT', 1024, 65535)
+  const bind = cleanString(env.SGLUNA_RCON_BIND ?? '127.0.0.1', 'SGLUNA_RCON_BIND', 15)
+  check(bind === '127.0.0.1' || bind === '0.0.0.0', 'SGLUNA_RCON_BIND must be 127.0.0.1 or 0.0.0.0')
+  const suppliedPassword = String(env.SGLUNA_RCON_PASSWORD ?? '')
+  const password = suppliedPassword === ''
+    ? nonce() + nonce()
+    : cleanString(suppliedPassword, 'SGLUNA_RCON_PASSWORD', 256)
+  return { port, bind, password }
+}
+
+export function factorioVisibilityDiagnostics(factorio = { username: '', token: '', public: false }, chatPlayers = { mode: 'disabled', names: [] }) {
+  if (factorio?.public === true) {
+    const diagnostics = ['Factorio visibility: PUBLIC']
+    if (chatPlayers?.mode === 'all') {
+      diagnostics.push('SECURITY WARNING: public Factorio listing with chat=all allows every player to issue !luna/!airi commands; configure SGLUNA_CHAT_PLAYERS=none or an explicit allowlist.')
+    }
+    return diagnostics
+  }
+  return ['Factorio visibility: PRIVATE/HIDDEN', 'No Factorio listing credentials supplied']
+}
+
+export const SGLUNA_CONFIG_DEFAULTS = {
   actorMode: 'npc',
-  chatPlayers: '',
+  chatPlayers: 'none',
   providerUrl: 'https://provider.invalid/v1',
+  providerProfile: 'auto',
   model: 'replace-me',
   save: '',
-  providerTimeoutMs: 120000,
+  // A 32,000-unit plan-authoring reply takes about three minutes.
+  providerTimeoutMs: 300000,
   gamePort: 34197,
   maxProviderRequestsPerHour: 30,
+  maxProviderOutputTokensPerTurn: 100000,
   shutdownTimeoutMs: 60000,
 }
 
 export function migrateConfig(raw = {}, env = process.env) {
-  check(raw && typeof raw === 'object' && !Array.isArray(raw), 'airi-config.json must be an object')
-  const actorMode = cleanString(env.AIRI_ACTOR_MODE ?? raw.actorMode ?? AIRI_CONFIG_DEFAULTS.actorMode, 'AIRI_ACTOR_MODE', 32)
-  check(actorMode === 'npc', 'This v8 egg currently supports AIRI_ACTOR_MODE=npc only')
-  const chatPlayers = cleanString(
-    env.AIRI_CHAT_PLAYERS
-      ?? env.AIRI_CHAT_PLAYER
-      ?? env.AIRI_PLAYER
-      ?? raw.chatPlayers
-      ?? raw.chatPlayer
-      ?? raw.player
-      ?? AIRI_CONFIG_DEFAULTS.chatPlayers,
-    'AIRI_CHAT_PLAYERS',
-    512,
+  check(raw && typeof raw === 'object' && !Array.isArray(raw), 'sgluna-config.json must be an object')
+  const actorMode = cleanString(
+    preferredEnv(env, 'SGLUNA_ACTOR_MODE', 'AIRI_ACTOR_MODE', raw.actorMode ?? SGLUNA_CONFIG_DEFAULTS.actorMode),
+    'SGLUNA_ACTOR_MODE',
+    32,
   )
+  check(actorMode === 'npc', 'This v8 egg currently supports SGLUNA_ACTOR_MODE=npc only')
+  const chatPlayers = cleanString(chatPlayersValue(env, raw, SGLUNA_CONFIG_DEFAULTS.chatPlayers), 'SGLUNA_CHAT_PLAYERS', 512)
+  // Once AI_API_METHOD is set it wins outright (see configuration() above),
+  // so a stored/legacy PROVIDER_PROFILE is carried through unvalidated here
+  // rather than rejected: an old or unrelated value on disk must never block
+  // startup for a server that has already moved to the method setting.
+  const aiApiMethod = aiApiMethodValue(env)
   const next = {
     actorMode,
     chatPlayers,
-    providerUrl: env.OPENAI_API_BASEURL ?? raw.providerUrl ?? AIRI_CONFIG_DEFAULTS.providerUrl,
-    model: cleanString(env.OPENAI_MODEL ?? raw.model ?? AIRI_CONFIG_DEFAULTS.model, 'OPENAI_MODEL', 200),
-    save: cleanString(env.SAVE_NAME ?? raw.save ?? AIRI_CONFIG_DEFAULTS.save, 'SAVE_NAME', 160),
+    providerUrl: env.OPENAI_API_BASEURL ?? raw.providerUrl ?? SGLUNA_CONFIG_DEFAULTS.providerUrl,
+    providerProfile: providerProfileValue(env, raw, SGLUNA_CONFIG_DEFAULTS.providerProfile, { validate: !aiApiMethod }),
+    model: cleanString(env.OPENAI_MODEL ?? raw.model ?? SGLUNA_CONFIG_DEFAULTS.model, 'OPENAI_MODEL', 200),
+    save: cleanString(env.SAVE_NAME ?? raw.save ?? SGLUNA_CONFIG_DEFAULTS.save, 'SAVE_NAME', 160),
     providerTimeoutMs: safeInteger(
-      env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? AIRI_CONFIG_DEFAULTS.providerTimeoutMs,
+      env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? SGLUNA_CONFIG_DEFAULTS.providerTimeoutMs,
       'PROVIDER_TIMEOUT_MS',
       1000,
       600000,
     ),
-    gamePort: safeInteger(env.SERVER_PORT ?? raw.gamePort ?? AIRI_CONFIG_DEFAULTS.gamePort, 'SERVER_PORT', 1024, 65535),
+    gamePort: safeInteger(env.SERVER_PORT ?? raw.gamePort ?? SGLUNA_CONFIG_DEFAULTS.gamePort, 'SERVER_PORT', 1024, 65535),
     maxProviderRequestsPerHour: safeInteger(
-      env.MAX_PROVIDER_REQUESTS_PER_HOUR ?? raw.maxProviderRequestsPerHour ?? AIRI_CONFIG_DEFAULTS.maxProviderRequestsPerHour,
+      env.MAX_PROVIDER_REQUESTS_PER_HOUR ?? raw.maxProviderRequestsPerHour ?? SGLUNA_CONFIG_DEFAULTS.maxProviderRequestsPerHour,
       'MAX_PROVIDER_REQUESTS_PER_HOUR',
       1,
       1200,
     ),
+    maxProviderOutputTokensPerTurn: safeInteger(
+      env.MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN ?? raw.maxProviderOutputTokensPerTurn ?? SGLUNA_CONFIG_DEFAULTS.maxProviderOutputTokensPerTurn,
+      'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN',
+      1000,
+      200000,
+    ),
     shutdownTimeoutMs: safeInteger(
-      env.SHUTDOWN_TIMEOUT_MS ?? raw.shutdownTimeoutMs ?? AIRI_CONFIG_DEFAULTS.shutdownTimeoutMs,
+      env.SHUTDOWN_TIMEOUT_MS ?? raw.shutdownTimeoutMs ?? SGLUNA_CONFIG_DEFAULTS.shutdownTimeoutMs,
       'SHUTDOWN_TIMEOUT_MS',
       1000,
       300000,
@@ -167,6 +349,29 @@ export async function migrateConfigFile(filename, env = process.env) {
   return next
 }
 
+async function pathExists(filename) {
+  try { await fsp.access(filename); return true }
+  catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
+}
+
+export async function migrateCanonicalConfig(root, env = process.env) {
+  const canonical = path.join(root, 'sgluna-config.json')
+  const legacy = path.join(root, 'airi-config.json')
+  const canonicalExists = await pathExists(canonical)
+  const legacyExists = await pathExists(legacy)
+  const raw = canonicalExists ? await readJson(canonical, {}) : legacyExists ? await readJson(legacy, {}) : {}
+  const config = migrateConfig(raw, env)
+  const expected = `${JSON.stringify(config, null, 2)}\n`
+  let current = null
+  try { current = await fsp.readFile(canonical, 'utf8') }
+  catch (error) { if (error?.code !== 'ENOENT') throw error }
+  if (current !== expected) await atomicWrite(canonical, expected)
+  return { config, filename: canonical, migratedFromLegacy: !canonicalExists && legacyExists, legacy }
+}
+
 export function installedAppRoot(moduleUrl = import.meta.url) {
   return path.resolve(path.dirname(fileURLToPath(moduleUrl)), '..', '..')
 }
@@ -181,6 +386,19 @@ export function routeNpcRequest(text, npcName = '') {
   return trimmed.slice(separator + 1).trim()
 }
 
+// Player words the supervisor handles itself instead of sending to the model.
+// Matched on the whole message, ignoring case and trailing punctuation, so
+// "Stop!" or "停止。" stop at once like "stop" does.
+const CONTROL_WORDS = new Map([
+  ...['stop', 'pause', 'halt', '停', '停止', '暂停', '停下', '别动'].map(word => [word, 'stop']),
+  ...['status', 'progress', '状态', '进度'].map(word => [word, 'status']),
+])
+
+export function controlWord(text) {
+  const normalized = String(text ?? '').trim().toLocaleLowerCase().replace(/[\s.!?。！？~～…]+$/u, '')
+  return CONTROL_WORDS.get(normalized)
+}
+
 export function navigationObstaclePolicy(text) {
   const normalized = String(text ?? '').trim().toLocaleLowerCase()
   const denyPhrases = [
@@ -193,7 +411,7 @@ export function navigationObstaclePolicy(text) {
   const denied = denyPhrases.some(phrase => normalized.includes(phrase))
   if (denied) return { shouldUpdate: true, clearObstacles: false }
 
-  const continuation = ['continue', 'resume', '继续', '继续吧', '继续做', '接着', '接着做']
+  const continuation = CONTINUATION_WORDS
     .some(prefix => normalized === prefix || normalized.startsWith(`${prefix} `) || normalized.startsWith(`${prefix}，`) || normalized.startsWith(`${prefix},`))
   if (continuation) return { shouldUpdate: false, clearObstacles: true }
   return { shouldUpdate: true, clearObstacles: true }
@@ -202,6 +420,84 @@ export function navigationObstaclePolicy(text) {
 function uiText(value, max = 500) {
   const text = String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
+}
+
+const UI_TASK_BLOCKER_SUMMARIES = new Map([
+  ['no_autorio_operation_for_remaining_plan', 'SGLuna has more work planned, but did not start the next action.'],
+  ['operation_admission_failed', 'The game did not accept SGLuna’s next action, so it did not start.'],
+  ['provider_recovery_exhausted', 'SGLuna could not get a usable model response after retrying.'],
+  ['unverified_transfer_step', 'SGLuna cannot continue until the transfer step is verified.'],
+  ['placement_collision', 'SGLuna cannot place the planned entity at the current location.'],
+])
+const UI_TASK_PAUSE_SUMMARIES = new Map([
+  ['player_requested', 'SGLuna was paused by the player.'],
+  ['npc_identity_or_session_changed', 'SGLuna paused because the active NPC session changed.'],
+  ['actor_replaced', 'SGLuna paused because the controlled NPC was replaced.'],
+  ['follow_mode', 'SGLuna paused the current task while following a player.'],
+  ['jev_needs_user_clarification', 'SGLuna needs your direction before it can commit a plan. Reply with the clarification, or continue to retry.'],
+  ['jev_refinement_budget_exhausted', 'SGLuna could not settle on a plan it could commit. Reply with more specific direction, or continue to retry.'],
+  ['recoverable_provider_failure:requires_machine_retry_exhausted', 'Paused: the craft needs a machine and the retry limit was reached. Press Resume or say continue.'],
+  ['recoverable_provider_failure:research_preflight_retry_exhausted', 'Paused: the research request was refused repeatedly and the retry limit was reached. Press Resume or say continue.'],
+  ['recoverable_provider_failure:preflight_executor_refusal_uncorrected', 'Paused: the game refused the planned operation again after a correction, so nothing ran. The run retries from a fresh observation; Resume or say continue to retry now.'],
+  ['recoverable_provider_failure:preflight_world_refusal_uncorrected', 'Paused: the game refused the planned operation twice, so nothing ran. The run retries from a fresh observation; Resume or say continue to retry now.'],
+])
+
+function requestFailurePauseSummary(raw) {
+  if (raw.startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
+    return 'SGLuna paused on a temporary model-provider problem and will resume automatically from the verified task state.'
+  }
+  if (raw.startsWith('provider_output_budget_exhausted:')) {
+    return 'SGLuna paused because the model exhausted its response budget while no Autorio work was running. Continue to retry from the verified task state.'
+  }
+  if (raw.startsWith('request_failed:')) {
+    return 'SGLuna paused because the model request failed while no Autorio work was running. Continue to retry from the verified task state.'
+  }
+  return ''
+}
+
+export function formatTaskCondition(value, kind = 'blocker', evidence = undefined) {
+  const raw = uiText(value, kind === 'pause' ? 300 : 500)
+  if (!raw) return { raw: '', summary: '' }
+
+  if (kind === 'pause') {
+    if (raw.startsWith('provider_recovery_exhausted:')) {
+      return { raw, summary: 'SGLuna could not get a usable model response after retrying.' }
+    }
+    if (raw.startsWith('provider_action_omission_repair_failed:')) {
+      return { raw, summary: 'SGLuna kept planning without starting the next action, so it paused. Continue to retry, or give more specific direction.' }
+    }
+    if (raw.startsWith('provider_semantic_alignment_failed:')) {
+      return { raw, summary: 'SGLuna proposed work that did not match the current step, so it paused instead of drifting. Continue to retry, or revise the task.' }
+    }
+    if (raw.startsWith('server_stop_')) {
+      return { raw, summary: 'SGLuna paused because the server is stopping.' }
+    }
+    if (raw.startsWith('blocked_')) {
+      return { raw, summary: 'Paused: the game refused the next operation and the plan is blocked. Revise or Cancel it in the Task Board, or say in chat what to change.' }
+    }
+    const requestFailure = requestFailurePauseSummary(raw)
+    if (requestFailure) return { raw, summary: requestFailure }
+    return {
+      raw,
+      summary: UI_TASK_PAUSE_SUMMARIES.get(raw) ?? 'SGLuna is paused by an internal task condition.',
+    }
+  }
+
+  if (raw === 'operation_preflight_failed:stale_exact_target') {
+    return { raw, summary: 'SGLuna’s saved entity target is no longer current and must be observed again.' }
+  }
+  if (raw === 'operation_preflight_failed:bootstrap_dependency_unresolved') {
+    return { raw, summary: 'SGLuna cannot start the next action until a required bootstrap dependency is available.' }
+  }
+  const lockedRecipe = lockedRecipeSummary(raw, evidence)
+  if (lockedRecipe) return { raw, summary: lockedRecipe }
+  if (raw.startsWith('operation_preflight_failed:')) {
+    return { raw, summary: 'SGLuna’s next action failed a preflight check before it could start.' }
+  }
+  return {
+    raw,
+    summary: UI_TASK_BLOCKER_SUMMARIES.get(raw) ?? 'SGLuna is blocked by an internal task condition.',
+  }
 }
 
 function exactUiObjectKeys(value, allowed) {
@@ -277,9 +573,6 @@ export function parseUiInputBatch(raw) {
       if (event) parsed.push({ kind: 'prompt', ...event })
       continue
     }
-    // A poll asks for a snapshot. It carries no player identity and causes a
-    // read plus a push, never a state change, so unlike controls and prompts it
-    // is not attributable to a player and needs no authorization.
     if (kind === 'poll') {
       if (!exactUiObjectKeys(payload, ['version', 'tick'])) continue
       if (payload.version !== 1) continue
@@ -342,7 +635,6 @@ function activityKindFromEvidence(kind) {
   return 'observation'
 }
 
-// Receipts are stored as JSON for the model; render them as one readable line for players.
 export function evidenceText(item) {
   const summary = uiText(item?.summary, 1000)
   if (!summary.startsWith('{')) return summary
@@ -364,11 +656,35 @@ export function evidenceText(item) {
   return summary
 }
 
+function evidenceBatch(item) {
+  try {
+    const parsed = JSON.parse(String(item?.summary ?? ''))
+    return Number.isSafeInteger(parsed?.batch_id) ? { id: parsed.batch_id, outcome: parsed.outcome } : undefined
+  }
+  catch { return undefined }
+}
+
+// A successful deterministic verification restates the completed receipt for the
+// same batch. Look for receipts across all retained evidence, not only the
+// displayed tail, so a verification cannot resurface once its receipt scrolls
+// out of the window.
+function completedReceiptBatches(evidence) {
+  const batches = new Set()
+  for (const item of evidence) {
+    if (!/receipt/i.test(String(item?.kind ?? ''))) continue
+    const batch = evidenceBatch(item)
+    if (batch?.outcome === 'completed') batches.add(batch.id)
+  }
+  return batches
+}
+
 export function deriveActivity(state) {
   if (!state || typeof state !== 'object') return []
   const entries = []
-  const evidence = Array.isArray(state.task_board?.evidence) ? state.task_board.evidence.slice(-4) : []
-  for (const item of evidence) {
+  const allEvidence = Array.isArray(state.task_board?.evidence) ? state.task_board.evidence : []
+  const receipted = completedReceiptBatches(allEvidence)
+  for (const item of allEvidence.slice(-4)) {
+    if (item?.kind === 'deterministic_verification' && receipted.has(evidenceBatch(item)?.id)) continue
     const summary = evidenceText(item)
     if (summary) entries.push({ kind: activityKindFromEvidence(uiText(item?.kind, 64)), text: summary })
   }
@@ -378,18 +694,557 @@ export function deriveActivity(state) {
     const text = uiText(operation, 1000)
     if (text) entries.push({ kind: 'action', text })
   }
-  const blocker = uiText(state.blocker, 500)
-  if (blocker) entries.push({ kind: 'blocker', text: blocker })
-  const pauseReason = uiText(state.pause_reason, 300)
-  if (pauseReason) entries.push({ kind: 'system', text: `Paused: ${pauseReason}` })
+  const blocker = formatTaskCondition(state.blocker, 'blocker', state.task_board?.evidence)
+  if (blocker.raw) entries.push({ kind: 'blocker', text: blocker.summary })
+  const pauseReason = formatTaskCondition(state.pause_reason, 'pause')
+  // An exhausted provider recovery already reached the feed as the request's
+  // failure, with the same message; the pause adds only its reason code.
+  if (pauseReason.raw && !pauseReason.raw.startsWith('provider_recovery_exhausted:')) entries.push({ kind: 'system', text: pauseReason.summary })
   return entries.slice(-UI_ACTIVITY_LIMIT)
 }
 
-// Maps agent-loop trace events onto the live phase shown in the in-game console.
-// Returns undefined for events that do not change what the player should see.
+function debugInteger(value) {
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0
+}
+
+// Same AI method/host/model summary as aiApiMethodLine, shaped for the
+// Debug window's per-field snapshot instead of one formatted log line.
+function aiMethodDebugFields(config = {}) {
+  return {
+    ai_method: config.aiApiMethod ?? `unset(profile=${config.profile ?? ''})`,
+    ai_host: aiApiHostname(config.base ?? ''),
+    ai_main_model: config.model ?? '',
+    ai_subagent_model: config.subagentModel ?? 'none',
+  }
+}
+
+function debugOptionalInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+function debugOptionalText(value, max) {
+  if (typeof value !== 'string') return undefined
+  const text = uiText(value, max)
+  return text || undefined
+}
+
+function debugStructuredContent(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const jsonValid = typeof value.json_valid === 'boolean' ? value.json_valid : undefined
+  const planValid = typeof value.plan_valid === 'boolean' ? value.plan_valid : undefined
+  const error = debugOptionalText(value.error, 300)
+  if (jsonValid === undefined && planValid === undefined && error === undefined) return undefined
+  return {
+    ...(jsonValid === undefined ? {} : { json_valid: jsonValid }),
+    ...(planValid === undefined ? {} : { plan_valid: planValid }),
+    ...(error === undefined ? {} : { error }),
+  }
+}
+
+function emptyAgentDebug(fallback = {}) {
+  return {
+    request_id: uiText(fallback.request_id, 120),
+    turn: debugInteger(fallback.turn),
+    provider_model: uiText(fallback.provider_model, 160),
+    // Static per-session AI method/host/model-list summary (plan 1.10); set
+    // once from config, not from a provider event, so it survives every
+    // merge below unchanged for the life of the session.
+    ai_method: uiText(fallback.ai_method, 32),
+    ai_host: uiText(fallback.ai_host, 200),
+    ai_main_model: uiText(fallback.ai_main_model, 200),
+    ai_subagent_model: uiText(fallback.ai_subagent_model, 200),
+    provider_round: 0,
+    provider_latency_ms: 0,
+    provider_diagnostic_code: '',
+    provider_finish_reason: '',
+    provider_capability_profile: '',
+    requested_token_field: '',
+    requested_output_cap: 0,
+    requested_reasoning_effort: '',
+    requested_thinking_mode: '',
+    reported_reasoning_tokens: 0,
+    usage_complete: 0,
+    cap_enforcement_anomaly: 0,
+    reasoning_effort: '',
+    reasoning_policy_reason: '',
+    think_rounds: 0,
+    think_total_ms: 0,
+    think_slowest_round_ms: 0,
+    think_slowest_round_effort: '',
+    content_chars: 0,
+    reasoning_content_chars: 0,
+    input_units: 0,
+    cached_input_units: 0,
+    output_units: 0,
+    total_units: 0,
+    latest_round_provider_round: 0,
+    latest_round_input_units: 0,
+    latest_round_cached_input_units: 0,
+    latest_round_output_units: 0,
+    latest_round_total_units: 0,
+    decision_provider: '',
+    decision_model: '',
+    decision_shadow_intent: '',
+    decision_active_intent: '',
+    decision_post_step_route: '',
+    decision_post_step_applied_route: '',
+    decision_post_step_confidence_percent: 0,
+    decision_post_step_latency_ms: 0,
+    decision_post_step_fallback: '',
+    decision_development: '',
+    decision_development_confidence_percent: 0,
+    decision_steering: '',
+    decision_steering_confidence_percent: 0,
+    decision_reasoning_budget: '',
+    decision_reasoning_confidence_percent: 0,
+    decision_planning_horizon: '',
+    decision_observation_budget: 0,
+    decision_confidence_percent: 0,
+    decision_queue_conflict_percent: 0,
+    decision_latency_ms: 0,
+    decision_input_units: 0,
+    decision_output_units: 0,
+    decision_cost_micro_usd: 0,
+    decision_calls_total: 0,
+    decision_input_units_total: 0,
+    decision_output_units_total: 0,
+    decision_cost_micro_usd_total: 0,
+    decision_shadow_matches_total: 0,
+    decision_shadow_mismatches_total: 0,
+    decision_post_step_calls_total: 0,
+    decision_planner_skips_total: 0,
+    decision_planner_wakes_total: 0,
+    decision_planner_continue_low_wakes_total: 0,
+    decision_planner_reanchor_low_wakes_total: 0,
+    decision_planner_replan_high_wakes_total: 0,
+    decision_planner_fallback_wakes_total: 0,
+    decision_error: '',
+    decision_fallbacks_total: 0,
+    jev_measurement: '',
+    jev_request_calls: 0,
+    jev_request_fallbacks: 0,
+    jev_request_fallback_percent: 0,
+    jev_last_fallback: '',
+    // 2.6: the harness time estimate for the active step and this request's
+    // think / actor-busy / idle split, as ready-to-show text.
+    time_estimate: '',
+    time_split: '',
+    // 2.10: time to the first chat line and to the first admitted action.
+    responsiveness: '',
+    step_time_step: 0,
+    step_time_caption: '',
+    // 2.7: model usage of the current goal across its requests (units only).
+    goal_spend: '',
+    step_completion_contract: '',
+    step_completion_status: '',
+    step_completion_evidence: '',
+    runtime_condition: '',
+    runtime_condition_state: '',
+    last_tool: '',
+    last_event: '',
+    recovery_attempt: 0,
+    recovery_result: '',
+    last_error: '',
+    actor_id: debugInteger(fallback.actor_id),
+    actor_epoch: debugInteger(fallback.actor_epoch),
+  }
+}
+
+function decisionCumulativeFields(value = {}) {
+  return {
+    decision_calls_total: debugInteger(value.decision_calls_total),
+    decision_input_units_total: debugInteger(value.decision_input_units_total),
+    decision_output_units_total: debugInteger(value.decision_output_units_total),
+    decision_cost_micro_usd_total: debugInteger(value.decision_cost_micro_usd_total),
+    decision_shadow_matches_total: debugInteger(value.decision_shadow_matches_total),
+    decision_shadow_mismatches_total: debugInteger(value.decision_shadow_mismatches_total),
+    decision_post_step_calls_total: debugInteger(value.decision_post_step_calls_total),
+    decision_planner_skips_total: debugInteger(value.decision_planner_skips_total),
+    decision_planner_wakes_total: debugInteger(value.decision_planner_wakes_total),
+    decision_planner_continue_low_wakes_total: debugInteger(value.decision_planner_continue_low_wakes_total),
+    decision_planner_reanchor_low_wakes_total: debugInteger(value.decision_planner_reanchor_low_wakes_total),
+    decision_planner_replan_high_wakes_total: debugInteger(value.decision_planner_replan_high_wakes_total),
+    decision_planner_fallback_wakes_total: debugInteger(value.decision_planner_fallback_wakes_total),
+    decision_fallbacks_total: debugInteger(value.decision_fallbacks_total),
+  }
+}
+
+// The agent loop owns the Jev health window (it opens before request.received
+// because interaction routing runs first), so the UI mirrors its latest values.
+function jevHealthFields(value = {}) {
+  return {
+    jev_measurement: uiText(value.jev_measurement, 32),
+    jev_request_calls: debugInteger(value.jev_request_calls),
+    jev_request_fallbacks: debugInteger(value.jev_request_fallbacks),
+    jev_request_fallback_percent: debugInteger(value.jev_request_fallback_percent),
+    jev_last_fallback: uiText(value.jev_last_fallback, 300),
+  }
+}
+
+function applyJevHealth(debug, health) {
+  if (!health || typeof health !== 'object') return
+  debug.jev_measurement = uiText(health.measurement, 32)
+  debug.jev_request_calls = debugInteger(health.requests)
+  debug.jev_request_fallbacks = debugInteger(health.fallbacks)
+  debug.jev_request_fallback_percent = debugInteger(health.fallback_rate_percent)
+  const last = health.last_fallback
+  if (last && typeof last === 'object') {
+    debug.jev_last_fallback = uiText(`${last.contract} · ${last.kind} · ${last.reason}`, 300)
+  }
+}
+function requestStartDecisionFields(value = {}) {
+  return {
+    ...decisionCumulativeFields(value),
+    ...jevHealthFields(value),
+    decision_provider: uiText(value.decision_provider, 80),
+    decision_model: uiText(value.decision_model, 160),
+    decision_shadow_intent: uiText(value.decision_shadow_intent, 80),
+    decision_active_intent: uiText(value.decision_active_intent, 80),
+    decision_development: uiText(value.decision_development, 32),
+    decision_development_confidence_percent: debugInteger(value.decision_development_confidence_percent),
+    decision_confidence_percent: debugInteger(value.decision_confidence_percent),
+    decision_queue_conflict_percent: debugInteger(value.decision_queue_conflict_percent),
+    decision_latency_ms: debugInteger(value.decision_latency_ms),
+    decision_input_units: debugInteger(value.decision_input_units),
+    decision_output_units: debugInteger(value.decision_output_units),
+    decision_cost_micro_usd: debugInteger(value.decision_cost_micro_usd),
+    decision_error: uiText(value.decision_error, 300),
+  }
+}
+
+function decisionPercent(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 1 ? Math.round(value * 100) : 0
+}
+
+function decisionMicroUsd(value) {
+  return Number.isFinite(value) && value >= 0 ? Math.round(value * 1_000_000) : 0
+}
+
+function applyDebugUsage(debug, usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return debug
+  return {
+    ...debug,
+    input_units: debugInteger(usage.input_units),
+    cached_input_units: debugInteger(usage.cached_input_units),
+    output_units: debugInteger(usage.output_units),
+    total_units: debugInteger(usage.total_units),
+  }
+}
+
+function applyLatestRoundDebugUsage(debug, usage, round) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return debug
+  return {
+    ...debug,
+    latest_round_provider_round: debugInteger(round),
+    latest_round_input_units: debugInteger(usage.input_units),
+    latest_round_cached_input_units: debugInteger(usage.cached_input_units),
+    latest_round_output_units: debugInteger(usage.output_units),
+    latest_round_total_units: debugInteger(usage.total_units),
+  }
+}
+
+export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = {}) {
+  const failure = data?.failure_snapshot && typeof data.failure_snapshot === 'object' ? data.failure_snapshot : undefined
+  let debug = event === 'request.received'
+    ? { ...emptyAgentDebug(fallback), ...requestStartDecisionFields(previous) }
+    : { ...emptyAgentDebug(fallback), ...(previous && typeof previous === 'object' ? previous : {}) }
+
+  debug.last_event = uiText(event, 120)
+  debug.request_id = uiText(failure?.request_id ?? data?.request_id ?? fallback.request_id ?? debug.request_id, 120)
+  debug.turn = debugInteger(failure?.turn ?? data?.turn ?? fallback.turn ?? debug.turn)
+  debug.actor_id = debugInteger(failure?.actor_id ?? data?.actor_id ?? fallback.actor_id ?? debug.actor_id)
+  debug.actor_epoch = debugInteger(failure?.epoch ?? data?.epoch ?? fallback.actor_epoch ?? debug.actor_epoch)
+
+  const providerEvent = failure?.provider ?? (event === 'provider.response' ? data : undefined)
+  const provider = providerEvent?.provider
+  if (event === 'provider.request') {
+    debug.provider_round = debugInteger(data.round)
+    debug.recovery_attempt = debugInteger(data.recovery_attempt)
+    // Keep diagnostics from the latest completed provider round visible while
+    // the next round is in flight. This matches latest-round token semantics
+    // and prevents tool/result driven UI refreshes from making policy fields
+    // flash briefly and then disappear.
+  }
+  if (providerEvent && typeof providerEvent === 'object') {
+    debug.provider_round = debugInteger(providerEvent.round ?? debug.provider_round)
+    debug.provider_latency_ms = debugInteger(providerEvent.latency_ms ?? debug.provider_latency_ms)
+    debug.recovery_attempt = debugInteger(providerEvent.recovery_attempt ?? debug.recovery_attempt)
+    debug.provider_model = uiText(provider?.model ?? fallback.provider_model ?? debug.provider_model, 160)
+    debug.provider_diagnostic_code = uiText(provider?.diagnostic_code ?? debug.provider_diagnostic_code, 160)
+    debug.provider_finish_reason = uiText(provider?.finish_reason ?? debug.provider_finish_reason, 80)
+    debug.provider_capability_profile = uiText(provider?.capability_profile ?? debug.provider_capability_profile, 40)
+    debug.requested_token_field = uiText(provider?.requested_token_field ?? debug.requested_token_field, 40)
+    debug.requested_output_cap = debugInteger(provider?.requested_output_cap ?? debug.requested_output_cap)
+    debug.requested_reasoning_effort = uiText(provider?.requested_reasoning_effort ?? debug.requested_reasoning_effort, 32)
+    debug.requested_thinking_mode = uiText(provider?.requested_thinking_mode ?? debug.requested_thinking_mode, 32)
+    debug.reported_reasoning_tokens = debugInteger(provider?.reported_reasoning_tokens ?? debug.reported_reasoning_tokens)
+    debug.usage_complete = provider?.usage_complete === true ? 1 : provider?.usage_complete === false ? 0 : debug.usage_complete
+    debug.cap_enforcement_anomaly = provider?.cap_enforcement_anomaly === true ? 1 : 0
+    debug.reasoning_effort = uiText(provider?.reasoning_effort ?? debug.reasoning_effort, 32)
+    debug.reasoning_policy_reason = uiText(provider?.reasoning_policy_reason ?? debug.reasoning_policy_reason, 80)
+    debug.response_id = debugOptionalText(provider?.response_id, 160)
+    debug.response_bytes = debugOptionalInteger(provider?.response_bytes)
+    debug.tool_call_count = debugOptionalInteger(provider?.tool_call_count)
+    debug.content_utf8_bytes = debugOptionalInteger(provider?.content_utf8_bytes)
+    debug.content_non_ascii_chars = debugOptionalInteger(provider?.content_non_ascii_chars)
+    debug.content_replacement_chars = debugOptionalInteger(provider?.content_replacement_chars)
+    debug.normalized_content_chars = debugOptionalInteger(provider?.normalized_content_chars)
+    debug.structured_content = debugStructuredContent(provider?.structured_content)
+    debug.content_chars = debugInteger(provider?.content_chars ?? debug.content_chars)
+    debug.reasoning_content_chars = debugInteger(provider?.reasoning_content_chars ?? debug.reasoning_content_chars)
+    const diagnostic = uiText(provider?.diagnostic_code, 160)
+    if (diagnostic && diagnostic !== 'ok') {
+      const finish = uiText(provider?.finish_reason, 80)
+      debug.last_error = finish ? `${diagnostic} · finish=${finish}` : diagnostic
+    }
+  }
+  else if (!debug.provider_model) {
+    debug.provider_model = uiText(fallback.provider_model ?? debug.provider_model, 160)
+  }
+
+  if (event === 'provider.output_budget_recovery_started') debug.recovery_result = 'started'
+  if (event === 'provider.output_budget_recovery_succeeded') debug.recovery_result = 'succeeded'
+  if (event === 'provider.output_budget_recovery_exhausted') debug.recovery_result = 'exhausted_again'
+  if (event === 'provider.output_budget_recovery_failed' && debug.recovery_result !== 'budget_rejected') debug.recovery_result = 'failed'
+  if (event === 'budget.rejected' && data?.recovery_kind === 'output_budget_exhaustion') debug.recovery_result = 'budget_rejected'
+  if (event === 'provider.response' && data?.recovery_kind === 'output_budget_exhaustion') {
+    const recoveryDiagnostic = uiText(provider?.diagnostic_code, 160)
+    debug.recovery_result = recoveryDiagnostic === 'provider_output_budget_exhausted' ? 'exhausted_again' : 'response_received'
+  }
+
+  // Request-cumulative usage comes from traceRequest/failure snapshots. A
+  // provider.response carries usage for only that provider call, so keep it in
+  // separate latest-round fields instead of letting the cumulative fallback
+  // shadow (or overwrite) it.
+  const cumulativeUsage = failure?.usage ?? fallback.usage
+  debug = applyDebugUsage(debug, cumulativeUsage)
+  if (fallback.time && typeof fallback.time === 'object') {
+    debug.time_estimate = uiText(fallback.time.time_estimate, 300)
+    debug.time_split = uiText(fallback.time.time_split, 300)
+    debug.step_time_step = Number.isSafeInteger(fallback.time.step_time_index) && fallback.time.step_time_index >= 0 ? fallback.time.step_time_index + 1 : 0
+    debug.step_time_caption = uiText(fallback.time.step_time_caption, 120)
+  }
+  debug.responsiveness = uiText(fallback.responsiveness, 200)
+  if (fallback.spend && typeof fallback.spend === 'object') debug.goal_spend = uiText(fallback.spend.goal_spend, 300)
+  if (event === 'provider.response') {
+    debug = applyLatestRoundDebugUsage(debug, data?.usage ?? providerEvent?.usage, providerEvent?.round ?? data?.round)
+    // Think time accumulates per completed round of the current planner
+    // request (reset on request.received, same as the fields above). Only
+    // a real provider.response carries a trustworthy latency_ms and the
+    // effort that round actually used; request.failed's failure snapshot
+    // re-describes a round already counted here, so it is excluded to avoid
+    // double counting.
+    const roundLatencyMs = data?.latency_ms
+    if (Number.isFinite(roundLatencyMs) && roundLatencyMs >= 0) {
+      const latency = Math.floor(roundLatencyMs)
+      debug.think_rounds = debugInteger(debug.think_rounds) + 1
+      debug.think_total_ms = debugInteger(debug.think_total_ms) + latency
+      if (latency > debugInteger(debug.think_slowest_round_ms)) {
+        debug.think_slowest_round_ms = latency
+        debug.think_slowest_round_effort = uiText(data?.provider?.reasoning_effort, 32)
+      }
+    }
+  }
+
+  if (event === 'interaction.routed') {
+    const shadow = data?.decision_shadow && typeof data.decision_shadow === 'object' ? data.decision_shadow : undefined
+    if (shadow) {
+      debug.decision_provider = uiText(shadow.provider, 80)
+      debug.decision_model = uiText(shadow.model, 160)
+      debug.decision_shadow_intent = uiText(shadow.intent, 80)
+      debug.decision_active_intent = uiText(data.intent, 80)
+      debug.decision_confidence_percent = decisionPercent(shadow.intent_confidence)
+      if (shadow.development) {
+        debug.decision_development = uiText(shadow.development, 32)
+        debug.decision_development_confidence_percent = decisionPercent(shadow.development_confidence)
+      }
+      debug.decision_queue_conflict_percent = decisionPercent(shadow.queue_conflict_probability)
+      debug.decision_latency_ms = debugInteger(data.decision_shadow_latency_ms)
+      const decisionInput = debugInteger(shadow.usage?.input_tokens)
+      const decisionOutput = debugInteger(shadow.usage?.output_tokens)
+      const decisionCost = decisionMicroUsd(shadow.usage?.cost)
+      debug.decision_input_units = decisionInput
+      debug.decision_output_units = decisionOutput
+      debug.decision_cost_micro_usd = decisionCost
+      debug.decision_calls_total = debugInteger(debug.decision_calls_total) + 1
+      debug.decision_input_units_total = debugInteger(debug.decision_input_units_total) + decisionInput
+      debug.decision_output_units_total = debugInteger(debug.decision_output_units_total) + decisionOutput
+      debug.decision_cost_micro_usd_total = debugInteger(debug.decision_cost_micro_usd_total) + decisionCost
+      if (shadow.intent === data.intent) debug.decision_shadow_matches_total = debugInteger(debug.decision_shadow_matches_total) + 1
+      else debug.decision_shadow_mismatches_total = debugInteger(debug.decision_shadow_mismatches_total) + 1
+      debug.decision_error = ''
+    }
+    const decisionError = uiText(data.decision_shadow_error, 300)
+    if (decisionError) debug.decision_error = decisionError
+  }
+
+
+  if (event === 'jev.health') {
+    if (data?.outcome === 'fallback') {
+      debug.decision_fallbacks_total = debugInteger(debug.decision_fallbacks_total) + 1
+    }
+    applyJevHealth(debug, data)
+  }
+  if ((event === 'request.completed' || event === 'request.failed') && data?.jev_health) {
+    applyJevHealth(debug, data.jev_health)
+  }
+
+  if (event === 'post_step.routed') {
+    debug.decision_post_step_calls_total = debugInteger(debug.decision_post_step_calls_total) + 1
+    const decision = data?.decision && typeof data.decision === 'object' ? data.decision : undefined
+    debug.decision_post_step_route = uiText(data.route, 80)
+    debug.decision_post_step_applied_route = uiText(data.applied_route, 80)
+    debug.decision_post_step_fallback = uiText(data.fallback_reason, 300)
+    debug.decision_post_step_latency_ms = debugInteger(data.decision_latency_ms)
+    if (decision) {
+      debug.decision_provider = uiText(decision.provider, 80)
+      debug.decision_model = uiText(decision.model, 160)
+      debug.decision_post_step_confidence_percent = decisionPercent(decision.confidence)
+      // Jev is advisory here: boundary steering and routing only.
+      const steeringRecommendation = decision.steering && typeof decision.steering === 'object'
+        ? decision.steering
+        : undefined
+      if (steeringRecommendation) {
+        debug.decision_steering = uiText(steeringRecommendation.recommended_mode, 32)
+        debug.decision_steering_confidence_percent = decisionPercent(steeringRecommendation.confidence)
+      }
+      const steering = decision.boundary_steering && typeof decision.boundary_steering === 'object'
+        ? decision.boundary_steering
+        : undefined
+      if (steering) {
+        debug.decision_development = uiText(steering.development, 32)
+        debug.decision_development_confidence_percent = decisionPercent(steering.development_confidence)
+        debug.decision_reasoning_budget = uiText(steering.reasoning_budget, 32)
+        debug.decision_reasoning_confidence_percent = decisionPercent(steering.reasoning_confidence)
+        debug.decision_planning_horizon = uiText(steering.planning_horizon, 32)
+        debug.decision_observation_budget = debugInteger(steering.observation_budget)
+      }
+      const decisionInput = debugInteger(decision.usage?.input_tokens)
+      const decisionOutput = debugInteger(decision.usage?.output_tokens)
+      const decisionCost = decisionMicroUsd(decision.usage?.cost)
+      debug.decision_input_units = decisionInput
+      debug.decision_output_units = decisionOutput
+      debug.decision_cost_micro_usd = decisionCost
+      debug.decision_calls_total = debugInteger(debug.decision_calls_total) + 1
+      debug.decision_input_units_total = debugInteger(debug.decision_input_units_total) + decisionInput
+      debug.decision_output_units_total = debugInteger(debug.decision_output_units_total) + decisionOutput
+      debug.decision_cost_micro_usd_total = debugInteger(debug.decision_cost_micro_usd_total) + decisionCost
+      debug.decision_error = ''
+    }
+    if (debug.decision_post_step_fallback) debug.decision_error = debug.decision_post_step_fallback
+  }
+
+  if (event === 'planner.skipped' && data?.source === 'decision_provider') {
+    debug.decision_planner_skips_total = debugInteger(debug.decision_planner_skips_total) + 1
+  }
+  if (event === 'planner.wake' && data?.source === 'decision_provider') {
+    debug.decision_planner_wakes_total = debugInteger(debug.decision_planner_wakes_total) + 1
+    if (data?.route === 'continue_current') {
+      debug.decision_planner_continue_low_wakes_total = debugInteger(debug.decision_planner_continue_low_wakes_total) + 1
+    }
+    else if (data?.route === 'reanchor_plan') {
+      debug.decision_planner_reanchor_low_wakes_total = debugInteger(debug.decision_planner_reanchor_low_wakes_total) + 1
+    }
+    else if (data?.route === 'replan') {
+      debug.decision_planner_replan_high_wakes_total = debugInteger(debug.decision_planner_replan_high_wakes_total) + 1
+    }
+    else if (data?.route === 'fallback_planner') {
+      debug.decision_planner_fallback_wakes_total = debugInteger(debug.decision_planner_fallback_wakes_total) + 1
+    }
+  }
+
+  if (event === 'step.contract_created' || event === 'step.checkpoint_validated') {
+    const contract = data?.contract && typeof data.contract === 'object' ? data.contract : {}
+    const kinds = Array.isArray(contract.requirements)
+      ? contract.requirements.map(requirement => uiText(requirement?.kind, 60)).filter(Boolean).join('+')
+      : ''
+    debug.step_completion_contract = uiText(kinds || contract.mode || 'semantic_unknown', 200)
+    debug.step_completion_status = contract.mode === 'semantic_unknown' ? 'unknown' : 'waiting'
+  }
+  if (event === 'step.completion_checked') {
+    debug.step_completion_status = uiText(data.status, 80) || debug.step_completion_status
+    debug.step_completion_evidence = uiText(JSON.stringify(data.evidence ?? []), 300)
+  }
+  if (event === 'step.close_declined') {
+    debug.step_completion_status = uiText(`${data.trigger ?? 'close'}: ${data.reason ?? 'declined'}`, 120)
+  }
+  if (event === 'step.verified') {
+    debug.step_completion_status = 'verified'
+    debug.step_completion_evidence = uiText(JSON.stringify(data.task_board ?? data.evidence ?? {}), 300)
+  }
+  if (event === 'runtime.condition_registered') {
+    debug.runtime_condition = uiText(JSON.stringify(data.condition ?? {}), 300)
+    debug.runtime_condition_state = 'active'
+  }
+  if (event === 'runtime.condition_waiting') debug.runtime_condition_state = 'active'
+  if (event === 'runtime.condition_satisfied') debug.runtime_condition_state = 'satisfied'
+  if (event === 'runtime.condition_timeout') debug.runtime_condition_state = 'timeout'
+  if (event === 'runtime.condition_failed') debug.runtime_condition_state = 'failed'
+  if (event === 'runtime.condition_progress_stopped') debug.runtime_condition_state = 'stopped'
+  if (event === 'runtime.condition_stale') debug.runtime_condition_state = 'stale'
+
+  if (event === 'tool.call' || event === 'tool.result') debug.last_tool = uiText(data.name, 120)
+  if (event === 'actor.bound') {
+    debug.actor_id = debugInteger(data.actor_id)
+    debug.actor_epoch = debugInteger(data.epoch)
+  }
+  if (event === 'replan.started') {
+    debug.recovery_attempt = debugInteger(data.attempt ?? debug.recovery_attempt)
+    const reason = uiText(data.reason, 500)
+    if (reason) debug.last_error = reason
+  }
+  if (event === 'provider.error') {
+    const message = uiText(data.message, 500)
+    if (message) debug.last_error = message
+  }
+  if (event === 'request.failed') {
+    const message = uiText(failure?.message ?? data.message, 500)
+    if (message) debug.last_error = message
+    debug.recovery_attempt = debugInteger(failure?.recovery?.attempt ?? debug.recovery_attempt)
+    const lastTool = failure?.last_tool
+    if (lastTool?.name) debug.last_tool = uiText(lastTool.name, 120)
+  }
+
+  return debug
+}
+
 export function liveAgentEvent(event, data = {}) {
   const count = value => Array.isArray(value) ? value.length : 0
   switch (event) {
+    case 'post_step.routed': {
+      const requested = uiText(data.route, 80) || 'fallback_planner'
+      const applied = uiText(data.applied_route, 80) || requested
+      const decision = data?.decision && typeof data.decision === 'object' ? data.decision : undefined
+      const confidence = decisionPercent(decision?.confidence)
+      const fallback = uiText(data.fallback_reason, 160)
+      return {
+        activity: {
+          kind: 'system',
+          text: `Jev ACTIVE post-step: ${requested}${applied !== requested ? ` → ${applied}` : ''}${confidence > 0 ? ` · ${confidence}%` : ''}${fallback ? ` · fallback ${fallback}` : ''}`,
+        },
+      }
+    }
+    case 'interaction.routed': {
+      const signal = data?.decision_shadow && typeof data.decision_shadow === 'object' ? data.decision_shadow : undefined
+      if (signal) {
+        const confidence = decisionPercent(signal.intent_confidence)
+        const routeSource = uiText(data.interaction_route_source, 40)
+        const direct = routeSource === 'jev'
+        const match = signal.intent === data.intent ? 'match' : `active ${uiText(data.intent, 80) || 'unknown'}`
+        const input = debugInteger(signal.usage?.input_tokens)
+        const cost = decisionMicroUsd(signal.usage?.cost)
+        return {
+          activity: {
+            kind: 'system',
+            text: `Jev ${direct ? 'ACTIVE route' : 'hybrid signal'}: ${uiText(signal.intent, 80) || 'unknown'} · ${confidence}% · ${match} · ${debugInteger(data.decision_shadow_latency_ms)} ms${input > 0 ? ` · ${input} in` : ''}${cost > 0 ? ` · ${cost} µUSD` : ''}`,
+          },
+        }
+      }
+      const decisionError = uiText(data.decision_shadow_error, 200)
+      return decisionError
+        ? { activity: { kind: 'system', text: `Jev interaction signal unavailable: ${decisionError}` } }
+        : undefined
+    }
     case 'request.received':
       return {
         phase: 'thinking',
@@ -410,16 +1265,34 @@ export function liveAgentEvent(event, data = {}) {
         detail: `Checking ${uiText(data.name, 64)}`,
         activity: { kind: 'observation', text: `Tool ${uiText(data.name, 64)}${data.cached ? ' (cached)' : ''}` },
       }
-    case 'plan.accepted':
-      return { phase: 'executing', detail: uiText(data.chat_message, 200) || 'Plan accepted' }
+    case 'plan.accepted': {
+      const message = uiText(data.chat_message, 1000)
+      return {
+        phase: 'executing',
+        detail: uiText(data.chat_message, 200) || 'Plan accepted',
+        // chat_message is the public player-facing reply. Keep every non-empty
+        // reply in the live activity stream regardless of whether this turn was
+        // triggered by a new request, a failure, or an automatic continuation.
+        // Current Task Conversation is projected from that retained stream.
+        ...(message ? { activity: { kind: 'decision', text: message } } : {}),
+      }
+    }
     case 'operations.admit':
       return { phase: 'executing', detail: `Submitting ${count(data.operations)} operation(s) to Autorio` }
     case 'request.waiting':
       return { phase: 'waiting', detail: `Autorio is running ${data.operation_count ?? 0} operation(s)` }
     case 'request.completed':
       return { phase: 'idle', detail: 'Finished the last request' }
+    case 'executor.slice_wake_deferred':
+      return {
+        phase: 'waiting',
+        detail: `Slice verified; waiting for Resume (planner unavailable: ${uiText(data.reason, 80)})`,
+        activity: { kind: 'blocker', text: `Slice verified but I could not hand the goal back to the planner (${uiText(data.reason, 80)}). Resume to continue.` },
+      }
     case 'factorio.completed_signal':
-      return { phase: 'thinking', detail: 'Batch finished; checking the result', activity: { kind: 'result', text: 'Autorio batch completed' } }
+      // With a durable plan the batch receipt says the same thing with detail, so
+      // the snapshot drops this line; without one it is the only record.
+      return { phase: 'thinking', detail: 'Batch finished; checking the result', activity: { kind: 'result', text: 'Autorio batch completed', covered_by_receipt: true } }
     case 'factorio.error_continuation':
       return { phase: 'thinking', detail: 'Autorio reported an error; replanning' }
     case 'replan.started':
@@ -433,65 +1306,183 @@ export function liveAgentEvent(event, data = {}) {
     case 'request.cancelled':
       return { phase: 'idle', detail: `Cancelled (${uiText(data.reason, 64) || 'cancelled'})` }
     case 'factorio.status':
-      // Task receipts update board evidence and may advance the active step.
       return { refresh: true }
     default:
       return undefined
   }
 }
 
-export function taskBoardUiSnapshot(state, live) {
+function uiActivityEntry(entry) {
+  const { covered_by_receipt: _covered, ...rest } = entry
+  return rest
+}
+
+function trackerUiStatus(tracker, state) {
+  if (state?.status === 'paused') return 'paused'
+  if (tracker?.status === 'BLOCKED') return 'blocked'
+  if (tracker?.status === 'COMPLETED' || tracker?.goal_status === 'completed') return 'completed'
+  if (tracker?.plan_id || (tracker?.goal_id && tracker?.goal_status === 'active')) return 'active'
+  return undefined
+}
+
+function trackerUiBlocked(tracker) {
+  if (!tracker || tracker.status !== 'BLOCKED') return undefined
+  const blocker = tracker.blocker && typeof tracker.blocker === 'object' ? tracker.blocker : {}
+  const reason = uiText(blocker.reason_code, 500) || 'blocked'
+  const summary = uiText(blocker.detail, 500)
+  const choice = blocker.user_choice?.choice
+  const result = {
+    reason,
+    ...(summary ? { summary } : {}),
+    awaiting_choice: blocker.requires_user_decision === true && !choice,
+    ...(choice ? { choice } : {}),
+  }
+  if (blocker.kind === 'deadlock' && Array.isArray(blocker.signals) && blocker.signals.length > 0) {
+    const first = blocker.signals[0]
+    if (['evidence_stall', 'repeated_failure', 'unsatisfiable_contract'].includes(first?.kind)) {
+      result.deadlock = {
+        signal: first.kind,
+        count: blocker.signals.filter(signal => signal?.kind === first.kind).length,
+        ...(uiText(first?.detail, 200) ? { detail: uiText(first.detail, 200) } : {}),
+      }
+    }
+  }
+  return result
+}
+
+function trackerUiPlan(tracker) {
+  if (!tracker?.plan_id) return undefined
+  return {
+    plan_id: String(tracker.plan_id).slice(0, 100),
+    plan_version: Number.isSafeInteger(tracker.plan_version) && tracker.plan_version > 0 ? tracker.plan_version : 1,
+    ...(Array.isArray(tracker.roadmap_node_ids) && tracker.roadmap_node_ids[0]
+      ? { roadmap_node_id: String(tracker.roadmap_node_ids[0]).slice(0, 100) }
+      : {}),
+    ...(tracker.derived_from_plan_id ? { derived_from: String(tracker.derived_from_plan_id).slice(0, 100) } : {}),
+    ...(tracker.superseded_by_plan_id ? { superseded_by: String(tracker.superseded_by_plan_id).slice(0, 100) } : {}),
+  }
+}
+
+function trackerUiShelf(tracker) {
+  if (!Array.isArray(tracker?.roadmap_shelf)) return []
+  const statuses = new Set(['tentative', 'ready_to_refine', 'partially_realized', 'realized', 'invalidated'])
+  return tracker.roadmap_shelf.slice(0, 12).map(node => ({
+    id: String(node?.id ?? '').slice(0, 100),
+    intent: String(node?.intent ?? '').slice(0, 300),
+    why_it_matters: String(node?.why_it_matters ?? '').slice(0, 240),
+    status: statuses.has(node?.status) ? node.status : 'tentative',
+    depends_on: (Array.isArray(node?.depends_on) ? node.depends_on : []).slice(0, 4).map(id => String(id).slice(0, 100)),
+    ...(node?.development_hint ? { development_hint: String(node.development_hint).slice(0, 32) } : {}),
+    linked: node?.linked === true,
+  })).filter(node => node.id && node.intent)
+}
+
+function trackerUiSteps(tracker, state) {
+  if (!tracker?.plan_id || !Array.isArray(tracker.steps)) return undefined
+  const paused = state?.status === 'paused'
+  const blocked = tracker.status === 'BLOCKED'
+  return tracker.steps.slice(0, 30).map((step, index) => {
+    let status = step?.status === 'completed' ? 'completed' : step?.status === 'active' ? 'active' : 'pending'
+    if (index === tracker.active_step_index && status === 'active') {
+      if (blocked) status = 'blocked'
+      else if (paused) status = 'paused'
+    }
+    return {
+      id: String(step?.step_id ?? '').slice(0, 80),
+      description: String(step?.description ?? '').slice(0, 500),
+      status,
+      contract_kind: step?.completion_contract ? 'grounded' : step?.contract_status === 'pending' ? 'pending' : 'prose',
+      ...(step?.reduced_confidence === true ? { reduced_confidence: true } : {}),
+    }
+  })
+}
+
+export function taskBoardUiSnapshot(state, live, tracker) {
   const board = state?.task_board
+  const trackerSteps = trackerUiSteps(tracker, state)
+  const trackerShelf = trackerUiShelf(tracker)
+  const trackerStatus = trackerUiStatus(tracker, state)
+  const trackerBlocked = trackerUiBlocked(tracker)
   const agent = {
     phase: UI_AGENT_PHASES.has(live?.phase) ? live.phase : 'idle',
     detail: uiText(live?.detail, 300),
   }
+  const debug = live?.debug && typeof live.debug === 'object' ? live.debug : emptyAgentDebug()
   const liveActivity = Array.isArray(live?.activity) ? live.activity : []
-  if (!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps)) {
-    // No durable plan yet (or a chat-only reply): still show what AIRI is doing.
-    if (!live || (agent.phase === 'idle' && liveActivity.length === 0)) return undefined
+  const liveConversation = Array.isArray(live?.conversation) ? live.conversation.slice(-UI_CONVERSATION_LIMIT) : []
+  const conversationId = uiText(live?.conversation_id, 120)
+  if ((!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps)) && trackerSteps === undefined && trackerShelf.length === 0) {
+    if (!live || (agent.phase === 'idle' && liveActivity.length === 0 && liveConversation.length === 0)) return undefined
     return {
-      goal_id: '',
-      objective: uiText(live.objective, 500),
+      goal_id: String(tracker?.goal_id ?? '').slice(0, 100),
+      objective: uiText(state?.objective ?? live.objective, 500),
+      project: undefined,
+      shelf: trackerShelf,
       status: 'idle',
       blocker: '',
+      blocker_summary: '',
       pause_reason: '',
+      pause_summary: '',
       completed_count: 0,
       total_steps: 0,
       active_index: 0,
       steps: [],
-      activity: liveActivity.slice(-UI_ACTIVITY_LIMIT),
+      activity: liveActivity.slice(-UI_ACTIVITY_LIMIT).map(uiActivityEntry),
       wanted_items: [],
+      conversation_id: conversationId,
+      conversation: liveConversation,
       agent,
+      debug,
     }
   }
+  const blocker = formatTaskCondition(board?.blocker, 'blocker', board?.evidence)
+  const pauseReason = formatTaskCondition(board?.pause_reason, 'pause')
+  const baseSteps = trackerSteps ?? board.steps.slice(0, 30).map(step => ({
+    id: String(step?.id ?? '').slice(0, 80),
+    description: String(step?.description ?? '').slice(0, 500),
+    status: step?.status,
+  }))
+  // 2.6: the harness estimate on the step it belongs to (1-based in debug).
+  const timedStep = debugInteger(debug.step_time_step) - 1
+  const stepTime = uiText(debug.step_time_caption, 120)
+  const steps = timedStep >= 0 && stepTime
+    ? baseSteps.map((step, index) => index === timedStep && step.status !== 'completed' ? { ...step, time: stepTime } : step)
+    : baseSteps
+  const completedCount = trackerSteps
+    ? trackerSteps.filter(step => step.status === 'completed').length
+    : board.completed_count
+  const activeIndex = trackerSteps
+    ? Math.max(0, Math.min(Number.isSafeInteger(tracker?.active_step_index) ? tracker.active_step_index : 0, Math.max(0, trackerSteps.length - 1)))
+    : board.active_index
+  const topStatus = trackerStatus ?? board.status
+  const topBlocked = trackerBlocked ?? state?.planning?.blocked
+  const blockerRaw = trackerBlocked?.reason ?? blocker.raw
+  // A locked recipe's own summary names the technology and the next research; the tracker's detail is the bare code.
+  const blockerSummary = lockedRecipeSummary(blockerRaw, board?.evidence) ?? trackerBlocked?.summary ?? blocker.summary
   return {
-    goal_id: String(board.goal_id ?? state.goal_id ?? '').slice(0, 100),
-    objective: String(state.objective ?? '').slice(0, 500),
-    status: board.status,
-    blocker: String(board.blocker ?? '').slice(0, 500),
-    pause_reason: String(board.pause_reason ?? '').slice(0, 300),
-    completed_count: board.completed_count,
-    total_steps: board.total_steps,
-    active_index: board.active_index,
-    steps: board.steps.slice(0, 30).map(step => ({
-      id: String(step?.id ?? '').slice(0, 80),
-      description: String(step?.description ?? '').slice(0, 500),
-      status: step?.status,
-    })),
-    activity: [...deriveActivity(state), ...liveActivity].slice(-UI_ACTIVITY_LIMIT),
+    goal_id: String(tracker?.goal_id ?? board?.goal_id ?? state?.goal_id ?? '').slice(0, 100),
+    objective: String(state?.objective ?? live?.objective ?? '').slice(0, 500),
+    plan: trackerUiPlan(tracker) ?? state?.planning?.plan,
+    blocked: topBlocked,
+    status: topStatus,
+    blocker: blockerRaw,
+    blocker_summary: blockerSummary,
+    pause_reason: pauseReason.raw,
+    pause_summary: pauseReason.summary,
+    completed_count: completedCount,
+    total_steps: steps.length,
+    active_index: activeIndex,
+    steps,
+    shelf: trackerShelf,
+    activity: [...deriveActivity(state), ...liveActivity.filter(entry => !entry.covered_by_receipt)].slice(-UI_ACTIVITY_LIMIT).map(uiActivityEntry),
     wanted_items: deriveWantedItems(state),
+    conversation_id: conversationId,
+    conversation: liveConversation,
     agent,
+    debug,
   }
 }
 
-/**
- * Serialises a snapshot small enough to survive the RCON command path.
- *
- * Activity goes first because the oldest lines have already scrolled out of the
- * console, then step text, which the console truncates for display anyway. A
- * shortened board beats the previous behaviour of silently sending nothing.
- */
 export function taskBoardUiJson(snapshot) {
   let candidate = snapshot
   let json = JSON.stringify(candidate)
@@ -504,52 +1495,241 @@ export function taskBoardUiJson(snapshot) {
     candidate = { ...candidate, steps: candidate.steps.map(step => ({ ...step, description: uiText(step.description, limit) })) }
     json = JSON.stringify(candidate)
   }
+  for (const limit of [200, 120, 80]) {
+    if (Buffer.byteLength(json) <= UI_SNAPSHOT_MAX_BYTES) break
+    candidate = {
+      ...candidate,
+      shelf: (candidate.shelf ?? []).map(node => ({
+        ...node,
+        intent: uiText(node.intent, limit),
+        why_it_matters: uiText(node.why_it_matters, Math.max(60, Math.floor(limit * 0.75))),
+      })),
+    }
+    json = JSON.stringify(candidate)
+  }
+  // Conversation is a separate UI concern from model dialogue memory. Preserve
+  // every retained turn before considering payload trimming; if a very long task
+  // would exceed the RCON command ceiling, shorten message text rather than
+  // dropping whole user/assistant turns from the visible task transcript.
+  for (const limit of [1200, 800, 500, 300]) {
+    if (Buffer.byteLength(json) <= UI_SNAPSHOT_MAX_BYTES) break
+    candidate = { ...candidate, conversation: (candidate.conversation ?? []).map(message => ({ ...message, text: uiText(message.text, limit) })) }
+    json = JSON.stringify(candidate)
+  }
   return Buffer.byteLength(json) <= UI_SNAPSHOT_MAX_BYTES ? json : undefined
 }
 
 async function stopWorldWork(session) {
   await session.ensureAuthorization()
   await session.rcon.command('/silent-command remote.call("autorio_operations","stop_follow_player")')
-  await session.rcon.command('/silent-command remote.call("airi_deployment","cancel")')
+  await session.rcon.command('/silent-command remote.call("sgluna_deployment","cancel")')
 }
 
+// A pause never unfreezes a BLOCKED plan (the reducer keeps it BLOCKED), so
+// the player is told the plan is still waiting for their Revise/Cancel choice
+// instead of being told it was paused.
+export function pauseChatLine(state, { cancelledWork = false } = {}) {
+  const work = cancelledWork ? 'cancelled active Autorio work' : 'stopped active work'
+  if (state?.status === 'blocked') {
+    return `The SGLuna plan is blocked and waiting for your Revise or Cancel choice in the Task Board; I ${work}.`
+  }
+  return cancelledWork
+    ? `Paused the current SGLuna plan and ${work}. Say continue/resume when you want me to pick it back up.`
+    : `Paused the current SGLuna plan and ${work}. Use continue/resume when you want it to continue.`
+}
+
+// A person's pause is class operator. A plan that is already paused for a reason a timer would resume (transport,
+// model_recoverable) is re-paused as operator, so the player's pause is not undone.
 async function pausePlanIfPresent(session, reason) {
   const state = session.currentPlanState?.()
-  if (!state || state.status === 'completed' || state.status === 'paused') return state
+  if (!state || state.status === 'completed') return state
+  if (state.status === 'paused') {
+    const key = typeof session.agent?.activePlanKey === 'function' ? session.agent.activePlanKey() : undefined
+    const held = session.agent?.memory?.pauseRecord?.(key)
+    if (!isAutoResumable(pauseClassOf(held).pause_class)) return state
+    session.cancelAutoResume?.('operator_pause')
+  }
   if (typeof session.agent?.pausePersistentPlan !== 'function') {
     session.agent?.cancel?.(reason)
     return state
   }
-  return session.agent.pausePersistentPlan(reason)
+  return session.agent.pausePersistentPlan(reason, { pause_class: PAUSE_CLASS.OPERATOR })
 }
 
-async function terminatePlan(session, reason) {
+function resetLiveTaskContext(session) {
+  if (!session.agentLive || typeof session.agentLive !== 'object') return
+  Object.assign(session.agentLive, {
+    phase: 'idle',
+    detail: '',
+    objective: '',
+    at: Date.now(),
+    activity: [],
+  })
+  // Terminate and New Task are both boundaries for the *current* task
+  // conversation. Terminate may retain bounded model dialogue memory internally,
+  // but that retained memory belongs to history/continuity rather than the
+  // Current Task Conversation panel.
+  session.startNewUiConversation?.()
+}
+
+async function discardTaskContext(session, reason, { clearDialogue = false } = {}) {
   const agent = session.agent
   if (!agent) return undefined
   await agent.loadPersistentState?.()
-  const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'airi'}`
-  const previous = agent.memory?.terminatePlan?.(key, reason)
+  const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'sgluna'}`
+
+  // Cancellation is deliberately first: an in-flight provider response must not
+  // race the destructive context update, and no new Autorio work may be admitted
+  // while the server is clearing the durable slot.
   agent.cancel?.(reason)
+  await stopWorldWork(session)
+
+  const cleared = clearDialogue
+    ? agent.memory?.clearTaskContext?.(key)
+    : agent.memory?.terminatePlan?.(key)
   await agent.persistState?.()
-  return previous
+  resetLiveTaskContext(session)
+  // Both destructive lifecycle boundaries clear the current UI snapshot. Old
+  // task/history data is retained by the history subsystem, and Terminate still
+  // preserves bounded dialogue memory internally when clearDialogue is false.
+  await session.clearTaskBoardUi()
+  return cleared
+}
+
+function completedTaskResult(result) {
+  return result?.goalStatus === 'completed' || result?.taskBoard?.status === 'completed'
+}
+
+export async function finalizeCompletedTaskBoundary(session, result) {
+  if (!session?.agent || !completedTaskResult(result)) return false
+  await session.agent.loadPersistentState?.()
+  const key = session.agent.activePlanKey?.() ?? session.agent.lastMemoryKey ?? `npc:${session.npcId ?? 'sgluna'}`
+  const decision = completionFinalizationDecision(session.agent.memory, key, result)
+  if (!decision.allowed) {
+    await session.agent.traceEvent?.('goal.finalization_refused', {
+      request_id: session.agent.traceRequest?.id,
+      reason: decision.reason,
+      goal_id: decision.goal_id,
+      result_goal_id: result?.goalId ?? result?.taskBoard?.goal_id,
+      task_board_status: result?.taskBoard?.status,
+    })
+    return false
+  }
+
+  // Publish exactly one final completed snapshot before clearing the live slot.
+  // This lets Old Tasks and learning consume the completed stages, evidence and
+  // player-facing conversation instead of seeing the task simply disappear.
+  const taskBoard = result?.taskBoard
+  if (taskBoard?.status === 'completed') {
+    const completedState = {
+      goal_id: result?.goalId ?? taskBoard.goal_id ?? '',
+      owner: session.agent?.requestInfo?.sender ?? '',
+      objective: session.agentLive?.objective ?? '',
+      status: 'completed',
+      blocker: '',
+      pause_reason: '',
+      plan: [],
+      current_step: 0,
+      last_chat_message: result?.chatMessage ?? '',
+      last_operations: [],
+      task_board: taskBoard,
+    }
+    await session.syncTaskBoardUi(completedState)
+  }
+
+  const finalized = await session.agent.finalizeCompletedTaskContext?.(result)
+  if (finalized === false || finalized?.finalized === false) return false
+  resetLiveTaskContext(session)
+  await session.clearTaskBoardUi()
+  await resumeInterruptedTaskAfterCompletion(session)
+  return true
+}
+
+// MW2: when the interrupting temporary task has verified complete, the most recently interrupted runnable temporary task
+// comes back from the durable ledger (design section 3). The task's committed plan and verified progress are restored
+// without a model turn; the ordinary interrupted-plan recovery then re-observes the world before anything is issued.
+// Queued, not awaited: it runs after the current event, like every other recovery.
+export async function resumeInterruptedTaskAfterCompletion(session) {
+  const agent = session?.agent
+  if (typeof agent?.resumeInterruptedTask !== 'function') return undefined
+  const resumed = await agent.resumeInterruptedTask({ reason: 'interrupting_task_completed' })
+  if (!resumed?.ok) return resumed
+  await session.syncTaskBoardUi?.(resumed.state)
+  if (typeof session.queueEvent === 'function') {
+    session.queueEvent(() => session.recoverInterruptedPlan('interrupted_task_resumed', {
+      task_id: resumed.task.task_id,
+      goal_id: resumed.task.goal_id,
+    }), { reportError: true })
+  }
+  return resumed
 }
 
 export async function executeUiControl(session, event) {
   if (!session?.rcon || !session?.agent) return false
 
+  const recordBlockedChoice = async (choice) => {
+    const agent = session.agent
+    const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'sgluna'}`
+    const state = agent.memory?.recordBlockedChoice?.(key, choice, event.player_name, { now: Date.now() })
+    if (!state) return undefined
+    await agent.persistState?.()
+    return session.currentPlanState?.() ?? state
+  }
+
+  if (event.action === 'keep_paused') {
+    // BLOCKED is already a durable freeze. Do not relabel it PAUSED or ask the
+    // model to recover it; this is an explicit acknowledgement only.
+    let state = session.currentPlanState?.()
+    if (state?.status !== 'blocked') return false
+    await stopWorldWork(session)
+    state = await recordBlockedChoice('keep_paused') ?? state
+    await session.syncTaskBoardUi(state)
+    await session.printChat('Kept the blocked SGLuna plan frozen. No replanning or world work will start until you explicitly revise it or cancel it.')
+    return true
+  }
+
+  if (event.action === 'revise') {
+    // A click opens the user-controlled revision path, but contains no goals
+    // or constraints from which the runtime may fabricate a successor plan.
+    let state = session.currentPlanState?.()
+    if (state?.status !== 'blocked') return false
+    await stopWorldWork(session)
+    state = await recordBlockedChoice('revise') ?? state
+    await session.syncTaskBoardUi(state)
+    await session.printChat('The blocked plan remains frozen. Enter the revised goal or constraints in the Task Board prompt; SGLuna will not replace this plan until you explicitly provide that revision.')
+    return true
+  }
+
+  if (event.action === 'cancel') {
+    // The control acknowledges the cancellation choice and makes the world
+    // safe, but preserves the existing two-click TERMINATE confirmation for
+    // irreversible durable-plan deletion.
+    let state = session.currentPlanState?.()
+    if (state?.status !== 'blocked') return false
+    await stopWorldWork(session)
+    state = await recordBlockedChoice('cancel') ?? state
+    await session.syncTaskBoardUi(state)
+    await session.printChat('Cancellation selected. The blocked plan remains frozen until you confirm TERMINATE in the Task Board.')
+    return true
+  }
+
   if (event.action === 'pause') {
     const state = await pausePlanIfPresent(session, 'ui_pause')
     await stopWorldWork(session)
     if (state) await session.syncTaskBoardUi(state)
-    await session.printChat('Paused the current AIRI plan and stopped active work. Use continue/resume when you want it to continue.')
+    await session.printChat(pauseChatLine(state))
     return true
   }
 
   if (event.action === 'terminate') {
-    await terminatePlan(session, 'ui_terminate')
-    await stopWorldWork(session)
-    await session.clearTaskBoardUi()
-    await session.printChat('Terminated the current AIRI goal. Its durable plan was discarded and will not resume.')
+    await discardTaskContext(session, 'ui_terminate')
+    await session.printChat('Terminated the current SGLuna goal. Its durable plan was discarded and will not resume.')
+    return true
+  }
+
+  if (event.action === 'new_task') {
+    await discardTaskContext(session, 'ui_new_task', { clearDialogue: true })
+    await session.printChat('Started a new task context for this NPC. Previous conversation and durable plan were cleared; learned skills and Factorio world state were kept.')
     return true
   }
 
@@ -576,8 +1756,8 @@ export async function executeUiControl(session, event) {
 function parseStatus(text) {
   let value
   try { value = JSON.parse(String(text).trim()) }
-  catch { throw new DeploymentError('Invalid airi_deployment status JSON') }
-  check(value && typeof value === 'object' && !Array.isArray(value), 'Invalid airi_deployment status')
+  catch { throw new DeploymentError('Invalid sgluna_deployment status JSON') }
+  check(value && typeof value === 'object' && !Array.isArray(value), 'Invalid sgluna_deployment status')
   return value
 }
 
@@ -592,60 +1772,502 @@ function providerRecoveryExhausted(message) {
   return /^Provider response recovery exhausted after \d+ attempts:/.test(String(message))
 }
 
-export function shouldRecoverInterruptedPlan(state) {
-  if (!state || state.status === 'completed' || state.status === 'blocked') return false
+// `awaitingNextSlice`: the agent reports a verified-complete plan slice whose
+// user goal is still active, i.e. the goal was between slices when it stopped.
+// `allowModelRecoverable`: the caller (the model_recoverable auto-resume) already read the durable pause class and the plan identity
+// from the reducer, so a paused plan is recoverable. Without it a pause stays a pause unless it is a lifecycle or transport one.
+export function shouldRecoverInterruptedPlan(state, { awaitingNextSlice = false, allowModelRecoverable = false } = {}) {
+  if (!state || state.status === 'blocked') return false
+  if (state.status === 'completed') return awaitingNextSlice === true
   if (state.status === 'active') return true
   if (state.status !== 'paused') return false
+  if (allowModelRecoverable === true) return true
   const pauseReason = String(state.pause_reason ?? '')
-  return SYSTEM_RECOVERY_PAUSE_REASONS.has(pauseReason) || pauseReason.startsWith('server_stop_')
+  return SYSTEM_RECOVERY_PAUSE_REASONS.has(pauseReason)
+    || pauseReason.startsWith('server_stop_')
+    || pauseReason.startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
+    || state.pause_class === PAUSE_CLASS.TRANSPORT
 }
 
-export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
+function idleAutorioRuntime(status) {
+  if (!status || typeof status !== 'object' || Array.isArray(status) || status.status_error) return false
+  if (!Number.isSafeInteger(status.queue_length) || typeof status.task_state !== 'string') return false
+  return status.queue_length === 0 && status.task_state.trim().toLowerCase() === 'idle'
+}
+
+// Pause class transport (pause-class.mjs): temporary provider conditions that resolve by waiting. The hourly request budget
+// refilling, rate limiting, provider 5xx, timeouts and network errors. A long goal must not stop for one of these until a human
+// types "continue". Model-behaviour failures (bad output, action omission, context window) are other classes: waiting does not fix
+// them. The subkind is read from the structured error where the provider layer set it; the message regex is the legacy fallback.
+export const AUTO_RESUME_MAX_ATTEMPTS = Object.freeze({ budget: 15, default: 6 })
+
+export function transientProviderFailure(failure) {
+  return transportFailureOf(failure)?.subkind
+}
+
+// Budget exhaustion waits for the hourly window to refill; the others back off
+// exponentially from 30 s to 8 min.
+export function autoResumeDelayMs(kind, attempt) {
+  if (kind === 'budget') return 5 * 60 * 1000
+  return Math.min(30_000 * 2 ** Math.max(0, attempt), 8 * 60 * 1000)
+}
+
+export function autoResumeMaxAttempts(kind) {
+  return AUTO_RESUME_MAX_ATTEMPTS[kind] ?? AUTO_RESUME_MAX_ATTEMPTS.default
+}
+
+// The request failure codes whose pause text the player sees by name (formatTaskCondition); any other failure reads as request_failed.
+const PAUSE_REASON_CODES = new Set([
+  'provider_output_budget_exhausted',
+  'provider_recovery_exhausted',
+  'provider_action_omission_repair_failed',
+  'provider_semantic_alignment_failed',
+])
+
+// `failure` is the Error (its structured fields decide the pause class) or, for callers that only have text, the message.
+export async function pauseStrandedPlanAfterRequestError(session, failure) {
+  const message = failure instanceof Error ? failure.message : failure
+  const agent = session?.agent
+  const state = session?.currentPlanState?.()
+  if (!agent || state?.status !== 'active') return undefined
+  if (state.condition_wait?.state === 'active') return undefined
+
+  let runtime
+  try {
+    runtime = typeof agent.readInteractionTaskStatus === 'function'
+      ? await agent.readInteractionTaskStatus()
+      : undefined
+  }
+  catch {
+    return undefined
+  }
+  // Never let a provider/runtime exception cancel or relabel real world work
+  // that Autorio still owns. Only close the false ACTIVE+IDLE split-brain state.
+  if (!idleAutorioRuntime(runtime)) return undefined
+
+  const clean = uiText(message, 240)
+  // Keep the agent's own failure class: "the model answered but proposed no
+  // action / the wrong step" needs a different response from the player than
+  // a network failure, and all of them used to read as "request failed".
+  // The class is declared here, where the pause is created (pause-class.mjs): transport waits, model_recoverable gets a fresh
+  // executor restage, anything the registry cannot place is a guard pause that needs a player.
+  const classified = classifyRequestFailure(failure instanceof Error ? failure : clean)
+  const reasonCode = classified.pause_class === PAUSE_CLASS.TRANSPORT
+    ? TRANSIENT_PAUSE_PREFIX
+    : (PAUSE_REASON_CODES.has(classified.code) || classified.source === 'harness_state_fault' || classified.source === 'guard_code') ? classified.code : 'request_failed'
+  // A harness guard that carries the refusal that tripped it (PreservationProofError.detail) names it instead of repeating its own code.
+  const trigger = classified.source === 'guard_code' && failure?.detail?.preflight_code
+    ? `${failure.detail.preflight_code}${failure.detail.operation_name ? ` on ${failure.detail.operation_name}` : ''}` : ''
+  const reason = `${reasonCode}: ${trigger ? uiText(trigger, 240) : clean || 'unexpected request failure'}`
+  const paused = await agent.pausePersistentPlan?.(reason, { pause_class: classified.pause_class, pause_subkind: classified.pause_subkind })
+  if (paused) await session.syncTaskBoardUi?.(paused)
+  return paused
+}
+
+// C7 (delegation design section 4): after a restart, an actor replacement or a
+// death the conversation is REBUILT from a handoff packet, not continued from
+// any earlier transcript: the persisted reducer plan state, the fresh actor
+// snapshot (new epoch) and the runtime's task state. The [HARNESS] recovery
+// instruction follows the packet as the step-level tail. No turn is open here
+// (the supervisor cancelled the old one), so no safePoint is passed
+// (restageBetweenTurns); a refusal ('round_in_flight' | 'round_open' | ...) or a
+// restage_error means the conversation the loop already built stays, and the
+// helper traces the reason (context.restage_refused / context.restage_error);
+// this function adds runtime.recovery_restage_fallback naming it.
+// The role is the EXECUTOR's when the reducer holds a committed plan (a restart, an actor
+// replacement or a death interrupts the slice that plan is): the fresh actor snapshot
+// carries the new epoch and the executor re-observes and continues the committed step.
+// A plan that is still a draft has not been handed to an executor yet; its recovery keeps
+// the planner's role. No planner conversation is parked: the one this restart rebuilt is
+// only the recovery scaffolding, so the slice close builds a fresh planner from a packet.
+async function restageRecoveryConversation(agent, { reason, recoveryMessage, owner, requestId, isCancelled }) {
+  const superseded = () => isCancelled?.() || !ownsDecisionBudgets(agent, owner)
+  const refused = result => result?.restaged
+    ? { ...result, decision_started: false, decision_reason: 'executor_decision_superseded_after_handoff' }
+    : { restaged: false, reason: 'decision_owner_superseded' }
+  if (superseded()) return refused()
+  if (typeof agent.restageBetweenTurns !== 'function') return { restaged: false, reason: 'agent_cannot_restage' }
+  let runtime
+  try {
+    runtime = await agent.readInteractionTaskStatus?.()
+  }
+  catch {
+    runtime = undefined
+  }
+  if (superseded()) return refused()
+  let role = agent.agentContext?.role ?? 'planner'
+  try {
+    const active = getActivePlan(agent.memory?.planningState?.(`npc:${agent.npcId ?? 'sgluna'}`))
+    if (active && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(active.status) && agent.executorHandoffEnabled !== false) role = 'executor'
+  }
+  catch {}
+  const result = await agent.restageBetweenTurns({
+    checkpoint: 'C7',
+    role,
+    reason: `recovery:${uiText(reason, 80)}`,
+    actor: agent.epoch,
+    runtime,
+    requestId,
+  })
+  if (superseded() && result.decision_started !== false) return refused(result)
+  if (!result.restaged) {
+    // try/await, not a promise chain: a trace writer that throws before it returns a promise
+    // would otherwise abort the recovery instead of leaving it on the conversation it has.
+    try {
+      await agent.traceEvent?.('runtime.recovery_restage_fallback', { request_id: requestId, reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId })
+    }
+    catch {}
+    return superseded() ? refused(result) : result
+  }
+  if (result.decision_started === false) {
+    try {
+      await agent.traceEvent?.('runtime.recovery_decision_superseded', { request_id: requestId, reason: result.decision_reason, recovery_reason: uiText(reason, 80) }, { requestId })
+    }
+    catch {}
+    return superseded() ? refused(result) : result
+  }
+  if (superseded()) return refused(result)
+  const harness = { role: 'user', content: recoveryMessage }
+  agent.baseMessages = [...agent.baseMessages, harness]
+  agent.messages = [...agent.messages, { ...harness }]
+  return result
+}
+
+// An active goal that had plans (so it is past its first plan and past any
+// clarification) but has no active plan to carry.
+export function goalInterruptedWithoutPlan(planning) {
+  return planning?.goal?.status === GOAL_STATUS.ACTIVE
+    && Array.isArray(planning.plans) && planning.plans.length > 0
+    && !getActivePlan(planning)
+}
+
+// An active goal admitted but interrupted BEFORE its first plan (nothing ever committed, no
+// plan history) and not already paused: a restart leaves it with no plan to carry, so it is
+// paused visibly instead of stalling in silence.
+export function goalInterruptedBeforeFirstPlan(planning) {
+  return planning?.goal?.status === GOAL_STATUS.ACTIVE
+    && (!Array.isArray(planning.plans) || planning.plans.length === 0)
+    && !getActivePlan(planning)
+    && planning.run?.paused !== true
+}
+
+// options.allowModelRecoverable: the caller read a durable model_recoverable pause and checked its plan identity (see
+//   Session.runModelRecoverableResume). options.requestId names the recovery request so the caller's trace rows share it.
+// A model_recoverable resume is a FRESH executor restage: the leftover action-omission repair flags of the failed request are
+// cleared, so the rebuilt handoff packet starts a clean turn instead of inheriting the exhausted repair.
+// RULE: the executor is never restaged onto a PAUSED plan. A paused plan is made active first (memory.resumePausedPlan) or the
+//   recovery ends with the plan left paused and the reason traced and returned (`refusal`). A recovery that gives no `reactivate`
+//   gets the default: only a transport pause or a runtime-lifecycle pause (server stop, actor or session replacement) resumes.
+//   An ACTIVE plan (a crash mid-step) is restaged unchanged.
+// options.reactivate ({ pause_classes, identity, actor, onResumed }): an automatic resume makes the plan ACTIVE again (the same
+//   RUN_RESUMED transition a player's continue ends in) before the executor is restaged, because a checkpoint is refused on a paused
+//   plan (checkpoint_requires_active_step, run H). Only a pause of one of `pause_classes` is resumed (memory.resumePausedPlan), after
+//   `isCancelled` was checked with no await in between, so a player stop that already arrived wins. `actor` ({ actor_id, epoch }) is
+//   what the resume was scheduled under: a different actor or epoch at resume time refuses it (actor_or_epoch_changed).
+//   `onResumed(state)` lets the caller refresh its task-board UI.
+export async function recoverInterruptedAgentPlan(agent, reason, details = {}, options = {}) {
   if (!agent) return { recovered: false, reason: 'agent_unavailable' }
+  const recoveryRequestId = typeof options.requestId === 'string' && options.requestId ? options.requestId : `recovery_${Date.now().toString(36)}`
+  // Startup has no optional token. Fence the first await too; only our own
+  // synchronous cancel below may intentionally advance this identity.
+  let owner = decisionBudgetOwner(agent)
+  let traceOwner = agent.traceRequest
+  const authoringBoundary = agent.goalAwaitingNextSlice?.() === true
+  let admissionOwner = agent.requestAdmissionOwner
+  const amendmentOwner = agent.pendingInteractionAmendment
+  let state
+  const key = `npc:${agent.npcId ?? 'sgluna'}`
+  const interrupted = () => options.isCancelled?.()
+    ? { recovered: false, reason: 'cancelled_after_fire', state }
+    : !ownsDecisionBudgets(agent, owner) || agent.traceRequest !== traceOwner
+      || agent.requestAdmissionOwner !== admissionOwner || agent.pendingInteractionAmendment !== amendmentOwner
+      ? { recovered: false, reason: 'decision_owner_superseded', state: agent.memory?.currentPlan?.(key) ?? state }
+      : undefined
+  const cancelled = async (stopped, stage) => {
+    try {
+      await agent.traceEvent?.('runtime.recovery_preparation_cancelled', {
+        request_id: recoveryRequestId, reason: stopped.reason, stage, recovery_reason: uiText(reason, 80),
+      }, { requestId: recoveryRequestId })
+    }
+    catch {}
+    return stopped
+  }
+  if (admissionOwner && (authoringBoundary || admissionOwner.phase === 'intake')) return { recovered: false, reason: 'next_slice_intake_owned' }
   await agent.loadPersistentState?.()
-  const key = `npc:${agent.npcId ?? 'airi'}`
-  const state = agent.memory?.currentPlan?.(key)
-  if (!shouldRecoverInterruptedPlan(state)) return { recovered: false, reason: 'plan_not_recoverable', state }
+  let stopped = interrupted()
+  if (stopped) return cancelled(stopped, 'load_persistent_state')
+  state = agent.memory?.currentPlan?.(key)
+  const durablePlanning = agent.memory?.planningState?.(key)
+  const durablePlan = getActivePlan(durablePlanning)
+  if (durablePlan?.blocker?.kind === 'contract_defect'
+    || durablePlan?.status === PLAN_STATUS.DRAFT && durablePlanning?.goal?.contract_defect_successors?.includes(durablePlan.plan_id)) {
+    const pauseOwner = agent.captureCheckpointOwner?.()
+    await agent.traceEvent?.('contract.defect_exhausted', { request_id: recoveryRequestId,
+      goal_id: durablePlanning.goal.goal_id, plan_id: durablePlan.plan_id,
+      step_id: durablePlan.steps[durablePlan.active_step_index]?.step_id,
+      reason: 'interrupted_claim_requires_visible_pause', disposition: 'classified_guard_pause' }, { requestId: recoveryRequestId })
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'contract_defect_interrupted_trace')
+    const paused = await agent.pausePersistentPlan?.('contract_translation_defect:interrupted_claim', { pause_class: PAUSE_CLASS.GUARD }, pauseOwner)
+    return { recovered: false, reason: 'contract_defect_claim_exhausted', state: paused ?? state, paused: true }
+  }
+  const awaitingNextSlice = agent.goalAwaitingNextSlice?.(key) === true
+  if (!shouldRecoverInterruptedPlan(state, { awaitingNextSlice, allowModelRecoverable: options.allowModelRecoverable === true })) return { recovered: false, reason: 'plan_not_recoverable', state }
+  if (options.allowModelRecoverable === true) agent.clearActionOmissionRecovery?.()
+
+  if (state?.provider_recovery?.kind === 'output_budget_exhaustion' && state.provider_recovery.phase === 'in_flight') {
+    const runtime = await agent.readInteractionTaskStatus?.()
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'output_budget_status')
+    const reduced = agent.memory?.applyOutcomeAuthority?.(key, {
+      kind: 'recoverable_provider_failure',
+      source: 'runtime_restart',
+      reason_code: 'provider_budget',
+    }, {
+      world: runtime ?? {},
+    })
+    agent.memory?.setProviderRecovery?.(key, undefined)
+    await agent.persistState?.()
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'output_budget_persist')
+    if (reduced?.state?.status === 'paused') agent.cancel?.('runtime_recovery_interrupted_output_budget')
+    return {
+      recovered: true,
+      reason: 'interrupted_output_budget_recovery_fail_closed',
+      state: reduced?.state ?? state,
+    }
+  }
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
-  const epoch = await agent.captureEpoch()
-  const memoryContext = agent.memory?.context?.(key) ?? ''
-  const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
-  const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations. Recovery details: ${recoveryDetails}`
+  admissionOwner = agent.requestAdmissionOwner
+  traceOwner = agent.traceRequest
+  const decisionBudgetScope = captureDecisionBudgets(agent, { requestId: recoveryRequestId })
+  owner = decisionBudgetScope
+  try {
+    const epoch = await agent.captureEpoch()
+    if (options.expectedActor && (epoch.actor_id !== options.expectedActor.actor_id || epoch.epoch !== options.expectedActor.epoch)) {
+      return cancelled({ recovered: false, reason: 'actor_or_epoch_changed', state }, 'preparation_actor')
+    }
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'preparation')
+    // MW2b: before anything is issued again, reconcile any batch that was sent but never settled (a restart, an actor replacement
+    // or a death can lose its acknowledgement and receipt) against the game's own batch records. The model is told what they prove.
+    const reconciliation = await agent.reconcileOutstandingOperation?.({ trigger: reason, requestId: recoveryRequestId })
+    const reconciliationLine = reconciliation ? ` ${reconciliationGuidance(reconciliation, reconciliation.pending)}` : ''
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'preparation')
+    // C7: a plan is resumed only when the reducer holds an active plan to carry.
+    // Otherwise the goal is paused (a chat line follows) instead of waking a
+    // model with nothing to execute.
+    if (!awaitingNextSlice && typeof agent.memory?.planningState === 'function' && !getActivePlan(agent.memory.planningState(key))) {
+      await agent.traceEvent?.('runtime.recovery_no_active_plan', { reason: 'reducer_holds_no_active_plan', recovery_reason: uiText(reason, 80) }, { requestId: recoveryRequestId })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'no_active_plan_trace')
+      const paused = await agent.pausePersistentPlan?.(`runtime_recovery_no_active_plan:${uiText(reason, 80)}`, { pause_class: PAUSE_CLASS.GUARD })
+      return { recovered: false, reason: 'no_active_plan', paused: paused !== undefined, state: paused ?? state }
+    }
+    if (!awaitingNextSlice && agent.memory?.currentPlan?.(key)?.status === 'paused') {
+      const reactivate = options.reactivate ?? { pause_classes: [PAUSE_CLASS.TRANSPORT] }
+      // No await between this check and the resume: a stop that cancelled the token cannot be undone by it.
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'preparation')
+      const scheduled = reactivate.actor
+      const actorChanged = scheduled && (scheduled.actor_id !== epoch?.actor_id || scheduled.epoch !== epoch?.epoch)
+      const resumed = actorChanged
+        ? { resumed: false, reason: 'actor_or_epoch_changed' }
+        : agent.memory?.resumePausedPlan?.(key, { reason: `auto_resume:${uiText(reason, 80)}`, pauseClasses: reactivate.pause_classes ?? [], identity: reactivate.identity, lifecycle: true })
+      if (!resumed?.resumed) {
+        const refusal = resumed?.reason ?? 'plan_resume_unavailable'
+        await agent.traceEvent?.('recovery.auto_resume_plan_not_resumed', {
+          request_id: recoveryRequestId,
+          reason: refusal,
+          pause_class: resumed?.pause_class,
+          step_id: resumed?.step_id,
+          recovery_reason: uiText(reason, 80),
+          ...(actorChanged ? { scheduled_actor_id: scheduled.actor_id, scheduled_epoch: scheduled.epoch, actor_id: epoch?.actor_id, epoch: epoch?.epoch } : {}),
+        }, { requestId: recoveryRequestId })
+        return { recovered: false, reason: 'plan_not_resumable', refusal, pause_class: resumed?.pause_class, state: agent.memory?.currentPlan?.(key) ?? state }
+      }
+      else {
+        await agent.persistState?.()
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'reactivation_persist')
+        await agent.traceEvent?.('recovery.auto_resume_plan_resumed', {
+          request_id: recoveryRequestId,
+          reason: uiText(reason, 80),
+          pause_class: resumed.pause_class,
+          step_id: resumed.step_id,
+          goal_id: resumed.state?.goal_id,
+          pause_reason: uiText(resumed.pause_reason, 160),
+        }, { requestId: recoveryRequestId })
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'reactivation_trace')
+        await reactivate.onResumed?.(resumed.state)
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'reactivation_callback')
+      }
+    }
+    // LIFECYCLE_TABLE: a step recovery never runs on a closed goal (the reactivation above made a paused one active, or returned).
+    const lifecycle = agent.lifecycleEnter?.('recovery.interrupted', { reason: uiText(reason, 80), boundary: awaitingNextSlice ? 'plan_slice' : 'step' }, { requestId: recoveryRequestId })
+    if (lifecycle) return { recovered: false, reason: 'lifecycle_refused', refusal: lifecycle.reason, state: agent.memory?.currentPlan?.(key) ?? state }
+    const memoryContext = agent.memory?.context?.(key) ?? ''
+    const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'conversation_setup')
+    if (awaitingNextSlice) {
+      const pause = agent.memory.pauseRecord?.(key)
+      if (pause?.paused && pause.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE && pause.pause_class !== PAUSE_CLASS.TRANSPORT) {
+        return { recovered: false, reason: 'next_slice_pause_not_resumable', state }
+      }
+      agent.epoch = epoch
+      const boundaryOwner = nextSliceOwner(agent)
+      const native = await nextSliceNativeState(agent, boundaryOwner, epoch)
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'next_slice_native_reconcile')
+      if (native.busy || native.unknown || native.uncertain) return { recovered: false, reason: 'next_slice_native_not_idle', state }
+      await registerNextSlice(agent, { owner: boundaryOwner, reason: 'interrupted_authoring_boundary' })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'next_slice_episode_persist')
+      if (!options.allowModelRecoverable) {
+        agent.memory.dispatchPlanningEvent(key, { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime', goal_id: agent.memory.nextSliceAnchor(key).goal_id,
+          reason: 'next_slice_transition_interrupted: startup authoring boundary', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+        const allowance = agent.memory.autoResumeAllowance(key)
+        if (allowance.limit_kind) {
+          agent.memory.dispatchPlanningEvent(key, { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime', goal_id: allowance.goal_id, reason: 'next_slice_recovery_exhausted', pause_class: PAUSE_CLASS.GUARD })
+          agent.memory.recordNextSliceTransition(key, { phase: 'paused', boundary_key: allowance.boundary_key, reason: 'next_slice_recovery_exhausted', failure_class: PAUSE_CLASS.GUARD })
+          await agent.persistState({ strict: true })
+          stopped = interrupted()
+          if (stopped) return cancelled(stopped, 'next_slice_exhaustion_persist')
+          return { recovered: false, reason: 'next_slice_recovery_exhausted', state: agent.memory.currentPlan(key), paused: true }
+        }
+        const claim = agent.memory.recordAutoResumeStarted(key, { ...allowance, request_id: recoveryRequestId })
+        if (!claim.recorded) return { recovered: false, reason: 'next_slice_claim_refused', state }
+        await agent.persistState({ strict: true })
+        stopped = interrupted()
+        if (stopped) return cancelled(stopped, 'next_slice_claim_persist')
+      }
+      const episode = agent.memory.nextSliceEpisode?.(key)
+      if (episode?.phase !== 'claimed' || episode.owner?.request_id !== recoveryRequestId) return { recovered: false, reason: 'next_slice_unclaimed_request', state }
+      agent.memory.dispatchPlanningEvent(key, { type: 'RUN_RESUMED', now: Date.now(), source: 'runtime', goal_id: episode.goal_id, reason: 'counted_next_slice_authoring' })
+      agent.memory.recordNextSliceTransition(key, { phase: 'request_owned', boundary_key: episode.boundary_key, reason: 'counted_authoring_request',
+        owner: { request_id: recoveryRequestId, actor_id: epoch.actor_id, epoch: epoch.epoch } })
+      await agent.persistState({ strict: true })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'next_slice_request_persist')
+      state = agent.memory.currentPlan(key)
+      // Between slices there is no current step to re-observe: re-check the goal
+      // in game and plan the next slice, exactly as the completed slice would
+      // have done had nothing interrupted it.
+      agent.epoch = epoch
+      agent.lastMemoryKey = key
+      agent.planUpdateReason = 'completion'
+      agent.reasoningTriggerSource = null
+      agent.replaceConversation({
+        baseMessages: [
+          { role: 'system', content: agent.systemPrompt },
+          ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+          { role: 'user', content: `[HARNESS] Runtime recovery after ${uiText(reason, 120)} at a plan-slice boundary: the last plan slice was already verified complete and the user goal is still active. Recovery details: ${recoveryDetails}` },
+        ],
+      })
+      agent.requestInfo = {
+        memoryKey: key,
+        turnId: ++agent.turnSequence,
+        sender: uiText(state.owner || 'runtime-recovery', 128),
+        text: uiText(state.objective || 'Resume interrupted SGLuna goal', 4000),
+      }
+      agent.active = true
+      agent.continuations = 1
+      if (typeof agent.traceEvent === 'function') {
+        agent.traceRequest = { id: recoveryRequestId, seq: 0 }
+        traceOwner = agent.traceRequest
+        await agent.traceEvent('runtime.recovery_started', { reason, details, boundary: 'plan_slice' })
+      }
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'recovery_trace')
+      const result = await agent.settleCompletedStepState(state, { nextSliceBoundary: episode.boundary_key })
+      return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
+    }
+    const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations.${reconciliationLine} Recovery details: ${recoveryDetails}`
 
-  agent.epoch = epoch
-  agent.lastMemoryKey = key
-  agent.planUpdateReason = 'recovery'
-  agent.baseMessages = [
-    { role: 'system', content: agent.systemPrompt },
-    ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
-    { role: 'user', content: recoveryMessage },
-  ]
-  agent.messages = agent.baseMessages.map(message => ({ ...message }))
-  agent.requestInfo = {
-    memoryKey: key,
-    turnId: ++agent.turnSequence,
-    sender: uiText(state.owner || 'runtime-recovery', 128),
-    text: uiText(state.objective || 'Resume interrupted AIRI goal', 4000),
+    agent.epoch = epoch
+    agent.lastMemoryKey = key
+    // Ordinary runtime recovery only. This path has never had replan authority:
+    // it re-observes the world and continues the committed plan.
+    agent.planUpdateReason = 'recovery'
+    agent.reasoningTriggerSource = null
+    agent.replaceConversation({
+      baseMessages: [
+        { role: 'system', content: agent.systemPrompt },
+        ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+        { role: 'user', content: recoveryMessage },
+      ],
+    })
+    agent.requestInfo = {
+      memoryKey: key,
+      turnId: ++agent.turnSequence,
+      sender: uiText(state.owner || 'runtime-recovery', 128),
+      text: uiText(state.objective || 'Resume interrupted SGLuna goal', 4000),
+    }
+    agent.active = true
+    agent.continuations = 1
+    if (typeof agent.traceEvent === 'function') {
+      agent.traceRequest = { id: recoveryRequestId, seq: 0 }
+      traceOwner = agent.traceRequest
+      await agent.traceEvent('runtime.recovery_started', { reason, details })
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'recovery_trace')
+      // A fresh executor context gets its own correction turn for a refusal (unit 13).
+      await agent.resetRefusalRecoveryBudgets?.({ requestId: recoveryRequestId })
+    }
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'recovery_trace')
+    // A lost completion callback may now have durable verified receipt proof.
+    // Reconcile its unchanged checkpoint BEFORE the executor handoff names the
+    // active step; otherwise the first next-step reply is rejected as stale.
+    if (reason === 'runtime_restart' && reconciliation?.verdict === 'admitted_completed') {
+      const fresh = await agent.settleIdleStepCheckpoint?.()
+      if (fresh?.contractRecovery && fresh.recoveryRequestId === recoveryRequestId) {
+        return { recovered: true, reason: 'restart_contract_defect_settled', result: fresh.contractRecovery,
+          state: agent.memory?.currentPlan?.(key) }
+      }
+      stopped = interrupted()
+      if (stopped) return cancelled(stopped, 'restart_checkpoint')
+      if (fresh?.completionDeferred) return { recovered: true, reason: 'restart_checkpoint_deferred', result: fresh.completionDeferred, state: agent.memory?.currentPlan?.(key) }
+      if (fresh?.closed) {
+        state = agent.memory?.currentPlan?.(key) ?? fresh.state
+        if (fresh.contractPause || state?.status === 'paused') return { recovered: true, reason: 'restart_checkpoint_paused', state }
+        if (state?.status === 'completed') {
+          const result = await agent.settleCompletedStepState(state)
+          return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
+        }
+      }
+    }
+    const restage = await restageRecoveryConversation(agent, { reason, recoveryMessage, owner, requestId: recoveryRequestId, isCancelled: options.isCancelled })
+    if (restage?.decision_started === false) return cancelled({
+      recovered: false, reason: 'executor_decision_superseded_after_handoff', state: agent.memory?.currentPlan?.(key) ?? state,
+    }, 'recovery_handoff')
+    stopped = interrupted()
+    if (stopped) return cancelled(stopped, 'before_run_guarded')
+    const result = await agent.runGuarded()
+    return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
   }
-  agent.active = true
-  // Recovery is semantically a continuation of the durable goal. This matters
-  // because an empty operation batch must either complete/block the existing
-  // plan, never leave an "active" Task Board with no live runtime work.
-  agent.continuations = 1
-  if (typeof agent.traceEvent === 'function') {
-    agent.traceRequest = { id: `recovery_${Date.now().toString(36)}`, seq: 0 }
-    await agent.traceEvent('runtime.recovery_started', { reason, details })
+  catch (error) {
+    if (error?.code !== 'stale_handoff_reply') throw error
+    return cancelled(interrupted() ?? { recovered: false, reason: 'checkpoint_owner_superseded', state: agent.memory?.currentPlan?.(key) ?? state }, 'reconciliation_owner')
   }
-  const result = await agent.runGuarded()
-  return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
+  finally {
+    await restoreDecisionBudgets(agent, decisionBudgetScope)
+  }
 }
 
+
 export class Session {
-  constructor({ root, app, game, config, save, settingsFile, modDir, ini, log = console.log, provider = providerRequest, startupMs = 120000 }) {
+  constructor({ root, app, game, config, save, settingsFile, modDir, ini, rcon = rconConfiguration(), log = console.log, provider = providerRequest, startupMs = 120000 }) {
     Object.assign(this, { root, app, game, config, save, settingsFile, modDir, ini, log, provider, startupMs })
     this.session = nonce() + nonce()
-    this.rconPassword = nonce() + nonce()
+    this.rconPassword = rcon.password
+    this.rconPort = rcon.port
+    this.rconBind = rcon.bind
     this.rcon = null
     this.gameChild = null
     this.agent = null
@@ -658,46 +2280,233 @@ export class Session {
     this.lastErrorAt = 0
     this.lastStatus = null
     this.authorizationPromise = null
-    this.npcName = 'AIRI'
-    this.npcId = 'airi'
-    this.agentLive = { phase: 'idle', detail: '', objective: '', at: 0, activity: [] }
+    this.npcName = 'SGLuna'
+    this.npcId = 'sgluna'
+    this.activityEpoch = Date.now().toString(36)
+    this.conversationGeneration = 0
+    this.conversationSequence = 0
+    this.agentLive = {
+      phase: 'idle',
+      detail: '',
+      objective: '',
+      at: 0,
+      activity: [],
+      conversation_id: `task_${this.activityEpoch}_0`,
+      conversation: [],
+      debug: emptyAgentDebug({ provider_model: this.config?.model, ...aiMethodDebugFields(this.config) }),
+    }
     this.activitySequence = 0
+    // Live ids must not repeat across supervisor restarts: the mod keeps a
+    // history keyed by id, and a reused live_1 would be taken for an old event
+    // and silently dropped.
     this.uiSyncDirty = false
     this.uiSyncRunning = null
     this.uiInputPoll = null
     this.uiHeartbeat = null
     this.uiInputPollRunning = false
+    this.conditionPollRunning = false
     this.lastUiFailure = ''
     this.lastUiFailureAt = 0
+    // The pending model_recoverable resume ({ timer, correlation, attempt, pause_class }); its attempt COUNTS live in durable plan state.
+    this.modelResume = null
+    // The pending intake retry ({ token, timer, record, running }); durable in memory.intakeRetry(). See handleIntakeFailure.
+    this.intakeRetry = null
+    // Bumped by every takeover (cancelAutoResume). A request that is mid-flight when one arrives cannot schedule an intake retry
+    // afterwards: handleIntakeFailure compares the value it started under.
+    this.cancelGeneration = 0
+    this.lastPauseDecision = ''
+  }
+
+  startNewUiConversation() {
+    this.conversationGeneration += 1
+    this.conversationSequence = 0
+    if (!this.agentLive || typeof this.agentLive !== 'object') return
+    this.agentLive.conversation_id = `task_${this.activityEpoch}_${this.conversationGeneration}`
+    this.agentLive.conversation = []
+  }
+
+  appendUiConversation(role, sender, rawText) {
+    const text = uiText(rawText, 2000)
+    if (!text || (role !== 'user' && role !== 'assistant')) return
+    if (!Array.isArray(this.agentLive.conversation)) this.agentLive.conversation = []
+    const previous = this.agentLive.conversation.at(-1)
+    if (previous?.role === role && previous?.text === text) return
+    const message = {
+      id: `message_${this.activityEpoch}_${this.conversationGeneration}_${++this.conversationSequence}`,
+      role,
+      sender: uiText(sender || (role === 'assistant' ? 'SGLuna' : 'Player'), 128),
+      text,
+    }
+    this.agentLive.conversation = [...this.agentLive.conversation, message].slice(-UI_CONVERSATION_LIMIT)
+  }
+
+  async restoreTaskBoardUiConversation(state = this.currentPlanState()) {
+    if (!this.rcon || !state?.goal_id || !this.agentLive || typeof this.agentLive !== 'object') return false
+    if (Array.isArray(this.agentLive.conversation) && this.agentLive.conversation.length > 0) return false
+
+    try {
+      const raw = String(await this.rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_task_board","status")))') ?? '').trim()
+      if (!raw || raw === 'nil' || raw === 'null') return false
+      let saved
+      try { saved = JSON.parse(raw) }
+      catch { return false }
+      if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return false
+      if (uiText(saved.goal_id, 100) !== uiText(state.goal_id, 100)) return false
+
+      const sourceConversation = Array.isArray(saved.conversation) ? saved.conversation.slice(-UI_CONVERSATION_LIMIT) : []
+      const restored = []
+      for (let index = 0; index < sourceConversation.length; index++) {
+        const entry = sourceConversation[index]
+        const role = entry?.role === 'assistant' ? 'assistant' : entry?.role === 'user' ? 'user' : undefined
+        const text = uiText(entry?.text, 2000)
+        if (!role || !text) continue
+        restored.push({
+          id: uiText(entry?.id, 120) || `restored_${index + 1}`,
+          role,
+          sender: uiText(entry?.sender, 128) || (role === 'assistant' ? (this.npcName || 'SGLuna') : 'Player'),
+          text,
+        })
+      }
+      if (restored.length === 0) return false
+
+      const savedConversationId = uiText(saved.conversation_id, 120)
+      if (savedConversationId) this.agentLive.conversation_id = savedConversationId
+      this.agentLive.conversation = restored
+      return true
+    }
+    catch (error) {
+      this.log(`Task Board UI conversation restore skipped: ${error instanceof Error ? error.message : error}`)
+      return false
+    }
+  }
+
+  ensureUiConversationForState(state) {
+    if (!state?.goal_id || !this.agentLive || typeof this.agentLive !== 'object') return false
+    if (Array.isArray(this.agentLive.conversation) && this.agentLive.conversation.length > 0) return false
+    const before = Array.isArray(this.agentLive.conversation) ? this.agentLive.conversation.length : 0
+    this.appendUiConversation('user', state.owner || 'Player', state.objective)
+    this.appendUiConversation('assistant', this.npcName || 'SGLuna', state.last_chat_message)
+    return this.agentLive.conversation.length > before
   }
 
   onAgentActivity(event, data) {
+    void this.publishNextSliceControl()
+    if (['operations.ack', 'step.verified', 'step.semantic_completed'].includes(event)) {
+      this.controllerProgressSequence = (this.controllerProgressSequence ?? 0) + 1
+    }
+    if (event === 'goal.defined') this.announceGoalUnderstanding(data)
+    if (event === 'budget.goal_warning') this.announceGoalBudgetWarning(data)
+    if (event === 'amendment.dropped') this.announceAmendmentDropped(data)
+    if (event === ACK_EVENT) this.announceAcknowledgement(data)
+    if (event === 'plan.replacement_announced') this.announceReplacement(data)
+    this.responsivenessTracker().observe(event, data, { requestId: this.agent?.traceRequest?.id, ts: Date.now() })
+    // Every pause is named by one goal.paused row; the durable pause class decides whether anything resumes it.
+    if (event === 'goal.paused' && !this.stopping) this.queueEvent(() => this.considerPauseForAutoResume())
+    if (event === 'goal.evaluated') {
+      this.announceSliceProgress(data)
+      // A slice boundary just read the game; let the Goal card show it now.
+      this.goalUiCache = undefined
+    }
+    // Real world progress ends a transient-failure streak.
+    if ((event === 'operations.ack' || event === 'step.verified') && this.autoResume && !this.autoResume.timer) {
+      this.autoResume = null
+    }
+    if (event === 'interaction.routed') {
+      if (data?.intent === 'new_goal') this.startNewUiConversation()
+      this.appendUiConversation('user', data?.sender, data?.text)
+    }
+    if (event === 'request.received') this.appendUiConversation('user', data?.sender, data?.text)
+    if ((event === 'plan.accepted' || event === 'request.completed') && data?.chat_message) {
+      this.appendUiConversation('assistant', this.npcName || 'SGLuna', data.chat_message)
+    }
+    const fallback = {
+      request_id: this.agent?.traceRequest?.id,
+      turn: this.agent?.traceRequest ? this.agent.continuations + 1 : 0,
+      provider_model: this.config?.model,
+      ...aiMethodDebugFields(this.config),
+      actor_id: this.agent?.epoch?.actor_id ?? this.lastStatus?.actor_id,
+      actor_epoch: this.agent?.epoch?.epoch ?? this.lastStatus?.epoch,
+      usage: this.agent?.traceRequest?.usage,
+      time: this.agentTimeDebugFields(),
+      spend: this.agentSpendDebugFields(),
+      responsiveness: this.responsivenessTracker().debugText(this.agent?.traceRequest?.id),
+    }
+    this.agentLive.debug = liveAgentDebugEvent(event, data, this.agentLive.debug, fallback)
     const update = liveAgentEvent(event, data)
-    if (!update) return
-    if (update.phase) Object.assign(this.agentLive, { phase: update.phase, detail: update.detail ?? '', at: Date.now() })
-    if (update.objective) this.agentLive.objective = update.objective
-    if (update.activity) {
-      const activity = { ...update.activity, id: `live_${++this.activitySequence}` }
+    if (update?.phase) Object.assign(this.agentLive, { phase: update.phase, detail: update.detail ?? '', at: Date.now() })
+    if (update?.objective) this.agentLive.objective = update.objective
+    if (update?.activity) {
+      const activity = { ...update.activity, id: `live_${this.activityEpoch}_${++this.activitySequence}` }
       this.agentLive.activity = [...this.agentLive.activity, activity].slice(-UI_LIVE_ACTIVITY_LIMIT)
     }
-    this.requestTaskBoardUiSync()
+    if (update || event === 'provider.response' || event === 'tool.result' || event === 'actor.bound') this.requestTaskBoardUiSync()
+  }
+
+  responsivenessTracker() {
+    this.responsiveness ??= new ResponsivenessTracker() // 2.10
+    return this.responsiveness
+  }
+
+  // 2.10: the one quick acknowledgement of a player request. It is printed at
+  // once and kept in the Console conversation like any assistant line.
+  announceAcknowledgement(data) {
+    const line = uiText(data?.chat_message, 400)
+    if (!line) return
+    this.appendUiConversation?.('assistant', this.npcName || 'SGLuna', line)
+    this.printChat(line).catch(error => this.log(`Unable to acknowledge the request: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  agentSpendDebugFields() {
+    try {
+      const agent = this.agent
+      if (!agent?.usageLedger || typeof agent.peekPlanState !== 'function') return undefined
+      return agent.usageLedger.debugFields(agent.peekPlanState(agent.activePlanKey())?.goal_id)
+    }
+    catch {
+      return undefined
+    }
+  }
+
+  // 2.7: the goal budget warning reaches the player once per goal.
+  announceAmendmentDropped(data) {
+    const line = uiText(data?.chat_message, 400)
+    if (!line) return
+    this.printChat(line).catch(error => this.log(`Unable to announce a dropped amendment: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  announceGoalBudgetWarning(data) {
+    const line = uiText(data?.chat_message, 400)
+    const key = `${data?.goal_id ?? ''}|${data?.threshold_output_units ?? ''}`
+    if (!line || this.lastGoalBudgetWarning === key) return
+    this.lastGoalBudgetWarning = key
+    this.printChat(line).catch(error => this.log(`Unable to announce the goal budget warning: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  agentTimeDebugFields() {
+    try {
+      const agent = this.agent
+      if (!agent?.planTiming || typeof agent.peekPlanState !== 'function') return undefined
+      return agent.planTiming.debugFields(agent.peekPlanState(agent.activePlanKey()), {
+        actorId: agent.epoch?.actor_id,
+        epoch: agent.epoch?.epoch,
+      })
+    }
+    catch {
+      return undefined
+    }
   }
 
   liveAgentStatus() {
     const live = this.agentLive
     let { phase, detail } = live
-    // Pausing or cancelling resets the loop without a trace event, so an inactive
-    // agent must not keep advertising work it is no longer doing.
     const inactive = !this.agent?.active
     if (inactive && (phase === 'executing' || phase === 'waiting' || (phase === 'thinking' && Date.now() - live.at > UI_STALE_THINKING_MS))) {
       phase = 'idle'
       detail = ''
     }
-    return { phase, detail, objective: live.objective, activity: live.activity }
+    return { phase, detail, objective: live.objective, activity: live.activity, conversation_id: live.conversation_id, conversation: live.conversation, debug: live.debug }
   }
 
-  // Coalesces bursts of trace events into sequential snapshot pushes so the
-  // console follows the agent live without flooding RCON or reordering state.
   requestTaskBoardUiSync() {
     this.uiSyncDirty = true
     if (this.uiSyncRunning) return this.uiSyncRunning
@@ -712,9 +2521,6 @@ export class Session {
       finally {
         const reschedule = this.uiSyncDirty && this.rcon && !this.stopping
         this.uiSyncRunning = null
-        // Do not lose a refresh that arrives after the loop decided it was clean
-        // but before the running promise is cleared. Poll/trace bursts can hit
-        // exactly that window and otherwise leave the console stale indefinitely.
         if (reschedule) this.requestTaskBoardUiSync()
       }
     })()
@@ -722,10 +2528,8 @@ export class Session {
   }
 
   taskBoardUiHeartbeat() {
+    if (this.tickSprint?.lease) return false // zero-human UI refresh waits for the sprint boundary
     if (!this.rcon || !this.ready || this.stopping) return false
-    // Liveness must not depend on the game UI successfully producing/draining a
-    // poll. A small runtime-owned heartbeat keeps synced_tick current and also
-    // republishes canonical plan progress during long world operations.
     this.requestTaskBoardUiSync()
     return true
   }
@@ -741,9 +2545,9 @@ export class Session {
 
   cleanEnv() {
     const env = { ...process.env }
-    for (const key of Object.keys(env)) if (/(?:OPENAI|API_KEY|TOKEN|PASSWORD|RCON)/i.test(key)) delete env[key]
+    for (const key of Object.keys(env)) if (/OPENAI|API_KEY|TOKEN|PASSWORD|RCON/i.test(key)) delete env[key]
     env.HOME = this.root
-    env.TMPDIR = path.join(this.root, '.airi', 'tmp')
+    env.TMPDIR = path.join(this.root, '.sgluna', 'tmp')
     return env
   }
 
@@ -754,25 +2558,23 @@ export class Session {
       '--start-server', this.save,
       '--server-settings', this.settingsFile,
       '--bind', `0.0.0.0:${this.config.gamePort}`,
-      '--rcon-bind', `127.0.0.1:${rconPort}`,
+      '--rcon-bind', `${this.rconBind}:${rconPort}`,
       '--rcon-password', this.rconPassword,
     ]
   }
 
   async rawStatus() {
     check(this.rcon, 'RCON is not connected')
-    return parseStatus(await this.rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("airi_deployment","status")))'))
+    return parseStatus(await this.rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("sgluna_deployment","status")))'))
   }
 
-  // Autorio cannot safely reconcile a loaded save from `script.on_load`: that
-  // handler runs per peer, so a joining client would stop engine control states
-  // the server is still driving and desync the game. An RCON command is
-  // replicated to every peer as a single input action, so the mod defers the
-  // work to this explicit call once the server has finished loading.
   async reconcileNpcAfterLoad() {
     if (!this.rcon) return false
     try {
+      const logical = JSON.parse(String(await this.rcon.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","reconcile_startup",${luaString(this.session)})))`)).trim())
+      if (logical?.ok !== true) throw new Error('Logical startup reconciliation refused')
       await this.rcon.command('/silent-command remote.call("autorio_actor","reconcile_after_load")')
+      this.startupReconciledSession = this.session
       return true
     }
     catch (error) {
@@ -785,7 +2587,7 @@ export class Session {
     const status = await configureNpcSession(this.rcon, this.session)
     this.updateNpcIdentity(status)
     this.lastStatus = status
-    await this.reconcileNpcAfterLoad()
+    check(await this.reconcileNpcAfterLoad(), 'NPC startup reconciliation failed; refusing to bind')
     return status
   }
 
@@ -793,7 +2595,7 @@ export class Session {
     if (this.authorizationPromise) return this.authorizationPromise
     this.authorizationPromise = (async () => {
       const current = await this.rawStatus()
-      const stable = current.revision === 'airi-deploy-v8-npc-staging'
+      const stable = current.revision === 'sgluna-deploy-v8-npc-staging'
         && current.session === this.session
         && current.mode === 'npc'
         && current.allowed === true
@@ -802,7 +2604,7 @@ export class Session {
         && current.actor_id > 0
         && Number.isSafeInteger(current.epoch)
         && current.epoch > 0
-      if (stable) {
+      if (stable && this.startupReconciledSession === this.session) {
         this.updateNpcIdentity(current)
         this.lastStatus = current
         return current
@@ -810,7 +2612,7 @@ export class Session {
 
       if (this.agent?.active) {
         if (typeof this.agent.pausePersistentPlan === 'function') {
-          const state = await this.agent.pausePersistentPlan('npc_identity_or_session_changed')
+          const state = await this.agent.pausePersistentPlan('npc_identity_or_session_changed', { pause_class: PAUSE_CLASS.SYSTEM })
           await this.syncTaskBoardUi(state)
         }
         else this.agent.cancel()
@@ -833,12 +2635,764 @@ export class Session {
     return this.agent.memory.currentPlan(key)
   }
 
-  async recoverInterruptedPlan(reason, details = {}) {
-    if (!this.agent || !shouldRecoverInterruptedPlan(this.currentPlanState())) return null
-    this.log(`Recovering interrupted AIRI plan after ${reason}; mutable world state will be re-observed before resuming`)
+  currentPlanTrackerView() {
+    if (!this.agent?.memory?.planningTrackerView) return undefined
+    const key = typeof this.agent.activePlanKey === 'function' ? this.agent.activePlanKey() : `npc:${this.npcId}`
+    return this.agent.memory.planningTrackerView(key)
+  }
+
+  // Show the player, in game, how the system understood their goal and which
+  // game-checked conditions will decide that it is done.
+  announceSliceProgress(data) {
+    const note = formatSliceProgressNote(data)
+    // Recovery can re-evaluate an unchanged boundary; say it once.
+    if (!note || note === this.lastSliceProgressNote) return
+    this.lastSliceProgressNote = note
+    this.printChat(note).catch(error => this.log(`Unable to announce slice progress: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  // The console's Goal card. The checks are re-read from the game at most every
+  // GOAL_UI_REFRESH_MS (read-only: this never records a baseline), so a sync
+  // every second costs a few RCON calls per half minute. Running checks are
+  // read once here; only the completion check samples them (goal-definition.mjs).
+  async goalUiView(now = Date.now()) {
+    const key = this.agent?.activePlanKey?.()
+    const goal = this.agent?.memory?.planningState?.(key)?.goal
+    if (!goal || goal.status !== GOAL_STATUS.ACTIVE) return undefined
+    const definition = goal.definition
+    const cacheKey = `${goal.goal_id}#${JSON.stringify(definition?.done_when ?? [])}`
+    const cached = this.goalUiCache
+    const fresh = cached?.key === cacheKey && now - cached.at < GOAL_UI_REFRESH_MS
+    if (definition && !fresh) {
+      let evaluation
+      try { evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command), { samples: 1 }) }
+      catch { evaluation = undefined }
+      this.goalUiCache = { key: cacheKey, at: now, evaluation }
+    }
+    const evaluation = this.goalUiCache?.key === cacheKey ? this.goalUiCache.evaluation : undefined
+    return goalUiView(goal, evaluation, { checkedAt: this.goalUiCache?.key === cacheKey ? this.goalUiCache.at : undefined })
+  }
+
+  async reportGoalStatus() {
+    const agent = this.agent
+    const key = agent?.activePlanKey?.()
+    const memory = agent?.memory
+    const planning = memory?.planningState?.(key)
+    const goal = planning?.goal
+    let evaluation
+    if (goal?.status === GOAL_STATUS.ACTIVE && goal.definition) {
+      try { evaluation = await evaluateGoalDefinition(goal.definition, command => this.rcon.command(command), { samples: 1 }) }
+      catch { evaluation = undefined }
+    }
+    const lines = formatGoalStatus({
+      goal,
+      tracker: memory?.planningTrackerView?.(key),
+      legacyStatus: memory?.currentPlan?.(key)?.status,
+      evaluation,
+    })
+    for (const line of lines) await this.printChat(line)
+  }
+
+  // MW5: a committed replacement plan tells the player what changed and why. Printed once per plan id.
+  announceReplacement(data) {
+    const line = uiText(data?.chat_message, 400)
+    const planId = typeof data?.plan_id === 'string' ? data.plan_id : ''
+    if (!line || !planId) return
+    this.announcedReplacementPlans ??= new Set()
+    if (this.announcedReplacementPlans.has(planId)) return
+    this.announcedReplacementPlans.add(planId)
+    if (this.announcedReplacementPlans.size > 64) this.announcedReplacementPlans.delete(this.announcedReplacementPlans.values().next().value)
+    this.appendUiConversation?.('assistant', this.npcName || 'SGLuna', line)
+    this.printChat(line).catch(error => this.log(`Unable to announce the replacement plan: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  announceGoalUnderstanding(data) {
+    const lines = formatGoalUnderstanding(data?.definition, {
+      objective: data?.objective,
+      roadmap: data?.roadmap,
+    })
+    if (lines.length === 0) return
+    const readingNote = formatGoalReadingNote(data?.jev_goal_reading)
+    if (readingNote) lines.push(readingNote)
+    this.appendUiConversation?.('assistant', this.npcName || 'SGLuna', lines.join('\n').replace(/\[\/?color[^\]]*\]/g, ''))
+    ;(async () => {
+      for (const line of lines) await this.printChat(line)
+    })().catch(error => this.log(`Unable to announce goal understanding: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  // Resume a plan paused on a transient provider failure without a human.
+  // Bounded: the attempt count resets only on real world progress, and any
+  // player request, stop, or plan change cancels a pending resume.
+  // `failure` is the Error (its structured fields decide the subkind) or a message (legacy text). Falls back to the subkind the
+  // pause itself declared (durable run state) when the failure carries none.
+  async scheduleAutoResume(failure) {
+    const declared = pauseClassOf(this.agent?.memory?.pauseRecord?.(this.planKey()))
+    const kind = transientProviderFailure(failure) ?? (declared.pause_class === PAUSE_CLASS.TRANSPORT ? (declared.pause_subkind || TRANSPORT_FALLBACK_SUBKIND) : undefined)
+    if (!kind || this.stopping) return false
+    const attempt = this.autoResume?.attempt ?? 0
+    const maxAttempts = autoResumeMaxAttempts(kind)
+    this.clearAutoResume({ keepAttempts: true })
+    if (attempt >= maxAttempts) {
+      this.autoResume = null
+      this.log(`Auto-resume gave up after ${attempt} attempts (${kind}); waiting for an explicit continue`)
+      await this.printChat(`I still cannot reach the model provider after ${attempt} automatic retries (${kind}). The plan stays paused; say continue to retry.`)
+      return false
+    }
+    const delayMs = autoResumeDelayMs(kind, attempt)
+    const timer = setTimeout(() => {
+      if (this.autoResume?.timer !== timer) return
+      this.autoResume.timer = null
+      this.queueEvent(() => this.runAutoResume(), { reportError: true })
+    }, delayMs)
+    timer.unref?.()
+    this.autoResume = { attempt: attempt + 1, kind, timer, actor: this.currentActorCorrelation() }
+    this.log(`Auto-resume ${attempt + 1}/${maxAttempts} scheduled in ${Math.round(delayMs / 1000)} s after transient provider failure (${kind})`)
+    await this.printChat(`Paused on a temporary model-provider problem (${kind}). Resuming automatically in ${Math.round(delayMs / 1000)} s (attempt ${attempt + 1}/${maxAttempts}).`)
+    return true
+  }
+
+  clearAutoResume({ keepAttempts = false } = {}) {
+    if (this.autoResume?.timer) clearTimeout(this.autoResume.timer)
+    if (!keepAttempts) this.autoResume = null
+    else if (this.autoResume) this.autoResume.timer = null
+  }
+
+  async runAutoResume() {
+    const state = this.currentPlanState()
+    const declaredTransport = pauseClassOf(this.agent?.memory?.pauseRecord?.(this.planKey())).pause_class === PAUSE_CLASS.TRANSPORT
+    const pausedTransient = state?.status === 'paused' && (declaredTransport || String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`))
+    if (this.stopping || !(pausedTransient || this.agent?.goalAwaitingNextSlice?.() === true)) {
+      // The plan moved on (player continue, stop, new goal): nothing to resume.
+      this.clearAutoResume()
+      return null
+    }
+    // Fenced like the model_recoverable resume: a takeover (a player request, a stop, a UI control) bumps cancelGeneration, and the
+    // job is checked at every await before the plan is made active and again before the executor turn runs.
+    const generation = this.cancelGeneration ?? 0
+    const cancelled = () => (this.cancelGeneration ?? 0) !== generation || this.stopping === true
+    const requestId = `recovery_${Date.now().toString(36)}`
+    const scheduledActor = this.autoResume?.actor
+    return this.recoverInterruptedPlan('auto_resume_after_transient_provider_failure', {
+      attempt: this.autoResume?.attempt,
+      kind: this.autoResume?.kind,
+    }, { requestId, isCancelled: cancelled, reactivate: { pause_classes: [PAUSE_CLASS.TRANSPORT], actor: scheduledActor, onResumed: resumed => this.syncTaskBoardUi(resumed) } })
+  }
+
+  // --- model_recoverable automatic resume (pause-class.mjs) ----------------------------------------------------------------
+  //
+  // transport pauses keep their in-memory backoff above. A pause whose DURABLE class is model_recoverable is resumed here, a
+  // bounded number of times, through the same interrupted-plan recovery a restart uses (a fresh executor restage from a rebuilt
+  // handoff packet; the committed plan, goal_id and step identity are never touched). Authority, operator, system and guard pauses
+  // are never resumed by a timer; a pause with no declared class is reported (recovery.pause_unclassified) and also not resumed.
+  // The attempt counts live in the planning reducer's run state, so a restart does not reset them.
+
+  planKey() {
+    return typeof this.agent?.activePlanKey === 'function' ? this.agent.activePlanKey() : `npc:${this.npcId ?? 'sgluna'}`
+  }
+
+  async traceRecovery(event, data = {}) {
+    const requestId = data.request_id ?? this.agent?.lastTerminalRequestId
     try {
-      const recovery = await recoverInterruptedAgentPlan(this.agent, reason, details)
-      if (!recovery.recovered) return null
+      await this.agent?.traceEvent?.(event, data, { requestId })
+    }
+    catch (error) {
+      this.log(`Unable to trace ${event}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // The actor identity a scheduled resume is bound to. Both fields are required: a resume with no actor/epoch to correlate against is
+  // never scheduled (fail closed).
+  currentActorCorrelation() {
+    return { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch }
+  }
+
+  // A frozen (BLOCKED) plan is a structural stop: only a person unfreezes it. Read from the reducer's plan, not the legacy mirror.
+  planIsBlocked() {
+    const planning = this.agent?.memory?.planningState?.(this.planKey())
+    return getActivePlan(planning)?.status === PLAN_STATUS.BLOCKED || this.currentPlanState()?.status === 'blocked'
+  }
+
+  // Cancels the pending OR already-fired model_recoverable resume (and the transport timer) when a person takes over. It is
+  // synchronous on purpose: callers invoke it BEFORE queueing their own operator pause, and a resume job that already left its timer
+  // checks its token after every await, so no queued resume can start in between.
+  cancelAutoResume(reason) {
+    this.cancelGeneration = (this.cancelGeneration ?? 0) + 1
+    this.clearAutoResume()
+    // The pending intake retry (a goal that never got its first plan) is cancelled by the same takeover, under the same fence.
+    const intakeCancelled = this.cancelIntakeRetry(reason)
+    const pending = this.modelResume
+    if (!pending) return intakeCancelled
+    if (pending.timer) clearTimeout(pending.timer)
+    pending.token.cancelled = true
+    pending.token.reason = reason
+    this.modelResume = null
+    this.traceRecovery('recovery.auto_resume_cancelled', {
+      reason,
+      pause_class: pending.pause_class,
+      attempt: pending.attempt,
+      goal_id: pending.correlation.goal_id,
+      plan_id: pending.correlation.plan_id,
+      step_id: pending.correlation.step_id,
+      actor_id: pending.correlation.actor_id,
+      actor_epoch: pending.correlation.epoch,
+    })
+    return true
+  }
+
+  // --- intake retry (a goal lost at intake) --------------------------------------------------------------------------------------
+  //
+  // A new goal whose FIRST planner call fails on transport has no plan, so no pause exists for the automatic resume above to carry:
+  // the request failed and the objective vanished. The agent marks that failure (error.intake_failure, npc-agent-loop.mjs
+  // intakeTransportFailure) and the player request that hit it is kept here as ONE pending intake retry: sender, text, intent,
+  // request id, the actor and epoch it was received under, the attempt count and the time of the next attempt.
+  //   - same schedule and limits as a transport pause (autoResumeDelayMs / autoResumeMaxAttempts), not a parallel set of numbers;
+  //   - durable (memory.intakeRetry(), written with the rest of the NPC state), so a restart mid-backoff keeps it;
+  //   - the cancel token and fence follow modelResume: any player request or control cancels it synchronously (cancelAutoResume),
+  //     a changed actor or epoch cancels it at fire time, and the token is checked after every await;
+  //   - the limit ends with one chat line and a recovery.intake_retry_exhausted row. A failure that is not a transport failure at
+  //     intake is not handled here at all: it propagates exactly as before.
+
+  intakeTraceBase(record) {
+    return {
+      request_id: record.request_id,
+      origin_request_id: record.origin_request_id,
+      goal_id: record.goal_id,
+      interaction_intent: record.interaction_intent,
+      actor_id: record.actor_id,
+      actor_epoch: record.epoch,
+    }
+  }
+
+  async persistIntakeRetry() {
+    try { await this.agent?.persistState?.() }
+    catch (error) { this.log(`Unable to persist the intake retry: ${error instanceof Error ? error.message : String(error)}`) }
+  }
+
+  // Synchronous on purpose (see cancelAutoResume). A graceful stop keeps the durable record: the restart is what resumes it.
+  cancelIntakeRetry(reason) {
+    const pending = this.intakeRetry
+    if (!pending) return false
+    if (pending.timer) clearTimeout(pending.timer)
+    pending.token.cancelled = true
+    pending.token.reason = reason
+    this.intakeRetry = null
+    const kept = reason === 'session_stopping'
+    if (!kept) {
+      this.agent?.memory?.setIntakeRetry?.(null)
+      void this.persistIntakeRetry()
+    }
+    // A retry that already fired is mid-request: the takeover supersedes it.
+    if (pending.running && !kept) this.agent?.cancel?.('intake_retry_cancelled')
+    void this.traceRecovery('recovery.intake_retry_cancelled', {
+      ...this.intakeTraceBase(pending.record),
+      reason,
+      attempt: pending.record.attempt,
+      kept_for_restart: kept || undefined,
+    })
+    return true
+  }
+
+  // The reason a pending intake retry must not run now, or undefined. Compares what it was received under with the live values.
+  async intakeRetryStaleReason(record) {
+    if (this.stopping) return 'session_stopping'
+    if (!this.agent?.memory?.planningState) return 'agent_unavailable'
+    let current
+    try {
+      current = await this.rawStatus()
+    }
+    catch {
+      return 'status_unreadable'
+    }
+    if (current?.actor_id !== record.actor_id) return 'actor_changed'
+    if (current?.epoch !== record.epoch) return 'epoch_changed'
+    return this.intakeGoalAdmittedReason(record)
+  }
+
+  // A plan, or a goal other than the one the failed request admitted, appeared meanwhile: the request is no longer the intake.
+  intakeGoalAdmittedReason(record) {
+    const key = this.planKey()
+    const memory = this.agent.memory
+    const planning = memory.planningState?.(key)
+    if (getActivePlan(planning) || planning?.plans?.length > 0 || memory.currentPlan?.(key)) return 'goal_admitted'
+    const goal = planning?.goal
+    if (goal?.status === GOAL_STATUS.ACTIVE && goal.goal_id !== record.goal_id) return 'goal_admitted'
+    return undefined
+  }
+
+  intakePreview(text) {
+    return uiText(text, 70)
+  }
+
+  // True when this failure was handled here (retry scheduled, or the limit reported), false when the caller must handle it as
+  // before. `intake` is the running retry ({ token, record }) when the failure is a retry's own.
+  async handleIntakeFailure(error, { sender, text, received, intake, generation } = {}) {
+    const failure = error?.intake_failure
+    if (!failure || this.stopping) return false
+    const transport = transportFailureOf(error)
+    if (!transport) return false
+    if (intake?.token?.cancelled) return false
+    const prior = intake?.record
+    const actor = prior ? { actor_id: prior.actor_id, epoch: prior.epoch } : (received ?? this.currentActorCorrelation())
+    const kind = transport.subkind
+    const causeCode = failureCauseCode(error)
+    const base = {
+      request_id: failure.request_id,
+      origin_request_id: prior?.origin_request_id ?? failure.request_id,
+      goal_id: failure.goal_id,
+      interaction_intent: failure.interaction_intent,
+      actor_id: actor.actor_id,
+      actor_epoch: actor.epoch,
+    }
+    if (generation !== undefined && generation !== this.cancelGeneration) {
+      // A player request or control arrived while this request was in flight: what they said stands. The failure is reported as before.
+      await this.traceRecovery('recovery.intake_retry_cancelled', { ...base, reason: 'superseded_before_schedule', transport_subkind: kind, cause_code: causeCode })
+      return false
+    }
+    if (!Number.isSafeInteger(actor.actor_id) || !Number.isSafeInteger(actor.epoch)) {
+      // Nothing to correlate the retry against: fail closed to today's behaviour, but say why.
+      await this.traceRecovery('recovery.intake_retry_cancelled', { ...base, reason: 'actor_unknown', transport_subkind: kind, cause_code: causeCode })
+      return false
+    }
+    const attempts = prior?.attempt ?? 0
+    const limit = autoResumeMaxAttempts(kind)
+    const preview = this.intakePreview(text)
+    if (attempts >= limit) {
+      await this.finishIntakeRetry(intake)
+      this.log(`Intake retry gave up after ${attempts} attempts (${kind})`)
+      await this.traceRecovery('recovery.intake_retry_exhausted', { ...base, reason: 'retry_limit_reached', attempt: attempts, limit, transport_subkind: kind, cause_code: causeCode })
+      // The objective is dropped and the player told so: the plan-less goal it admitted must not linger (a later restart notice, or a
+      // pending interrupted task when the next goal displaces it).
+      if (await this.agent.discardIntakeGoal?.(failure.goal_id, { requestId: failure.request_id, reason: 'intake_retry_exhausted' })) await this.syncTaskBoardUi()
+      const line = `I still cannot reach the model provider after ${attempts} automatic retries (${kind}), so I did not start "${preview}". Send the request again when the provider is reachable.`
+      await this.printChat(line)
+      await this.traceChatFailureReported(line, failure.request_id)
+      return true
+    }
+    const delayMs = autoResumeDelayMs(kind, attempts)
+    const kept = this.agent.memory.setIntakeRetry?.({
+      sender,
+      text,
+      interaction_intent: failure.interaction_intent,
+      request_id: failure.request_id,
+      origin_request_id: base.origin_request_id,
+      goal_id: failure.goal_id,
+      actor_id: actor.actor_id,
+      epoch: actor.epoch,
+      attempt: attempts + 1,
+      transport_subkind: kind,
+      cause_code: causeCode,
+      next_at: Date.now() + delayMs,
+    })
+    if (!kept) return false // the memory refused the record: handle the failure as before
+    this.armIntakeRetry(kept, delayMs)
+    await this.persistIntakeRetry()
+    this.log(`Intake retry ${kept.attempt}/${limit} scheduled in ${Math.round(delayMs / 1000)} s after a transport failure at goal intake (${kind})`)
+    await this.traceRecovery('recovery.intake_retry_scheduled', { ...base, reason: 'transport_failure_at_intake', attempt: kept.attempt, limit, delay_ms: delayMs, transport_subkind: kind, cause_code: causeCode })
+    const line = `I could not reach the model provider (${kind}), so I have not started "${preview}" yet. Retrying automatically in ${Math.round(delayMs / 1000)} s (attempt ${kept.attempt}/${limit}). Say stop to cancel.`
+    await this.printChat(line)
+    await this.traceChatFailureReported(line, failure.request_id)
+    return true
+  }
+
+  async traceChatFailureReported(line, requestId) {
+    try {
+      await this.agent?.traceEvent?.('chat.request_failed_reported', { chat_line_length: line.length, resume_hint_included: false }, { requestId })
+    }
+    catch (error) { this.log(`Unable to trace the intake chat line: ${error instanceof Error ? error.message : String(error)}`) }
+  }
+
+  // Replaces any pending retry with `record`: synchronous, so a cancel that arrives during the awaits that follow finds it.
+  armIntakeRetry(record, delayMs) {
+    if (this.intakeRetry?.timer) clearTimeout(this.intakeRetry.timer)
+    const token = { cancelled: false, reason: undefined }
+    const timer = setTimeout(() => {
+      if (this.intakeRetry?.token !== token || token.cancelled) return
+      this.intakeRetry.timer = null
+      this.queueEvent(() => this.runIntakeRetry(token), { reportError: true })
+    }, Math.max(0, delayMs))
+    timer.unref?.()
+    this.intakeRetry = { token, timer, record, running: false }
+    return token
+  }
+
+  // Drops the durable record of a retry that ended (not one that was replaced by its own next attempt).
+  async finishIntakeRetry(intake) {
+    if (!intake?.token || this.intakeRetry?.token !== intake.token) return
+    this.intakeRetry = null
+    this.agent?.memory?.setIntakeRetry?.(null)
+    await this.persistIntakeRetry()
+  }
+
+  // The timer fired. `token` is the schedule's cancel token; it is checked after every await and before the request is re-queued.
+  async runIntakeRetry(token) {
+    const pending = this.intakeRetry
+    if (!pending || pending.token !== token) return null
+    const record = pending.record
+    const traceBase = { ...this.intakeTraceBase(record), attempt: record.attempt }
+    const cancelled = () => token.cancelled === true || this.stopping === true
+    const abort = async (reason) => {
+      if (this.intakeRetry?.token === token) {
+        this.intakeRetry = null
+        this.agent.memory.setIntakeRetry?.(null)
+        await this.persistIntakeRetry()
+      }
+      // A cancel through cancelIntakeRetry already wrote its own row.
+      if (!token.cancelled) await this.traceRecovery('recovery.intake_retry_cancelled', { ...traceBase, reason })
+      return null
+    }
+    if (cancelled()) return abort('session_stopping')
+    const stale = await this.intakeRetryStaleReason(record)
+    if (cancelled()) return abort('session_stopping')
+    if (stale) return abort(stale)
+    const generation = this.cancelGeneration
+    pending.running = true
+    await this.traceRecovery('recovery.intake_retry_started', {
+      ...traceBase,
+      reason: 'backoff_elapsed',
+      limit: autoResumeMaxAttempts(record.transport_subkind),
+      transport_subkind: record.transport_subkind,
+    })
+    if (cancelled()) return abort('session_stopping')
+    try {
+      return await this.processPlayerRequest(record.sender, record.text, { received: { actor_id: record.actor_id, epoch: record.epoch }, intake: pending, generation, isCancelled: cancelled })
+    }
+    catch (error) {
+      // The takeover that cancelled the retry also aborted its request: that failure is the cancellation, not a new problem.
+      if (cancelled()) return null
+      throw error
+    }
+    finally {
+      // A retry that ended (admitted, or failed for another reason) leaves no record; one that rescheduled itself keeps the new one.
+      await this.finishIntakeRetry(pending)
+    }
+  }
+
+  // After a restart: the durable record is put back on its clock, unless the body or the goal moved on while the server was down.
+  async restoreIntakeRetry() {
+    const record = this.agent?.memory?.intakeRetry?.()
+    if (!record || this.stopping || this.intakeRetry) return false
+    const current = this.currentActorCorrelation()
+    const stale = current.actor_id !== record.actor_id ? 'actor_changed'
+      : current.epoch !== record.epoch ? 'epoch_changed'
+        : this.intakeGoalAdmittedReason(record)
+    const base = { ...this.intakeTraceBase(record), attempt: record.attempt }
+    if (stale) {
+      this.agent.memory.setIntakeRetry(null)
+      await this.persistIntakeRetry()
+      await this.traceRecovery('recovery.intake_retry_cancelled', { ...base, reason: stale, restored: true })
+      await this.printChat(`I restarted while waiting to retry "${this.intakePreview(record.text)}" and could not safely keep it (${stale}). Send the request again.`)
+      this.queueStartupGoalNotice()
+      return false
+    }
+    const kind = record.transport_subkind
+    const delayMs = Math.min(Math.max(0, record.next_at - Date.now()), autoResumeDelayMs(kind, record.attempt - 1))
+    this.armIntakeRetry(record, delayMs)
+    this.log(`Intake retry ${record.attempt} restored after a restart; due in ${Math.round(delayMs / 1000)} s`)
+    await this.traceRecovery('recovery.intake_retry_scheduled', {
+      ...base,
+      reason: 'restored_after_restart',
+      limit: autoResumeMaxAttempts(kind),
+      delay_ms: delayMs,
+      transport_subkind: kind,
+      cause_code: record.cause_code,
+      restored: true,
+    })
+    await this.printChat(`I restarted while waiting to retry "${this.intakePreview(record.text)}". Retrying in ${Math.round(delayMs / 1000)} s (attempt ${record.attempt}/${autoResumeMaxAttempts(kind)}). Say stop to cancel.`)
+    return true
+  }
+
+  // Called for every pause (goal.paused) and once at startup. Decides, from the durable class only, whether a resume is scheduled.
+  async considerPauseForAutoResume() {
+    if (this.stopping || !this.agent?.memory?.pauseRecord) return null
+    const key = this.planKey()
+    const record = this.agent.memory.pauseRecord(key)
+    if (!record?.paused) return null
+    if (this.planIsBlocked()) return null
+    const allowance = this.agent.memory.autoResumeAllowance?.(key)
+    const decisionKey = `${record.goal_id ?? ''}|${record.paused_at ?? ''}|${record.pause_reason}|${allowance?.goal_attempts ?? 0}|${allowance?.step_attempts ?? 0}`
+    if (this.lastPauseDecision === decisionKey) return null
+    const declared = pauseClassOf(record)
+    if (!declared.classified) {
+      this.lastPauseDecision = decisionKey
+      await this.traceRecovery('recovery.pause_unclassified', {
+        reason: 'pause_created_without_declared_class',
+        pause_reason: uiText(record.pause_reason, 200),
+        pause_class: record.pause_class ? uiText(record.pause_class, 40) : undefined,
+        goal_id: record.goal_id,
+        auto_resume: 'none',
+      })
+      return null
+    }
+    // transport keeps its own scheduler; every other class waits for a person or its own lifecycle recovery.
+    if (declared.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return null
+    this.lastPauseDecision = decisionKey
+    // Run BB lane B: an executor review that repeats the previous resumed pause's blocker evidence on the same step, with no
+    // verified progress since, gets no further generic resume. It ends in a visible guard pause that names the evidence.
+    const repeat = this.agent.memory.reviewBlockerRepeat?.(key)
+    if (repeat) return this.pauseForUnchangedReviewBlocker(key, record, repeat)
+    return this.scheduleModelRecoverableResume(record, allowance)
+  }
+
+  async pauseForUnchangedReviewBlocker(key, record, repeat) {
+    const pauseReason = REVIEW_BLOCKER_UNCHANGED_REASON
+    this.agent.memory.pausePlan?.(key, pauseReason, { pause_class: PAUSE_CLASS.GUARD })
+    await this.agent.persistState?.({ strict: true })
+    this.log(`Auto-resume withheld: the executor review on this step repeats its previous blocker evidence (${repeat.evidence.reason} ${repeat.evidence.digest}); the plan stays paused`)
+    await this.traceRecovery('recovery.review_blocker_unchanged', {
+      pause_class: PAUSE_CLASS.GUARD,
+      reason: pauseReason,
+      review_reason: repeat.evidence.reason,
+      evidence_digest: repeat.evidence.digest,
+      previous_pause: repeat.previous_pause,
+      current_pause: { ...repeat.current_pause, pause_reason: uiText(record.pause_reason, 160) },
+      step_attempts: repeat.step_attempts,
+      goal_attempts: repeat.goal_attempts,
+      goal_id: repeat.goal_id,
+      plan_id: repeat.plan_id,
+      plan_version: repeat.plan_version,
+      step_id: repeat.step_id,
+    })
+    await this.syncTaskBoardUi?.(this.currentPlanState?.())
+    await this.printChat(`I paused because the executor raised the same blocker (${repeat.evidence.reason}) on this step again with nothing verified in between, so another automatic restart would repeat it. The plan stays paused; change the approach or say continue to retry.`)
+    return false
+  }
+
+  async scheduleModelRecoverableResume(record, allowance) {
+    if (this.modelResume) return false
+    if (!allowance?.step_key) {
+      await this.traceRecovery('recovery.auto_resume_cancelled', { reason: 'no_active_plan', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE, goal_id: record.goal_id })
+      return false
+    }
+    const actor = this.currentActorCorrelation()
+    if (!Number.isSafeInteger(actor.actor_id) || !Number.isSafeInteger(actor.epoch)) {
+      await this.traceRecovery('recovery.auto_resume_cancelled', { reason: 'actor_unknown', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE, goal_id: record.goal_id })
+      return false
+    }
+    if (allowance.limit_kind) {
+      await this.reportModelResumeExhausted(allowance)
+      return false
+    }
+    const attempt = allowance.step_attempts + 1
+    const delayMs = MODEL_RECOVERABLE_RESUME_DELAY_MS
+    const correlation = {
+      ...actor,
+      ...(allowance.boundary_key ? { boundary_key: allowance.boundary_key, native_session: this.lastStatus?.session } : {}),
+      goal_id: allowance.goal_id,
+      plan_id: allowance.plan_id,
+      plan_version: allowance.plan_version,
+      step_id: allowance.step_id,
+    }
+    const token = { cancelled: false, reason: undefined }
+    const timer = setTimeout(() => {
+      if (this.modelResume?.token !== token || token.cancelled) return
+      this.modelResume.timer = null
+      this.fireModelResume(token)
+    }, delayMs)
+    timer.unref?.()
+    this.modelResume = { token, timer, correlation, attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }
+    this.log(`Auto-resume ${attempt}/${allowance.per_step} (goal ${allowance.goal_attempts + 1}/${allowance.per_goal}) scheduled in ${Math.round(delayMs / 1000)} s after a model_recoverable pause`)
+    await this.traceRecovery('recovery.auto_resume_scheduled', {
+      pause_class: PAUSE_CLASS.MODEL_RECOVERABLE,
+      attempt,
+      limit: allowance.per_step,
+      goal_attempt: allowance.goal_attempts + 1,
+      goal_limit: allowance.per_goal,
+      delay_ms: delayMs,
+      reason: uiText(record.pause_reason, 160),
+      goal_id: allowance.goal_id,
+      plan_id: allowance.plan_id,
+      plan_version: allowance.plan_version,
+      step_id: allowance.step_id,
+      actor_id: correlation.actor_id,
+      actor_epoch: correlation.epoch,
+    })
+    await this.printChat(`Paused because the model did not produce a usable action. Resuming automatically in ${Math.round(delayMs / 1000)} s with a fresh context (attempt ${attempt}/${allowance.per_step} for this step, ${allowance.goal_attempts + 1}/${allowance.per_goal} for this goal).`)
+    return true
+  }
+
+  // The timer fired: queue the job. The record stays on the session while the job runs, so a stop or a player request can still
+  // cancel it by invalidating its token.
+  fireModelResume(token) {
+    const pending = this.modelResume
+    if (!pending || pending.token !== token || token.cancelled) return null
+    return this.queueEvent(() => this.runModelRecoverableResume(pending.correlation, pending.attempt, token), { reportError: true })
+  }
+
+  async reportModelResumeExhausted(allowance) {
+    const owner = nextSliceOwner(this.agent)
+    const cancel = this.cancelGeneration
+    const current = () => this.cancelGeneration === cancel && ownsNextSlice(this.agent, owner)
+    if (allowance.boundary_key && !this.agent.requestAdmissionOwner
+      && this.agent.memory.nextSliceAnchor?.(this.planKey())?.boundary_key === allowance.boundary_key) {
+      this.agent.memory.dispatchPlanningEvent(this.planKey(), { type: 'RUN_PAUSED', now: Date.now(), source: 'runtime', goal_id: allowance.goal_id,
+        reason: 'next_slice_recovery_exhausted', pause_class: PAUSE_CLASS.GUARD })
+      this.agent.memory.recordNextSliceTransition(this.planKey(), { phase: 'paused', boundary_key: allowance.boundary_key,
+        reason: 'next_slice_recovery_exhausted', failure_class: PAUSE_CLASS.GUARD })
+      await this.agent.persistState({ strict: true })
+      if (!current()) return
+    }
+    const goalLimit = allowance.limit_kind === 'goal'
+    this.log(`Auto-resume gave up (${allowance.limit_kind} limit); waiting for an explicit continue`)
+    await this.traceRecovery('recovery.auto_resume_exhausted', {
+      pause_class: PAUSE_CLASS.MODEL_RECOVERABLE,
+      limit_kind: allowance.limit_kind,
+      step_attempts: allowance.step_attempts,
+      step_limit: allowance.per_step,
+      goal_attempts: allowance.goal_attempts,
+      goal_limit: allowance.per_goal,
+      reason: goalLimit ? 'goal_limit_reached' : 'step_limit_reached_without_verified_progress',
+      goal_id: allowance.goal_id,
+      plan_id: allowance.plan_id,
+      plan_version: allowance.plan_version,
+      step_id: allowance.step_id,
+    })
+    if (!current()) return
+    await this.printChat(goalLimit
+      ? `I paused after ${allowance.goal_attempts} automatic restarts for this goal and will not retry on my own again. The plan stays paused; say continue to retry.`
+      : `I paused after ${allowance.step_attempts} automatic restarts on this step without verified progress. The plan stays paused; say continue to retry.`)
+  }
+
+  // The reason a scheduled resume must not run now, or undefined. Compares everything it was scheduled under against the live values.
+  async modelResumeStaleReason(correlation) {
+    if (this.stopping) return 'session_stopping'
+    if (!this.agent?.memory?.pauseRecord) return 'agent_unavailable'
+    if (!Number.isSafeInteger(correlation.actor_id) || !Number.isSafeInteger(correlation.epoch)) return 'actor_unknown'
+    let current
+    try {
+      current = await this.rawStatus()
+    }
+    catch {
+      return 'status_unreadable'
+    }
+    if (current?.actor_id !== correlation.actor_id) return 'actor_changed'
+    if (current?.epoch !== correlation.epoch) return 'epoch_changed'
+    if (correlation.boundary_key && (!correlation.native_session || current.session !== correlation.native_session)) return 'session_changed'
+    const key = this.planKey()
+    const record = this.agent.memory.pauseRecord(key)
+    if (!record?.paused) return 'no_longer_paused'
+    if (pauseClassOf(record).pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return 'pause_class_changed'
+    if (this.planIsBlocked()) return 'plan_blocked'
+    const allowance = this.agent.memory.autoResumeAllowance?.(key)
+    if (allowance?.goal_id !== correlation.goal_id) return 'goal_changed'
+    if (allowance.plan_id !== correlation.plan_id || allowance.plan_version !== correlation.plan_version) return 'plan_changed'
+    if (allowance.step_id !== correlation.step_id) return 'step_changed'
+    return undefined
+  }
+
+  // `token` is the schedule's cancel token (fireModelResume passes it). A direct call without one is cancellable through a record of
+  // its own. The token is checked after every await and immediately before the attempt is counted and before recovery starts.
+  async runModelRecoverableResume(correlation, attempt, token = undefined) {
+    const key = this.planKey()
+    const diagnosticAgent = this.agent
+    const diagnosticRequestId = this.agent.traceRequest?.id
+    let recoveryRequestId
+    const traceCancelled = data => correlation.boundary_key
+      ? diagnosticAgent.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0, event: 'recovery.auto_resume_cancelled',
+        request_id: recoveryRequestId ?? diagnosticRequestId, actor_id: correlation.actor_id, epoch: correlation.epoch, data })
+      : this.traceRecovery('recovery.auto_resume_cancelled', data)
+    if (!token) {
+      token = { cancelled: false, reason: undefined }
+      this.modelResume = { token, timer: null, correlation, attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }
+    }
+    const traceBase = {
+      pause_class: PAUSE_CLASS.MODEL_RECOVERABLE,
+      attempt,
+      goal_id: correlation.goal_id,
+      plan_id: correlation.plan_id,
+      plan_version: correlation.plan_version,
+      step_id: correlation.step_id,
+      actor_id: correlation.actor_id,
+      actor_epoch: correlation.epoch,
+    }
+    const finish = () => { if (this.modelResume?.token === token) this.modelResume = null }
+    const boundaryAgent = this.agent
+    const boundaryAdmission = this.agent.requestAdmissionOwner
+    const boundaryAmendment = this.agent.pendingInteractionAmendment
+    const cancelled = () => token.cancelled === true || this.stopping === true
+      || correlation.boundary_key && (this.agent !== boundaryAgent || this.modelResume?.token !== token || Boolean(boundaryAdmission)
+        || this.agent.requestAdmissionOwner !== boundaryAdmission || this.agent.pendingInteractionAmendment !== boundaryAmendment)
+    const abortCancelled = async () => {
+      finish()
+      await traceCancelled({ ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
+      return null
+    }
+    if (cancelled()) return abortCancelled()
+    const stale = await this.modelResumeStaleReason(correlation)
+    if (cancelled()) return abortCancelled()
+    if (stale) {
+      finish()
+      await traceCancelled({ ...traceBase, reason: stale })
+      return null
+    }
+    // Count the attempt BEFORE it runs, in durable plan state: a crash mid-attempt still spent it. No await between the last
+    // cancel check and the (synchronous) count.
+    const requestId = `recovery_${Date.now().toString(36)}`
+    recoveryRequestId = requestId
+    const counted = this.agent.memory.recordAutoResumeStarted?.(key, { ...correlation, request_id: requestId })
+    if (!counted?.recorded) {
+      finish()
+      await traceCancelled({ ...traceBase, reason: 'plan_identity_changed' })
+      return null
+    }
+    let result = null
+    try {
+      await this.agent.persistState?.(correlation.boundary_key ? { strict: true } : undefined)
+      if (cancelled()) return abortCancelled()
+      await this.traceRecovery('recovery.auto_resume_started', {
+        ...traceBase,
+        request_id: requestId,
+        step_attempt: counted.allowance.step_attempts,
+        step_limit: counted.allowance.per_step,
+        goal_attempt: counted.allowance.goal_attempts,
+        goal_limit: counted.allowance.per_goal,
+      })
+      if (cancelled()) return abortCancelled()
+      result = await this.recoverInterruptedPlan('auto_resume_after_model_recoverable_pause', { attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }, {
+        allowModelRecoverable: true,
+        requestId,
+        isCancelled: cancelled,
+        reactivate: { pause_classes: [PAUSE_CLASS.MODEL_RECOVERABLE], identity: correlation, actor: { actor_id: correlation.actor_id, epoch: correlation.epoch }, onResumed: state => this.syncTaskBoardUi(state) },
+      })
+      if (cancelled()) await traceCancelled({ ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
+    }
+    finally {
+      finish()
+      // A failed attempt leaves the plan paused again: decide on the next one (or the limit) right away. A cancelled attempt does not:
+      // a person took over, and the pause that follows is theirs (a stop pauses as operator).
+      if (!cancelled()) await this.considerPauseForAutoResume().catch(error => this.log(`Auto-resume follow-up failed: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    return result
+  }
+
+  recoverablePlan(state = this.currentPlanState(), options = {}) {
+    return shouldRecoverInterruptedPlan(state, {
+      awaitingNextSlice: this.agent?.goalAwaitingNextSlice?.() === true,
+      allowModelRecoverable: options.allowModelRecoverable === true,
+    })
+  }
+
+  async recoverInterruptedPlan(reason, details = {}, options = {}) {
+    if (!this.agent || !this.recoverablePlan(undefined, options)) return null
+    this.log(`Recovering interrupted SGLuna plan after ${reason}; mutable world state will be re-observed before resuming`)
+    try {
+      const recovery = await recoverInterruptedAgentPlan(this.agent, reason, details, options)
+      if (!recovery.recovered) {
+        if (recovery.reason === 'plan_not_resumable') {
+          // The paused plan could not be made active, so nothing was restaged. It stays paused, and a person is told why.
+          if (recovery.state) await this.syncTaskBoardUi(recovery.state)
+          await this.printChat(`I could not resume the paused plan automatically after ${reason} (${recovery.refusal ?? 'not resumable'}), so it stays paused and nothing ran. Say continue to resume it.`)
+          return null
+        }
+        if (recovery.reason === 'no_active_plan') {
+          // C7 with no plan to carry: the goal is paused, never a model woken with nothing to run.
+          if (recovery.paused && recovery.state) await this.syncTaskBoardUi(recovery.state)
+          // An actor replacement prints its own line for every unrecovered case.
+          if (reason !== 'actor_replaced') {
+            await this.printChat(`I came back after ${reason} but there is no committed plan to resume, so I paused the goal instead of guessing. Say continue or give me a new instruction.`)
+          }
+        }
+        return null
+      }
       await this.syncTaskBoardUi(recovery.state)
       if (recovery.result?.chatMessage) await this.printChat(recovery.result.chatMessage)
       return recovery.result
@@ -846,8 +3400,42 @@ export class Session {
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.log(`Interrupted plan recovery failed after ${reason}: ${message}`)
+      // A superseded recovery has no authority to pause or reschedule its
+      // replacement. Its own cancellation is already a terminal disposition.
+      if (options.isCancelled?.() || expectedCancellation(error) || error?.code === 'stale_handoff_reply') return null
+      if (this.agent.goalAwaitingNextSlice?.() === true) {
+        await this.agent.settleNextSliceExit?.({ failure: error, reason: 'supervisor_authoring_error' })
+        if (transientProviderFailure(error)) {
+          await this.scheduleAutoResume(error)
+          return null
+        }
+        await this.printChat(`I could not plan the next slice of the goal after ${reason}: ${message}. Say continue to retry.`)
+        return null
+      }
+      const failure = classifyRequestFailure(error)
+      if (failure.pause_class === PAUSE_CLASS.TRANSPORT && typeof this.agent.pausePersistentPlan === 'function') {
+        const paused = await this.agent.pausePersistentPlan(`${TRANSIENT_PAUSE_PREFIX}: ${uiText(message, 200)}`, { pause_class: PAUSE_CLASS.TRANSPORT, pause_subkind: failure.pause_subkind })
+        if (paused) await this.syncTaskBoardUi(paused)
+        await this.scheduleAutoResume(error)
+        return null
+      }
+      // A recovery that failed because the model again produced no usable action stays model_recoverable (bounded by the durable
+      // allowance); a harness-state invariant (checkpoint_requires_active_step) is the harness's own fault and pauses as system, with
+      // its code as the cause; anything else the registry cannot place needs a player.
+      const faultCode = harnessStateFaultCode(error)
+      if (faultCode) {
+        await this.traceRecovery('recovery.harness_state_fault', {
+          request_id: options.requestId,
+          reason: faultCode,
+          pause_class: PAUSE_CLASS.SYSTEM,
+          recovery_reason: uiText(reason, 80),
+        })
+      }
+      const pauseClass = failure.pause_class === PAUSE_CLASS.MODEL_RECOVERABLE
+        ? PAUSE_CLASS.MODEL_RECOVERABLE
+        : failure.pause_class === PAUSE_CLASS.SYSTEM ? PAUSE_CLASS.SYSTEM : PAUSE_CLASS.GUARD
       const paused = typeof this.agent.pausePersistentPlan === 'function'
-        ? await this.agent.pausePersistentPlan(`runtime_recovery_failed:${uiText(reason, 80)}:${uiText(message, 180)}`)
+        ? await this.agent.pausePersistentPlan(`runtime_recovery_failed:${uiText(reason, 80)}:${uiText(message, 180)}`, { pause_class: pauseClass })
         : undefined
       if (paused) await this.syncTaskBoardUi(paused)
       await this.printChat(`I could not safely recover the interrupted plan after ${reason}; it has been paused instead of guessing. ${message}`)
@@ -855,14 +3443,6 @@ export class Session {
     }
   }
 
-  /**
-   * Writes one console update and confirms the mod actually accepted it.
-   *
-   * `/silent-command` reports a Lua error in the RCON response body instead of
-   * failing the command, and the mod answers a rejected snapshot with `false`.
-   * An unchecked write therefore reports success even when the console never saw
-   * it, which is exactly how this path could sit broken while looking healthy.
-   */
   async writeTaskBoardUi(command, label) {
     if (!this.rcon) return false
     try {
@@ -880,8 +3460,6 @@ export class Session {
     }
   }
 
-  // Report a new fault at once, then stay quiet about it until it changes or the
-  // interval elapses, so a real diagnostic cannot drown out the log.
   logTaskBoardUiFailure(message) {
     const now = Date.now()
     if (this.lastUiFailure === message && now - this.lastUiFailureAt < UI_FAILURE_LOG_INTERVAL_MS) return
@@ -894,10 +3472,24 @@ export class Session {
     return this.writeTaskBoardUi('/silent-command rcon.print(tostring(remote.call("autorio_task_board","clear")))', 'clear')
   }
 
+  async ackTaskBoardUiLifecycle(playerIndex, action) {
+    if (!Number.isSafeInteger(playerIndex) || playerIndex < 1) return false
+    return this.writeTaskBoardUi(
+      `/silent-command rcon.print(tostring(remote.call("autorio_task_board","ack_lifecycle",${playerIndex},${luaString(action)})))`,
+      `ack ${action}`,
+    )
+  }
+
   async syncTaskBoardUi(state = this.currentPlanState()) {
     if (!this.rcon) return false
-    const snapshot = taskBoardUiSnapshot(state, this.liveAgentStatus())
+    if (state?.goal_id && (!Array.isArray(this.agentLive?.conversation) || this.agentLive.conversation.length === 0)) {
+      await this.restoreTaskBoardUiConversation(state)
+    }
+    this.ensureUiConversationForState(state)
+    const snapshot = taskBoardUiSnapshot(state, this.liveAgentStatus(), this.currentPlanTrackerView())
     if (!snapshot) return this.clearTaskBoardUi()
+    const goal = await this.goalUiView()
+    if (goal) snapshot.goal = goal
     const json = taskBoardUiJson(snapshot)
     if (json === undefined) {
       this.logTaskBoardUiFailure(`Task Board UI sync skipped: snapshot exceeds ${UI_SNAPSHOT_MAX_BYTES} bytes even after trimming`)
@@ -910,30 +3502,23 @@ export class Session {
   }
 
   async drainTaskBoardUiInputs() {
+    if (this.tickSprint?.lease) return false
     if (!this.rcon || !this.ready || this.stopping || this.uiInputPollRunning) return false
     this.uiInputPollRunning = true
     try {
       const raw = await this.rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_task_board","drain_inputs")))')
       const inputs = parseUiInputBatch(raw)
       for (const input of inputs) {
-        // Answer every poll, even when nothing changed: a refreshed synced_tick
-        // is what lets the console tell a quiet AIRI from a dead one.
         if (input.kind === 'poll') {
           this.requestTaskBoardUiSync()
           continue
         }
         if (!chatAuthorized(this.config.chatPlayers, input.player_name)) {
-          this.log(`[AIRI UI] Ignored unauthorized ${input.kind} player=${input.player_name}${input.action ? ` action=${input.action}` : ''}`)
+          this.log(`[SGLuna UI] Ignored unauthorized ${input.kind} player=${input.player_name}${input.action ? ` action=${input.action}` : ''}`)
           continue
         }
-        if (input.kind === 'control') {
-          this.queueEvent(async () => {
-            await executeUiControl(this, input)
-          }, { reportError: true })
-        }
-        else {
-          this.queuePlayerRequest(input.player_name, input.text)
-        }
+        if (input.kind === 'control') this.queueUiControl(input)
+        else this.queueUiPrompt(input)
       }
       return inputs.length > 0
     }
@@ -944,6 +3529,137 @@ export class Session {
     finally {
       this.uiInputPollRunning = false
     }
+  }
+
+  pollRuntimeCondition() {
+    if (!this.agent || !this.rcon || !this.ready || this.stopping || this.conditionPollRunning) return false
+    const state = this.currentPlanState()
+    if (state?.condition_wait?.state !== 'active' || typeof this.agent.pollConditionWait !== 'function') return false
+    this.conditionPollRunning = true
+    this.queueEvent(async () => {
+      try {
+        await this.ensureAuthorization()
+        const result = await this.agent.pollConditionWait()
+        if (!result || result.action === 'stale') return
+        if (result.state) await this.syncTaskBoardUi(result.state)
+
+        if (result.action === 'waiting') {
+          this.log(`Runtime condition still active; planner remains asleep wait=${result.wait_id}`)
+          return
+        }
+
+        if (result.action === 'paused') {
+          // The plan tracker and the task board disagreed: the goal is paused
+          // and the player is told so, never left silent.
+          if (result.chat_message) await this.printChat(result.chat_message)
+          return
+        }
+
+        if (result.action === 'verified') {
+          if (result.state?.status === 'completed') {
+            const completed = {
+              goalStatus: 'completed',
+              goalId: result.state.goal_id,
+              taskBoard: result.state.task_board,
+              chatMessage: 'The requested goal is verified complete.',
+            }
+            const finalized = await finalizeCompletedTaskBoundary(this, completed)
+            if (completed.chatMessage) await this.printChat(completed.chatMessage)
+            if (!finalized) await this.syncTaskBoardUi(result.state)
+            return
+          }
+          const resumed = await this.recoverInterruptedPlan('condition_satisfied', {
+            condition_wait_id: result.wait_id,
+            source: 'runtime_condition',
+            ...(result.facts ? { facts: result.facts } : {}),
+          })
+          if (!resumed) await this.syncTaskBoardUi(result.state)
+          return
+        }
+
+        if (result.action === 'wake' || result.action === 'timeout' || result.action === 'failed') {
+          const resumed = await this.recoverInterruptedPlan(`condition_${result.action}`, {
+            condition_wait_id: result.wait_id,
+            reason: result.reason,
+            source: 'runtime_condition',
+            ...(Number.isFinite(result.expected_seconds) ? { expected_seconds: result.expected_seconds, elapsed_seconds: result.elapsed_seconds } : {}),
+            ...(result.facts ? { facts: result.facts } : {}),
+          })
+          if (!resumed) await this.syncTaskBoardUi(result.state)
+        }
+      }
+      finally {
+        this.conditionPollRunning = false
+      }
+    }, { reportError: true })
+    return true
+  }
+
+  nextSliceControlView() {
+    if (this.nextSliceControlAgent !== this.agent) {
+      this.nextSliceControlAgent = this.agent
+      this.nextSliceControlInstance = nonce()
+      this.nextSliceSettlement = null
+    }
+    this.nextSliceControlInstance ??= nonce()
+    return { ...nextSliceControlView(this), instance_id: this.nextSliceControlInstance,
+      settlement: this.nextSliceSettlement ?? null }
+  }
+
+  // Coalesced local observation only. A stored active flag is never work ownership.
+  publishNextSliceControl() {
+    if (!this.root || !this.agent) return Promise.resolve()
+    this.nextSliceControlDirty = true
+    if (this.nextSliceControlWriting) return this.nextSliceControlWriting
+    this.nextSliceControlWriting = (async () => {
+      try {
+        while (this.nextSliceControlDirty) {
+          this.nextSliceControlDirty = false
+          await atomicWrite(path.join(this.root, '.sgluna', 'controller-state.json'), `${JSON.stringify(this.nextSliceControlView())}\n`)
+        }
+      } finally { this.nextSliceControlWriting = null }
+    })().catch(error => this.log(`Controller ownership observation unavailable: ${error.message}`))
+    return this.nextSliceControlWriting
+  }
+
+  async readNextSliceSettlementRequest() {
+    if (!this.root) return undefined
+    const raw = await fsp.readFile(path.join(this.root, '.sgluna', 'next-slice-settle-request.json'), 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return ''
+      throw error
+    })
+    if (!raw || raw.length > 4096) return undefined
+    let request
+    try { request = JSON.parse(raw) } catch { return undefined }
+    const view = this.nextSliceControlView()
+    if (request.schema !== 1 || typeof request.request_id !== 'string' || request.request_id.length > 240
+      || request.request_id === this.nextSliceSettlement?.request_id || request.instance_id !== view.instance_id
+      || request.goal_id !== view.goal_id || request.boundary_key !== view.boundary_key
+      || request.actor_id !== view.actor_id || request.epoch !== view.epoch
+      || !Number.isFinite(request.requested_at) || request.requested_at > Date.now() || Date.now() - request.requested_at > 30000) return undefined
+    return request
+  }
+
+  pollControllerLiveness() {
+    if (!this.agent || !this.ready || this.stopping || this.controllerProbeQueued) return false
+    this.controllerProbeQueued = true
+    this.queueEvent(async () => {
+      try {
+        const request = await this.readNextSliceSettlementRequest()
+        const owner = this.agent && nextSliceOwner(this.agent)
+        const cancel = this.cancelGeneration
+        const boundary = await inspectNextSliceLiveness(this, { withinEvent: true })
+        const view = this.nextSliceControlView()
+        if (request && boundary.native_reconciled === true && this.cancelGeneration === cancel
+          && ownsNextSlice(this.agent, owner) && request.instance_id === view.instance_id
+          && request.goal_id === view.goal_id && request.boundary_key === view.boundary_key) {
+          this.nextSliceSettlement = { ...request, settled_at: Date.now(), disposition: boundary.action, native_reconciled: true }
+        }
+        return boundary.action === 'not_applicable' ? await inspectControllerLiveness(this) : boundary
+      }
+      finally { this.controllerProbeQueued = false; void this.publishNextSliceControl() }
+    })
+    return true
   }
 
   async applyNavigationObstaclePolicy(text) {
@@ -959,13 +3675,18 @@ export class Session {
     }
   }
 
-  async start() {
-    const rconPort = await freeTcpPort([this.config.gamePort])
-    const secrets = [this.config.key, this.rconPassword, this.session, this.config.factorio.token]
-    const gameLog = line => {
-      this.log(redact(secrets, line))
-      this.onGameLine(line)
-    }
+  // Role-aware provider call (delegation U1). `context.role` picks the model via
+  // agent-roles.mjs (planner when absent); the request is the pre-roles shape, so
+  // a single-model config is unchanged.
+  async roleProvider(messages, context) {
+    const { role, ...request } = resolveAgentRole(this.config, context?.role)
+    const reply = await this.provider(request, messages, context)
+    await this.tickSprint?.boundary('provider_response')
+    return reply
+  }
+
+  async startGameProcess(rconPort, gameLog) {
+    this.rcon = null
     this.gameChild = new Child(path.join(this.game, 'bin', 'x64', 'factorio'), this.gameArgs(rconPort), {
       cwd: this.root,
       env: this.cleanEnv(),
@@ -991,29 +3712,118 @@ export class Session {
     check(this.rcon, 'Timed out waiting for authenticated Factorio RCON')
     const version = await this.rcon.command('/version')
     check(/2\.0\.\d+/.test(version), 'Authenticated Factorio RCON version probe failed')
+    const handshake = await confirmLuaConsoleReady(this.rcon)
+    this.log(`startup.lua_console_ready ${JSON.stringify({ request_id: 'startup', reason: handshake.attempts === 2 ? 'native_confirmation_repeated' : 'already_enabled', ...handshake })}`)
+  }
+
+  async restartPausedSprintGame(rconPort, gameLog) {
+    const pausedAt = Date.now()
+    await pauseSprintStartup(this.rcon)
+    this.rcon.close()
+    const stopped = await this.gameChild.stop(Math.min(this.config.stopMs, 30000), 'SIGINT')
+    check(!stopped.forced && stopped.result?.code === 0, 'Paused sprint bootstrap did not save/exit cleanly')
+    const save = await fsp.stat(this.save)
+    check(save.size > 0 && save.mtimeMs >= pausedAt, 'Paused sprint bootstrap save is stale')
+    this.settingsFile = await prepareServerSettings(this.root, this.game, this.config.factorio)
+    await this.startGameProcess(rconPort, gameLog)
+    const loaded = JSON.parse(await this.rcon.command(STARTUP_CLOCK_COMMAND))
+    check(loaded.paused === true && loaded.speed === 1 && loaded.humans === 0 && !loaded.guard?.lease,
+      'Paused sprint bootstrap did not reload a safe world')
     await this.bindNpc()
+  }
+  async start() {
+    const rconPort = this.rconPort ?? await freeTcpPort([this.config.gamePort])
+    const secrets = [this.config.key, this.rconPassword, this.session, this.config.factorio.token]
+    const gameLog = line => {
+      this.log(redact(secrets, line))
+      this.onGameLine(line)
+    }
+    await this.startGameProcess(rconPort, gameLog)
+    if (process.env.SGLUNA_E2E_PROFILE === 'accelerated') {
+      const binding = { profile: 'accelerated', run_id: process.env.SGLUNA_E2E_RUN_ID, source_sha: process.env.SGLUNA_E2E_SOURCE_SHA }
+      const ledger = path.join(this.root, '.sgluna', 'startup-clock-recovery.json')
+      this.startupClockProof = await initializeSprintStartupClock({ rcon: () => this.rcon, binding,
+        restartAtNormalSpeed: () => this.restartPausedSprintGame(rconPort, gameLog),
+        load: () => readJson(ledger, null),
+        persist: value => persistSprintLedger(ledger, value),
+        record: async value => {
+          await atomicWrite(path.join(this.root, '.sgluna', 'startup-clock-proof.json'), `${JSON.stringify({ ...binding, ...value })}\n`)
+          this.log(`Sprint startup clock: ${JSON.stringify({ ...binding, ...value })}`)
+        } })
+    }
+    else await this.bindNpc()
 
     const prompt = await fsp.readFile(path.join(this.app, 'src', 'prompt.md'), 'utf8')
+    const jevDecisionProvider = this.config.decisionProvider
+      ? async (state, questions, context = {}) => {
+          const reply = await decisionProviderRequest(
+          this.config.decisionProvider,
+          state,
+          questions,
+          {
+            signal: context.signal,
+            reserve: () => reserveBudget(
+              path.join(this.root, '.sgluna', 'decision-provider-budget.json'),
+              this.config.decisionProvider.maxRequestsPerHour,
+            ),
+          },
+          )
+          await this.tickSprint?.boundary('jev_response')
+          return reply
+        }
+      : undefined
     this.agent = new NpcAgentLoop({
+      completionProtocolVersion: 3,
+      executorObservationRate: true, // harness-owned replenishing live-read rate
+      requireTypedObligations: true,
+      executorProgressAudit: this.config.executorProgressAudit === true,
+      replacementWake: true, // MW5: player-objective grant at admission and the replacement wake
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
       npcId: this.npcId,
       memory: new CanonicalTaskBoardMemory(),
-      stateFile: path.join(this.root, '.airi', 'npc-state.json'),
-      provider: (messages, context) => this.provider({
-        base: this.config.base,
-        key: this.config.key,
-        model: this.config.model,
-        timeoutMs: this.config.providerTimeoutMs,
-      }, messages, context),
-      reserve: async () => reserveBudget(path.join(this.root, '.airi', 'provider-budget.json'), this.config.budget),
-      log: message => this.log(`[AIRI agent] ${redact(secrets, message)}`),
+      stateFile: path.join(this.root, '.sgluna', 'npc-state.json'),
+      provider: (messages, context) => this.roleProvider(messages, context),
+      interactionProvider: (messages, context) => this.roleProvider(messages, context),
+      agentRoleConfig: this.config, // names the planner/executor models for the loop's role tagging (agent-roles.mjs)
+      // Production contract: every goal starts from a game-checkable goal
+      // definition that the player sees in game.
+      goalDefinitionPolicy: 'required',
+      interactionDecisionProvider: jevDecisionProvider,
+      steeringDecisionProvider: jevDecisionProvider,
+      operationProjectionDecisionProvider: jevDecisionProvider,
+      // Skill discovery is deterministic; no shadow/advisory Jev lookup call.
+      // Other Jev routes retain their dedicated decision providers.
+      reserve: async context => reserveBudget(
+        path.join(this.root, '.sgluna', 'provider-budget.json'),
+        this.config.budget,
+        Date.now(),
+        { reservedSlots: 1, emergency: context?.recoveryKind === 'output_budget_exhaustion' },
+      ),
+      maxProviderOutputUnits: this.config.maxProviderOutputUnits,
+      log: message => this.log(`[SGLuna agent] ${redact(secrets, message)}`),
       onActivity: (event, data) => this.onAgentActivity(event, data),
     })
     await this.agent.loadPersistentState()
     await this.syncTaskBoardUi()
 
+    if (process.env.SGLUNA_E2E_PROFILE === 'accelerated') {
+      this.agent.epoch = await this.agent.captureEpoch()
+      const watchdog = new Rcon(rconPort, this.rconPassword, 700, { auxiliary: true })
+      try {
+        await watchdog.connect()
+        this.tickSprint = new TickSprintController({ session: this, watchdog,
+          ledgerFile: path.join(this.root, '.sgluna', 'tick-sprint-ledger.json'),
+          binding: { profile: 'accelerated', run_id: process.env.SGLUNA_E2E_RUN_ID, source_sha: process.env.SGLUNA_E2E_SOURCE_SHA } })
+        await this.tickSprint.start()
+        this.agent.tickSprintBoundary = reason => this.tickSprint.boundary(reason)
+        await resumeSprintStartup(this.rcon)
+      } catch (error) { watchdog.close(); throw error }
+    }
+    this.nextSliceControlInstance = nonce()
+    this.nextSliceSettlement = null
     this.ready = true
+    await this.publishNextSliceControl()
     this.uiInputPoll = setInterval(() => {
       if (!this.stopping) this.drainTaskBoardUiInputs()
     }, UI_INPUT_POLL_MS)
@@ -1021,34 +3831,168 @@ export class Session {
     this.uiHeartbeat.unref?.()
     this.drainTaskBoardUiInputs()
     this.poll = setInterval(() => {
-      if (!this.stopping) this.ensureAuthorization().catch(error => this.log(`NPC authorization health check failed: ${error.message}`))
+      if (this.stopping) return
+      void this.publishNextSliceControl()
+      if (this.pollRuntimeCondition()) return
+      this.pollControllerLiveness()
+      this.ensureAuthorization().catch(error => this.log(`NPC authorization health check failed: ${error.message}`))
     }, 2000)
-    if (shouldRecoverInterruptedPlan(this.currentPlanState())) {
-      this.queueEvent(async () => {
-        await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
-      })
-    }
-    this.log(`AIRI Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)
+    this.queueStartupRecovery(this.currentPlanState())
+    this.log(`SGLuna Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)
     return this.lastStatus
   }
 
-  queueEvent(fn, { reportError = false } = {}) {
-    this.eventQueue = this.eventQueue.then(fn).catch(async error => {
+  // What a restart does with the plan it finds: recover it (active, lifecycle or transport pause), announce a goal with no plan, or
+  // let the declared pause class decide (a model_recoverable pause that survived the restart resumes on its persisted attempt
+  // count, not a fresh one).
+  queueStartupRecovery(startupState) {
+    // A pending intake retry survives the restart: it is put back on its clock (or dropped with a reason when the body or goal moved
+    // on). With no plan to carry, it replaces the "restarted before the first plan" notice.
+    if (this.agent?.memory?.intakeRetry?.()) {
+      this.queueEvent(() => this.restoreIntakeRetry(), { reportError: true })
+      if (!startupState) return 'intake_retry'
+    }
+    if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
+      this.queueEvent(async () => {
+        // A transport pause resumed by the restart is an automatic-resume attempt like any other: counted in the bounded in-memory
+        // counter, so a restage that fails on transport again backs off under the same cap instead of starting over.
+        const record = this.agent?.memory?.pauseRecord?.(this.planKey())
+        if (record?.paused && pauseClassOf(record).pause_class === PAUSE_CLASS.TRANSPORT) {
+          this.autoResume = { attempt: (this.autoResume?.attempt ?? 0) + 1, kind: pauseClassOf(record).pause_subkind || TRANSPORT_FALLBACK_SUBKIND, timer: null, actor: this.currentActorCorrelation() }
+        }
+        await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
+      })
+      return 'recover'
+    }
+    if (!startupState) {
+      this.queueStartupGoalNotice()
+      return 'notice'
+    }
+    if (startupState.status === 'paused') {
+      this.queueEvent(() => this.considerPauseForAutoResume())
+      return 'consider_pause'
+    }
+    return 'none'
+  }
+
+  // Which startup notice an active goal with no plan to carry needs, if any. Both wake no model.
+  //  - 'before_first_plan': it never got a first plan (or was waiting for the player's answer): the
+  //    owner's known silent stall. It is paused visibly and the line says Resume re-drives it.
+  //  - 'no_active_plan': it HAD plans but holds none to carry now.
+  startupGoalNoticeKind() {
+    const planning = this.agent?.memory?.planningState?.(`npc:${this.npcId}`)
+    if (goalInterruptedBeforeFirstPlan(planning)) return 'before_first_plan'
+    if (goalInterruptedWithoutPlan(planning)) return 'no_active_plan'
+    return undefined
+  }
+
+  // The kind is decided when the notice RUNS, not when it is queued: the goal may have moved on in between.
+  queueStartupGoalNotice() {
+    if (!this.startupGoalNoticeKind()) return false
+    this.queueEvent(async () => {
+      const kind = this.startupGoalNoticeKind()
+      if (kind) await this.announceStartupGoal(kind)
+    })
+    return true
+  }
+
+  async announceStartupGoal(kind) {
+    const requestId = `recovery_${Date.now().toString(36)}`
+    const goalId = this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id
+    if (kind === 'before_first_plan') {
+      const paused = await this.agent.pauseGoalWithoutPlan?.(RESTART_BEFORE_FIRST_PLAN_PAUSE, { requestId })
+      const didPause = paused?.paused === true
+      await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: didPause ? RESTART_BEFORE_FIRST_PLAN_PAUSE : 'pause_not_applied', request_id: requestId, goal_id: paused?.goal_id ?? goalId, paused: didPause, model_woken: false }, { requestId })
+      // Say only what happened: a pause that did not apply is not announced as one.
+      await this.printChat(didPause
+        ? `I restarted before this goal had a plan (or while I was waiting for your answer), so I paused it and did not wake the planner. ${RESUME_HINT} If I had asked you something, answer that instead.`
+        : `I restarted before this goal had a plan and did not wake the planner, but I could not record a pause. Give me a new instruction.`)
+      return
+    }
+    await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: 'runtime_restart_no_active_plan', request_id: requestId, goal_id: goalId, model_woken: false }, { requestId })
+    await this.printChat('I restarted and this goal has no active plan to resume, so I am not waking the planner. Say continue or give me a new instruction.')
+  }
+
+  queueEvent(fn, { reportError = false, safetyControl = false } = {}) {
+    // Activity hooks and real timers can inherit the completed agent turn's AsyncLocalStorage scope.
+    // A supervised event starts its own turn; retaining that old generation makes a valid recovery stale.
+    const inherited = this.agent?.turnScope?.getStore?.()
+    if (inherited) {
+      return this.agent.turnScope.exit(() => {
+        void this.traceRecovery('recovery.queue_scope_detached', {
+          request_id: this.agent?.traceRequest?.id ?? inherited.requestId,
+          origin_request_id: inherited.requestId,
+          reason: 'supervisor_event_starts_fresh_turn',
+        })
+        return this.queueEvent(fn, { reportError, safetyControl })
+      })
+    }
+    this.controllerQueuedEvents = (this.controllerQueuedEvents ?? 0) + 1
+    void this.publishNextSliceControl()
+    this.eventQueue = this.eventQueue.then(async () => {
+      this.controllerQueuedEvents--
+      this.controllerEventRunning = (this.controllerEventRunning ?? 0) + 1
+      let eventFailure
+      try {
+        await this.tickSprint?.boundary(safetyControl ? 'safety_control' : 'supervisor_event')
+        return await fn()
+      } catch (error) { eventFailure = error; throw error }
+      finally {
+        this.controllerEventRunning--
+        try { await inspectNextSliceLiveness(this, { failure: eventFailure }) }
+        catch (error) { this.log(`Next-slice event settlement deferred: ${error.message}`) }
+        void this.publishNextSliceControl()
+      }
+    }).catch(async error => {
       const message = error instanceof Error ? error.message : String(error)
       this.log(message)
-      if (reportError && providerRecoveryExhausted(message) && this.agent) {
+      if (reportError && !expectedCancellation(error) && this.agent) {
         try {
-          const state = await this.agent.pausePersistentPlan(`provider_recovery_exhausted: ${message.slice(0, 240)}`)
-          await this.syncTaskBoardUi(state)
-          if (state) this.log('Canonical Task Board paused after provider response recovery exhaustion')
+          const state = await pauseStrandedPlanAfterRequestError(this, error)
+          if (state) this.log('Canonical Task Board paused after a failed request left Autorio idle')
+          if (state && (pauseClassOf(this.agent.memory?.pauseRecord?.(this.planKey())).pause_class === PAUSE_CLASS.TRANSPORT
+            || String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`))) {
+            await this.scheduleAutoResume(error)
+          }
+          else if (!state && transientProviderFailure(error) && this.agent.goalAwaitingNextSlice?.() === true) {
+            // The failure hit the planner call for the next slice: there is no
+            // active plan to pause, but the goal is still live.
+            await this.scheduleAutoResume(error)
+          }
+          else if (providerRecoveryExhausted(message)) {
+            // Preserve the old diagnostic signal without blindly pausing if
+            // Autorio status is unknown or still owns live world work.
+            this.log('Provider recovery exhausted; durable task was not auto-paused because Autorio was not authoritatively idle')
+          }
         }
         catch (pauseError) {
-          this.log(`Unable to pause Task Board after provider response recovery exhaustion: ${pauseError instanceof Error ? pauseError.message : pauseError}`)
+          this.log(`Unable to reconcile Task Board after request failure: ${pauseError instanceof Error ? pauseError.message : pauseError}`)
         }
       }
       if (reportError && !expectedCancellation(error)) {
-        try { await this.printChat(`Request failed: ${message}`) }
-        catch (printError) { this.log(`Unable to report AIRI error in chat: ${printError instanceof Error ? printError.message : printError}`) }
+        // A goal this failure left paused gets the same Resume line every other
+        // pause carries; without one the player has no way to know it is paused.
+        // A transient provider pause resumes on its own, so it gets no hint.
+        const planState = this.currentPlanState()
+        const transientPause = String(planState?.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
+        const resume = planState?.status === 'paused' && !transientPause ? ` ${RESUME_HINT}` : ''
+        try {
+          const line = `Request failed: ${message}${resume}`
+          await this.printChat(line)
+          // Trace what the player actually got so run-check does not flag the
+          // failed request as chat-silent. Length + hint flag only: the raw
+          // error text is not repeated here.
+          if (typeof this.agent?.traceEvent === 'function') {
+            try {
+              await this.agent.traceEvent('chat.request_failed_reported', {
+                chat_line_length: line.length,
+                resume_hint_included: resume !== '',
+              }, { requestId: this.agent.lastTerminalRequestId })
+            }
+            catch (traceError) { this.log(`Unable to trace request-failed chat line: ${traceError instanceof Error ? traceError.message : traceError}`) }
+          }
+        }
+        catch (printError) { this.log(`Unable to report SGLuna error in chat: ${printError instanceof Error ? printError.message : printError}`) }
       }
     })
     return this.eventQueue
@@ -1057,64 +4001,142 @@ export class Session {
   async printChat(message) {
     if (!message || !this.rcon || this.stopping) return
     const clean = String(message).replace(/[\r\n]+/g, ' ').slice(0, 2000)
-    const label = this.npcName && this.npcName !== 'AIRI' ? `[AIRI/${this.npcName}]` : '[AIRI]'
+    const label = this.npcName && this.npcName !== 'SGLuna' ? `[SGLuna/${this.npcName}]` : '[SGLuna]'
     await this.rcon.command(`/silent-command game.print(${luaString(`${label} ${clean}`)})`)
   }
 
-  queuePlayerRequest(sender, rawText) {
+  queueUiControl(input) {
+    // Terminate is an emergency stop, not ordinary queued work. Abort the
+    // current provider turn before entering eventQueue so a long model response
+    // cannot delay termination. The queued handler still owns durable-state
+    // deletion, Autorio cancellation, UI clearing, and the final lifecycle ACK.
+    if (input.action === 'terminate') this.agent?.cancel?.('ui_terminate_immediate')
+    // A person's control takes over from any pending or already-fired automatic resume, before its own queued work runs.
+    if (['pause', 'terminate', 'follow', 'new_task'].includes(input.action)) this.cancelAutoResume(`ui_${input.action}`)
+    this.queueEvent(async () => {
+      try {
+        await executeUiControl(this, input)
+      }
+      finally {
+        if (input.action === 'pause' || input.action === 'terminate') {
+          await this.ackTaskBoardUiLifecycle(input.player_index, input.action)
+        }
+      }
+    }, { reportError: true, safetyControl: ['pause', 'terminate'].includes(input.action) })
+    return true
+  }
+
+  queueUiPrompt(input) {
+    const resume = input.text.trim().toLowerCase() === 'continue'
+    return this.queuePlayerRequest(input.player_name, input.text, resume ? {
+      onSettled: async () => { await this.ackTaskBoardUiLifecycle(input.player_index, 'resume') },
+    } : undefined)
+  }
+
+  queuePlayerRequest(sender, rawText, { onSettled } = {}) {
     const text = routeNpcRequest(rawText, this.npcName)
     if (!text || !this.agent) return false
-    const stop = text.toLowerCase() === 'stop'
+    // Answered at once from durable state and a read-only game check, without
+    // a model call, without waiting behind the running turn, and without
+    // cancelling a pending automatic resume.
+    const control = controlWord(text)
+    if (control === 'status') {
+      this.reportGoalStatus().catch(error => this.log(`Unable to report goal status: ${error instanceof Error ? error.message : String(error)}`))
+      return true
+    }
+    // MW1 (provisional syntax, reserve-command.mjs): mark or release a reserved container. Handled here, like a
+    // control word: no model call, and it does not cancel a pending automatic resume or interrupt the running turn.
+    const reserve = parseReserveCommand(text)
+    if (reserve) {
+      this.queueEvent(async () => {
+        const key = typeof this.agent.activePlanKey === 'function' ? this.agent.activePlanKey() : `npc:${this.npcId ?? 'sgluna'}`
+        const result = await executeReserveCommand({ rcon: this.rcon, memory: this.agent.memory, key, sender, command: reserve })
+        if (result.ok) await this.agent.persistState?.()
+        await this.printChat(result.message)
+      }, { reportError: true })
+      return true
+    }
+    // A player turn takes over from any pending automatic resume.
+    this.cancelAutoResume('player_request')
+    const generation = this.cancelGeneration // after this request's own bump: a later takeover changes it
+    const stop = control === 'stop'
     if (stop) this.agent.cancel('user_stop_immediate')
+    const received = this.currentActorCorrelation() // what the request arrived under: an intake retry is fenced to it
     this.queueEvent(async () => {
-      if (stop) {
-        const state = typeof this.agent.pausePersistentPlan === 'function'
-          ? await this.agent.pausePersistentPlan('user_stop')
-          : undefined
-        if (state) await this.syncTaskBoardUi(state)
-        await this.ensureAuthorization()
-        await this.rcon.command('/silent-command remote.call("airi_deployment","cancel")')
-        await this.printChat('Paused the current AIRI plan and cancelled active Autorio work. Say continue/resume when you want me to pick it back up.')
-        return
+      try {
+        if (stop) {
+          const state = typeof this.agent.pausePersistentPlan === 'function'
+            ? await this.agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
+            : undefined
+          if (state) await this.syncTaskBoardUi(state)
+          await this.ensureAuthorization()
+          await this.rcon.command('/silent-command remote.call("sgluna_deployment","cancel")')
+          await this.printChat(pauseChatLine(state, { cancelledWork: true }))
+          return
+        }
+        await this.processPlayerRequest(sender, text, { received, generation })
       }
-      await this.ensureAuthorization()
-      await this.applyNavigationObstaclePolicy(text)
-      const result = await this.agent.request(text, { sender })
-      await this.syncTaskBoardUi()
-      if (result?.chatMessage) await this.printChat(result.chatMessage)
-    }, { reportError: true })
+      finally {
+        if (typeof onSettled === 'function') await onSettled()
+      }
+    }, { reportError: true, safetyControl: stop })
     return true
+  }
+
+  // One player request through the agent and back to the player. `received` is the actor and epoch the request arrived under;
+  // `intake` is the running intake retry when this is one (its failure may schedule the next attempt instead of being reported).
+  // `generation` is cancelGeneration as the request started; `isCancelled` (an intake retry's token) is checked after each await
+  // before the request reaches the agent, so a stop in that window is not lost.
+  async processPlayerRequest(sender, text, { received, intake, generation, isCancelled } = {}) {
+    const cancelled = () => isCancelled?.() === true
+    if (cancelled()) return null
+    await this.ensureAuthorization()
+    if (cancelled()) return null
+    await this.applyNavigationObstaclePolicy(text)
+    if (cancelled()) return null
+    // Bind the visible user turn immediately. interaction.routed/request.received
+    // deduplicate this same entry; a true new_goal can still rotate the
+    // conversation before re-appending the message.
+    this.appendUiConversation('user', sender, text)
+    let result
+    try {
+      result = await this.agent.request(text, { sender, ...(intake ? { intakeRetryIntent: intake.record.interaction_intent } : {}) })
+    }
+    catch (error) {
+      if (await this.handleIntakeFailure(error, { sender, text, received, intake, generation })) return null
+      throw error
+    }
+    if (result?.chatMessage) this.appendUiConversation('assistant', this.npcName || 'SGLuna', result.chatMessage)
+    const finalized = await finalizeCompletedTaskBoundary(this, result)
+    if (!finalized) await this.syncTaskBoardUi()
+    if (result?.chatMessage) await this.printChat(result.chatMessage)
+    return result
   }
 
   onGameLine(line) {
     if (!this.ready || this.stopping || !this.agent) return
 
-    // Legacy stdout marker bridge retained during rolling upgrades. New console
-    // input uses the RCON-drained mod queue because Factorio log() is not a
-    // reliable child-stdout transport.
     const uiControl = parseUiControlLine(line)
     if (uiControl) {
       if (!chatAuthorized(this.config.chatPlayers, uiControl.player_name)) {
-        this.log(`[AIRI UI] Ignored unauthorized control action=${uiControl.action} player=${uiControl.player_name}`)
+        this.log(`[SGLuna UI] Ignored unauthorized control action=${uiControl.action} player=${uiControl.player_name}`)
         return
       }
-      this.queueEvent(async () => {
-        await executeUiControl(this, uiControl)
-      }, { reportError: true })
+      this.queueUiControl(uiControl)
       return
     }
 
     const uiPrompt = parseUiPromptLine(line)
     if (uiPrompt) {
       if (!chatAuthorized(this.config.chatPlayers, uiPrompt.player_name)) {
-        this.log(`[AIRI UI] Ignored unauthorized prompt player=${uiPrompt.player_name}`)
+        this.log(`[SGLuna UI] Ignored unauthorized prompt player=${uiPrompt.player_name}`)
         return
       }
-      this.queuePlayerRequest(uiPrompt.player_name, uiPrompt.text)
+      this.queueUiPrompt(uiPrompt)
       return
     }
 
-    const chat = line.match(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[CHAT\] ([^:\r\n]+): !airi (.{1,4000})$/)
+    const chat = line.match(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[CHAT\] ([^:\r\n]+): !(?:luna|airi) (.{1,4000})$/)
     if (chat && chatAuthorized(this.config.chatPlayers, chat[1])) {
       this.queuePlayerRequest(chat[1], chat[2])
       return
@@ -1126,7 +4148,7 @@ export class Session {
         const planBeforeRecovery = this.currentPlanState()
         this.agent.cancel?.('actor_replaced_stale_turn')
         await this.ensureAuthorization()
-        if (shouldRecoverInterruptedPlan(planBeforeRecovery)) {
+        if (this.recoverablePlan(planBeforeRecovery)) {
           const result = await this.recoverInterruptedPlan('actor_replaced', {
             previous_actor_id: Number(recovery[1]),
             replacement_actor_id: Number(recovery[2]),
@@ -1139,14 +4161,18 @@ export class Session {
       return
     }
 
-    if (line.includes('[AUTORIO] All operations completed') && Date.now() - this.lastCompletionAt > 250) {
+    // Distinct native batches can finish less than 250ms apart (finite
+    // production transfers). The loop coalesces exact receipt/batch identity;
+    // wall-clock filtering here could discard the only wake for the next batch.
+    if (line.includes('[AUTORIO] All operations completed')) {
       this.lastCompletionAt = Date.now()
       this.queueEvent(async () => {
         if (!this.agent.active) return
         await this.ensureAuthorization()
         if (!this.agent.active) return
         const result = await this.agent.completed()
-        await this.syncTaskBoardUi()
+        const finalized = await finalizeCompletedTaskBoundary(this, result)
+        if (!finalized) await this.syncTaskBoardUi()
         if (result?.chatMessage) await this.printChat(result.chatMessage)
       }, { reportError: true })
       return
@@ -1157,7 +4183,7 @@ export class Session {
       this.lastErrorAt = Date.now()
       this.queueEvent(async () => {
         if (!this.agent.active) {
-          this.log(`[AIRI agent] Autorio error with no active model goal: ${autorioError[1]}`)
+          this.log(`[SGLuna agent] Autorio error with no active model goal: ${autorioError[1]}`)
           return
         }
         await this.ensureAuthorization()
@@ -1173,6 +4199,7 @@ export class Session {
     if (this.stopPromise) return this.stopPromise
     this.expectedStop = ['requested', 'signal', 'console'].includes(reason)
     this.stopping = true
+    this.cancelAutoResume('session_stopping')
     this.ready = false
     if (this.uiInputPoll) clearInterval(this.uiInputPoll)
     if (this.uiHeartbeat) clearInterval(this.uiHeartbeat)
@@ -1180,17 +4207,24 @@ export class Session {
     this.stopPromise = (async () => {
       let clean = true
       let gracefulResult
+      try { await this.tickSprint?.stop('shutdown') }
+      catch (error) { clean = false; this.log(`Sprint shutdown restoration failed: ${error.message}`) }
       if (this.agent?.active) {
         try {
-          if (typeof this.agent.pausePersistentPlan === 'function') {
-            const state = await this.agent.pausePersistentPlan(`server_stop_${reason}`)
+          if (this.agent.goalAwaitingNextSlice?.() === true) {
+            // Between slices nothing is executing; keep the verified slice as
+            // completed so restart recovery plans the next slice.
+            this.agent.cancel()
+          }
+          else if (typeof this.agent.pausePersistentPlan === 'function') {
+            const state = await this.agent.pausePersistentPlan(`server_stop_${reason}`, { pause_class: PAUSE_CLASS.SYSTEM })
             await this.syncTaskBoardUi(state)
           }
           else this.agent.cancel()
         }
         catch (error) {
           clean = false
-          this.log(`Unable to persist active AIRI plan before shutdown: ${error instanceof Error ? error.message : error}`)
+          this.log(`Unable to persist active SGLuna plan before shutdown: ${error instanceof Error ? error.message : error}`)
         }
       }
       if (this.rcon && this.gameChild?.alive()) {
@@ -1221,7 +4255,7 @@ export class Session {
         clean = false
       }
       this.rcon?.close()
-      this.log(clean ? 'AIRI Factorio stopped cleanly' : 'AIRI Factorio shutdown required fallback handling')
+      this.log(clean ? 'SGLuna Factorio stopped cleanly' : 'SGLuna Factorio shutdown required fallback handling')
       return clean
     })()
     return this.stopPromise
@@ -1230,7 +4264,7 @@ export class Session {
 
 export async function verifyManifest(app) {
   const manifest = await readJson(path.join(app, 'manifest.json'))
-  check(manifest?.revision === 'airi-pterodactyl-v8' && manifest.files && typeof manifest.files === 'object', 'Missing v8 release manifest')
+  check(manifest?.revision === 'sgluna-pterodactyl-v8' && manifest.files && typeof manifest.files === 'object', 'Missing v8 release manifest')
   for (const [name, expected] of Object.entries(manifest.files)) {
     check(typeof expected === 'string' && /^[a-f0-9]{64}$/.test(expected), `Invalid manifest digest: ${name}`)
     const filename = path.join(app, name)
@@ -1241,21 +4275,31 @@ export async function verifyManifest(app) {
 }
 
 async function main() {
-  check(os.arch() === 'x64', 'AIRI Pterodactyl v8 requires amd64')
+  check(os.arch() === 'x64', 'SGLuna Pterodactyl v8 requires amd64')
   const root = path.resolve(process.env.CONTAINER_ROOT || '/home/container')
   const app = installedAppRoot()
   const manifest = await verifyManifest(app)
-  await directory(path.join(root, '.airi'))
-  await directory(path.join(root, '.airi', 'tmp'))
-  const raw = await migrateConfigFile(path.join(root, 'airi-config.json'))
-  const config = configuration(raw)
+  await directory(path.join(root, '.sgluna'))
+  await directory(path.join(root, '.sgluna', 'tmp'))
+  const migratedConfig = await migrateCanonicalConfig(root)
+  const config = configuration(migratedConfig.config)
   const game = path.join(app, 'factorio')
   await regularFile(path.join(game, 'bin', 'x64', 'factorio'))
-  const work = await fsp.mkdtemp(path.join(root, '.airi', 'run-'))
+  const work = await fsp.mkdtemp(path.join(root, '.sgluna', 'run-'))
   let session
   let requestedStop = false
-  const log = message => console.log(`[${new Date().toISOString()}] [AIRI Factorio] ${message}`)
+  const log = message => console.log(`[${new Date().toISOString()}] [SGLuna] ${message}`)
   log(describeRelease(manifest))
+  if (migratedConfig.migratedFromLegacy) log('Migrated legacy airi-config.json into canonical sgluna-config.json; the legacy file is no longer authoritative.')
+  for (const message of deploymentCompatibilityWarnings(process.env)) log(`Compatibility warning: ${message}`)
+  for (const message of factorioVisibilityDiagnostics(config.factorio, config.chatPlayers)) log(message)
+  log(`Client mod download: ${path.join(root, 'client-mods', 'autorio_0.1.0.zip')}`)
+  log(`User Factorio mod directory: ${path.join(root, 'mods')}`)
+  log(`Managed runtime mod directory: ${path.join(root, '.sgluna', 'run-*', 'mods')} (internal; do not edit)`)
+  log(`Operator help: ${path.join(root, 'README-SGLUNA.txt')}`)
+  log(jevStatusLine(config))
+  log(aiApiMethodLine(config))
+  if (config.aiApiMethodOverridesProfile) log(`AI_API_METHOD=${config.aiApiMethod} overrides PROVIDER_PROFILE=${config.overriddenProviderProfile ?? ''}; the method wins`)
 
   const handleSignal = () => {
     requestedStop = true
@@ -1265,14 +4309,14 @@ async function main() {
 
   try {
     const modDir = await prepareMods(root, app, work)
-    const settingsFile = await prepareServerSettings(root, game, config.factorio)
+    const settingsFile = await prepareServerSettings(root, game, config.factorio, { pausedStartup: process.env.SGLUNA_E2E_PROFILE === 'accelerated' })
     const ini = await prepareGameConfig(work, game, root)
     const selected = await selectSave(root, config.save)
     if (selected.create) {
       log(`Creating initial save ${path.basename(selected.filename)}`)
       await createSave(selected.filename, game, modDir, ini, root, log)
     }
-    session = new Session({ root, app, game, config, save: selected.filename, settingsFile, modDir, ini, log })
+    session = new Session({ root, app, game, config, save: selected.filename, settingsFile, modDir, ini, rcon: rconConfiguration(), log })
     try {
       await session.start()
     }
@@ -1296,7 +4340,7 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    console.error(`[AIRI Factorio] ${error instanceof Error ? error.message : 'Startup failed'}`)
+    console.error(`[SGLuna] ${error instanceof Error ? error.message : 'Startup failed'}`)
     process.exitCode = 1
   })
 }

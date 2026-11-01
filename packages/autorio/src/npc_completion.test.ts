@@ -6,8 +6,8 @@ import { TaskStates } from './types'
 
 beforeEach(() => {
   ;(globalThis as any).game.connected_players = []
-  ;(globalThis as any).storage.airi_actor_mode = 'player'
-  ;(globalThis as any).storage.airi_awareness_chunk = undefined
+  ;(globalThis as any).storage.sgluna_actor_mode = 'player'
+  ;(globalThis as any).storage.sgluna_awareness_chunk = undefined
   task_manager.cancel_all_tasks()
   ;(globalThis as any).storage.standalone_character_unit_number = undefined
   ;(globalThis as any).serpent = {
@@ -26,6 +26,7 @@ function configureNpcWorld(resource?: Record<string, any>) {
     research_progress: 0,
     get_spawn_position: () => ({ x: 0, y: 0 }),
     chart: vi.fn(),
+    connected_players: [],
   }
 
   let character_created = false
@@ -133,7 +134,7 @@ describe('standalone NPC completion polling', () => {
     expect(character.mining_state.mining).toBe(false)
   })
 
-  it('also restarts mining when Factorio clears the selected entity', () => {
+  it('moves closer instead of restarting every tick when Factorio clears the selected entity', () => {
     const resource: Record<string, any> = {
       valid: true,
       name: 'iron-ore',
@@ -152,9 +153,17 @@ describe('standalone NPC completion polling', () => {
     character.character_mining_progress = 0.5
     on_tick({})
 
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(1)
-    expect(character.selected).toBe(resource)
-    expect(character.mining_state.mining).toBe(true)
+    expect(task_manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(task_manager.get_status_snapshot()).toMatchObject({
+      queue_length: 1,
+      queued_task_types: [TaskStates.MINING],
+      current_task: {
+        target_kind: 'position',
+        requested_position: resource.position,
+      },
+    })
+    expect(character.selected).toBeUndefined()
+    expect(character.mining_state.mining).toBe(false)
   })
 })
 
@@ -163,7 +172,7 @@ describe('connected player completion compatibility', () => {
     const player: Record<string, any> = {
       valid: true,
       index: 1,
-      name: 'AIRI',
+      name: 'SGLuna',
       character: {},
       position: { x: 0, y: 0 },
       surface: { find_entities_filtered: () => [] },

@@ -1,5 +1,6 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { selected_weapon_readiness } from './equipment'
 import { distance } from './utils/math'
 
 const DEFAULT_DEFENSE_RADIUS = 24
@@ -18,19 +19,19 @@ interface DefenseState {
 }
 
 declare const storage: {
-  airi_defense_state?: DefenseState
+  sgluna_defense_state?: DefenseState
 }
 
 function current_state(): DefenseState {
-  if (!storage.airi_defense_state) {
-    storage.airi_defense_state = {
+  if (!storage.sgluna_defense_state) {
+    storage.sgluna_defense_state = {
       enabled: true,
       radius: DEFAULT_DEFENSE_RADIUS,
       code: 'armed',
       updated_tick: game.tick,
     }
   }
-  return storage.airi_defense_state
+  return storage.sgluna_defense_state
 }
 
 function clear_target(state: DefenseState) {
@@ -46,12 +47,7 @@ function stop_shooting(actor: ControlledActor | undefined) {
 }
 
 function has_selected_weapon_and_ammo(character: LuaEntity) {
-  const factorioIndex = character.selected_gun_index
-  const guns = character.get_inventory(defines.inventory.character_guns)
-  const ammo = character.get_inventory(defines.inventory.character_ammo)
-  if (!factorioIndex || !guns || !ammo) return false
-  const index = factorioIndex - 1
-  return guns[index]?.valid_for_read === true && ammo[index]?.valid_for_read === true
+  return selected_weapon_readiness(character).ready
 }
 
 export function new_defense_controller(get_actor: () => ControlledActor | undefined) {

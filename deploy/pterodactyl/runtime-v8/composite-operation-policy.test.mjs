@@ -129,7 +129,7 @@ test('supply_entity rejects duplicate items and more than eight item types', () 
   }))
 })
 
-test('completed supply_entity receipt remains conservative because transfers may be partial', () => {
+test('completed supply_entity receipt without positive-effect detail remains conservative', () => {
   const state = {
     last_operations: [
       'supply_entity {"unit_number":104,"items":[{"item_name":"coal","count":10},{"item_name":"iron-ore","count":10}]}',
@@ -149,6 +149,6 @@ test('completed supply_entity receipt remains conservative because transfers may
 
   assert.deepEqual(verifyDeterministicReceipt(state, evidence), {
     verified: false,
-    reason: 'operation_requires_additional_verification:supply_entity',
+    reason: 'transfer_effect_not_verified',
   })
 })

@@ -1,4 +1,8 @@
 import type { ControlledActor } from './actors/types'
+import type { LuaEntityPrototype } from 'factorio:runtime'
+import { resolve_visible_entity_reference } from './entity_reference'
+import type { SeenArea } from './visible_reads'
+import { point_area, seen_link, seen_now } from './visible_reads'
 
 export type ThroughputCapacityRequest
   = | {
@@ -47,6 +51,12 @@ function entity_summary(entity: any) {
   }
 }
 
+// A pickup or drop target in a chunk the NPC does not see now (M3) is unknown, not absent.
+function linked_summary(seen: SeenArea, position: { x: number, y: number } | undefined, read: () => unknown) {
+  const link = seen_link(seen, position ? point_area(position) : undefined, read as () => any)
+  return link.seen ? entity_summary(link.entity) : { not_visible: true }
+}
+
 function inserter_transfer_rate_unvalidated() {
   return {
     validated: false as const,
@@ -60,11 +70,15 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
 
   if (request.kind === 'inserter_instance') {
     if (!valid_unit_number(request.unit_number)) return fail('unit_number must be a positive integer')
-    const entity = game.get_entity_by_unit_number(request.unit_number as any)
+    // Live facts about a model-named entity cover only chunks the NPC sees now (M3).
+    const resolved = resolve_visible_entity_reference(actor, request.unit_number, 'actor_body')
+    if (resolved.code === 'not_visible') return fail(`entity_not_visible: entity ${request.unit_number} is in a chunk the NPC does not see now; observe it again from nearby`)
+    if (resolved.code === 'wrong_surface') return fail('entity is on another surface')
+    const entity = resolved.entity
     if (!entity || !entity.valid) return fail(`entity not found: ${request.unit_number}`)
-    if (entity.surface.index !== actor.surface.index) return fail('entity is on another surface')
     if (entity.type !== 'inserter') return fail(`entity is not an inserter: ${request.unit_number}`)
 
+    const seen = seen_now(actor.force, entity.surface)
     const held = entity.held_stack
     return {
       ok: true as const,
@@ -78,8 +92,8 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
       pickup_from_right_lane: entity.pickup_from_right_lane,
       pickup_position: entity.pickup_position,
       drop_position: entity.drop_position,
-      pickup_target: entity_summary(entity.pickup_target),
-      drop_target: entity_summary(entity.drop_target),
+      pickup_target: linked_summary(seen, entity.pickup_position, () => entity.pickup_target),
+      drop_target: linked_summary(seen, entity.drop_position, () => entity.drop_target),
       held_stack: held?.valid_for_read
         ? { name: held.name, count: held.count }
         : undefined,
@@ -93,7 +107,7 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
   }
 
   if (!valid_name(request.prototype_name)) return fail('prototype_name must be a bounded non-empty string')
-  const prototype = (prototypes.entity as any)[request.prototype_name]
+  const prototype: LuaEntityPrototype | undefined = prototypes.entity[request.prototype_name]
   if (!prototype) return fail(`entity prototype not found: ${request.prototype_name}`)
 
   if (request.kind === 'belt') {
@@ -166,7 +180,8 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
     if (request.item_name && !item) return fail(`item prototype not found: ${request.item_name}`)
     const hand_capacity = item ? math.min(raw_hand_capacity, item.stack_size) : raw_hand_capacity
     const force_belt_stack_size = 1 + (actor.force.belt_stack_size_bonus ?? 0)
-    const prototype_belt_stack_limit = prototype.inserter_max_belt_stack_size ?? 1
+    // Read live in Factorio 2.0.77; missing from the typed-factorio 2.0.72 declarations.
+    const prototype_belt_stack_limit = (prototype as LuaEntityPrototype & { readonly inserter_max_belt_stack_size?: number }).inserter_max_belt_stack_size ?? 1
 
     return {
       ok: true as const,
@@ -181,8 +196,9 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
       item_stack_size: item?.stack_size,
       belt_drop_stack_limit: math.min(force_belt_stack_size, prototype_belt_stack_limit),
       movement: {
-        rotation_speed: prototype.get_inserter_rotation_speed?.(),
-        extension_speed: prototype.get_inserter_extension_speed?.(),
+        // Typed calls: on an untyped prototype `?.()` passes the prototype as the quality argument.
+        rotation_speed: prototype.get_inserter_rotation_speed(),
+        extension_speed: prototype.get_inserter_extension_speed(),
         pickup_position: prototype.inserter_pickup_position,
         drop_position: prototype.inserter_drop_position,
       },

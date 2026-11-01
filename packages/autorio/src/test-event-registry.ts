@@ -4,6 +4,26 @@
 export const event_handlers = new Map<unknown, (event: any) => void>()
 
 let load_handler: (() => void) | undefined
+let init_handler: (() => void) | undefined
+let configuration_changed_handler: (() => void) | undefined
+
+export function set_init_handler(handler: (() => void) | undefined) {
+  init_handler = handler
+}
+
+export function set_configuration_changed_handler(handler: (() => void) | undefined) {
+  configuration_changed_handler = handler
+}
+
+export function get_init_handler() {
+  if (!init_handler) throw new Error('No on_init handler registered')
+  return init_handler
+}
+
+export function get_configuration_changed_handler() {
+  if (!configuration_changed_handler) throw new Error('No on_configuration_changed handler registered')
+  return configuration_changed_handler
+}
 
 export function set_load_handler(handler: (() => void) | undefined) {
   load_handler = handler

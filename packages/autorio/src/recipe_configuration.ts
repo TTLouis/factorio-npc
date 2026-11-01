@@ -2,6 +2,7 @@ import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { resolve_exact_entity } from './entity_reference'
 import { entity_interaction_reach } from './interaction_range'
+import { crafting_categories_support_recipe } from './recipe_categories'
 import type { new_task_manager } from './task_manager'
 
 type Manager = ReturnType<typeof new_task_manager>
@@ -11,13 +12,10 @@ function squared_distance(a: { x: number, y: number }, b: { x: number, y: number
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
 
+// Recipe category reading lives in one place; see recipe_categories.ts for why
+// `recipe.categories` is fatal rather than merely wrong.
 function supports_recipe_category(target: any, recipe: any) {
-  const supported = target.prototype?.crafting_categories
-  if (!supported) return false
-  for (const category of recipe.categories ?? []) {
-    if (supported[category]) return true
-  }
-  return false
+  return crafting_categories_support_recipe(target.prototype?.crafting_categories, recipe)
 }
 
 export function new_recipe_configuration_runtime(manager: Manager, controller: BasicController) {
@@ -78,6 +76,19 @@ export function new_recipe_configuration_runtime(manager: Manager, controller: B
     if (current_recipe) {
       controller.fail(actor, task, 'set_recipe_failed')
       log(`[AUTORIO] Refused to replace existing recipe ${current_recipe.name} on machine unit ${task.target_unit_number}`)
+      return
+    }
+
+    // Even a first assignment must not displace native stock or active work.
+    // Recheck at execution, after any reach recovery and queued-world changes.
+    let occupied = target.is_crafting() || target.get_fluid_count() > 0
+    for (let index = 1; index <= target.get_max_inventory_index(); index++) {
+      const inventory = target.get_inventory(index)
+      if (inventory && !inventory.is_empty()) occupied = true
+    }
+    if (occupied) {
+      controller.fail(actor, task, 'set_recipe_failed')
+      log(`[AUTORIO] Refused first recipe assignment with native contents or active crafting on machine unit ${task.target_unit_number}`)
       return
     }
 

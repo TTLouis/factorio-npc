@@ -8,12 +8,14 @@ import { stripTypeScriptTypes } from 'node:module'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
-async function fixture() {
+async function fixture(restoredStorage = {}) {
   const source = await fs.readFile(path.join(here, 'guard.ts'), 'utf8')
-  const storage = {}
+  const storage = { ...restoredStorage }
   let actor = {
     mode: 'npc',
     connected_players: 0,
+    surface_index: 1,
+    force_index: 2,
     actor: {
       actor_id: 18,
       kind: 'standalone_character',
@@ -82,8 +84,8 @@ async function fixture() {
 
 test('npc configure succeeds with zero connected players and captures physical plus logical NPC identity', async () => {
   const f = await fixture()
-  assert.equal(f.calls.airi_deployment.configure('npc', 'session-1'), 'session-1')
-  const status = f.calls.airi_deployment.status()
+  assert.equal(f.calls.sgluna_deployment.configure('npc', 'session-1'), 'session-1')
+  const status = f.calls.sgluna_deployment.status()
   assert.equal(status.allowed, true)
   assert.equal(status.mode, 'npc')
   assert.equal(status.actor_id, 18)
@@ -93,33 +95,48 @@ test('npc configure succeeds with zero connected players and captures physical p
   assert.equal(status.connected_players, 0)
   assert.equal(status.idle, true)
   assert.equal(status.actor_interface, true)
+  assert.equal(status.surface_index, 1)
+  assert.equal(status.force_index, 2)
+})
+
+test('status refreshes live scope without inventing an actor epoch change', async () => {
+  const f = await fixture()
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
+  const before = f.calls.sgluna_deployment.status()
+  f.setActor({ ...f.actor, surface_index: 3, force_index: 4 })
+  const after = f.calls.sgluna_deployment.status()
+  assert.equal(after.actor_id, before.actor_id)
+  assert.equal(after.epoch, before.epoch)
+  assert.equal(after.allowed, true)
+  assert.equal(after.surface_index, 3)
+  assert.equal(after.force_index, 4)
 })
 
 test('human join count does not change NPC authorization', async () => {
   const f = await fixture()
-  f.calls.airi_deployment.configure('npc', 'session-1')
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
   f.setActor({ ...f.actor, connected_players: 4 })
-  assert.equal(f.calls.airi_deployment.status().allowed, true)
+  assert.equal(f.calls.sgluna_deployment.status().allowed, true)
 })
 
 test('replacement NPC invalidates the physical authorization epoch while preserving logical identity', async () => {
   const f = await fixture()
-  f.calls.airi_deployment.configure('npc', 'session-1')
-  const epoch = f.calls.airi_deployment.status().epoch
-  assert.equal(f.calls.airi_deployment.authorize(epoch), true)
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
+  const epoch = f.calls.sgluna_deployment.status().epoch
+  assert.equal(f.calls.sgluna_deployment.authorize(epoch), true)
 
   f.setActor({
     ...f.actor,
     actor: { ...f.actor.actor, actor_id: 42 },
   })
-  assert.equal(f.calls.airi_deployment.authorize(epoch), false)
-  const stale = f.calls.airi_deployment.status()
+  assert.equal(f.calls.sgluna_deployment.authorize(epoch), false)
+  const stale = f.calls.sgluna_deployment.status()
   assert.equal(stale.allowed, false)
   assert.equal(stale.actor_name, 'Aster-1')
   assert.equal(stale.npc_id, 'npc-1')
 
-  assert.equal(f.calls.airi_deployment.configure('npc', 'session-1'), 'session-1')
-  const refreshed = f.calls.airi_deployment.status()
+  assert.equal(f.calls.sgluna_deployment.configure('npc', 'session-1'), 'session-1')
+  const refreshed = f.calls.sgluna_deployment.status()
   assert.equal(refreshed.actor_id, 42)
   assert.equal(refreshed.actor_name, 'Aster-1')
   assert.equal(refreshed.npc_id, 'npc-1')
@@ -129,47 +146,103 @@ test('replacement NPC invalidates the physical authorization epoch while preserv
 
 test('mode or actor-kind changes fail closed', async () => {
   const f = await fixture()
-  f.calls.airi_deployment.configure('npc', 'session-1')
-  const epoch = f.calls.airi_deployment.status().epoch
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
+  const epoch = f.calls.sgluna_deployment.status().epoch
 
   f.setActor({ ...f.actor, mode: 'player' })
-  assert.equal(f.calls.airi_deployment.authorize(epoch), false)
+  assert.equal(f.calls.sgluna_deployment.authorize(epoch), false)
 
   f.setActor({
     ...f.actor,
     mode: 'npc',
     actor: { ...f.actor.actor, kind: 'connected_player' },
   })
-  assert.equal(f.calls.airi_deployment.authorize(epoch), false)
+  assert.equal(f.calls.sgluna_deployment.authorize(epoch), false)
 })
 
 test('invalid or missing character fails closed', async () => {
   const f = await fixture()
-  f.calls.airi_deployment.configure('npc', 'session-1')
-  const epoch = f.calls.airi_deployment.status().epoch
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
+  const epoch = f.calls.sgluna_deployment.status().epoch
   f.setActor({ ...f.actor, actor: { ...f.actor.actor, valid: false } })
-  assert.equal(f.calls.airi_deployment.authorize(epoch), false)
+  assert.equal(f.calls.sgluna_deployment.authorize(epoch), false)
 })
 
-test('configure rejects invalid mode or empty session', async () => {
+test('configure rejects invalid mode and non-string or empty sessions before cancellation or rebinding', async () => {
   const f = await fixture()
-  assert.equal(f.calls.airi_deployment.configure('swarm', 'session-1'), false)
-  assert.equal(f.calls.airi_deployment.configure('npc', ''), false)
+  assert.equal(f.calls.sgluna_deployment.configure('swarm', 'session-1'), false)
+  for (const session of ['', undefined, null, false, 0, {}, []]) {
+    assert.equal(f.calls.sgluna_deployment.configure('npc', session), false)
+  }
+  assert.equal(f.cancelCount, 0)
+  assert.deepEqual(f.storage, {})
+
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
+  const before = { ...f.storage }
+  const cancellations = f.cancelCount
+  assert.equal(f.calls.sgluna_deployment.configure('npc', {}), false)
+  assert.deepEqual(f.storage, before)
+  assert.equal(f.cancelCount, cancellations)
 })
 
 test('cancel and disable clear owned task state without depending on human controls', async () => {
   const f = await fixture()
-  f.calls.airi_deployment.configure('npc', 'session-1')
-  const first = f.calls.airi_deployment.status().epoch
+  f.calls.sgluna_deployment.configure('npc', 'session-1')
+  const first = f.calls.sgluna_deployment.status().epoch
   f.setTasks({ task_state: 'waiting', queue_empty: false, queue_length: 1 })
-  f.calls.airi_deployment.cancel()
+  f.calls.sgluna_deployment.cancel()
   assert.equal(f.cancelCount >= 2, true)
-  assert.equal(f.calls.airi_deployment.status().idle, true)
-  assert.ok(f.calls.airi_deployment.status().epoch > first)
+  assert.equal(f.calls.sgluna_deployment.status().idle, true)
+  const cancelled = f.calls.sgluna_deployment.status().epoch
+  assert.ok(cancelled > first)
+  assert.equal(f.calls.sgluna_deployment.authorize(first), false)
+  assert.equal(f.calls.sgluna_deployment.authorize(cancelled), true)
 
-  f.calls.airi_deployment.disable()
-  assert.equal(f.calls.airi_deployment.status().allowed, false)
-  assert.equal(f.calls.airi_deployment.status().session, '')
+  f.calls.sgluna_deployment.disable()
+  const disabled = f.calls.sgluna_deployment.status()
+  assert.equal(disabled.allowed, false)
+  assert.equal(disabled.session, '')
+  for (const epoch of [first, cancelled, disabled.epoch]) {
+    assert.equal(f.calls.sgluna_deployment.authorize(epoch), false)
+  }
+})
+
+test('disabled authorization remains closed after restore, repeated cancellation, and reconfigure', async () => {
+  const original = await fixture()
+  original.calls.sgluna_deployment.configure('npc', 'session-1')
+  const oldEpoch = original.calls.sgluna_deployment.status().epoch
+  original.calls.sgluna_deployment.disable()
+  const f = await fixture(JSON.parse(JSON.stringify(original.storage)))
+  const disabledEpoch = f.calls.sgluna_deployment.status().epoch
+  assert.equal(f.calls.sgluna_deployment.status().allowed, false)
+  assert.equal(f.calls.sgluna_deployment.authorize(disabledEpoch), false)
+  f.calls.sgluna_deployment.cancel()
+  f.calls.sgluna_deployment.disable()
+  assert.equal(f.calls.sgluna_deployment.authorize(f.calls.sgluna_deployment.status().epoch), false)
+
+  assert.equal(f.calls.sgluna_deployment.configure('npc', 'session-2'), 'session-2')
+  const rebound = f.calls.sgluna_deployment.status()
+  assert.equal(rebound.allowed, true)
+  assert.equal(rebound.session, 'session-2')
+  assert.equal(f.calls.sgluna_deployment.authorize(rebound.epoch), true)
+  assert.equal(f.calls.sgluna_deployment.authorize(oldEpoch), false)
+  assert.equal(f.calls.sgluna_deployment.authorize(disabledEpoch), false)
+})
+
+test('invalid durable session values fail closed at status and authorize despite matching actor identity', async () => {
+  for (const session of ['', undefined, null, false, 0, {}, []]) {
+    const f = await fixture()
+    f.calls.sgluna_deployment.configure('npc', 'session-1')
+    const epoch = f.calls.sgluna_deployment.status().epoch
+    f.storage.sgluna_deployment_session = session
+    assert.equal(f.calls.sgluna_deployment.status().allowed, false)
+    assert.equal(f.calls.sgluna_deployment.authorize(epoch), false)
+    assert.equal(f.calls.sgluna_deployment.configure('npc', 'session-2'), 'session-2')
+    const rebound = f.calls.sgluna_deployment.status()
+    assert.equal(rebound.allowed, true)
+    assert.equal(f.calls.sgluna_deployment.authorize(rebound.epoch), true)
+    assert.equal(f.calls.sgluna_deployment.authorize(epoch), false)
+  }
 })
 
 test('player mode remains possible but requires a connected-player actor snapshot', async () => {
@@ -185,6 +258,6 @@ test('player mode remains possible but requires a connected-player actor snapsho
       name: 'Louis',
     },
   })
-  assert.equal(f.calls.airi_deployment.configure('player', 'session-1'), 'session-1')
-  assert.equal(f.calls.airi_deployment.status().allowed, true)
+  assert.equal(f.calls.sgluna_deployment.configure('player', 'session-1'), 'session-1')
+  assert.equal(f.calls.sgluna_deployment.status().allowed, true)
 })

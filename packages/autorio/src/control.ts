@@ -3,69 +3,161 @@ import type {
   LuaEntity,
   OnPlayerCraftedItemEvent,
   OnPlayerMinedEntityEvent,
+  OnPlayerMinedItemEvent,
   OnScriptPathRequestFinishedEvent,
   OnSelectedEntityChangedEvent,
 } from 'factorio:runtime'
 
 import type { ControlledActor } from './actors/types'
-import { get_controlled_actor } from './actors/actor_controller'
+import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
+import { new_output_delivery_proof_controller, tick_output_delivery_proofs } from './output_delivery_proof'
+import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
+import { new_area_clearing_controller } from './area_clearing'
+import { craft_bootstrap_preflight_for_actor } from './bootstrap_planning'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
 import { new_combat_controller } from './combat'
 import { new_composite_operation_controller } from './composite_operations'
-import { execute_validated_construction_plan } from './construction_execution'
+import { construction_plan_preflight, execute_validated_construction_plan } from './construction_execution'
 import { new_crafting_controller } from './crafting'
 import { new_defense_controller } from './defense'
 import { create_discovery_remote_interface } from './discovery'
 import { new_equipment_controller } from './equipment'
+import { new_corpse_recovery_controller, note_npc_corpse, note_npc_death } from './corpse_recovery'
+import { entity_last_user } from './entity_provenance'
+import { entity_reference_hint, resolve_exact_entity } from './entity_reference'
 import { new_follow_controller } from './follow'
+import { find_harvest_source, new_harvest_controller } from './harvest'
 import { new_interaction_recovery } from './interaction_recovery'
 import { create_knowledge_remote_interface } from './knowledge'
 import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
+import { execute_placement_candidate, placement_candidate_preflight, freeze_fluid_preservation_candidate } from './placement_candidates'
+import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
-import { create_prototype_knowledge_remote_interface } from './prototype_knowledge'
+import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
+import { new_rocket_launch_runtime } from './rocket_launch'
 import { new_research_controller } from './research'
+import { research_operation_preflight } from './research_preflight'
+import { with_refusal_class } from './refusal_classes'
+import { navigation_position_preflight } from './navigation_position_preflight'
+import { transfer_preflight_facts, transfer_unknown_item } from './transfer_preflight'
+import { ensure_basic_skill_definitions } from './skills'
 import { with_research_trigger } from './research_trigger'
+import { is_runtime_task_state, type RuntimeTaskState } from './task_state_runtime'
 import { new_task_manager } from './task_manager'
+import { new_operation_admission } from './operation_admission'
 import { create_task_board_ui_remote_interface, set_task_board_world_task_provider } from './task_board_ui'
 import { create_tools_remote_interface } from './tools'
+import { register_area_reservations } from './area_reservation_ui'
+import { reservation_preflight, reserve_area } from './area_reservations'
 import { TaskStates } from './types'
+import { new_tick_sprint_guard } from './e2e_tick_sprint'
 import { direction_towards } from './utils/direction'
 import { get_actor_inventory_items } from './utils/inventory'
+import { find_world_entities } from './npc_vision'
+import { cleanup_pump_preparation, invalidate_pump_preparation_proposals, pump_site_preflight, tick_pump_preparation } from './pump_site_preparation'
 
 create_tools_remote_interface()
 create_discovery_remote_interface(get_controlled_actor)
 create_knowledge_remote_interface(get_controlled_actor)
-create_prototype_knowledge_remote_interface()
-create_production_planning_remote_interface(get_controlled_actor)
+create_prototype_knowledge_remote_interface(get_controlled_actor)
+create_production_planning_remote_interface(get_controlled_actor, undefined, peek_controlled_actor)
 create_task_board_ui_remote_interface()
 
 let setup_complete = false
 
 export const task_manager = new_task_manager(get_controlled_actor)
+const operation_admission = new_operation_admission(get_controlled_actor, () => task_manager.get_status_snapshot())
+const tick_sprint = new_tick_sprint_guard(peek_controlled_actor, () => task_manager.get_status_snapshot(), () => operation_admission.status().records)
+remote.add_interface('sgluna_tick_sprint', {
+  configure: (binding: Parameters<typeof tick_sprint.configure>[0]) => tick_sprint.configure(binding),
+  arm: (lease: Parameters<typeof tick_sprint.arm>[0]) => tick_sprint.arm(lease),
+  finish: (reason: string, lease_id?: string) => tick_sprint.finish(reason, lease_id),
+  status: () => tick_sprint.status(),
+  seal: (reason: string) => tick_sprint.seal(reason),
+  fail: (reason: string) => tick_sprint.fail(reason),
+  safety_event: (reason: string) => tick_sprint.safety(reason),
+})
+register_area_reservations(peek_controlled_actor, () => task_manager.player_state.task_state === TaskStates.IDLE)
+type Admission = typeof operation_admission
+// remote.call passes no self: wrap the controller's methods (compiled with a
+// self parameter) in arrow functions, as every other interface does.
+remote.add_interface('autorio_operation_admission', {
+  begin: (raw: Parameters<Admission['begin']>[0]) => operation_admission.begin(raw),
+  slot: (key: string, index: number, raw: Parameters<Admission['slot']>[2]) => operation_admission.slot(key, index, raw),
+  finish: (key: string, raw: Parameters<Admission['finish']>[1]) => operation_admission.finish(key, raw),
+  leave: (key: string) => operation_admission.leave(key),
+  resolve: (key: string, raw: Parameters<Admission['resolve']>[1]) => operation_admission.resolve(key, raw),
+  status: (key?: string) => operation_admission.status(key),
+})
 set_task_board_world_task_provider(() => task_manager.get_status_snapshot())
 const awareness_controller = new_awareness_controller()
+const area_clearing_controller = new_area_clearing_controller(get_controlled_actor, task_manager)
 const basic_operation_controller = new_basic_operation_controller(get_controlled_actor, task_manager)
 const basic_operation_runtime = new_basic_operation_runtime(task_manager, basic_operation_controller)
 const orientation_runtime = new_orientation_runtime(task_manager, basic_operation_controller)
 const recipe_configuration_runtime = new_recipe_configuration_runtime(task_manager, basic_operation_controller)
+const rocket_launch_runtime = new_rocket_launch_runtime(task_manager, basic_operation_controller)
 const interaction_recovery = new_interaction_recovery(task_manager)
 const navigation_controller = new_navigation_controller(get_controlled_actor, task_manager)
 const composite_operation_controller = new_composite_operation_controller(navigation_controller, basic_operation_controller, task_manager)
+const harvest_controller = new_harvest_controller(get_controlled_actor, task_manager)
 const navigation_obstacle_recovery = new_navigation_obstacle_recovery()
 const crafting_controller = new_crafting_controller(get_controlled_actor, task_manager)
 const research_controller = new_research_controller(get_controlled_actor, task_manager)
 const combat_controller = new_combat_controller(get_controlled_actor, task_manager)
 const equipment_controller = new_equipment_controller(get_controlled_actor)
+const corpse_recovery_controller = new_corpse_recovery_controller(get_controlled_actor)
+const output_delivery_proof_controller = new_output_delivery_proof_controller(get_controlled_actor)
 const follow_controller = new_follow_controller(
   get_controlled_actor,
   (player_name, follow_distance) => navigation_controller.submit_player(player_name, follow_distance),
 )
 const defense_controller = new_defense_controller(get_controlled_actor)
+
+type RuntimeTaskDispatcher = (actor: ControlledActor) => void
+
+const runtime_task_dispatchers: Record<RuntimeTaskState, RuntimeTaskDispatcher> = {
+  [TaskStates.WALKING_TO_ENTITY]: (actor) => {
+    const handled = navigation_obstacle_recovery.tick(actor, task_manager.player_state.parameters_walk_to_entity)
+    if (!handled) navigation_controller.tick(actor)
+  },
+  [TaskStates.WALKING_DIRECT]: actor => state_walking_direct(actor),
+  [TaskStates.MINING]: actor => basic_operation_runtime.state_mining(actor),
+  [TaskStates.PREPARING_PUMP_SITE]: actor => {
+    const task = task_manager.player_state.parameters_prepare_pump_site
+    if (!task) return
+    if (!basic_operation_controller.identity_matches(actor, task) || task.owner_surface_index !== actor.surface.index) {
+      cleanup_pump_preparation(task)
+      basic_operation_controller.fail(actor, task, 'actor_changed')
+      return
+    }
+    const result = tick_pump_preparation(actor, task)
+    if (result.state === 'failed') {
+      cleanup_pump_preparation(task)
+      basic_operation_controller.fail(actor, task, 'pump_preparation_refused', { preparation_reason: result.reason })
+    } else if (result.state === 'complete') basic_operation_controller.complete(actor, task, { preparation_reason: result.reason })
+  },
+  [TaskStates.HARVESTING]: actor => harvest_controller.tick(actor),
+  [TaskStates.CLEARING_AREA]: actor => area_clearing_controller.tick(actor),
+  [TaskStates.PLACING]: actor => basic_operation_runtime.state_placing(actor),
+  [TaskStates.ROTATING]: actor => orientation_runtime.state_rotating(actor),
+  [TaskStates.MOVING_ITEMS]: actor => basic_operation_runtime.state_moving_items(actor),
+  [TaskStates.SETTING_RECIPE]: actor => recipe_configuration_runtime.state_setting_recipe(actor),
+  [TaskStates.LAUNCHING_ROCKET]: actor => rocket_launch_runtime.state_launching_rocket(actor),
+  [TaskStates.CRAFTING]: actor => crafting_controller.tick(actor),
+  [TaskStates.RESEARCHING]: actor => research_controller.tick(actor),
+  [TaskStates.ATTACKING]: actor => combat_controller.tick(actor),
+  [TaskStates.WAITING]: actor => basic_operation_runtime.state_waiting(actor),
+}
+
+export function runtime_dispatch_has_handler(state: RuntimeTaskState) {
+  return runtime_task_dispatchers[state] !== undefined
+}
 
 remote.add_interface('autorio_navigation', {
   status: () => ({
@@ -79,12 +171,26 @@ remote.add_interface('autorio_follow', {
   status: () => follow_controller.status(),
 })
 
+// Read-only diagnostics for the hidden NPC vision vehicle (npc_vision.ts); it is
+// not an NPC tool and no model contract maps it.
+remote.add_interface('autorio_npc_vision', {
+  status: () => awareness_controller.vision.status(),
+})
+
 remote.add_interface('autorio_defense', {
   status: () => defense_controller.status(),
 })
 
 remote.add_interface('autorio_equipment', {
   status: () => equipment_controller.status(),
+})
+
+remote.add_interface('autorio_corpse_recovery', {
+  status: () => corpse_recovery_controller.status(),
+})
+remote.add_interface('autorio_output_delivery_proof', {
+  register: (spec: Parameters<typeof output_delivery_proof_controller.register>[0]) => output_delivery_proof_controller.register(spec),
+  status: (proof_id: string) => output_delivery_proof_controller.status(proof_id),
 })
 
 remote.add_interface('autorio_crafting', {
@@ -113,7 +219,7 @@ function log_actor_info() {
     if (tech.researched) technologies.push(name)
   }
 
-  const nearby_entities = actor.surface.find_entities_filtered({
+  const nearby_entities = find_world_entities(actor.surface, {
     position: actor.position,
     radius: 20,
   }).map(({ name, position }) => ({ name, position }))
@@ -150,7 +256,290 @@ function log_actor_info() {
   return true
 }
 
+function operation_preflight(name: string, args: Record<string, any>) {
+  const actor = get_controlled_actor()
+  if (name === 'reserve_construction_area') return reservation_preflight(actor, args.reservation_id, args.revision)
+  const reject = (code: string, details: Record<string, unknown> = {}) => ({
+    ok: false,
+    code,
+    operation: name,
+    ...details,
+  })
+  const accept = (details: Record<string, unknown> = {}) => ({
+    ok: true,
+    operation: name,
+    ...details,
+  })
+
+  if (!args || typeof args !== 'object') return reject('invalid_preflight_args')
+  if (name === 'walk_to_position') return navigation_position_preflight(actor, args)
+  // Harness-only witness for fluid-preservation admission; the general operation metadata keeps this operation
+  // preflight-free, so only that seam asks. Read-only: see construction_plan_preflight.
+  if (name === 'execute_construction_plan') return { operation: name, ...construction_plan_preflight(actor, args.validation_id, args.placement_count) }
+  if (name === 'place_candidate') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    if (typeof args.candidate_set_id !== 'string' || typeof args.candidate_id !== 'string') return reject('invalid_preflight_args')
+    return { operation: name, ...placement_candidate_preflight(actor, args.candidate_set_id, args.candidate_id) }
+  }
+  if (name === 'prepare_pump_site') {
+    if (typeof args.preparation_id !== 'string') return reject('invalid_preflight_args')
+    const checked = pump_site_preflight(actor, args.preparation_id)
+    return checked.ok ? accept({ preparation_id: args.preparation_id, execution_strategy: 'actor' }) : reject(checked.code)
+  }
+
+  if (name === 'move_items_with_player') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const player_name = args.player_name
+    const details = { field: 'player_name', identity: player_name }
+    if (typeof player_name !== 'string' || player_name.length === 0) return reject('player_unavailable', details)
+    // Match execution's availability check. An NPC display name is not a
+    // LuaPlayer identity; refuse before any operation in the decision runs.
+    const player = game.get_player(player_name)
+    if (!player || !player.valid || !player.connected || !player.character) return reject('player_unavailable', details)
+    return accept(details)
+  }
+
+  if (name === 'research_technology') {
+    return research_operation_preflight(actor, args.technology_name)
+  }
+  if (name === 'harvest_product') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
+    const radius = args.search_radius ?? 256
+    if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) return reject('invalid_harvest_search_radius')
+    const sources = natural_harvest_source_names(args.product_name)
+    if (sources.length === 0) return reject('no_natural_harvest_source')
+    const source = find_harvest_source(actor, sources, radius)
+    if (!source) return reject('natural_harvest_source_not_found', { field: 'product_name', identity: args.product_name,
+      search_radius: radius, source_names: sources })
+    return accept({ source_names: sources, source_search: { radius, target_present: true },
+      natural_source: { name: source.name, position: source.position } })
+  }
+
+  let exact_target: Record<string, unknown> | undefined
+  const exact_unit_operations = [
+    'walk_to_entity_exact',
+    'mine_entity_exact',
+    'supply_entity',
+    'rotate_entity',
+    'move_items_exact',
+    'set_machine_recipe',
+    'launch_rocket',
+  ]
+  if (exact_unit_operations.indexOf(name) >= 0) {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const unit_number = args.unit_number
+    if (typeof unit_number !== 'number'
+      || unit_number !== math.floor(unit_number)
+      || unit_number < 1
+      || unit_number > 9007199254740991) {
+      return reject('invalid_unit_number', { field: 'unit_number', identity: unit_number })
+    }
+    const target = resolve_exact_entity(actor, unit_number)
+    if (!target || !target.valid) {
+      const hint = entity_reference_hint(unit_number)
+      return reject('stale_exact_target', {
+        field: 'unit_number',
+        identity: unit_number,
+        last_observed: hint
+          ? {
+              unit_number,
+              name: hint.name,
+              surface_index: hint.surface_index,
+              force_index: hint.force_index,
+              position: hint.position,
+              observed_tick: hint.observed_tick,
+            }
+          : undefined,
+      })
+    }
+    if (target.surface.index !== actor.surface.index) {
+      return reject('different_surface', {
+        field: 'unit_number',
+        identity: unit_number,
+        target_surface_index: target.surface.index,
+        actor_surface_index: actor.surface.index,
+      })
+    }
+    exact_target = {
+      unit_number,
+      name: target.name,
+      position: { x: target.position.x, y: target.position.y },
+      surface_index: target.surface.index,
+      force_index: target.force.index,
+      // MW1: the engine's last-user record, so the harness can tell a player-built
+      // entity (human last_user) from an NPC- or map-built one at admission.
+      last_user: entity_last_user(target),
+    }
+    // Match execution's capability check before the harness reserves any batch.
+    // In particular, supplying a furnace must not run before an unsupported
+    // explicit recipe operation is discovered during execution.
+    if (name === 'set_machine_recipe' && target.type !== 'assembling-machine') {
+      return reject('not_recipe_machine', {
+        field: 'unit_number', identity: unit_number, target: exact_target,
+        observed_type: target.type, expected_type: 'assembling-machine',
+      })
+    }
+    if (name === 'supply_entity' || name === 'move_items_exact') {
+      const unknown_item = transfer_unknown_item(name, args)
+      if (unknown_item !== undefined) {
+        return reject('unknown_prototype', { field: 'item_name', identity: unknown_item, expected_type: 'item' })
+      }
+      // Source/destination facts: reject only when the native move is certain to move nothing.
+      const facts = transfer_preflight_facts(actor, target, name, args)
+      if (facts) {
+        const details = { field: 'unit_number', identity: unit_number, target: exact_target, transfer: facts.transfer }
+        return facts.ok ? accept(details) : reject(facts.code as string, details)
+      }
+    }
+    if (name !== 'set_machine_recipe') {
+      return accept({ field: 'unit_number', identity: unit_number, target: exact_target })
+    }
+  }
+
+  if (name === 'craft_item') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const item_name = args.item_name
+    if (typeof item_name !== 'string') {
+      return reject('unknown_recipe', {
+        field: 'item_name',
+        identity: item_name,
+        expected: 'force recipe',
+      })
+    }
+    return craft_bootstrap_preflight_for_actor(actor, item_name, args.count ?? 1)
+  }
+
+  if (name === 'gather_resource' || name === 'mine_resource_at') {
+    const resource_name = args.resource_name
+    const prototype = typeof resource_name === 'string' ? prototypes.entity[resource_name] : undefined
+    if (!prototype) {
+      return reject('unknown_prototype', {
+        field: 'resource_name',
+        identity: resource_name,
+        expected_type: 'resource',
+        observed_type: 'missing',
+      })
+    }
+    if (prototype.type !== 'resource') {
+      return reject('invalid_target_kind', {
+        field: 'resource_name',
+        identity: resource_name,
+        expected_type: 'resource',
+        observed_type: prototype.type,
+      })
+    }
+    if (name === 'gather_resource') {
+      if (!actor || !actor.is_valid) return reject('no_actor')
+      const radius = args.search_radius ?? 256
+      if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) {
+        return reject('invalid_resource_search_radius')
+      }
+      // A known prototype does not prove a source exists in this search. Do
+      // this read before reserving a native batch that navigation would cancel.
+      const sources = find_world_entities(actor.surface, { position: actor.position, radius, name: resource_name, type: 'resource', limit: 64 })
+      const source = sources.find(entity => entity.valid && entity.amount > 0)
+      if (!source) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, search_radius: radius })
+      return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type,
+        resource_search: { radius, position: source.position, amount: source.amount } })
+    }
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const x = args.x; const y = args.y; const count = args.count ?? 1
+    if (typeof x !== 'number' || typeof y !== 'number' || x !== x || y !== y || math.abs(x) === math.huge || math.abs(y) === math.huge) {
+      return reject('invalid_resource_position')
+    }
+    if (typeof count !== 'number' || count !== math.floor(count) || count < 1 || count === math.huge) return reject('invalid_resource_count')
+    const source = find_world_entities(actor.surface, { position: { x, y }, radius: 0.25, name: resource_name, type: 'resource', limit: 1 })[0]
+    const nearby_correction = () => {
+      const radius = 5
+      const sources = find_world_entities(actor.surface, { position: { x, y }, radius, name: resource_name, type: 'resource', limit: 128 })
+        .filter(entity => entity.valid && entity.type === 'resource' && entity.name === resource_name
+          && entity.surface.index === actor.surface.index && entity.amount >= count
+          && (entity.position.x - x) ** 2 + (entity.position.y - y) ** 2 <= radius ** 2)
+      sources.sort((a, b) => {
+        const da = (a.position.x - x) ** 2 + (a.position.y - y) ** 2
+        const db = (b.position.x - x) ** 2 + (b.position.y - y) ** 2
+        return da - db || a.position.x - b.position.x || a.position.y - b.position.y
+      })
+      const candidate = sources[0]
+      return candidate !== undefined ? { resource_name, position: candidate.position, origin: { x, y }, radius,
+        surface_index: actor.surface.index, amount: candidate.amount } : undefined
+    }
+    if (!source || !source.valid || !(source.amount > 0)) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, position: { x, y }, resource_correction: nearby_correction() })
+    const resource_target = { position: source.position, amount: source.amount, requested_count: count, infinite: prototype.infinite_resource === true }
+    if (!resource_target.infinite && count > source.amount) return reject('resource_source_insufficient', { field: 'resource_name', identity: resource_name, resource_target, resource_correction: nearby_correction() })
+    return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type, resource_target })
+  }
+
+  if (name === 'place_entity' || name === 'mine_entity' || name === 'walk_to_entity') {
+    const entity_name = args.entity_name
+    const prototype = typeof entity_name === 'string' ? prototypes.entity[entity_name] : undefined
+    if (!prototype) {
+      return reject('unknown_prototype', {
+        field: 'entity_name',
+        identity: entity_name,
+        expected: 'entity prototype',
+      })
+    }
+    if (name === 'place_entity' && prototype.type === 'offshore-pump') return reject('placement_candidate_required', { field: 'entity_name', identity: entity_name, required_operation: 'place_candidate', correction_message: 'Offshore pumps require place_candidate with live native registry ids. First read getFluidSourceTiles for water and inspect covered_fluid_hints, then request getPlacementCandidates near observed exposed water. If needed move within build reach and refresh candidates. Do not retry generic place_entity with or without coordinates; the committed step is unchanged.' })
+    if (name === 'place_entity') {
+      const planned_footprint = planned_placement_footprint(entity_name, args.x, args.y, args.direction)
+      return { operation: name, ...placement_item_preflight(actor, entity_name), ...(planned_footprint ? { planned_footprint } : {}) }
+    }
+    if (name === 'walk_to_entity') {
+      if (!actor || !actor.is_valid) return reject('no_actor')
+      const radius = args.search_radius
+      if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) {
+        return reject('invalid_navigation_search_radius')
+      }
+      // Prototype existence alone cannot establish a navigable target. This
+      // bounded current-world read makes absence a refusal before queueing;
+      // execution still owns target selection, pathfinding and live validity.
+      const targets = find_world_entities(actor.surface, { position: actor.position, radius, name: entity_name, limit: 64 })
+      const target = targets.find(entity => entity.valid)
+      if (!target) return reject('navigation_target_not_found', { field: 'entity_name', identity: entity_name, search_radius: radius })
+      return accept({ field: 'entity_name', identity: entity_name, observed_type: prototype.type,
+        navigation_search: { radius, target_present: true } })
+    }
+    return accept({ field: 'entity_name', identity: entity_name, observed_type: prototype.type })
+  }
+
+  if (name === 'set_machine_recipe') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const recipe_name = args.recipe_name
+    const recipe = typeof recipe_name === 'string' ? actor.force.recipes[recipe_name] : undefined
+    if (!recipe) {
+      return reject('unknown_recipe', {
+        field: 'recipe_name',
+        identity: recipe_name,
+        expected: 'force recipe',
+      })
+    }
+    return accept({
+      field: 'recipe_name',
+      identity: recipe_name,
+      recipe_name: recipe.name,
+      target: exact_target,
+    })
+  }
+
+  return accept({ validation: 'not_required' })
+}
+
+remote.add_interface('autorio_preflight', {
+  // The single place a preflight refusal gets its class (see refusal_classes.ts); every ok:false result passes through here.
+  operation: (name: string, args: Record<string, any>) => with_refusal_class(operation_preflight(name, args)),
+  fluid_preservation_candidate: (set: string, candidate: string, operation_key: string, protected_ids: number[], context: Parameters<typeof freeze_fluid_preservation_candidate>[5]) =>
+    freeze_fluid_preservation_candidate(get_controlled_actor(), set, candidate, operation_key, protected_ids, context),
+})
+
 remote.add_interface('autorio_operations', {
+  reserve_construction_area: (id: number, revision: number): [boolean, string] => {
+    if (task_manager.player_state.task_state !== TaskStates.IDLE) return [false, 'actor_busy']
+    const result = reserve_area(get_controlled_actor(), id, revision)
+    return [result.ok, result.ok ? `reservation:${id}:${revision}` : result.code]
+  },
+  reconcile_startup: (deployment_session: string) => task_manager.reconcile_startup(deployment_session),
   walk_to_entity: (entity_name: string, search_radius: number) => {
     log(`[AUTORIO] New walk_to_entity task: ${entity_name}, radius: ${search_radius}`)
     return navigation_controller.submit(entity_name, search_radius)
@@ -178,6 +567,7 @@ remote.add_interface('autorio_operations', {
   stop_follow_player: (): [boolean, string] => follow_controller.stop(),
   set_auto_defense: (enabled: boolean): [boolean, string] => defense_controller.set_enabled(enabled),
   equip_weapon: (item_name: string, slot: number = 1): [boolean, string] => equipment_controller.equip_weapon(item_name, slot),
+  recover_corpse: (corpse_ref: string, max_slots: number, max_count: number, expected_actor_id: number, request_id: string, operation_ordinal: number) => corpse_recovery_controller.recover(corpse_ref, max_slots, max_count, expected_actor_id, request_id, operation_ordinal),
   equip_ammo: (item_name: string, slot: number = 1): [boolean, string] => equipment_controller.equip_ammo(item_name, slot),
   equip_armor: (item_name: string): [boolean, string] => equipment_controller.equip_armor(item_name),
   select_weapon_slot: (slot: number): [boolean, string] => equipment_controller.select_weapon_slot(slot),
@@ -201,6 +591,16 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New gather_resource task: ${resource_name} x${count}, radius=${search_radius}`)
     return result
   },
+  harvest_product: (product_name: string, count: number = 1, search_radius: number = 256): [boolean, string] => {
+    const result = harvest_controller.submit(product_name, count, search_radius)
+    if (result[0]) log(`[AUTORIO] New harvest_product task: ${product_name} +${count}, radius=${search_radius}`)
+    return result
+  },
+  clear_construction_area: (x: number, y: number, width: number, height: number): [boolean, string] => {
+    const result = area_clearing_controller.submit(x, y, width, height)
+    if (result[0]) log(`[AUTORIO] New clear_construction_area task: center=(${x},${y}), size=${width}x${height}`)
+    return result
+  },
   supply_entity: (unit_number: number, items: Array<{ item_name: string, count: number }>): [boolean, string] => {
     const result = composite_operation_controller.supply_entity(unit_number, items)
     if (result[0]) log(`[AUTORIO] New supply_entity task: unit=${unit_number}, item_types=${items.length}`)
@@ -219,8 +619,24 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New execute_construction_plan task: validation=${validation_id}, placements=${placement_count}`)
     return result
   },
-  place_entity: (entity_name: string, x?: number, y?: number, direction?: number) => {
-    const accepted = basic_operation_controller.submit_placement(entity_name, x, y, direction)
+  prepare_pump_site: (preparation_id: string) => basic_operation_controller.submit_prepare_pump_site(preparation_id),
+  place_candidate: (candidate_set_id: string, candidate_id: string): [boolean, string] => {
+    const actor = get_controlled_actor()
+    if (!actor) return [false, 'controlled actor is unavailable']
+    const result = execute_placement_candidate(
+      actor,
+      candidate_set_id,
+      candidate_id,
+      (...args) => basic_operation_controller.submit_placement(...args),
+    )
+    if (result[0]) log(`[AUTORIO] New place_candidate task: ${candidate_set_id}/${candidate_id}`)
+    return result
+  },
+  place_entity: (entity_name: string, x?: number, y?: number, direction?: number, refuse_clearance?: boolean) => {
+    // External harness placement is placement-only even if a blocker appears
+    // after admission. Omitted by the existing autonomous adapters.
+    const accepted = basic_operation_controller.submit_placement(entity_name, x, y, direction, undefined, undefined, undefined,
+      refuse_clearance === true ? { refuse_clearance: true } : undefined)
     if (accepted) {
       const position = x !== undefined && y !== undefined ? ` at (${x}, ${y})` : ''
       const facing = direction !== undefined ? ` direction=${direction}` : ''
@@ -252,6 +668,11 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New set_machine_recipe task for entity unit ${unit_number}: ${recipe_name}`)
     return result
   },
+  launch_rocket: (unit_number: number): [boolean, string] => {
+    const result = basic_operation_controller.submit_launch_rocket_exact(unit_number)
+    if (result[0]) log(`[AUTORIO] New launch_rocket task for silo unit ${unit_number}`)
+    return result
+  },
   move_items_with_player: (item_name: string, player_name: string, max_count: number, to_player: boolean): [boolean, string] => {
     const result = basic_operation_controller.submit_player_move(item_name, player_name, max_count, to_player)
     if (result[0]) {
@@ -276,6 +697,9 @@ remote.add_interface('autorio_operations', {
     const actor = get_controlled_actor()
     return {
       ...task_manager.get_status_snapshot(),
+      placement_no_clear_supported: true,
+      external_fluid_candidates_supported: 1,
+      admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       basic_operation: basic_operation_controller.status(),
       follow: follow_controller.status(),
@@ -332,7 +756,9 @@ function state_walking_direct(actor: ControlledActor) {
   }
 }
 
-script.on_event(defines.events.on_selected_entity_changed, (unused_event: OnSelectedEntityChangedEvent) => {})
+script.on_event(defines.events.on_entity_died, event => note_npc_death(event))
+script.on_event(defines.events.on_post_entity_died, event => note_npc_corpse(event))
+script.on_event(defines.events.on_selected_entity_changed, (_event: OnSelectedEntityChangedEvent) => { /* Selection changes are intentionally ignored. */ })
 
 script.on_event(defines.events.on_script_path_request_finished, (event: OnScriptPathRequestFinishedEvent) => {
   navigation_controller.on_path_finished(event)
@@ -342,18 +768,50 @@ script.on_event(defines.events.on_script_path_request_finished, (event: OnScript
 script.on_event(defines.events.on_player_mined_entity, (event: OnPlayerMinedEntityEvent) => {
   const actor = get_controlled_actor()
   if (!actor) return
-  basic_operation_runtime.on_player_mined_entity(actor, event.player_index)
+  if (task_manager.player_state.task_state === TaskStates.HARVESTING) {
+    harvest_controller.on_player_mined_entity(actor, event.player_index, event.entity)
+  }
+  else if (task_manager.player_state.task_state === TaskStates.CLEARING_AREA) {
+    area_clearing_controller.on_player_mined_entity(actor, event.player_index, event.entity)
+  }
+  else {
+    basic_operation_runtime.on_player_mined_entity(actor, event.player_index, event.entity)
+  }
+})
+
+// A leftover vision vehicle (an old save, a lost record) must not outlive the
+// actor it followed: keep only the one stored for the current NPC.
+function sweep_npc_vision(reason: string) {
+  const identity = peek_controlled_actor()?.status_snapshot()
+  const actor_id = identity?.kind === 'standalone_character' ? identity.actor_id : undefined
+  awareness_controller.vision.sweep(actor_id, reason)
+}
+
+script.on_init(() => sweep_npc_vision('on_init'))
+script.on_event(defines.events.on_player_created, () => tick_sprint.safety('player_created'))
+script.on_event(defines.events.on_entity_damaged, event => {
+  if (event.entity.unit_number === peek_controlled_actor()?.character?.unit_number) tick_sprint.safety('actor_damaged')
+})
+script.on_configuration_changed(() => {
+  if (task_manager.player_state.task_state === TaskStates.PREPARING_PUMP_SITE) task_manager.cancel_all_tasks('pump_site_configuration_changed')
+  invalidate_pump_preparation_proposals()
+  sweep_npc_vision('on_configuration_changed')
 })
 
 function setup() {
+  const seeded = ensure_basic_skill_definitions()
   setup_complete = true
+  if (seeded.added > 0 || seeded.upgraded > 0 || seeded.removed > 0) log(`[AUTORIO] Seeded ${seeded.added}/${seeded.total} curated basic skill patterns (${seeded.upgraded} upgraded, ${seeded.removed} retired)`)
   log('[AUTORIO] Setup complete')
 }
 
 let no_actor_found = false
 
-script.on_event(defines.events.on_tick, (unused_event) => {
+script.on_event(defines.events.on_tick, (_event) => {
+  task_manager.initialize()
+  tick_sprint.tick()
   if (!setup_complete) setup()
+  tick_output_delivery_proofs()
 
   const actor = get_controlled_actor()
   if (actor === undefined || actor.character === undefined || !actor.is_valid) {
@@ -361,6 +819,8 @@ script.on_event(defines.events.on_tick, (unused_event) => {
       log('[AUTORIO] No valid controlled actor found')
       no_actor_found = true
     }
+    // No standalone NPC to follow: the vision vehicle goes with it.
+    awareness_controller.vision.release('no_controlled_actor')
     return
   }
   no_actor_found = false
@@ -381,48 +841,31 @@ script.on_event(defines.events.on_tick, (unused_event) => {
   follow_controller.suspend(actor)
   defense_controller.suspend(actor)
 
+  const task_state = task_manager.player_state.task_state
+  if (!is_runtime_task_state(task_state)) {
+    navigation_obstacle_recovery.suspend(actor)
+    task_manager.fail_unsupported_task_state(task_state)
+    return
+  }
+
   if (interaction_recovery.tick(actor)) return
 
-  if (task_manager.player_state.task_state === TaskStates.WALKING_TO_ENTITY) {
-    const handled = navigation_obstacle_recovery.tick(actor, task_manager.player_state.parameters_walk_to_entity)
-    if (!handled) navigation_controller.tick(actor)
-  }
-  else {
+  if (task_state !== TaskStates.WALKING_TO_ENTITY) {
     navigation_obstacle_recovery.suspend(actor)
-    if (task_manager.player_state.task_state === TaskStates.MINING) {
-      basic_operation_runtime.state_mining(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.PLACING) {
-      basic_operation_runtime.state_placing(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.ROTATING) {
-      orientation_runtime.state_rotating(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.MOVING_ITEMS) {
-      basic_operation_runtime.state_moving_items(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.SETTING_RECIPE) {
-      recipe_configuration_runtime.state_setting_recipe(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.CRAFTING) {
-      crafting_controller.tick(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.RESEARCHING) {
-      research_controller.tick(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.WALKING_DIRECT) {
-      state_walking_direct(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.ATTACKING) {
-      combat_controller.tick(actor)
-    }
-    else if (task_manager.player_state.task_state === TaskStates.WAITING) {
-      basic_operation_runtime.state_waiting(actor)
-    }
   }
+  runtime_task_dispatchers[task_state](actor)
+})
+
+// A connected player's hand mining and crafting on the NPC's force is hand
+// work too: a production_rate window that contains it is not automated output.
+script.on_event(defines.events.on_player_mined_item, (event: OnPlayerMinedItemEvent) => {
+  const player = game.get_player(event.player_index)
+  if (player) record_hand_mined_item(player.force.index, event.item_stack.name)
 })
 
 script.on_event(defines.events.on_player_crafted_item, (event: OnPlayerCraftedItemEvent) => {
+  const crafter = game.get_player(event.player_index)
+  if (crafter) record_hand_crafted_tick(crafter.force.index, event.item_stack.name)
   const actor = get_controlled_actor()
   if (!actor || !actor.owns_player_index(event.player_index)) {
     return

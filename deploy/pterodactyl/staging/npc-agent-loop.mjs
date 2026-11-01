@@ -1,13 +1,36 @@
 import { setTimeout as delay } from 'node:timers/promises'
 
 import { actorChanged, deploymentStatus, executeAuthorizedBatch } from './supervisor-adapter.mjs'
-import { parsePlan, renderOperation, toolCommand } from './structured-policy.mjs'
+import { isApprovedOperationName, isObservationToolName, parsePlan, renderOperation, toolCommand } from './structured-policy.mjs'
 
 export class AgentLoopError extends Error {}
 
+class ToolValidationError extends AgentLoopError {
+  constructor(message, code, details = {}) {
+    super(message)
+    this.code = code
+    this.failureClass = 'tool_validation'
+    this.details = details
+  }
+}
+
+class PlanCategoryError extends AgentLoopError {
+  constructor(message, code, details = {}) {
+    super(message)
+    this.code = code
+    this.failureClass = 'plan_category'
+    this.details = details
+  }
+}
+
+const MAX_TOOL_CALLS_PER_BATCH = 4
 const THROUGHPUT_MEASUREMENT_TOOL = 'measureTransportThroughput'
+const STATIC_PROTOTYPE_TOOL = 'getPrototypeDetails'
+const STATIC_PROTOTYPE_CACHE_LIMIT = 64
+const STATIC_PROTOTYPE_CONTEXT_LIMIT = 8
 const THROUGHPUT_POLL_MS = process.env.NODE_TEST_CONTEXT ? 1 : 250
 const THROUGHPUT_NO_PROGRESS_MS = process.env.NODE_TEST_CONTEXT ? 100 : 10000
+const OBSERVATION_DECISION_PRESSURE_ROUNDS = 3
 
 function check(ok, message) {
   if (!ok) throw new AgentLoopError(message)
@@ -24,18 +47,125 @@ function cleanMemoryText(value, max) {
   return `${text.slice(0, Math.max(0, max - 1))}…`
 }
 
+// The harness tells a model that a reply was rejected, but the rejected turn
+// is not kept in the transcript (a tool_calls turn cannot be replayed without
+// its tool replies). This short echo says what the harness actually received,
+// so the correction message describes the real mistake.
+export function describeRejectedReply(message) {
+  const parts = []
+  const content = typeof message?.content === 'string' ? message.content.trim() : ''
+  if (content) {
+    let kind = `text content (${content.length} chars)`
+    try {
+      const raw = JSON.parse(content)
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        kind = Array.isArray(raw.operations)
+          ? `plan in content (${raw.operations.length} operation${raw.operations.length === 1 ? '' : 's'})`
+          : 'JSON object in content'
+      }
+    }
+    catch {}
+    parts.push(kind)
+  }
+  else {
+    parts.push('empty content')
+  }
+  if (message?.tool_calls !== undefined) {
+    const calls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+    const names = calls.map(call => call?.function?.name).filter(name => typeof name === 'string' && name).slice(0, 6)
+    parts.push(Array.isArray(message.tool_calls)
+      ? `tool_calls=[${names.join(', ')}${calls.length > names.length ? ', …' : ''}]`
+      : 'tool_calls is not an array')
+  }
+  return cleanMemoryText(`Received: ${parts.join('; ')}.`, 300)
+}
+
+// Once the observation phase closes, a model with no resource location has
+// nothing to fall back on unless it is told these operations search for it.
+const OBSERVATION_LOCATE_HINT = 'gather_resource, harvest_product and walk_to_entity find their own target within the search radius, so the plan can start without another lookup.'
+
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue)
   if (!value || typeof value !== 'object') return value
   return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]))
 }
 
-function toolSignature(name, args) {
+export function toolSignature(name, args) {
   return `${name}:${JSON.stringify(stableValue(args))}`
 }
 
 function messageChars(message) {
   return String(message?.content ?? '').length + JSON.stringify(message?.tool_calls ?? '').length
+}
+
+function prototypeReference(name) {
+  return `prototype:${String(name ?? '').slice(0, 200)}`
+}
+
+function compactPrototypeFacts(raw, fallbackName = '') {
+  try {
+    const value = JSON.parse(String(raw ?? ''))
+    const name = typeof value?.query === 'string' ? value.query : fallbackName
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid prototype result')
+    if (value.found !== true) {
+      return {
+        reference: prototypeReference(name),
+        found: false,
+        error: typeof value.error === 'string' ? cleanMemoryText(value.error, 300) : 'prototype not found',
+      }
+    }
+    const entity = value.entity && typeof value.entity === 'object'
+      ? {
+          name: value.entity.name,
+          type: value.entity.type,
+          is_building: value.entity.is_building,
+          size: {
+            width: value.entity.tile_width,
+            height: value.entity.tile_height,
+          },
+          collision_box: value.entity.collision_box,
+          selection_box: value.entity.selection_box,
+          place_items: value.entity.place_items,
+          crafting: value.entity.crafting,
+          mining: value.entity.mining,
+          belt: value.entity.belt,
+          inserter: value.entity.inserter,
+          fluidboxes: value.entity.fluidboxes,
+          fluidboxes_truncated: value.entity.fluidboxes_truncated,
+        }
+      : undefined
+    return {
+      reference: prototypeReference(name),
+      found: true,
+      item: value.item,
+      fluid: value.fluid,
+      entity,
+    }
+  }
+  catch {
+    return {
+      reference: prototypeReference(fallbackName),
+      found: 'unknown',
+      raw_summary: cleanMemoryText(raw, 1200),
+    }
+  }
+}
+
+function prototypeBaselineResult(entry) {
+  return JSON.stringify({
+    observation_mode: 'cached_static',
+    source: 'runtime_static_prototype_cache',
+    ...entry.facts,
+  })
+}
+
+function prototypeUnchangedResult(entry) {
+  return JSON.stringify({
+    observation_mode: 'unchanged',
+    source: 'runtime_static_prototype_cache',
+    reference: entry.facts.reference,
+    note: 'Static prototype facts are already present in [STATIC_PROTOTYPE_CACHE] for this request.',
+  })
 }
 
 function throughputMeasurementStatusCommand(measurementId) {
@@ -86,7 +216,7 @@ export class NpcDialogueMemory {
 
   compactLine(turn) {
     const action = turn.actions ? ` | actions: ${turn.actions}` : ''
-    return `${turn.sender}: ${turn.user} | AIRI: ${turn.assistant}${action}`
+    return `${turn.sender}: ${turn.user} | SGLuna: ${turn.assistant}${action}`
   }
 
   appendSummary(bucket, turn) {
@@ -143,7 +273,7 @@ export class NpcDialogueMemory {
       lines.push('Recent dialogue:')
       for (const turn of bucket.recent) {
         lines.push(`[CHAT] ${turn.sender}: ${turn.user}`)
-        lines.push(`[AIRI] ${turn.assistant}`)
+        lines.push(`[SGLUNA] ${turn.assistant}`)
         if (turn.actions) lines.push(`[ACTIONS] ${turn.actions}`)
       }
     }
@@ -151,6 +281,20 @@ export class NpcDialogueMemory {
     if (text.length <= this.maxContextChars) return text
     const prefix = `${lines[0]}\nCompacted earlier dialogue:\n[older memory compacted]\n`
     return `${prefix}${text.slice(-Math.max(0, this.maxContextChars - prefix.length))}`
+  }
+
+  terminatePlan(key) {
+    if (!key || !(this.planByNpc instanceof Map)) return undefined
+    const previous = this.planByNpc.get(key)
+    this.planByNpc.delete(key)
+    return previous
+  }
+
+  clearTaskContext(key) {
+    if (!key) return { cleared_dialogue: false, cleared_plan: false }
+    const cleared_dialogue = this.byNpc.delete(key)
+    const cleared_plan = this.planByNpc instanceof Map ? this.planByNpc.delete(key) : false
+    return { cleared_dialogue, cleared_plan }
   }
 }
 
@@ -163,13 +307,13 @@ export class NpcAgentLoop {
     log = () => {},
     maxToolRounds = 12,
     maxContinuations = 10,
-    maxToolLoopRetries = 3,
+    maxToolLoopRetries = 1,
     maxToolValidationRetries = 3,
     maxRecoveryAttempts = 3,
-    maxWorkingMessages = 36,
-    maxWorkingChars = 60000,
+    maxWorkingMessages = 28,
+    maxWorkingChars = 40000,
     memory = new NpcDialogueMemory(),
-    npcId = 'airi',
+    npcId = 'sgluna',
     memoryKeyForStatus,
   }) {
     check(rcon && typeof rcon.command === 'function', 'RCON transport required')
@@ -208,10 +352,51 @@ export class NpcAgentLoop {
     this.epoch = null
     this.continuations = 0
     this.toolCache = new Map()
+    this.staticPrototypeCache ??= new Map()
+    this.prototypeRefsThisRequest = []
     this.duplicateToolRounds = 0
+    this.observationRecoveryRounds = 0
+    this.observationOnlyRounds = 0
+    this.resetObservationDecisionState()
+    this.finiteNoOperationPressureUsed = false
     this.toolValidationRetries = 0
+    this.planCategoryRetries = 0
     this.requestInfo = null
     this.generation = (this.generation ?? 0) + 1
+  }
+
+  rememberPrototypeRef(signature) {
+    const existing = this.prototypeRefsThisRequest.indexOf(signature)
+    if (existing >= 0) this.prototypeRefsThisRequest.splice(existing, 1)
+    this.prototypeRefsThisRequest.push(signature)
+    if (this.prototypeRefsThisRequest.length > STATIC_PROTOTYPE_CONTEXT_LIMIT) this.prototypeRefsThisRequest.shift()
+  }
+
+  prototypeContext() {
+    const facts = []
+    for (const signature of this.prototypeRefsThisRequest) {
+      const entry = this.staticPrototypeCache.get(signature)
+      if (entry?.facts) facts.push(entry.facts)
+    }
+    if (facts.length === 0) return ''
+    return `[STATIC_PROTOTYPE_CACHE] Runtime-static deterministic prototype facts already observed for this request. They remain valid for this server runtime; do not re-query getPrototypeDetails unless a different prototype is needed.\n${JSON.stringify(facts)}`
+  }
+
+  cachePrototype(signature, name, raw) {
+    const entry = {
+      name,
+      raw: String(raw),
+      facts: compactPrototypeFacts(raw, name),
+    }
+    if (this.staticPrototypeCache.has(signature)) this.staticPrototypeCache.delete(signature)
+    this.staticPrototypeCache.set(signature, entry)
+    while (this.staticPrototypeCache.size > STATIC_PROTOTYPE_CACHE_LIMIT) {
+      const oldest = this.staticPrototypeCache.keys().next().value
+      if (oldest === undefined) break
+      this.staticPrototypeCache.delete(oldest)
+    }
+    this.rememberPrototypeRef(signature)
+    return entry
   }
 
   async captureEpoch() {
@@ -239,11 +424,13 @@ export class NpcAgentLoop {
     }
   }
 
-  async request(text, { sender = 'unknown' } = {}) {
+  async request(text, { sender = 'unknown', assertOwner } = {}) {
     check(typeof text === 'string' && text.trim().length > 0 && text.length <= 4000, 'Invalid chat request')
     check(typeof sender === 'string' && sender.trim().length > 0 && sender.length <= 128 && !/[\x00-\x1f\x7f]/.test(sender), 'Invalid chat sender')
     this.reset()
-    this.epoch = await this.captureEpoch()
+    const requestEpoch = await this.captureEpoch()
+    assertOwner?.() // intake may be cancelled/replaced while actor binding is pending
+    this.epoch = requestEpoch
     const memoryKey = this.memoryKeyForStatus(this.epoch)
     check(typeof memoryKey === 'string' && memoryKey.length > 0 && memoryKey.length <= 200, 'Invalid NPC memory key')
     const memoryContext = this.memory.context(memoryKey)
@@ -263,10 +450,61 @@ export class NpcAgentLoop {
     return this.runGuarded()
   }
 
+  resetObservationDecisionState() {
+    this.observationDecisionPressure = false
+    this.observationDecisionPressureRemaining = 0
+    this.observationDecisionForced = false
+  }
+
+  observationDecisionPressureBudget() {
+    return 1
+  }
+
+  async forceDecisionFromObservations(reason, reasonCode = 'observation_decision_required', readFence) {
+    if (this.observationDecisionForced) return
+    this.observationDecisionPressure = true
+    this.observationDecisionPressureRemaining = 0
+    this.observationDecisionForced = true
+    await this.recoveryDiagnostic({
+      failure_class: 'observation_no_progress',
+      reason_code: reasonCode,
+      reason,
+      retry: 1,
+      retry_limit: 1,
+      tools_enabled: false,
+    })
+    if (typeof readFence === 'function') await readFence()
+    this.messages.push({
+      role: 'user',
+      content: `[HARNESS] ${reason} The observation phase for this decision is now closed. Reuse the grounded evidence already collected and return the required strict-JSON plan/action or a truthful blocker. Do not request another read-only observation; ${OBSERVATION_LOCATE_HINT}`,
+    })
+  }
+
+  // The one reply shape that is valid right now, for correction messages.
+  // Subclasses that add a planner control tool name it here.
+  validReplyShape({ toolsEnabled }) {
+    return toolsEnabled
+      ? 'Valid next reply: approved observation tool call(s) with strict JSON arguments, or the strict-JSON plan as content with no tool_calls field.'
+      : 'Valid next reply: the strict-JSON plan (or a truthful blocker) as content, with no tool_calls field.'
+  }
+
+  // How the model should name its plan reply in pressure messages.
+  planReplyName() {
+    return 'one strict-JSON plan'
+  }
+
+  // B2: the one way to replace the conversation wholesale.
+  replaceConversation({ baseMessages = this.baseMessages, messages = baseMessages.map(message => ({ ...message })) } = {}) {
+    this.baseMessages = baseMessages
+    this.messages = messages
+  }
+
   prepareContinuationContext() {
     const latestPlan = [...this.messages].reverse().find(message => message.role === 'assistant' && message.tool_calls === undefined)
+    const prototypeContext = this.prototypeContext()
     this.messages = [
       ...this.baseMessages.map(message => ({ ...message })),
+      ...(prototypeContext ? [{ role: 'user', content: prototypeContext }] : []),
       ...(latestPlan ? [{ ...latestPlan }] : []),
     ]
   }
@@ -279,7 +517,12 @@ export class NpcAgentLoop {
     this.prepareContinuationContext()
     this.toolCache.clear()
     this.duplicateToolRounds = 0
+    this.observationRecoveryRounds = 0
+    this.observationOnlyRounds = 0
+    this.resetObservationDecisionState()
+    this.finiteNoOperationPressureUsed = false
     this.toolValidationRetries = 0
+    this.planCategoryRetries = 0
     this.messages.push({ role: 'user', content: '[MOD] All operations completed' })
     return this.runGuarded()
   }
@@ -353,10 +596,43 @@ export class NpcAgentLoop {
     return message
   }
 
+  isObservationToolName(name) {
+    return isObservationToolName(name)
+  }
+
+  observationToolCommand(name, args) {
+    return toolCommand(name, args)
+  }
+
   parsePlanMessage(message) {
     check(message.tool_calls === undefined, 'Provider attempted a tool call while tools were disabled')
     check(typeof message.content === 'string', 'Provider message has no strict JSON content')
-    return parsePlan(strictJson(message.content, 'provider content'))
+    const raw = strictJson(message.content, 'provider content')
+    const misplaced = Array.isArray(raw?.operations)
+      ? raw.operations.find(operation => this.isObservationToolName(operation?.name))
+      : undefined
+    if (misplaced) {
+      throw new PlanCategoryError(
+        `${misplaced.name} is an observation/planning tool, not an approved world-mutation operation. Do not place it in the operations array; operations are world mutations only.`,
+        'observation_tool_as_operation',
+        { tool_name: misplaced.name },
+      )
+    }
+    return this.parsePlanValue(raw)
+  }
+
+  // A reply that parsed, checked once more before anything is committed or admitted. The base accepts it as parsed;
+  // runtime-v8 grounds the first plan of a goal against the live game here. An override throws a plan_category error
+  // to ask the planner for one corrective round. options.recovery marks a provider-error recovery attempt, where no
+  // corrective round may be asked (it would spend a recovery attempt on a valid plan).
+  async parsePlanMessageChecked(message, _options = {}) {
+    return this.parsePlanMessage(message)
+  }
+
+  // The policy that admits the plan's operations. A runtime whose policy
+  // approves more operations (runtime-v8: place_candidate) overrides this.
+  parsePlanValue(raw) {
+    return parsePlan(raw)
   }
 
   async commitPlan(plan) {
@@ -403,7 +679,7 @@ export class NpcAgentLoop {
       })
       let plan
       try {
-        plan = this.parsePlanMessage(message)
+        plan = await this.parsePlanMessageChecked(message, { recovery: true })
       }
       catch (error) {
         lastError = error
@@ -423,12 +699,31 @@ export class NpcAgentLoop {
   }
 
   prepareToolBatch(message) {
-    check(Array.isArray(message.tool_calls) && message.tool_calls.length >= 1 && message.tool_calls.length <= 4, 'Invalid tool call batch')
+    if (!Array.isArray(message.tool_calls) || message.tool_calls.length < 1) {
+      throw new ToolValidationError(
+        `Invalid tool call batch: tool_calls ${Array.isArray(message.tool_calls) ? 'is empty' : 'is not an array'}, so there is no observation call to run`,
+        'invalid_tool_batch',
+      )
+    }
+    if (message.tool_calls.length > MAX_TOOL_CALLS_PER_BATCH) {
+      throw new ToolValidationError(
+        `Tool call batch exceeds the maximum of ${MAX_TOOL_CALLS_PER_BATCH}`,
+        'tool_batch_too_large',
+        { observed_count: message.tool_calls.length, maximum: MAX_TOOL_CALLS_PER_BATCH },
+      )
+    }
     const prepared = message.tool_calls.map((tool) => {
       check(tool && tool.type === 'function' && typeof tool.id === 'string' && tool.id.length >= 1 && tool.id.length <= 200, 'Invalid tool call')
       check(tool.function && typeof tool.function.name === 'string' && typeof tool.function.arguments === 'string', 'Invalid tool function')
       const args = strictJson(tool.function.arguments, 'tool arguments')
-      const command = toolCommand(tool.function.name, args)
+      if (isApprovedOperationName(tool.function.name)) {
+        throw new ToolValidationError(
+          `${tool.function.name} is an approved world-mutation operation, not an observation tool. Return it in the strict-JSON operations array instead of calling it as a tool.`,
+          'operation_called_as_tool',
+          { operation_name: tool.function.name },
+        )
+      }
+      const command = this.observationToolCommand(tool.function.name, args)
       return {
         tool,
         args,
@@ -510,6 +805,12 @@ export class NpcAgentLoop {
     }
   }
 
+  // The text the model reads for a live tool answer. A subclass reorders or labels a known answer here, never changing its
+  // facts, before it is cached and cut to the message limit; the default delivers the answer as read.
+  renderToolOutput(_toolName, raw, _limit) {
+    return raw
+  }
+
   async handleToolBatch(message, prepared = this.prepareToolBatch(message)) {
     this.messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: message.tool_calls })
     let duplicateThisRound = false
@@ -522,35 +823,109 @@ export class NpcAgentLoop {
         duplicateThisRound = true
         output = `[HARNESS] Duplicate observation suppressed. Reuse this cached result and act or report a blocker instead of repeating the same tool call.\n${cached}`
       }
-      else {
-        if (entry.tool.function.name === THROUGHPUT_MEASUREMENT_TOOL) {
-          output = await this.runThroughputMeasurement(entry)
+      else if (entry.tool.function.name === STATIC_PROTOTYPE_TOOL) {
+        const staticEntry = this.staticPrototypeCache.get(entry.signature)
+        if (staticEntry) {
+          const alreadyReferenced = this.prototypeRefsThisRequest.includes(entry.signature)
+          this.rememberPrototypeRef(entry.signature)
+          output = alreadyReferenced ? prototypeUnchangedResult(staticEntry) : prototypeBaselineResult(staticEntry)
+          this.toolCache.set(entry.signature, output)
         }
         else {
           await this.assertCurrent()
           output = String(await this.rcon.command(entry.command)).slice(0, 12000)
           await this.assertCurrent()
+          this.toolCache.set(entry.signature, output)
+          this.cachePrototype(entry.signature, entry.args?.name, output)
         }
+      }
+      else {
+        if (entry.tool.function.name === THROUGHPUT_MEASUREMENT_TOOL) {
+          output = await this.runThroughputMeasurement(entry)
+        }
+        else if (typeof entry._sglunaPrereadOutput === 'string') {
+          // Already read live by the subclass during admission; the actor must
+          // still be current when that answer is delivered.
+          await this.assertCurrent()
+          output = entry._sglunaPrereadOutput
+        }
+        else {
+          await this.assertCurrent()
+          const raw = String(await this.rcon.command(entry.command))
+          // Internal harness probes validate full native identity before any
+          // rendering, caching or publication. Model tool arguments cannot set this hook.
+          if (typeof entry._sglunaValidateRaw === 'function') entry._sglunaValidateRaw(raw)
+          output = String(this.renderToolOutput(entry.tool.function.name, raw, 12000)).slice(0, 12000)
+          await this.assertCurrent()
+        }
+        if (typeof entry._sglunaReadFence === 'function') await entry._sglunaReadFence()
         this.toolCache.set(entry.signature, output)
       }
       this.messages.push({ role: 'tool', tool_call_id: entry.tool.id, content: String(output).slice(0, 16000) })
     }
 
-    if (duplicateThisRound) {
-      this.duplicateToolRounds++
-      check(this.duplicateToolRounds <= this.maxToolLoopRetries, `Repeated tool observation loop after ${this.maxToolLoopRetries} retries`)
-    }
+    if (duplicateThisRound) this.duplicateToolRounds++
     else {
       this.duplicateToolRounds = 0
+      this.observationRecoveryRounds = 0
     }
+    this.observationOnlyRounds++
     this.compactWorkingContext()
+  }
+
+  async recoveryDiagnostic(_details) {}
+
+  finiteNoOperationPressure(_plan) {
+    return ''
+  }
+
+  async blockedWithoutMutation(reason, failureClass = 'harness_blocker', { isCurrent = () => true } = {}) {
+    const current = await this.assertCurrent()
+    if (!isCurrent()) return { chatMessage: '', operations: [], superseded: true }
+    this.active = false
+    return {
+      chatMessage: `Blocked before mutation: ${cleanMemoryText(reason, 800)}`,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: current.epoch,
+      actorId: current.actor_id,
+      blocked: true,
+      blocker: { class: failureClass, reason: cleanMemoryText(reason, 1200) },
+    }
   }
 
   async runTurn() {
     const generation = this.generation
     for (let round = 0; round < this.maxToolRounds; round++) {
       const current = await this.assertCurrent()
-      const message = await this.callProvider(current, generation, { round })
+      const message = await this.callProvider(current, generation, {
+        round,
+        allowTools: this.observationDecisionForced !== true,
+      })
+
+      if (message.tool_calls !== undefined && this.observationDecisionForced) {
+        this.toolValidationRetries++
+        await this.recoveryDiagnostic({
+          failure_class: 'tool_validation',
+          reason_code: 'observation_phase_closed',
+          reason: 'Provider returned observation tools after the runtime closed the observation phase for this decision.',
+          retry: this.toolValidationRetries,
+          retry_limit: this.maxToolValidationRetries,
+          tools_enabled: false,
+        })
+        if (this.toolValidationRetries > this.maxToolValidationRetries) {
+          return this.blockedWithoutMutation(
+            'Provider repeatedly requested observation tools after the runtime closed the observation phase. Grounded evidence was preserved.',
+            'tool_validation',
+          )
+        }
+        this.messages.push({
+          role: 'user',
+          content: `[HARNESS] Observation phase is closed for this decision (${this.toolValidationRetries}/${this.maxToolValidationRetries}; observation_phase_closed). ${describeRejectedReply(message)} Tools are disabled, so no tool call is valid now. ${this.validReplyShape({ toolsEnabled: false })} Reuse the grounded evidence already collected; ${OBSERVATION_LOCATE_HINT}`,
+        })
+        continue
+      }
 
       if (message.tool_calls !== undefined) {
         let prepared
@@ -559,27 +934,162 @@ export class NpcAgentLoop {
         }
         catch (error) {
           const reason = error instanceof Error ? error.message : String(error)
+          const code = typeof error?.code === 'string' ? error.code : 'invalid_tool_call'
           this.toolValidationRetries++
+          await this.recoveryDiagnostic({
+            failure_class: 'tool_validation',
+            reason_code: code,
+            reason,
+            retry: this.toolValidationRetries,
+            retry_limit: this.maxToolValidationRetries,
+            tools_enabled: true,
+            ...(error?.details && typeof error.details === 'object' ? error.details : {}),
+          })
           if (this.toolValidationRetries > this.maxToolValidationRetries) {
-            return this.recoverPlan(generation, error, round + 1)
+            return this.blockedWithoutMutation(
+              `Tool validation failed repeatedly (${code}): ${reason}. Deterministic observations collected earlier were preserved.`,
+              'tool_validation',
+            )
           }
+          const instruction = code === 'tool_batch_too_large'
+            ? `The runtime allows at most ${MAX_TOOL_CALLS_PER_BATCH} observation tool calls in one provider turn. Keep the observations already collected, choose the smallest necessary subset, and retry with no more than ${MAX_TOOL_CALLS_PER_BATCH} tool calls. Tools remain enabled; do not emit a world mutation merely to recover from this formatting error.`
+            : `${this.validReplyShape({ toolsEnabled: true })} Tools remain enabled; fix the problem named above and do not resend the same call.`
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Tool call rejected (${this.toolValidationRetries}/${this.maxToolValidationRetries}): ${reason}. Retry using only an approved tool name and strict JSON arguments matching its schema. Do not repeat the rejected payload.`,
+            content: `[HARNESS] Tool-validation failure (${this.toolValidationRetries}/${this.maxToolValidationRetries}; ${code}): ${reason}. ${describeRejectedReply(message)} ${instruction}`,
           })
           continue
         }
         this.toolValidationRetries = 0
+        if (this.observationDecisionPressure && prepared.length > this.observationDecisionPressureRemaining) {
+          await this.forceDecisionFromObservations(
+            `Observation decision pressure had ${this.observationDecisionPressureRemaining} targeted observation call(s) remaining, but the provider requested ${prepared.length}.`,
+            'observation_decision_budget_exhausted',
+          )
+          continue
+        }
         await this.handleToolBatch(message, prepared)
+        if (this.observationDecisionForced) continue
+        if (this.duplicateToolRounds >= this.maxToolLoopRetries && this.duplicateToolRounds > 0) {
+          const reason = `Repeated tool observation loop after ${this.duplicateToolRounds} no-progress round${this.duplicateToolRounds === 1 ? '' : 's'}`
+          this.observationRecoveryRounds++
+          await this.recoveryDiagnostic({
+            failure_class: 'observation_no_progress',
+            reason_code: 'duplicate_observation',
+            reason,
+            retry: this.observationRecoveryRounds,
+            retry_limit: this.maxToolLoopRetries + 1,
+            tools_enabled: true,
+          })
+          if (this.duplicateToolRounds > this.maxToolLoopRetries) {
+            return this.recoverPlan(
+              generation,
+              new AgentLoopError(`${reason}. Observation retries are exhausted. Reuse the deterministic observations already collected and make the next decision from that evidence. Return one valid strict-JSON plan with the next executable action when the evidence supports it, or a truthful blocker with no mutation when a required fact is still missing.`),
+              round + 1,
+            )
+          }
+          this.messages.push({
+            role: 'user',
+            content: `[HARNESS] ${reason}. The duplicate result was suppressed and earlier deterministic observations remain available. Tools stay enabled only for a specific missing fact: do not switch to a different read-only observation merely to avoid the duplicate guard. If the existing evidence already identifies a safe executable next action, return a strict-JSON plan now; otherwise make one targeted observation for the exact missing fact or report a truthful blocker. Do not guess an unobserved Factorio identity and do not force a mutation just to make progress.`,
+          })
+        }
+        if (this.observationDecisionPressure) {
+          this.observationDecisionPressureRemaining = Math.max(0, this.observationDecisionPressureRemaining - prepared.length)
+          if (this.observationDecisionPressureRemaining <= 0) {
+            await this.forceDecisionFromObservations(
+              'The targeted observation budget allowed by decision pressure is complete.',
+              'observation_decision_budget_complete',
+            )
+            continue
+          }
+          this.messages.push({
+            role: 'user',
+            content: `[HARNESS] Decision-pressure observation budget: ${this.observationDecisionPressureRemaining} targeted observation call(s) remain. Reuse existing evidence first; spend another observation only on a fact still required to choose or parameterize the next action.`,
+          })
+        }
+        else if (this.observationOnlyRounds >= OBSERVATION_DECISION_PRESSURE_ROUNDS) {
+          const allowance = Math.max(0, Math.min(8, Math.trunc(this.observationDecisionPressureBudget())))
+          this.observationDecisionPressure = true
+          this.observationDecisionPressureRemaining = allowance
+          await this.recoveryDiagnostic({
+            failure_class: 'observation_no_progress',
+            reason_code: 'observation_decision_pressure',
+            reason: `Consecutive observation-only rounds reached ${this.observationOnlyRounds}; targeted allowance ${allowance}`,
+            retry: 1,
+            retry_limit: Math.max(1, allowance),
+            tools_enabled: allowance > 0,
+          })
+          if (allowance <= 0) {
+            await this.forceDecisionFromObservations(
+              'Observation decision pressure permits no additional observations for this decision.',
+              'observation_decision_budget_zero',
+            )
+            continue
+          }
+          this.messages.push({
+            role: 'user',
+            content: `[HARNESS] Decision pressure after ${this.observationOnlyRounds} consecutive observation-only rounds. If the live evidence already parameterizes a safe executable next action, return ${this.planReplyName()} now. Otherwise you may spend up to ${allowance} additional targeted observation call(s), only on facts still required for this decision. Do not switch among unrelated read-only tools merely to defer the decision.`,
+          })
+        }
         continue
       }
 
       let plan
       try {
-        plan = this.parsePlanMessage(message)
+        plan = await this.parsePlanMessageChecked(message)
       }
       catch (error) {
+        if (error?.failureClass === 'plan_category') {
+          this.planCategoryRetries++
+          const reason = error instanceof Error ? error.message : String(error)
+          const toolsEnabled = this.observationDecisionForced !== true && !(this.actionOmissionRepairActive && this.actionOmissionForceNoTools)
+          await this.recoveryDiagnostic({
+            failure_class: 'plan_category',
+            reason_code: error.code,
+            reason,
+            retry: this.planCategoryRetries,
+            retry_limit: this.maxToolValidationRetries,
+            tools_enabled: toolsEnabled,
+            ...(error?.details && typeof error.details === 'object' ? error.details : {}),
+          })
+          if (error?.details?.deterministic_no_retry === true) {
+            return this.blockedWithoutMutation(
+              `${reason} The harness stopped this request without changing canonical task state because repeating the same deterministically invalid repair cannot create a live exact-entity binding.`,
+              'plan_category',
+              { code: error.code },
+            )
+          }
+          if (this.planCategoryRetries > this.maxToolValidationRetries) {
+            return this.blockedWithoutMutation(error?.details?.tool_name !== undefined
+              ? `Provider repeatedly placed an observation tool in operations (${error.details.tool_name}).`
+              : `Provider repeatedly returned a plan the harness refused (${error.code ?? 'plan_category'}): ${reason}`, 'plan_category', { code: error.code })
+          }
+          this.messages.push({ role: 'assistant', content: cleanMemoryText(message.content, 4000) })
+          const toolInstruction = !toolsEnabled
+            ? 'Normal observation tools remain closed. Follow the current CONTROL_DECISION_STATE for eligible bounded fact requests; otherwise reuse collected evidence and return a corrected strict-JSON plan with its completion declarations or truthful blocker.'
+            : 'Tools remain enabled. Preserve the observations and canonical Task Board already collected. Use the supplied correction exactly: issue one required observation tool call when a fact is missing, otherwise return a strict-JSON plan containing only safe approved world-mutation operations.'
+          this.messages.push({
+            role: 'user',
+            content: `[HARNESS] Plan/tool category or targeting error (${this.planCategoryRetries}/${this.maxToolValidationRetries}; ${error.code}): ${reason} ${toolInstruction} Do not bypass an observed exact identity with an ambiguous name-based mutation.`,
+          })
+          continue
+        }
         return this.recoverPlan(generation, error, round + 1)
+      }
+      this.planCategoryRetries = 0
+      const finitePressure = this.finiteNoOperationPressure(plan)
+      if (finitePressure && !this.finiteNoOperationPressureUsed) {
+        this.finiteNoOperationPressureUsed = true
+        await this.recoveryDiagnostic({
+          failure_class: 'finite_goal_no_operation',
+          reason_code: 'finite_goal_continuation_pressure',
+          reason: cleanMemoryText(finitePressure, 1200),
+          retry: 1,
+          retry_limit: 1,
+          tools_enabled: true,
+        })
+        this.messages.push({ role: 'user', content: `[HARNESS] ${finitePressure}` })
+        continue
       }
       return this.commitPlan(plan)
     }

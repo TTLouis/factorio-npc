@@ -2,6 +2,12 @@ node_modules
 **/node_modules
 .git
 .git/**
+.pnpm-store
+**/.pnpm-store
+.claude
+.vscode
+logs
+temp
 .pixi
 **/.pixi
 models

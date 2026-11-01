@@ -11,7 +11,8 @@ function recipe({
   enabled = true,
   hidden = false,
   energy = 0.5,
-  categories = ['crafting'],
+  category = 'crafting',
+  additional_categories = [],
   ingredients = [],
   products = [],
 }: {
@@ -19,11 +20,12 @@ function recipe({
   enabled?: boolean
   hidden?: boolean
   energy?: number
-  categories?: string[]
+  category?: string
+  additional_categories?: string[]
   ingredients?: Array<Record<string, unknown>>
   products?: Array<Record<string, unknown>>
 }) {
-  return { name, enabled, hidden, energy, categories, ingredients, products }
+  return { name, enabled, hidden, energy, category, additional_categories, ingredients, products }
 }
 
 function actorWith(recipes: Record<string, unknown>) {
@@ -62,19 +64,22 @@ describe('live production planning adapter', () => {
         'assembling-machine-1': {
           name: 'assembling-machine-1',
           type: 'assembling-machine',
-          crafting_speed: 0.5,
+          // 2.0 prototypes expose only the method; the old field raises in the engine.
+          get_crafting_speed: () => 0.5,
           crafting_categories: { crafting: true },
         },
         'assembling-machine-2': {
           name: 'assembling-machine-2',
           type: 'assembling-machine',
-          crafting_speed: 0.75,
+          // 2.0 prototypes expose only the method; the old field raises in the engine.
+          get_crafting_speed: () => 0.75,
           crafting_categories: { crafting: true },
         },
         'chemical-plant': {
           name: 'chemical-plant',
           type: 'assembling-machine',
-          crafting_speed: 1,
+          // 2.0 prototypes expose only the method; the old field raises in the engine.
+          get_crafting_speed: () => 1,
           crafting_categories: { chemistry: true },
         },
       },
@@ -101,6 +106,27 @@ describe('live production planning adapter', () => {
     expect(result.recipe_rates.map(item => item.recipe_name)).toEqual(['copper-cable', 'electronic-circuit'])
     expect(result.fully_sized).toBe(false)
     expect(result.evidence_ids_used).toEqual(['engine:recipe:copper-cable', 'engine:recipe:electronic-circuit'])
+  })
+
+  it('does not let bootstrap inventory erase steady-state continuous-production inputs', () => {
+    const actor = {
+      ...actorWith(baseRecipes()),
+      get_main_inventory: () => ({
+        get_item_count: (name: string) => name === 'electronic-circuit' ? 100 : name === 'iron-plate' ? 50 : 0,
+      }),
+    } as unknown as ControlledActor
+
+    const result = solve_live_production(actor, {
+      calculation_id: 'steady-state-ignores-bootstrap-inventory',
+      target: { type: 'item', name: 'electronic-circuit', rate_per_second: 10 },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.external_inputs).toEqual([
+      { type: 'item', name: 'copper-plate', rate_per_second: 15 },
+      { type: 'item', name: 'iron-plate', rate_per_second: 10 },
+    ])
   })
 
   it('uses explicit machine selections without silently picking an assembler tier', () => {

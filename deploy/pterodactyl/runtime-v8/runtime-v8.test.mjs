@@ -7,16 +7,16 @@ import { pathToFileURL } from 'node:url'
 
 import { chatAuthorized, describeChatPlayers } from './common.mjs'
 import { providerEndpoint } from './provider.mjs'
-import { configuration, installedAppRoot, Session } from './supervisor.mjs'
+import { configuration, deploymentCompatibilityWarnings, factorioVisibilityDiagnostics, installedAppRoot, Session } from './supervisor.mjs'
 
 async function temp(t) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-v8-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-v8-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   return dir
 }
 
 const baseEnv = {
-  AIRI_ACTOR_MODE: 'npc',
+  SGLUNA_ACTOR_MODE: 'npc',
   AIRI_CHAT_PLAYER: 'Louis',
   OPENAI_API_KEY: 'test-key-1234',
   OPENAI_MODEL: 'test-model',
@@ -35,41 +35,73 @@ test('configuration defaults to standalone NPC and keeps chat authorization sepa
   delete aliasEnv.AIRI_CHAT_PLAYER
   const alias = configuration({}, aliasEnv)
   assert.deepEqual(alias.chatPlayers, { mode: 'allowlist', names: ['LegacyName'] })
-  assert.throws(() => configuration({}, { ...baseEnv, AIRI_ACTOR_MODE: 'player' }))
+  assert.throws(() => configuration({}, { ...baseEnv, SGLUNA_ACTOR_MODE: 'player' }))
 })
 
-test('AIRI_CHAT_PLAYERS blank or "*" allows every player', () => {
-  const blank = configuration({}, { ...baseEnv, AIRI_CHAT_PLAYERS: '' })
+test('SGLUNA deployment variables override AIRI compatibility values deterministically', () => {
+  const env = {
+    ...baseEnv,
+    SGLUNA_ACTOR_MODE: 'npc',
+    AIRI_ACTOR_MODE: 'player',
+    SGLUNA_CHAT_PLAYERS: 'TTLouis',
+    AIRI_CHAT_PLAYERS: 'Legacy',
+  }
+  const config = configuration({}, env)
+  assert.equal(config.actorMode, 'npc')
+  assert.deepEqual(config.chatPlayers, { mode: 'allowlist', names: ['TTLouis'] })
+  assert.deepEqual(deploymentCompatibilityWarnings(env), [
+    'SGLUNA_ACTOR_MODE overrides conflicting compatibility value AIRI_ACTOR_MODE.',
+    'SGLUNA_CHAT_PLAYERS overrides conflicting compatibility value AIRI_CHAT_PLAYERS.',
+  ])
+})
+
+test('legacy AIRI deployment variables remain accepted when SGLUNA variables are absent', () => {
+  const env = { ...baseEnv }
+  delete env.SGLUNA_ACTOR_MODE
+  env.AIRI_ACTOR_MODE = 'npc'
+  env.AIRI_CHAT_PLAYERS = 'Legacy'
+  const config = configuration({}, env)
+  assert.equal(config.actorMode, 'npc')
+  assert.deepEqual(config.chatPlayers, { mode: 'allowlist', names: ['Legacy'] })
+})
+
+test('explicit blank SGLUNA_CHAT_PLAYERS overrides non-blank AIRI compatibility values', () => {
+  const config = configuration({}, { ...baseEnv, SGLUNA_CHAT_PLAYERS: '', AIRI_CHAT_PLAYERS: 'Legacy' })
+  assert.deepEqual(config.chatPlayers, { mode: 'all', names: [] })
+})
+
+test('SGLUNA_CHAT_PLAYERS blank or "*" allows every player', () => {
+  const blank = configuration({}, { ...baseEnv, SGLUNA_CHAT_PLAYERS: '' })
   assert.deepEqual(blank.chatPlayers, { mode: 'all', names: [] })
   assert.equal(chatAuthorized(blank.chatPlayers, 'AnyoneAtAll'), true)
-  const wildcard = configuration({}, { ...baseEnv, AIRI_CHAT_PLAYERS: '*' })
+  const wildcard = configuration({}, { ...baseEnv, SGLUNA_CHAT_PLAYERS: '*' })
   assert.deepEqual(wildcard.chatPlayers, { mode: 'all', names: [] })
   assert.equal(chatAuthorized(wildcard.chatPlayers, 'AnyoneAtAll'), true)
 })
 
-test('AIRI_CHAT_PLAYERS "none" disables every player', () => {
-  const config = configuration({}, { ...baseEnv, AIRI_CHAT_PLAYERS: 'none' })
+test('SGLUNA_CHAT_PLAYERS "none" disables every player', () => {
+  const config = configuration({}, { ...baseEnv, SGLUNA_CHAT_PLAYERS: 'none' })
   assert.deepEqual(config.chatPlayers, { mode: 'disabled', names: [] })
   assert.equal(chatAuthorized(config.chatPlayers, 'Louis'), false)
 })
 
-test('AIRI_CHAT_PLAYERS supports a single-name allowlist', () => {
-  const config = configuration({}, { ...baseEnv, AIRI_CHAT_PLAYERS: 'TTLouis' })
+test('SGLUNA_CHAT_PLAYERS supports a single-name allowlist', () => {
+  const config = configuration({}, { ...baseEnv, SGLUNA_CHAT_PLAYERS: 'TTLouis' })
   assert.deepEqual(config.chatPlayers, { mode: 'allowlist', names: ['TTLouis'] })
   assert.equal(chatAuthorized(config.chatPlayers, 'TTLouis'), true)
   assert.equal(chatAuthorized(config.chatPlayers, 'Alice'), false)
 })
 
-test('AIRI_CHAT_PLAYERS supports a multi-name allowlist and trims/dedupes whitespace', () => {
-  const config = configuration({}, { ...baseEnv, AIRI_CHAT_PLAYERS: ' TTLouis , Alice ,,Bob, Alice ' })
+test('SGLUNA_CHAT_PLAYERS supports a multi-name allowlist and trims/dedupes whitespace', () => {
+  const config = configuration({}, { ...baseEnv, SGLUNA_CHAT_PLAYERS: ' TTLouis , Alice ,,Bob, Alice ' })
   assert.deepEqual(config.chatPlayers, { mode: 'allowlist', names: ['TTLouis', 'Alice', 'Bob'] })
   assert.equal(chatAuthorized(config.chatPlayers, 'TTLouis'), true)
   assert.equal(chatAuthorized(config.chatPlayers, 'Alice'), true)
   assert.equal(chatAuthorized(config.chatPlayers, 'Bob'), true)
 })
 
-test('AIRI_CHAT_PLAYERS rejects a player not on the allowlist', () => {
-  const config = configuration({}, { ...baseEnv, AIRI_CHAT_PLAYERS: 'TTLouis,Alice' })
+test('SGLUNA_CHAT_PLAYERS rejects a player not on the allowlist', () => {
+  const config = configuration({}, { ...baseEnv, SGLUNA_CHAT_PLAYERS: 'TTLouis,Alice' })
   assert.equal(chatAuthorized(config.chatPlayers, 'Eve'), false)
 })
 
@@ -100,6 +132,16 @@ test('Factorio account: only one of username/token supplied fails configuration'
   assert.throws(() => configuration({}, { ...baseEnv, FACTORIO_TOKEN: 'dummy-token-1234' }))
 })
 
+test('Factorio visibility diagnostics report state without exposing credentials', () => {
+  const token = 'never-print-this-token'
+  const publicText = factorioVisibilityDiagnostics({ username: 'ttlouis', token, public: true }).join('\n')
+  assert.match(publicText, /Factorio visibility: PUBLIC/)
+  assert.doesNotMatch(publicText, /ttlouis|never-print-this-token/)
+  const privateText = factorioVisibilityDiagnostics({ username: '', token: '', public: false }).join('\n')
+  assert.match(privateText, /Factorio visibility: PRIVATE\/HIDDEN/)
+  assert.match(privateText, /No Factorio listing credentials supplied/)
+})
+
 test('Factorio account: a stored factorioUsername in airi-config.json is never read', () => {
   const config = configuration({ factorioUsername: 'stored-old-username' }, baseEnv)
   assert.equal(config.factorio.username, '')
@@ -128,7 +170,7 @@ test('cleanEnv strips the Factorio auth token from the game child process enviro
   process.env.FACTORIO_TOKEN = 'super-secret-token'
   process.env.FACTORIO_USERNAME = 'ttlouis'
   try {
-    const session = new Session({ root: '/tmp/airi-root', app: '/tmp/app', game: '/tmp/game', config: configuration({}, baseEnv), save: 'x', settingsFile: 'x', modDir: 'x', ini: 'x' })
+    const session = new Session({ root: '/tmp/sgluna-root', app: '/tmp/app', game: '/tmp/game', config: configuration({}, baseEnv), save: 'x', settingsFile: 'x', modDir: 'x', ini: 'x' })
     const env = session.cleanEnv()
     assert.equal(env.FACTORIO_TOKEN, undefined)
     assert.equal(env.FACTORIO_USERNAME, 'ttlouis')
@@ -140,15 +182,27 @@ test('cleanEnv strips the Factorio auth token from the game child process enviro
 })
 
 test('installed supervisor resolves the release root above src/runtime-v8', () => {
-  const moduleUrl = pathToFileURL('/srv/.airi/releases/v8/src/runtime-v8/supervisor.mjs').href
-  assert.equal(installedAppRoot(moduleUrl), path.resolve('/srv/.airi/releases/v8'))
+  const moduleUrl = pathToFileURL('/srv/.sgluna/releases/v8/src/runtime-v8/supervisor.mjs').href
+  assert.equal(installedAppRoot(moduleUrl), path.resolve('/srv/.sgluna/releases/v8'))
 })
 
 test('provider URL is HTTPS remotely and may be loopback HTTP', () => {
   assert.equal(providerEndpoint('https://api.openai.com/v1'), 'https://api.openai.com/v1/chat/completions')
   assert.equal(providerEndpoint('http://127.0.0.1:8000/v1'), 'http://127.0.0.1:8000/v1/chat/completions')
+  assert.equal(providerEndpoint('http://host.docker.internal:1234/v1'), 'http://host.docker.internal:1234/v1/chat/completions')
   assert.throws(() => providerEndpoint('http://example.com/v1'))
   assert.throws(() => providerEndpoint('https://user:pass@example.com/v1'))
+})
+
+test('provider URL permits HTTP on Tailscale hosts and rejects suffix lookalikes', () => {
+  assert.equal(providerEndpoint('http://proxy.example-tailnet.ts.net:18317/v1'), 'http://proxy.example-tailnet.ts.net:18317/v1/chat/completions')
+  assert.equal(providerEndpoint('http://PROXY.EXAMPLE-TAILNET.TS.NET:18317/v1'), 'http://proxy.example-tailnet.ts.net:18317/v1/chat/completions')
+  for (const host of ['ts.net', 'evilts.net', 'proxy.example-tailnet.ts.net.example.com', 'ts.net-example.com']) {
+    assert.throws(() => providerEndpoint(`http://${host}:18317/v1`), /Remote provider URL requires HTTPS/)
+  }
+  assert.throws(() => providerEndpoint('http://user:pass@proxy.example-tailnet.ts.net:18317/v1'), /cannot contain credentials/)
+  assert.throws(() => providerEndpoint('http://proxy.example-tailnet.ts.net:18317/v1?key=fixture'), /query/)
+  assert.throws(() => providerEndpoint('ftp://proxy.example-tailnet.ts.net:18317/v1'), /Remote provider URL requires HTTPS/)
 })
 
 const fakeFactorio = `#!/usr/bin/env node
@@ -156,10 +210,10 @@ import fs from 'node:fs';
 import net from 'node:net';
 const args=process.argv.slice(2);const get=n=>{const i=args.indexOf(n);return i>=0?args[i+1]:undefined};
 const binding=get('--rcon-bind');const password=get('--rcon-password');const save=get('--start-server');
-let session='',mode='player',actorId=18,epoch=0,stopping=false,configureCommand='';const sockets=new Set();
+let session='',mode='player',actorId=18,epoch=0,stopping=false,configureCommand='',luaPrimed=false;const sockets=new Set();
 function packet(id,type,text){const body=Buffer.from(String(text));const b=Buffer.alloc(body.length+14);b.writeInt32LE(body.length+10,0);b.writeInt32LE(id,4);b.writeInt32LE(type,8);body.copy(b,12);return b}
-function status(){return {revision:'airi-deploy-v8-npc-staging',session,mode,actor_id:actorId,actor_kind:mode==='npc'?'standalone_character':'connected_player',connected_players:0,allowed:!!session&&mode==='npc',idle:true,epoch,tools:true,operations:true,actor_interface:true}}
-const server=net.createServer(socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));socket.on('error',()=>{});let buffer=Buffer.alloc(0),auth=false;socket.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4){const size=buffer.readInt32LE(0);if(buffer.length<size+4)break;const msg=buffer.subarray(4,size+4);buffer=buffer.subarray(size+4);const id=msg.readInt32LE(0),type=msg.readInt32LE(4),text=msg.subarray(8,-2).toString();if(type===3){auth=text===password;socket.write(packet(auth?id:-1,2,''));continue}if(!auth){socket.destroy();return}let response='';if(text==='/version')response='Version: 2.0.77 (fixture)';else if(text.includes('"configure","npc"')){if(!configureCommand){configureCommand=text;response='Player <server> tried using the command '+text+'. Lua console commands will disable achievements. Please repeat the command to proceed.'}else if(text!==configureCommand){response='configure command was not repeated exactly'}else{const m=text.match(/"configure","npc",("(?:[^"\\\\]|\\\\.)*")/);const marker=(text.match(/AIRI_CONFIG_[a-f0-9]{24}:/)||[])[0];if(!m||!marker){response='invalid configure fixture command'}else{session=JSON.parse(m[1]);mode='npc';epoch++;response=marker+JSON.stringify({ok:true,result:session})}}}else if(text.includes('"airi_deployment","status"'))response=JSON.stringify(status());else if(text.includes('"airi_deployment","cancel"')){epoch++;response='true'}else if(text==='/quit'){if(save)fs.appendFileSync(save,'quit-saved');response='Quitting';setTimeout(()=>{console.log('Goodbye');stop()},10)}else if(text==='/server-save'){if(save)fs.appendFileSync(save,'saved');response='Saving map'}else response='ok';const out=packet(id,0,response);socket.write(out.subarray(0,3));socket.write(out.subarray(3))}})});
+function status(){return {revision:'sgluna-deploy-v8-npc-staging',session,mode,actor_id:actorId,actor_kind:mode==='npc'?'standalone_character':'connected_player',connected_players:0,allowed:!!session&&mode==='npc',idle:true,epoch,tools:true,operations:true,actor_interface:true}}
+const server=net.createServer(socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));socket.on('error',()=>{});let buffer=Buffer.alloc(0),auth=false;socket.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4){const size=buffer.readInt32LE(0);if(buffer.length<size+4)break;const msg=buffer.subarray(4,size+4);buffer=buffer.subarray(size+4);const id=msg.readInt32LE(0),type=msg.readInt32LE(4),text=msg.subarray(8,-2).toString();if(type===3){auth=text===password;socket.write(packet(auth?id:-1,2,''));continue}if(!auth){socket.destroy();return}let response='';if(text==='/version')response='Version: 2.0.77 (fixture)';else if(text.includes('SGLUNA_UI_RCON_READY')){response=luaPrimed?'SGLUNA_UI_RCON_READY':'';luaPrimed=true;}else if(text.includes('"configure","npc"')){if(!configureCommand){configureCommand=text;response='Player <server> tried using the command '+text+'. Lua console commands will disable achievements. Please repeat the command to proceed.'}else if(text!==configureCommand){response='configure command was not repeated exactly'}else{const m=text.match(/"configure","npc",("(?:[^"\\\\]|\\\\.)*")/);const marker=(text.match(/SGLUNA_CONFIG_[a-f0-9]{24}:/)||[])[0];if(!m||!marker){response='invalid configure fixture command'}else{session=JSON.parse(m[1]);mode='npc';epoch++;response=marker+JSON.stringify({ok:true,result:session})}}}else if(text.includes('"autorio_operations","reconcile_startup"'))response=JSON.stringify({ok:true,reconciled:true,batch_generation:1});else if(text.includes('"autorio_actor","reconcile_after_load"'))response=JSON.stringify({cancelled:true});else if(text.includes('"sgluna_deployment","status"'))response=JSON.stringify(status());else if(text.includes('"sgluna_deployment","cancel"')){epoch++;response='true'}else if(text==='/quit'){if(save)fs.appendFileSync(save,'quit-saved');response='Quitting';setTimeout(()=>{console.log('Goodbye');stop()},10)}else if(text==='/server-save'){if(save)fs.appendFileSync(save,'saved');response='Saving map'}else response='ok';const out=packet(id,0,response);socket.write(out.subarray(0,3));socket.write(out.subarray(3))}})});
 server.listen(Number(binding.split(':').pop()),'127.0.0.1',()=>console.log('Fixture Factorio ready'));
 function stop(){if(stopping)return;stopping=true;for(const s of sockets)s.destroy();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),100)};process.on('SIGINT',stop);process.on('SIGTERM',stop);setInterval(()=>{},1000);
 `
@@ -190,7 +244,12 @@ test('session starts zero-player standalone NPC over authenticated loopback RCON
   assert.equal(status.actor_kind, 'standalone_character')
   assert.equal(status.connected_players, 0)
   assert.equal(status.allowed, true)
-  assert.match(logs.find(line => line.includes('AIRI Factorio ready')) ?? '', /AIRI Factorio ready; npc=AIRI \(airi\), actor_id=18/)
+  assert.ok(logs.some(line => {
+    if (!line.includes('startup.lua_console_ready')) return false
+    const event = JSON.parse(line.slice(line.indexOf('{')))
+    return event.request_id === 'startup' && event.reason === 'native_confirmation_repeated' && event.attempts === 2
+  }))
+  assert.match(logs.find(line => line.includes('SGLuna Factorio ready')) ?? '', /SGLuna Factorio ready; npc=SGLuna \(sgluna\), actor_id=18/)
 
   let reserveAuthorizationChecks = 0
   session.ensureAuthorization = async () => {
@@ -228,5 +287,5 @@ test('chat authorization triggers provider path only for configured requester', 
   session.onGameLine('2026-09-13 20:00:01 [CHAT] Louis: !airi wait')
   await session.eventQueue
   assert.deepEqual(requests, ['wait'])
-  assert.ok(prints.some(text => text.includes('[AIRI] Accepted.')))
+  assert.ok(prints.some(text => text.includes('[SGLuna] Accepted.')))
 })

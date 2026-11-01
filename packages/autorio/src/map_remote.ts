@@ -1,5 +1,9 @@
-import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { entity_reference_hint, hint_surface, remember_entity_reference, resolve_visible_entity_on_any_surface } from './entity_reference'
+import { chunk_coverage, is_chunk_known_charted, is_chunk_known_visible, MAP_CROP_DEFAULT_RADIUS, MAP_CROP_MAX_RADIUS, map_crop, map_knowledge_summary } from './map_knowledge'
+import { crafting_categories_support_recipe } from './recipe_categories'
+import { find_world_entities } from './npc_vision'
 
 const MAX_MAP_QUERY_RADIUS = 256
 const MAX_MAP_QUERY_RESULTS = 64
@@ -28,40 +32,15 @@ function chunk_position(position: { x: number, y: number }) {
 }
 
 export function is_position_charted(actor: ControlledActor, surface: LuaSurface, position: { x: number, y: number }) {
-  return actor.force.is_chunk_charted(surface, chunk_position(position))
+  return is_chunk_known_charted(actor.force, surface, chunk_position(position))
 }
 
 export function is_position_visible(actor: ControlledActor, surface: LuaSurface, position: { x: number, y: number }) {
-  return actor.force.is_chunk_visible(surface, chunk_position(position))
+  return is_chunk_known_visible(actor.force, surface, chunk_position(position))
 }
 
 function map_coverage(actor: ControlledActor, surface: LuaSurface, area: QueryArea) {
-  const min_chunk_x = math.floor(area.left_top.x / 32)
-  const min_chunk_y = math.floor(area.left_top.y / 32)
-  const max_chunk_x = math.floor(area.right_bottom.x / 32)
-  const max_chunk_y = math.floor(area.right_bottom.y / 32)
-  let charted_chunks = 0
-  let visible_chunks = 0
-  let total_chunks = 0
-
-  for (let chunk_x = min_chunk_x; chunk_x <= max_chunk_x; chunk_x++) {
-    for (let chunk_y = min_chunk_y; chunk_y <= max_chunk_y; chunk_y++) {
-      total_chunks++
-      const chunk = { x: chunk_x, y: chunk_y }
-      if (actor.force.is_chunk_charted(surface, chunk)) charted_chunks++
-      if (actor.force.is_chunk_visible(surface, chunk)) visible_chunks++
-    }
-  }
-
-  return {
-    charted_chunks,
-    uncharted_chunks: total_chunks - charted_chunks,
-    visible_chunks,
-    fogged_chunks: charted_chunks - visible_chunks,
-    total_chunks,
-    partial: charted_chunks > 0 && charted_chunks < total_chunks,
-    visibility_partial: visible_chunks > 0 && visible_chunks < total_chunks,
-  }
+  return chunk_coverage(actor.force, surface, area)
 }
 
 function visible_query_areas(actor: ControlledActor, surface: LuaSurface, area: QueryArea) {
@@ -74,7 +53,7 @@ function visible_query_areas(actor: ControlledActor, surface: LuaSurface, area: 
   for (let chunk_x = min_chunk_x; chunk_x <= max_chunk_x; chunk_x++) {
     for (let chunk_y = min_chunk_y; chunk_y <= max_chunk_y; chunk_y++) {
       const chunk = { x: chunk_x, y: chunk_y }
-      if (!actor.force.is_chunk_visible(surface, chunk)) continue
+      if (!is_chunk_known_visible(actor.force, surface, chunk)) continue
 
       const chunk_left = chunk_x * 32
       const chunk_top = chunk_y * 32
@@ -191,13 +170,16 @@ export function query_charted_entities(
   for (const visible_area of query_areas) {
     const filters: any = { area: visible_area }
     if (name !== undefined) filters.name = name
-    const candidates = surface.find_entities_filtered(filters)
+    const candidates = find_world_entities(surface, filters)
     for (const entity of candidates) {
       if (!entity.valid) continue
       if (!is_position_visible(actor, surface, entity.position)) continue
       const identity = entity_identity(entity)
       if (seen[identity]) continue
       seen[identity] = true
+      // Map-observed unit numbers must resolve later, and ordinary buildings
+      // are not indexed by game.get_entity_by_unit_number().
+      remember_entity_reference(entity)
       entities.push(entity_snapshot(entity))
       if (entities.length >= limit) break
     }
@@ -221,7 +203,17 @@ function resolve_visible_entity(actor: ControlledActor, unit_number: number) {
   if (!valid_integer(unit_number, 1, 9007199254740991)) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
-  const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  // Resolve only where the NPC sees now (M3), on whichever surface the entity is: an entity in fog answers the same whether
+  // it still stands, and nothing there is scanned or refreshed. Its stored hint position only says whether the chunk was
+  // ever charted.
+  const visible = resolve_visible_entity_on_any_surface(actor, unit_number)
+  if (visible.code === 'not_visible') {
+    const hint = entity_reference_hint(unit_number)
+    const surface = hint === undefined ? undefined : hint_surface(actor, hint)
+    const uncharted = hint !== undefined && surface !== undefined && !is_position_charted(actor, surface, hint.position)
+    return { code: (uncharted ? 'area_uncharted' : 'area_not_visible') as MapObservationCode, entity: undefined }
+  }
+  const entity = visible.entity
   if (!entity || !entity.valid) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
@@ -247,12 +239,7 @@ export function inspect_charted_entity(actor: ControlledActor, unit_number: numb
 }
 
 function supports_recipe_category(target: LuaEntity, recipe: any) {
-  const supported = target.prototype?.crafting_categories
-  if (!supported) return false
-  for (const category of recipe.categories ?? []) {
-    if (supported[category]) return true
-  }
-  return false
+  return crafting_categories_support_recipe(target.prototype?.crafting_categories, recipe)
 }
 
 function nonempty_inventory(target: LuaEntity, inventory: any) {
@@ -357,6 +344,18 @@ export function set_charted_machine_recipe(actor: ControlledActor, unit_number: 
   return mutation_result(true, true, 'completed', details)
 }
 
+// A bounded crop of what the NPC knows of the map around a tile position on its own surface (default: where it stands): one
+// letter per chunk (V visible now, F explored but fogged, U never explored) with its surface, origin, tick and revision, and
+// how much of the explored record lies outside it. It reads only the knowledge record and the engine's chart/visibility flags:
+// it names no entities, charts, generates or reserves nothing, and grants no execution authority (M3).
+export function map_crop_around(actor: ControlledActor, radius: number = MAP_CROP_DEFAULT_RADIUS, x?: number, y?: number) {
+  if (!valid_integer(radius, 1, MAP_CROP_MAX_RADIUS)) return { ok: false, code: 'invalid_radius' as MapObservationCode, max_radius: MAP_CROP_MAX_RADIUS }
+  if ((x === undefined) !== (y === undefined)) return { ok: false, code: 'invalid_position' as MapObservationCode }
+  if (x !== undefined && (!valid_number(x) || !valid_number(y!))) return { ok: false, code: 'invalid_position' as MapObservationCode }
+  const center = chunk_position(x === undefined ? actor.position : { x, y: y! })
+  return { ok: true, code: 'ok' as MapObservationCode, crop: map_crop(actor.force, actor.surface, center, radius) }
+}
+
 export function create_map_remote_interface(get_actor: () => ControlledActor | undefined) {
   remote.add_interface('autorio_map', {
     context: () => {
@@ -378,7 +377,15 @@ export function create_map_remote_interface(get_actor: () => ControlledActor | u
           index: actor.surface.index,
           name: actor.surface.name,
         },
+        map_knowledge: map_knowledge_summary(actor.force),
       }
+    },
+    crop: (radius?: number, x?: number, y?: number) => {
+      const actor = get_actor()
+      if (!actor || !actor.is_valid) {
+        return { ok: false, code: 'no_actor' as MapObservationCode }
+      }
+      return map_crop_around(actor, radius, x, y)
     },
     query_area: (surface_index: number, x: number, y: number, radius: number = 32, limit: number = 32, name?: string) => {
       const actor = get_actor()

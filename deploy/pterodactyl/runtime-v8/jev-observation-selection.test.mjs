@@ -1,0 +1,317 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import {
+  decisionEnvelopeQuestions,
+  observationRelevanceFamilies,
+  observationRelevanceQuestions,
+  parseObservationRelevance,
+} from './jev-decision-taxonomy.mjs'
+import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
+import {
+  observationToolFamilies,
+  observationToolFamily,
+  observationToolFamilyCatalog,
+  observationToolTier,
+  OBSERVATION_TOOL_TIER,
+  toolDefinitions,
+} from './structured-policy.mjs'
+
+test('M7 observation relevance uses parallel Noul questions instead of an integer budget question', () => {
+  const families = observationRelevanceFamilies()
+  const questions = observationRelevanceQuestions()
+  assert.equal(families.length, 11)
+  assert.deepEqual(Object.keys(questions), families.map(family => `need_${family}`))
+  for (const [id, question] of Object.entries(questions)) {
+    assert.equal(question.type, 'noul', id)
+    assert.deepEqual(Object.keys(question.criteria), ['true', 'false'])
+    assert.match(JSON.stringify(question.instructions), /do not invent/i)
+  }
+
+  const envelope = decisionEnvelopeQuestions()
+  assert.equal(Object.hasOwn(envelope, 'observation_budget'), false)
+  for (const family of families) assert.equal(envelope[`need_${family}`].type, 'noul')
+})
+
+test('M7 typed relevance is thresholded and capped in deterministic code', () => {
+  const response = {
+    answers: {
+      need_inventory_equipment: { type: 'noul', noul: 0.94 },
+      need_nearby_world: { type: 'noul', noul: 0.82 },
+      need_recipe_production: { type: 'noul', noul: 0.71 },
+      need_research_state: { type: 'noul', noul: 0.66 },
+      need_entity_status: { type: 'noul', noul: 0.61 },
+      need_runtime_status: { type: 'noul', noul: 0.2 },
+    },
+  }
+  const parsed = parseObservationRelevance(response)
+  assert.equal(parsed.source, 'typed_relevance')
+  assert.equal(parsed.threshold, 0.5)
+  assert.equal(parsed.signal_count, 6)
+  assert.deepEqual(parsed.selected_families, [
+    'inventory_equipment',
+    'nearby_world',
+    'recipe_production',
+    'research_state',
+  ])
+  assert.equal(parsed.budget, 4)
+  assert.equal(parsed.probabilities.entity_status, 0.61)
+  assert.equal(parsed.probabilities.runtime_status, 0.2)
+})
+
+test('legacy integer observation budget is parse-only compatibility and is not emitted as a question', () => {
+  const parsed = parseObservationRelevance({
+    answers: {
+      observation_budget: { type: 'score', score: 3.6 },
+    },
+  })
+  assert.equal(parsed.source, 'legacy_score_compat')
+  assert.equal(parsed.budget, 4)
+  assert.deepEqual(parsed.selected_families, [])
+  assert.equal(Object.hasOwn(decisionEnvelopeQuestions(), 'observation_budget'), false)
+})
+
+test('every deterministic observation tool belongs to exactly one typed relevance family', () => {
+  const families = observationToolFamilies()
+  assert.deepEqual(families, observationRelevanceFamilies())
+  const catalog = observationToolFamilyCatalog()
+  const names = toolDefinitions.map(tool => tool.function.name)
+
+  assert.deepEqual(Object.keys(catalog).sort(), [...names].sort())
+  for (const name of names) {
+    assert.ok(families.includes(observationToolFamily(name)), name)
+  }
+
+  assert.equal(observationToolFamily('getInventoryItems'), 'inventory_equipment')
+  assert.equal(observationToolFamily('getNearbyEntities'), 'nearby_world')
+  assert.equal(observationToolFamily('getEntityStatus'), 'entity_status')
+  assert.equal(observationToolFamily('getResearchPath'), 'research_state')
+  assert.equal(observationToolFamily('getPlacementCandidates'), 'placement_candidates')
+  assert.equal(observationToolFamily('validateConstructionPlan'), 'construction_state')
+})
+
+
+class ObservationSelectionRcon {
+  constructor() {
+    this.commands = []
+  }
+
+  async command(text) {
+    this.commands.push(text)
+    if (text.includes('remote.call("sgluna_deployment","status")')) {
+      return JSON.stringify({
+        revision: 'sgluna-deploy-v8-npc-staging',
+        session: '0123456789abcdef0123456789abcdef',
+        mode: 'npc',
+        actor_id: 18,
+        actor_kind: 'standalone_character',
+        connected_players: 0,
+        allowed: true,
+        idle: true,
+        epoch: 3,
+        actor_interface: true,
+        operations: true,
+        tools: true,
+      })
+    }
+    if (text.includes('remote.call("autorio_tools","get_inventory_items"')) return JSON.stringify({ items: [{ name: 'iron-plate', count: 4 }] })
+    if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify({ actor_position: { x: 0, y: 0 }, entities: [] })
+    return '{}'
+  }
+}
+
+test('M7 live admission executes selected fresh observation families and defers unselected families', async () => {
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'typed observation admission test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = {
+    revision: 'sgluna-deploy-v8-npc-staging',
+    session: '0123456789abcdef0123456789abcdef',
+    mode: 'npc',
+    actor_id: 18,
+    actor_kind: 'standalone_character',
+    connected_players: 0,
+    allowed: true,
+    idle: true,
+    epoch: 3,
+    actor_interface: true,
+    operations: true,
+    tools: true,
+  }
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.observationBudgetOverride = 2
+  agent.observationBudgetRemaining = 2
+  agent.observationRelevanceOverride = ['inventory_equipment']
+
+  await agent.handleToolBatch({
+    tool_calls: [
+      {
+        id: 'inventory',
+        type: 'function',
+        function: { name: 'getInventoryItems', arguments: '{}' },
+      },
+      {
+        // Relevance still gates optional-tier reads; fact and discovery reads
+        // have their own admission rules (see the tier test below).
+        id: 'player',
+        type: 'function',
+        function: { name: 'getPlayerStatus', arguments: '{"player_name":"Louis"}' },
+      },
+    ],
+  })
+
+  assert.equal(rcon.commands.some(command => command.includes('get_inventory_items')), true)
+  assert.equal(agent.observationBudgetRemaining, 1)
+  assert.deepEqual(agent.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['inventory'])
+})
+
+test('M7 cached observations remain reusable even when their family is not currently selected', async () => {
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'typed observation cache test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = {
+    revision: 'sgluna-deploy-v8-npc-staging',
+    session: '0123456789abcdef0123456789abcdef',
+    mode: 'npc',
+    actor_id: 18,
+    actor_kind: 'standalone_character',
+    connected_players: 0,
+    allowed: true,
+    idle: true,
+    epoch: 3,
+    actor_interface: true,
+    operations: true,
+    tools: true,
+  }
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.observationBudgetOverride = 2
+  agent.observationBudgetRemaining = 2
+  agent.observationRelevanceOverride = null
+
+  const request = {
+    tool_calls: [{
+      id: 'nearby-first',
+      type: 'function',
+      function: { name: 'getNearbyEntities', arguments: '{"radius":20}' },
+    }],
+  }
+  await agent.handleToolBatch(request)
+  const afterFirst = rcon.commands.filter(command => command.includes('get_nearby_entities')).length
+
+  agent.observationRelevanceOverride = ['inventory_equipment']
+  await agent.handleToolBatch({
+    tool_calls: [{
+      id: 'nearby-again',
+      type: 'function',
+      function: { name: 'getNearbyEntities', arguments: '{"radius":20}' },
+    }],
+  })
+
+  assert.equal(rcon.commands.filter(command => command.includes('get_nearby_entities')).length, afterFirst)
+})
+
+test('Jev cannot defer fact reads, admits one discovery read, and still bounds rounds', async () => {
+  // Jev budget and relevance as observed in the 2026-09-24 cloud trials: run 1
+  // deferred the inventory read that proved the step, run 5 deferred the
+  // search for the stone patch.
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'observation tier admission test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = await rcon.command('remote.call("sgluna_deployment","status")').then(JSON.parse)
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.observationBudgetOverride = 0
+  agent.observationBudgetRemaining = 0
+  agent.observationRelevanceOverride = []
+
+  const call = (id, name, args = '{}') => ({ id, type: 'function', function: { name, arguments: args } })
+  await agent.handleToolBatch({
+    tool_calls: [
+      call('inventory', 'getInventoryItems'),
+      call('nearby', 'getNearbyEntities', '{"radius":20}'),
+      call('long-range', 'findLongRangeEntities', '{"name":"stone"}'),
+      call('player', 'getPlayerStatus', '{"player_name":"Louis"}'),
+    ],
+  })
+  const executed = () => agent.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id)
+  assert.deepEqual(executed(), ['inventory', 'nearby'])
+  assert.equal(agent.observationBudgetRemaining, 0)
+  assert.equal(agent.observationDecisionForced, true)
+
+  // The exhausted budget closed the observation phase: not even a fact read runs.
+  await agent.handleToolBatch({ tool_calls: [call('actor', 'getActorStatus')] })
+  assert.deepEqual(executed(), ['inventory', 'nearby'])
+})
+
+test('spending the read budget closes the observation phase without a recovery record', async () => {
+  // Run Y (docs/NPC_EXECUTOR_RUN_AHEAD_DESIGN_2026-10-18.md): 63 of 70 recovery.classified rows were this normal
+  // close, and it became the request's recovery record that later recovery decisions and failure snapshots read.
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'observation phase close test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = await rcon.command('remote.call("sgluna_deployment","status")').then(JSON.parse)
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.traceRequest = { id: 'req_phase_close' }
+  agent.observationBudgetOverride = 1
+  agent.observationBudgetRemaining = 1
+  agent.observationRelevanceOverride = ['inventory_equipment']
+  const events = []
+  const traceEvent = agent.traceEvent.bind(agent)
+  agent.traceEvent = async (event, data) => {
+    events.push({ event, data })
+    return traceEvent(event, data)
+  }
+
+  await agent.handleToolBatch({ tool_calls: [{ id: 'inventory', type: 'function', function: { name: 'getInventoryItems', arguments: '{}' } }] })
+
+  assert.equal(agent.observationBudgetRemaining, 0)
+  assert.equal(agent.observationDecisionForced, true)
+  assert.match(agent.messages.at(-1).content, /observation phase for this decision is now closed/)
+  const closed = events.filter(row => row.event === 'observation.budget_closed')
+  assert.equal(closed.length, 1)
+  assert.equal(closed[0].data.reason_code, 'jev_observation_budget_complete')
+  assert.equal(events.some(row => row.event === 'recovery.classified'), false)
+  assert.equal(agent.traceRequest.recovery, undefined)
+
+  // A real recovery still records and traces as one.
+  await agent.recoveryDiagnostic({ failure_class: 'observation_no_progress', reason_code: 'jev_observation_budget_exhausted', reason: 'over budget' })
+  assert.equal(events.filter(row => row.event === 'recovery.classified').length, 1)
+  assert.equal(agent.traceRequest.recovery.reason_code, 'jev_observation_budget_exhausted')
+})
+
+test('every observation tool has an admission tier', () => {
+  for (const name of Object.keys(observationToolFamilyCatalog())) {
+    assert.ok(Object.hasOwn(OBSERVATION_TOOL_TIER, name), name)
+  }
+  assert.equal(observationToolTier('getInventoryItems'), 'fact')
+  assert.equal(observationToolTier('getRecipeDetails'), 'fact')
+  assert.equal(observationToolTier('findLongRangeEntities'), 'discovery')
+  assert.equal(observationToolTier('getPlayerStatus'), 'optional')
+})

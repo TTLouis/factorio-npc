@@ -1,0 +1,930 @@
+import type { ControlledActor } from './actors/types'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { new_basic_operation_runtime } from './basic_operation_runtime'
+import { new_basic_operation_controller } from './basic_operations'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, sort_candidates } from './placement_candidates'
+import { placement_footprint } from './placement_geometry'
+import { with_refusal_class } from './refusal_classes'
+import { new_task_manager } from './task_manager'
+
+// Run 19af: getPlacementCandidates returned legal drill candidates, but its rejected-footprint
+// samples (footprints overlapping furnace 31) were listed first and both roles read the answer as
+// blocked; the candidates were also about 15 tiles from the furnace they were meant to feed. The
+// candidate read now lists candidates first, labels the rejected footprints, ranks by distance to
+// an anchor entity, and treats footprints blocked only by clearable entities as legal.
+
+type Box = { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+type Pos = { x: number, y: number }
+
+const FURNACE = {
+  name: 'stone-furnace',
+  type: 'furnace',
+  tile_width: 2,
+  tile_height: 2,
+  collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
+  collision_mask: { layers: { object: true, item: true } },
+  items_to_place_this: [{ name: 'stone-furnace', count: 1 }],
+}
+const SPOT = { x: -33.5, y: -35.5 }
+const ACTOR_FORCE = { index: 1, name: 'player', is_chunk_charted: () => true, is_chunk_visible: () => true }
+const NEUTRAL = { index: 3, name: 'neutral' }
+const OTHER_FORCE = { index: 2, name: 'other' }
+const STATUS = { working: 1, normal: 2, no_ingredients: 3 }
+const MASK = { layers: { object: true } }
+
+function inside(box: Box, position: Pos) {
+  return position.x > box.left_top.x && position.x < box.right_bottom.x && position.y > box.left_top.y && position.y < box.right_bottom.y
+}
+
+let next_unit = 100
+function entity(fields: Record<string, any>): any {
+  const value: any = {
+    valid: true,
+    unit_number: next_unit++,
+    force: ACTOR_FORCE,
+    minable: true,
+    surface: { index: 1 },
+    ...fields,
+  }
+  value.destroy = vi.fn(() => { value.valid = false })
+  return value
+}
+
+// Natural: trees and rocks are neutral-force, hand-minable, and not placed buildings. The engine marks
+// every simple entity (a rock) as is_building, so the prototype's owner/placing item decides, as in the mod.
+function tree(position: Pos) {
+  const result = entity({
+    name: 'tree-01',
+    type: 'tree',
+    position,
+    force: NEUTRAL,
+    prototype: { type: 'tree', is_building: false, is_entity_with_owner: false, items_to_place_this: [], collision_mask: MASK,
+      mineable_properties: { minable: true, mining_time: 0.55, products: [{ type: 'item', name: 'wood', amount: 4 }] } },
+  })
+  return result
+}
+function rock(position: Pos) {
+  return entity({
+    name: 'rock-big',
+    type: 'simple-entity',
+    position,
+    force: NEUTRAL,
+    prototype: { type: 'simple-entity', is_building: true, is_entity_with_owner: false, items_to_place_this: [], collision_mask: MASK,
+      mineable_properties: { minable: true, mining_time: 2, products: [{ type: 'item', name: 'stone', amount_min: 20, amount_max: 50 }] } },
+  })
+}
+function cliff(position: Pos) {
+  return entity({
+    name: 'cliff',
+    type: 'cliff',
+    position,
+    force: NEUTRAL,
+    minable: false,
+    prototype: { type: 'cliff', is_building: true, is_entity_with_owner: false, items_to_place_this: [], collision_mask: MASK, mineable_properties: { minable: false } },
+  })
+}
+// A built chest. Defaults describe an idle NPC-built entity: actor force, no human last_user, no status,
+// empty inventories, no fluid, no logistic or wire links.
+function chest(position: Pos, fields: Record<string, any> = {}) {
+  return entity({
+    name: 'wooden-chest',
+    type: 'container',
+    position,
+    prototype: { type: 'container', is_building: true, is_entity_with_owner: true, items_to_place_this: [{ name: 'wooden-chest', count: 1 }], collision_mask: MASK,
+      mineable_properties: { minable: true, mining_time: 0.2, products: [{ type: 'item', name: 'wooden-chest', amount: 1 }] } },
+    status: undefined,
+    last_user: undefined,
+    get_max_inventory_index: () => 1,
+    get_inventory: () => ({ is_empty: () => true }),
+    fluidbox: [],
+    ...fields,
+  })
+}
+
+function ground_item(name: string, count: number, position: Pos) {
+  return entity({
+    name: 'item-on-ground',
+    type: 'item-entity',
+    position,
+    prototype: { collision_mask: { layers: { item: true } } },
+    stack: { valid_for_read: true, name, count, quality: { name: 'normal' } },
+  })
+}
+
+function world(entities: any[]) {
+  const live = () => entities.filter(value => value.valid)
+  const in_area = (filters: any) => live().filter(value => (!filters.type || value.type === filters.type) && (!filters.area || inside(filters.area, value.position))
+    && (!filters.force || value.force?.index === filters.force.index))
+  const surface: any = {
+    index: 1,
+    get_tile: () => ({ name: 'grass-1', collides_with: () => false }),
+    find_entities_filtered: vi.fn((filters: any) => in_area(filters).slice(0, filters.limit ?? 1000)),
+    count_entities_filtered: vi.fn((filters: any) => in_area(filters).length),
+    // The script check: anything in the footprint blocks it.
+    can_place_entity: vi.fn((args: any) => in_area({ area: placement_footprint(FURNACE, args.position, args.direction).world_box }).length === 0),
+  }
+  return surface
+}
+
+function inventory_with(slots: number) {
+  const held: Record<string, number> = { 'stone-furnace': 1 }
+  const inventory: any = {
+    held,
+    get_item_count: vi.fn((name: string) => held[name] ?? 0),
+    remove: vi.fn(({ name, count }: any) => {
+      const removed = Math.min(held[name] ?? 0, count)
+      held[name] = (held[name] ?? 0) - removed
+      // Room comes back for everything except the placement item, which was never part of the room under test.
+      if (name !== 'stone-furnace') slots += removed
+      return removed
+    }),
+    can_insert: vi.fn(({ count }: any) => count <= slots),
+    // Item units free, with no whole empty stacks: the room check then reduces to a per-item comparison.
+    get_insertable_count: vi.fn(() => slots),
+    count_empty_stacks: vi.fn(() => 0),
+    insert: vi.fn((stack: any) => {
+      const inserted = Math.min(stack.count, slots)
+      slots -= inserted
+      held[stack.name] = (held[stack.name] ?? 0) + inserted
+      return inserted
+    }),
+  }
+  return inventory
+}
+
+// An inventory described the way the engine answers the room check: whole empty stacks plus room left in partly filled stacks.
+function slot_inventory(empty: number, partial: Record<string, number> = {}) {
+  const sizes: Record<string, number> = { wood: 100, stone: 50, coal: 50, 'copper-ore': 50, 'stone-furnace': 50, 'wooden-chest': 50 }
+  const held: Record<string, number> = { 'stone-furnace': 1 }
+  const name_of = (filter: any) => typeof filter === 'string' ? filter : filter.name
+  const inventory: any = {
+    held,
+    count_empty_stacks: vi.fn(() => empty),
+    get_insertable_count: vi.fn((filter: any) => (partial[name_of(filter)] ?? 0) + empty * (sizes[name_of(filter)] ?? 0)),
+    get_item_count: vi.fn((name: string) => held[name] ?? 0),
+    remove: vi.fn(({ name, count }: any) => { held[name] = (held[name] ?? 0) - count; return count }),
+    can_insert: vi.fn(() => true),
+    insert: vi.fn((stack: any) => { held[stack.name] = (held[stack.name] ?? 0) + stack.count; return stack.count }),
+  }
+  return inventory
+}
+
+function npc(surface: any, inventory: any, position: Pos = { x: -33, y: -37 }) {
+  return {
+    is_valid: true,
+    character: { valid: true, prototype: { mining_speed: 0.5 }, character_mining_speed_modifier: 0, resource_reach_distance: 2.7, build_distance: 10 },
+    position,
+    surface,
+    force: { ...ACTOR_FORCE, manual_mining_speed_modifier: 0 },
+    get_main_inventory: () => inventory,
+    entity_build_args: () => ({ force: { index: 1 } }),
+    status_snapshot: () => ({ actor_id: 7, kind: 'standalone_character', valid: true, has_character: true, position }),
+  } as unknown as ControlledActor
+}
+
+// Native mining as the engine does it: the products go into the given inventory and the entity is gone.
+function mineable(value: any) {
+  value.mine = vi.fn(({ inventory: target }: any) => {
+    for (const product of value.prototype.mineable_properties.products) target.insert({ name: product.name, count: product.amount ?? product.amount_max })
+    value.valid = false
+    return true
+  })
+  return value
+}
+
+function request(extra: Record<string, unknown> = {}) {
+  return { entity_name: 'stone-furnace', covers_position: SPOT, center: { x: -33, y: -34 }, radius: 8, limit: 4, ...extra }
+}
+
+describe('placement candidate reads and clearing (Run 19af)', () => {
+  const originalPairs = (globalThis as any).pairs
+  const originalEntityPrototypes = (globalThis as any).prototypes.entity
+  const originalItemPrototypes = (globalThis as any).prototypes.item
+  const originalDefines = (globalThis as any).defines
+  const originalGetEntity = (globalThis as any).game.get_entity_by_unit_number
+  let by_unit: Record<number, any>
+
+  beforeEach(() => {
+    ;(globalThis as any).pairs = Object.entries
+    ;(globalThis as any).storage = {}
+    ;(globalThis as any).game.tick = 100
+    ;(globalThis as any).prototypes.entity = { 'stone-furnace': FURNACE }
+    ;(globalThis as any).prototypes.item = { 'stone-furnace': { stack_size: 50 }, wood: { stack_size: 100 }, stone: { stack_size: 50 }, coal: { stack_size: 50 }, 'copper-ore': { stack_size: 50 }, 'wooden-chest': { stack_size: 50 } }
+    ;(globalThis as any).defines = { ...originalDefines, entity_status: STATUS }
+    by_unit = {}
+    ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => by_unit[unit]
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).pairs = originalPairs
+    ;(globalThis as any).prototypes.entity = originalEntityPrototypes
+    ;(globalThis as any).prototypes.item = originalItemPrototypes
+    ;(globalThis as any).defines = originalDefines
+    ;(globalThis as any).game.get_entity_by_unit_number = originalGetEntity
+  })
+
+  function register(...values: any[]) {
+    for (const value of values) by_unit[value.unit_number] = value
+    return values[0]
+  }
+
+  describe('candidates first, rejected footprints labelled apart', () => {
+    it('lists the legal candidates before the rejected-footprint samples and labels those samples', () => {
+      // A player's furnace beside the search centre: footprints overlapping it are rejected, the rest are legal.
+      const player_furnace = register(chest({ x: -33, y: -34 }, { name: 'stone-furnace', type: 'furnace', unit_number: 31, force: OTHER_FORCE, prototype: { ...FURNACE, type: 'furnace', is_building: true, is_entity_with_owner: true, mineable_properties: { minable: true, mining_time: 0.2, products: [] } } }))
+      const result = create_placement_candidate_set(npc(world([player_furnace]), inventory_with(10)), { entity_name: 'stone-furnace', center: { x: -33, y: -34 }, radius: 4, limit: 4 }) as any
+
+      expect(result.ok).toBe(true)
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.obstructions.rejected_count).toBeGreaterThan(0)
+      const keys = Object.keys(result)
+      expect(keys.indexOf('candidates')).toBeGreaterThan(-1)
+      expect(keys.indexOf('candidates')).toBeLessThan(keys.indexOf('obstructions'))
+      expect(result.obstructions.label).toBe('rejected_footprint_samples_not_candidates')
+      expect(result.obstructions.samples[0].entities[0]).toMatchObject({ name: 'stone-furnace' })
+      for (const candidate of result.candidates) {
+        expect(candidate.id).toMatch(/^candidate-\d+$/)
+        const box = candidate.footprint.world_box
+        expect(inside(box, { x: -33, y: -34 })).toBe(false)
+      }
+    })
+  })
+
+  describe('anchor ranking', () => {
+    it('ranks candidates by distance to the anchor entity and reports it', () => {
+      const anchor = register(chest({ x: -39, y: -30 }, { name: 'stone-furnace', type: 'furnace', unit_number: 31, status: STATUS.working, prototype: { ...FURNACE, type: 'furnace', is_building: true, is_entity_with_owner: true, mineable_properties: { minable: true, mining_time: 0.2, products: [] } } }))
+      const actor = npc(world([anchor]), inventory_with(10))
+      const anchored = create_placement_candidate_set(actor, { entity_name: 'stone-furnace', center: { x: -33, y: -34 }, radius: 8, limit: 5, anchor: { unit_number: 31 } } as any) as any
+      const plain = create_placement_candidate_set(actor, { entity_name: 'stone-furnace', center: { x: -33, y: -34 }, radius: 8, limit: 5 }) as any
+
+      expect(anchored.ok).toBe(true)
+      expect(anchored.ordering).toBe('nearest_to_anchor_first')
+      expect(anchored.anchor).toMatchObject({ unit_number: 31, entity_name: 'stone-furnace' })
+      const distances = anchored.candidates.map((candidate: any) => candidate.distance_from_anchor)
+      expect(distances.every((value: unknown) => typeof value === 'number')).toBe(true)
+      expect([...distances].sort((left: number, right: number) => left - right)).toEqual(distances)
+      for (const candidate of anchored.candidates) expect(candidate.distance_from_anchor).toBeCloseTo(Math.hypot(candidate.position.x + 39, candidate.position.y + 30), 6)
+      // With no anchor the existing ordering stands, nearest the search centre.
+      expect(plain.ordering).toBe('fewest_clears_then_resource_coverage_then_nearest_to_center')
+      expect(plain.candidates[0].distance_from_anchor).toBeUndefined()
+      expect(anchored.candidates[0].position).not.toEqual(plain.candidates[0].position)
+    })
+
+    it('searches around the anchor when no centre is given, however far the actor is', () => {
+      const anchor = register(chest({ x: -18, y: -37 }, { name: 'stone-furnace', type: 'furnace', unit_number: 31, prototype: { ...FURNACE, type: 'furnace', is_building: true, is_entity_with_owner: true, mineable_properties: { minable: true, mining_time: 0.2, products: [] } } }))
+      const actor = npc(world([anchor]), inventory_with(10))
+      const result = create_placement_candidate_set(actor, { entity_name: 'stone-furnace', radius: 5, limit: 3, anchor: { unit_number: 31 } } as any) as any
+
+      expect(result.ok).toBe(true)
+      expect(result.center).toEqual({ x: -18, y: -37 })
+      for (const candidate of result.candidates) expect(candidate.distance_from_anchor).toBeLessThan(9)
+    })
+
+    it('refuses an anchor that is not an entity on the actor surface and force', () => {
+      const actor = npc(world([]), inventory_with(10))
+      expect(create_placement_candidate_set(actor, request({ anchor: { unit_number: 999 } })))
+        .toMatchObject({ ok: false, code: 'anchor_entity_not_found' })
+      expect(create_placement_candidate_set(actor, request({ anchor: { unit_number: 0 } })))
+        .toMatchObject({ ok: false, code: 'invalid_anchor' })
+    })
+
+    it('never offers to clear the anchor itself, though the same idle entity is clearable without it', () => {
+      const idle = register(chest(SPOT, { unit_number: 31 }))
+      const actor = npc(world([idle]), inventory_with(10))
+      const anchored = create_placement_candidate_set(actor, request({ anchor: { unit_number: 31 } })) as any
+      const plain = create_placement_candidate_set(actor, request()) as any
+
+      expect(anchored.returned_candidate_count).toBe(0)
+      expect(plain.returned_candidate_count).toBeGreaterThan(0)
+      expect(plain.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', unit_number: 31, reason: 'own_idle_entity' }])
+    })
+  })
+
+  describe('which footprint blockers count as clearable', () => {
+    function candidates_over(blockers: any[]) {
+      register(...blockers)
+      return create_placement_candidate_set(npc(world(blockers), inventory_with(10)), request()) as any
+    }
+
+    it('treats a tree as a clearable natural obstruction and names it', () => {
+      const result = candidates_over([tree(SPOT)])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      for (const candidate of result.candidates) {
+        expect(candidate.clears).toMatchObject([{ name: 'tree-01', type: 'tree', reason: 'natural_obstruction', position: SPOT }])
+      }
+    })
+
+    it('treats a rock (a simple entity the engine flags is_building) as clearable by its prototype data', () => {
+      const result = candidates_over([rock(SPOT)])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'rock-big', type: 'simple-entity', reason: 'natural_obstruction' }])
+    })
+
+    it('treats the NPC\'s own idle entity as clearable', () => {
+      const result = candidates_over([chest(SPOT)])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', reason: 'own_idle_entity' }])
+    })
+
+    it('still lists ground items and the entities to clear together', () => {
+      const result = candidates_over([tree(SPOT), ground_item('copper-ore', 1, { x: -33.2, y: -35.2 })])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.candidates[0].ground_items).toMatchObject([{ name: 'copper-ore', count: 1 }])
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'tree-01' }])
+    })
+
+    it.each([
+      ['a player building on another force', () => chest(SPOT, { force: OTHER_FORCE })],
+      ['a same-force building a human built or configured', () => chest(SPOT, { last_user: { valid: true, name: 'owner', index: 5 } })],
+      ['a cliff, which hand mining cannot remove', () => cliff(SPOT)],
+      ['an own entity that is working', () => chest(SPOT, { status: STATUS.working })],
+      ['an own entity holding items', () => chest(SPOT, { get_inventory: () => ({ is_empty: () => false }) })],
+      ['an own entity connected to fluid', () => chest(SPOT, { fluidbox: Object.assign([undefined], { get_connections: () => [{ valid: true }] }) })],
+      ['an own entity that drops onto another', () => chest(SPOT, { drop_target: { valid: true } })],
+      ['an own entity that picks up from another', () => chest(SPOT, { pickup_target: { valid: true } })],
+      ['an own entity wired to a pole', () => chest(SPOT, { neighbours: { copper: [{ valid: true }] } })],
+      ['an own belt with a neighbour', () => chest(SPOT, { belt_neighbours: { inputs: [{ valid: true }], outputs: [] } })],
+    ])('keeps %s blocked', (_label, make) => {
+      const result = candidates_over([make()])
+      expect(result.returned_candidate_count).toBe(0)
+      expect(result.obstructions.rejected_count).toBeGreaterThan(0)
+    })
+
+    it('keeps an own entity blocked while another machine feeds or drains it', () => {
+      const target = chest(SPOT)
+      const drill = chest({ x: -36, y: -35.5 }, { name: 'burner-mining-drill', type: 'mining-drill', drop_target: target })
+      const result = candidates_over([target, drill])
+      expect(result.returned_candidate_count).toBe(0)
+    })
+
+    it('keeps the whole footprint blocked when any one blocker is not clearable', () => {
+      const result = candidates_over([tree(SPOT), chest({ x: -33.2, y: -35.2 }, { force: OTHER_FORCE })])
+      expect(result.returned_candidate_count).toBe(0)
+    })
+
+    // A pole needs the engine's own prototype fields for its supply area and wire reach.
+    function pole(position: Pos, fields: Record<string, any> = {}) {
+      const result = chest(position, { name: 'small-electric-pole', type: 'electric-pole', neighbours: { copper: [] }, ...fields })
+      result.prototype = { ...result.prototype, type: 'electric-pole', supply_area_distance: 2.5, max_wire_distance: 7.5 }
+      return result
+    }
+    // Something a pole could supply: it carries an electric energy source and does not collide with the footprint.
+    function consumer(position: Pos) {
+      return chest(position, { name: 'lab', type: 'lab', prototype: { type: 'lab', is_building: true, is_entity_with_owner: true, items_to_place_this: [{ name: 'lab', count: 1 }],
+        collision_mask: { layers: { ground_tile: true } }, electric_energy_source_prototype: {}, mineable_properties: { minable: true, mining_time: 0.2, products: [] } } })
+    }
+
+    it('keeps a lone pole clearable only while nothing stands in its supply area', () => {
+      const alone = candidates_over([pole(SPOT)])
+      expect(alone.returned_candidate_count).toBeGreaterThan(0)
+      expect(alone.candidates[0].clears).toMatchObject([{ name: 'small-electric-pole', reason: 'own_idle_entity' }])
+      const supplying = candidates_over([pole(SPOT), consumer({ x: SPOT.x + 2.2, y: SPOT.y })])
+      expect(supplying.returned_candidate_count).toBe(0)
+    })
+
+    it.each([
+      ['a solar panel or accumulator on an electric network', () => chest(SPOT, { electric_network_id: 5 })],
+      ['a consumer a pole covers', () => chest(SPOT, { electric_network_id: 9 })],
+    ])('keeps %s blocked', (_label, make) => {
+      expect(candidates_over([make()]).returned_candidate_count).toBe(0)
+    })
+
+    it('treats an unreadable last user as a player\'s work and never clears it', () => {
+      const unreadable = chest(SPOT)
+      Object.defineProperty(unreadable, 'last_user', { get() { throw new Error('last_user is not readable here') } })
+      expect(candidates_over([unreadable]).returned_candidate_count).toBe(0)
+    })
+
+    it('keeps a neutral entity that holds items blocked, like an own one', () => {
+      const holder = tree(SPOT)
+      holder.get_max_inventory_index = () => 1
+      holder.get_inventory = () => ({ is_empty: () => false })
+      expect(candidates_over([holder]).returned_candidate_count).toBe(0)
+    })
+
+    it('fails closed when the neighbour scan fills its bound, since the entity that feeds this one may lie beyond it', () => {
+      const crowd = Array.from({ length: 70 }, (_unused, index) => chest({ x: SPOT.x + 2.9, y: SPOT.y - 1 + index * 0.02 }, {
+        name: 'filler', prototype: { type: 'container', is_building: true, is_entity_with_owner: true, items_to_place_this: [], collision_mask: { layers: { ground_tile: true } }, mineable_properties: { minable: false } },
+      }))
+      expect(candidates_over([chest(SPOT), ...crowd]).returned_candidate_count).toBe(0)
+    })
+
+    it('evaluates an entity once per request however many footprints touch it', () => {
+      const idle = chest(SPOT)
+      const reads = vi.fn(() => 1)
+      idle.get_max_inventory_index = reads
+      const result = candidates_over([idle])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.legal_candidate_count).toBeGreaterThan(1)
+      expect(reads).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not check clearance for footprints the request\'s own covers filter drops', () => {
+      const blockers = [chest({ x: -20, y: -20 })]
+      register(...blockers)
+      const surface = world(blockers)
+      const actor = npc(surface, inventory_with(10))
+      const result = create_placement_candidate_set(actor, request({ center: { x: -20, y: -20 }, radius: 2 })) as any
+      // Every footprint in this window is dropped by covers_position, so none is probed or sampled.
+      expect(result.clearance_probes).toBe(0)
+      expect(result.obstructions.rejected_count).toBe(0)
+      expect(result.candidates_may_be_incomplete).toBeUndefined()
+    })
+
+    it('spends the clearance budget outward from the centre and says beside the candidates when it ran out', () => {
+      const wood = tree({ x: -33.5, y: -35.5 })
+      register(wood)
+      const surface = world([wood, chest({ x: -10, y: -10 }, { force: OTHER_FORCE })])
+      surface.can_place_entity = vi.fn(() => false)
+      const result = create_placement_candidate_set(npc(surface, inventory_with(10)), { entity_name: 'stone-furnace', center: { x: -33, y: -35 }, radius: 24, limit: 3 }) as any
+
+      expect(result.clearance_probes).toBe(400)
+      expect(result).toMatchObject({ candidates_may_be_incomplete: true, candidates_incomplete_reason: 'clearance_check_limit' })
+      expect(Object.keys(result).indexOf('candidates_may_be_incomplete')).toBeLessThan(Object.keys(result).indexOf('obstructions'))
+      expect(result.obstructions.candidates_may_be_incomplete).toBeUndefined()
+      // The tree stands at the centre, in the first rings, so the budget reached it although most of the window is refused.
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'tree-01' }])
+    })
+
+    it('clears an idle own drill standing among many neutral trees and ore tiles', () => {
+      const drill = chest(SPOT, { name: 'burner-mining-drill', type: 'mining-drill' })
+      // Neutral entities cannot feed or power an NPC machine, so they never fill the neighbour scan.
+      const crowd = Array.from({ length: 80 }, (_unused, index) => tree({ x: SPOT.x + 2.9, y: SPOT.y - 1 + index * 0.02 }))
+      const result = candidates_over([drill, ...crowd])
+      expect(result.returned_candidate_count).toBeGreaterThan(0)
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'burner-mining-drill', reason: 'own_idle_entity' }])
+    })
+
+    it('with an anchor, an adjacent footprint that needs one tree cleared still comes first', () => {
+      const anchor = register(chest({ x: -33.5, y: -35.5 }, { unit_number: 31, status: STATUS.working }))
+      const wood = register(tree({ x: -31.5, y: -35.5 }))
+      const surface = world([anchor, wood])
+      // Only footprints over the tree are clearable near the anchor; clean spots exist 13+ tiles east of it.
+      surface.can_place_entity = vi.fn((args: any) => args.position.x > -33.5 + 13)
+      const result = create_placement_candidate_set(npc(surface, inventory_with(10)), { entity_name: 'stone-furnace', radius: 18, limit: 5, anchor: { unit_number: 31 } } as any) as any
+
+      expect(result.ordering).toBe('nearest_to_anchor_first')
+      expect(result.legal_candidate_count).toBeGreaterThan(5)
+      expect(result.candidates[0].clears).toMatchObject([{ name: 'tree-01' }])
+      expect(result.candidates[0].distance_from_anchor).toBeLessThan(4)
+      expect(result.candidates.slice(1).some((candidate: any) => candidate.clears === undefined && candidate.distance_from_anchor > 12)).toBe(true)
+    })
+
+    it('ranks by anchor distance first with the clear count as tie-break, and by clear count first without an anchor', () => {
+      const base = { id: '', direction: 0, distance_from_center: 1, footprint: {} as any }
+      const near_clearing: any = { ...base, position: { x: 1, y: 1 }, clears: [{ name: 'wooden-chest', type: 'container', position: { x: 1, y: 1 }, reason: 'own_idle_entity' }] }
+      const far_clean: any = { ...base, position: { x: 9, y: 9 }, distance_from_center: 9 }
+      const grounded: any = { ...base, position: { x: 5, y: 5 }, distance_from_center: 5, ground_items: [{ name: 'copper-ore', count: 1, position: { x: 5, y: 5 } }] }
+      const plain: any = { ...base, position: { x: 5, y: 7 }, distance_from_center: 5 }
+      const without_anchor = [near_clearing, far_clean]
+      sort_candidates(without_anchor)
+      expect(without_anchor[0]).toBe(far_clean)
+      const with_anchor = [far_clean, near_clearing]
+      sort_candidates(with_anchor, undefined, undefined, { x: 1, y: 1 })
+      expect(with_anchor[0]).toBe(near_clearing)
+      // At equal anchor distance, the one that clears nothing wins.
+      const equal_clearing: any = { ...base, position: { x: 3, y: 1 }, clears: near_clearing.clears }
+      const equal_clean: any = { ...base, position: { x: -1, y: 1 } }
+      const equal = [equal_clearing, equal_clean]
+      sort_candidates(equal, undefined, undefined, { x: 1, y: 1 })
+      expect(equal[0]).toBe(equal_clean)
+      // At equal distance, fewer ground items first.
+      const tied = [grounded, plain]
+      sort_candidates(tied)
+      expect(tied[0]).toBe(plain)
+    })
+
+    it('keeps terrain that collides blocked even when the entities in it are clearable', () => {
+      const blockers = [tree(SPOT)]
+      const surface = world(blockers)
+      surface.get_tile = () => ({ name: 'water', collides_with: (layer: string) => layer === 'object' })
+      const result = create_placement_candidate_set(npc(surface, inventory_with(10)), request()) as any
+      expect(result.returned_candidate_count).toBe(0)
+    })
+  })
+
+  describe('placing over clearable entities', () => {
+    function build(blockers: any[], slots: number | object = 10, position: Pos = { x: -33, y: -37 }) {
+      const inventory = typeof slots === 'number' ? inventory_with(slots) : slots as any
+      for (const blocker of blockers) if (blocker.type !== 'item-entity') mineable(blocker)
+      register(...blockers)
+      const surface = world(blockers)
+      surface.create_entity = vi.fn((args: any) => ({ valid: true, name: args.name, type: 'furnace', unit_number: 21, position: args.position, direction: 0, surface, force: { index: 1 } }))
+      const actor = npc(surface, inventory, position)
+      const manager = new_task_manager(() => actor)
+      const controller = new_basic_operation_controller(() => actor, manager)
+      const runtime = new_basic_operation_runtime(manager, controller)
+      return { actor, inventory, surface, manager, controller, runtime }
+    }
+
+    it('waits the native mining time, then mines the tree into the inventory and builds', () => {
+      const wood = tree(SPOT)
+      const { actor, inventory, surface, controller, runtime } = build([wood])
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+
+      runtime.state_placing(actor)
+      expect(wood.mine).not.toHaveBeenCalled()
+      expect(surface.create_entity).not.toHaveBeenCalled()
+      // 0.55 s of mining at speed 0.5 is 66 ticks.
+      ;(globalThis as any).game.tick = 100 + 65
+      runtime.state_placing(actor)
+      expect(wood.mine).not.toHaveBeenCalled()
+      ;(globalThis as any).game.tick = 100 + 66
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(true)
+      expect(wood.mine).toHaveBeenCalledTimes(1)
+      expect(wood.mine.mock.calls[0][0]).toMatchObject({ inventory, force: false })
+      expect(inventory.held.wood).toBe(4)
+      expect(surface.create_entity).toHaveBeenCalledTimes(1)
+      expect(controller.status().last_result).toMatchObject({
+        code: 'completed',
+        placed_unit_number: 21,
+        entities_cleared: [{ name: 'tree-01', type: 'tree', reason: 'natural_obstruction', position: SPOT, state: 'cleared', items: [{ name: 'wood', count: 4 }] }],
+      })
+    })
+
+    it('refuses a raw place_entity over the NPC\'s own idle entity instead of clearing it', () => {
+      const own = chest(SPOT)
+      const { actor, inventory, surface, controller, runtime, manager } = build([own])
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(own.mine).not.toHaveBeenCalled()
+      expect(own.valid).toBe(true)
+      expect(surface.create_entity).not.toHaveBeenCalled()
+      expect(inventory.held['wooden-chest'] ?? 0).toBe(0)
+      expect(controller.status().last_result).toMatchObject({ code: 'not_placeable', placement_blockers: [{ name: 'wooden-chest' }] })
+      expect(controller.status().last_result?.entities_cleared).toBeUndefined()
+      expect(cancelled).toHaveBeenCalledWith('placing:not_placeable', expect.objectContaining({ failed_before_mutation: true }))
+    })
+
+    it('still clears a tree and ground items on a raw place_entity', () => {
+      const wood = tree(SPOT)
+      const { actor, controller, runtime } = build([wood, ground_item('copper-ore', 1, { x: -33.2, y: -35.2 })])
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      expect(runtime.state_placing(actor)?.[0]).toBe(true)
+      expect(controller.status().last_result).toMatchObject({ code: 'completed', entities_cleared: [{ name: 'tree-01' }] })
+    })
+
+    it('clears the NPC\'s own idle entity only through place_candidate, and reports it', () => {
+      const own = chest(SPOT)
+      const { actor, inventory, controller, runtime } = build([own])
+      const generated = create_placement_candidate_set(actor, request({ limit: 1 })) as any
+      expect(generated.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', unit_number: own.unit_number, reason: 'own_idle_entity' }])
+      const queued = execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, (...args) => controller.submit_placement(...args))
+      expect(queued[0]).toBe(true)
+      expect(runtime.state_placing(actor)).toBeUndefined()
+      ;(globalThis as any).game.tick = 100 + 1000
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(true)
+      expect(inventory.held['wooden-chest']).toBe(1)
+      expect(controller.status().last_result).toMatchObject({
+        code: 'completed',
+        entities_cleared: [{ name: 'wooden-chest', reason: 'own_idle_entity', items: [{ name: 'wooden-chest', count: 1 }] }],
+      })
+    })
+
+    it('refuses with a clear code, before any mutation, when the inventory cannot take the products', () => {
+      const wood = tree(SPOT)
+      const { actor, surface, controller, runtime, manager } = build([wood], 2)
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(wood.mine).not.toHaveBeenCalled()
+      expect(wood.valid).toBe(true)
+      expect(surface.create_entity).not.toHaveBeenCalled()
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full', clearing_left: { name: 'tree-01', unit_number: wood.unit_number } })
+      expect(controller.status().last_result?.entities_cleared).toBeUndefined()
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_inventory_full', expect.objectContaining({ failed_before_mutation: true }))
+    })
+
+    it('reports what was cleared when a later blocker cannot be, and gives no proof of no mutation', () => {
+      const first = tree({ x: -33.2, y: -35.2 })
+      const second = tree({ x: -33.8, y: -35.8 })
+      const { actor, controller, runtime, manager } = build([first, second])
+      second.mine = vi.fn(() => false)
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(controller.status().last_result).toMatchObject({
+        code: 'clearing_failed',
+        entities_cleared: [{ name: 'tree-01', unit_number: first.unit_number }],
+        clearing_left: { unit_number: second.unit_number },
+      })
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
+    })
+
+    it('refuses before mining when the blockers together do not fit, though each would fit alone', () => {
+      const first = tree({ x: -33.2, y: -35.2 })
+      const second = tree({ x: -33.8, y: -35.8 })
+      const { actor, controller, runtime, manager } = build([first, second], 4)
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(first.mine).not.toHaveBeenCalled()
+      expect(second.mine).not.toHaveBeenCalled()
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_inventory_full', expect.objectContaining({ failed_before_mutation: true }))
+    })
+
+    function stone_and_coal() {
+      const rubble = rock(SPOT)
+      rubble.prototype.mineable_properties.products = [{ type: 'item', name: 'stone', amount: 5 }, { type: 'item', name: 'coal', amount: 5 }]
+      return rubble
+    }
+
+    it('counts every product of a blocker: one empty stack cannot take stone and coal together', () => {
+      const rubble = stone_and_coal()
+      const { actor, controller, runtime } = build([rubble], slot_inventory(1))
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      expect(runtime.state_placing(actor)?.[0]).toBe(false)
+      expect(rubble.mine).not.toHaveBeenCalled()
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
+    })
+
+    it.each([
+      ['two empty stacks', () => slot_inventory(2)],
+      ['room left in the stacks already held', () => slot_inventory(0, { stone: 5, coal: 5 })],
+    ])('takes both products with %s', (_label, inventory) => {
+      const rubble = stone_and_coal()
+      const { actor, controller, runtime } = build([rubble], inventory())
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      expect(runtime.state_placing(actor)).toBeUndefined()
+      expect(rubble.mine).not.toHaveBeenCalled()
+      expect(controller.status().last_result?.code).not.toBe('clearing_inventory_full')
+    })
+
+    it('counts the ground items with the blockers in the room it needs', () => {
+      const wood = tree(SPOT)
+      const ore = ground_item('copper-ore', 3, { x: -33.2, y: -35.2 })
+      const { actor, controller, runtime } = build([wood, ore], slot_inventory(1))
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      expect(runtime.state_placing(actor)?.[0]).toBe(false)
+      expect(wood.mine).not.toHaveBeenCalled()
+      expect(ore.valid).toBe(true)
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_inventory_full' })
+    })
+
+    it('never writes the inventory while it checks that the yield fits', () => {
+      const wood = tree(SPOT)
+      const { actor, inventory, controller, runtime } = build([wood], 10)
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      expect(inventory.insert).not.toHaveBeenCalled()
+      expect(inventory.remove).not.toHaveBeenCalled()
+      expect(inventory.get_insertable_count).toHaveBeenCalled()
+      expect(inventory.held.wood ?? 0).toBe(0)
+    })
+
+    it('records what a failed mine call changed: items that arrived although it returned false', () => {
+      const wood = tree(SPOT)
+      const { actor, inventory, controller, runtime, manager } = build([wood])
+      wood.mine = vi.fn(({ inventory: target }: any) => { target.insert({ name: 'wood', count: 2 }); return false })
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(inventory.held.wood).toBe(2)
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', state: 'items_taken_entity_remained', items: [{ name: 'wood', count: 2 }] }] })
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
+    })
+
+    it('records an entity the engine destroyed although the mine call returned false', () => {
+      const wood = tree(SPOT)
+      const { actor, controller, runtime, manager } = build([wood])
+      wood.mine = vi.fn(() => { wood.valid = false; return false })
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      runtime.state_placing(actor)
+
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed', entities_cleared: [{ name: 'tree-01', state: 'entity_gone_call_failed', items: [] }] })
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: false }))
+    })
+
+    it('keeps the no-mutation proof when a failed mine call changed nothing', () => {
+      const wood = tree(SPOT)
+      const { actor, controller, runtime, manager } = build([wood])
+      wood.mine = vi.fn(() => false)
+      const cancelled = vi.spyOn(manager, 'cancel_all_tasks')
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+      ;(globalThis as any).game.tick = 100 + 1000
+      runtime.state_placing(actor)
+
+      expect(controller.status().last_result).toMatchObject({ code: 'clearing_failed' })
+      expect(controller.status().last_result?.entities_cleared).toBeUndefined()
+      expect(cancelled).toHaveBeenCalledWith('placing:clearing_failed', expect.objectContaining({ failed_before_mutation: true }))
+    })
+
+    it('walks within mining reach of a blocker first, then resumes the same placement', () => {
+      const wood = tree(SPOT)
+      // Within build reach of the spot but beyond hand-mining reach of the tree.
+      const { actor, controller, runtime, manager } = build([wood], 10, { x: -33, y: -43 })
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0)).toBe(true)
+      runtime.state_placing(actor)
+
+      expect(manager.player_state.task_state).toBe('walking_to_entity')
+      expect(wood.mine).not.toHaveBeenCalled()
+      expect(manager.player_state.parameters_walk_to_entity?.requested_position).toEqual(SPOT)
+    })
+
+    it('hands place_candidate only the own entities the candidate listed', () => {
+      const own = chest(SPOT)
+      const { actor } = build([own])
+      const generated = create_placement_candidate_set(actor, request({ limit: 1 })) as any
+      const submit = vi.fn(() => true)
+      expect(execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, submit)[0]).toBe(true)
+      expect(submit).toHaveBeenCalledWith('stone-furnace', generated.candidates[0].position.x, generated.candidates[0].position.y, generated.candidates[0].direction, undefined, undefined, [own.unit_number])
+    })
+
+    it('refuses a candidate whose footprint gained an own entity it did not list', () => {
+      const wood = tree(SPOT)
+      const newcomer = chest({ x: -33.2, y: -35.2 })
+      const { actor, surface, controller } = build([wood])
+      const generated = create_placement_candidate_set(actor, request({ limit: 1 })) as any
+      expect(generated.candidates[0].clears).toMatchObject([{ name: 'tree-01' }])
+      mineable(newcomer)
+      register(newcomer)
+      ;(surface.find_entities_filtered as any).mockImplementation((filters: any) => [wood, newcomer].filter(value => value.valid && (!filters.area || inside(filters.area, value.position)) && (!filters.type || value.type === filters.type) && (!filters.force || value.force?.index === filters.force.index)))
+      surface.can_place_entity = vi.fn(() => false)
+      const submit = vi.fn(() => true)
+
+      expect(execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, submit)).toEqual([false, 'placement candidate is no longer placeable'])
+      expect(submit).not.toHaveBeenCalled()
+      void controller
+    })
+
+    it('does not clear what became unclearable after the candidate was read', () => {
+      const own = chest(SPOT)
+      const { actor, surface, controller, runtime } = build([own])
+      const generated = create_placement_candidate_set(actor, request({ limit: 1 })) as any
+      expect(generated.returned_candidate_count).toBe(1)
+      own.status = STATUS.working
+      const submit = vi.fn(() => true)
+
+      expect(execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, submit)).toEqual([false, 'placement candidate is no longer placeable'])
+      expect(submit).not.toHaveBeenCalled()
+      expect(own.mine).not.toHaveBeenCalled()
+      void surface; void controller; void runtime
+    })
+
+    it('hands the anchor to the placement so it can never be cleared there either', () => {
+      const anchor = chest({ x: -30, y: -30 }, { unit_number: 31 })
+      const { actor } = build([anchor])
+      const generated = create_placement_candidate_set(actor, { entity_name: 'stone-furnace', center: { x: -33, y: -34 }, radius: 3, limit: 1, anchor: { unit_number: 31 } } as any) as any
+      const submit = vi.fn(() => true)
+
+      expect(execute_placement_candidate(actor, generated.candidate_set_id, generated.candidates[0].id, submit)[0]).toBe(true)
+      expect(submit).toHaveBeenCalledWith('stone-furnace', generated.candidates[0].position.x, generated.candidates[0].position.y, generated.candidates[0].direction, undefined, [31])
+    })
+
+    it('never clears the anchor even when a raw placement lands on it', () => {
+      const anchor = chest(SPOT, { unit_number: 31 })
+      const { actor, controller, runtime, surface } = build([anchor])
+      expect(controller.submit_placement('stone-furnace', -34, -36, 0, undefined, [31])).toBe(true)
+      const result = runtime.state_placing(actor)
+
+      expect(result?.[0]).toBe(false)
+      expect(anchor.mine).not.toHaveBeenCalled()
+      expect(surface.create_entity).not.toHaveBeenCalled()
+      expect(controller.status().last_result).toMatchObject({ code: 'not_placeable' })
+    })
+  })
+
+  // Review O3-R2-1: whether an owned blocker is idle is decided by scanning around it (what feeds it, what its pole powers).
+  // Those scans are world reads too: one reaching a chunk the NPC does not see keeps the blocker and makes the footprint
+  // unseen, so an unseen machine can never decide the answer, and the map context covers the scanned area.
+  describe('clearance scans and map visibility (review O3-R2-1)', () => {
+    // Only chunk (0, 0), tiles 0..31, is visible to the NPC.
+    function chunk_zero_npc(blockers: any[]) {
+      register(...blockers)
+      const actor: any = npc(world(blockers), inventory_with(10), { x: 20, y: 10 })
+      actor.force = { ...ACTOR_FORCE, manual_mining_speed_modifier: 0, is_chunk_charted: () => true, is_chunk_visible: (_surface: any, chunk: Pos) => chunk.x === 0 && chunk.y === 0 }
+      return actor
+    }
+    function over(blockers: any[], at: Pos) {
+      return create_placement_candidate_set(chunk_zero_npc(blockers), { entity_name: 'stone-furnace', covers_position: at, center: { x: at.x - 0.5, y: at.y - 0.5 }, radius: 3, limit: 4 }) as any
+    }
+
+    it('an owned chest whose feeding scan reaches an unseen chunk is unseen, not idle and not verified blocked, with or without a hidden inserter', () => {
+      const at = { x: 30.5, y: 10.5 }
+      const alone = over([chest(at)], at)
+      const target = chest(at)
+      const hidden = chest({ x: 33.5, y: 10.5 }, { name: 'inserter', type: 'inserter', drop_target: target })
+      const fed = over([target, hidden], at)
+      for (const result of [alone, fed]) {
+        expect(result.ok).toBe(true)
+        expect(result.returned_candidate_count).toBe(0)
+        expect(result.spatial_status).toBe('search_incomplete')
+        expect(result.search_completeness.complete).toBe(false)
+        expect(result.search_completeness.reason).toBe('area_not_fully_visible')
+        expect(result.search_completeness.not_visible_rejected_count).toBeGreaterThan(0)
+        expect(result.map_context.evaluated_area.right_bottom.x).toBeGreaterThan(32)
+        expect(result.map_context.evaluated_area_coverage.fogged_chunks).toBeGreaterThan(0)
+      }
+      // The hidden inserter changed nothing the model reads.
+      expect(fed.search_completeness).toEqual(alone.search_completeness)
+      expect(JSON.stringify(fed)).not.toContain('"inserter"')
+    })
+
+    it('inside the visible chunk the scan still protects a fed chest and still clears an idle one', () => {
+      const at = { x: 16.5, y: 16.5 }
+      const idle = over([chest(at)], at)
+      expect(idle.returned_candidate_count).toBeGreaterThan(0)
+      expect(idle.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', reason: 'own_idle_entity' }])
+      expect(idle.search_completeness.not_visible_rejected_count).toBe(0)
+
+      const target = chest(at)
+      const feeding = chest({ x: 18.5, y: 16.5 }, { name: 'inserter', type: 'inserter', drop_target: target })
+      const fed = over([target, feeding], at)
+      expect(fed.returned_candidate_count).toBe(0)
+      expect(fed.spatial_status).toBe('none_in_verified_scope')
+      expect(fed.search_completeness.complete).toBe(true)
+      expect(fed.search_completeness.not_visible_rejected_count).toBe(0)
+    })
+  })
+  // M3C-R1-2: a stored candidate that clears an own blocker re-decides at preflight and execution whether that blocker is idle,
+  // which scans around it. The footprint can stay visible while that scan reaches a chunk the NPC no longer sees: the candidate
+  // is then stale (placement_candidate_not_visible) and nothing in the unseen chunk is read, whatever stands there. Pre-change
+  // (10d746a8) the revalidation scanned the unseen chunk: an idle blocker passed (ok:true, the candidate executed) and a feeding
+  // machine in the fog made it "no longer placeable".
+  describe('selection to execution re-reads a blocker only in chunks the NPC sees now (M3)', () => {
+    const BLOCKER_AT = { x: 1.5, y: 1.5 }
+
+    function stored_candidate(extra: any[] = []) {
+      const own = chest(BLOCKER_AT)
+      const blockers = [own, ...extra]
+      register(...blockers)
+      const surface = world(blockers)
+      const actor: any = npc(surface, inventory_with(10), { x: 2, y: 4 })
+      let fogged = false
+      // Chunk x = -1 holds the blocker's neighbour scan edge (tiles -1.5..0); the footprints cover tiles 0..3 in chunk 0.
+      actor.force.is_chunk_visible = (_surface: unknown, chunk: Pos) => !fogged || (chunk.x >= 0 && chunk.y >= 0)
+      const generated = create_placement_candidate_set(actor, request({ covers_position: BLOCKER_AT, center: { x: 1.5, y: 1.5 }, radius: 3, limit: 2 })) as any
+      expect(generated.returned_candidate_count).toBeGreaterThan(0)
+      expect(generated.candidates[0].clears).toMatchObject([{ name: 'wooden-chest', unit_number: own.unit_number, reason: 'own_idle_entity' }])
+      for (const candidate of generated.candidates) expect(candidate.position.x - 1).toBeGreaterThanOrEqual(0)
+      return { actor, surface, generated, fog: () => { fogged = true }, clear: () => { fogged = false } }
+    }
+
+    function scanned_unseen(surface: any) {
+      return surface.find_entities_filtered.mock.calls.some(([filters]: any[]) => filters.area !== undefined && (filters.area.left_top.x < 0 || filters.area.left_top.y < 0))
+    }
+
+    it('refuses at preflight and execution, without scanning the unseen chunk, while the footprint stays visible', () => {
+      const { actor, surface, generated, fog, clear } = stored_candidate()
+      const id = generated.candidates[0].id
+      // Control: everything visible, the stored candidate still holds.
+      expect(placement_candidate_preflight(actor, generated.candidate_set_id, id)).toMatchObject({ ok: true })
+
+      fog()
+      surface.find_entities_filtered.mockClear()
+      const result = placement_candidate_preflight(actor, generated.candidate_set_id, id) as any
+      expect(result).toMatchObject({ ok: false, code: 'placement_candidate_unavailable' })
+      expect(result.error.startsWith('placement_candidate_not_visible')).toBe(true)
+      expect(with_refusal_class(result).refusal_class).toBe('argument')
+      expect(scanned_unseen(surface)).toBe(false)
+
+      const submitted = vi.fn(() => true)
+      const executed = execute_placement_candidate(actor, generated.candidate_set_id, id, submitted)
+      expect(executed[0]).toBe(false)
+      expect(executed[1]).toContain('placement_candidate_not_visible')
+      expect(submitted).not.toHaveBeenCalled()
+      expect(scanned_unseen(surface)).toBe(false)
+
+      // Seen again, the same stored candidate holds again: the freshness is checked, not remembered.
+      clear()
+      expect(placement_candidate_preflight(actor, generated.candidate_set_id, id)).toMatchObject({ ok: true })
+    })
+
+    it('gives the same answer whether the unseen chunk is empty or holds a machine that feeds the blocker', () => {
+      const feeder = chest({ x: -0.5, y: 1.5 }, { name: 'burner-inserter', type: 'inserter' })
+      const { actor, generated, fog } = stored_candidate([feeder])
+      const id = generated.candidates[0].id
+      // Idle when the candidate was read; once its chunk is fogged it starts feeding the blocker.
+      fog()
+      feeder.drop_target = by_unit[generated.candidates[0].clears[0].unit_number]
+      const result = placement_candidate_preflight(actor, generated.candidate_set_id, id) as any
+      expect(result.error.startsWith('placement_candidate_not_visible')).toBe(true)
+    })
+  })
+})

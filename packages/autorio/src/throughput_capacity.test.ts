@@ -1,12 +1,13 @@
 import type { ControlledActor } from './actors/types'
 import { afterEach, describe, expect, it } from 'vitest'
+import { remember_entity_reference } from './entity_reference'
 import { throughput_capacity } from './throughput_capacity'
 
 const originalPrototypes = (globalThis as any).prototypes
 const originalGame = (globalThis as any).game
 
 function actor(force: Record<string, unknown> = {}, surfaceIndex = 1) {
-  return { is_valid: true, force, surface: { index: surfaceIndex } } as unknown as ControlledActor
+  return { is_valid: true, force: { index: 1, is_chunk_visible: () => true, is_chunk_charted: () => true, ...force }, surface: { index: surfaceIndex } } as unknown as ControlledActor
 }
 
 afterEach(() => {
@@ -85,6 +86,9 @@ describe('deterministic throughput capacity facts', () => {
       type: 'inserter',
       unit_number: 42,
       surface: { index: 1 },
+      force: { index: 1 },
+      position: { x: 1, y: 0 },
+      bounding_box: { left_top: { x: 0.6, y: -0.4 }, right_bottom: { x: 1.4, y: 0.4 } },
       active: true,
       inserter_target_pickup_count: 4,
       inserter_stack_size_override: 3,
@@ -96,9 +100,15 @@ describe('deterministic throughput capacity facts', () => {
       drop_target: drop,
       held_stack: { valid_for_read: true, name: 'iron-plate', count: 2 },
     }
-    ;(globalThis as any).game = { get_entity_by_unit_number: (unit: number) => unit === 42 ? inserter : undefined }
+    // Inserters lack the get-by-unit-number flag, so the native lookup misses
+    // in Factorio 2.0; the observation hint resolves the same identity.
+    ;(globalThis as any).storage = {}
+    ;(globalThis as any).game = { tick: 1, get_entity_by_unit_number: () => undefined }
+    remember_entity_reference(inserter as any)
+    const observer = actor({ index: 1 }, 1) as any
+    observer.surface.find_entities_filtered = () => [inserter]
 
-    const result = throughput_capacity(actor({}, 1), { kind: 'inserter_instance', unit_number: 42 })
+    const result = throughput_capacity(observer, { kind: 'inserter_instance', unit_number: 42 })
     expect(result).toMatchObject({
       ok: true,
       kind: 'inserter_instance',
@@ -118,7 +128,8 @@ describe('deterministic throughput capacity facts', () => {
 
   it('rejects an inserter instance on another surface', () => {
     ;(globalThis as any).game = {
-      get_entity_by_unit_number: () => ({ valid: true, type: 'inserter', surface: { index: 2 } }),
+      tick: 1,
+      get_entity_by_unit_number: () => ({ valid: true, name: 'inserter', type: 'inserter', unit_number: 7, surface: { index: 2 }, force: { index: 1 }, position: { x: 0, y: 0 } }),
     }
     expect(throughput_capacity(actor({}, 1), { kind: 'inserter_instance', unit_number: 7 })).toEqual({
       ok: false, error: { code: 'INVALID_REQUEST', message: 'entity is on another surface' },
@@ -127,7 +138,7 @@ describe('deterministic throughput capacity facts', () => {
 
   it('caps hand capacity by the selected item stack size', () => {
     ;(globalThis as any).prototypes = {
-      entity: { 'mod-inserter': { name: 'mod-inserter', type: 'inserter', bulk: false, uses_inserter_stack_size_bonus: true, inserter_stack_size_bonus: 20 } },
+      entity: { 'mod-inserter': { name: 'mod-inserter', type: 'inserter', bulk: false, uses_inserter_stack_size_bonus: true, inserter_stack_size_bonus: 20, get_inserter_rotation_speed: () => 0.02, get_inserter_extension_speed: () => 0.03 } },
       item: { fish: { name: 'fish', stack_size: 5 } },
     }
     const result = throughput_capacity(actor({ inserter_stack_size_bonus: 20, belt_stack_size_bonus: 0 }), {

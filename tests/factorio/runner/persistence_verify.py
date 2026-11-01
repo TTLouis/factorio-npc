@@ -63,10 +63,10 @@ def run(client: Rcon, results: Path) -> None:
 
     # The save already has Lua commands enabled, but keep the restart handshake
     # explicit so an unexpectedly unavailable mod/runtime fails with a useful log.
-    probe = command('/silent-command rcon.print("AIRI_RESTART_READY")')
-    if probe != 'AIRI_RESTART_READY':
-        probe = command('/silent-command rcon.print("AIRI_RESTART_READY")')
-    require(probe == 'AIRI_RESTART_READY', probe)
+    probe = command('/silent-command rcon.print("SGLUNA_RESTART_READY")')
+    if probe != 'SGLUNA_RESTART_READY':
+        probe = command('/silent-command rcon.print("SGLUNA_RESTART_READY")')
+    require(probe == 'SGLUNA_RESTART_READY', probe)
 
     original_id = before['actor_id']
     target_id = before['target_id']
@@ -75,6 +75,11 @@ def run(client: Rcon, results: Path) -> None:
     # The supervisor's bindNpc() issues this replicated RCON repair command once
     # the multiplayer server is ready. Mirror that exact startup boundary here
     # before asserting that stale serialized walking/mining/shooting was cleared.
+    startup = json_command(
+        lua_json(remote_call('autorio_operations', 'reconcile_startup', repr('persistence-restart-verify'))),
+        'logical task post-restart reconciliation',
+    )
+    require(startup.get('ok') is True and startup.get('reconciled') is True, startup)
     reconciliation = json_command(
         lua_json(remote_call('autorio_actor', 'reconcile_after_load')),
         'post-restart reconciliation',

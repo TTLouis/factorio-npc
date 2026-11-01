@@ -1,6 +1,7 @@
 import type { LuaEntity, LuaLogisticNetwork, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { remember_entity_reference } from './entity_reference'
 import { cancel_remote_deconstruction, inspect_remote_deconstruction, mark_remote_deconstruction } from './map_deconstruction'
 
 function make_network(overrides: Partial<LuaLogisticNetwork> = {}) {
@@ -57,6 +58,7 @@ function make_entity(surface: LuaSurface) {
 }
 
 beforeEach(() => {
+  ;(globalThis as any).storage = {}
   ;(globalThis as any).game.get_entity_by_unit_number = vi.fn()
 })
 
@@ -181,4 +183,34 @@ describe('map remote deconstruction', () => {
     })
     expect(entity.cancel_deconstruction).toHaveBeenCalledWith(actor.force)
   })
+
+  it('rejects deconstructing another force but allows neutral entities', () => {
+    const surface = make_surface([make_network()])
+    const actor = make_actor(surface)
+    const enemy = make_entity(surface)
+    ;(enemy as any).force = { index: 2, name: 'enemy' }
+    ;(globalThis as any).game.get_entity_by_unit_number.mockReturnValue(enemy)
+
+    expect(mark_remote_deconstruction(actor, 42)).toMatchObject({ accepted: false, code: 'wrong_force' })
+    expect(cancel_remote_deconstruction(actor, 42)).toMatchObject({ accepted: false, code: 'wrong_force' })
+    expect(enemy.order_deconstruction).not.toHaveBeenCalled()
+
+    const wreck = make_entity(surface)
+    ;(wreck as any).force = { index: 3, name: 'neutral' }
+    ;(globalThis as any).game.get_entity_by_unit_number.mockReturnValue(wreck)
+
+    expect(mark_remote_deconstruction(actor, 42)).toMatchObject({ accepted: true, code: 'deconstruction_marked' })
+  })
+
+  it('marks a map-observed building the unit-number index does not cover', () => {
+    const surface = make_surface([make_network()])
+    const actor = make_actor(surface)
+    const entity = make_entity(surface)
+    remember_entity_reference(entity)
+    ;(surface as any).find_entities_filtered = vi.fn(() => [entity])
+    ;(globalThis as any).game.get_surface = vi.fn(() => surface)
+
+    expect(mark_remote_deconstruction(actor, 42)).toMatchObject({ accepted: true, code: 'deconstruction_marked' })
+  })
 })
+

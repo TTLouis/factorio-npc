@@ -1,10 +1,24 @@
-import type { SkillDefinition } from './skills'
+import {
+  create_skill_candidate,
+  get_skill_definition,
+  type SkillDefinition,
+} from './skills'
+import {
+  skill_constraint_predicate_signature,
+  type SkillConstraintPredicate,
+} from './skill_constraint_predicates'
+import {
+  mark_skill_revision_reverified,
+  record_skill_evidence,
+  skill_semantic_signature,
+} from './skill_semantic_evidence'
 
 export type LearningOpportunitySource = 'completed_goal' | 'observed_factory' | 'experiment' | 'manual'
 export type LearningOpportunityState = 'detected' | 'analyzing' | 'candidate_created' | 'duplicate' | 'awaiting_verification' | 'verified' | 'rejected' | 'failed'
 export type LearningPolicy = 'manual' | 'assisted' | 'autonomous_bounded'
 export type LearningCost = 'cheap' | 'moderate' | 'expensive'
 export type LearningRisk = 'safe' | 'moderate' | 'dangerous'
+export type LearningVerificationQueueState = 'queued' | 'running' | 'blocked'
 
 export interface LearningSourceArea {
   surface_index: number
@@ -33,19 +47,47 @@ export interface LearningOpportunity {
 export interface LearningVerificationQueueItem {
   opportunity_id: string
   skill_id: string
-  state: 'queued' | 'blocked'
+  state: LearningVerificationQueueState
   created_tick: number
   estimated_cost: LearningCost
   risk: LearningRisk
   reason: string
 }
 
+interface VerificationEvidenceSnapshot {
+  id: string
+  skill_id: string
+  skill_revision: number
+  state?: string
+  failure_kind?: 'execution' | 'semantic'
+  reason?: string
+  evidence_refs?: string[]
+}
+
+export interface SkillSemanticCounterexample {
+  run_id: string
+  skill_id: string
+  skill_revision: number
+  predicates: SkillConstraintPredicate[]
+  evidence_refs: string[]
+  summary: string
+}
+
+interface StoredSkillRevision {
+  id: string
+  revision: number
+  status?: string
+}
+
 declare const storage: {
-  airi_learning_opportunities?: Record<string, LearningOpportunity>
-  airi_learning_opportunity_order?: string[]
-  airi_learning_next_id?: number
-  airi_learning_verification_queue?: LearningVerificationQueueItem[]
-  airi_learning_policy?: LearningPolicy
+  sgluna_learning_opportunities?: Record<string, LearningOpportunity>
+  sgluna_learning_opportunity_order?: string[]
+  sgluna_learning_next_id?: number
+  sgluna_learning_verification_queue?: LearningVerificationQueueItem[]
+  sgluna_learning_policy?: LearningPolicy
+  sgluna_skill_verification_runs?: Record<string, VerificationEvidenceSnapshot>
+  sgluna_skill_definitions?: Record<string, StoredSkillRevision>
+  sgluna_learning_terminal_evidence_processed?: Record<string, string>
 }
 
 export const MAX_LEARNING_OPPORTUNITIES = 32
@@ -70,44 +112,213 @@ function unique_strings(values: string[], limit = MAX_EVIDENCE_REFS) {
   return result
 }
 
+function unique_predicates(values: SkillConstraintPredicate[]) {
+  const result: SkillConstraintPredicate[] = []
+  const signatures: string[] = []
+  for (const predicate of values) {
+    const signature = skill_constraint_predicate_signature(predicate)
+    if (signatures.includes(signature)) continue
+    signatures.push(signature)
+    result.push(predicate)
+  }
+  return result
+}
+
 function records_readonly(): Record<string, LearningOpportunity> {
-  return storage.airi_learning_opportunities ?? {}
+  return storage.sgluna_learning_opportunities ?? {}
 }
 
 function order_readonly() {
-  return storage.airi_learning_opportunity_order ?? []
+  return storage.sgluna_learning_opportunity_order ?? []
 }
 
 function ensure_records() {
-  if (storage.airi_learning_opportunities === undefined) storage.airi_learning_opportunities = {}
-  if (storage.airi_learning_opportunity_order === undefined) storage.airi_learning_opportunity_order = []
-  return storage.airi_learning_opportunities
+  if (storage.sgluna_learning_opportunities === undefined) storage.sgluna_learning_opportunities = {}
+  if (storage.sgluna_learning_opportunity_order === undefined) storage.sgluna_learning_opportunity_order = []
+  return storage.sgluna_learning_opportunities
 }
 
 function ensure_queue() {
-  if (storage.airi_learning_verification_queue === undefined) storage.airi_learning_verification_queue = []
-  return storage.airi_learning_verification_queue
+  if (storage.sgluna_learning_verification_queue === undefined) storage.sgluna_learning_verification_queue = []
+  return storage.sgluna_learning_verification_queue
+}
+
+function terminal_evidence_processed() {
+  storage.sgluna_learning_terminal_evidence_processed ??= {}
+  return storage.sgluna_learning_terminal_evidence_processed
+}
+
+export function semantic_counterexample_from_failure(skill: SkillDefinition, run: VerificationEvidenceSnapshot, evidence_refs: string[] = []): SkillSemanticCounterexample | undefined {
+  if (run.state !== 'failed' || run.failure_kind !== 'semantic') return undefined
+  if (run.skill_id !== skill.id || run.skill_revision !== skill.revision) return undefined
+
+  const predicates: SkillConstraintPredicate[] = []
+  for (const relation of skill.topology.relations) {
+    if (relation.kind === 'adjacent' || relation.kind === 'custom') continue
+    if (relation.from === undefined && relation.to === undefined && relation.via === undefined) continue
+    predicates.push({
+      type: 'required_topology_relation',
+      relation_kind: relation.kind,
+      from: relation.from,
+      to: relation.to,
+      via: relation.via,
+    })
+  }
+  for (const output of skill.outputs) {
+    predicates.push({ type: 'output_delta', item: output.item, minimum_delta: 1 })
+  }
+
+  const deduplicated = unique_predicates(predicates)
+  if (deduplicated.length === 0) return undefined
+  return {
+    run_id: run.id,
+    skill_id: run.skill_id,
+    skill_revision: run.skill_revision,
+    predicates: deduplicated,
+    evidence_refs: unique_strings([...(run.evidence_refs ?? []), ...evidence_refs]),
+    summary: clean_text(run.reason ?? 'Semantic verification counterexample.'),
+  }
+}
+
+function counterexample_constraint_description(predicate: SkillConstraintPredicate) {
+  if (predicate.type === 'required_topology_relation') {
+    const endpoints = `${predicate.from ?? '?'} -> ${predicate.to ?? '?'}`
+    const via = predicate.via !== undefined ? ` via ${predicate.via}` : ''
+    return `Semantic counterexample requires ${predicate.relation_kind} ${endpoints}${via} to hold on a rebuilt instance.`
+  }
+  if (predicate.type === 'output_delta') return `Semantic counterexample requires ${predicate.item} to increase by at least ${predicate.minimum_delta} during bounded verification.`
+  if (predicate.type === 'resource_coverage') return `Semantic counterexample requires coverage of ${predicate.resource} by at least ${predicate.minimum_entities} resource entities.`
+  return 'Semantic counterexample requires a translated rebuild before reuse.'
+}
+
+export function revise_skill_from_semantic_counterexample(skill: SkillDefinition, counterexample: SkillSemanticCounterexample) {
+  if (counterexample.skill_id !== skill.id || counterexample.skill_revision !== skill.revision) return undefined
+  const existing = skill.constraints
+    .map(constraint => skill_constraint_predicate_signature(constraint.predicate))
+    .filter(value => value.length > 0)
+  const additions = counterexample.predicates.filter(predicate => !existing.includes(skill_constraint_predicate_signature(predicate)))
+  if (additions.length === 0) return undefined
+
+  const evidence_refs = unique_strings([...skill.source.evidence_refs, ...counterexample.evidence_refs], 64)
+  const known_failure_modes = unique_strings([...skill.known_failure_modes, counterexample.summary], 64)
+  const confidence_basis = unique_strings([
+    ...skill.confidence.basis,
+    `Revision ${skill.revision + 1} encodes deterministic semantic predicates from counterexample ${counterexample.run_id}.`,
+  ], 64)
+  const confidence_level = skill.confidence.level === 'high' ? 'medium' : skill.confidence.level
+
+  return create_skill_candidate({
+    ...skill,
+    revision: skill.revision + 1,
+    source: { ...skill.source, evidence_refs },
+    constraints: [
+      ...skill.constraints,
+      ...additions.map(predicate => ({
+        kind: predicate.type === 'resource_coverage' ? 'resource' as const : predicate.type === 'output_delta' ? 'custom' as const : 'placement' as const,
+        description: counterexample_constraint_description(predicate),
+        validation: 'unvalidated' as const,
+        evidence_refs: counterexample.evidence_refs,
+        predicate,
+      })),
+    ],
+    verification: {
+      ...skill.verification,
+      placement_rebuild: 'not_tested',
+      production_output: 'not_tested',
+      acceptance_conditions: [],
+    },
+    known_failure_modes,
+    confidence: { level: confidence_level, basis: confidence_basis },
+    examples: [
+      ...skill.examples,
+      {
+        summary: `Revised after semantic counterexample ${counterexample.run_id}.`,
+        notes: 'The revision adds only machine-readable predicates derived from structured topology/output semantics; free-form failure text is retained as evidence, not parsed as authority.',
+      },
+    ].slice(0, 64),
+  })
+}
+
+/**
+ * Verification owns the execution state machine, while learning owns the
+ * semantic evidence/trust overlay. Verification writes its terminal run before
+ * updating the linked learning opportunity, so this bridge can classify the
+ * completed run without introducing another polling loop or coupling the
+ * verifier to trust storage.
+ */
+function bridge_terminal_verification_evidence(opportunity: LearningOpportunity) {
+  if ((opportunity.state !== 'failed' && opportunity.state !== 'verified') || opportunity.verification_run_id === undefined) return
+  const run = storage.sgluna_skill_verification_runs?.[opportunity.verification_run_id]
+  if (!run || (run.state !== 'failed' && run.state !== 'verified')) return
+
+  const terminal_key = `${run.id}:${run.state}`
+  const processed = terminal_evidence_processed()
+  if (processed[run.id] === terminal_key) return
+
+  const refs = unique_strings([...(run.evidence_refs ?? []), ...opportunity.evidence_refs])
+  if (run.state === 'failed') {
+    const semantic = run.failure_kind === 'semantic'
+    record_skill_evidence(
+      run.skill_id,
+      run.skill_revision,
+      semantic ? 'semantic_failure' : 'execution_failure',
+      run.reason ?? opportunity.reason,
+      refs,
+    )
+    processed[run.id] = terminal_key
+
+    if (semantic) {
+      const skill = get_skill_definition(run.skill_id)
+      if (skill !== undefined && skill.revision === run.skill_revision && skill.status === 'candidate') {
+        const counterexample = semantic_counterexample_from_failure(skill, run, refs)
+        const revised = counterexample !== undefined ? revise_skill_from_semantic_counterexample(skill, counterexample) : undefined
+        if (revised !== undefined) {
+          const classification = classify_verification_cost_risk(revised)
+          queue_learning_verification(
+            opportunity.id,
+            revised.id,
+            classification.estimated_cost,
+            classification.risk,
+            `Re-verify revision ${revised.revision} after semantic counterexample ${run.id}.`,
+          )
+        }
+      }
+    }
+    return
+  }
+
+  const promoted = storage.sgluna_skill_definitions?.[run.skill_id]
+  if (!promoted || promoted.status !== 'verified' || promoted.revision <= run.skill_revision) return
+  record_skill_evidence(
+    promoted.id,
+    promoted.revision,
+    'success',
+    `Verification ${run.id} promoted revision ${promoted.revision} after live semantic checks.`,
+    refs,
+  )
+  mark_skill_revision_reverified(promoted.id, promoted.revision, refs)
+  processed[run.id] = terminal_key
 }
 
 export function get_learning_policy(): LearningPolicy {
-  return storage.airi_learning_policy ?? 'assisted'
+  return storage.sgluna_learning_policy ?? 'assisted'
 }
 
 export function set_learning_policy(value: unknown): LearningPolicy {
   if (value !== 'manual' && value !== 'assisted' && value !== 'autonomous_bounded') throw new Error('learning policy must be manual, assisted, or autonomous_bounded')
-  storage.airi_learning_policy = value
+  storage.sgluna_learning_policy = value
   return value
 }
 
 function next_opportunity_id() {
-  const next = storage.airi_learning_next_id ?? 1
-  storage.airi_learning_next_id = next + 1
+  const next = storage.sgluna_learning_next_id ?? 1
+  storage.sgluna_learning_next_id = next + 1
   return `learning-${next}`
 }
 
 export function create_learning_opportunity(value: Omit<LearningOpportunity, 'id' | 'created_tick' | 'state'> & { state?: LearningOpportunityState }) {
   const records = ensure_records()
-  const order = storage.airi_learning_opportunity_order as string[]
+  const order = storage.sgluna_learning_opportunity_order as string[]
   const id = next_opportunity_id()
   const opportunity: LearningOpportunity = {
     id,
@@ -132,6 +343,7 @@ export function create_learning_opportunity(value: Omit<LearningOpportunity, 'id
     const removed = order.shift()
     if (removed !== undefined) delete records[removed]
   }
+  bridge_terminal_verification_evidence(opportunity)
   return opportunity
 }
 
@@ -143,6 +355,7 @@ export function update_learning_opportunity(id: string, patch: Partial<LearningO
   if (patch.reason !== undefined) next.reason = clean_text(patch.reason)
   if (patch.evidence_refs !== undefined) next.evidence_refs = unique_strings(patch.evidence_refs)
   records[id] = next
+  bridge_terminal_verification_evidence(next)
   return next
 }
 
@@ -158,7 +371,7 @@ export function list_learning_opportunities(limit = MAX_LEARNING_OPPORTUNITIES) 
 }
 
 export function list_learning_verification_queue() {
-  return (storage.airi_learning_verification_queue ?? []).slice()
+  return (storage.sgluna_learning_verification_queue ?? []).slice()
 }
 
 export function queue_learning_verification(opportunity_id: string, skill_id: string, estimated_cost: LearningCost, risk: LearningRisk, reason: string) {
@@ -207,24 +420,22 @@ export function skill_novelty_key(skill: SkillDefinition) {
     const from = relation.from !== undefined ? node_by_id[relation.from] ?? relation.from : ''
     const to = relation.to !== undefined ? node_by_id[relation.to] ?? relation.to : ''
     const via = relation.via !== undefined ? node_by_id[relation.via] ?? relation.via : ''
-    return `${relation.kind}|${from}|${to}|${via}`
+    return `${relation.kind}|${from}|${to}|${via}|${relation.description ?? ''}`
   })
   relations.sort()
   const recipes = skill.source.recipe_ids.slice()
   recipes.sort()
-  const constraints = skill.constraints.map(value => `${value.kind}|${value.validation}`)
-  constraints.sort()
-  const parameters = skill.parameters.map(value => `${value.name}|${value.required ? 'required' : 'optional'}`)
+  const parameters = skill.parameters.map(value => `${value.name}|${value.required ? 'required' : 'optional'}|${value.description}|${value.default_value ?? ''}`)
   parameters.sort()
   return [
-    'learning-novelty-v1',
+    'learning-novelty-v2',
     `kind=${skill.kind}`,
     `inputs=${flow_signature(skill.inputs).join(',')}`,
     `outputs=${flow_signature(skill.outputs).join(',')}`,
     `recipes=${recipes.join(',')}`,
     `nodes=${nodes.join(',')}`,
     `relations=${relations.join(',')}`,
-    `constraints=${constraints.join(',')}`,
+    `semantic=${skill_semantic_signature(skill)}`,
     `parameters=${parameters.join(',')}`,
   ].join(';')
 }
@@ -269,6 +480,9 @@ function merge_numbers(left: number[], right: number[], limit = 64) {
 }
 
 export function merge_duplicate_skill(existing: SkillDefinition, incoming: SkillDefinition): SkillDefinition {
+  if (skill_novelty_key(existing) !== skill_novelty_key(incoming)) {
+    throw new Error('cannot merge skills with different semantic novelty keys')
+  }
   const evidence_refs = unique_strings([...existing.source.evidence_refs, ...incoming.source.evidence_refs])
   const recipe_ids = unique_strings([...existing.source.recipe_ids, ...incoming.source.recipe_ids], 64)
   const basis = unique_strings([...existing.confidence.basis, 'Observed an additional equivalent reusable instance.'], 64)

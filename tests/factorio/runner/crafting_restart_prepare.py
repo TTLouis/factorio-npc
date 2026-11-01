@@ -1,4 +1,4 @@
-"""Save while AIRI owns a live native crafting queue so load reconciliation can be verified."""
+"""Save while SGLuna owns a live native crafting queue so load reconciliation can be verified."""
 import argparse
 import json
 import sys

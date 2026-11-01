@@ -22,7 +22,7 @@ function fixture() {
     request_path: vi.fn(() => ++requestId),
   }
   const actor = {
-    is_valid: true, character, position, surface, force: { index: 1 },
+    is_valid: true, character, position, surface, force: { index: 1, is_chunk_visible: () => true, is_chunk_charted: () => true },
     status_snapshot: () => ({ actor_id: 1, kind: 'standalone_character', valid: true, has_character: true, position }),
     set_walking_state: vi.fn(),
   } as unknown as ControlledActor

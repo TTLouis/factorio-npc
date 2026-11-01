@@ -18,7 +18,7 @@ function fixture() {
       kind: 'standalone_character',
       valid: true,
       has_character: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
     }),
   } as unknown as ControlledActor
@@ -35,7 +35,7 @@ beforeEach(() => {
   ;(globalThis as any).game.tick = 100
   ;(globalThis as any).prototypes.entity['iron-ore'] = { type: 'resource' }
   ;(globalThis as any).prototypes.entity.coal = { type: 'resource' }
-  ;(globalThis as any).prototypes.entity['tree-01'] = { type: 'tree' }
+  ;(globalThis as any).prototypes.entity['tree-02-red'] = { type: 'tree' }
 })
 
 describe('composite resource gathering', () => {
@@ -84,7 +84,9 @@ describe('composite resource gathering', () => {
   it('rejects non-resource entities before creating any work', () => {
     const f = fixture()
 
-    expect(f.composite.gather_resource('tree-01', 1, 256)[0]).toBe(false)
+    const result = f.composite.gather_resource('tree-02-red', 1, 256)
+    expect(result[0]).toBe(false)
+    expect(result[1]).toMatch(/^invalid_target_kind: expected resource prototype; observed type=tree/)
     expect(f.manager.get_status_snapshot()).toMatchObject({
       task_state: TaskStates.IDLE,
       queue_length: 0,

@@ -2,6 +2,7 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { PlayerParametersWalkToEntity } from './types'
 import { distance } from './utils/math'
+import { find_world_entities } from './npc_vision'
 
 const SAMPLE_TICKS = 30
 const STUCK_TICKS = 90
@@ -29,9 +30,9 @@ interface ObstacleRecoveryState {
 }
 
 declare const storage: {
-  airi_navigation_clear_obstacles?: boolean
-  airi_navigation_obstacle_recovery?: ObstacleRecoveryState
-  airi_follow_state?: {
+  sgluna_navigation_clear_obstacles?: boolean
+  sgluna_navigation_obstacle_recovery?: ObstacleRecoveryState
+  sgluna_follow_state?: {
     active?: boolean
     clear_obstacles?: boolean
   }
@@ -59,15 +60,15 @@ export function is_natural_navigation_obstacle(entity: Pick<LuaEntity, 'type' | 
 }
 
 function task_policy(task: NavigationTask) {
-  if (task.persistent_follow && storage.airi_follow_state?.active === true) {
-    return storage.airi_follow_state.clear_obstacles !== false
+  if (task.persistent_follow && storage.sgluna_follow_state?.active === true) {
+    return storage.sgluna_follow_state.clear_obstacles !== false
   }
-  return storage.airi_navigation_clear_obstacles !== false
+  return storage.sgluna_navigation_clear_obstacles !== false
 }
 
 function state_for(actor: ControlledActor, task: NavigationTask) {
   const signature = task_signature(actor, task)
-  let state = storage.airi_navigation_obstacle_recovery
+  let state = storage.sgluna_navigation_obstacle_recovery
   if (!state || state.signature !== signature) {
     state = {
       signature,
@@ -76,13 +77,13 @@ function state_for(actor: ControlledActor, task: NavigationTask) {
       sample_tick: game.tick,
       last_progress_tick: game.tick,
     }
-    storage.airi_navigation_obstacle_recovery = state
+    storage.sgluna_navigation_obstacle_recovery = state
   }
   return state
 }
 
 function nearest_natural_obstacle(actor: ControlledActor) {
-  const candidates = actor.surface.find_entities_filtered({
+  const candidates = find_world_entities(actor.surface, {
     position: actor.position,
     radius: SCAN_RADIUS,
   }).filter(entity => entity.valid && is_natural_navigation_obstacle(entity))
@@ -175,21 +176,21 @@ function physically_stuck(actor: ControlledActor, state: ObstacleRecoveryState) 
 
 export function new_navigation_obstacle_recovery() {
   function set_enabled(enabled: boolean) {
-    storage.airi_navigation_clear_obstacles = enabled !== false
-    if (enabled === false && storage.airi_navigation_obstacle_recovery) {
-      storage.airi_navigation_obstacle_recovery.clear_obstacles = false
+    storage.sgluna_navigation_clear_obstacles = enabled !== false
+    if (enabled === false && storage.sgluna_navigation_obstacle_recovery) {
+      storage.sgluna_navigation_obstacle_recovery.clear_obstacles = false
     }
-    return storage.airi_navigation_clear_obstacles
+    return storage.sgluna_navigation_clear_obstacles
   }
 
   function enabled() {
-    return storage.airi_navigation_clear_obstacles !== false
+    return storage.sgluna_navigation_clear_obstacles !== false
   }
 
   function suspend(actor: ControlledActor | undefined) {
-    const state = storage.airi_navigation_obstacle_recovery
+    const state = storage.sgluna_navigation_obstacle_recovery
     if (state?.clearing_target && actor?.is_valid) actor.set_mining_state({ mining: false })
-    storage.airi_navigation_obstacle_recovery = undefined
+    storage.sgluna_navigation_obstacle_recovery = undefined
   }
 
   function tick(actor: ControlledActor, raw_task: PlayerParametersWalkToEntity | undefined) {
@@ -211,7 +212,7 @@ export function new_navigation_obstacle_recovery() {
   }
 
   function status() {
-    const state = storage.airi_navigation_obstacle_recovery
+    const state = storage.sgluna_navigation_obstacle_recovery
     const target = state?.clearing_target
     return {
       clear_obstacles: enabled(),

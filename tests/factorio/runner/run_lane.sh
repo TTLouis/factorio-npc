@@ -11,16 +11,22 @@ FACTORIO_ROOT="${FACTORIO_ROOT:-/opt/factorio}"
 FACTORIO_BIN="$FACTORIO_ROOT/bin/x64/factorio"
 TEST_ROOT="${TEST_ROOT:-/test}"
 SERVER_SETTINGS="$TEST_ROOT/fixtures/server-settings.json"
-RCON_PASSWORD="${RCON_PASSWORD:-airi-test}"
+RCON_PASSWORD="${RCON_PASSWORD:-sgluna-test}"
 LANE_ROOT="$(dirname "$RESULTS")"
 WRITE_DATA="$LANE_ROOT/factorio-data"
 MODS="$LANE_ROOT/mods"
 CONFIG="$LANE_ROOT/config.ini"
 FACTORIO_PID=""
 START_COUNT=0
+PRISTINE_SAVE="$LANE_ROOT/pristine-planning-live.zip"
 export PYTHONUNBUFFERED=1
 
-mkdir -p "$RESULTS" "$WRITE_DATA" "$MODS"
+mkdir -p "$RESULTS" "$WRITE_DATA/saves" "$MODS"
+if [[ "$LANE" == resilience || "$LANE" == recovery-loop || "$LANE" == queued-craft || "$LANE" == local-transfer-target || "$LANE" == shoreline-recovery || "$LANE" == partial-transfer ]]; then
+  # Independent controllers cannot share a persisted operation-ordinal journal.
+  # Capture the untouched generated world before either controller runs.
+  cp "$SAVE" "$PRISTINE_SAVE"
+fi
 # Parallel Factorio instances must not share a writable mod directory. Factorio
 # may maintain per-instance mod metadata/caches there, so clone the prepared test
 # mod tree once per lane just like save/write-data/ports are isolated.
@@ -72,6 +78,10 @@ trap 'exit 143' TERM
 
 start_factorio() {
   START_COUNT=$((START_COUNT + 1))
+  if [[ "$LANE" == tick-sprint && "$START_COUNT" -gt 1 ]]; then
+    SERVER_SETTINGS="$LANE_ROOT/sprint-startup-settings.json"
+    python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p["auto_pause"]=True; json.dump(p,open(sys.argv[2],"w"))' "$TEST_ROOT/fixtures/server-settings.json" "$SERVER_SETTINGS"
+  fi
   local process_log="$RESULTS/factorio-process-$START_COUNT.log"
   local console_log="$RESULTS/factorio-console-$START_COUNT.log"
 
@@ -116,6 +126,17 @@ run_py() {
     "$@"
 }
 
+run_node() {
+  local script="$1"
+  shift
+  NODE_TEST_CONTEXT=1 node "$TEST_ROOT/runner/$script" \
+    --host 127.0.0.1 \
+    --port "$RCON_PORT" \
+    --password "$RCON_PASSWORD" \
+    --results "$RESULTS" \
+    "$@"
+}
+
 printf '[npc-test][%s] Starting isolated runtime lane.\n' "$LANE"
 start_factorio
 
@@ -125,12 +146,194 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  map-context)
+    # M3: map crop, fog and selection-to-execution freshness with zero humans, then a real save/restart.
+    printf '[npc-test][map-context] Running map crop, boundary, movement and stale-selection gates...\n'
+    run_node map_context_factorio.mjs --phase prepare --save "$SAVE"
+    restart_factorio
+    printf '[npc-test][map-context] Verifying knowledge, crop and stale refusals after a real Factorio restart...\n'
+    run_node map_context_factorio.mjs --phase verify
+    ;;
+  tick-sprint)
+    run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"
+    stop_factorio
+    SAVE="$WRITE_DATA/saves/sprint-active-negative-control.zip"
+    [[ -s "$SAVE" ]] || { echo 'Active-lease negative-control save missing' >&2; exit 1; }
+    run_node startup_clock_factorio.mjs --save "$SAVE" --mods "$MODS" --game-port "$SERVER_PORT"
+    ;;
+  production-task)
+    run_node production_task_factorio.mjs
+    ;;
+  entity-refresh)
+    run_node run_as_entity_refresh_factorio.mjs
+    ;;
+  pump-landfill-removal)
+    run_py pump_landfill_removal_cell.py
+    run_py pump_landfill_lifecycle.py --phase prepare --save "$SAVE"
+    restart_factorio
+    run_py pump_landfill_lifecycle.py --phase verify
+    run_py pump_landfill_lifecycle.py --phase death
+    ;;
+  offshore-water-first)
+    run_py offshore_water_first_cell.py
+    ;;
+  area-reservations)
+    run_node area_reservation_factorio.mjs --phase prepare --save "$SAVE"
+    restart_factorio
+    run_node area_reservation_factorio.mjs --phase verify
+    ;;
+  water-reach-approach)
+    printf '[npc-test][water-reach-approach] Running water approach, collision-refused walk and positive-read gate on the 18ab seed...\n'
+    run_py water_reach_approach_cell.py
+    ;;
+  partial-transfer)
+    run_node partial_transfer_factorio.mjs --mode recovery
+    stop_factorio
+    SAVE="$LANE_ROOT/partial-transfer-unknown.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node partial_transfer_factorio.mjs --mode unknown
+    ;;
+  zero-transfer)
+    run_node zero_transfer_factorio.mjs
+    ;;
+  fresh-topology)
+    run_node fresh_topology_factorio.mjs
+    ;;
+  normal-observation)
+    run_node normal_observation_factorio.mjs
+    ;;
+  direct-feed-observation)
+    run_node direct_feed_observation_factorio.mjs
+    ;;
+  ground-item-pickup)
+    printf '[npc-test][ground-item-pickup] Running drill spill, furnace pickup build and partial-pickup receipts against the real engine...\n'
+    run_node ground_item_pickup_factorio.mjs
+    ;;
+  placement-clearing)
+    printf '[npc-test][placement-clearing] Running tree, rock and idle-chest clearing, blocked footprints, the anchor ranking and region-constrained candidates against the real engine...\n'
+    run_node placement_clearing_factorio.mjs
+    ;;
+  local-transfer-target)
+    run_node local_transfer_target_factorio.mjs --mode recovery
+    stop_factorio
+    # Factorio saves back to --start-server's path on shutdown. Never start
+    # either control directly from the immutable pristine fixture.
+    SAVE="$LANE_ROOT/local-transfer-prefix.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node local_transfer_target_factorio.mjs --mode prefix
+    stop_factorio
+    SAVE="$LANE_ROOT/local-transfer-destroyed.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node local_transfer_target_factorio.mjs --mode destroyed
+    ;;
+  resume-water)
+    run_node resume_water_factorio.mjs --mode prepare
+    restart_factorio
+    run_node resume_water_factorio.mjs --mode verify
+    ;;
+  targeted-water)
+    run_node targeted_water_factorio.mjs
+    ;;
+  closed-action)
+    run_node closed_action_factorio.mjs
+    ;;
+  step-contract)
+    run_node step_contract_factorio.mjs
+    ;;
+  observation-baseline)
+    run_node observation_baseline_factorio.mjs
+    ;;
+  shoreline-recovery)
+    run_node shoreline_recovery_factorio.mjs
+    stop_factorio
+    SAVE="$LANE_ROOT/shoreline-water-only.zip"
+    cp "$PRISTINE_SAVE" "$SAVE"
+    start_factorio
+    run_node shoreline_recovery_factorio.mjs --water-only
+    ;;
+  invalid-reference)
+    run_node invalid_reference_factorio.mjs
+    ;;
+  queued-craft)
+    run_node queued_craft_factorio.mjs --mode control
+    stop_factorio
+    SAVE="$PRISTINE_SAVE"
+    start_factorio
+    run_node queued_craft_factorio.mjs --mode proof
+    ;;
+  recovery-loop)
+    run_node recovery_loop_factorio.mjs --mode prepare --save "$SAVE"
+    restart_factorio
+    run_node recovery_loop_factorio.mjs --mode collect --save "$SAVE"
+    restart_factorio
+    run_node recovery_loop_factorio.mjs --mode settle --save "$SAVE"
+    stop_factorio
+    SAVE="$PRISTINE_SAVE"
+    start_factorio
+    run_node recovery_loop_factorio.mjs --mode cancel --save "$SAVE"
+    ;;
+  steam-lab)
+    printf '[npc-test][steam-lab] Running steam/drill canary and native powered-lab research gate...\n'
+    run_py steam_power_cell.py
+    ;;
+  entity-observation)
+    run_py exact_entity_status_cell.py
+    run_node contract_obligation_geometry_factorio.mjs
+    run_node fluid_preservation_factorio.mjs
+    ;;
+  craft-trigger)
+    run_py craft_trigger_cell.py
+    ;;
+  trigger-ladder)
+    printf '[npc-test][trigger-ladder] Running fresh-world research-trigger ladder (every trigger tech in the red/green science closure)...\n'
+    run_py trigger_ladder_cell.py
+    ;;
+  requirements)
+    printf '[npc-test][requirements] Running scripted first-plan grounding against live recipe/research facts...\n'
+    run_node goal_requirements_factorio.mjs
+    ;;
+  native-admission)
+    printf '[npc-test][native-admission] Running native admission refusals, natural-only harvest and held-item placement against the real engine...\n'
+    run_node native_admission_factorio.mjs
+    ;;
+
   core)
+    printf '[npc-test][core] Running exact entity observation gate...\n'
+    run_py exact_entity_status_cell.py
     printf '[npc-test][core] Running placement/transfer and lifecycle cancellation gates...\n'
     run_py placement_transfer.py
+    printf '[npc-test][core] Running full furnace supply/retrieval transfer gate...\n'
+    run_py smelting_transfer.py
+    printf '[npc-test][core] Running three-furnace supply refusal gate (one refused move, independent siblings)...\n'
+    run_py furnace_supply_refusal.py
     run_py control_lifecycle.py
     printf '[npc-test][core] Running owned basic-operation outcome/failure gates...\n'
     run_py basic_outcomes.py
+    printf '[npc-test][core] Running exact non-resource mining auto-approach gate...\n'
+    run_py exact_entity_mining.py
+    printf '[npc-test][core] Running construction-area finite blocker clearing gate...\n'
+    run_py construction_area_clearing.py
+    printf '[npc-test][core] Running last_user provenance gate (MW1 protected-asset rule)...\n'
+    run_py last_user_provenance.py
+    ;;
+
+  provenance)
+    # MW1: isolated, fast lane for the protected-asset engine facts (LuaEntity.last_user).
+    printf '[npc-test][provenance] Running last_user provenance gate...\n'
+    run_py last_user_provenance.py
+    ;;
+
+  vision)
+    # Hidden NPC vision vehicle: lifecycle, non-interaction, invisibility and what the engine
+    # charts with zero players, then a real save/restart of the single persisted vehicle.
+    printf '[npc-test][vision] Running NPC vision vehicle gate...\n'
+    run_py npc_vision_cell.py --phase prepare --save "$SAVE"
+    restart_factorio
+    printf '[npc-test][vision] Verifying the persisted vision vehicle after a real Factorio restart...\n'
+    run_py npc_vision_cell.py --phase verify
     ;;
 
   research-combat)
@@ -143,10 +346,28 @@ case "$LANE" in
     ;;
 
   resilience)
+    printf '[npc-test][resilience] Preparing full planning lifecycle acceptance state on real Factorio...\n'
+    run_node planning_lifecycle_factorio.mjs --mode prepare
+
     printf '[npc-test][resilience] Saving active movement for real process restart...\n'
     run_py persistence_prepare.py --save "$SAVE"
     restart_factorio
     run_py persistence_verify.py
+
+    printf '[npc-test][resilience] Verifying full planning lifecycle lineage after real Factorio restart...\n'
+    run_node planning_lifecycle_factorio.mjs --mode verify
+
+    # Each fixture owns independent durable memory. Restart preserves the world
+    # admission high-water mark, so use a pristine world for the next controller
+    # rather than resetting that production replay fence.
+    stop_factorio
+    SAVE="$PRISTINE_SAVE"
+    start_factorio
+    printf '[npc-test][resilience] Preparing live planning BLOCKED state against real Factorio preflight...\n'
+    run_node planning_live_factorio.mjs --mode prepare --save "$SAVE"
+    restart_factorio
+    printf '[npc-test][resilience] Restoring planning BLOCKED state after real Factorio restart...\n'
+    run_node planning_live_factorio.mjs --mode verify
 
     printf '[npc-test][resilience] Running death-recovery and navigation/belt gates...\n'
     run_py death_recovery.py
@@ -155,10 +376,35 @@ case "$LANE" in
     printf '[npc-test][resilience] Running owned native crafting/cancellation gate...\n'
     run_py crafting.py
 
-    printf '[npc-test][resilience] Saving active owned craft for second process restart...\n'
+    printf '[npc-test][resilience] Saving active owned craft for crafting restart...\n'
     run_py crafting_restart_prepare.py --save "$SAVE"
     restart_factorio
     run_py crafting_restart_verify.py
+    ;;
+
+  production)
+    # Production-capability validation lane (docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md).
+    # Kept isolated from `core` because these gates rewrite terrain, force
+    # always_day and raise game.speed inside their own save.
+    # Ordering matters: the assembler gate ends by exercising the NPC recipe
+    # operation, which currently kills the Factorio process (see the runtime
+    # defect documented in powered_assembler_cell.py), so it must run last.
+    printf '[npc-test][production] Running candidate drill -> furnace placement gate...\n'
+    run_py burner_drill_placement_cell.py
+    printf '[npc-test][production] Running hand mining/crafting rate gate (force manual modifiers)...\n'
+    run_py hand_work_rates_cell.py
+    printf '[npc-test][production] Running hand-crafted item statistics gate (items_produced counts what the NPC crafts)...\n'
+    run_py hand_craft_statistics_cell.py
+    printf '[npc-test][production] Running machine expected-finish gate (waits from game data)...\n'
+    run_py machine_eta_cell.py
+    printf '[npc-test][production] Running minimal steam power gate (offshore pump -> boiler -> engine -> electric drill)...\n'
+    run_py steam_power_cell.py
+    printf '[npc-test][production] Running compiled-Lua scope/capacity/fluid tool gate...\n'
+    run_py compiled_lua_tools_cell.py
+    printf '[npc-test][production] Running A1 belt/inserter transport gate...\n'
+    run_py belt_transport_cell.py
+    printf '[npc-test][production] Running A1 powered assembler production cell gate...\n'
+    run_py powered_assembler_cell.py
     ;;
 
   *)

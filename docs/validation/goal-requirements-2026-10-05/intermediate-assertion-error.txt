@@ -1,0 +1,5 @@
+AssertionError [ERR_ASSERTION]: ordinary red-science prerequisites must fit without spurious orbital research
+
+true !== false
+
+    at main (file:///test/runner/goal_requirements_factorio.mjs:70:12)

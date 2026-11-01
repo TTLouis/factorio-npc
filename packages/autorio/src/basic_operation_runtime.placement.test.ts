@@ -5,16 +5,35 @@ import { new_basic_operation_controller } from './basic_operations'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
-function fixture() {
-  const item = { valid_for_read: true, count: 2 }
+function fixture(itemName = 'steel-chest', itemCount = 2) {
+  const item = { valid_for_read: true, name: itemName, count: itemCount }
   const inventory: any = []
-  inventory.find_item_stack = vi.fn(() => [item, 1])
+  inventory.get_item_count = vi.fn((name: string) => name === item.name ? item.count : 0)
+  inventory.remove = vi.fn(({ name, count }: { name: string, count: number }) => {
+    if (name !== item.name) return 0
+    const removed = math.min(item.count, count)
+    item.count -= removed
+    return removed
+  })
 
-  const surface = {
+  const surface: any = {
+    index: 1,
     find_non_colliding_position: vi.fn(() => ({ x: 1, y: 0 })),
     can_place_entity: vi.fn(() => true),
-    create_entity: vi.fn(() => ({ valid: true, unit_number: 77 })),
+    find_entities_filtered: vi.fn(() => []),
   }
+  surface.create_entity = vi.fn((args: any) => ({
+    valid: true,
+    name: args.name,
+    type: 'container',
+    unit_number: 77,
+    position: { x: args.position.x, y: args.position.y },
+    direction: args.direction ?? 0,
+    surface,
+    // A real LuaEntity always carries force; placement now remembers the entity
+    // it just built so exact operations can resolve it before any observation.
+    force: { index: 1 },
+  }))
   const actor = {
     is_valid: true,
     character: { valid: true },
@@ -41,15 +60,30 @@ function fixture() {
 beforeEach(() => {
   ;(globalThis as any).storage = {}
   ;(globalThis as any).game.tick = 100
+  ;(globalThis as any).prototypes.item['steel-chest'] = {}
   ;(globalThis as any).prototypes.entity['steel-chest'] = {
     items_to_place_this: [{ name: 'steel-chest', count: 1 }],
+    tile_width: 1,
+    tile_height: 1,
+    collision_box: { left_top: { x: -0.4, y: -0.4 }, right_bottom: { x: 0.4, y: 0.4 } },
   }
 })
 
 describe('precise placement runtime', () => {
+  it('settles a placement queued before its footprint becomes reserved', () => {
+    const f = fixture()
+    expect(f.controller.submit_placement('steel-chest', 4.5, -1.5, 0)).toBe(true)
+    ;(storage as any).sgluna_area_reservations = [{ id: 1, state: 'reserved', surface: f.surface,
+      box: { left_top: { x: 4, y: -2 }, right_bottom: { x: 5, y: -1 } } }]
+    expect(f.runtime.state_placing(f.actor)?.[0]).toBe(false)
+    expect(f.controller.status().last_result).toMatchObject({ code: 'npc_area_reserved' })
+    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.surface.create_entity).not.toHaveBeenCalled()
+    expect(f.item.count).toBe(2)
+  })
   it('places at the exact local coordinate with the requested direction', () => {
     const f = fixture()
-    expect(f.controller.submit_placement('steel-chest', 4.5, -2, 6)).toBe(true)
+    expect(f.controller.submit_placement('steel-chest', 4.5, -1.5, 6)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
 
@@ -57,13 +91,13 @@ describe('precise placement runtime', () => {
     expect(f.surface.find_non_colliding_position).not.toHaveBeenCalled()
     expect(f.surface.can_place_entity).toHaveBeenCalledWith({
       name: 'steel-chest',
-      position: { x: 4.5, y: -2 },
+      position: { x: 4.5, y: -1.5 },
       direction: 6,
       force: f.actor.force,
     })
     expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({
       name: 'steel-chest',
-      position: { x: 4.5, y: -2 },
+      position: { x: 4.5, y: -1.5 },
       direction: 6,
       raise_built: true,
     }))
@@ -72,14 +106,125 @@ describe('precise placement runtime', () => {
     expect(f.controller.status().last_result).toMatchObject({
       code: 'completed',
       completed: true,
-      requested_position: { x: 4.5, y: -2 },
+      requested_position: { x: 4.5, y: -1.5 },
       direction: 6,
+      placed_unit_number: 77,
+      placed_entity_type: 'container',
+      placed_position: { x: 4.5, y: -1.5 },
+      placed_surface_index: 1,
+      placed_direction: 6,
     })
+  })
+
+  it('snaps an auto-picked position onto the tile grid when no coordinate is given', () => {
+    const f = fixture()
+    ;(f.actor as any).position = { x: 8.18359375, y: 0.31640625 }
+    f.surface.find_non_colliding_position.mockImplementation((_name: string, origin: { x: number, y: number }) => ({ x: origin.x + 1, y: origin.y }))
+    expect(f.controller.submit_placement('steel-chest')).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(true)
+    expect(f.surface.find_non_colliding_position).toHaveBeenCalledWith('steel-chest', { x: 8.5, y: 0.5 }, 1, 1)
+    expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'steel-chest',
+      position: { x: 9.5, y: 0.5 },
+    }))
+    expect(f.controller.status().last_result).toMatchObject({ code: 'completed', completed: true })
+  })
+
+  it('snaps an off-grid center onto the tile the engine would use and keeps the requested point', () => {
+    ;(globalThis as any).prototypes.item['burner-mining-drill'] = {}
+    ;(globalThis as any).prototypes.entity['burner-mining-drill'] = {
+      items_to_place_this: [{ name: 'burner-mining-drill', count: 1 }],
+      tile_width: 2,
+      tile_height: 2,
+      collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
+    }
+    const f = fixture('burner-mining-drill', 2)
+    // The live P0 regression passed a drill's drop point as a 2x2 center. The
+    // engine places a 2x2 on the nearest tile corner, so (1.5, 0.5) is (2, 1).
+    expect(f.controller.submit_placement('burner-mining-drill', 1.5, 0.5, 8)).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(true)
+    expect(f.surface.can_place_entity).toHaveBeenCalledWith(expect.objectContaining({ position: { x: 2, y: 1 } }))
+    expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({ position: { x: 2, y: 1 } }))
+    expect(f.controller.status().last_result).toMatchObject({
+      code: 'completed',
+      requested_position: { x: 1.5, y: 0.5 },
+      placed_position: { x: 2, y: 1 },
+    })
+  })
+
+  it('snaps a 1x1 center to the tile under the point, as the engine does', () => {
+    const f = fixture()
+    expect(f.controller.submit_placement('steel-chest', 0.95, -0.2)).toBe(true)
+
+    f.runtime.state_placing(f.actor)
+
+    expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({ position: { x: 0.5, y: -0.5 } }))
+  })
+
+  it('names the snapped center it checked when the engine refuses an off-grid request', () => {
+    ;(globalThis as any).prototypes.item['burner-mining-drill'] = {}
+    ;(globalThis as any).prototypes.entity['burner-mining-drill'] = {
+      items_to_place_this: [{ name: 'burner-mining-drill', count: 1 }],
+      tile_width: 2,
+      tile_height: 2,
+      collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
+    }
+    const f = fixture('burner-mining-drill', 2)
+    f.surface.can_place_entity.mockReturnValue(false)
+    expect(f.controller.submit_placement('burner-mining-drill', 1.5, 0.5, 8)).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(false)
+    expect(f.surface.create_entity).not.toHaveBeenCalled()
+    expect(f.item.count).toBe(2)
+    expect(f.controller.status().last_result).toMatchObject({
+      code: 'not_placeable',
+      requested_position: { x: 1.5, y: 0.5 },
+      placement_footprint: { tile_width: 2, tile_height: 2 },
+      placement_grid: { x_offset: 0, y_offset: 0, nearest_valid_center: { x: 2, y: 1 } },
+    })
+  })
+
+  it('records on the cancelled batch receipt that a refused placement changed nothing and its dependent tasks never started', () => {
+    const f = fixture()
+    f.surface.can_place_entity.mockReturnValue(false)
+    expect(f.controller.submit_placement('steel-chest', 1.5, 0.5, 4)).toBe(true)
+    expect(f.controller.submit_move('coal', 'steel-chest', 5, true)).toEqual([true, 'Task started'])
+
+    f.runtime.state_placing(f.actor)
+
+    expect(f.manager.get_status_snapshot().last_cancelled_batch).toMatchObject({
+      reason: 'placing:not_placeable', started_count: 1, failed_before_mutation: true,
+    })
+  })
+
+  it('does not claim a pre-mutation proof for a failure of any other task type', () => {
+    const f = fixture()
+    expect(f.controller.submit_wait(10)).toEqual([true, 'Task started'])
+    f.controller.fail(f.actor, f.manager.player_state.parameters_waiting!, 'actor_changed')
+
+    const receipt = f.manager.get_status_snapshot().last_cancelled_batch
+    expect(receipt).toMatchObject({ reason: 'waiting:actor_changed', started_count: 1 })
+    expect(receipt?.failed_before_mutation).toBeUndefined()
   })
 
   it('fails closed when Factorio reports that the requested position is blocked', () => {
     const f = fixture()
     f.surface.can_place_entity.mockReturnValue(false)
+    f.surface.find_entities_filtered.mockReturnValue([{
+      valid: true,
+      name: 'stone-furnace',
+      type: 'furnace',
+      unit_number: 88,
+      position: { x: 1.5, y: 0.5 },
+    }])
     expect(f.controller.submit_placement('steel-chest', 1.5, 0.5, 4)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
@@ -93,6 +238,7 @@ describe('precise placement runtime', () => {
     })
     expect(f.surface.create_entity).not.toHaveBeenCalled()
     expect(f.item.count).toBe(2)
+    expect((f.actor.get_main_inventory() as any).remove).not.toHaveBeenCalled()
     expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({
       code: 'not_placeable',
@@ -100,6 +246,21 @@ describe('precise placement runtime', () => {
       completed: false,
       requested_position: { x: 1.5, y: 0.5 },
       direction: 4,
+      placement_footprint: {
+        tile_width: 1,
+        tile_height: 1,
+      },
+      placement_grid: {
+        x_offset: 0.5,
+        y_offset: 0.5,
+        nearest_valid_center: { x: 1.5, y: 0.5 },
+      },
+      placement_blockers: [{
+        name: 'stone-furnace',
+        type: 'furnace',
+        unit_number: 88,
+        position: { x: 1.5, y: 0.5 },
+      }],
     })
   })
 
@@ -113,6 +274,7 @@ describe('precise placement runtime', () => {
     expect(f.surface.can_place_entity).not.toHaveBeenCalled()
     expect(f.surface.create_entity).not.toHaveBeenCalled()
     expect(f.item.count).toBe(2)
+    expect((f.actor.get_main_inventory() as any).remove).not.toHaveBeenCalled()
     expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({
       code: 'too_far',
@@ -121,5 +283,77 @@ describe('precise placement runtime', () => {
       requested_position: { x: 10.01, y: 0 },
       direction: 2,
     })
+  })
+  it('looks up and consumes the resolved placement item alias and count', () => {
+    ;(globalThis as any).prototypes.item['custom-chest-kit'] = {}
+    ;(globalThis as any).prototypes.entity['custom-chest'] = {
+      items_to_place_this: [{ name: 'custom-chest-kit', count: 2 }],
+      tile_width: 1,
+      tile_height: 1,
+    }
+    const f = fixture('custom-chest-kit', 3)
+    expect(f.controller.submit_placement('custom-chest', 1.5, 0.5, 0)).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(true)
+    const inventory = f.actor.get_main_inventory() as any
+    expect(inventory.get_item_count).toHaveBeenCalledWith('custom-chest-kit')
+    expect(inventory.remove).toHaveBeenCalledWith({ name: 'custom-chest-kit', count: 2 })
+    expect(f.item.count).toBe(1)
+    expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({ name: 'custom-chest' }))
+  })
+
+  it('does not consume a resolved placement item when entity creation fails', () => {
+    const f = fixture()
+    f.surface.create_entity.mockReturnValueOnce(undefined)
+    expect(f.controller.submit_placement('steel-chest', 1.5, 0.5, 0)).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(false)
+    expect((f.actor.get_main_inventory() as any).remove).not.toHaveBeenCalled()
+    expect(f.item.count).toBe(2)
+  })
+
+  it('fails closed for ambiguous placement-item prototypes without touching inventory', () => {
+    ;(globalThis as any).prototypes.item['kit-a'] = {}
+    ;(globalThis as any).prototypes.item['kit-b'] = {}
+    ;(globalThis as any).prototypes.entity['ambiguous-chest'] = {
+      items_to_place_this: [{ name: 'kit-a', count: 1 }, { name: 'kit-b', count: 1 }],
+      tile_width: 1,
+      tile_height: 1,
+    }
+    const f = fixture('kit-a', 2)
+    expect(f.controller.submit_placement('ambiguous-chest', 1, 0, 0)).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(false)
+    const inventory = f.actor.get_main_inventory() as any
+    expect(inventory.get_item_count).not.toHaveBeenCalled()
+    expect(inventory.remove).not.toHaveBeenCalled()
+    expect(f.surface.create_entity).not.toHaveBeenCalled()
+    expect(f.controller.status().last_result).toMatchObject({ code: 'ambiguous_placement_item' })
+  })
+
+  it('refuses an offshore pump the manual build check rejects, as the script check would accept dry land', () => {
+    ;(globalThis as any).prototypes.item['offshore-pump'] = {}
+    ;(globalThis as any).prototypes.entity['offshore-pump'] = {
+      type: 'offshore-pump',
+      items_to_place_this: [{ name: 'offshore-pump', count: 1 }],
+      tile_width: 1,
+      tile_height: 1,
+      collision_box: { left_top: { x: -0.6, y: -1.05 }, right_bottom: { x: 0.6, y: 0.3 } },
+    }
+    const manual = (globalThis as any).defines.build_check_type.manual
+    const f = fixture('offshore-pump', 1)
+    f.surface.can_place_entity.mockImplementation((args: any) => args.build_check_type !== manual)
+    expect(f.controller.submit_placement('offshore-pump', 2.5, 0.5, 0)).toBe(false)
+
+    expect(f.surface.can_place_entity).not.toHaveBeenCalled()
+    expect(f.surface.create_entity).not.toHaveBeenCalled()
+    expect(f.item.count).toBe(1)
+    expect(f.controller.status().last_result).toMatchObject({ code: 'placement_candidate_required' })
   })
 })

@@ -1,70 +1,173 @@
 # Working on Factorio NPC
 
-This is the older `main` snapshot. Current development and its maintained agent
-instructions are on
-[`experiment/jev-agent-architecture`](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/AGENTS.md).
-Jev is optional on that branch. Do not infer a Jev dependency from its name.
+Instructions for coding agents contributing to SGLuna, the standalone Factorio
+NPC. Read this file first, then only the references relevant to the task.
 Explicit user instructions remain authoritative.
 
-## Start with the right branch
+## External-harness setup requests
 
-- New implementation targets the current Jev candidate, not this older snapshot.
-  Updating `main` documentation does not authorize promoting a runtime to `main`.
-- Inspect status, branch, upstream and worktrees before editing. Preserve existing
-  changes; never reset, stash or overwrite another session's work.
-- In the owner's shared workspace, read the parent `AGENTS.md` and `WORKTREES.md`
-  before branch/worktree operations. Register one owner and bounded task first.
-  Independent clones do not require those machine-local files.
-- Use [CONTRIBUTING.md](CONTRIBUTING.md), [SPEC.md](SPEC.md) and the
-  [documentation index](docs/README.md) for this snapshot. Check out the Jev branch
-  and read its own instructions before working on current runtime behavior.
+When asked to set up the external harness on main, including when given only its
+repository/branch link in auto mode, follow
+[docs/EXTERNAL_HARNESS_SETUP.md](docs/EXTERNAL_HARNESS_SETUP.md). Inspect local
+capabilities, make routine path/port/layout choices, build the exact requested
+source in isolation, bind once, register stdio MCP through the host's supported
+mechanism (or use the bundled process adapter) and verify the actual connection
+with `setup-check.mjs --fresh` and host-level read-only calls. Stop ready for the user's goal;
+setup does not authorize gameplay. Preserve private credentials and paired
+save/ledger state. Report only unavoidable prerequisite/permission blockers.
+This installation path stays on the requested source revision and does not start
+the internal planner/Jev or use the ordinary server installers below.
 
-## Runtime boundaries
+For a gameplay goal, search `factorio_library` separately for knowledge references
+and skill methods, then read the relevant full entries. This local library is
+advisory content, not an unlock, native proof or operation authority; obtain
+recipes, sizing, availability and geometry from current game tools.
 
-- Own a standalone Factorio `character`, never a connected human `LuaPlayer`.
-  Zero connected humans must remain a valid state.
+For this owner's full-automation goals, read
+`knowledge-owner-electrical-first-automation`: automate centralized electricity
+and its service first, use electric mining and electric transfers where live
+availability permits, then separated smelting arrays with automatic feed, output
+and service. No agent fuel runs to individual machines; manual priming is a
+declared finite bootstrap only. Central power fuel and smelting fuel, if required
+by live machines, need automatic supply. Check the admitted placement catalog
+before a future goal; never silently substitute a burner line if a required
+electric miner is unsupported. Electric miners reuse `getPlacementCandidates`
+and `place_candidate` with native fluid-port preservation, not the nonfluid
+coordinate shortcut. A short run on prefilled fuel is not
+full automation. See the [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
+This guidance does not authorize gameplay, tool expansion or another trial.
+
+## Start here
+
+1. Identify the requested outcome, affected subsystem and acceptance evidence.
+   Use [SPEC.md](SPEC.md) for the project contract and
+   [docs/README.md](docs/README.md) to find its owning document.
+2. Inspect Git status, branch, upstream and worktrees before editing. Preserve
+   existing changes; never reset, stash or overwrite another session's work.
+3. In the owner's shared workspace, read its parent `AGENTS.md` and `WORKTREES.md`.
+   Register ownership before creating a checkout; use its naming, source and
+   integration rules. Those local files are not prerequisites for an independent
+   contributor's clone. See [CONTRIBUTING.md](CONTRIBUTING.md).
+4. External-harness development and setup target `main`. The internal planner/Jev
+   experiment remains on `experiment/jev-agent-architecture`; keep that work
+   separate unless explicitly requested. Do not switch another session's branch.
+5. Keep one bounded task per branch. For substantial work, record owner, source
+   SHA, dependencies, acceptance criteria and a resumable checkpoint using the
+   [development workflow](docs/DEVELOPMENT_WORKFLOW.md).
+
+## Runtime invariants
+
+- SGLuna owns a standalone Factorio `character`, never a human `LuaPlayer`.
+  Zero connected humans must remain a valid operating state.
 - Preserve native inventory, crafting, mining, research, combat, reach/collision,
-  death and save/restart behavior. Do not replace production mechanics with
-  teleporting, instant item insertion or fake completion.
-- Model actions must be structured and bounded. Do not introduce arbitrary
-  model-generated Lua, shell/console commands or unrestricted remote calls.
-- The harness owns authoritative state, validation, admission, receipts and
-  recovery. Verify the requested world state; admission does not prove completion.
-- Correlate asynchronous work with the exact actor, operation and epoch. Stale
-  work after replacement, death or restart must fail safely.
-- Derive recipes, topology, geometry, ratios and transport capacities
-  deterministically; do not ask models to guess unverified game facts.
-- Prefer map-first operations when the native game supports them. Keep later
-  vehicle/train/platform and swarm work separate from the single-NPC baseline.
+  death and save/restart behavior. Do not substitute teleporting, instant items
+  or fake completion for production mechanics.
+- Models receive structured observations and choose bounded operations. Never
+  introduce model-generated Lua, shell/console commands or unrestricted remote
+  calls. Deterministic code derives game facts, constraints and valid candidates.
+- The harness owns authoritative state, admission, receipts, recovery and
+  completion. Admission, placement and a clean wrapper exit do not establish
+  gameplay success; verify the requested native world state.
+- Correlate asynchronous work with the exact actor, operation and epoch. Stale,
+  uncertain or native-busy work must fail safely, including after restart/death.
+- Preserve the User Goal, non-executable LOD Roadmap Shelf and immutable committed
+  Active Plan. The Main LLM drafts plans; optional Jev selects/ranks/routes without granting
+  permission, approving correctness, mutating committed plans or advancing steps.
+- Structural blockers freeze the committed plan. A replacement needs verified
+  standing task authority or user approval outside that grant. Preserve the
+  requested result and verified history. Ask before substantially redesigning
+  player structures, using reserved supplies or changing the result. Bounded
+  recovery preserving the committed semantic step does not require interruption.
+- Interrupted accepted tasks belong to a durable ledger, separate from future
+  shelf work. Questions block affected work only. Campaign allowances cannot
+  reset on restage, plan slices or restart; preserve existing guards until a new
+  accounting contract is implemented and validated.
+- Strategic `vertical | horizontal | maintain | recover` steering occurs at safe
+  planning boundaries relative to the critical path. It cannot replace a healthy
+  committed plan or impose an arbitrary alternating cadence.
 
-## Validation, configuration and evidence
+The [planning roadmap](docs/NPC_PLANNING_ROADMAP.md) and
+[macro design](docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md) define these contracts;
+design requirements are not claims that every path is implemented.
+For tool/operation changes, update the owning adapter,
+[contract manifest](contracts/factorio-tool-contract.json) and parity tests
+together. Preserve intentional provider differences; see
+[architecture ownership](docs/ARCHITECTURE_OWNERSHIP.md).
 
-- Follow [TESTING.md](docs/TESTING.md). Unit/type checks protect regressions;
-  engine semantics need deterministic real-Factorio coverage. Never weaken an
-  assertion to turn a failure into a pass or present placement as production.
-- Windows shared-workspace dependencies may be WSL symlinks. Never run host
-  package installation, tests or hook installation there; use a supported isolated
-  environment. This snapshot has no `scripts/test-local.sh`.
-- Deployment environment/Egg variables override non-secret `airi-config.json`.
-  Keep credentials out of Git and non-secret config. Never read, print or copy
-  `.env`, credentials or private endpoints into commands, logs, commits or reports.
-- Offline tests/CI need no real provider credentials. Live provider/Jev calls,
-  retries, autonomous trials, pushes and deployment require their existing owner
-  authorization. One E2E instruction permits one trial; do not correct gameplay
-  manually. Follow current workspace trial/stop/save/evidence rules.
-- Preserve historical reports, traces, saves and user configuration. Add a new
-  checkpoint instead of rewriting old evidence. Use package smoke/release gates
-  at promotion; a green feature SHA is not a release.
-- Own exact run-scoped Docker resources and clean up on every exit after preserving
-  evidence. Never prune globally, delete persistent data, affect other sessions
-  or restart Docker Desktop. Report cleanup that cannot be verified.
+## Validation and evidence
 
-## Review and publication
+- Use [docs/TESTING.md](docs/TESTING.md) for commands and environment requirements.
+  On this shared Windows workspace, dependency directories are WSL symlinks:
+  never run host `pnpm`, `vitest`, `eslint`, `tstl` or dependency/hook installation.
+  Use the existing Docker runner and its reviewed mounts.
+- Build first and use the smallest meaningful focused checks for changed
+  behavior, regressions and material failure cases. Reuse valid results for
+  unchanged code. Do not repeat or broaden checks without a specific failure,
+  unresolved material risk, explicit owner request or required release/CI gate.
+  The full offline gate is not the default for each implementation iteration.
+  Preserve required native, recovery and release gates when their claims apply.
+  Documentation changes need focused link, command and diff review. Keep full
+  logs and real exit codes; do not hide failures with pipes.
+- Unit/type checks protect contracts. Engine claims require deterministic real
+  Factorio coverage under `tests/factorio/`, with the exact version and layout.
+  Never weaken an assertion to obtain a pass or give models unmeasured transport,
+  recipe, stacking or throughput assumptions.
+- E2E-derived fixes must meet [E2E_REPAIR_REQUIREMENTS.md](docs/E2E_REPAIR_REQUIREMENTS.md):
+  shared harness prevention, authoritative detection and bounded harness-owned
+  correction; original failure, residual miss, safe continuation, safety fences,
+  restart limits and exhaustion evidence. Prompt promises do not own correctness.
+- Add a named, request-correlated reason trace and regression for behavior changes.
+  Check the [production validation ladder](docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md)
+  before claiming a capability; retain the burner-drill/furnace canary.
+- Read [current status](docs/NPC_AGENT_HARNESS_STATUS.md) for verified limits.
+  Preserve dated reports, traces and saves. Add a new checkpoint instead of
+  rewriting historical evidence to describe a newer commit.
 
-Keep changes bounded and record acceptance evidence. A separate reviewer checks
-actual diffs and claims; resolve actionable findings. Preserve main-only
-configuration/documentation and upstream MIT attribution. Do not mix swarm work
-into single-NPC promotion without explicit scope and proof. Follow the owning
-branch's payload-repin procedure if shipped files change. Use small conventional
-commits with no tool/co-author trailers, and preserve existing newline styles.
+## Configuration, secrets and live activity
+
+- For authorized external-harness setup on a user's machine, follow the
+  [portable setup workflow](docs/EXTERNAL_HARNESS_SETUP.md) and
+  [runtime guide](docs/EXTERNAL_HARNESS.md): build the exact guarded
+  source; choose native Windows or Windows-host-to-Docker with loopback-only
+  RCON; keep the Windows ledger on local fixed NTFS with the PowerShell helper
+  permitted. Keep runtime credentials and state private, and verify native
+  execution receipts rather than treating admission as completion.
+- Deployment environment/Egg variables override non-secret config mirrors.
+  `sgluna-config.json` is canonical; `airi-config.json` is a compatibility input.
+- Never read, print or copy `.env`, credentials or private provider endpoints
+  into commands, logs, commits or reports. CI and offline fixtures use no real
+  provider credentials. Public `.env.example` files document setting names.
+- Live model/Jev calls, autonomous trials, provider retries, pushes and deployment
+  need the owner's authorization for that action. One E2E instruction authorizes
+  one trial. Usage thresholds and old standing allowances do not authorize runs.
+- Before any authorized trial, follow [docs/LIVE_E2E.md](docs/LIVE_E2E.md) and the
+  current workspace rules. Freeze exact source/profile/deployment identity. Use
+  configured CLI-proxy planner/executor roles and dedicated Jev settings; verify
+  effective models from non-secret evidence. Never change the owner's models.
+- Normal speed is the baseline. Acceleration requires the separately frozen,
+  validated profile in [E2E_TICK_SPRINT.md](docs/E2E_TICK_SPRINT.md); never retrofit
+  an active run. Do not manually correct gameplay or resume the NPC.
+- Own and clean up exact run-scoped Docker resources on every exit path, preserving
+  evidence first. Never prune globally, delete persistent data, affect another
+  session's resources or restart Docker Desktop. Report unverified cleanup.
+
+## Review and integration
+
+Use the [development workflow](docs/DEVELOPMENT_WORKFLOW.md) and PR template.
+Commit one logical change with a conventional message and no tool/co-author
+trailers. A separate reviewer checks the actual diff and acceptance evidence;
+resolve actionable findings before integration. Delegate only authorized,
+independent work with clear ownership and completion criteria.
+
+The integrator must own the integration checkout, verify the reported tests,
+merge with `--no-ff` and check the changed integration boundary, reusing valid
+results for unchanged code. Do not push automatically:
+publication and promotion retain their explicit authorization and release gates.
 Never force-push or rewrite shared history without an explicit request.
+
+If the installer or shipped files change, follow the payload repin procedure in
+[TESTING.md](docs/TESTING.md) and commit the repin separately. Package smoke and
+release gates are additional promotion checks. Preserve main-only deployment
+changes, user saves/configuration and upstream MIT attribution. Keep swarm or
+optional vision work separate from single-NPC promotion unless explicitly scoped.
+Preserve existing newline styles when editing files.

@@ -68,21 +68,62 @@ def run(client: Rcon, results: Path) -> None:
             require(result[1] == reason, result)
         return result
 
+    def preflight(name: str) -> dict:
+        command_text = (
+            "/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation',"
+            "'research_technology',{technology_name=" + repr(name) + "})))"
+        )
+        return json_command(command_text, 'research preflight')
+
     original_id = json.loads((results / 'runner.json').read_text())['actor_id']
     initial = status('before research')
     require(initial['actor']['actor_id'] == original_id and initial['actor']['valid'] is True, initial)
     validate_clock(initial['runtime'])
     require(initial['task_state'] == 'idle' and initial['queue_length'] == 0, initial)
 
+    # Check real early-game deterministic preflight before any mutation admission.
+    # The same locked target is then submitted directly below to preserve the
+    # engine-backed assertion that real Autorio admission still rejects it.
+    unknown_preflight = preflight('__sgluna_missing_technology__')
+    trigger_preflight = preflight('steam-power')
+    locked_preflight = preflight('automation')
+    require(unknown_preflight['ok'] is False and unknown_preflight['code'] == 'unknown_technology', unknown_preflight)
+    require(trigger_preflight['ok'] is False and trigger_preflight['code'] == 'trigger_research', trigger_preflight)
+    require(locked_preflight['ok'] is False and locked_preflight['code'] == 'missing_prerequisites', locked_preflight)
+    next_actionable = locked_preflight.get('next_actionable')
+    require(isinstance(next_actionable, dict) and next_actionable.get('name') and next_actionable.get('name') != 'automation', locked_preflight)
+    trigger_observation = technology('steam-power')
+    require(trigger_preflight.get('research_trigger') == trigger_observation.get('research_trigger'), (trigger_preflight, trigger_observation))
+    untouched_research = research_status()
+    require(untouched_research.get('current') is None and untouched_research.get('queue_length', 0) == 0, untouched_research)
+
     # Check real early-game rejection BEFORE setting up this isolated research
     # fixture. The success target (automation) is never directly researched.
-    submit('__airi_missing_technology__', False, 'unknown_technology')
+    submit('__sgluna_missing_technology__', False, 'unknown_technology')
     submit('steam-power', False, 'trigger_research')
     submit('automation', False, 'missing_prerequisites')
-    require(technology('__airi_missing_technology__')['found'] is False, 'unknown technology appeared')
+    require(technology('__sgluna_missing_technology__')['found'] is False, 'unknown technology appeared')
     trigger = technology('steam-power')
     require(trigger['found'] is True and trigger['trigger_type'] == 'craft-item', trigger)
     require(trigger['request_error'] == 'trigger_research', trigger)
+    # Factorio 2.0 gives a craft-item trigger's item as an ItemIDFilter table
+    # {name=...}. The summary must name that item, or the model reads a bare
+    # {type='craft-item',count=50} as lab research (tool audit bug #4).
+    raw_trigger = json_command(
+        "/silent-command local t=prototypes.technology['steam-power'].research_trigger; "
+        "rcon.print(helpers.table_to_json({type=t.type,item_kind=type(t.item),"
+        "item_name=type(t.item)=='table' and t.item.name or t.item,count=t.count}))",
+        'steam-power raw research trigger',
+    )
+    require(raw_trigger.get('type') == 'craft-item' and isinstance(raw_trigger.get('item_name'), str), raw_trigger)
+    expected_trigger = {'type': 'craft-item', 'item': raw_trigger['item_name'], 'count': raw_trigger['count']}
+    require(trigger.get('research_trigger') == expected_trigger, {'expected': expected_trigger, 'technology': trigger, 'engine': raw_trigger})
+    require(trigger_preflight.get('research_trigger') == expected_trigger, {'expected': expected_trigger, 'preflight': trigger_preflight})
+    path = json_command(lua_json(remote_call('autorio_planning', 'research_path', repr('steam-power'))), 'steam-power research path')
+    path_nodes = [node for node in path.get('pending_path') or [] if node.get('name') == 'steam-power']
+    require(len(path_nodes) == 1 and path_nodes[0].get('research_trigger') == expected_trigger
+            and path_nodes[0].get('mode') == 'trigger', {'expected': expected_trigger, 'path': path})
+    print(f"PASS: steam-power trigger names its item: {expected_trigger} (engine item field is a {raw_trigger['item_kind']})", flush=True)
     locked = technology('automation')
     require(locked['researched'] is False and locked['request_error'] == 'missing_prerequisites', locked)
 

@@ -1,5 +1,9 @@
-import type { LuaEntity, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { resolve_visible_entity_reference } from './entity_reference'
+import { area_known_visible, chunk_coverage } from './map_knowledge'
+import { placement_check_args, placement_footprint, placement_tile_size, snap_placement_center, type PlacementWorldBox } from './placement_geometry'
+import { find_world_entities } from './npc_vision'
 
 const DEFAULT_HALF_SIZE = 12
 const MIN_HALF_SIZE = 4
@@ -48,10 +52,6 @@ function squared_distance(a: Position, b: Position) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
 
-function snap_center(value: number) {
-  return math.floor(value) + 0.5
-}
-
 function bounded_integer(value: number | undefined, fallback: number, min: number, max: number) {
   if (value === undefined || math.floor(value) !== value) return fallback
   return math.max(min, math.min(max, value))
@@ -68,9 +68,11 @@ function resolve_anchor(actor: ControlledActor, request: ConstructionObservation
     if (request.anchor_unit_number < 1 || math.floor(request.anchor_unit_number) !== request.anchor_unit_number) {
       return { error: 'invalid anchor_unit_number' }
     }
-    const entity = game.get_entity_by_unit_number(request.anchor_unit_number as UnitNumber)
+    const resolved = resolve_visible_entity_reference(actor, request.anchor_unit_number, 'map_visible')
+    if (resolved.code === 'not_visible') return { error: 'anchor entity is in a chunk the NPC does not see now; observe it again from nearby' }
+    if (resolved.code === 'wrong_surface') return { error: 'anchor entity is on another surface' }
+    const entity = resolved.entity
     if (!entity || !entity.valid) return { error: 'anchor entity not found' }
-    if (entity.surface.index !== actor.surface.index) return { error: 'anchor entity is on another surface' }
     return { position: entity.position, entity }
   }
   if (request.position !== undefined) {
@@ -207,16 +209,11 @@ function terrain_snapshot(actor: ControlledActor, center: Position, half_size: n
       types: types.slice(0, MAX_TERRAIN_TYPES),
       types_truncated: types.length > MAX_TERRAIN_TYPES,
       run_count,
-      runs: runs,
+      runs,
       runs_truncated: run_count > runs.length,
       encoding: 'row_runs_inclusive',
     },
   }
-}
-
-function requested_prototype(name: string | undefined) {
-  if (!name) return undefined
-  return prototypes.entity[name]
 }
 
 export function prototype_spatial_geometry(name: string) {
@@ -238,14 +235,21 @@ export function prototype_spatial_geometry(name: string) {
   }
 }
 
-function corridor_descriptors(anchor: Position, request: PlacementPlanRequest) {
+function corridor_descriptors(anchor: Position, request: PlacementPlanRequest, prototype: any, direction: number | undefined) {
   const side = request.side ?? 'any'
   const extension = request.extension_direction ?? side
+  const extension_vector = direction_vector(extension)
+  const size = placement_tile_size(prototype, direction)
+  const extension_clearance = extension_vector
+    ? (extension_vector.x !== 0 ? size.tile_width : size.tile_height)
+    : undefined
   return {
     input: request.reserve_input === true ? { reserved: true, side } : { reserved: false },
     output: request.reserve_output === true ? { reserved: true, side: extension } : { reserved: false },
     power: request.reserve_power === true ? { reserved: true, around_anchor: anchor, clearance: 1 } : { reserved: false },
-    future_extension: extension === 'any' ? { reserved: false } : { reserved: true, direction: extension, minimum_clear_tiles: 2 },
+    future_extension: extension === 'any'
+      ? { reserved: false }
+      : { reserved: true, direction: extension, minimum_clear_tiles: extension_clearance },
   }
 }
 
@@ -257,10 +261,13 @@ export function local_spatial_observation(actor: ControlledActor, request: Const
     left_top: { x: anchor.position.x - half_size, y: anchor.position.y - half_size },
     right_bottom: { x: anchor.position.x + half_size, y: anchor.position.y + half_size },
   }
-  const matches = actor.surface.find_entities_filtered({ area })
+  // Only an area the NPC sees now is read: a fogged or unknown chunk would leak live entities and tiles as fresh facts.
+  if (!area_known_visible(actor.force, actor.surface, area)) {
+    return { ok: false, error: 'area_not_visible: the observed area reaches chunks the NPC does not see now', tick: game.tick, bounds: area, coverage: chunk_coverage(actor.force, actor.surface, area) }
+  }
+  const matches = find_world_entities(actor.surface, { area })
   sort_entities(matches)
   const entities = matches.slice(0, MAX_ENTITIES).map(entity => entity_summary(entity, actor))
-  const prototype = requested_prototype(request.requested_entity_name)
   const terrain = terrain_snapshot(actor, anchor.position, half_size)
   return {
     ok: true,
@@ -285,12 +292,19 @@ export function local_spatial_observation(actor: ControlledActor, request: Const
   }
 }
 
-function preferred_side_penalty(anchor: Position, candidate: Position, side: PlacementSide) {
+function preferred_side_penalty(anchor: AnchorResult, candidate: Position, candidate_box: PlacementWorldBox, side: PlacementSide) {
   if (side === 'any') return 0
-  if (side === 'north') return candidate.y <= anchor.y ? 0 : 100
-  if (side === 'south') return candidate.y >= anchor.y ? 0 : 100
-  if (side === 'west') return candidate.x <= anchor.x ? 0 : 100
-  return candidate.x >= anchor.x ? 0 : 100
+  const anchor_box = anchor.entity?.bounding_box
+  if (anchor_box) {
+    if (side === 'north') return candidate_box.right_bottom.y <= anchor_box.left_top.y ? 0 : 100
+    if (side === 'south') return candidate_box.left_top.y >= anchor_box.right_bottom.y ? 0 : 100
+    if (side === 'west') return candidate_box.right_bottom.x <= anchor_box.left_top.x ? 0 : 100
+    return candidate_box.left_top.x >= anchor_box.right_bottom.x ? 0 : 100
+  }
+  if (side === 'north') return candidate.y <= anchor.position.y ? 0 : 100
+  if (side === 'south') return candidate.y >= anchor.position.y ? 0 : 100
+  if (side === 'west') return candidate.x <= anchor.position.x ? 0 : 100
+  return candidate.x >= anchor.position.x ? 0 : 100
 }
 
 function direction_vector(side: PlacementSide): Position | undefined {
@@ -301,8 +315,10 @@ function direction_vector(side: PlacementSide): Position | undefined {
   return undefined
 }
 
-function nearby_blockers(actor: ControlledActor, position: Position) {
-  const matches = actor.surface.find_entities_filtered({ position, radius: 1.5 })
+function nearby_blockers(actor: ControlledActor, position: Position, footprint_box?: PlacementWorldBox) {
+  const matches = footprint_box
+    ? find_world_entities(actor.surface, { area: footprint_box })
+    : find_world_entities(actor.surface, { position, radius: 1.5 })
   const blockers: Array<Record<string, unknown>> = []
   for (const entity of matches) {
     if (blockers.length >= 8) break
@@ -313,21 +329,62 @@ function nearby_blockers(actor: ControlledActor, position: Position) {
   return { entities: blockers, terrain: terrain ? { name: tile.name, kind: terrain } : undefined }
 }
 
-function extension_penalty(actor: ControlledActor, entity_name: string, position: Position, direction: number | undefined, extension: PlacementSide) {
+function extension_penalty(actor: ControlledActor, prototype: any, entity_name: string, position: Position, direction: number | undefined, extension: PlacementSide) {
   const vector = direction_vector(extension)
   if (!vector) return 0
-  const future = { x: position.x + vector.x * 2, y: position.y + vector.y * 2 }
+  const size = placement_tile_size(prototype, direction)
+  const clearance = vector.x !== 0 ? size.tile_width : size.tile_height
+  const future = {
+    x: position.x + vector.x * clearance,
+    y: position.y + vector.y * clearance,
+  }
   return actor.surface.can_place_entity({ name: entity_name, position: future, direction, force: actor.force }) ? 0 : 25
 }
 
-function candidate_positions(anchor: Position, radius: number) {
+function boxes_overlap(a: PlacementWorldBox, b: PlacementWorldBox) {
+  return a.left_top.x < b.right_bottom.x
+    && a.right_bottom.x > b.left_top.x
+    && a.left_top.y < b.right_bottom.y
+    && a.right_bottom.y > b.left_top.y
+}
+
+function box_gap(a: PlacementWorldBox, b: PlacementWorldBox) {
+  const x_gap = a.right_bottom.x <= b.left_top.x
+    ? b.left_top.x - a.right_bottom.x
+    : b.right_bottom.x <= a.left_top.x
+      ? a.left_top.x - b.right_bottom.x
+      : 0
+  const y_gap = a.right_bottom.y <= b.left_top.y
+    ? b.left_top.y - a.right_bottom.y
+    : b.right_bottom.y <= a.left_top.y
+      ? a.left_top.y - b.right_bottom.y
+      : 0
+  return math.max(x_gap, y_gap)
+}
+
+function candidate_positions(anchor: AnchorResult, radius: number, prototype: any, direction: number | undefined) {
   const result: Position[] = []
+  const seen: Record<string, boolean> = {}
+  const anchor_box = anchor.entity?.bounding_box
+  // With an entity anchor, radius is measured outward from its footprint. The
+  // extra center rings only let us reach that edge; accepted candidates remain
+  // bounded by box_gap <= radius and the caller's local build-reach guard.
+  const ring_limit = anchor_box ? radius + MAX_PLACEMENT_DISTANCE : radius
   let evaluations = 0
-  for (let ring = 1; ring <= radius && evaluations < MAX_CANDIDATE_EVALUATIONS; ring++) {
+  for (let ring = 1; ring <= ring_limit && evaluations < MAX_CANDIDATE_EVALUATIONS; ring++) {
     for (let dx = -ring; dx <= ring && evaluations < MAX_CANDIDATE_EVALUATIONS; dx++) {
       for (let dy = -ring; dy <= ring && evaluations < MAX_CANDIDATE_EVALUATIONS; dy++) {
         if (math.max(math.abs(dx), math.abs(dy)) !== ring) continue
-        result.push({ x: snap_center(anchor.x + dx), y: snap_center(anchor.y + dy) })
+        const position = snap_placement_center(prototype, { x: anchor.position.x + dx, y: anchor.position.y + dy }, direction)
+        const key = `${position.x},${position.y}`
+        if (seen[key]) continue
+        seen[key] = true
+        if (anchor_box) {
+          const candidate_box = placement_footprint(prototype, position, direction).world_box
+          if (boxes_overlap(candidate_box, anchor_box)) continue
+          if (box_gap(candidate_box, anchor_box) > radius) continue
+        }
+        result.push(position)
         evaluations++
       }
     }
@@ -355,6 +412,8 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
   }
   const prototype = prototypes.entity[request.entity_name]
   if (!prototype) return { ok: false, error: { code: 'UNKNOWN_ENTITY', message: `unknown entity ${request.entity_name}` } }
+  if (prototype.type === 'offshore-pump') return { ok: false, error: { code: 'PLACEMENT_CANDIDATE_REQUIRED',
+    message: 'First read fluid source tiles, then use getPlacementCandidates and place_candidate for offshore pumps' } }
   const anchor = resolve_anchor(actor, request)
   if ('error' in anchor) return { ok: false, error: { code: 'INVALID_ANCHOR', message: anchor.error } }
 
@@ -366,21 +425,22 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
   const candidates: Array<Record<string, any>> = []
   const rejected: Array<Record<string, unknown>> = []
 
-  for (const position of candidate_positions(anchor.position, radius)) {
+  for (const position of candidate_positions(anchor, radius, prototype, direction)) {
     if (squared_distance(actor.position, position) > MAX_PLACEMENT_DISTANCE ** 2) {
       if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'outside_local_build_reach' })
       continue
     }
-    const placeable = actor.surface.can_place_entity({ name: request.entity_name, position, direction, force: actor.force })
+    const footprint = placement_footprint(prototype, position, direction)
+    const placeable = actor.surface.can_place_entity({ name: request.entity_name, position, direction, force: actor.force, ...placement_check_args(request.entity_name) })
     if (!placeable) {
-      if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'collision', blockers: nearby_blockers(actor, position) })
+      if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'collision', footprint, blockers: nearby_blockers(actor, position, footprint.world_box) })
       continue
     }
-    const score = preferred_side_penalty(anchor.position, position, side)
+    const score = preferred_side_penalty(anchor, position, footprint.world_box, side)
       + math.sqrt(squared_distance(anchor.position, position))
       + math.sqrt(squared_distance(actor.position, position)) * 0.1
-      + extension_penalty(actor, request.entity_name, position, direction, extension)
-    candidates.push({ position, direction, score })
+      + extension_penalty(actor, prototype, request.entity_name, position, direction, extension)
+    candidates.push({ position, direction, score, footprint })
   }
 
   sort_candidates(candidates)
@@ -394,7 +454,7 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
     search_radius: radius,
     max_candidates,
     prototype: prototype_spatial_geometry(request.entity_name),
-    corridors: corridor_descriptors(anchor.position, request),
+    corridors: corridor_descriptors(anchor.position, request, prototype, direction),
     best: selected[0],
     candidates: selected,
     rejected,

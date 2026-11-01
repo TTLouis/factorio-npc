@@ -1,0 +1,2386 @@
+{
+  "source": {
+    "run": "AR",
+    "baseline": "18509c77033a89af3e810f1dc1ea7f1a9d6127ff",
+    "tested": "2f5f52820aae8b84ed92c0cbf71cdcfe63f7e66a",
+    "raw_manifest_sha256": "45a270bebeb7693cdff473fa7a8b4bbb8eb60f2e4fd942191862133fab9131b4",
+    "selection": "Exact final immutable goal/shelf/plan/contracts, admitted operations and restored-save native journal. Scheduling flags rewound before the guard/operator pauses; original operation args reattached from operations.preflight_ok, and new surface-correlation metadata from the read-only restored-save native baseline proof. Deterministic future mining/native callbacks are fixture substitutions. No original semantics edited."
+  },
+  "key": "npc:npc-1",
+  "memory": {
+    "version": 1,
+    "plans": [
+      {
+        "key": "npc:npc-1",
+        "state": {
+          "goal_id": "goal_1u1qvv2_1",
+          "owner": "<server>",
+          "objective": "Build a fully automated factory producing at least one automation-science-pack per game minute from natural resources.",
+          "status": "active",
+          "admission_status": "admitted",
+          "blocker": "",
+          "pause_reason": "",
+          "plan": [
+            "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+            "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+            "Smelt and collect 10 copper plates, then verify that electronics research is complete."
+          ],
+          "current_step": 0,
+          "revision": 16,
+          "last_chat_message": "",
+          "last_operations": [
+            "gather_resource {\"resource_name\":\"coal\",\"count\":10,\"search_radius\":128}"
+          ],
+          "durable_last_operations": [
+            {
+              "name": "gather_resource",
+              "args": {
+                "resource_name": "coal",
+                "count": 10,
+                "search_radius": 128
+              },
+              "role": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace."
+            }
+          ],
+          "exact_target_audit": [],
+          "last_mutation_verified": false,
+          "updated_at": 1792790563535,
+          "history": [
+            {
+              "revision": 3,
+              "status": "active",
+              "current_step": 0,
+              "step": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+              "chat": "I\u2019ll build a self-fed production chain, then verify at least one science pack per minute over a full game minute. First I\u2019ll smelt the 10 copper plates needed to unlock electronics, reusing the held furnace. This small bootstrap can be hand-supplied; the finished factory will need automatic ore, fuel, ingredient, and output transport."
+            },
+            {
+              "revision": 7,
+              "status": "active",
+              "current_step": 0,
+              "step": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+              "chat": "I\u2019ll gather the required copper ore and coal while retaining the held furnace."
+            },
+            {
+              "revision": 10,
+              "status": "active",
+              "current_step": 0,
+              "step": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+              "chat": ""
+            },
+            {
+              "revision": 13,
+              "status": "active",
+              "current_step": 0,
+              "step": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+              "chat": ""
+            },
+            {
+              "revision": 14,
+              "status": "blocked",
+              "current_step": 0,
+              "step": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+              "chat": ""
+            },
+            {
+              "revision": 15,
+              "status": "blocked",
+              "current_step": 0,
+              "step": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+              "chat": ""
+            }
+          ],
+          "pause_class": "",
+          "pause_subkind": "",
+          "task_board": {
+            "kind": "task_board_lite",
+            "goal_id": "goal_1u1qvv2_1",
+            "status": "active",
+            "blocker": "",
+            "pause_reason": "",
+            "revision": 10,
+            "event_sequence": 9,
+            "active_index": 0,
+            "active_step_id": "step_1",
+            "proposed_focus_index": 0,
+            "proposed_focus_step_id": "step_1",
+            "completed_count": 0,
+            "total_steps": 3,
+            "steps": [
+              {
+                "id": "step_1",
+                "description": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                "status": "active",
+                "revision": 2,
+                "completion_contract": {
+                  "mode": "all",
+                  "requirements": [
+                    {
+                      "id": "requirement_1",
+                      "kind": "inventory_count",
+                      "item_name": "copper-ore",
+                      "minimum": 10
+                    },
+                    {
+                      "id": "requirement_2",
+                      "kind": "inventory_count",
+                      "item_name": "coal",
+                      "minimum": 10
+                    },
+                    {
+                      "id": "requirement_3",
+                      "kind": "inventory_count",
+                      "item_name": "stone-furnace",
+                      "minimum": 1
+                    }
+                  ],
+                  "confidence": 0
+                },
+                "completion_contract_at": 1792790439417,
+                "completion_mode": "deterministic",
+                "contract_status": "bound"
+              },
+              {
+                "id": "step_2",
+                "description": "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                "status": "pending",
+                "revision": 1,
+                "completion_contract": null,
+                "completion_mode": "deterministic",
+                "contract_status": "pending"
+              },
+              {
+                "id": "step_3",
+                "description": "Smelt and collect 10 copper plates, then verify that electronics research is complete.",
+                "status": "pending",
+                "revision": 1,
+                "completion_contract": null,
+                "completion_mode": "deterministic",
+                "contract_status": "pending"
+              }
+            ],
+            "evidence": [
+              {
+                "id": "evidence_1",
+                "kind": "step_completion_contract_validated",
+                "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"copper-ore\",\"minimum\":10},{\"id\":\"requirement_2\",\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":10},{\"id\":\"requirement_3\",\"kind\":\"inventory_count\",\"item_name\":\"stone-furnace\",\"minimum\":1}],\"confidence\":0}}",
+                "ref": "checkpoint/step_1",
+                "at": 1792790439418,
+                "step_id": "step_1"
+              },
+              {
+                "id": "evidence_2",
+                "kind": "operation_error_receipt",
+                "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":1,\"batch_generation\":1,\"batch_ref\":\"batch-g1-1\",\"task_count\":4,\"task_types\":[\"walking_to_entity\",\"mining\",\"walking_to_entity\",\"mining\"],\"tick\":15306,\"reason\":\"mining:mining_rejected\",\"basic_operation\":{\"operation_id\":2,\"tick\":15306,\"actor_id\":25,\"type\":\"mining\",\"accepted\":false,\"completed\":false,\"code\":\"mining_rejected\",\"entity_name\":\"coal\",\"requested_count\":10},\"correlation\":{\"goal_id\":\"goal_1u1qvv2_1\",\"step_id\":\"step_1\",\"actor_id\":25,\"actor_epoch\":1}}",
+                "ref": "batch-g1-1",
+                "at": 1792790472088,
+                "step_id": "step_1"
+              },
+              {
+                "id": "evidence_3",
+                "kind": "operation_preflight_blocker",
+                "summary": "{\"request_id\":\"req_mvlh1w1v_1\",\"operation_index\":1,\"operation_name\":\"gather_resource\",\"operation_args\":{\"resource_name\":\"coal\",\"count\":10,\"search_radius\":128},\"reason_code\":\"duplicate_effect_suppressed\",\"factorio_error\":\"Operation admission refused: conflicting unresolved work may already have taken effect\",\"no_replay\":false}",
+                "ref": "req_mvlh1w1v_1/admission",
+                "at": 1792790513452,
+                "step_id": "step_1"
+              }
+            ],
+            "events": [
+              {
+                "seq": 1,
+                "type": "created",
+                "at": 1792790439186,
+                "revision": 1,
+                "active_step_id": "step_1",
+                "total_steps": 3
+              },
+              {
+                "seq": 2,
+                "type": "evidence",
+                "at": 1792790439418,
+                "revision": 3,
+                "evidence_id": "evidence_1",
+                "step_id": "step_1"
+              },
+              {
+                "seq": 3,
+                "type": "evidence",
+                "at": 1792790472088,
+                "revision": 4,
+                "evidence_id": "evidence_2",
+                "step_id": "step_1"
+              },
+              {
+                "seq": 4,
+                "type": "evidence",
+                "at": 1792790513452,
+                "revision": 5,
+                "evidence_id": "evidence_3",
+                "step_id": "step_1"
+              },
+              {
+                "seq": 5,
+                "type": "blocked",
+                "at": 1792790513452,
+                "revision": 6,
+                "active_step_id": "step_1"
+              },
+              {
+                "seq": 6,
+                "type": "paused",
+                "at": 1792790513504,
+                "revision": 7,
+                "active_step_id": "step_1"
+              },
+              {
+                "seq": 7,
+                "type": "blocked",
+                "at": 1792790513504,
+                "revision": 8,
+                "active_step_id": "step_1"
+              },
+              {
+                "seq": 8,
+                "type": "paused",
+                "at": 1792790563535,
+                "revision": 9,
+                "active_step_id": "step_1"
+              },
+              {
+                "seq": 9,
+                "type": "blocked",
+                "at": 1792790563535,
+                "revision": 10,
+                "active_step_id": "step_1"
+              }
+            ],
+            "created_at": 1792790439186,
+            "updated_at": 1792790563535,
+            "evidence_sequence": 3
+          },
+          "planning": {
+            "reasoning_epoch": 2,
+            "plan": {
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "plan_version": 1,
+              "roadmap_node_id": "copper-bootstrap"
+            }
+          }
+        }
+      }
+    ],
+    "planning_states": [
+      {
+        "key": "npc:npc-1",
+        "state": {
+          "version": 1,
+          "sequence": 3,
+          "goal": {
+            "goal_id": "goal_1u1qvv2_1",
+            "owner": "<server>",
+            "objective": "Build a fully automated factory producing at least one automation-science-pack per game minute from natural resources.",
+            "constraints": [],
+            "status": "active",
+            "created_at": 1792790293918,
+            "updated_at": 1792790439195,
+            "definition": {
+              "scope": "long_horizon",
+              "summary": "Build a fully automated factory producing at least one automation-science-pack per game minute from natural resources.",
+              "done_when": [
+                {
+                  "id": "done_1",
+                  "kind": "production_rate",
+                  "item_name": "automation-science-pack",
+                  "per_minute": 1,
+                  "window_minutes": 1
+                }
+              ],
+              "source": "main_planner",
+              "defined_at": 1792790439195
+            }
+          },
+          "roadmap": {
+            "roadmap_revision_id": "goal_1u1qvv2_1_r2",
+            "goal_id": "goal_1u1qvv2_1",
+            "revision_index": 1,
+            "derived_from_revision_id": null,
+            "reason": "goal_decomposed_to_shelf",
+            "authority": "user",
+            "evidence_refs": [],
+            "created_at": 1792790439186,
+            "nodes": [
+              {
+                "id": "copper-bootstrap",
+                "ready_since": 1792790439186,
+                "intent": "Unlock electronics with copper",
+                "why_it_matters": "Smelt and collect 10 copper plates from natural ore and verify the electronics production trigger. This is a finite bootstrap, not the final automatic copper supply.",
+                "status": "ready_to_refine",
+                "depends_on": [],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "iron-bootstrap",
+                "ready_since": null,
+                "intent": "Unlock steam with iron",
+                "why_it_matters": "Produce the 50 iron plates required by the steam-power trigger and verify the unlock. Prefer the held burner miner for a reusable direct-fed iron cell after checking its setup cost.",
+                "status": "tentative",
+                "depends_on": [
+                  "copper-bootstrap"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "steam-electricity",
+                "ready_since": null,
+                "intent": "Establish working steam electricity",
+                "why_it_matters": "Provide a running electrical network under a real load. Separate pump installation, boiler connection, engine connection, and electrical verification at fresh-geometry boundaries.",
+                "status": "tentative",
+                "depends_on": [
+                  "iron-bootstrap"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "science-unlock",
+                "ready_since": null,
+                "intent": "Unlock automation science packs",
+                "why_it_matters": "After electronics and steam-power unlock the lab recipe, craft one lab to perform the exact automation-science-pack research trigger and verify completion.",
+                "status": "tentative",
+                "depends_on": [
+                  "copper-bootstrap",
+                  "iron-bootstrap"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "assembly-unlock",
+                "ready_since": null,
+                "intent": "Research automated assembly",
+                "why_it_matters": "Make the 10 bootstrap automation-science-packs required for automation research, supply a powered lab, and verify automation before building assembling-machine-1.",
+                "status": "tentative",
+                "depends_on": [
+                  "science-unlock",
+                  "steam-electricity"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "automatic-fuel",
+                "ready_since": null,
+                "intent": "Automate coal extraction and delivery",
+                "why_it_matters": "Extract natural coal and automatically deliver it to the boiler and any retained burner machines. Exit only when normal operation no longer needs hand-carried fuel.",
+                "status": "tentative",
+                "depends_on": [
+                  "steam-electricity"
+                ],
+                "resolved_by": [],
+                "assumptions": [
+                  "Check mining and transport recipe unlocks before choosing the equipment."
+                ],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "automatic-iron",
+                "ready_since": null,
+                "intent": "Automate iron plate supply",
+                "why_it_matters": "Connect natural iron extraction, smelting, fuel where needed, and plate transport without hand-fed ore or intermediary stock. Size the route using live rates.",
+                "status": "tentative",
+                "depends_on": [
+                  "steam-electricity",
+                  "automatic-fuel"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "automatic-copper",
+                "ready_since": null,
+                "intent": "Automate copper plate supply",
+                "why_it_matters": "Connect natural copper extraction, smelting, fuel where needed, and plate transport without hand-fed ore or intermediary stock. Validate the route's capacity.",
+                "status": "tentative",
+                "depends_on": [
+                  "steam-electricity",
+                  "automatic-fuel"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "automatic-gears",
+                "ready_since": null,
+                "intent": "Automate iron gear production",
+                "why_it_matters": "Run an unlocked, powered assembler from automatically supplied iron plates and deliver its gears onward without manual ingredient insertion.",
+                "status": "tentative",
+                "depends_on": [
+                  "assembly-unlock",
+                  "automatic-iron"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "science-assembly",
+                "ready_since": null,
+                "intent": "Automate science assembly and collection",
+                "why_it_matters": "Feed automatically produced copper plates and gears into powered science assembly, with automatic output removal. Validate actual transport capacity against the selected rate.",
+                "status": "tentative",
+                "depends_on": [
+                  "assembly-unlock",
+                  "automatic-copper",
+                  "automatic-gears"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "science-throughput",
+                "ready_since": null,
+                "intent": "Verify autonomous science throughput",
+                "why_it_matters": "Verify the complete natural-resource and fuel routes, allow hand-fed startup inputs to clear, and measure at least one automation-science-pack per minute over a full uncontaminated game-minute window.",
+                "status": "tentative",
+                "depends_on": [
+                  "science-assembly",
+                  "automatic-fuel"
+                ],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_1u1qvv2_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              }
+            ]
+          },
+          "roadmap_history": [],
+          "plans": [
+            {
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "plan_version": 1,
+              "goal_id": "goal_1u1qvv2_1",
+              "roadmap_revision_id": "goal_1u1qvv2_1_r2",
+              "roadmap_node_ids": [
+                "copper-bootstrap"
+              ],
+              "development_mode": "vertical",
+              "refinement_grounding": {
+                "ready_node_ids": [
+                  "copper-bootstrap"
+                ],
+                "not_ready": []
+              },
+              "steering_at_draft": {
+                "mode": "vertical",
+                "steering_sequence": 1,
+                "critical_path": null,
+                "diverges_from_steering": false
+              },
+              "status": "EXECUTING",
+              "steps": [
+                {
+                  "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+                  "description": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                  "completion_contract": {
+                    "mode": "all",
+                    "requirements": [
+                      {
+                        "id": "requirement_1",
+                        "kind": "inventory_count",
+                        "item_name": "copper-ore",
+                        "minimum": 10
+                      },
+                      {
+                        "id": "requirement_2",
+                        "kind": "inventory_count",
+                        "item_name": "coal",
+                        "minimum": 10
+                      },
+                      {
+                        "id": "requirement_3",
+                        "kind": "inventory_count",
+                        "item_name": "stone-furnace",
+                        "minimum": 1
+                      }
+                    ],
+                    "confidence": 0
+                  },
+                  "execution_guidance": {
+                    "approach": "Manually acquire 10 copper ore and a 10-coal bootstrap reserve; reuse the held furnace and preserve the held miner for subsequent iron work.",
+                    "rationale": "Only 10 copper plates are needed now. Manual supply avoids a second machine installation and output alignment. Direct feeding benefits repeated demand; extra cells have no demonstrated payback for this batch.",
+                    "constraints": [
+                      "Use natural copper ore and coal; do not take player stock.",
+                      "Reuse the held furnace rather than crafting a duplicate.",
+                      "The coal reserve is startup stock, not automatic fuel delivery."
+                    ],
+                    "skillIds": [
+                      "direct-miner-smelting"
+                    ],
+                    "materialSupply": {
+                      "mode": "manual_bootstrap",
+                      "resource": "copper-ore"
+                    }
+                  },
+                  "completion_mode": "deterministic",
+                  "contract_status": "bound",
+                  "completion_confidence": "grounded",
+                  "reduced_confidence": false
+                },
+                {
+                  "step_id": "goal_1u1qvv2_1_p3_v1_s2_1jh0jwt",
+                  "description": "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                  "completion_contract": null,
+                  "execution_guidance": {
+                    "approach": "Place one held stone furnace near the selected copper work area, then obtain its live identity and inspect its state before exact supply.",
+                    "rationale": "The furnace is already owned. Its placement is a necessary identity boundary; a presence checkpoint must not imply that smelting or automatic supply is working.",
+                    "constraints": [
+                      "End this step at furnace presence, not production.",
+                      "Read the new exact furnace identity before transferring inputs.",
+                      "Keep later automatic copper routing tentative."
+                    ],
+                    "skillIds": [],
+                    "materialSupply": null
+                  },
+                  "completion_mode": "deterministic",
+                  "contract_status": "pending",
+                  "completion_confidence": "pending",
+                  "reduced_confidence": false
+                },
+                {
+                  "step_id": "goal_1u1qvv2_1_p3_v1_s3_0oi6gj1",
+                  "description": "Smelt and collect 10 copper plates, then verify that electronics research is complete.",
+                  "completion_contract": null,
+                  "execution_guidance": {
+                    "approach": "Use the exact furnace to smelt the 10 acquired copper ore, collect 10 copper plates, and verify electronics research.",
+                    "rationale": "The live research path requires production of 10 copper plates. Furnace production performs that trigger; submitting lab research or attempting hand-crafted plates does not.",
+                    "constraints": [
+                      "Check the enabled copper-smelting recipe and fuel requirement before supply.",
+                      "Require both 10 held copper plates and completed electronics research.",
+                      "Do not treat this hand-fed bootstrap as autonomous production."
+                    ],
+                    "skillIds": [
+                      "direct-miner-smelting"
+                    ],
+                    "materialSupply": {
+                      "mode": "manual_bootstrap",
+                      "resource": "copper-ore"
+                    }
+                  },
+                  "completion_mode": "deterministic",
+                  "contract_status": "pending",
+                  "completion_confidence": "pending",
+                  "reduced_confidence": false
+                }
+              ],
+              "active_step_index": 0,
+              "derived_from_plan_id": null,
+              "superseded_by_plan_id": null,
+              "origin": "live_task_board",
+              "created_at": 1792790439186,
+              "updated_at": 1792790513452,
+              "committed_at": 1792790439518,
+              "completed_at": null,
+              "blocker": {
+                "kind": "structural",
+                "reason_code": "operation_preflight_failed:duplicate_effect_suppressed",
+                "detected_at": 1792790513452,
+                "evidence_refs": [
+                  "req_mvlh1w1v_1/admission"
+                ],
+                "detail": "operation_preflight_failed:duplicate_effect_suppressed",
+                "requires_user_decision": true
+              },
+              "execution": {
+                "step_progress": {
+                  "goal_1u1qvv2_1_p3_v1_s1_14auhzf": {
+                    "status": "active",
+                    "accepted_evidence": [],
+                    "batches_attempted": 0,
+                    "batches_since_evidence": 0,
+                    "operations_attempted": 0,
+                    "failure_counts": {},
+                    "contract_satisfied": false,
+                    "unsatisfiable": null,
+                    "completed_at": null
+                  },
+                  "goal_1u1qvv2_1_p3_v1_s2_1jh0jwt": {
+                    "status": "pending",
+                    "accepted_evidence": [],
+                    "batches_attempted": 0,
+                    "batches_since_evidence": 0,
+                    "operations_attempted": 0,
+                    "failure_counts": {},
+                    "contract_satisfied": false,
+                    "unsatisfiable": null,
+                    "completed_at": null
+                  },
+                  "goal_1u1qvv2_1_p3_v1_s3_0oi6gj1": {
+                    "status": "pending",
+                    "accepted_evidence": [],
+                    "batches_attempted": 0,
+                    "batches_since_evidence": 0,
+                    "operations_attempted": 0,
+                    "failure_counts": {},
+                    "contract_satisfied": false,
+                    "unsatisfiable": null,
+                    "completed_at": null
+                  }
+                },
+                "batches_attempted": 0,
+                "receipts": {
+                  "goal_1u1qvv2_1_p3_v1_s1_14auhzf": [
+                    {
+                      "batch_id": "",
+                      "kind": "step_completion_contract_validated",
+                      "ref": "checkpoint/step_1",
+                      "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"copper-ore\",\"minimum\":10},{\"id\":\"requirement_2\",\"kind\":\"inventory_count\",\"ite",
+                      "at": 1792790439418,
+                      "source": "runtime",
+                      "seq": 1
+                    },
+                    {
+                      "batch_id": "1",
+                      "kind": "operation_error_receipt",
+                      "ref": "batch-g1-1",
+                      "summary": "outcome=failed; task_state=idle; task_count=4; reason=mining:mining_rejected; types=walking_to_entity,mining,walking_to_entity,mining",
+                      "at": 1792790472088,
+                      "source": "runtime",
+                      "seq": 2
+                    },
+                    {
+                      "batch_id": "",
+                      "kind": "operation_preflight_blocker",
+                      "ref": "req_mvlh1w1v_1/admission",
+                      "summary": "{\"request_id\":\"req_mvlh1w1v_1\",\"operation_index\":1,\"operation_name\":\"gather_resource\",\"operation_args\":{\"resource_name\":\"coal\",\"count\":10,\"search_radius\":128},\"reason_code\":\"duplicate_effect_suppressed\",\"factorio_error\":\"Operation admission",
+                      "at": 1792790513452,
+                      "source": "runtime",
+                      "seq": 3
+                    }
+                  ]
+                },
+                "receipts_seeded": true
+              },
+              "advisory": {
+                "planner_focus_step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+                "planner_focus_at": 1792790450517,
+                "steering_note": null
+              },
+              "carried_forward_evidence": [],
+              "lifecycle": [
+                {
+                  "status": "DRAFT",
+                  "at": 1792790439417,
+                  "reason": "live_task_board"
+                },
+                {
+                  "status": "COMMITTED",
+                  "at": 1792790439518,
+                  "reason": "auto_commit_runtime_validated"
+                },
+                {
+                  "status": "BLOCKED",
+                  "at": 1792790513452,
+                  "reason": "operation_preflight_failed:duplicate_effect_suppressed"
+                }
+              ],
+              "runtime_validation": {
+                "passed": true,
+                "validated_at": 1792790439518,
+                "scope": "completion_contracts",
+                "unsupported_step_ids": []
+              }
+            }
+          ],
+          "active_plan_id": "goal_1u1qvv2_1_p3",
+          "steering": {
+            "current_mode": "vertical",
+            "previous_mode": null,
+            "reason": null,
+            "critical_path": null,
+            "pressure": {
+              "vertical": [
+                "capability_absent",
+                "goal_requires_new_capability"
+              ],
+              "horizontal": []
+            },
+            "dropped_pressure": [],
+            "last_plan_id": null,
+            "last_directional_mode": "vertical",
+            "consecutive_mode_slices": 1,
+            "hysteresis_applied": false,
+            "hold_reasons": [],
+            "proposed_mode": "vertical",
+            "forced_by_user": false,
+            "recommendation": {
+              "recommended_by": "jev",
+              "recommended_mode": "vertical",
+              "confidence": 0.55,
+              "reason_codes": [
+                "capability_absent",
+                "goal_requires_new_capability"
+              ],
+              "candidate_shelf_nodes": []
+            },
+            "user_priority": null,
+            "boundary": "goal_admission",
+            "authority": "runtime",
+            "sequence": 1,
+            "updated_at": 1792790294143,
+            "history": [
+              {
+                "mode": "vertical",
+                "boundary": "goal_admission",
+                "at": 1792790294143,
+                "plan_id": null,
+                "changed": true,
+                "hysteresis_applied": false,
+                "hold_reasons": []
+              }
+            ]
+          },
+          "updated_at": 1792790563535,
+          "reasoning_epoch": 2,
+          "last_reasoning_reset": {
+            "epoch": 2,
+            "at": 1792790439186,
+            "event_type": "ROADMAP_REVISED",
+            "reason": "goal_decomposed_to_shelf"
+          },
+          "run": {
+            "paused": false,
+            "pause_reason": "",
+            "pause_code": "",
+            "pause_class": "",
+            "pause_subkind": "",
+            "auto_resume": null,
+            "paused_at": 1792790513504,
+            "resumed_at": null,
+            "pause_count": 1,
+            "condition_wait": null,
+            "provider_recovery": null,
+            "persistent_runtime": null,
+            "pending_operation": {
+              "operation_key": "req_mvlh1w1v_1/batch_1",
+              "request_id": "req_mvlh1w1v_1",
+              "attempt_id": "req_mvlh1w1v_1/batch_1",
+              "protocol_version": 2,
+              "ordinal": 1,
+              "scopes": [
+                "*"
+              ],
+              "state": "admitted",
+              "goal_id": "goal_1u1qvv2_1",
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+              "actor": {
+                "actor_id": 25,
+                "epoch": 1
+              },
+              "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+              "operations": [
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_1",
+                  "name": "gather_resource",
+                  "effect_class": "world",
+                  "args": {
+                    "resource_name": "copper-ore",
+                    "count": 10,
+                    "search_radius": 1024
+                  }
+                },
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_2",
+                  "name": "gather_resource",
+                  "effect_class": "world",
+                  "args": {
+                    "resource_name": "coal",
+                    "count": 10,
+                    "search_radius": 1024
+                  }
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 0,
+                "active": null
+              },
+              "effect": "partial_unknown",
+              "verdict": "admitted_cancelled",
+              "reason": "exact_batch_cancelled",
+              "batch_id": null,
+              "sent_at": 1792790450798,
+              "reconciled_at": 1792790513441,
+              "surface_index": 1
+            },
+            "locators": {
+              "durable_last_operations": [
+                {
+                  "name": "gather_resource",
+                  "args": {
+                    "resource_name": "coal",
+                    "count": 10,
+                    "search_radius": 128
+                  },
+                  "role": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace."
+                }
+              ],
+              "exact_target_audit": []
+            },
+            "stale_exact_identities": [],
+            "updated_at": 1792790563535
+          },
+          "operation_ledger": {
+            "version": 1,
+            "sequence": 1,
+            "records": [
+              {
+                "operation_key": "req_mvlh1w1v_1/batch_1",
+                "request_id": "req_mvlh1w1v_1",
+                "attempt_id": "req_mvlh1w1v_1/batch_1",
+                "protocol_version": 2,
+                "ordinal": 1,
+                "scopes": [
+                  "*"
+                ],
+                "state": "admitted",
+                "goal_id": "goal_1u1qvv2_1",
+                "plan_id": "goal_1u1qvv2_1_p3",
+                "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+                "actor": {
+                  "actor_id": 25,
+                  "epoch": 1
+                },
+                "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+                "operations": [
+                  {
+                    "trace_operation_id": "req_mvlh1w1v_1/op_1",
+                    "name": "gather_resource",
+                    "effect_class": "world",
+                    "args": {
+                      "resource_name": "copper-ore",
+                      "count": 10,
+                      "search_radius": 1024
+                    }
+                  },
+                  {
+                    "trace_operation_id": "req_mvlh1w1v_1/op_2",
+                    "name": "gather_resource",
+                    "effect_class": "world",
+                    "args": {
+                      "resource_name": "coal",
+                      "count": 10,
+                      "search_radius": 1024
+                    }
+                  }
+                ],
+                "baseline": {
+                  "generation": 1,
+                  "max_batch_id": 0,
+                  "active": null
+                },
+                "effect": "partial_unknown",
+                "verdict": "admitted_cancelled",
+                "reason": "exact_batch_cancelled",
+                "batch_id": null,
+                "sent_at": 1792790450798,
+                "reconciled_at": 1792790513441,
+                "surface_index": 1
+              }
+            ],
+            "closed": []
+          },
+          "context_restages": [
+            {
+              "goal_id": "goal_1u1qvv2_1",
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "role": "executor",
+              "checkpoint": "C3",
+              "reason": "executor_fresh_at_plan_commit",
+              "handoff_id": "ho_054ac4e6e4d2",
+              "packet_chars": 4627,
+              "previous_context_chars": 97227,
+              "at": 1792790440988
+            }
+          ],
+          "authorization": {
+            "version": 1,
+            "sequence": 1,
+            "grants": [
+              {
+                "grant_id": "player_task:goal_1u1qvv2_1",
+                "mandate_kind": "player_task",
+                "mandate_id": "goal_1u1qvv2_1",
+                "goal_id": "goal_1u1qvv2_1",
+                "task_id": null,
+                "requested_result": {
+                  "result_key": "goal:goal_1u1qvv2_1",
+                  "destination": ""
+                },
+                "permitted_scope": [
+                  "expand_infrastructure",
+                  "route_change",
+                  "resource_expansion",
+                  "supporting_work",
+                  "recovery"
+                ],
+                "constraints": [],
+                "protected_materials": [],
+                "protected_assets": {
+                  "unit_numbers": []
+                },
+                "actor": null,
+                "revision": 1,
+                "status": "active",
+                "granted_at": 1792790293919,
+                "updated_at": 1792790293919,
+                "revoked_at": null,
+                "revision_history": [
+                  {
+                    "revision": 1,
+                    "at": 1792790293919,
+                    "change": "granted",
+                    "reason": "player_objective"
+                  }
+                ]
+              }
+            ],
+            "questions": [],
+            "approvals": [],
+            "refusals": [],
+            "world": {
+              "npc_placements": [],
+              "reservations": []
+            }
+          },
+          "log": [
+            {
+              "type": "GOAL_ACCEPTED",
+              "at": 1792790293918,
+              "goal_id": "goal_1u1qvv2_1"
+            },
+            {
+              "type": "AUTHORIZATION_GRANTED",
+              "at": 1792790293919,
+              "grant_id": "player_task:goal_1u1qvv2_1",
+              "revision": 1
+            },
+            {
+              "type": "STEERING_EVALUATED",
+              "at": 1792790294143,
+              "boundary": "goal_admission",
+              "mode": "vertical",
+              "hysteresis_applied": false
+            },
+            {
+              "type": "ROADMAP_REVISED",
+              "at": 1792790439186,
+              "roadmap_revision_id": "goal_1u1qvv2_1_r2",
+              "reason": "goal_decomposed_to_shelf"
+            },
+            {
+              "type": "DRAFT_CREATED",
+              "at": 1792790439186,
+              "plan_id": "goal_1u1qvv2_1_p3"
+            },
+            {
+              "type": "GOAL_DEFINED",
+              "at": 1792790439195,
+              "goal_id": "goal_1u1qvv2_1"
+            },
+            {
+              "type": "DRAFT_CREATED",
+              "at": 1792790439417,
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "in_place": true
+            },
+            {
+              "type": "PLAN_COMMITTED",
+              "at": 1792790439518,
+              "plan_id": "goal_1u1qvv2_1_p3"
+            },
+            {
+              "type": "STRUCTURAL_BLOCKER_CONFIRMED",
+              "at": 1792790513452,
+              "plan_id": "goal_1u1qvv2_1_p3"
+            },
+            {
+              "type": "RUN_PAUSED",
+              "at": 1792790513504,
+              "reason_code": "blocked_duplicate_effect_suppressed"
+            },
+            {
+              "type": "RUN_PAUSED",
+              "at": 1792790563535,
+              "reason_code": "user_stop"
+            }
+          ]
+        }
+      }
+    ],
+    "dialogue": []
+  },
+  "operations": [
+    {
+      "name": "gather_resource",
+      "args": {
+        "resource_name": "copper-ore",
+        "count": 10,
+        "search_radius": 1024
+      }
+    },
+    {
+      "name": "gather_resource",
+      "args": {
+        "resource_name": "coal",
+        "count": 10,
+        "search_radius": 1024
+      }
+    }
+  ],
+  "native": {
+    "task_state": "idle",
+    "batch_generation": 1,
+    "tasks_added": 4,
+    "queue_empty": true,
+    "queue_length": 0,
+    "queued_task_types": {},
+    "last_cancelled_batch": {
+      "batch_id": 1,
+      "batch_generation": 1,
+      "batch_ref": "batch-g1-1",
+      "task_count": 4,
+      "task_types": [
+        "walking_to_entity",
+        "mining",
+        "walking_to_entity",
+        "mining"
+      ],
+      "tick": 15306,
+      "reason": "mining:mining_rejected",
+      "started_count": 12,
+      "tasks_started": 4
+    },
+    "receipt_journal": [
+      {
+        "batch_id": 1,
+        "batch_generation": 1,
+        "batch_ref": "batch-g1-1",
+        "task_count": 4,
+        "task_types": [
+          "walking_to_entity",
+          "mining",
+          "walking_to_entity",
+          "mining"
+        ],
+        "tick": 15306,
+        "reason": "mining:mining_rejected",
+        "started_count": 12,
+        "tasks_started": 4,
+        "state": "cancelled"
+      }
+    ],
+    "admission_journal": [
+      {
+        "operation_key": "req_mvlh1w1v_1/batch_1",
+        "attempt_id": "req_mvlh1w1v_1/batch_1",
+        "actor_id": 25,
+        "epoch": 1,
+        "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+        "ordinal": 1,
+        "operation_count": 2,
+        "state": "uncertain",
+        "generation": 1,
+        "tick": 12691,
+        "slots": [
+          {
+            "index": 1,
+            "ok": true,
+            "operation": "gather_resource",
+            "batch_refs": [
+              {
+                "batch_id": 1,
+                "batch_generation": 1,
+                "batch_ref": "batch-g1-1"
+              }
+            ],
+            "queued_tasks": 2
+          },
+          {
+            "index": 2,
+            "ok": true,
+            "operation": "gather_resource",
+            "batch_refs": [
+              {
+                "batch_id": 1,
+                "batch_generation": 1,
+                "batch_ref": "batch-g1-1"
+              }
+            ],
+            "queued_tasks": 2
+          }
+        ],
+        "work_mark": 4,
+        "ok": true,
+        "error": "batch_reconciliation_required"
+      }
+    ],
+    "actor": {
+      "kind": "standalone_character",
+      "valid": true,
+      "name": "Piper-1",
+      "npc_id": "npc-1",
+      "position": {
+        "y": -30.41015625,
+        "x": -90.07421875
+      },
+      "has_character": true,
+      "actor_id": 25,
+      "selected_entity": {
+        "name": "tree-08-red",
+        "position": {
+          "y": -29.625,
+          "x": -90.9375
+        }
+      },
+      "mining_state": {
+        "mining": false,
+        "position": {
+          "y": 0,
+          "x": 0
+        }
+      },
+      "mining_progress": 0
+    },
+    "basic_operation": {
+      "last_result": {
+        "operation_id": 2,
+        "type": "mining",
+        "accepted": false,
+        "completed": false,
+        "code": "mining_rejected",
+        "tick": 15306,
+        "actor_id": 25,
+        "actor_kind": "standalone_character",
+        "force_index": 1,
+        "entity_name": "coal",
+        "requested_count": 10
+      },
+      "next_operation_id": 2
+    },
+    "follow": {
+      "active": false,
+      "state": "stopped",
+      "clear_obstacles": true,
+      "code": "stopped",
+      "updated_tick": 20811,
+      "healthy": false,
+      "controller_live": false,
+      "last_position": {
+        "x": -90.07421875,
+        "y": -30.41015625
+      },
+      "navigation": {
+        "active": false,
+        "state": "reached",
+        "persistent_follow": false
+      },
+      "actor": {
+        "kind": "standalone_character",
+        "valid": true,
+        "name": "Piper-1",
+        "npc_id": "npc-1",
+        "position": {
+          "y": -30.41015625,
+          "x": -90.07421875
+        },
+        "has_character": true,
+        "actor_id": 25,
+        "selected_entity": {
+          "name": "tree-08-red",
+          "position": {
+            "y": -29.625,
+            "x": -90.9375
+          }
+        },
+        "mining_state": {
+          "mining": false,
+          "position": {
+            "y": 0,
+            "x": 0
+          }
+        },
+        "mining_progress": 0
+      }
+    },
+    "defense": {
+      "enabled": true,
+      "radius": 24,
+      "code": "armed",
+      "updated_tick": 3,
+      "actor": {
+        "kind": "standalone_character",
+        "valid": true,
+        "name": "Piper-1",
+        "npc_id": "npc-1",
+        "position": {
+          "y": -30.41015625,
+          "x": -90.07421875
+        },
+        "has_character": true,
+        "actor_id": 25,
+        "selected_entity": {
+          "name": "tree-08-red",
+          "position": {
+            "y": -29.625,
+            "x": -90.9375
+          }
+        },
+        "mining_state": {
+          "mining": false,
+          "position": {
+            "y": 0,
+            "x": 0
+          }
+        },
+        "mining_progress": 0
+      }
+    }
+  },
+  "inventory": {
+    "burner-mining-drill": 1,
+    "stone-furnace": 1,
+    "copper-ore": 10,
+    "iron-plate": 8
+  },
+  "failure_events": [
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:21:12.041Z",
+      "seq": 152,
+      "event": "plan.contract_prediction_discarded",
+      "request_id": "req_mvlh1w1v_1",
+      "turn": 1,
+      "actor_id": 25,
+      "epoch": 1,
+      "data": {
+        "request_id": "req_mvlh1w1v_1",
+        "plan_id": "goal_1u1qvv2_1_p3",
+        "step_id": "goal_1u1qvv2_1_p3_v1_s2_1jh0jwt",
+        "assumed_step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+        "reason": "native_step_failed"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:165"
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:21:27.474Z",
+      "seq": 189,
+      "event": "operation.duplicate_suppressed",
+      "request_id": "req_mvlh1w1v_1",
+      "turn": 2,
+      "actor_id": 25,
+      "epoch": 1,
+      "data": {
+        "ok": false,
+        "reason": "unresolved_operation_scope_conflict",
+        "operation_key": "req_mvlh1w1v_1/batch_1",
+        "effect": "partial_unknown",
+        "verdict": "admitted_cancelled",
+        "pending_state": "admitted",
+        "effect_classes": [
+          "world"
+        ],
+        "batch_id": null,
+        "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+        "plan_id": "goal_1u1qvv2_1_p3",
+        "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+        "request_id": "req_mvlh1w1v_1"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:202"
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:21:53.449Z",
+      "seq": 236,
+      "event": "operation.duplicate_suppressed",
+      "request_id": "req_mvlh1w1v_1",
+      "turn": 2,
+      "actor_id": 25,
+      "epoch": 1,
+      "data": {
+        "ok": false,
+        "reason": "unresolved_operation_scope_conflict",
+        "operation_key": "req_mvlh1w1v_1/batch_1",
+        "effect": "partial_unknown",
+        "verdict": "admitted_cancelled",
+        "pending_state": "admitted",
+        "effect_classes": [
+          "world"
+        ],
+        "batch_id": null,
+        "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+        "plan_id": "goal_1u1qvv2_1_p3",
+        "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+        "request_id": "req_mvlh1w1v_1"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:249"
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:21:53.517Z",
+      "seq": 242,
+      "event": "goal.paused",
+      "request_id": "req_mvlh1w1v_1",
+      "turn": 2,
+      "actor_id": 25,
+      "epoch": 1,
+      "data": {
+        "request_id": "req_mvlh1w1v_1",
+        "cause": "blocked_duplicate_effect_suppressed",
+        "pause_reason": "blocked_duplicate_effect_suppressed",
+        "pause_class": "guard",
+        "provider_failure": false,
+        "source": "blocked_preflight",
+        "goal_id": "goal_1u1qvv2_1",
+        "active_step_id": "step_1",
+        "resume": "Revise or Cancel the blocked plan, or say continue"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:255"
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:22:43.546Z",
+      "seq": 0,
+      "event": "goal.paused",
+      "request_id": "req_mvlh1w1v_1",
+      "data": {
+        "request_id": "req_mvlh1w1v_1",
+        "cause": "user_stop",
+        "pause_reason": "user_stop",
+        "pause_class": "operator",
+        "provider_failure": false,
+        "source": "pause_persistent_plan",
+        "goal_id": "goal_1u1qvv2_1",
+        "active_step_id": "step_1",
+        "resume": "Resume or say continue"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:269"
+    }
+  ],
+  "reconciliation_events": [
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:21:12.076Z",
+      "seq": 153,
+      "event": "operation.reconciled",
+      "request_id": "req_mvlh1w1v_1",
+      "turn": 1,
+      "actor_id": 25,
+      "epoch": 1,
+      "data": {
+        "request_id": "req_mvlh1w1v_1",
+        "trigger": "receipt",
+        "operation_key": "req_mvlh1w1v_1/batch_1",
+        "verdict": "admitted_cancelled",
+        "effect": "partial_unknown",
+        "reason": "exact_batch_cancelled",
+        "batch_id": null,
+        "operations": [
+          "gather_resource",
+          "gather_resource"
+        ],
+        "effect_classes": [
+          "world"
+        ],
+        "settled": false,
+        "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+        "plan_id": "goal_1u1qvv2_1_p3",
+        "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:166"
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:21:27.456Z",
+      "seq": 188,
+      "event": "operation.reconciled",
+      "request_id": "req_mvlh1w1v_1",
+      "turn": 2,
+      "actor_id": 25,
+      "epoch": 1,
+      "data": {
+        "request_id": "req_mvlh1w1v_1",
+        "trigger": "receipt",
+        "operation_key": "req_mvlh1w1v_1/batch_1",
+        "verdict": "admitted_cancelled",
+        "effect": "partial_unknown",
+        "reason": "exact_batch_cancelled",
+        "batch_id": null,
+        "operations": [
+          "gather_resource",
+          "gather_resource"
+        ],
+        "effect_classes": [
+          "world"
+        ],
+        "settled": false,
+        "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+        "plan_id": "goal_1u1qvv2_1_p3",
+        "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:201"
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-23T21:21:53.437Z",
+      "seq": 235,
+      "event": "operation.reconciled",
+      "request_id": "req_mvlh1w1v_1",
+      "turn": 2,
+      "actor_id": 25,
+      "epoch": 1,
+      "data": {
+        "request_id": "req_mvlh1w1v_1",
+        "trigger": "receipt",
+        "operation_key": "req_mvlh1w1v_1/batch_1",
+        "verdict": "admitted_cancelled",
+        "effect": "partial_unknown",
+        "reason": "exact_batch_cancelled",
+        "batch_id": null,
+        "operations": [
+          "gather_resource",
+          "gather_resource"
+        ],
+        "effect_classes": [
+          "world"
+        ],
+        "settled": false,
+        "signature": "6d36edb1af1c18722023b94834872f2bc1b60e09613fa1ffa26239130966dd51",
+        "plan_id": "goal_1u1qvv2_1_p3",
+        "step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf"
+      },
+      "_source": "data/logs/sgluna-behavior.jsonl:248"
+    }
+  ],
+  "model_responses": [
+    {
+      "schema": 1,
+      "event": "capture.response",
+      "tap_request_id": "tap_6",
+      "started": "2026-10-23T21:20:41.563Z",
+      "ts": "2026-10-23T21:20:50.011Z",
+      "elapsed_ms": 8448.402899999986,
+      "model": "gpt-6-luna",
+      "stream": false,
+      "request_body_sha256": "323b54dc74bd342c48954d1012454eaccc2873efa0752ed7dcee66743640bfdf",
+      "status": 200,
+      "response_id": "resp_05974a03bc899da5016adbcfa9c34887d1bb0f889031902f81",
+      "reported_model": "gpt-6-luna",
+      "usage": {
+        "completion_tokens": 293,
+        "total_tokens": 23289,
+        "prompt_tokens": 22996,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "cached_creation_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 179
+        }
+      },
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "tool_calls",
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_KLaqCY5jzXkGCytNS29L7seG",
+                "type": "function",
+                "function": {
+                  "name": "submitPlan",
+                  "arguments": "{\"stepId\":\"goal_1u1qvv2_1_p3_v1_s1_14auhzf\",\"operations\":[{\"name\":\"gather_resource\",\"args\":{\"resource_name\":\"copper-ore\",\"count\":10,\"search_radius\":1024}},{\"name\":\"gather_resource\",\"args\":{\"resource_name\":\"coal\",\"count\":10,\"search_radius\":1024}}],\"chatMessage\":\"I\u2019ll gather the required copper ore and coal while retaining the held furnace.\"}"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "captured_response_bytes": 1071,
+      "complete": true,
+      "derived_provenance": {
+        "request_id": "req_mvlh1w1v_1",
+        "request_source": "data/logs/sgluna-prompts.jsonl:11",
+        "response_source": "data/logs/sgluna-prompts.jsonl:13",
+        "role": "executor",
+        "model": "gpt-6-luna",
+        "disposition": "operation_proposal_admitted; native completion is separate",
+        "validation_events": [
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:20:50.183Z",
+            "seq": 108,
+            "event": "plan.accepted",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 1,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "trigger_source": "new_goal",
+              "chat_message": "I\u2019ll gather the required copper ore and coal while retaining the held furnace.",
+              "plan": [
+                "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                "Smelt and collect 10 copper plates, then verify that electronics research is complete."
+              ],
+              "current_step": 0,
+              "operations": [
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_1",
+                  "name": "gather_resource",
+                  "args": {
+                    "resource_name": "copper-ore",
+                    "count": 10,
+                    "search_radius": 1024
+                  }
+                },
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_2",
+                  "name": "gather_resource",
+                  "args": {
+                    "resource_name": "coal",
+                    "count": 10,
+                    "search_radius": 1024
+                  }
+                }
+              ]
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:121"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:20:50.538Z",
+            "seq": 109,
+            "event": "plan.persisted",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 1,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "lifecycle": "admitting",
+              "goal_id": "goal_1u1qvv2_1",
+              "task_board": {
+                "kind": "task_board_lite",
+                "goal_id": "goal_1u1qvv2_1",
+                "status": "active",
+                "blocker": "",
+                "pause_reason": "",
+                "revision": 3,
+                "completed_count": 0,
+                "total_steps": 3,
+                "active_index": 0,
+                "active_step_id": "step_1",
+                "proposed_focus_index": 0,
+                "proposed_focus_step_id": "step_1",
+                "steps": [
+                  {
+                    "id": "step_1",
+                    "description": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                    "status": "active",
+                    "revision": 2,
+                    "completion_contract": {
+                      "mode": "all",
+                      "requirements": [
+                        {
+                          "id": "requirement_1",
+                          "kind": "inventory_count",
+                          "item_name": "copper-ore",
+                          "minimum": 10
+                        },
+                        {
+                          "id": "requirement_2",
+                          "kind": "inventory_count",
+                          "item_name": "coal",
+                          "minimum": 10
+                        },
+                        {
+                          "id": "requirement_3",
+                          "kind": "inventory_count",
+                          "item_name": "stone-furnace",
+                          "minimum": 1
+                        }
+                      ],
+                      "confidence": 0
+                    },
+                    "completion_contract_at": 1792790439417,
+                    "completion_mode": "deterministic",
+                    "contract_status": "bound"
+                  },
+                  {
+                    "id": "step_2",
+                    "description": "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                    "status": "pending",
+                    "revision": 1,
+                    "completion_contract": null,
+                    "completion_mode": "deterministic",
+                    "contract_status": "pending"
+                  },
+                  {
+                    "id": "step_3",
+                    "description": "Smelt and collect 10 copper plates, then verify that electronics research is complete.",
+                    "status": "pending",
+                    "revision": 1,
+                    "completion_contract": null,
+                    "completion_mode": "deterministic",
+                    "contract_status": "pending"
+                  }
+                ],
+                "evidence": [
+                  {
+                    "id": "evidence_1",
+                    "kind": "step_completion_contract_validated",
+                    "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"copper-ore\",\"minimum\":10},{\"id\":\"requirement_2\",\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":10},{\"id\":\"requirement_3\",\"kind\":\"inventory_count\",\"item_name\":\"stone-furnace\",\"minimum\":1}],\"confidence\":0}}",
+                    "ref": "checkpoint/step_1",
+                    "at": 1792790439418,
+                    "step_id": "step_1"
+                  }
+                ],
+                "events": [
+                  {
+                    "seq": 1,
+                    "type": "created",
+                    "at": 1792790439186,
+                    "revision": 1,
+                    "active_step_id": "step_1",
+                    "total_steps": 3
+                  },
+                  {
+                    "seq": 2,
+                    "type": "evidence",
+                    "at": 1792790439418,
+                    "revision": 3,
+                    "evidence_id": "evidence_1",
+                    "step_id": "step_1"
+                  }
+                ]
+              }
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:122"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:20:50.808Z",
+            "seq": 112,
+            "event": "operations.admit",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 1,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "operations": [
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_1",
+                  "name": "gather_resource",
+                  "args": {
+                    "resource_name": "copper-ore",
+                    "count": 10,
+                    "search_radius": 1024
+                  }
+                },
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_2",
+                  "name": "gather_resource",
+                  "args": {
+                    "resource_name": "coal",
+                    "count": 10,
+                    "search_radius": 1024
+                  }
+                }
+              ]
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:125"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:20:50.890Z",
+            "seq": 115,
+            "event": "plan.time_estimate",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 1,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "goal_id": "goal_1u1qvv2_1",
+              "step_id": "step_1",
+              "step_index": 0,
+              "batch_expected_seconds": 40,
+              "step_expected_seconds": 40,
+              "lane": "actor",
+              "single_lane": true,
+              "basis": "live prototype rates via autorio_knowledge.production_estimate (hand mining: mining_time / character mining speed; hand crafting: recipe energy / hand crafting speed); wait: ticks / 60",
+              "excluded": [
+                "walking",
+                "placement",
+                "transfer"
+              ],
+              "lower_bound": false,
+              "unknown_operations": 0,
+              "widest_search_radius": 1024,
+              "long": false,
+              "threshold_seconds": 300,
+              "review": "below_threshold",
+              "operations": [
+                {
+                  "index": 0,
+                  "name": "gather_resource",
+                  "kind": "hand_mine",
+                  "target": "copper-ore",
+                  "count": 10,
+                  "search_radius": 1024,
+                  "seconds": 20,
+                  "seconds_per_unit": 2
+                },
+                {
+                  "index": 1,
+                  "name": "gather_resource",
+                  "kind": "hand_mine",
+                  "target": "coal",
+                  "count": 10,
+                  "search_radius": 1024,
+                  "seconds": 20,
+                  "seconds_per_unit": 2
+                }
+              ]
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:128"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:20:50.983Z",
+            "seq": 117,
+            "event": "plan.contract_prediction_started",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 1,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "request_id": "req_mvlh1w1v_1",
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "step_id": "goal_1u1qvv2_1_p3_v1_s2_1jh0jwt",
+              "assumed_step_id": "goal_1u1qvv2_1_p3_v1_s1_14auhzf",
+              "reason": "native_batch_admitted"
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:130"
+          }
+        ],
+        "context_note": "Exact wire request source supplies the prompt, observations and tools available to this response. Original message content/arguments are unchanged."
+      }
+    },
+    {
+      "schema": 1,
+      "event": "capture.response",
+      "tap_request_id": "tap_9",
+      "started": "2026-10-23T21:21:21.466Z",
+      "ts": "2026-10-23T21:21:27.093Z",
+      "elapsed_ms": 5626.929300000018,
+      "model": "gpt-6-luna",
+      "stream": false,
+      "request_body_sha256": "3050d015a3bd064a1e6a1cf53cca7620d5a549199a8e84be0f61a15817fc4613",
+      "status": 200,
+      "response_id": "resp_02377dde0ce6cad4016adbcfd1b98c87d18e95f5c55579ca93",
+      "reported_model": "gpt-6-luna",
+      "usage": {
+        "completion_tokens": 193,
+        "total_tokens": 30353,
+        "prompt_tokens": 30160,
+        "prompt_tokens_details": {
+          "cached_tokens": 19840,
+          "cache_write_tokens": 0,
+          "cached_creation_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 68
+        }
+      },
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "tool_calls",
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_WiYWye5UNqiuWvhBPbGdzSzp",
+                "type": "function",
+                "function": {
+                  "name": "submitPlan",
+                  "arguments": "{\"stepId\":\"goal_1u1qvv2_1_p3_v1_s1_14auhzf\",\"operations\":[{\"name\":\"gather_resource\",\"args\":{\"resource_name\":\"coal\",\"count\":10,\"search_radius\":128}}],\"checkpoint\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"inventory_count\",\"item_name\":\"copper-ore\",\"minimum\":10},{\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":10},{\"kind\":\"inventory_count\",\"item_name\":\"stone-furnace\",\"minimum\":1}]}}"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "captured_response_bytes": 1131,
+      "complete": true,
+      "derived_provenance": {
+        "request_id": "req_mvlh1w1v_1",
+        "request_source": "data/logs/sgluna-prompts.jsonl:21",
+        "response_source": "data/logs/sgluna-prompts.jsonl:23",
+        "role": "executor",
+        "model": "gpt-6-luna",
+        "disposition": "parsed_proposal; no commitment or admission inferred",
+        "validation_events": [
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:27.189Z",
+            "seq": 183,
+            "event": "plan.accepted",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "trigger_source": "post_step_replan",
+              "chat_message": "",
+              "plan": [
+                "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                "Smelt and collect 10 copper plates, then verify that electronics research is complete."
+              ],
+              "current_step": 0,
+              "operations": [
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_1",
+                  "name": "gather_resource",
+                  "args": {
+                    "resource_name": "coal",
+                    "count": 10,
+                    "search_radius": 128
+                  }
+                }
+              ],
+              "checkpoint": {
+                "mode": "all",
+                "requirements": [
+                  {
+                    "id": "requirement_1",
+                    "kind": "inventory_count",
+                    "item_name": "copper-ore",
+                    "minimum": 10
+                  },
+                  {
+                    "id": "requirement_2",
+                    "kind": "inventory_count",
+                    "item_name": "coal",
+                    "minimum": 10
+                  },
+                  {
+                    "id": "requirement_3",
+                    "kind": "inventory_count",
+                    "item_name": "stone-furnace",
+                    "minimum": 1
+                  }
+                ],
+                "confidence": 0,
+                "source": "planner_semantic_checkpoint"
+              }
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:196"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:27.256Z",
+            "seq": 184,
+            "event": "plan.step_close_skipped_on_fresh_read",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "request_id": "req_mvlh1w1v_1",
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "step_index": 0,
+              "step_id": "step_1",
+              "trigger": "checkpoint_met_before_batch",
+              "reason": "operation_batch_in_flight"
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:197"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:27.275Z",
+            "seq": 185,
+            "event": "plan.persisted",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "lifecycle": "admitting",
+              "goal_id": "goal_1u1qvv2_1",
+              "task_board": {
+                "kind": "task_board_lite",
+                "goal_id": "goal_1u1qvv2_1",
+                "status": "active",
+                "blocker": "",
+                "pause_reason": "",
+                "revision": 4,
+                "completed_count": 0,
+                "total_steps": 3,
+                "active_index": 0,
+                "active_step_id": "step_1",
+                "proposed_focus_index": 0,
+                "proposed_focus_step_id": "step_1",
+                "steps": [
+                  {
+                    "id": "step_1",
+                    "description": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                    "status": "active",
+                    "revision": 2,
+                    "completion_contract": {
+                      "mode": "all",
+                      "requirements": [
+                        {
+                          "id": "requirement_1",
+                          "kind": "inventory_count",
+                          "item_name": "copper-ore",
+                          "minimum": 10
+                        },
+                        {
+                          "id": "requirement_2",
+                          "kind": "inventory_count",
+                          "item_name": "coal",
+                          "minimum": 10
+                        },
+                        {
+                          "id": "requirement_3",
+                          "kind": "inventory_count",
+                          "item_name": "stone-furnace",
+                          "minimum": 1
+                        }
+                      ],
+                      "confidence": 0
+                    },
+                    "completion_contract_at": 1792790439417,
+                    "completion_mode": "deterministic",
+                    "contract_status": "bound"
+                  },
+                  {
+                    "id": "step_2",
+                    "description": "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                    "status": "pending",
+                    "revision": 1,
+                    "completion_contract": null,
+                    "completion_mode": "deterministic",
+                    "contract_status": "pending"
+                  },
+                  {
+                    "id": "step_3",
+                    "description": "Smelt and collect 10 copper plates, then verify that electronics research is complete.",
+                    "status": "pending",
+                    "revision": 1,
+                    "completion_contract": null,
+                    "completion_mode": "deterministic",
+                    "contract_status": "pending"
+                  }
+                ],
+                "evidence": [
+                  {
+                    "id": "evidence_1",
+                    "kind": "step_completion_contract_validated",
+                    "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"copper-ore\",\"minimum\":10},{\"id\":\"requirement_2\",\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":10},{\"id\":\"requirement_3\",\"kind\":\"inventory_count\",\"item_name\":\"stone-furnace\",\"minimum\":1}],\"confidence\":0}}",
+                    "ref": "checkpoint/step_1",
+                    "at": 1792790439418,
+                    "step_id": "step_1"
+                  },
+                  {
+                    "id": "evidence_2",
+                    "kind": "operation_error_receipt",
+                    "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":1,\"batch_generation\":1,\"batch_ref\":\"batch-g1-1\",\"task_count\":4,\"task_types\":[\"walking_to_entity\",\"mining\",\"walking_to_entity\",\"mining\"],\"tick\":15306,\"reason\":\"mining:mining_rejected\",\"basic_operation\":{\"operation_id\":2,\"tick\":15306,\"actor_id\":25,\"type\":\"mining\",\"accepted\":false,\"completed\":false,\"code\":\"mining_rejected\",\"entity_name\":\"coal\",\"requested_count\":10},\"correlation\":{\"goal_id\":\"goal_1u1qvv2_1\",\"step_id\":\"step_1\",\"actor_id\":25,\"actor_epoch\":1}}",
+                    "ref": "batch-g1-1",
+                    "at": 1792790472088,
+                    "step_id": "step_1"
+                  }
+                ],
+                "events": [
+                  {
+                    "seq": 1,
+                    "type": "created",
+                    "at": 1792790439186,
+                    "revision": 1,
+                    "active_step_id": "step_1",
+                    "total_steps": 3
+                  },
+                  {
+                    "seq": 2,
+                    "type": "evidence",
+                    "at": 1792790439418,
+                    "revision": 3,
+                    "evidence_id": "evidence_1",
+                    "step_id": "step_1"
+                  },
+                  {
+                    "seq": 3,
+                    "type": "evidence",
+                    "at": 1792790472088,
+                    "revision": 4,
+                    "evidence_id": "evidence_2",
+                    "step_id": "step_1"
+                  }
+                ]
+              }
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:198"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:27.280Z",
+            "seq": 187,
+            "event": "step.checkpoint_change_ignored",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "active_step_id": "step_1",
+              "reason": "committed_completion_contract_is_immutable",
+              "committed_contract": {
+                "mode": "all",
+                "requirements": [
+                  {
+                    "id": "requirement_1",
+                    "kind": "inventory_count",
+                    "item_name": "copper-ore",
+                    "minimum": 10
+                  },
+                  {
+                    "id": "requirement_2",
+                    "kind": "inventory_count",
+                    "item_name": "coal",
+                    "minimum": 10
+                  },
+                  {
+                    "id": "requirement_3",
+                    "kind": "inventory_count",
+                    "item_name": "stone-furnace",
+                    "minimum": 1
+                  }
+                ],
+                "confidence": 0
+              },
+              "proposed_contract": {
+                "mode": "all",
+                "requirements": [
+                  {
+                    "id": "requirement_1",
+                    "kind": "inventory_count",
+                    "item_name": "copper-ore",
+                    "minimum": 10
+                  },
+                  {
+                    "id": "requirement_2",
+                    "kind": "inventory_count",
+                    "item_name": "coal",
+                    "minimum": 10
+                  },
+                  {
+                    "id": "requirement_3",
+                    "kind": "inventory_count",
+                    "item_name": "stone-furnace",
+                    "minimum": 1
+                  }
+                ],
+                "confidence": 0,
+                "source": "planner_semantic_checkpoint"
+              }
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:200"
+          }
+        ],
+        "context_note": "Exact wire request source supplies the prompt, observations and tools available to this response. Original message content/arguments are unchanged."
+      }
+    },
+    {
+      "schema": 1,
+      "event": "capture.response",
+      "tap_request_id": "tap_13",
+      "started": "2026-10-23T21:21:43.021Z",
+      "ts": "2026-10-23T21:21:53.074Z",
+      "elapsed_ms": 10053.454499999993,
+      "model": "gpt-6-luna",
+      "stream": false,
+      "request_body_sha256": "0ff2b9047578d59a1b67357cfd4c93466c9f295361d998ba6d8659bd98f1d806",
+      "status": 200,
+      "response_id": "resp_05f45214e7964ce5016adbcfe72eb887d185257a38afb19e56",
+      "reported_model": "gpt-6-luna",
+      "usage": {
+        "completion_tokens": 404,
+        "total_tokens": 30526,
+        "prompt_tokens": 30122,
+        "prompt_tokens_details": {
+          "cached_tokens": 19840,
+          "cache_write_tokens": 0,
+          "cached_creation_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 343
+        }
+      },
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "{\"chatMessage\":\"\",\"stepId\":\"goal_1u1qvv2_1_p3_v1_s1_14auhzf\",\"operations\":[{\"name\":\"gather_resource\",\"args\":{\"resource_name\":\"coal\",\"count\":10,\"search_radius\":128}}]}",
+            "tool_calls": null
+          }
+        }
+      ],
+      "captured_response_bytes": 769,
+      "complete": true,
+      "derived_provenance": {
+        "request_id": "req_mvlh1w1v_1",
+        "request_source": "data/logs/sgluna-prompts.jsonl:33",
+        "response_source": "data/logs/sgluna-prompts.jsonl:37",
+        "role": "executor",
+        "model": "gpt-6-luna",
+        "disposition": "parsed_proposal; no commitment or admission inferred",
+        "validation_events": [
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:53.172Z",
+            "seq": 232,
+            "event": "plan.accepted",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "trigger_source": "post_step_replan",
+              "chat_message": "",
+              "plan": [
+                "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                "Smelt and collect 10 copper plates, then verify that electronics research is complete."
+              ],
+              "current_step": 0,
+              "operations": [
+                {
+                  "trace_operation_id": "req_mvlh1w1v_1/op_1",
+                  "name": "gather_resource",
+                  "args": {
+                    "resource_name": "coal",
+                    "count": 10,
+                    "search_radius": 128
+                  }
+                }
+              ]
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:245"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:53.236Z",
+            "seq": 233,
+            "event": "plan.step_close_skipped_on_fresh_read",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "request_id": "req_mvlh1w1v_1",
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "step_index": 0,
+              "step_id": "step_1",
+              "trigger": "checkpoint_met_before_batch",
+              "reason": "operation_batch_in_flight"
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:246"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:53.250Z",
+            "seq": 234,
+            "event": "plan.persisted",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "lifecycle": "admitting",
+              "goal_id": "goal_1u1qvv2_1",
+              "task_board": {
+                "kind": "task_board_lite",
+                "goal_id": "goal_1u1qvv2_1",
+                "status": "active",
+                "blocker": "",
+                "pause_reason": "",
+                "revision": 4,
+                "completed_count": 0,
+                "total_steps": 3,
+                "active_index": 0,
+                "active_step_id": "step_1",
+                "proposed_focus_index": 0,
+                "proposed_focus_step_id": "step_1",
+                "steps": [
+                  {
+                    "id": "step_1",
+                    "description": "Acquire 10 copper ore and 10 coal for the electronics bootstrap, retaining the held furnace.",
+                    "status": "active",
+                    "revision": 2,
+                    "completion_contract": {
+                      "mode": "all",
+                      "requirements": [
+                        {
+                          "id": "requirement_1",
+                          "kind": "inventory_count",
+                          "item_name": "copper-ore",
+                          "minimum": 10
+                        },
+                        {
+                          "id": "requirement_2",
+                          "kind": "inventory_count",
+                          "item_name": "coal",
+                          "minimum": 10
+                        },
+                        {
+                          "id": "requirement_3",
+                          "kind": "inventory_count",
+                          "item_name": "stone-furnace",
+                          "minimum": 1
+                        }
+                      ],
+                      "confidence": 0
+                    },
+                    "completion_contract_at": 1792790439417,
+                    "completion_mode": "deterministic",
+                    "contract_status": "bound"
+                  },
+                  {
+                    "id": "step_2",
+                    "description": "Install the held stone furnace for copper smelting; observe its new exact identity before supplying it.",
+                    "status": "pending",
+                    "revision": 1,
+                    "completion_contract": null,
+                    "completion_mode": "deterministic",
+                    "contract_status": "pending"
+                  },
+                  {
+                    "id": "step_3",
+                    "description": "Smelt and collect 10 copper plates, then verify that electronics research is complete.",
+                    "status": "pending",
+                    "revision": 1,
+                    "completion_contract": null,
+                    "completion_mode": "deterministic",
+                    "contract_status": "pending"
+                  }
+                ],
+                "evidence": [
+                  {
+                    "id": "evidence_1",
+                    "kind": "step_completion_contract_validated",
+                    "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"copper-ore\",\"minimum\":10},{\"id\":\"requirement_2\",\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":10},{\"id\":\"requirement_3\",\"kind\":\"inventory_count\",\"item_name\":\"stone-furnace\",\"minimum\":1}],\"confidence\":0}}",
+                    "ref": "checkpoint/step_1",
+                    "at": 1792790439418,
+                    "step_id": "step_1"
+                  },
+                  {
+                    "id": "evidence_2",
+                    "kind": "operation_error_receipt",
+                    "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":1,\"batch_generation\":1,\"batch_ref\":\"batch-g1-1\",\"task_count\":4,\"task_types\":[\"walking_to_entity\",\"mining\",\"walking_to_entity\",\"mining\"],\"tick\":15306,\"reason\":\"mining:mining_rejected\",\"basic_operation\":{\"operation_id\":2,\"tick\":15306,\"actor_id\":25,\"type\":\"mining\",\"accepted\":false,\"completed\":false,\"code\":\"mining_rejected\",\"entity_name\":\"coal\",\"requested_count\":10},\"correlation\":{\"goal_id\":\"goal_1u1qvv2_1\",\"step_id\":\"step_1\",\"actor_id\":25,\"actor_epoch\":1}}",
+                    "ref": "batch-g1-1",
+                    "at": 1792790472088,
+                    "step_id": "step_1"
+                  }
+                ],
+                "events": [
+                  {
+                    "seq": 1,
+                    "type": "created",
+                    "at": 1792790439186,
+                    "revision": 1,
+                    "active_step_id": "step_1",
+                    "total_steps": 3
+                  },
+                  {
+                    "seq": 2,
+                    "type": "evidence",
+                    "at": 1792790439418,
+                    "revision": 3,
+                    "evidence_id": "evidence_1",
+                    "step_id": "step_1"
+                  },
+                  {
+                    "seq": 3,
+                    "type": "evidence",
+                    "at": 1792790472088,
+                    "revision": 4,
+                    "evidence_id": "evidence_2",
+                    "step_id": "step_1"
+                  }
+                ]
+              }
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:247"
+          },
+          {
+            "schema": 1,
+            "ts": "2026-10-23T21:21:53.475Z",
+            "seq": 238,
+            "event": "plan.replacement_wake_skipped",
+            "request_id": "req_mvlh1w1v_1",
+            "turn": 2,
+            "actor_id": 25,
+            "epoch": 1,
+            "data": {
+              "request_id": "req_mvlh1w1v_1",
+              "plan_id": "goal_1u1qvv2_1_p3",
+              "trigger": "operation_preflight_blocker",
+              "reason": "blocker_not_world_evidence",
+              "evidence_detail": "code_not_world_change:duplicate_effect_suppressed"
+            },
+            "_source": "data/logs/sgluna-behavior.jsonl:251"
+          }
+        ],
+        "context_note": "Exact wire request source supplies the prompt, observations and tools available to this response. Original message content/arguments are unchanged."
+      }
+    }
+  ]
+}

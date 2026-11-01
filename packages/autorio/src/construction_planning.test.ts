@@ -33,7 +33,7 @@ function fixture() {
     character: actorCharacter,
     position: actorCharacter.position,
     surface,
-    force: { index: 1, name: 'player' },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
   } as unknown as ControlledActor
   return { actor, surface, actorCharacter, cliff }
 }
@@ -138,8 +138,65 @@ describe('shared local spatial observation', () => {
     expect(result.prototype).toMatchObject({
       physical_footprint: { tile_width: 3, tile_height: 3 },
     })
-    expect(result.corridors).toMatchObject({ input: { reserved: true }, output: { reserved: true }, power: { reserved: true } })
+    expect(result.corridors).toMatchObject({ input: { reserved: true }, output: { reserved: true }, power: { reserved: true }, future_extension: { reserved: true, direction: 'east', minimum_clear_tiles: 3 } })
     expect(result.rejected.length).toBeGreaterThan(0)
+  })
+
+  it('starts entity-anchor placement search outside the anchor footprint', () => {
+    const { actor, surface } = fixture()
+    const anchor: any = {
+      valid: true,
+      name: 'assembling-machine-1',
+      type: 'assembling-machine',
+      unit_number: 99,
+      position: { x: 0.5, y: 0.5 },
+      bounding_box: { left_top: { x: -1, y: -1 }, right_bottom: { x: 2, y: 2 } },
+      force: { name: 'player' },
+      surface,
+    }
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => anchor)
+    surface.can_place_entity.mockReturnValue(true)
+
+    const result: any = plan_placement(actor, {
+      entity_name: 'burner-mining-drill',
+      anchor_unit_number: 99,
+      side: 'east',
+      search_radius: 2,
+      max_candidates: 4,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.best.position.x).toBeGreaterThanOrEqual(3)
+    for (const candidate of result.candidates) {
+      const box = candidate.footprint.world_box
+      const overlaps = box.left_top.x < anchor.bounding_box.right_bottom.x
+        && box.right_bottom.x > anchor.bounding_box.left_top.x
+        && box.left_top.y < anchor.bounding_box.right_bottom.y
+        && box.right_bottom.y > anchor.bounding_box.left_top.y
+      expect(overlaps).toBe(false)
+    }
+  })
+
+  it('plans even-sized entities on whole-coordinate centers and returns their footprint', () => {
+    const { actor } = fixture()
+    const result: any = plan_placement(actor, {
+      entity_name: 'burner-mining-drill',
+      position: { x: 0.5, y: 0.5 },
+      side: 'east',
+      search_radius: 4,
+      max_candidates: 4,
+    })
+
+    expect(result.ok).toBe(true)
+    for (const candidate of result.candidates) {
+      expect(Number.isInteger(candidate.position.x)).toBe(true)
+      expect(Number.isInteger(candidate.position.y)).toBe(true)
+      expect(candidate.footprint).toMatchObject({
+        tile_width: 2,
+        tile_height: 2,
+        grid: { x_offset: 0, y_offset: 0 },
+      })
+    }
   })
 
   it('reuses the same collision-aware backend to select a local navigation escape point', () => {

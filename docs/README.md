@@ -1,27 +1,49 @@
 # Documentation
 
-**For current SGLuna use the
-[Jev branch documentation](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/docs/README.md).**
-Jev is optional on that branch; a main LLM provider is still needed. The pages
-below belong to the older `main` snapshot, with AIRI-era settings and evidence.
+Start with the page that matches your task. Architecture/design documents define
+contracts; the status page and dated evidence establish what has been verified.
 
-| Main snapshot reference | Read |
+## Use or contribute
+
+| I want to… | Read |
 | --- | --- |
-| Branch choice and project overview | [README](../README.md) |
-| Contributions | [CONTRIBUTING](../CONTRIBUTING.md) |
-| Coding-agent rules | [AGENTS](../AGENTS.md) |
-| Project contract | [SPEC](../SPEC.md) |
-| Testing this snapshot | [Testing](TESTING.md) |
-| Task/review workflow | [Development workflow](DEVELOPMENT_WORKFLOW.md) |
-| Retained server setup | [Docker](../deploy/docker/README.md), [Pterodactyl](../deploy/pterodactyl/README.md) |
-| Actor/body contract | [Character architecture](NPC_CHARACTER_ARCHITECTURE.md) |
-| Retained roadmap | [Harness plan](NPC_AGENT_HARNESS_PLAN.md) |
-| Recorded capability and limits | [Harness status](NPC_AGENT_HARNESS_STATUS.md) |
-| Historical checkpoints | [Validation history](validation/README.md) |
-| Earlier identity transition | [Migration tracker](PROJECT_MIGRATION_TRACKER.md) |
+| Understand SGLuna and its limits | [Project overview](../README.md), [current status](NPC_AGENT_HARNESS_STATUS.md) |
+| Run a server | [Docker](../deploy/docker/README.md) or [Pterodactyl](../deploy/pterodactyl/README.md) |
+| Set up an external AI harness | [Portable automatic setup](EXTERNAL_HARNESS_SETUP.md), [local MCP runtime/tools](EXTERNAL_HARNESS.md) |
+| Make a first contribution or report a bug | [Contributing](../CONTRIBUTING.md) |
+| Work with a coding agent | [AGENTS.md](../AGENTS.md) |
+| Choose tests and a supported environment | [Testing](TESTING.md) |
+| Scope, review and integrate a task | [Development workflow](DEVELOPMENT_WORKFLOW.md) |
+| Understand the project contract | [SPEC.md](../SPEC.md) |
 
-Historical branch names, paths and commands describe their original snapshots.
-Do not restart an old run from its report or rewrite it to describe a newer SHA.
-For new work, follow the current branch's guide rather than combining commands
-from different branches. Keep one owning guide per subject and preserve existing
-filenames/evidence links when cleaning documentation.
+## Find the owning contract
+
+| Area | Reference |
+| --- | --- |
+| Character, inventory and standalone actor | [Character architecture](NPC_CHARACTER_ARCHITECTURE.md) |
+| Runtime/adapters and shared tool contracts | [Architecture ownership](ARCHITECTURE_OWNERSHIP.md), [tool manifest](../contracts/factorio-tool-contract.json) |
+| Harness direction and promotion gates | [Harness plan](NPC_AGENT_HARNESS_PLAN.md) |
+| Goal, Roadmap Shelf, Active Plan and Jev authority | [Planning roadmap](NPC_PLANNING_ROADMAP.md) |
+| Task interruption, authority and campaign allowance | [Macro execution design](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md) |
+| Production capability and engine proof | [Production validation ladder](NPC_PRODUCTION_VALIDATION_ROADMAP.md) |
+| Spatial placement | [Placement architecture](NPC_SPATIAL_PLACEMENT_ARCHITECTURE.md) |
+| Repairing an E2E failure | [Repair requirements](E2E_REPAIR_REQUIREMENTS.md) |
+| Running an authorized provider trial | [Live E2E procedure](LIVE_E2E.md) |
+| Accelerated trial profiles | [Tick-sprint contract and adoption gates](E2E_TICK_SPRINT.md) |
+
+Other design and dated work notes in this directory provide subsystem context;
+their existence does not establish implementation or current readiness. In
+particular, swarm/vision proposals are separate from the single-NPC baseline.
+
+## History and documentation maintenance
+
+[Validation history](validation/README.md) contains dated runs, checkpoints and
+superseded handoffs. Their SHAs, commands and paths describe the recorded run;
+they are not instructions to restart it. Use
+[current status](NPC_AGENT_HARNESS_STATUS.md) to find the relevant checkpoint.
+The [migration tracker](PROJECT_MIGRATION_TRACKER.md) records origin/identity work.
+
+Keep the overview in the root README, contribution steps in CONTRIBUTING, coding
+agent rules in AGENTS, and test commands in TESTING. Update an existing owning
+document before adding a competing roadmap. Preserve existing filenames and
+historical evidence so old links and retained run references remain usable.

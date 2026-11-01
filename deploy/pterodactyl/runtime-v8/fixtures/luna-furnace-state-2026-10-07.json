@@ -1,0 +1,1460 @@
+{
+  "version": 1,
+  "dialogue": [
+    {
+      "key": "npc:npc-1",
+      "summary": "",
+      "recent": [
+        {
+          "id": 1,
+          "sender": "<server>",
+          "user": "Make red science packs and consume them in native lab research to complete logistic-science-pack and enable green science. Hand crafting and hand-fed machines are allowed; factory automation is optional. Use natural resources and native game mechanics. Finish when logistic-science-pack is researched and its recipe is enabled.",
+          "assistant": "BLOCKED: The 50 iron ore has been gathered, but the available live recipe data shows the only nearby stone furnace is set to copper-plate. I can’t safely change or supply that exact furnace without a fresh entity observation, and observations are closed for this decision.",
+          "actions": "{\"name\":\"gather_resource\",\"args\":{\"resource_name\":\"iron-ore\",\"count\":50,\"search_radius\":256}}"
+        }
+      ]
+    }
+  ],
+  "plans": [
+    {
+      "key": "npc:npc-1",
+      "state": {
+        "goal_id": "goal_065pf7k_1",
+        "owner": "<server>",
+        "objective": "Make red science packs and consume them in native lab research to complete logistic-science-pack and enable green science. Hand crafting and hand-fed machines are allowed; factory automation is optional. Use natural resources and native game mechanics. Finish when logistic-science-pack is researched and its recipe is enabled.",
+        "status": "paused",
+        "admission_status": "admitted",
+        "blocker": "",
+        "pause_reason": "recoverable_provider_failure:provider_reported_blocker",
+        "plan": [
+          "Complete the electronics trigger by crafting 10 copper plates",
+          "Complete the steam-power trigger by crafting 50 iron plates",
+          "Complete the automation-science-pack trigger by crafting 1 lab",
+          "Produce red science packs and complete logistic science research"
+        ],
+        "current_step": 1,
+        "revision": 38,
+        "last_chat_message": "BLOCKED: The 50 iron ore has been gathered, but the available live recipe data shows the only nearby stone furnace is set to copper-plate. I can’t safely change or supply that exact furnace without a fresh entity observation, and observations are closed for this decision.",
+        "last_operations": [
+          "gather_resource {\"resource_name\":\"iron-ore\",\"count\":50,\"search_radius\":256}"
+        ],
+        "durable_last_operations": [
+          {
+            "name": "gather_resource",
+            "args": {
+              "resource_name": "iron-ore",
+              "count": 50,
+              "search_radius": 256
+            },
+            "role": "Complete the steam-power trigger by crafting 50 iron plates"
+          }
+        ],
+        "exact_target_audit": [
+          {
+            "unit_number": 12,
+            "operation_name": "supply_entity",
+            "locator": {
+              "name": "stone-furnace",
+              "type": "furnace",
+              "position": {
+                "x": 82,
+                "y": -1
+              },
+              "role": "Complete the electronics trigger by crafting 10 copper plates"
+            },
+            "recorded_at": 1791363129234
+          }
+        ],
+        "last_mutation_verified": true,
+        "last_verified_batch_id": 7,
+        "updated_at": 1791363295832,
+        "history": [
+          {
+            "revision": 3,
+            "status": "active",
+            "current_step": 0,
+            "step": "Complete the electronics trigger by crafting 10 copper plates",
+            "chat": "I’ll first complete the prerequisite triggers in order, then produce red science packs and use them in lab research for logistic science."
+          },
+          {
+            "revision": 8,
+            "status": "active",
+            "current_step": 0,
+            "step": "Complete the electronics trigger by crafting 10 copper plates",
+            "chat": "I’ll begin the active electronics-trigger step by gathering the 10 copper ore needed to make the required copper plates."
+          },
+          {
+            "revision": 14,
+            "status": "active",
+            "current_step": 0,
+            "step": "Complete the electronics trigger by crafting 10 copper plates",
+            "chat": "The 10 copper ore is gathered, but electronics is not researched yet. I’ll gather coal needed to smelt it; the remaining step will require placing and fueling the furnace, then making 10 copper plates."
+          },
+          {
+            "revision": 18,
+            "status": "active",
+            "current_step": 0,
+            "step": "Complete the electronics trigger by crafting 10 copper plates",
+            "chat": "I’ll place the stone furnace now. After placement, its live state must be observed before I can fuel it and smelt the copper plates needed for the electronics trigger."
+          },
+          {
+            "revision": 22,
+            "status": "active",
+            "current_step": 0,
+            "step": "Complete the electronics trigger by crafting 10 copper plates",
+            "chat": "I’ll use the live placement candidate to attempt placing the furnace; if it succeeds, I’ll need to observe the placed furnace before supplying fuel or relying on its identity."
+          },
+          {
+            "revision": 27,
+            "status": "active",
+            "current_step": 0,
+            "step": "Complete the electronics trigger by crafting 10 copper plates",
+            "chat": "I’ll supply the observed furnace with the 10 copper ore and coal needed to smelt copper plates for the electronics trigger."
+          },
+          {
+            "revision": 32,
+            "status": "active",
+            "current_step": 1,
+            "step": "Complete the steam-power trigger by crafting 50 iron plates",
+            "chat": "I’ll continue the active electronics-trigger step by gathering copper ore for the furnace; the recent supply receipt confirms only that coal was delivered."
+          },
+          {
+            "revision": 37,
+            "status": "active",
+            "current_step": 1,
+            "step": "Complete the steam-power trigger by crafting 50 iron plates",
+            "chat": "BLOCKED: The 50 iron ore has been gathered, but the available live recipe data shows the only nearby stone furnace is set to copper-plate. I can’t safely change or supply that exact furnace without a fresh entity observation, and observations are closed for this decision."
+          }
+        ],
+        "task_board": {
+          "kind": "task_board_lite",
+          "goal_id": "goal_065pf7k_1",
+          "status": "paused",
+          "blocker": "",
+          "pause_reason": "recoverable_provider_failure:provider_reported_blocker",
+          "revision": 17,
+          "event_sequence": 16,
+          "active_index": 1,
+          "active_step_id": "step_2",
+          "proposed_focus_index": 1,
+          "proposed_focus_step_id": "step_2",
+          "completed_count": 1,
+          "total_steps": 4,
+          "steps": [
+            {
+              "id": "step_1",
+              "description": "Complete the electronics trigger by crafting 10 copper plates",
+              "status": "completed",
+              "revision": 2,
+              "completion_contract": {
+                "mode": "all",
+                "requirements": [
+                  {
+                    "id": "requirement_1",
+                    "kind": "research_completed",
+                    "technology": "electronics"
+                  }
+                ],
+                "confidence": 0
+              },
+              "completion_contract_at": 1791363009372,
+              "completion_mode": "deterministic"
+            },
+            {
+              "id": "step_2",
+              "description": "Complete the steam-power trigger by crafting 50 iron plates",
+              "status": "paused",
+              "revision": 1,
+              "completion_contract": {
+                "mode": "all",
+                "requirements": [
+                  {
+                    "id": "requirement_1",
+                    "kind": "research_completed",
+                    "technology": "steam-power"
+                  }
+                ],
+                "confidence": 0
+              },
+              "completion_contract_at": 1791363021890,
+              "completion_mode": "deterministic"
+            },
+            {
+              "id": "step_3",
+              "description": "Complete the automation-science-pack trigger by crafting 1 lab",
+              "status": "pending",
+              "revision": 1,
+              "completion_contract": {
+                "mode": "all",
+                "requirements": [
+                  {
+                    "id": "requirement_1",
+                    "kind": "research_completed",
+                    "technology": "automation-science-pack"
+                  }
+                ],
+                "confidence": 0
+              },
+              "completion_contract_at": 1791363021890,
+              "completion_mode": "deterministic"
+            },
+            {
+              "id": "step_4",
+              "description": "Produce red science packs and complete logistic science research",
+              "status": "pending",
+              "revision": 1,
+              "completion_contract": {
+                "mode": "all",
+                "requirements": [
+                  {
+                    "id": "requirement_1",
+                    "kind": "research_completed",
+                    "technology": "logistic-science-pack"
+                  }
+                ],
+                "confidence": 0
+              },
+              "completion_contract_at": 1791363021890,
+              "completion_mode": "deterministic"
+            }
+          ],
+          "evidence": [
+            {
+              "id": "evidence_1",
+              "kind": "step_completion_contract_validated",
+              "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"research_completed\",\"technology\":\"electronics\"}],\"confidence\":0}}",
+              "ref": "checkpoint/step_1",
+              "at": 1791363009372,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_2",
+              "kind": "operation_receipt",
+              "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":1,\"batch_generation\":1,\"batch_ref\":\"batch-g1-1\",\"task_count\":2,\"task_types\":[\"walking_to_entity\",\"mining\"],\"tick\":6497,\"basic_operation\":{\"operation_id\":1,\"tick\":6497,\"actor_id\":6,\"type\":\"mining\",\"accepted\":true,\"completed\":true,\"code\":\"completed\",\"entity_name\":\"copper-ore\",\"requested_count\":10},\"correlation\":{\"goal_id\":\"goal_065pf7k_1\",\"step_id\":\"step_1\",\"actor_id\":6,\"actor_epoch\":1}}",
+              "ref": "batch-g1-1",
+              "at": 1791363052514,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_3",
+              "kind": "deterministic_verification",
+              "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":1,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+              "ref": "batch_1",
+              "at": 1791363052514,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_4",
+              "kind": "operation_receipt",
+              "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":2,\"batch_generation\":1,\"batch_ref\":\"batch-g1-2\",\"task_count\":2,\"task_types\":[\"walking_to_entity\",\"mining\"],\"tick\":8125,\"basic_operation\":{\"operation_id\":2,\"tick\":8125,\"actor_id\":6,\"type\":\"mining\",\"accepted\":true,\"completed\":true,\"code\":\"completed\",\"entity_name\":\"coal\",\"requested_count\":5},\"correlation\":{\"goal_id\":\"goal_065pf7k_1\",\"step_id\":\"step_1\",\"actor_id\":6,\"actor_epoch\":1}}",
+              "ref": "batch-g1-2",
+              "at": 1791363079648,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_5",
+              "kind": "deterministic_verification",
+              "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":2,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+              "ref": "batch_2",
+              "at": 1791363079648,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_6",
+              "kind": "operation_error_receipt",
+              "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":3,\"batch_generation\":1,\"batch_ref\":\"batch-g1-3\",\"task_count\":1,\"task_types\":[\"placing\"],\"tick\":9211,\"reason\":\"placing:no_position\",\"basic_operation\":{\"operation_id\":3,\"tick\":9211,\"actor_id\":6,\"type\":\"placing\",\"accepted\":false,\"completed\":false,\"code\":\"no_position\",\"entity_name\":\"stone-furnace\"},\"correlation\":{\"goal_id\":\"goal_065pf7k_1\",\"step_id\":\"step_1\",\"actor_id\":6,\"actor_epoch\":1}}",
+              "ref": "batch-g1-3",
+              "at": 1791363097793,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_7",
+              "kind": "operation_receipt",
+              "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":4,\"batch_generation\":1,\"batch_ref\":\"batch-g1-4\",\"task_count\":1,\"task_types\":[\"placing\"],\"tick\":9930,\"basic_operation\":{\"operation_id\":4,\"tick\":9930,\"actor_id\":6,\"type\":\"placing\",\"accepted\":true,\"completed\":true,\"code\":\"completed\",\"entity_name\":\"stone-furnace\",\"placed_unit_number\":12,\"placed_entity_type\":\"furnace\",\"placed_position\":{\"x\":82,\"y\":-1},\"placed_surface_index\":1,\"placed_direction\":0},\"correlation\":{\"goal_id\":\"goal_065pf7k_1\",\"step_id\":\"step_1\",\"actor_id\":6,\"actor_epoch\":1}}",
+              "ref": "batch-g1-4",
+              "at": 1791363109822,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_8",
+              "kind": "operation_receipt",
+              "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":5,\"batch_generation\":1,\"batch_ref\":\"batch-g1-5\",\"task_count\":2,\"task_types\":[\"moving_items\",\"moving_items\"],\"tick\":11115,\"basic_operation\":{\"operation_id\":6,\"tick\":11115,\"actor_id\":6,\"type\":\"moving_items\",\"accepted\":true,\"completed\":true,\"code\":\"completed\",\"target_unit_number\":12,\"item_name\":\"coal\",\"requested_count\":5,\"moved_count\":5,\"to_entity\":true},\"correlation\":{\"goal_id\":\"goal_065pf7k_1\",\"step_id\":\"step_1\",\"actor_id\":6,\"actor_epoch\":1}}",
+              "ref": "batch-g1-5",
+              "at": 1791363129571,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_9",
+              "kind": "deterministic_verification",
+              "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":5,\"operations\":[\"supply_entity\"],\"task_types\":[\"moving_items\",\"moving_items\"]}",
+              "ref": "batch_5",
+              "at": 1791363129571,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_10",
+              "kind": "operation_error_receipt",
+              "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":6,\"batch_generation\":1,\"batch_ref\":\"batch-g1-6\",\"task_count\":2,\"task_types\":[\"walking_to_entity\",\"mining\"],\"tick\":11905,\"reason\":\"mining:mining_rejected\",\"basic_operation\":{\"operation_id\":7,\"tick\":11905,\"actor_id\":6,\"type\":\"mining\",\"accepted\":false,\"completed\":false,\"code\":\"mining_rejected\",\"entity_name\":\"copper-ore\",\"requested_count\":10},\"correlation\":{\"goal_id\":\"goal_065pf7k_1\",\"step_id\":\"step_1\",\"actor_id\":6,\"actor_epoch\":1}}",
+              "ref": "batch-g1-6",
+              "at": 1791363142684,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_11",
+              "kind": "verified_world_state",
+              "summary": "{\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"research_completed\",\"technology\":\"electronics\"}],\"confidence\":0},\"results\":[{\"id\":\"requirement_1\",\"kind\":\"research_completed\",\"satisfied\":true,\"progressing\":false,\"summary\":\"\"}]}",
+              "ref": "checkpoint/step_1",
+              "at": 1791363162252,
+              "step_id": "step_1"
+            },
+            {
+              "id": "evidence_12",
+              "kind": "operation_receipt",
+              "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":7,\"batch_generation\":1,\"batch_ref\":\"batch-g1-7\",\"task_count\":2,\"task_types\":[\"walking_to_entity\",\"mining\"],\"tick\":19962,\"basic_operation\":{\"operation_id\":8,\"tick\":19962,\"actor_id\":6,\"type\":\"mining\",\"accepted\":true,\"completed\":true,\"code\":\"completed\",\"entity_name\":\"iron-ore\",\"requested_count\":50},\"correlation\":{\"goal_id\":\"goal_065pf7k_1\",\"step_id\":\"step_2\",\"actor_id\":6,\"actor_epoch\":1}}",
+              "ref": "batch-g1-7",
+              "at": 1791363276964,
+              "step_id": "step_2"
+            },
+            {
+              "id": "evidence_13",
+              "kind": "deterministic_verification",
+              "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":7,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+              "ref": "batch_7",
+              "at": 1791363276964,
+              "step_id": "step_2"
+            }
+          ],
+          "events": [
+            {
+              "seq": 1,
+              "type": "created",
+              "at": 1791363009307,
+              "revision": 1,
+              "active_step_id": "step_1",
+              "total_steps": 4
+            },
+            {
+              "seq": 2,
+              "type": "evidence",
+              "at": 1791363009372,
+              "revision": 3,
+              "evidence_id": "evidence_1",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 3,
+              "type": "evidence",
+              "at": 1791363052514,
+              "revision": 4,
+              "evidence_id": "evidence_2",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 4,
+              "type": "evidence",
+              "at": 1791363052514,
+              "revision": 5,
+              "evidence_id": "evidence_3",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 5,
+              "type": "evidence",
+              "at": 1791363079648,
+              "revision": 6,
+              "evidence_id": "evidence_4",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 6,
+              "type": "evidence",
+              "at": 1791363079648,
+              "revision": 7,
+              "evidence_id": "evidence_5",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 7,
+              "type": "evidence",
+              "at": 1791363097793,
+              "revision": 8,
+              "evidence_id": "evidence_6",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 8,
+              "type": "evidence",
+              "at": 1791363109822,
+              "revision": 9,
+              "evidence_id": "evidence_7",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 9,
+              "type": "evidence",
+              "at": 1791363129571,
+              "revision": 10,
+              "evidence_id": "evidence_8",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 10,
+              "type": "evidence",
+              "at": 1791363129571,
+              "revision": 11,
+              "evidence_id": "evidence_9",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 11,
+              "type": "evidence",
+              "at": 1791363142684,
+              "revision": 12,
+              "evidence_id": "evidence_10",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 12,
+              "type": "evidence",
+              "at": 1791363162252,
+              "revision": 13,
+              "evidence_id": "evidence_11",
+              "step_id": "step_1"
+            },
+            {
+              "seq": 13,
+              "type": "advanced",
+              "at": 1791363162252,
+              "revision": 14,
+              "from_step": "step_1",
+              "to_step": "step_2"
+            },
+            {
+              "seq": 14,
+              "type": "evidence",
+              "at": 1791363276964,
+              "revision": 15,
+              "evidence_id": "evidence_12",
+              "step_id": "step_2"
+            },
+            {
+              "seq": 15,
+              "type": "evidence",
+              "at": 1791363276964,
+              "revision": 16,
+              "evidence_id": "evidence_13",
+              "step_id": "step_2"
+            },
+            {
+              "seq": 16,
+              "type": "paused",
+              "at": 1791363295832,
+              "revision": 17,
+              "active_step_id": "step_2"
+            }
+          ],
+          "created_at": 1791363009307,
+          "updated_at": 1791363295832,
+          "evidence_sequence": 13
+        },
+        "planning": {
+          "reasoning_epoch": 2,
+          "plan": {
+            "plan_id": "goal_065pf7k_1_p3",
+            "plan_version": 1,
+            "roadmap_node_id": "research-prereqs"
+          }
+        }
+      }
+    }
+  ],
+  "planning_states": [
+    {
+      "key": "npc:npc-1",
+      "state": {
+        "version": 1,
+        "sequence": 3,
+        "goal": {
+          "goal_id": "goal_065pf7k_1",
+          "owner": "<server>",
+          "objective": "Make red science packs and consume them in native lab research to complete logistic-science-pack and enable green science. Hand crafting and hand-fed machines are allowed; factory automation is optional. Use natural resources and native game mechanics. Finish when logistic-science-pack is researched and its recipe is enabled.",
+          "constraints": [],
+          "status": "active",
+          "created_at": 1791362983142,
+          "updated_at": 1791363009312,
+          "definition": {
+            "scope": "long_horizon",
+            "summary": "Make red science packs and consume them in native lab research to complete logistic-science-pack and enable green science.",
+            "done_when": [
+              {
+                "id": "done_1",
+                "kind": "research_completed",
+                "technology": "logistic-science-pack"
+              }
+            ],
+            "source": "main_planner",
+            "defined_at": 1791363009312
+          }
+        },
+        "roadmap": {
+          "roadmap_revision_id": "goal_065pf7k_1_r2",
+          "goal_id": "goal_065pf7k_1",
+          "revision_index": 1,
+          "derived_from_revision_id": null,
+          "reason": "goal_decomposed_to_shelf",
+          "authority": "user",
+          "evidence_refs": [],
+          "created_at": 1791363009307,
+          "nodes": [
+            {
+              "id": "research-prereqs",
+              "ready_since": 1791363009307,
+              "intent": "Complete prerequisite triggers",
+              "why_it_matters": "Perform the exact gameplay triggers in order before using any recipes or machines they unlock.",
+              "status": "ready_to_refine",
+              "depends_on": [],
+              "resolved_by": [],
+              "assumptions": [],
+              "first_seen_revision_id": "goal_065pf7k_1_r2",
+              "verified_results": [],
+              "capability_frontier": null
+            },
+            {
+              "id": "red-packs",
+              "ready_since": 1791363009307,
+              "intent": "Produce red science packs",
+              "why_it_matters": "Make the packs required to conduct native lab research.",
+              "status": "ready_to_refine",
+              "depends_on": [],
+              "resolved_by": [],
+              "assumptions": [],
+              "first_seen_revision_id": "goal_065pf7k_1_r2",
+              "verified_results": [],
+              "capability_frontier": null
+            },
+            {
+              "id": "logistic-science",
+              "ready_since": 1791363009307,
+              "intent": "Complete logistic science research",
+              "why_it_matters": "Consume red science packs in a lab to research logistic-science-pack and enable green science.",
+              "status": "ready_to_refine",
+              "depends_on": [],
+              "resolved_by": [],
+              "assumptions": [],
+              "first_seen_revision_id": "goal_065pf7k_1_r2",
+              "verified_results": [],
+              "capability_frontier": null
+            }
+          ]
+        },
+        "roadmap_history": [],
+        "plans": [
+          {
+            "plan_id": "goal_065pf7k_1_p3",
+            "plan_version": 1,
+            "goal_id": "goal_065pf7k_1",
+            "roadmap_revision_id": "goal_065pf7k_1_r2",
+            "roadmap_node_ids": [
+              "research-prereqs"
+            ],
+            "development_mode": "vertical",
+            "refinement_grounding": {
+              "ready_node_ids": [
+                "research-prereqs"
+              ],
+              "not_ready": []
+            },
+            "steering_at_draft": {
+              "mode": "vertical",
+              "steering_sequence": 1,
+              "critical_path": null,
+              "diverges_from_steering": false
+            },
+            "status": "EXECUTING",
+            "steps": [
+              {
+                "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+                "description": "Complete the electronics trigger by crafting 10 copper plates",
+                "completion_contract": {
+                  "mode": "all",
+                  "requirements": [
+                    {
+                      "id": "requirement_1",
+                      "kind": "research_completed",
+                      "technology": "electronics"
+                    }
+                  ],
+                  "confidence": 0
+                },
+                "completion_mode": "deterministic",
+                "completion_confidence": "grounded",
+                "reduced_confidence": false
+              },
+              {
+                "step_id": "goal_065pf7k_1_p3_v1_s2_12smu13",
+                "description": "Complete the steam-power trigger by crafting 50 iron plates",
+                "completion_contract": {
+                  "mode": "all",
+                  "requirements": [
+                    {
+                      "id": "requirement_1",
+                      "kind": "research_completed",
+                      "technology": "steam-power"
+                    }
+                  ],
+                  "confidence": 0
+                },
+                "completion_mode": "deterministic",
+                "completion_confidence": "grounded",
+                "reduced_confidence": false
+              },
+              {
+                "step_id": "goal_065pf7k_1_p3_v1_s3_0s4vxqo",
+                "description": "Complete the automation-science-pack trigger by crafting 1 lab",
+                "completion_contract": {
+                  "mode": "all",
+                  "requirements": [
+                    {
+                      "id": "requirement_1",
+                      "kind": "research_completed",
+                      "technology": "automation-science-pack"
+                    }
+                  ],
+                  "confidence": 0
+                },
+                "completion_mode": "deterministic",
+                "completion_confidence": "grounded",
+                "reduced_confidence": false
+              },
+              {
+                "step_id": "goal_065pf7k_1_p3_v1_s4_1l3qq4s",
+                "description": "Produce red science packs and complete logistic science research",
+                "completion_contract": {
+                  "mode": "all",
+                  "requirements": [
+                    {
+                      "id": "requirement_1",
+                      "kind": "research_completed",
+                      "technology": "logistic-science-pack"
+                    }
+                  ],
+                  "confidence": 0
+                },
+                "completion_mode": "deterministic",
+                "completion_confidence": "grounded",
+                "reduced_confidence": false
+              }
+            ],
+            "active_step_index": 1,
+            "derived_from_plan_id": null,
+            "superseded_by_plan_id": null,
+            "origin": "live_task_board",
+            "created_at": 1791363009307,
+            "updated_at": 1791363295832,
+            "committed_at": 1791363009405,
+            "completed_at": null,
+            "blocker": null,
+            "execution": {
+              "step_progress": {
+                "goal_065pf7k_1_p3_v1_s1_09pp0ee": {
+                  "status": "completed",
+                  "accepted_evidence": [
+                    {
+                      "ref": "checkpoint/step_1",
+                      "kind": "outcome_authority",
+                      "source": "runtime",
+                      "batch_id": null,
+                      "satisfied_requirement_ids": [],
+                      "at": 1791363142684
+                    }
+                  ],
+                  "batches_attempted": 0,
+                  "batches_since_evidence": 0,
+                  "operations_attempted": 0,
+                  "failure_counts": {},
+                  "contract_satisfied": true,
+                  "unsatisfiable": null,
+                  "completed_at": 1791363142684
+                },
+                "goal_065pf7k_1_p3_v1_s2_12smu13": {
+                  "status": "active",
+                  "accepted_evidence": [],
+                  "batches_attempted": 1,
+                  "batches_since_evidence": 1,
+                  "operations_attempted": 1,
+                  "failure_counts": {
+                    "provider_reported_blocker": 1
+                  },
+                  "contract_satisfied": false,
+                  "unsatisfiable": null,
+                  "completed_at": null
+                },
+                "goal_065pf7k_1_p3_v1_s3_0s4vxqo": {
+                  "status": "pending",
+                  "accepted_evidence": [],
+                  "batches_attempted": 0,
+                  "batches_since_evidence": 0,
+                  "operations_attempted": 0,
+                  "failure_counts": {},
+                  "contract_satisfied": false,
+                  "unsatisfiable": null,
+                  "completed_at": null
+                },
+                "goal_065pf7k_1_p3_v1_s4_1l3qq4s": {
+                  "status": "pending",
+                  "accepted_evidence": [],
+                  "batches_attempted": 0,
+                  "batches_since_evidence": 0,
+                  "operations_attempted": 0,
+                  "failure_counts": {},
+                  "contract_satisfied": false,
+                  "unsatisfiable": null,
+                  "completed_at": null
+                }
+              },
+              "batches_attempted": 1,
+              "receipts": {
+                "goal_065pf7k_1_p3_v1_s1_09pp0ee": [
+                  {
+                    "batch_id": "",
+                    "kind": "step_completion_contract_validated",
+                    "ref": "checkpoint/step_1",
+                    "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"research_completed\",\"technology\":\"electronics\"}],\"confidence\":0}}",
+                    "at": 1791363009372,
+                    "source": "runtime",
+                    "seq": 1
+                  },
+                  {
+                    "batch_id": "1",
+                    "kind": "operation_receipt",
+                    "ref": "batch-g1-1",
+                    "summary": "outcome=completed; task_state=idle; task_count=2; types=walking_to_entity,mining",
+                    "at": 1791363052514,
+                    "source": "runtime",
+                    "seq": 2
+                  },
+                  {
+                    "batch_id": "1",
+                    "kind": "deterministic_verification",
+                    "ref": "batch_1",
+                    "summary": "verdict=verified_complete; types=walking_to_entity,mining",
+                    "at": 1791363052514,
+                    "source": "runtime",
+                    "seq": 3
+                  },
+                  {
+                    "batch_id": "2",
+                    "kind": "operation_receipt",
+                    "ref": "batch-g1-2",
+                    "summary": "outcome=completed; task_state=idle; task_count=2; types=walking_to_entity,mining",
+                    "at": 1791363079648,
+                    "source": "runtime",
+                    "seq": 4
+                  },
+                  {
+                    "batch_id": "2",
+                    "kind": "deterministic_verification",
+                    "ref": "batch_2",
+                    "summary": "verdict=verified_complete; types=walking_to_entity,mining",
+                    "at": 1791363079648,
+                    "source": "runtime",
+                    "seq": 5
+                  },
+                  {
+                    "batch_id": "3",
+                    "kind": "operation_error_receipt",
+                    "ref": "batch-g1-3",
+                    "summary": "outcome=failed; task_state=idle; task_count=1; reason=placing:no_position; types=placing",
+                    "at": 1791363097793,
+                    "source": "runtime",
+                    "seq": 6
+                  },
+                  {
+                    "batch_id": "4",
+                    "kind": "operation_receipt",
+                    "ref": "batch-g1-4",
+                    "summary": "outcome=completed; task_state=idle; task_count=1; types=placing",
+                    "at": 1791363109822,
+                    "source": "runtime",
+                    "seq": 7
+                  },
+                  {
+                    "batch_id": "5",
+                    "kind": "operation_receipt",
+                    "ref": "batch-g1-5",
+                    "summary": "outcome=completed; task_state=idle; task_count=2; types=moving_items,moving_items",
+                    "at": 1791363129571,
+                    "source": "runtime",
+                    "seq": 8
+                  },
+                  {
+                    "batch_id": "5",
+                    "kind": "deterministic_verification",
+                    "ref": "batch_5",
+                    "summary": "verdict=verified_complete; types=moving_items,moving_items",
+                    "at": 1791363129571,
+                    "source": "runtime",
+                    "seq": 9
+                  },
+                  {
+                    "batch_id": "6",
+                    "kind": "operation_error_receipt",
+                    "ref": "batch-g1-6",
+                    "summary": "outcome=failed; task_state=idle; task_count=2; reason=mining:mining_rejected; types=walking_to_entity,mining",
+                    "at": 1791363142684,
+                    "source": "runtime",
+                    "seq": 10
+                  },
+                  {
+                    "batch_id": "",
+                    "kind": "verified_world_state",
+                    "ref": "checkpoint/step_1",
+                    "summary": "{\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"research_completed\",\"technology\":\"electronics\"}],\"confidence\":0},\"results\":[{\"id\":\"requirement_1\",\"kind\":\"research_completed\",\"satisfied\":true,\"progressing\":false,\"summ",
+                    "at": 1791363162252,
+                    "source": "runtime",
+                    "seq": 11
+                  }
+                ],
+                "goal_065pf7k_1_p3_v1_s2_12smu13": [
+                  {
+                    "batch_id": "7",
+                    "kind": "operation_receipt",
+                    "ref": "batch-g1-7",
+                    "summary": "outcome=completed; task_state=idle; task_count=2; types=walking_to_entity,mining",
+                    "at": 1791363276964,
+                    "source": "runtime",
+                    "seq": 1
+                  },
+                  {
+                    "batch_id": "7",
+                    "kind": "deterministic_verification",
+                    "ref": "batch_7",
+                    "summary": "verdict=verified_complete; types=walking_to_entity,mining",
+                    "at": 1791363276964,
+                    "source": "runtime",
+                    "seq": 2
+                  }
+                ]
+              },
+              "receipts_seeded": true
+            },
+            "advisory": {
+              "planner_focus_step_id": "goal_065pf7k_1_p3_v1_s2_12smu13",
+              "planner_focus_at": 1791363174100,
+              "steering_note": null
+            },
+            "carried_forward_evidence": [],
+            "lifecycle": [
+              {
+                "status": "DRAFT",
+                "at": 1791363009372,
+                "reason": "live_task_board"
+              },
+              {
+                "status": "COMMITTED",
+                "at": 1791363009405,
+                "reason": "auto_commit_runtime_validated"
+              },
+              {
+                "status": "EXECUTING",
+                "at": 1791363142684,
+                "reason": "first_accepted_evidence"
+              }
+            ],
+            "runtime_validation": {
+              "passed": true,
+              "validated_at": 1791363009405,
+              "scope": "completion_contracts",
+              "unsupported_step_ids": []
+            }
+          }
+        ],
+        "active_plan_id": "goal_065pf7k_1_p3",
+        "steering": {
+          "current_mode": "vertical",
+          "previous_mode": null,
+          "reason": null,
+          "critical_path": null,
+          "pressure": {
+            "vertical": [
+              "capability_absent",
+              "goal_requires_new_capability"
+            ],
+            "horizontal": []
+          },
+          "dropped_pressure": [],
+          "last_plan_id": null,
+          "last_directional_mode": "vertical",
+          "consecutive_mode_slices": 1,
+          "hysteresis_applied": false,
+          "hold_reasons": [],
+          "proposed_mode": "vertical",
+          "forced_by_user": false,
+          "recommendation": {
+            "recommended_by": "jev",
+            "recommended_mode": "vertical",
+            "confidence": 0.45,
+            "reason_codes": [
+              "capability_absent",
+              "goal_requires_new_capability"
+            ],
+            "candidate_shelf_nodes": []
+          },
+          "user_priority": null,
+          "boundary": "goal_admission",
+          "authority": "runtime",
+          "sequence": 1,
+          "updated_at": 1791362983315,
+          "history": [
+            {
+              "mode": "vertical",
+              "boundary": "goal_admission",
+              "at": 1791362983315,
+              "plan_id": null,
+              "changed": true,
+              "hysteresis_applied": false,
+              "hold_reasons": []
+            }
+          ]
+        },
+        "updated_at": 1791363295832,
+        "reasoning_epoch": 2,
+        "last_reasoning_reset": {
+          "epoch": 2,
+          "at": 1791363009307,
+          "event_type": "ROADMAP_REVISED",
+          "reason": "goal_decomposed_to_shelf"
+        },
+        "run": {
+          "paused": true,
+          "pause_reason": "recoverable_provider_failure:provider_reported_blocker",
+          "pause_code": "recoverable_provider_failure",
+          "paused_at": 1791363295833,
+          "resumed_at": null,
+          "pause_count": 1,
+          "condition_wait": null,
+          "provider_recovery": null,
+          "persistent_runtime": null,
+          "pending_operation": null,
+          "locators": {
+            "durable_last_operations": [
+              {
+                "name": "gather_resource",
+                "args": {
+                  "resource_name": "iron-ore",
+                  "count": 50,
+                  "search_radius": 256
+                },
+                "role": "Complete the steam-power trigger by crafting 50 iron plates"
+              }
+            ],
+            "exact_target_audit": [
+              {
+                "unit_number": 12,
+                "operation_name": "supply_entity",
+                "locator": {
+                  "name": "stone-furnace",
+                  "type": "furnace",
+                  "position": {
+                    "x": 82,
+                    "y": -1
+                  },
+                  "role": "Complete the electronics trigger by crafting 10 copper plates"
+                },
+                "recorded_at": 1791363129234
+              }
+            ]
+          },
+          "stale_exact_identities": [],
+          "updated_at": 1791363295833
+        },
+        "operation_ledger": {
+          "version": 1,
+          "sequence": 7,
+          "records": [],
+          "closed": [
+            {
+              "operation_key": "req_muxv9o0h_1/batch_1",
+              "request_id": "req_muxv9o0h_1",
+              "attempt_id": "req_muxv9o0h_1/batch_1",
+              "protocol_version": 2,
+              "ordinal": 1,
+              "scopes": [
+                "*"
+              ],
+              "state": "acknowledged",
+              "goal_id": "goal_065pf7k_1",
+              "plan_id": "goal_065pf7k_1_p3",
+              "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+              "actor": {
+                "actor_id": 6,
+                "epoch": 1
+              },
+              "signature": "edf07cc13e3d9502d54ab2eb10739bed1b5aa56194a4395483fed63e7842eee1",
+              "operations": [
+                {
+                  "trace_operation_id": "req_muxv9o0h_1/op_1",
+                  "name": "gather_resource",
+                  "effect_class": "world"
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 0,
+                "active": null
+              },
+              "effect": "unknown",
+              "verdict": null,
+              "reason": "",
+              "batch_id": null,
+              "sent_at": 1791363021972,
+              "reconciled_at": null
+            },
+            {
+              "operation_key": "req_muxv9o0h_1/batch_2",
+              "request_id": "req_muxv9o0h_1",
+              "attempt_id": "req_muxv9o0h_1/batch_2",
+              "protocol_version": 2,
+              "ordinal": 2,
+              "scopes": [
+                "*"
+              ],
+              "state": "acknowledged",
+              "goal_id": "goal_065pf7k_1",
+              "plan_id": "goal_065pf7k_1_p3",
+              "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+              "actor": {
+                "actor_id": 6,
+                "epoch": 1
+              },
+              "signature": "72d8e979b8e487b8a98be698281f0ee5dd8fc0131a117705edecce3227c86b2a",
+              "operations": [
+                {
+                  "trace_operation_id": "req_muxv9o0h_1/op_1",
+                  "name": "gather_resource",
+                  "effect_class": "world"
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 1,
+                "active": null
+              },
+              "effect": "unknown",
+              "verdict": null,
+              "reason": "",
+              "batch_id": null,
+              "sent_at": 1791363065204,
+              "reconciled_at": null
+            },
+            {
+              "operation_key": "req_muxv9o0h_1/batch_3",
+              "request_id": "req_muxv9o0h_1",
+              "attempt_id": "req_muxv9o0h_1/batch_3",
+              "protocol_version": 2,
+              "ordinal": 3,
+              "scopes": [
+                "item:stone-furnace",
+                "*"
+              ],
+              "state": "acknowledged",
+              "goal_id": "goal_065pf7k_1",
+              "plan_id": "goal_065pf7k_1_p3",
+              "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+              "actor": {
+                "actor_id": 6,
+                "epoch": 1
+              },
+              "signature": "9465417ef00d959906bd8b5fd25df962d5751011876a4c9c644369d261a3e6a1",
+              "operations": [
+                {
+                  "trace_operation_id": "req_muxv9o0h_1/op_1",
+                  "name": "place_entity",
+                  "effect_class": "place"
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 2,
+                "active": null
+              },
+              "effect": "unknown",
+              "verdict": null,
+              "reason": "",
+              "batch_id": null,
+              "sent_at": 1791363097668,
+              "reconciled_at": null
+            },
+            {
+              "operation_key": "req_muxv9o0h_1/batch_4",
+              "request_id": "req_muxv9o0h_1",
+              "attempt_id": "req_muxv9o0h_1/batch_4",
+              "protocol_version": 2,
+              "ordinal": 4,
+              "scopes": [
+                "*"
+              ],
+              "state": "acknowledged",
+              "goal_id": "goal_065pf7k_1",
+              "plan_id": "goal_065pf7k_1_p3",
+              "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+              "actor": {
+                "actor_id": 6,
+                "epoch": 1
+              },
+              "signature": "1121ae6071cdde198a00803e92a1b8d1c605f2b77979fc0befed6273b8231b2f",
+              "operations": [
+                {
+                  "trace_operation_id": "req_muxv9o0h_1/op_1",
+                  "name": "place_candidate",
+                  "effect_class": "place"
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 3,
+                "active": null
+              },
+              "effect": "unknown",
+              "verdict": null,
+              "reason": "",
+              "batch_id": null,
+              "sent_at": 1791363109635,
+              "reconciled_at": null
+            },
+            {
+              "operation_key": "req_muxv9o0h_1/batch_5",
+              "request_id": "req_muxv9o0h_1",
+              "attempt_id": "req_muxv9o0h_1/batch_5",
+              "protocol_version": 2,
+              "ordinal": 5,
+              "scopes": [
+                "entity:12",
+                "*"
+              ],
+              "state": "acknowledged",
+              "goal_id": "goal_065pf7k_1",
+              "plan_id": "goal_065pf7k_1_p3",
+              "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+              "actor": {
+                "actor_id": 6,
+                "epoch": 1
+              },
+              "signature": "352ad2267a7d95142f673e691fa13a8ecffc47448eaa5e0a1c8cbc4c3b1f22b1",
+              "operations": [
+                {
+                  "trace_operation_id": "req_muxv9o0h_1/op_1",
+                  "name": "supply_entity",
+                  "effect_class": "delivery"
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 4,
+                "active": null
+              },
+              "effect": "unknown",
+              "verdict": null,
+              "reason": "",
+              "batch_id": null,
+              "sent_at": 1791363129375,
+              "reconciled_at": null
+            },
+            {
+              "operation_key": "req_muxv9o0h_1/batch_6",
+              "request_id": "req_muxv9o0h_1",
+              "attempt_id": "req_muxv9o0h_1/batch_6",
+              "protocol_version": 2,
+              "ordinal": 6,
+              "scopes": [
+                "*"
+              ],
+              "state": "acknowledged",
+              "goal_id": "goal_065pf7k_1",
+              "plan_id": "goal_065pf7k_1_p3",
+              "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+              "actor": {
+                "actor_id": 6,
+                "epoch": 1
+              },
+              "signature": "edf07cc13e3d9502d54ab2eb10739bed1b5aa56194a4395483fed63e7842eee1",
+              "operations": [
+                {
+                  "trace_operation_id": "req_muxv9o0h_1/op_1",
+                  "name": "gather_resource",
+                  "effect_class": "world"
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 5,
+                "active": null
+              },
+              "effect": "unknown",
+              "verdict": null,
+              "reason": "",
+              "batch_id": null,
+              "sent_at": 1791363139527,
+              "reconciled_at": null
+            },
+            {
+              "operation_key": "req_muxv9o0h_1/batch_7",
+              "request_id": "req_muxv9o0h_1",
+              "attempt_id": "req_muxv9o0h_1/batch_7",
+              "protocol_version": 2,
+              "ordinal": 7,
+              "scopes": [
+                "*"
+              ],
+              "state": "acknowledged",
+              "goal_id": "goal_065pf7k_1",
+              "plan_id": "goal_065pf7k_1_p3",
+              "step_id": "goal_065pf7k_1_p3_v1_s2_12smu13",
+              "actor": {
+                "actor_id": 6,
+                "epoch": 1
+              },
+              "signature": "61c94dd9136577dc2d58d00dedcee3812cfdbe8d597b4c937b3c1dc9a352ef5d",
+              "operations": [
+                {
+                  "trace_operation_id": "req_muxv9o0h_1/op_1",
+                  "name": "gather_resource",
+                  "effect_class": "world"
+                }
+              ],
+              "baseline": {
+                "generation": 1,
+                "max_batch_id": 6,
+                "active": null
+              },
+              "effect": "unknown",
+              "verdict": null,
+              "reason": "",
+              "batch_id": null,
+              "sent_at": 1791363174227,
+              "reconciled_at": null
+            }
+          ]
+        },
+        "context_restages": [
+          {
+            "goal_id": "goal_065pf7k_1",
+            "plan_id": "goal_065pf7k_1_p3",
+            "role": "executor",
+            "checkpoint": "C3",
+            "reason": "executor_fresh_at_plan_commit",
+            "handoff_id": "ho_244de42fae9d",
+            "packet_chars": 3043,
+            "previous_context_chars": 74759,
+            "at": 1791363009639
+          }
+        ],
+        "authorization": {
+          "version": 1,
+          "sequence": 0,
+          "grants": [],
+          "questions": [],
+          "approvals": [],
+          "refusals": [],
+          "world": {
+            "npc_placements": [
+              {
+                "unit_number": 12,
+                "entity_name": "stone-furnace",
+                "actor_id": 6,
+                "actor_epoch": 1,
+                "placed_last_user": null,
+                "at": 1791363109821
+              }
+            ],
+            "reservations": []
+          }
+        },
+        "log": [
+          {
+            "type": "GOAL_ACCEPTED",
+            "at": 1791362983142,
+            "goal_id": "goal_065pf7k_1"
+          },
+          {
+            "type": "STEERING_EVALUATED",
+            "at": 1791362983315,
+            "boundary": "goal_admission",
+            "mode": "vertical",
+            "hysteresis_applied": false
+          },
+          {
+            "type": "ROADMAP_REVISED",
+            "at": 1791363009307,
+            "roadmap_revision_id": "goal_065pf7k_1_r2",
+            "reason": "goal_decomposed_to_shelf"
+          },
+          {
+            "type": "DRAFT_CREATED",
+            "at": 1791363009307,
+            "plan_id": "goal_065pf7k_1_p3"
+          },
+          {
+            "type": "GOAL_DEFINED",
+            "at": 1791363009312,
+            "goal_id": "goal_065pf7k_1"
+          },
+          {
+            "type": "DRAFT_CREATED",
+            "at": 1791363009372,
+            "plan_id": "goal_065pf7k_1_p3",
+            "in_place": true
+          },
+          {
+            "type": "PLAN_COMMITTED",
+            "at": 1791363009405,
+            "plan_id": "goal_065pf7k_1_p3"
+          },
+          {
+            "type": "STEP_COMPLETED",
+            "at": 1791363142684,
+            "plan_id": "goal_065pf7k_1_p3",
+            "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee"
+          },
+          {
+            "type": "RUN_PAUSED",
+            "at": 1791363295833,
+            "reason_code": "recoverable_provider_failure"
+          }
+        ]
+      }
+    }
+  ],
+  "jev_judgment_ledger": {
+    "version": 1,
+    "seq": 2,
+    "families": {
+      "c4_next_step": {
+        "stage": "shadow",
+        "scored": 0,
+        "agreed": 0,
+        "evidence": 0,
+        "window": [],
+        "promotions": 0,
+        "demotions": 0,
+        "unscored": 0,
+        "would_save": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "saved": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "samples": [],
+        "recent": []
+      },
+      "observation_families": {
+        "stage": "shadow",
+        "scored": 1,
+        "agreed": 0,
+        "evidence": 1,
+        "window": [
+          0
+        ],
+        "promotions": 0,
+        "demotions": 0,
+        "unscored": 0,
+        "would_save": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "saved": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "samples": [],
+        "recent": [
+          {
+            "judgment_id": "jdg_v8u3e_2",
+            "request_id": "req_muxv9o0h_1",
+            "step_id": "goal_065pf7k_1_p3_v1_s1_09pp0ee",
+            "agreed": false,
+            "stage": "shadow",
+            "acted": false
+          }
+        ]
+      },
+      "shelf_ranking": {
+        "stage": "shadow",
+        "scored": 0,
+        "agreed": 0,
+        "evidence": 0,
+        "window": [],
+        "promotions": 0,
+        "demotions": 0,
+        "unscored": 0,
+        "would_save": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "saved": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "samples": [],
+        "recent": []
+      },
+      "skill_order": {
+        "stage": "shadow",
+        "scored": 1,
+        "agreed": 1,
+        "evidence": 1,
+        "window": [
+          1
+        ],
+        "promotions": 0,
+        "demotions": 0,
+        "unscored": 0,
+        "would_save": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "saved": {
+          "wakes": 0,
+          "rounds": 0,
+          "tokens": 0,
+          "calls": 0,
+          "jev_calls": 0
+        },
+        "samples": [],
+        "recent": [
+          {
+            "judgment_id": "jdg_v8u3e_1",
+            "request_id": "req_muxv9o0h_1",
+            "jev_choice": "none",
+            "agreed": true,
+            "stage": "shadow",
+            "acted": false
+          }
+        ]
+      }
+    }
+  }
+}

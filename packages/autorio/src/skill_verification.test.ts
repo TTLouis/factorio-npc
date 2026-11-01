@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FactoryAreaAnalysis, FactoryEntityObservation, FactoryGraphRelation, FactoryProductionBlock } from './factory_area_learning'
 import { skill_candidate_definition_from_block } from './factory_area_learning'
 import {
@@ -16,6 +16,7 @@ import {
   output_delta_satisfied,
   promote_verified_skill,
   start_next_skill_verification,
+  tick_skill_verification,
   type SkillVerificationRun,
 } from './skill_verification'
 import { create_skill_candidate, get_skill_definition } from './skills'
@@ -152,10 +153,10 @@ function analysis(id: string, offset: number, connected = true): FactoryAreaAnal
 
 function store_analysis(value: FactoryAreaAnalysis) {
   const state = (globalThis as any).storage
-  state.airi_factory_area_analyses = state.airi_factory_area_analyses ?? {}
-  state.airi_factory_area_order = state.airi_factory_area_order ?? []
-  state.airi_factory_area_analyses[value.id] = value
-  state.airi_factory_area_order.push(value.id)
+  state.sgluna_factory_area_analyses = state.sgluna_factory_area_analyses ?? {}
+  state.sgluna_factory_area_order = state.sgluna_factory_area_order ?? []
+  state.sgluna_factory_area_analyses[value.id] = value
+  state.sgluna_factory_area_order.push(value.id)
 }
 
 function candidate_from_source() {
@@ -174,6 +175,13 @@ function queued_opportunity(skill_id: string) {
   })
   queue_learning_verification(opportunity.id, skill_id, 'moderate', 'safe', 'Run translated rebuild verification.')
   return opportunity
+}
+
+function store_active_verification_run(run: SkillVerificationRun) {
+  const state = (globalThis as any).storage
+  state.sgluna_skill_verification_runs = { [run.id]: run }
+  state.sgluna_skill_verification_run_order = [run.id]
+  state.sgluna_skill_verification_active_run_id = run.id
 }
 
 function run_for(skill_id: string, opportunity_id: string, topology_match: boolean, current_output: number): SkillVerificationRun {
@@ -213,6 +221,7 @@ function run_for(skill_id: string, opportunity_id: string, topology_match: boole
 beforeEach(() => {
   ;(globalThis as any).storage = {}
   ;(globalThis as any).game = { tick: 1200 }
+  ;(globalThis as any).remote.call = () => undefined
 })
 
 describe('Skill Verification / Instance Layer V1', () => {
@@ -254,7 +263,7 @@ describe('Skill Verification / Instance Layer V1', () => {
     expect(verified.verification.acceptance_conditions.every(value => value.status === 'passed' && value.evidence_refs.length > 0)).toBe(true)
   })
 
-  it('classifies a built-but-broken intermediate transfer with no output as semantic failure and keeps the skill candidate', () => {
+  it('turns a semantic counterexample into a revised candidate and automatically requeues verification', () => {
     const skill = candidate_from_source()
     const opportunity = queued_opportunity(skill.id)
     store_analysis(analysis('broken-analysis', 80, false))
@@ -270,10 +279,18 @@ describe('Skill Verification / Instance Layer V1', () => {
     )
     expect(failed.state).toBe('failed')
     expect(failed.failure_kind).toBe('semantic')
-    expect(get_skill_definition(skill.id)?.status).toBe('candidate')
-    expect(get_skill_definition(skill.id)?.stage).toBe('executable_candidate')
-    expect(list_learning_opportunities()[0].state).toBe('failed')
-    expect(list_learning_verification_queue()).toHaveLength(0)
+    const revised = get_skill_definition(skill.id)
+    expect(revised?.status).toBe('candidate')
+    expect(revised?.stage).toBe('executable_candidate')
+    expect(revised?.revision).toBe(skill.revision + 1)
+    expect(revised?.constraints.some(value => value.predicate?.type === 'required_topology_relation')).toBe(true)
+    expect(revised?.constraints.some(value => value.predicate?.type === 'output_delta')).toBe(true)
+    expect(list_learning_opportunities()[0]).toMatchObject({
+      state: 'awaiting_verification',
+      skill_id: skill.id,
+    })
+    expect(list_learning_verification_queue()).toHaveLength(1)
+    expect(list_learning_verification_queue()[0].skill_id).toBe(skill.id)
   })
 
   it('keeps an unavailable actor as blocked rather than failed and retains the verification queue item', () => {
@@ -283,6 +300,56 @@ describe('Skill Verification / Instance Layer V1', () => {
     expect(result.ok).toBe(false)
     expect(result.run?.state).toBe('blocked')
     expect(get_skill_definition(skill.id)?.status).toBe('candidate')
+    expect(list_learning_opportunities()[0].state).toBe('awaiting_verification')
+    expect(list_learning_verification_queue()[0].state).toBe('blocked')
+  })
+
+  it('blocks a persisted pending verifier when the task-manager generation changed after reload', () => {
+    const skill = candidate_from_source()
+    const opportunity = queued_opportunity(skill.id)
+    capture_skill_instance_template_from_block(skill.id, skill.revision, 'source-analysis', 'block-1')
+    const run: SkillVerificationRun = {
+      ...run_for(skill.id, opportunity.id, true, 0),
+      state: 'constructing',
+      active_batch_id: 7,
+      active_batch_generation: 3,
+      active_batch_ref: 'batch-g3-7',
+    }
+    store_active_verification_run(run)
+    ;(globalThis as any).remote.call = vi.fn(() => ({
+      batch_generation: 4,
+      active_batch: { batch_id: 8, batch_generation: 4, batch_ref: 'batch-g4-8' },
+    }))
+
+    tick_skill_verification()
+
+    const blocked = (globalThis as any).storage.sgluna_skill_verification_runs[run.id]
+    expect(blocked.state).toBe('blocked')
+    expect(blocked.failure_kind).toBeUndefined()
+    expect(blocked.reason).toMatch(/interrupted by runtime reload/)
+    expect(list_learning_opportunities()[0].state).toBe('awaiting_verification')
+    expect(list_learning_verification_queue()[0].state).toBe('blocked')
+  })
+
+  it('fails closed to retryable blocked for a legacy pending verifier with only numeric batch_id', () => {
+    const skill = candidate_from_source()
+    const opportunity = queued_opportunity(skill.id)
+    capture_skill_instance_template_from_block(skill.id, skill.revision, 'source-analysis', 'block-1')
+    const run: SkillVerificationRun = {
+      ...run_for(skill.id, opportunity.id, true, 0),
+      state: 'constructing',
+      active_batch_id: 7,
+      active_batch_generation: undefined,
+      active_batch_ref: undefined,
+    }
+    store_active_verification_run(run)
+
+    tick_skill_verification()
+
+    const blocked = (globalThis as any).storage.sgluna_skill_verification_runs[run.id]
+    expect(blocked.state).toBe('blocked')
+    expect(blocked.failure_kind).toBeUndefined()
+    expect(blocked.reason).toMatch(/legacy pending batch 7 has no restart-safe identity/)
     expect(list_learning_opportunities()[0].state).toBe('awaiting_verification')
     expect(list_learning_verification_queue()[0].state).toBe('blocked')
   })

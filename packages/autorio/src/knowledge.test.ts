@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { entity_geometry_for_actor, recipe_details_for_actor } from './knowledge'
+import { entity_geometry_for_actor, mining_details_for_actor, preservation_geometry_for_actor, recipe_details_for_actor } from './knowledge'
 
 function luaPairs(value: Record<string, unknown>) {
   return Object.entries(value)
@@ -18,7 +18,8 @@ function recipe(name: string, options: {
     enabled: options.enabled ?? true,
     hidden: false,
     energy: options.energy,
-    categories: options.categories,
+    category: options.categories[0],
+    additional_categories: options.categories.slice(1),
     ingredients: options.ingredients,
     products: options.products,
     prototype: {
@@ -30,21 +31,30 @@ function recipe(name: string, options: {
 describe('recipe knowledge', () => {
   const originalPairs = (globalThis as any).pairs
   const originalGetEntityFiltered = (globalThis as any).prototypes.get_entity_filtered
+  const originalRecipeCategory = (globalThis as any).prototypes.recipe_category
 
   beforeEach(() => {
     ;(globalThis as any).pairs = luaPairs
+    ;(globalThis as any).prototypes.recipe_category = {
+      crafting: { name: 'crafting' },
+      'oil-processing': { name: 'oil-processing' },
+    }
     ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
       const category = filters[0]?.crafting_category
       if (category === 'oil-processing') {
         return {
           'refinery-z': {
             type: 'assembling-machine',
-            crafting_speed: 2,
+            get_crafting_speed: () => 2,
+            get_max_energy_usage: () => 7000,
+            electric_energy_source_prototype: {},
             crafting_categories: { 'oil-processing': true },
           },
           'refinery-a': {
             type: 'assembling-machine',
-            crafting_speed: 1,
+            get_crafting_speed: () => 1,
+            get_max_energy_usage: () => 7000,
+            electric_energy_source_prototype: {},
             crafting_categories: { 'oil-processing': true },
           },
         }
@@ -53,7 +63,9 @@ describe('recipe knowledge', () => {
         return {
           'assembling-machine-1': {
             type: 'assembling-machine',
-            crafting_speed: 0.5,
+            get_crafting_speed: () => 0.5,
+            get_max_energy_usage: () => 1250,
+            electric_energy_source_prototype: {},
             crafting_categories: { crafting: true },
           },
         }
@@ -64,6 +76,7 @@ describe('recipe knowledge', () => {
 
   afterEach(() => {
     ;(globalThis as any).pairs = originalPairs
+    ;(globalThis as any).prototypes.recipe_category = originalRecipeCategory
     ;(globalThis as any).prototypes.get_entity_filtered = originalGetEntityFiltered
   })
 
@@ -83,7 +96,7 @@ describe('recipe knowledge', () => {
     const actor = {
       is_valid: true,
       force: { recipes: { 'advanced-oil-processing': advancedOil } },
-      character: { prototype: { crafting_categories: { crafting: true } } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
     } as any
 
     const result = recipe_details_for_actor(actor, 'advanced-oil-processing') as any
@@ -103,10 +116,24 @@ describe('recipe knowledge', () => {
         expect.objectContaining({ type: 'fluid', name: 'petroleum-gas', amount: 55, fluidbox_index: 3 }),
       ]),
       crafting_machines: [
-        expect.objectContaining({ name: 'refinery-a', crafting_speed: 1 }),
-        expect.objectContaining({ name: 'refinery-z', crafting_speed: 2 }),
+        expect.objectContaining({ name: 'refinery-a', type: 'assembling-machine' }),
+        expect.objectContaining({ name: 'refinery-z', type: 'assembling-machine' }),
       ],
     })
+    // Speed 2 on a 5 s recipe: 0.4 crafts/s, so 55 petroleum per craft is 1320/min.
+    expect(result.recipes[0].crafting_machines[1]).toMatchObject({
+      crafting_speed: 2,
+      seconds_per_craft: 2.5,
+      crafts_per_second: 0.4,
+      energy_source: 'electric',
+      energy_watts: 420000,
+    })
+    expect(result.recipes[0].crafting_machines[1].products_per_minute).toEqual([
+      { type: 'fluid', name: 'heavy-oil', per_minute: 600 },
+      { type: 'fluid', name: 'petroleum-gas', per_minute: 1320 },
+    ])
+    // Oil processing is not a hand-crafting category.
+    expect(result.recipes[0].hand_crafting).toBeUndefined()
   })
 
   it('resolves an item/fluid name through recipe products when recipe names differ', () => {
@@ -119,7 +146,9 @@ describe('recipe knowledge', () => {
     const actor = {
       is_valid: true,
       force: { recipes: { 'make-widget-with-a-different-name': alternate } },
-      character: { prototype: { crafting_categories: { crafting: true } } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
+      get_main_inventory: () => ({ get_item_count: () => 0 }),
+      get_craftable_count: () => 0,
     } as any
 
     const result = recipe_details_for_actor(actor, 'widget') as any
@@ -133,14 +162,355 @@ describe('recipe knowledge', () => {
     const actor = {
       is_valid: true,
       force: { recipes: {} },
-      character: { prototype: { crafting_categories: { crafting: true } } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
     } as any
 
     expect(recipe_details_for_actor(actor, 'does-not-exist')).toEqual({
       found: false,
       query: 'does-not-exist',
+      code: 'no_recipe',
       error: 'no recipe produces this item/fluid and no recipe has this name',
     })
+  })
+
+  it('declares code no_recipe next to the error text for an item no recipe makes', () => {
+    const recipes = { is_valid: true, force: { recipes: {} } } as any
+    expect(recipe_details_for_actor(recipes, 'iron-ore')).toMatchObject({ found: false, query: 'iron-ore', code: 'no_recipe', error: 'no recipe produces this item/fluid and no recipe has this name' })
+  })
+})
+
+describe('machine energy and burner fuel knowledge', () => {
+  const originalPairs = (globalThis as any).pairs
+  const originalGetEntityFiltered = (globalThis as any).prototypes.get_entity_filtered
+  const originalItems = (globalThis as any).prototypes.item
+
+  // The live 2026-10-13 shape: copper-plate is smelted; the stone furnace burns a chemical fuel, the electric furnace
+  // takes power, and a hypothetical sink takes a void source. Fuel categories and items come from prototypes only.
+  const machines: Record<string, any> = {
+    'stone-furnace': {
+      name: 'stone-furnace',
+      type: 'furnace',
+      get_crafting_speed: () => 1,
+      get_max_energy_usage: () => 1500,
+      burner_prototype: { effectivity: 1, fuel_categories: { chemical: true } },
+      items_to_place_this: [{ name: 'stone-furnace', count: 1 }],
+    },
+    'electric-furnace': {
+      name: 'electric-furnace',
+      type: 'furnace',
+      get_crafting_speed: () => 2,
+      get_max_energy_usage: () => 3000,
+      electric_energy_source_prototype: {},
+      items_to_place_this: [{ name: 'electric-furnace', count: 1 }],
+    },
+    'free-furnace': {
+      name: 'free-furnace',
+      type: 'furnace',
+      get_crafting_speed: () => 1,
+      get_max_energy_usage: () => 100,
+      void_energy_source_prototype: {},
+    },
+  }
+  const resource = (name: string, product: string) => ({
+    name, type: 'resource', resource_category: 'basic-solid', infinite_resource: false,
+    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: product, amount: 1 }] },
+  })
+  const items = (extra: Record<string, unknown> = {}) => ({
+    'copper-plate': {},
+    coal: { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
+    wood: { name: 'wood', fuel_category: 'chemical', fuel_value: 2000000 },
+    'solid-fuel': { name: 'solid-fuel', fuel_category: 'chemical', fuel_value: 12000000 },
+    'uranium-fuel-cell': { name: 'uranium-fuel-cell', fuel_category: 'nuclear', fuel_value: 8000000000 },
+    'inert-lump': { name: 'inert-lump', fuel_category: 'chemical', fuel_value: 0 },
+    ...extra,
+  })
+
+  beforeEach(() => {
+    ;(globalThis as any).pairs = luaPairs
+    ;(globalThis as any).prototypes.item = items()
+    ;(globalThis as any).prototypes.recipe_category = { smelting: { name: 'smelting' } }
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
+      if (filters[0]?.type === 'resource') return { coal: resource('coal', 'coal'), 'copper-ore': resource('copper-ore', 'copper-ore') }
+      if (filters[0]?.filter === 'crafting-category') return machines
+      return {}
+    }
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).pairs = originalPairs
+    ;(globalThis as any).prototypes.get_entity_filtered = originalGetEntityFiltered
+    ;(globalThis as any).prototypes.item = originalItems
+    delete (globalThis as any).prototypes.recipe_category
+  })
+
+  function smelter() {
+    const plate = recipe('copper-plate', {
+      categories: ['smelting'],
+      energy: 3.2,
+      ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }],
+      products: [{ type: 'item', name: 'copper-plate', amount: 1 }],
+    })
+    return {
+      is_valid: true,
+      force: { recipes: { 'copper-plate': plate } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
+      get_main_inventory: () => ({ get_item_count: () => 0 }),
+      get_craftable_count: () => 0,
+    } as any
+  }
+
+  it('names each machine energy source from its prototype, including void, and the item that places it', () => {
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    const byName = Object.fromEntries(result.recipes[0].crafting_machines.map((machine: any) => [machine.name, machine]))
+    expect(byName['stone-furnace']).toMatchObject({ energy_source: 'burner', fuel_categories: ['chemical'], energy_watts: 90000, placed_by_item: 'stone-furnace' })
+    expect(byName['electric-furnace']).toMatchObject({ energy_source: 'electric', placed_by_item: 'electric-furnace' })
+    expect(byName['electric-furnace'].fuel_categories).toBeUndefined()
+    expect(byName['free-furnace']).toMatchObject({ energy_source: 'void' })
+    expect(byName['free-furnace'].placed_by_item).toBeUndefined()
+  })
+
+  it('lists the fuels the burner categories accept, resource-mined ones first, with their mining resources', () => {
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    expect(result.burner_fuels).toEqual({
+      categories: ['chemical'],
+      items: [
+        { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+        { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000 },
+        { name: 'wood', category: 'chemical', fuel_value: 2000000 },
+      ],
+    })
+    // Another category, a zero fuel value and a non-fuel item never appear.
+    const text = JSON.stringify(result.burner_fuels)
+    expect(text).not.toMatch(/uranium-fuel-cell|inert-lump|copper-plate/)
+  })
+
+  it('names the trees and rocks the harvest operation mines for a fuel, and ranks a harvestable fuel with the mined ones', () => {
+    const original_entity = (globalThis as any).prototypes.entity
+    const natural = (name: string, type: string, product: string, extra: Record<string, unknown> = {}) => ({
+      name, type, is_building: type === 'simple-entity',
+      mineable_properties: { mining_time: 0.5, products: [{ type: 'item', name: product, amount: 4 }] }, ...extra,
+    })
+    ;(globalThis as any).prototypes.entity = {
+      'tree-02': natural('tree-02', 'tree', 'wood'),
+      'tree-01': natural('tree-01', 'tree', 'wood'),
+      'huge-rock': natural('huge-rock', 'simple-entity', 'coal'),
+      // A placed building that yields wood when mined is a player asset (owner and placing item), never a harvest source.
+      'wooden-chest': natural('wooden-chest', 'simple-entity', 'wood', { is_building: true, is_entity_with_owner: true, items_to_place_this: [{ name: 'wooden-chest', count: 1 }] }),
+      'dead-tree': natural('dead-tree', 'tree', 'copper-plate'),
+    }
+    try {
+      const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+      expect(result.burner_fuels.items).toEqual([
+        { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'], harvested_from: ['huge-rock'] },
+        { name: 'wood', category: 'chemical', fuel_value: 2000000, harvested_from: ['tree-01', 'tree-02'] },
+        { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000 },
+      ])
+      // The queried item carries its own harvest sources, found or not, bounded and name-sorted.
+      expect(result.harvested_from).toEqual(['dead-tree'])
+      const wood = recipe_details_for_actor({ ...smelter(), force: { recipes: {} } }, 'wood') as any
+      expect(wood).toMatchObject({ found: false, code: 'no_recipe', harvested_from: ['tree-01', 'tree-02'] })
+      expect(wood.mined_from).toBeUndefined()
+      expect(JSON.stringify(wood)).not.toContain('wooden-chest')
+      expect((recipe_details_for_actor({ ...smelter(), force: { recipes: {} } }, 'solid-fuel') as any).harvested_from).toBeUndefined()
+    }
+    finally {
+      ;(globalThis as any).prototypes.entity = original_entity
+    }
+  })
+
+  it('lists every accepted fuel, minable fuels first', () => {
+    const many: Record<string, unknown> = {}
+    for (let i = 0; i < 9; i++) many[`fuel-${i}`] = { name: `fuel-${i}`, fuel_category: 'chemical', fuel_value: 1000 + i }
+    ;(globalThis as any).prototypes.item = items(many)
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    expect(result.burner_fuels.items).toHaveLength(12)
+    expect(result.burner_fuels.items[0].name).toBe('coal')
+    expect(result.burner_fuels.truncated).toBeUndefined()
+  })
+
+  it('carries no fuel facts when no listed machine burns fuel', () => {
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) =>
+      filters[0]?.filter === 'crafting-category' ? { 'electric-furnace': machines['electric-furnace'] } : {}
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    expect(result.burner_fuels).toBeUndefined()
+  })
+})
+
+describe('mining knowledge', () => {
+  const originalPairs = (globalThis as any).pairs
+  const originalGetEntityFiltered = (globalThis as any).prototypes.get_entity_filtered
+  const originalItems = (globalThis as any).prototypes.item
+
+  // Factorio 2.0 base values: iron ore mines in 1 s; the burner drill has speed
+  // 0.25 at 150 kW burner, the electric drill 0.5; the character mines at 0.5.
+  const ironOre = {
+    name: 'iron-ore',
+    type: 'resource',
+    resource_category: 'basic-solid',
+    infinite_resource: false,
+    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'iron-ore', amount: 1, probability: 1 }] },
+  }
+  const crudeOil = {
+    name: 'crude-oil',
+    type: 'resource',
+    resource_category: 'basic-fluid',
+    infinite_resource: true,
+    normal_resource_amount: 300000,
+    mineable_properties: { mining_time: 1, products: [{ type: 'fluid', name: 'crude-oil', amount: 10, probability: 1 }] },
+  }
+  const drills = {
+    'electric-mining-drill': {
+      name: 'electric-mining-drill',
+      type: 'mining-drill',
+      mining_speed: 0.5,
+      uses_force_mining_productivity_bonus: true,
+      resource_categories: { 'basic-solid': true },
+      get_max_energy_usage: () => 1500,
+      electric_energy_source_prototype: {},
+    },
+    'burner-mining-drill': {
+      name: 'burner-mining-drill',
+      type: 'mining-drill',
+      mining_speed: 0.25,
+      uses_force_mining_productivity_bonus: true,
+      resource_categories: { 'basic-solid': true },
+      get_max_energy_usage: () => 2500,
+      burner_prototype: { effectivity: 1, fuel_categories: { chemical: true } },
+    },
+    'pumpjack': {
+      name: 'pumpjack',
+      type: 'mining-drill',
+      mining_speed: 1,
+      uses_force_mining_productivity_bonus: true,
+      resource_categories: { 'basic-fluid': true },
+      get_max_energy_usage: () => 1500,
+      electric_energy_source_prototype: {},
+    },
+  }
+
+  function actor(force: Record<string, number> = {}) {
+    return {
+      is_valid: true,
+      force: { mining_drill_productivity_bonus: 0, manual_mining_speed_modifier: 0, ...force },
+      character: {
+        character_mining_speed_modifier: 0,
+        prototype: { mining_speed: 0.5, resource_categories: { 'basic-solid': true } },
+      },
+    } as any
+  }
+
+  beforeEach(() => {
+    ;(globalThis as any).pairs = luaPairs
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
+      if (filters[0]?.type === 'resource') return { 'iron-ore': ironOre, 'crude-oil': crudeOil }
+      if (filters[0]?.type === 'mining-drill') return drills
+      return {}
+    }
+    ;(globalThis as any).prototypes.item = {
+      ...originalItems,
+      coal: { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
+    }
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).pairs = originalPairs
+    ;(globalThis as any).prototypes.get_entity_filtered = originalGetEntityFiltered
+    ;(globalThis as any).prototypes.item = originalItems
+  })
+
+  it('gives mining time, per-drill ore per minute and burner fuel per minute', () => {
+    const result = mining_details_for_actor(actor(), 'iron-ore', 'coal') as any
+    expect(result.found).toBe(true)
+    expect(result.resources).toHaveLength(1)
+    const ore = result.resources[0]
+    expect(ore).toMatchObject({ name: 'iron-ore', category: 'basic-solid', mining_time: 1, infinite: false, drill_count: 2 })
+    expect(ore.drills.map((drill: any) => drill.name)).toEqual(['burner-mining-drill', 'electric-mining-drill'])
+    expect(ore.drills[0]).toEqual({
+      name: 'burner-mining-drill',
+      mining_speed: 0.25,
+      productivity_bonus: 0,
+      seconds_per_cycle: 4,
+      products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 15 }],
+      energy_source: 'burner',
+      energy_watts: 150000,
+      burner_effectivity: 1,
+      fuel_categories: ['chemical'],
+      fuel: { name: 'coal', accepted: true, fuel_value_joules: 4000000, per_minute: 2.25 },
+    })
+    expect(ore.drills[1].products_per_minute).toEqual([{ type: 'item', name: 'iron-ore', per_minute: 30 }])
+    expect(ore.hand_mining).toEqual({
+      mining_speed: 0.5,
+      seconds_per_cycle: 2,
+      products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 30 }],
+    })
+  })
+
+  it('applies the force mining productivity bonus to drills but not to hand mining', () => {
+    const result = mining_details_for_actor(actor({ mining_drill_productivity_bonus: 0.2, manual_mining_speed_modifier: 1 }), 'iron-ore') as any
+    const ore = result.resources[0]
+    expect(ore.drills[0]).toMatchObject({ productivity_bonus: 0.2, products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 18 }] })
+    expect(ore.drills[0].fuel).toBeUndefined()
+    // Manual mining modifier 1 doubles the hand speed; productivity does not apply.
+    expect(ore.hand_mining).toMatchObject({ mining_speed: 1, products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 60 }] })
+  })
+
+  it('flags infinite fluid resources and leaves hand mining out when the character cannot mine them', () => {
+    const result = mining_details_for_actor(actor(), 'crude-oil') as any
+    const oil = result.resources[0]
+    expect(oil).toMatchObject({ name: 'crude-oil', infinite: true, normal_resource_amount: 300000, drill_count: 1 })
+    expect(oil.drills[0]).toMatchObject({ name: 'pumpjack', products_per_minute: [{ type: 'fluid', name: 'crude-oil', per_minute: 600 }] })
+    expect(oil.hand_mining).toBeUndefined()
+  })
+
+  it('reports an unknown resource without inventing one, and points recipe lookups at mining', () => {
+    expect(mining_details_for_actor(actor(), 'unobtainium')).toEqual({
+      found: false,
+      query: 'unobtainium',
+      error: 'no resource has this name or yields this item/fluid',
+    })
+    const recipes = { ...actor(), force: { recipes: {} } } as any
+    expect((recipe_details_for_actor(recipes, 'iron-ore') as any).mined_from).toEqual(['iron-ore'])
+  })
+
+  it('names the resources an item is mined from in the found answer too, next to recipes that also list it as a product', () => {
+    // The live 2026-10-13 shape: copper-ore has recipes (recycling, asteroid crushing) AND is mined from a resource.
+    const recycling = recipe('copper-ore-recycling', {
+      categories: ['recycling'],
+      energy: 0.0625,
+      ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }],
+      products: [{ type: 'item', name: 'copper-ore', amount: 1, probability: 0.25 }],
+      hidden_from_player_crafting: true,
+    })
+    const crushing = recipe('advanced-metallic-asteroid-crushing', {
+      categories: ['crushing'],
+      energy: 2,
+      ingredients: [{ type: 'item', name: 'metallic-asteroid-chunk', amount: 1 }],
+      products: [{ type: 'item', name: 'copper-ore', amount: 10 }, { type: 'item', name: 'iron-ore', amount: 5 }],
+    })
+    const copperOre = { ...ironOre, name: 'copper-ore', mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'copper-ore', amount: 1, probability: 1 }] } }
+    // A resource whose name matches the query but which does not mine into it is not a source of the item.
+    const decoy = { ...ironOre, name: 'copper-ore-decoy', mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'stone', amount: 1 }] } }
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
+      if (filters[0]?.type === 'resource') return { 'iron-ore': ironOre, 'copper-ore': copperOre, 'copper-ore-decoy': decoy, 'crude-oil': crudeOil }
+      return {}
+    }
+    const actor = {
+      is_valid: true,
+      force: { recipes: { 'copper-ore-recycling': recycling, 'advanced-metallic-asteroid-crushing': crushing } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
+      get_main_inventory: () => ({ get_item_count: () => 0 }),
+      get_craftable_count: () => 0,
+    } as any
+
+    const found = recipe_details_for_actor(actor, 'copper-ore') as any
+    expect(found.found).toBe(true)
+    expect(found.recipes.map((entry: any) => entry.name)).toEqual(['advanced-metallic-asteroid-crushing', 'copper-ore-recycling'])
+    expect(found.mined_from).toEqual(['copper-ore'])
+    // An item no resource mines carries no mined_from, found or not.
+    expect((recipe_details_for_actor(actor, 'metallic-asteroid-chunk') as any).mined_from).toBeUndefined()
+    expect((recipe_details_for_actor({ ...actor, force: { recipes: {} } }, 'iron-plate') as any).mined_from).toBeUndefined()
+    // A fluid resource product counts the same way, deterministically ordered and bounded.
+    expect((recipe_details_for_actor({ ...actor, force: { recipes: {} } }, 'crude-oil') as any).mined_from).toEqual(['crude-oil'])
   })
 })
 
@@ -150,6 +520,8 @@ describe('entity geometry knowledge', () => {
     is_valid: true,
     position: { x: 0, y: 0 },
     surface: { index: 1 },
+    force: { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true },
+    status_snapshot: () => ({ actor_id: 18 }),
   } as any
 
   afterEach(() => {
@@ -164,7 +536,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 100,
       position: { x: 1, y: 0 },
       direction: 2,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
     }
     const destination = {
       valid: true,
@@ -173,7 +545,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 101,
       position: { x: 3, y: 0 },
       direction: 0,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
     }
     const inserter = {
       valid: true,
@@ -182,7 +554,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 42,
       position: { x: 2, y: 0 },
       direction: 2,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 0,
       fluidbox: { length: 0 },
@@ -196,6 +568,11 @@ describe('entity geometry knowledge', () => {
     expect(entity_geometry_for_actor(actor, 42)).toMatchObject({
       found: true,
       distance: 2,
+      actor_id: 18,
+      actor_surface_index: 1,
+      actor_force_index: 1,
+      surface_index: 1,
+      force_index: 1,
       entity: { name: 'inserter', unit_number: 42, position: { x: 2, y: 0 } },
       item_io: {
         pickup_position: { x: 1, y: 0 },
@@ -215,7 +592,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 50,
       position: { x: 10, y: 5 },
       direction: 4,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 0,
       fluidbox: { length: 0 },
@@ -240,14 +617,15 @@ describe('entity geometry knowledge', () => {
       unit_number: 90,
       position: { x: 21, y: 20 },
       direction: 0,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
+      surface: { index: 1 },
     }
     const fluidbox = {
       length: 2,
       get_capacity: (index: number) => index === 1 ? 100 : 200,
       get_prototype: (index: number) => index === 1
-        ? { index: 1, production_type: 'input', filter: undefined }
-        : { index: 2, production_type: 'output', filter: { name: 'sulfuric-acid' } },
+        ? { index: 1, volume: 100, production_type: 'input', filter: undefined }
+        : { index: 2, volume: 200, production_type: 'output', filter: { name: 'sulfuric-acid' } },
       get_pipe_connections: (index: number) => index === 1
         ? [{
             flow_direction: 'input',
@@ -272,7 +650,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 77,
       position: { x: 20, y: 20 },
       direction: 2,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 2,
       fluidbox,
@@ -282,17 +660,30 @@ describe('entity geometry knowledge', () => {
 
     const result = entity_geometry_for_actor(actor, 77) as any
     expect(result).toMatchObject({
+      fluid_geometry_version: 3,
       fluid_storage_count: 2,
       fluid_box_count: 2,
       non_fluidbox_storage_count: 0,
     })
+    // A synthetic fluid-capable drill reuses the same complete geometry proof.
+    // The identical unlisted machine remains unsupported by preservation.
+    expect(preservation_geometry_for_actor(actor, 77)).toBeUndefined()
+    chemicalPlant.name = 'electric-mining-drill'
+    chemicalPlant.type = 'mining-drill'
+    expect(preservation_geometry_for_actor(actor, 77)).toMatchObject({ found: true, entity: { name: 'electric-mining-drill' }, fluid_box_count: 2 })
+    chemicalPlant.name = 'chemical-plant'
+    chemicalPlant.type = 'assembling-machine'
     expect(result.fluid_storages).toHaveLength(2)
     expect(result.fluid_storages[0]).toMatchObject({
       index: 1,
       capacity: 100,
+      local_volume: 100,
       current_fluid: { name: 'water', amount: 40, temperature: 15 },
       prototypes: [{ index: 1, production_type: 'input' }],
       pipe_connections: [{
+        connection_index: 1,
+        connected: false,
+        target_valid: true,
         flow_direction: 'input',
         position: { x: 19, y: 20 },
         target_position: { x: 18, y: 20 },
@@ -301,6 +692,11 @@ describe('entity geometry knowledge', () => {
     expect(result.fluid_storages[1]).toMatchObject({
       prototypes: [{ index: 2, production_type: 'output', filter: 'sulfuric-acid' }],
       pipe_connections: [{
+        connection_index: 1,
+        connected: true,
+        target_valid: true,
+        target_surface_index: 1,
+        target_force_index: 1,
         flow_direction: 'output',
         position: { x: 21, y: 20 },
         target: { name: 'pipe', unit_number: 90 },
@@ -316,7 +712,7 @@ describe('entity geometry knowledge', () => {
       unit_number: 81,
       position: { x: 4, y: 4 },
       direction: 0,
-      force: { name: 'player' },
+      force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 1,
       fluidbox: { length: 0 },

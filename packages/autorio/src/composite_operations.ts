@@ -52,8 +52,11 @@ export function new_composite_operation_controller(
     }
 
     const prototype = prototypes.entity[resource_name]
-    if (!prototype || prototype.type !== 'resource') {
-      return [false, `${resource_name} is not a mineable resource entity`]
+    if (!prototype) {
+      return [false, `unknown_prototype: expected resource prototype; observed type=missing; target=${resource_name}`]
+    }
+    if (prototype.type !== 'resource') {
+      return [false, `invalid_target_kind: expected resource prototype; observed type=${prototype.type}; target=${resource_name}`]
     }
 
     if (!navigation.submit(resource_name, search_radius)) {

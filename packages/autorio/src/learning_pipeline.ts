@@ -37,7 +37,7 @@ import {
 
 const AUTO_ANALYSIS_RADIUS = 12
 const MAX_BLOCKS_PER_EVENT = 4
-const FACTORY_SAVE_BUTTON_PREFIX = 'airi_skill_save_block__'
+const FACTORY_SAVE_BUTTON_PREFIX = 'sgluna_skill_save_block__'
 const MAX_UI_OPPORTUNITIES = 4
 
 export interface LearningGoalSnapshot {
@@ -65,6 +65,19 @@ function append_unique(values: string[], additions: string[], limit = 32) {
   return result
 }
 
+// Remote callers pass plain Lua tables. Iterate a typed array so TypeScriptToLua
+// emits ipairs and `#`; a `.slice()` call on an untyped value is a nil method.
+function evidence_ref_list(value: unknown, limit = 16) {
+  const result: string[] = []
+  if (!Array.isArray(value)) return result
+  const refs: unknown[] = value
+  for (const ref of refs) {
+    if (result.length >= limit) break
+    if (typeof ref === 'string') result.push(ref)
+  }
+  return result
+}
+
 function candidate_for_source(analysis_id: string, block_id: string, source: LearningOpportunitySource, context: LearningContext) {
   const candidate = skill_candidate_definition_from_block(analysis_id, block_id, 1)
   candidate.source.kind = source
@@ -85,7 +98,7 @@ function duplicate_for_key(novelty_key: string) {
 
 function unique_candidate_id(candidate: SkillDefinition, novelty_key: string) {
   const existing = list_skill_definitions()
-  let id = candidate.id
+  const id = candidate.id
   for (const skill of existing) {
     if (skill.id !== id) continue
     if (skill_novelty_key(skill) === novelty_key) return id
@@ -246,7 +259,7 @@ export function record_experiment_learning(value: any = {}) {
       source: 'experiment',
       state: 'failed',
       goal_id: typeof value?.goal_id === 'string' ? value.goal_id : undefined,
-      evidence_refs: Array.isArray(value?.evidence_refs) ? value.evidence_refs.slice(0, 16) : [],
+      evidence_refs: evidence_ref_list(value?.evidence_refs),
       novelty_key: '', estimated_cost: 'cheap', risk: 'safe',
       reason: typeof value?.reason === 'string' ? value.reason : 'Experiment did not succeed; no successful skill candidate was created.',
     })
@@ -255,7 +268,7 @@ export function record_experiment_learning(value: any = {}) {
   if (typeof value.analysis_id === 'string') {
     const context: LearningContext = {
       goal_id: typeof value.goal_id === 'string' ? value.goal_id : undefined,
-      evidence_refs: Array.isArray(value.evidence_refs) ? value.evidence_refs.slice(0, 16) : [],
+      evidence_refs: evidence_ref_list(value.evidence_refs),
       reason: typeof value.reason === 'string' ? value.reason : 'A bounded experiment produced a working reusable structure.',
     }
     if (typeof value.block_id === 'string') return { ok: true, results: [process_factory_block_learning('experiment', value.analysis_id, value.block_id, context)] }
@@ -265,7 +278,7 @@ export function record_experiment_learning(value: any = {}) {
   if (!actor || !actor.is_valid) return { ok: false, error: 'controlled actor is unavailable' }
   return analyze_and_learn(actor, 'experiment', value.area_request ?? { surface_index: actor.surface.index, position: actor.position, radius: AUTO_ANALYSIS_RADIUS }, {
     goal_id: typeof value.goal_id === 'string' ? value.goal_id : undefined,
-    evidence_refs: Array.isArray(value.evidence_refs) ? value.evidence_refs.slice(0, 16) : [],
+    evidence_refs: evidence_ref_list(value.evidence_refs),
     reason: typeof value.reason === 'string' ? value.reason : 'A bounded experiment produced a working reusable structure.',
   })
 }
@@ -297,6 +310,13 @@ export function create_learning_remote_interface() {
   })
 }
 
+/** What render_learning_status shows, so a window can skip redrawing it when nothing changed. */
+export function learning_status_signature() {
+  const parts = [get_learning_policy(), `${list_learning_verification_queue().length}`]
+  for (const opportunity of list_learning_opportunities(MAX_UI_OPPORTUNITIES)) parts.push(`${opportunity.id}:${opportunity.state}:${opportunity.reason}:${opportunity.estimated_cost}:${opportunity.risk}`)
+  return parts.join('|')
+}
+
 export function render_learning_status(parent: LuaGuiElement) {
   const frame = parent.add({ type: 'frame', direction: 'vertical', style: 'inside_shallow_frame' })
   frame.style.horizontally_stretchable = true
@@ -309,7 +329,7 @@ export function render_learning_status(parent: LuaGuiElement) {
   body.style.horizontally_stretchable = true
   const opportunities = list_learning_opportunities(MAX_UI_OPPORTUNITIES)
   if (opportunities.length === 0) {
-    body.add({ type: 'label', caption: 'AIRI can learn from meaningful completed goals, task-relevant observations, experiments, or explicit Learn Area study. No opportunity recorded yet.' })
+    body.add({ type: 'label', caption: 'SGLuna can learn from meaningful completed goals, task-relevant observations, experiments, or explicit Learn Area study. No opportunity recorded yet.' })
     return
   }
   for (const opportunity of opportunities) {
@@ -325,7 +345,7 @@ export function handle_learning_ui_click(player: LuaPlayer, element_name: string
   const raw = element_name.slice(FACTORY_SAVE_BUTTON_PREFIX.length)
   const parts = raw.split('__')
   if (parts.length !== 2 || parts[0].length === 0 || parts[1].length === 0) {
-    player.print('[AIRI] Learning failed: malformed factory block selection.')
+    player.print('[SGLuna] Learning failed: malformed factory block selection.')
     return true
   }
   try {
@@ -333,12 +353,12 @@ export function handle_learning_ui_click(player: LuaPlayer, element_name: string
       evidence_refs: ['manual:learn-area'],
       reason: 'Player explicitly requested study of this factory block.',
     })
-    if (result.novelty === 'known') player.print(`[AIRI] Known reusable skill: ${result.skill?.name ?? result.skill?.id}. Added new evidence/example instead of duplicating it.`)
-    else if (result.skill !== undefined) player.print(`[AIRI] Learned candidate: ${result.skill.name}. Verification is queued; observation alone did not verify it.`)
-    else player.print(`[AIRI] Learning opportunity rejected: ${result.opportunity.reason}`)
+    if (result.novelty === 'known') player.print(`[SGLuna] Known reusable skill: ${result.skill?.name ?? result.skill?.id}. Added new evidence/example instead of duplicating it.`)
+    else if (result.skill !== undefined) player.print(`[SGLuna] Learned candidate: ${result.skill.name}. Verification is queued; observation alone did not verify it.`)
+    else player.print(`[SGLuna] Learning opportunity rejected: ${result.opportunity.reason}`)
   }
   catch (error) {
-    player.print(`[AIRI] Learning failed: ${error instanceof Error ? error.message : 'invalid learning opportunity'}`)
+    player.print(`[SGLuna] Learning failed: ${error instanceof Error ? error.message : 'invalid learning opportunity'}`)
   }
   return true
 }

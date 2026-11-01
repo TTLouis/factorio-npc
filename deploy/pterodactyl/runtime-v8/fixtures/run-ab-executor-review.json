@@ -1,0 +1,10 @@
+{
+  "source": "Run AB at 80eaf9e5, goal_0yxfaqp_1, 2026-10-18; non-secret native facts and visible executor response only",
+  "water_wide": { "search_radius": 256, "returned_count": 8, "first_sample": { "x": 60, "y": -36 }, "coverage_complete": false },
+  "water_narrow": { "search_radius": 128, "returned_count": 0, "coverage_complete": false, "empty_result_is_conclusive": false },
+  "navigation": { "reason": "navigation_unreachable", "destination": { "x": 60, "y": -36 } },
+  "legacy_reply": {
+    "chatMessage": "BLOCKED: I can't verify a legal water site or the live fluid-port and power geometry needed to install the chain safely. The available observations show the required buildings in inventory, but not that any are placed or connected.",
+    "operations": []
+  }
+}

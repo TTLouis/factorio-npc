@@ -1,0 +1,1180 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import {
+  DEADLOCK_EVIDENCE_STALL_BATCHES,
+  DEADLOCK_REPEATED_FAILURE_LIMIT,
+  DEADLOCK_SIGNAL_KIND,
+  getActivePlan,
+  PLAN_STATUS,
+  planTrackerView,
+} from './planning-state.mjs'
+
+function deployment() {
+  return {
+    revision: 'sgluna-deploy-v8-npc-staging',
+    session: '0123456789abcdef0123456789abcdef',
+    mode: 'npc',
+    actor_id: 18,
+    actor_kind: 'standalone_character',
+    connected_players: 1,
+    allowed: true,
+    idle: true,
+    epoch: 3,
+    actor_interface: true,
+    operations: true,
+    tools: true,
+  }
+}
+
+class RejectingPreflightRcon {
+  constructor() {
+    this.mutations = []
+  }
+
+  async command(text) {
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("autorio_preflight","operation"')) {
+      return JSON.stringify({
+        ok: false,
+        code: 'missing_runtime_capability',
+        operation: 'craft_item',
+        detail: 'required deterministic capability is unavailable',
+      })
+    }
+    if (text.includes('local ok,result=pcall')) {
+      this.mutations.push(text)
+      throw new Error('mutation must not be admitted after failed preflight')
+    }
+    return '{}'
+  }
+}
+
+// Admits every preflight and operation batch, so a test can drive the live
+// request path up to the first draft.
+class PlanningRcon {
+  constructor() {
+    this.mutations = []
+  }
+
+  async command(text) {
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
+    if (text.includes('remote.call("autorio_tools","goal_progress_facts"')) {
+      return JSON.stringify({ ok: true, rockets_launched: 0, researched_technologies: 0, enabled_technologies: 200, milestones: [] })
+    }
+    if (text.includes('local ok,result=pcall')) {
+      this.mutations.push(text)
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
+      const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
+      return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
+    }
+    return '{}'
+  }
+}
+
+function proposedPlan(steps, currentStep = 0) {
+  return {
+    chatMessage: 'Working on the durable plan.',
+    plan: steps,
+    currentStep,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  }
+}
+
+function startCommittedPlan(memory, key = 'npc:sgluna') {
+  const request = { sender: 'Louis', text: 'Build early automation' }
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, request, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 100, runtime_validation: { passed: true } })
+  return { request, plan, state: reconciled.state }
+}
+
+function block(memory, key = 'npc:sgluna') {
+  return memory.applyOutcomeAuthority(key, {
+    kind: 'world_blocked',
+    source: 'deterministic_runtime',
+    reason_code: 'operation_preflight_failed:missing_dependency',
+    candidate_blocker: 'operation_preflight_failed:missing_dependency',
+    evidence: [{
+      kind: 'operation_preflight_blocker',
+      ref: 'preflight_missing_dependency',
+      summary: 'Required dependency cannot be satisfied by the committed route.',
+    }],
+  }).state
+}
+
+test('live coordinator turns deterministic preflight rejection into reducer BLOCKED with no mutation', async () => {
+  const rcon = new RejectingPreflightRcon()
+  const memory = new CanonicalTaskBoardMemory()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async () => ({
+      content: JSON.stringify({
+        chatMessage: 'Crafting the first furnace.',
+        plan: ['Craft the first furnace', 'Place the furnace'],
+        currentStep: 0,
+        operations: [{ name: 'craft_item', args: { item_name: 'stone-furnace', count: 1 } }],
+      }),
+    }),
+    systemPrompt: 'planning preflight integration test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'sgluna',
+  })
+
+  const result = await agent.request('build the first furnace', { sender: 'Louis' })
+  const planning = memory.planningState('npc:sgluna')
+  const blocked = getActivePlan(planning)
+
+  assert.equal(result.goalStatus, 'blocked')
+  assert.equal(result.operations.length, 0)
+  assert.equal(rcon.mutations.length, 0)
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(blocked.blocker.reason_code, 'operation_preflight_failed:missing_runtime_capability')
+  assert.equal(blocked.blocker.evidence_refs.length, 1)
+  assert.equal(planning.plans.length, 1, 'preflight failure must freeze rather than auto-create a suffix plan')
+})
+
+test('live planning state survives restart BLOCKED and requires explicit revision before successor', () => {
+  const key = 'npc:sgluna'
+  const beforeRestart = new CanonicalTaskBoardMemory()
+  startCommittedPlan(beforeRestart, key)
+  block(beforeRestart, key)
+
+  const blockedBefore = getActivePlan(beforeRestart.planningState(key))
+  const blockedEpoch = beforeRestart.planningReasoningEpoch(key)
+  assert.equal(blockedBefore.status, PLAN_STATUS.BLOCKED)
+  assert.equal(beforeRestart.planningState(key).plans.length, 1)
+
+  const afterRestart = new CanonicalTaskBoardMemory()
+  afterRestart.restore(JSON.parse(JSON.stringify(beforeRestart.snapshot())))
+
+  const blockedAfter = getActivePlan(afterRestart.planningState(key))
+  assert.equal(blockedAfter.status, PLAN_STATUS.BLOCKED)
+  assert.equal(afterRestart.currentPlan(key).status, 'blocked')
+  assert.equal(afterRestart.planningState(key).plans.length, 1)
+  assert.equal(afterRestart.currentPlan(key).planning.blocked.awaiting_choice, true)
+  assert.equal(afterRestart.planningReasoningEpoch(key), blockedEpoch, 'restart must preserve the reducer reasoning epoch')
+
+  // A normal provider continuation cannot thaw BLOCKED or replace the suffix.
+  const ordinary = proposedPlan(['Gather stone', 'Craft furnace differently', 'Build power'], 1)
+  const previousBoard = afterRestart.currentPlan(key).task_board
+  const ordinaryRecorded = afterRestart.recordPlan(key, {
+    sender: 'Louis',
+    text: 'continue',
+  }, ordinary, { continuation: true })
+  const ordinaryReconciled = afterRestart.reconcileTaskBoard(
+    key,
+    previousBoard,
+    ordinary,
+    ordinaryRecorded,
+    { previousState: afterRestart.currentPlan(key), allowReplan: false },
+  )
+  assert.equal(ordinaryReconciled.blockedByHarness, true)
+  assert.equal(getActivePlan(afterRestart.planningState(key)).plan_id, blockedAfter.plan_id)
+  assert.equal(afterRestart.planningState(key).plans.length, 1)
+
+  // The explicit UI choice records intent only; it still creates no successor.
+  afterRestart.recordBlockedChoice(key, 'revise', 'Louis', { now: 200 })
+  assert.equal(afterRestart.planningState(key).plans.length, 1)
+  assert.equal(getActivePlan(afterRestart.planningState(key)).status, PLAN_STATUS.BLOCKED)
+
+  // The following user-authored revision supplies the actual replacement.
+  const revisedPlan = proposedPlan(['Gather stone', 'Use alternate furnace route', 'Build power'], 1)
+  const revisedRecorded = afterRestart.recordPlan(key, {
+    sender: 'Louis',
+    text: 'Use the alternate furnace route instead.',
+  }, revisedPlan)
+  const revised = afterRestart.reconcileTaskBoard(
+    key,
+    previousBoard,
+    revisedPlan,
+    revisedRecorded,
+    { previousState: ordinaryReconciled.state, allowReplan: false },
+  )
+  const successor = getActivePlan(afterRestart.planningState(key))
+
+  assert.equal(revisedRecorded.userRevisionApproved, true)
+  assert.equal(successor.status, PLAN_STATUS.DRAFT)
+  assert.equal(successor.plan_version, blockedAfter.plan_version + 1)
+  assert.equal(successor.derived_from_plan_id, blockedAfter.plan_id)
+  assert.ok(afterRestart.planningReasoningEpoch(key) > blockedEpoch, 'user-approved successor must invalidate predecessor reasoning')
+  assert.equal(afterRestart.planningState(key).plans.length, 2)
+  assert.equal(revised.state.status, 'active')
+  assert.equal(revised.blockedByHarness, false)
+})
+
+test('blocked cancel choice remains frozen until terminate emits PLAN_CANCELLED', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+  block(memory, key)
+
+  memory.recordBlockedChoice(key, 'cancel', 'Louis', { now: 300 })
+  const stillBlocked = getActivePlan(memory.planningState(key))
+  assert.equal(stillBlocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(stillBlocked.blocker.user_choice.choice, 'cancel')
+  assert.ok(memory.currentPlan(key), 'cancel choice alone must not destructively clear durable state')
+
+  memory.terminatePlan(key)
+  const cancelled = getActivePlan(memory.planningState(key))
+  assert.equal(cancelled.status, PLAN_STATUS.CANCELLED)
+  assert.equal(memory.currentPlan(key), undefined)
+})
+
+test('real state-file restart preserves BLOCKED, successor lineage, and reasoning epoch', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-planning-restart-'))
+  t.after(() => fsp.rm(root, { recursive: true, force: true }))
+  const stateFile = path.join(root, 'npc-state.json')
+  const key = 'npc:sgluna'
+  const makeAgent = () => new NpcAgentLoop({
+    rcon: { command: async () => '{}' },
+    provider: async () => { throw new Error('provider must not run in persistence test') },
+    systemPrompt: 'planning persistence integration test',
+    stateFile,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'sgluna',
+    memory: new CanonicalTaskBoardMemory(),
+  })
+
+  const first = makeAgent()
+  startCommittedPlan(first.memory, key)
+  block(first.memory, key)
+  const blocked = getActivePlan(first.memory.planningState(key))
+  const blockedEpoch = first.memory.planningReasoningEpoch(key)
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  await first.persistState()
+
+  const restarted = makeAgent()
+  await restarted.loadPersistentState()
+  const restoredBlocked = getActivePlan(restarted.memory.planningState(key))
+  assert.equal(restoredBlocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(restoredBlocked.plan_id, blocked.plan_id)
+  assert.equal(restarted.memory.planningReasoningEpoch(key), blockedEpoch)
+  assert.equal(restarted.memory.currentPlan(key).planning.blocked.awaiting_choice, true)
+
+  restarted.memory.recordBlockedChoice(key, 'revise', 'Louis', { now: 400 })
+  const revisedPlan = proposedPlan(['Gather stone', 'Use alternate furnace route', 'Build power'], 1)
+  const previousBoard = restarted.memory.currentPlan(key).task_board
+  const recorded = restarted.memory.recordPlan(key, {
+    sender: 'Louis',
+    text: 'Use the alternate furnace route instead.',
+  }, revisedPlan)
+  restarted.memory.reconcileTaskBoard(
+    key,
+    previousBoard,
+    revisedPlan,
+    recorded,
+    { previousState: restarted.memory.currentPlan(key), allowReplan: false },
+  )
+  const successor = getActivePlan(restarted.memory.planningState(key))
+  const successorEpoch = restarted.memory.planningReasoningEpoch(key)
+  assert.equal(recorded.userRevisionApproved, true)
+  assert.equal(successor.derived_from_plan_id, blocked.plan_id)
+  assert.equal(successor.plan_version, blocked.plan_version + 1)
+  assert.ok(successorEpoch > blockedEpoch)
+  await restarted.persistState()
+
+  const restartedAgain = makeAgent()
+  await restartedAgain.loadPersistentState()
+  const restoredSuccessor = getActivePlan(restartedAgain.memory.planningState(key))
+  assert.equal(restoredSuccessor.plan_id, successor.plan_id)
+  assert.equal(restoredSuccessor.derived_from_plan_id, blocked.plan_id)
+  assert.equal(restartedAgain.memory.planningReasoningEpoch(key), successorEpoch)
+})
+
+
+test('the harness evaluates steering at goal admission, without the model asking', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+
+  const steering = memory.planningState(key).steering
+  assert.ok(steering, 'admitting a goal is a boundary; steering runs whether or not anyone requested it')
+  assert.equal(steering.boundary, 'goal_admission')
+  assert.equal(steering.authority, 'runtime', 'the harness is the authority, never the model')
+  assert.equal(steering.sequence, 1)
+
+  // Drafting again is not a boundary: the sequence must not inflate.
+  memory.ensurePlanningDraft(key, memory.currentPlan(key), { now: 150 })
+  assert.equal(memory.planningState(key).steering.sequence, 1)
+})
+
+test('the harness evaluates steering when a plan completes, carrying jev advice as provenance only', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+
+  // Jev advises; the advice is stored, never applied on its own.
+  memory.recordSteeringAdvice(key, {
+    recommended_mode: 'horizontal',
+    confidence: 0.9,
+    pressure: { horizontal: ['power_margin_low', 'a hunch about belts'] },
+    reason_codes: ['frontier_reached'],
+    recommended_by: 'jev',
+  })
+  assert.equal(
+    memory.planningState(key).steering.recommendation.recommended_mode,
+    null,
+    'advice alone changes nothing',
+  )
+
+  // Drive the REAL completion path: outcome authority, one step at a time,
+  // exactly as the running loop does. Nothing here asks for steering.
+  const planId = getActivePlan(memory.planningState(key)).plan_id
+  const stepCount = getActivePlan(memory.planningState(key)).steps.length
+  for (let index = 0; index < stepCount; index += 1) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'verified_complete',
+      source: 'deterministic_runtime',
+      reason_code: 'step_verified',
+      evidence: [{
+        kind: 'verified_world_state',
+        ref: `verified_step_${index}`,
+        summary: 'step outcome verified against world state',
+      }],
+    })
+  }
+
+  const planning = memory.planningState(key)
+  const completed = planning.plans.find(item => item.plan_id === planId)
+  assert.equal(completed.status, PLAN_STATUS.COMPLETED, 'the slice actually finished')
+
+  const steering = planning.steering
+  assert.equal(steering.boundary, 'plan_completed', 'the harness reached the boundary on its own')
+  assert.equal(steering.authority, 'runtime')
+  assert.equal(steering.last_plan_id, planId)
+  assert.equal(steering.recommendation.recommended_by, 'jev', 'advice is provenance, not authority')
+  assert.equal(steering.recommendation.recommended_mode, 'horizontal')
+
+  // Grounded pressure survives; the hunch does not, and says so.
+  assert.deepEqual(steering.pressure.horizontal, ['power_margin_low'])
+  assert.deepEqual(steering.dropped_pressure, ['a hunch about belts'])
+
+  // Advice is written for one boundary and is consumed by it.
+  assert.equal(memory.steeringAdviceByNpc.get(key), undefined)
+})
+
+test('a boundary the harness has no authority for is refused, not forged', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+  const before = memory.planningState(key).steering.sequence
+
+  // The reducer requires user authority for these two, and the harness does
+  // not have it. The emitter must decline rather than claim to be the user.
+  for (const boundary of ['user_revision_approved', 'user_priority_change']) {
+    assert.equal(memory.evaluateSteeringAtBoundary(key, { boundary, now: 500 }), undefined)
+  }
+  assert.equal(memory.planningState(key).steering.sequence, before)
+})
+
+test('repeated live failures reach the deterministic deadlock signal and stop for the user', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+  const planId = getActivePlan(memory.planningState(key)).plan_id
+
+  // The same recoverable failure, over and over, on the same committed step.
+  // Nothing here evaluates anything: the harness counts attempts, and the
+  // deterministic signal is what notices.
+  const failure = () => memory.applyOutcomeAuthority(key, {
+    kind: 'recoverable_provider_failure',
+    source: 'deterministic_runtime',
+    reason_code: 'operation_rejected_by_preflight',
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  })
+
+  for (let attempt = 1; attempt < DEADLOCK_REPEATED_FAILURE_LIMIT; attempt += 1) {
+    failure()
+    const plan = getActivePlan(memory.planningState(key))
+    assert.notEqual(plan.status, PLAN_STATUS.BLOCKED, `attempt ${attempt} is not yet a deadlock`)
+  }
+
+  failure()
+  const blocked = getActivePlan(memory.planningState(key))
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED, 'the repeating failure limit is reached')
+  assert.equal(blocked.blocker.kind, 'deadlock')
+  assert.equal(blocked.blocker.requires_user_decision, true, 'a deadlock asks the user; it never replans itself')
+  assert.equal(blocked.blocker.signals[0].kind, 'repeating_failure')
+  assert.equal(blocked.plan_id, planId, 'no successor was invented')
+  assert.equal(memory.planningState(key).plans.length, 1)
+
+  // And the player can actually see it.
+  assert.equal(memory.currentPlan(key).planning.blocked.awaiting_choice, true)
+})
+
+test('an evidence stall deadlocks even when every batch reports success', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+
+  // The evidence-stall signal reads a contract: it measures batches that fail
+  // to advance one, so a prose-only step is invisible to it by design and gets
+  // the operation ceiling as its backstop instead. The contract has to be in
+  // place BEFORE the commit -- a committed plan is immutable.
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.setStepCompletionContract(key, reconciled.state.task_board.steps[0].id, {
+    mode: 'all',
+    confidence: 0.9,
+    requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 }],
+  })
+  memory.commitPlanningPlan(key, { now: 120, runtime_validation: { passed: true } })
+  assert.ok(
+    getActivePlan(memory.planningState(key)).steps[0].completion_contract,
+    'the committed step carries the contract the stall signal reads',
+  )
+
+  // Batches keep being submitted and keep being accepted, but no step evidence
+  // ever lands. This is the failure mode that looks healthiest from inside.
+  for (let attempt = 0; attempt < DEADLOCK_EVIDENCE_STALL_BATCHES; attempt += 1) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'execution_required',
+      source: 'deterministic_runtime',
+      reason_code: 'operations_submitted',
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    })
+  }
+
+  const blocked = getActivePlan(memory.planningState(key))
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(blocked.blocker.kind, 'deadlock')
+  assert.equal(blocked.blocker.signals[0].kind, 'evidence_stall')
+})
+
+test('successful batches do not accumulate toward a deadlock', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+
+  let completedSteps = 0
+  // Interleave attempts with real verified evidence. The stall counter resets
+  // on evidence, so healthy work must never trip the signal however long it
+  // runs -- otherwise the harness would punish slow steps.
+  for (let round = 0; round < DEADLOCK_EVIDENCE_STALL_BATCHES * 2; round += 1) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'execution_required',
+      source: 'deterministic_runtime',
+      reason_code: 'operations_submitted',
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    })
+    memory.applyOutcomeAuthority(key, {
+      kind: 'verified_complete',
+      source: 'deterministic_runtime',
+      reason_code: 'step_verified',
+      evidence: [{ kind: 'verified_world_state', ref: `verified_${round}`, summary: 'progress' }],
+    })
+    // Checked every round, not just at the end: once the plan finishes its
+    // planning state is retired, so a late-only assertion would pass vacuously.
+    const planning = memory.planningState(key)
+    // Once the plan finishes, its planning state is retired -- reaching that
+    // point is itself proof the run was healthy.
+    if (!planning) {
+      completedSteps = Infinity
+      break
+    }
+    // Step completion lives in execution.step_progress, not on the step.
+    for (const item of planning.plans) {
+      const progress = Object.values(item.execution?.step_progress ?? {})
+      completedSteps = Math.max(completedSteps, progress.filter(entry => entry.status === 'completed').length)
+      if (item.status === PLAN_STATUS.COMPLETED) completedSteps = Math.max(completedSteps, 1)
+    }
+    assert.equal(
+      planning.plans.some(item => item.status === PLAN_STATUS.BLOCKED),
+      false,
+      `round ${round}: evidence keeps resetting the stall counter`,
+    )
+    if (memory.currentPlan(key)?.status !== 'active') break
+  }
+
+  // Non-vacuous: the run has to have actually moved, or "never blocked" would
+  // be satisfied by a plan that did nothing at all.
+  assert.ok(completedSteps > 0, 'verified evidence advanced the plan while batches accumulated')
+})
+
+test('a draft commits only after deterministic runtime validation', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+
+  memory.commitPlanningPlan(key, { now: 100 })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
+
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: { passed: false } })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
+
+  memory.commitPlanningPlan(key, { now: 120, runtime_validation: { passed: true } })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMMITTED)
+})
+
+test('execution cannot admit its own plan retroactively', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
+
+  // Outcomes arriving against an uncommitted draft used to force it committed so
+  // they had somewhere to record themselves.
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'step_verified',
+    evidence: [{ kind: 'verified_world_state', ref: 'verified_0', summary: 'done' }],
+  })
+  const after = getActivePlan(memory.planningState(key))
+  assert.equal(after.status, PLAN_STATUS.DRAFT, 'an outcome is not an admission')
+  assert.equal(
+    Object.values(after.execution.step_progress).filter(entry => entry.status === 'completed').length,
+    0,
+    'and it records no progress against unadmitted work',
+  )
+})
+
+// --- CONTRACT_PROVEN_UNSATISFIABLE / PLANNER_FOCUS_PROPOSED ----------------
+//
+// Both events had reducer handlers and reducer tests and no live emitter, so
+// the reducer tests proved the handlers correct while nothing ever called them.
+// These tests therefore drive the ADAPTER, never `applyPlanningEvent` directly.
+
+function committedPlanWithExactContract(memory, key = 'npc:sgluna', { mode = 'all', unitNumber = 4412 } = {}) {
+  const plan = proposedPlan(['Refuel the stone furnace', 'Craft gears', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Keep the furnace fed' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  const stepId = reconciled.state.task_board.steps[0].id
+  memory.setStepCompletionContract(key, stepId, {
+    mode,
+    confidence: 0.9,
+    requirements: mode === 'any'
+      ? [
+          { id: 'furnace_fuel', kind: 'entity_inventory_count', unit_number: unitNumber, item_name: 'coal', minimum: 5 },
+          { id: 'furnace_alive', kind: 'entity_exists', unit_number: unitNumber + 1 },
+        ]
+      : [{ id: 'furnace_fuel', kind: 'entity_inventory_count', unit_number: unitNumber, item_name: 'coal', minimum: 5 }],
+  }, { now: 90 })
+  memory.commitPlanningPlan(key, { now: 100, runtime_validation: { passed: true } })
+  return { plan, state: memory.currentPlan(key) }
+}
+
+// The exact evidence `npc-agent-loop` records on the recoverable preflight path.
+function staleExactTargetEvidence(unitNumber, ref = 'request/stale_exact_target') {
+  return {
+    kind: 'operation_preflight_recoverable',
+    ref,
+    summary: JSON.stringify({
+      code: 'stale_exact_target',
+      operation_index: 0,
+      operation: 'move_items_exact',
+      identity: unitNumber,
+      last_observed: { name: 'stone-furnace', position: { x: 12, y: -4 } },
+    }),
+  }
+}
+
+test('live board evidence proves a contract unsatisfiable and the deadlock signal blocks the plan', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { unitNumber: 4412 })
+
+  const before = getActivePlan(memory.planningState(key))
+  assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(before.status))
+  const stepId = before.steps[before.active_step_index].step_id
+  assert.equal(before.execution.step_progress[stepId]?.unsatisfiable ?? null, null, 'nothing is proven impossible yet')
+  const plansBefore = memory.planningState(key).plans.length
+
+  // The game destroyed the furnace. This is the only input the test gives.
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(4412))
+
+  const after = getActivePlan(memory.planningState(key))
+  const progress = after.execution.step_progress[stepId]
+
+  // (1) the event reached the reducer from the live path
+  assert.ok(progress.unsatisfiable, 'CONTRACT_PROVEN_UNSATISFIABLE must have been emitted live')
+  assert.match(progress.unsatisfiable.reason, /4412/)
+  assert.equal(progress.unsatisfiable.proof_ref, 'request/stale_exact_target')
+
+  // (2) the deterministic deadlock signal that reads it actually fired
+  assert.equal(after.status, PLAN_STATUS.BLOCKED)
+  assert.equal(after.blocker.kind, 'deadlock')
+  assert.equal(after.blocker.reason_code, DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT)
+  assert.ok(after.blocker.signals.some(signal => signal.kind === DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT))
+
+  // (3) and it freezes for the user rather than replanning itself
+  assert.equal(after.blocker.requires_user_decision, true)
+  assert.equal(memory.planningState(key).plans.length, plansBefore, 'a proven-impossible contract must not auto-create a successor')
+  assert.equal(memory.currentPlan(key).status, 'blocked')
+})
+
+test('a stale identity the contract does not name proves nothing', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { unitNumber: 4412 })
+
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(9999))
+
+  const after = getActivePlan(memory.planningState(key))
+  const stepId = after.steps[after.active_step_index].step_id
+  assert.equal(after.execution.step_progress[stepId]?.unsatisfiable ?? null, null)
+  assert.notEqual(after.status, PLAN_STATUS.BLOCKED, 'an unrelated destroyed entity is not a proof about this contract')
+})
+
+test('an any-mode contract survives until every branch identity is destroyed', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { mode: 'any', unitNumber: 4412 })
+  const stepId = getActivePlan(memory.planningState(key)).steps[0].step_id
+
+  // One dead branch leaves the other reachable, so the contract is still live.
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(4412, 'request/stale_a'))
+  const midway = getActivePlan(memory.planningState(key))
+  assert.equal(midway.execution.step_progress[stepId]?.unsatisfiable ?? null, null)
+  assert.notEqual(midway.status, PLAN_STATUS.BLOCKED)
+
+  // The second proof kills the last branch, and only now is it impossible.
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(4413, 'request/stale_b'))
+  const after = getActivePlan(memory.planningState(key))
+  assert.ok(after.execution.step_progress[stepId].unsatisfiable)
+  assert.equal(after.status, PLAN_STATUS.BLOCKED)
+  assert.equal(after.blocker.reason_code, DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT)
+})
+
+test('repeated failures alone never prove a contract unsatisfiable', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { unitNumber: 4412 })
+  const stepId = getActivePlan(memory.planningState(key)).steps[0].step_id
+
+  for (let index = 0; index < DEADLOCK_REPEATED_FAILURE_LIMIT + 2; index++) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'recoverable_provider_failure',
+      source: 'deterministic_runtime',
+      reason_code: 'transfer_failed:full',
+      evidence: [],
+    })
+  }
+
+  const after = getActivePlan(memory.planningState(key))
+  // It may well be deadlocked -- by the repeating-failure signal. It must not
+  // be deadlocked by a contract it never proved impossible.
+  assert.equal(after.execution.step_progress[stepId]?.unsatisfiable ?? null, null)
+  assert.ok(
+    !(after.blocker?.signals ?? []).some(signal => signal.kind === DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT),
+    'N failures is the repeating-failure signal, never an impossibility proof',
+  )
+})
+
+test('planner focus reaches the reducer and still cannot advance or complete a step', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'], 0)
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 100, runtime_validation: { passed: true } })
+
+  const before = getActivePlan(memory.planningState(key))
+  assert.equal(before.active_step_index, 0)
+
+  // The provider now claims it is working on step 3 while nothing verified
+  // step 1. This is the divergence the Plan Tracker exists to show.
+  const ahead = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'], 2)
+  const aheadRecorded = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, ahead, { continuation: true })
+  memory.reconcileTaskBoard(key, reconciled.state.task_board, ahead, aheadRecorded, {
+    previousState: memory.currentPlan(key),
+    allowReplan: false,
+  })
+
+  const after = getActivePlan(memory.planningState(key))
+  const tracker = planTrackerView(memory.planningState(key))
+
+  // Recorded: PLANNER_FOCUS_PROPOSED ran on the live path.
+  assert.equal(after.advisory.planner_focus_step_id, after.steps[2].step_id)
+  assert.ok(Number.isFinite(after.advisory.planner_focus_at))
+  assert.equal(tracker.advisory_planner_focus_step_id, after.steps[2].step_id)
+
+  // Advisory: it moved nothing (roadmap 8).
+  assert.equal(after.active_step_index, 0, 'planner focus must not advance the active step')
+  assert.equal(tracker.active_step_index, 0)
+  assert.equal(tracker.active_step_id, after.steps[0].step_id)
+  assert.equal(after.execution.step_progress[after.steps[1].step_id]?.status ?? 'pending', 'pending')
+  assert.equal(tracker.verified_completed_step_ids.length, 0, 'planner focus must not complete a step')
+  assert.notEqual(after.status, PLAN_STATUS.COMPLETED)
+})
+
+
+test('live model context exposes reducer planning state, shelf refinement candidates, and tracker', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  const request = { sender: 'Louis', text: 'Build an expandable early factory' }
+  const plan = proposedPlan(['Establish smelting', 'Automate plates'])
+  memory.recordPlan(key, request, plan)
+  memory.reviseRoadmap(key, [
+    {
+      id: 'smelting-foundation',
+      intent: 'A working smelting foundation exists.',
+      why_it_matters: 'It unlocks the first production slice.',
+      operations: [{ name: 'forbidden-on-shelf', args: {} }],
+      steps: ['also forbidden on shelf'],
+    },
+    {
+      id: 'plate-automation',
+      intent: 'Plate production is automated.',
+      why_it_matters: 'It reduces manual bootstrap work.',
+      depends_on: ['smelting-foundation'],
+    },
+  ], { now: 120, reason: 'initial_goal_decomposition' })
+
+  const planningContext = memory.planningContext(key)
+  assert.match(planningContext, /^\[PLANNING_STATE\]/)
+  const visible = JSON.parse(planningContext.slice(planningContext.indexOf('\n') + 1))
+  assert.equal(visible.goal.objective, 'Build an expandable early factory')
+  assert.equal(visible.roadmap.nodes[0].id, 'smelting-foundation')
+  assert.equal('operations' in visible.roadmap.nodes[0], false)
+  assert.equal('steps' in visible.roadmap.nodes[0], false)
+  assert.equal(visible.steering.kind, 'steering_context')
+  assert.equal(visible.steering.execution_authority, false)
+  assert.equal(visible.steering.refinement_candidates[0].node_id, 'smelting-foundation')
+  assert.equal(visible.plan_tracker.kind, 'plan_tracker_view')
+  assert.deepEqual(visible.plan_tracker.steps.map(step => step.description), ['Establish smelting', 'Automate plates'])
+
+  const combined = memory.planContext(key)
+  assert.match(combined, /\[RUNTIME_COMPAT_STATE\]/)
+  assert.match(combined, /\[PLANNING_STATE\]/)
+  assert.doesNotMatch(combined, /\[PLAN_STATE\]/)
+})
+
+
+test('first live long-horizon draft links to shelf nodes created in the same submission', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  const request = { sender: 'Louis', text: 'Build an expandable factory' }
+  const plan = {
+    ...proposedPlan(['Establish smelting']),
+    roadmap: [
+      { id: 'smelting-foundation', intent: 'A working smelting foundation exists.', why_it_matters: 'Unlocks production.' },
+      { id: 'plate-automation', intent: 'Plate production is automated.', why_it_matters: 'Reduces manual work.', depends_on: ['smelting-foundation'] },
+    ],
+    roadmapNodeIds: ['smelting-foundation', 'fabricated-node'],
+    developmentMode: 'vertical',
+  }
+
+  memory.recordPlan(key, request, plan)
+  const planning = memory.planningState(key)
+  const draft = getActivePlan(planning)
+  assert.equal(planning.roadmap.nodes[0].id, 'smelting-foundation')
+  assert.deepEqual(draft.roadmap_node_ids, ['smelting-foundation'])
+  assert.equal(draft.roadmap_revision_id, planning.roadmap.roadmap_revision_id)
+  assert.deepEqual(draft.refinement_grounding.ready_node_ids, ['smelting-foundation'])
+  assert.equal(draft.development_mode, 'vertical')
+  assert.equal(draft.steering_at_draft?.mode ?? null, memory.planningState(key).steering?.current_mode ?? null)
+})
+
+
+test('checkpoint refresh preserves draft-to-shelf lineage before commit', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  const plan = {
+    ...proposedPlan(['Establish smelting']),
+    roadmap: [{ id: 'smelting-foundation', intent: 'A working smelting foundation exists.' }],
+    roadmapNodeIds: ['smelting-foundation'],
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build smelting' }, plan)
+  const stepId = recorded.state.task_board.steps[0].id
+  memory.setStepCompletionContract(key, stepId, {
+    mode: 'all',
+    requirements: [{ id: 'receipt', kind: 'authoritative_operation_receipt', operation_name: 'wait' }],
+  }, { now: 90 })
+
+  const refreshed = getActivePlan(memory.planningState(key))
+  assert.deepEqual(refreshed.roadmap_node_ids, ['smelting-foundation'])
+  assert.equal(refreshed.roadmap_revision_id, memory.planningState(key).roadmap.roadmap_revision_id)
+})
+
+test('goal-admission Jev steering is visible to the Main LLM before its first draft', async () => {
+  const rcon = new PlanningRcon()
+  const memory = new CanonicalTaskBoardMemory()
+  let firstPlannerContext = ''
+  let steeringCalls = 0
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async (messages) => {
+      firstPlannerContext = messages.map(message => String(message?.content ?? '')).join('\n')
+      return {
+        content: JSON.stringify({
+          chatMessage: 'Starting the first capability slice.',
+          plan: ['Establish the first capability'],
+          currentStep: 0,
+          operations: [{ name: 'wait', args: { ticks: 1 } }],
+          roadmap: [
+            { id: 'capability-1', intent: 'The first required capability exists.', development_hint: 'vertical' },
+            { id: 'support-1', intent: 'The first capability has enough support for the next push.', depends_on: ['capability-1'], development_hint: 'horizontal' },
+          ],
+          roadmapNodeIds: ['capability-1'],
+        }),
+      }
+    },
+    steeringDecisionProvider: async (_state, questions) => {
+      steeringCalls++
+      // Steering is fully typed: the mode is a development choice and each
+      // reason code is its own pressure_* noul.
+      assert.ok(questions.development, 'the typed boundary steering contract must be used')
+      assert.ok(questions.pressure_goal_requires_new_capability)
+      return {
+        answers: {
+          development: { type: 'choice', choice: 'vertical', confidence: 0.95, probabilities: { vertical: 0.95 } },
+          pressure_goal_requires_new_capability: { type: 'noul', noul: 0.9 },
+        },
+      }
+    },
+    systemPrompt: 'pre-draft steering visibility test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'sgluna',
+  })
+
+  await agent.request('build a staged long-horizon factory', { sender: 'Louis' })
+
+  assert.equal(steeringCalls, 1, 'goal admission gets exactly one steering recommendation before drafting')
+  assert.match(firstPlannerContext, /\[PLANNING_STATE\]/)
+  const contextMessage = firstPlannerContext.split('\n').find(line => line.startsWith('{') && line.includes('"steering"'))
+  assert.ok(contextMessage || /"current_mode":"vertical"/.test(firstPlannerContext))
+  assert.match(firstPlannerContext, /"current_mode":"vertical"/)
+  assert.match(firstPlannerContext, /"recommended_mode":"vertical"/)
+  assert.match(firstPlannerContext, /goal_requires_new_capability/)
+  assert.equal(memory.planningState('npc:sgluna').steering.current_mode, 'vertical')
+})
+
+test('a completed long-horizon slice stays attached to its goal and permits the next shelf draft', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  const planning = memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build a staged factory',
+    goalId: 'goal_long_horizon',
+    now: 10,
+  })
+  assert.equal(planning.goal.status, 'active')
+
+  const first = {
+    ...proposedPlan(['Establish capability']),
+    roadmap: [
+      { id: 'capability-1', intent: 'Capability exists.' },
+      { id: 'support-1', intent: 'Support is adequate.', depends_on: ['capability-1'] },
+    ],
+    roadmapNodeIds: ['capability-1'],
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged factory' }, first)
+  memory.reconcileTaskBoard(key, undefined, first, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
+
+  const active = getActivePlan(memory.planningState(key))
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'slice_verified',
+    evidence: [{ kind: 'verified_world_state', ref: 'slice_1', summary: 'capability exists' }],
+    metadata: { scope: 'step' },
+  })
+
+  const after = memory.planningState(key)
+  const completed = getActivePlan(after)
+  assert.equal(completed.plan_id, active.plan_id)
+  assert.equal(completed.status, PLAN_STATUS.COMPLETED)
+  assert.equal(after.goal.status, 'active', 'plan completion must not satisfy the user goal')
+  assert.ok(memory.currentPlan(key), 'legacy projection stays available at the safe next-slice boundary')
+
+  const next = {
+    ...proposedPlan(['Strengthen support']),
+    roadmapNodeIds: ['support-1'],
+  }
+  const nextRecorded = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, next, { continuation: true })
+  const nextReconciled = memory.reconcileTaskBoard(key, memory.currentPlan(key)?.task_board, next, nextRecorded, {
+    allowReplan: false,
+    previousState: memory.currentPlan(key),
+  })
+  assert.equal(nextReconciled.state.status, 'active')
+  const nextDraft = getActivePlan(memory.planningState(key))
+  assert.notEqual(nextDraft.plan_id, completed.plan_id)
+  assert.equal(nextDraft.status, PLAN_STATUS.DRAFT)
+  assert.deepEqual(nextDraft.roadmap_node_ids, ['support-1'])
+  assert.equal(memory.planningState(key).goal.goal_id, 'goal_long_horizon')
+})
+
+
+test('verified PLAN_COMPLETED consumes its exact Jev steering recommendation before the next draft context', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build a staged long-horizon factory',
+    goalId: 'goal_transactional_steering',
+    now: 10,
+  })
+  memory.reviseRoadmap(key, [
+    { id: 'frontier', intent: 'Establish the first capability.', development_hint: 'vertical' },
+    { id: 'support', intent: 'Strengthen the established capability.', depends_on: ['frontier'], development_hint: 'horizontal' },
+  ], { now: 11, reason: 'goal_decomposed_to_shelf' })
+  memory.evaluateSteeringAtBoundary(key, {
+    boundary: 'goal_admission',
+    now: 12,
+    recommendation: {
+      recommended_mode: 'vertical',
+      confidence: 0.95,
+      pressure: { vertical: ['goal_requires_new_capability'] },
+      reason_codes: ['goal_requires_new_capability'],
+      recommended_by: 'jev',
+    },
+  })
+
+  const plan = {
+    ...proposedPlan(['Establish the first capability']),
+    roadmapNodeIds: ['frontier'],
+    developmentMode: 'vertical',
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged long-horizon factory' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
+
+  const result = memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'slice_verified',
+    evidence: [{
+      kind: 'verified_world_state',
+      ref: 'slice_frontier_verified',
+      summary: 'first capability verified',
+    }],
+    metadata: { scope: 'step' },
+  }, {
+    steeringRecommendation: {
+      recommended_mode: 'horizontal',
+      confidence: 0.95,
+      pressure: { horizontal: ['power_margin_low'] },
+      reason_codes: ['power_margin_low'],
+      critical_path_summary: 'strengthen the reached frontier',
+      candidate_shelf_nodes: ['support'],
+      recommended_by: 'jev',
+    },
+  })
+
+  assert.equal(result.decision.accepted, true)
+  const planning = memory.planningState(key)
+  assert.equal(getActivePlan(planning).status, PLAN_STATUS.COMPLETED)
+  assert.equal(planning.steering.current_mode, 'horizontal')
+  assert.equal(planning.steering.recommendation.recommended_mode, 'horizontal')
+  assert.deepEqual(planning.steering.recommendation.candidate_shelf_nodes, ['support'])
+  assert.deepEqual(planning.steering.pressure.horizontal, ['power_margin_low'])
+  const context = memory.planningContext(key)
+  assert.match(context, /"current_mode":"horizontal"/)
+  assert.match(context, /"recommended_mode":"horizontal"/)
+  assert.match(context, /"candidate_shelf_nodes":\["support"\]/)
+})
+
+
+test('completed reducer slice remains an active user goal boundary rather than legacy goal completion', async () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build a staged long-horizon factory',
+    goalId: 'goal_status_vocabulary',
+    now: 10,
+  })
+  memory.reviseRoadmap(key, [
+    { id: 'frontier', intent: 'Establish a frontier.' },
+    { id: 'support', intent: 'Strengthen the frontier.', depends_on: ['frontier'] },
+  ], { now: 11, reason: 'goal_decomposed_to_shelf' })
+
+  const plan = {
+    ...proposedPlan(['Establish frontier']),
+    roadmapNodeIds: ['frontier'],
+    developmentMode: 'vertical',
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged long-horizon factory' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
+  const active = getActivePlan(memory.planningState(key))
+
+  const legacy = memory.currentPlan(key)
+  const stepId = legacy.task_board.active_step_id
+  memory.recordBoardEvidence(key, {
+    kind: 'deterministic_verification',
+    ref: 'batch_status_vocab',
+    summary: JSON.stringify({ verdict: 'verified_complete', operations: ['wait'] }),
+    step_id: stepId,
+  })
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'slice_verified',
+    evidence: [{
+      kind: 'deterministic_verification',
+      ref: 'batch_status_vocab',
+      summary: 'frontier verified',
+    }],
+    metadata: { scope: 'step' },
+  }, {
+    steeringRecommendation: {
+      recommended_mode: 'horizontal',
+      confidence: 0.95,
+      pressure: { horizontal: ['power_margin_low'] },
+      reason_codes: ['power_margin_low'],
+      recommended_by: 'jev',
+    },
+  })
+
+  const planning = memory.planningState(key)
+  assert.equal(getActivePlan(planning).plan_id, active.plan_id)
+  assert.equal(getActivePlan(planning).status, PLAN_STATUS.COMPLETED)
+  assert.equal(planning.goal.status, 'active')
+  assert.equal(memory.currentPlan(key).status, 'completed')
+  assert.equal(planning.steering.current_mode, 'horizontal')
+})
+
+
+test('next shelf draft replaces a completed legacy board before checkpoint refresh', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build two bounded capability slices',
+    goalId: 'goal_completed_slice_projection',
+    now: 10,
+  })
+  memory.reviseRoadmap(key, [
+    { id: 'first', intent: 'First capability exists.' },
+    { id: 'second', intent: 'Second capability exists.', depends_on: ['first'] },
+  ], { now: 11, reason: 'goal_decomposed_to_shelf' })
+
+  const firstPlan = {
+    ...proposedPlan(['Build the first capability']),
+    roadmapNodeIds: ['first'],
+    developmentMode: 'vertical',
+  }
+  const firstRecorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build both capabilities' }, firstPlan)
+  memory.reconcileTaskBoard(key, undefined, firstPlan, firstRecorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'first_slice_verified',
+    evidence: [{ kind: 'verified_world_state', ref: 'first_slice', summary: 'first capability verified' }],
+    metadata: { scope: 'step' },
+  })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMPLETED)
+  const completedBoard = memory.currentPlan(key).task_board
+  assert.equal(completedBoard.status, 'completed')
+
+  const secondPlan = {
+    ...proposedPlan(['Build the second capability']),
+    roadmapNodeIds: ['second'],
+    developmentMode: 'horizontal',
+  }
+  const secondRecorded = memory.recordPlan(
+    key,
+    { sender: 'Louis', text: 'Build both capabilities' },
+    secondPlan,
+    { continuation: true },
+  )
+  assert.equal(secondRecorded.completedSliceDraftApproved, true)
+  const secondReconciled = memory.reconcileTaskBoard(
+    key,
+    completedBoard,
+    secondPlan,
+    secondRecorded,
+    { allowReplan: false, previousState: memory.currentPlan(key) },
+  )
+
+  assert.equal(secondReconciled.state.task_board.status, 'active')
+  assert.deepEqual(
+    secondReconciled.state.task_board.steps.map(step => step.description),
+    ['Build the second capability'],
+  )
+  const draft = getActivePlan(memory.planningState(key))
+  assert.equal(draft.status, PLAN_STATUS.DRAFT)
+  assert.deepEqual(draft.steps.map(step => step.description), ['Build the second capability'])
+
+  memory.setStepCompletionContract(key, secondReconciled.state.task_board.active_step_id, {
+    mode: 'all',
+    requirements: [{ id: 'receipt', kind: 'authoritative_operation_receipt', operation_name: 'wait' }],
+  }, { now: 30 })
+  const refreshed = getActivePlan(memory.planningState(key))
+  assert.deepEqual(
+    refreshed.steps.map(step => step.description),
+    ['Build the second capability'],
+    'checkpoint refresh must never resurrect the prior completed slice text',
+  )
+  assert.deepEqual(refreshed.roadmap_node_ids, ['second'])
+})
+
+
+test('committed completion meaning cannot be rewritten through the legacy checkpoint adapter', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  const plan = proposedPlan(['Gather iron'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Gather iron safely' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  const stepId = reconciled.state.task_board.active_step_id
+  const committedContract = {
+    mode: 'all',
+    confidence: 0.95,
+    requirements: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }],
+  }
+  memory.setStepCompletionContract(key, stepId, committedContract, { now: 20 })
+  memory.commitPlanningPlan(key, { now: 30, runtime_validation: { passed: true } })
+
+  const reducerBefore = getActivePlan(memory.planningState(key))
+  const legacyBefore = memory.currentPlan(key).task_board.steps[0].completion_contract
+  assert.equal(reducerBefore.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(reducerBefore.steps[0].completion_contract, legacyBefore)
+
+  const attemptedRewrite = {
+    mode: 'all',
+    confidence: 0.99,
+    requirements: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 999 }],
+  }
+  memory.setStepCompletionContract(key, stepId, attemptedRewrite, { now: 40 })
+
+  const reducerAfter = getActivePlan(memory.planningState(key))
+  const legacyAfter = memory.currentPlan(key).task_board.steps[0].completion_contract
+  assert.equal(reducerAfter.plan_id, reducerBefore.plan_id)
+  assert.equal(reducerAfter.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(reducerAfter.steps[0].completion_contract, reducerBefore.steps[0].completion_contract)
+  assert.deepEqual(legacyAfter, legacyBefore, 'compatibility board must freeze with the committed semantic contract')
+})
+
+
+test('model context exposes one planning authority and labels the legacy board compatibility-only', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:sgluna'
+  const plan = proposedPlan(['Establish smelting'])
+  memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged factory' }, {
+    ...plan,
+    roadmap: [{ id: 'smelting', intent: 'Smelting exists.' }],
+    roadmapNodeIds: ['smelting'],
+  })
+
+  const context = memory.planContext(key)
+  assert.match(context, /\[RUNTIME_COMPAT_STATE\]/)
+  assert.match(context, /\[PLANNING_STATE\]/)
+  assert.doesNotMatch(context, /\[PLAN_STATE\]/)
+  assert.match(context, /Planning steps\/progress are authoritative only in \[PLANNING_STATE\]/)
+  const planningIndex = context.indexOf('[PLANNING_STATE]')
+  const trackerIndex = context.indexOf('"plan_tracker"')
+  assert.ok(planningIndex >= 0 && trackerIndex > planningIndex, 'reducer Plan Tracker is carried inside the authoritative planning block')
+})

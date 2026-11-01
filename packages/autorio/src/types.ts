@@ -1,19 +1,24 @@
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, PathfinderWaypoint } from 'factorio:runtime'
+import type { ClearedEntity } from './placement_clearing'
+import type { GroundItem } from './placement_ground_items'
+import type { FluidQueuedBinding } from './operation_admission'
 
 export enum TaskStates {
   IDLE = 'idle',
   WALKING_TO_ENTITY = 'walking_to_entity',
   MINING = 'mining',
+  PREPARING_PUMP_SITE = 'preparing_pump_site',
+  HARVESTING = 'harvesting',
+  CLEARING_AREA = 'clearing_area',
   PLACING = 'placing',
   ROTATING = 'rotating',
-  PLACING_IN_CHEST = 'placing_in_chest',
-  PICKING_UP = 'picking_up',
   CRAFTING = 'crafting',
   RESEARCHING = 'researching',
   WALKING_DIRECT = 'walking_direct',
   MOVING_ITEMS = 'moving_items',
   SETTING_RECIPE = 'setting_recipe',
+  LAUNCHING_ROCKET = 'launching_rocket',
   ATTACKING = 'attacking',
   WAITING = 'waiting',
 }
@@ -32,6 +37,9 @@ export interface PlayerParametersWalkToEntity {
   target_player_name?: string
   /** Arrival distance for this navigation task. */
   reach_distance?: number
+  /** True when this leg was spawned by the persistent follow controller. Routine
+   * follow legs stay out of player-facing batch chatter while failures still surface. */
+  persistent_follow?: boolean
   path: PathfinderWaypoint[] | null
   path_drawn: boolean
   path_index: number
@@ -61,6 +69,7 @@ export interface PlayerParametersWalkingDirect {
 
 export interface PlayerParametersMineEntity {
   type: TaskStates.MINING
+  owner_surface_index?: number
   operation_id?: number
   owner_actor_id?: number
   owner_actor_kind?: string
@@ -79,6 +88,63 @@ export interface PlayerParametersMineEntity {
   position?: MapPositionStruct
   /** Resource amount seen on the previous tick for standalone-NPC polling. */
   last_target_amount?: number
+  /** Consecutive engine-rejected mining starts for bounded approach recovery. */
+  mining_rejects?: number
+  /** True after this target was handed to Factorio; a stopped state on a later tick is a rejected start. */
+  mining_attempted?: boolean
+}
+
+export interface PlayerParametersPreparePumpSite {
+  type: TaskStates.PREPARING_PUMP_SITE
+  operation_id?: number
+  owner_actor_id?: number
+  owner_actor_kind?: string
+  owner_force_index?: number
+  preparation_id: string
+  owner_surface_index?: number
+  position?: MapPositionStruct
+  started_tick?: number
+  layer_started_tick?: number
+  tile_index?: number
+  removed_layers?: number
+  reclaimed_items?: Record<string, number>
+  owned_proxies?: LuaEntity[]
+  expected_tiles?: Array<{ position: MapPositionStruct, name: string, hidden?: string, double_hidden?: string }>
+  prepared_snapshot?: Array<{ position: MapPositionStruct, name: string, hidden?: string, double_hidden?: string }>
+}
+
+export interface PlayerParametersHarvestProduct {
+  type: TaskStates.HARVESTING
+  product_name: string
+  requested_count: number
+  search_radius: number
+  source_names: string[]
+  inventory_count_before: number
+  verified_gain: number
+  target?: LuaEntity | null
+  target_name?: string
+  target_position?: MapPositionStruct
+  mining_rejects?: number
+  mining_attempted?: boolean
+  owner_actor_id?: number
+  owner_actor_kind?: string
+  owner_force_index?: number
+}
+
+export interface PlayerParametersClearConstructionArea {
+  type: TaskStates.CLEARING_AREA
+  center: MapPositionStruct
+  width: number
+  height: number
+  cleared_count: number
+  target?: LuaEntity | null
+  target_name?: string
+  target_position?: MapPositionStruct
+  mining_rejects?: number
+  mining_attempted?: boolean
+  owner_actor_id?: number
+  owner_actor_kind?: string
+  owner_force_index?: number
 }
 
 export interface PlayerParametersPlaceEntity {
@@ -88,10 +154,47 @@ export interface PlayerParametersPlaceEntity {
   owner_actor_kind?: string
   owner_force_index?: number
   entity_name: string
+  /** Native candidate registry identity; never accepted on the generic placement wire. */
+  placement_candidate?: { candidate_set_id: string, candidate_id: string }
+  preservation_binding?: FluidQueuedBinding
   /** Exact requested placement position. When omitted the runtime finds a local valid position. */
   position?: MapPositionStruct
   /** Factorio direction value (0..15) for precise placement. */
   direction?: number
+  /**
+   * Ground items this placement has picked up from its footprint, as measured
+   * by the inventory insert. Any entry means the task changed the world, so no
+   * later failure of it is a refusal before mutation.
+   */
+  ground_items_picked_up?: GroundItem[]
+  /** An item stack was inserted but its ground entity could not be removed. */
+  ground_item_pickup_uncertain?: boolean
+  /** Entities the build must never clear: the anchor or join target of the candidate it came from. */
+  protected_unit_numbers?: number[]
+  /** The NPC's own entities this placement may mine: set only by place_candidate, from the candidate's recorded clears. */
+  allowed_own_clears?: number[]
+  /**
+   * Placement-only execution mode, fixed at queue time and carried in the queued task (so it survives save/load): a blocked
+   * footprint fails the task before any mutation. Nothing is mined, picked up or destroyed to make room. Set by the validated
+   * local construction executor, whose fluid-preservation witness promises exactly this.
+   */
+  refuse_clearance?: boolean
+  /**
+   * The node of a connected construction layout this placement builds (storage.sgluna_construction_layouts[layout_id].nodes
+   * [index]). Set only by the validated local construction executor: the runtime checks the layout's connections against the
+   * actual entities just before create_entity and binds the placed unit_number to the node right after it.
+   */
+  layout_node?: { layout_id: number, index: number }
+  /**
+   * Entities this placement has mined out of its footprint, as measured by the
+   * inventory. Any entry means the task changed the world, like a ground-item
+   * pickup.
+   */
+  entities_cleared?: ClearedEntity[]
+  /** Tick the native mining wait began, once every blocker is within reach. */
+  clearing_started_tick?: number
+  /** Walks begun to bring a blocker within hand-mining reach. */
+  clearing_repositions?: number
 }
 
 export interface PlayerParametersRotateEntity {
@@ -136,6 +239,20 @@ export interface PlayerParametersSetRecipe {
   recipe_name: string
 }
 
+export interface PlayerParametersLaunchRocket {
+  type: TaskStates.LAUNCHING_ROCKET
+  operation_id?: number
+  owner_actor_id?: number
+  owner_actor_kind?: string
+  owner_force_index?: number
+  /** Stable Factorio identity of the exact rocket silo. Never falls back to another silo. */
+  target_unit_number: number
+  /** Force rockets_launched when the launch was ordered; set once the order succeeds. */
+  rockets_launched_before?: number
+  /** Tick the launch was ordered; bounds the wait for the launch to register. */
+  launch_ordered_tick?: number
+}
+
 export interface PlayerParametersCraftItem {
   type: TaskStates.CRAFTING
   item_name: string
@@ -149,6 +266,9 @@ export interface PlayerParametersCraftItem {
   output_count_before?: number
   expected_output_delta?: number
   owns_native_queue?: boolean
+  // Remaining crafts per recipe at the last reconciliation; the difference to
+  // the live queue is what the engine finished since (see crafted_items.ts).
+  queue_snapshot?: Record<string, number>
 }
 
 export interface PlayerParametersAttackNearestEnemy {
@@ -157,6 +277,14 @@ export interface PlayerParametersAttackNearestEnemy {
   /** One-shot preserves the original behavior; clear_area keeps reacquiring
    * enemies until the bounded origin area is clear. */
   combat_mode?: 'single' | 'clear_area'
+  /** Runtime lifecycle phase for deterministic clear-area handoff and support cleanup. */
+  combat_phase?: 'engage' | 'safety' | 'cleanup'
+  /** What the current safety window unlocks once it remains stable. */
+  combat_safety_goal?: 'cleanup' | 'resume'
+  /** First tick of the current uninterrupted local-safety window. */
+  local_safe_since_tick?: number
+  /** Exact support-turret entities created and paid for by the current combat encounter. */
+  encounter_owned_turrets?: LuaEntity[]
   origin_position?: MapPositionStruct
   target: LuaEntity | null
   owner_actor_id?: number
@@ -223,10 +351,14 @@ export type PlayerParameters
   = | PlayerParametersWalkToEntity
     | PlayerParametersWalkingDirect
     | PlayerParametersMineEntity
+    | PlayerParametersPreparePumpSite
+    | PlayerParametersHarvestProduct
+    | PlayerParametersClearConstructionArea
     | PlayerParametersPlaceEntity
     | PlayerParametersRotateEntity
     | PlayerParametersMoveItems
     | PlayerParametersSetRecipe
+    | PlayerParametersLaunchRocket
     | PlayerParametersCraftItem
     | PlayerParametersAttackNearestEnemy
     | PlayerParametersResearchTechnology
@@ -237,10 +369,14 @@ export interface PlayerState {
   parameters_walk_to_entity?: PlayerParametersWalkToEntity
   parameters_walking_direct?: PlayerParametersWalkingDirect
   parameters_mine_entity?: PlayerParametersMineEntity
+  parameters_prepare_pump_site?: PlayerParametersPreparePumpSite
+  parameters_harvest_product?: PlayerParametersHarvestProduct
+  parameters_clear_construction_area?: PlayerParametersClearConstructionArea
   parameters_place_entity?: PlayerParametersPlaceEntity
   parameters_rotate_entity?: PlayerParametersRotateEntity
   parameters_move_items?: PlayerParametersMoveItems
   parameters_set_recipe?: PlayerParametersSetRecipe
+  parameters_launch_rocket?: PlayerParametersLaunchRocket
   parameters_craft_item?: PlayerParametersCraftItem
   parameters_attack_nearest_enemy?: PlayerParametersAttackNearestEnemy
   parameters_research_technology?: PlayerParametersResearchTechnology

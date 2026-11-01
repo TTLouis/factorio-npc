@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { get_load_handler } from '../test-event-registry'
 import {
+  create_actor_remote_interface,
   get_actor_mode,
   get_controlled_actor,
   get_load_reconciliation_status,
   get_npc_recovery_status,
   reconcile_npc_after_load,
   register_npc_recovery_handler,
+  register_npc_single_player_load_handler,
   set_actor_mode,
 } from './actor_controller'
 
@@ -36,6 +38,8 @@ function make_world() {
   }
   const surface = {
     name: 'nauvis',
+    index: 1,
+    valid: true,
     find_entities_filtered: vi.fn(() => [] as any[]),
     find_non_colliding_position: vi.fn(() => ({ x: 1, y: 2 })),
     create_entity: vi.fn(),
@@ -52,17 +56,41 @@ beforeEach(() => {
   ;(globalThis as any).game = {
     connected_players: [],
     surfaces: { 1: surface },
+    get_surface: vi.fn((index: number) => (index === 1 ? surface : undefined)),
     forces: { player: force },
     print: vi.fn(),
     tick: 123,
     is_multiplayer: vi.fn(() => false),
+    get_entity_by_unit_number: vi.fn(() => undefined),
   }
   ;(globalThis as any).rendering = { clear: vi.fn() }
   register_npc_recovery_handler(undefined)
+  register_npc_single_player_load_handler(undefined)
   set_actor_mode('player')
 })
 
 describe('actor mode', () => {
+  it('reports live actor surface and force scope on each status observation', () => {
+    const surface = (globalThis as any).game.surfaces[1]
+    const character = fake_character(42)
+    character.surface = surface
+    character.force = (globalThis as any).game.forces.player
+    surface.create_entity.mockReturnValue(character)
+    set_actor_mode('npc')
+    const original = (globalThis as any).remote.add_interface
+    let status: () => any
+    ;(globalThis as any).remote.add_interface = (_name: string, value: any) => { status = value.status }
+    try {
+      create_actor_remote_interface()
+      expect(status!()).toMatchObject({ observed_tick: 123, surface_index: 1, force_index: 1, actor: { actor_id: 42 } })
+      character.surface = { ...surface, index: 2 }
+      character.force = { ...character.force, index: 3 }
+      ;(globalThis as any).game.tick = 124
+      expect(status!()).toMatchObject({ observed_tick: 124, surface_index: 2, force_index: 3, actor: { actor_id: 42 } })
+    }
+    finally { ;(globalThis as any).remote.add_interface = original }
+  })
+
   it('defaults to the legacy connected-player mode', () => {
     ;(globalThis as any).storage = {}
     expect(get_actor_mode()).toBe('player')
@@ -113,7 +141,7 @@ describe('actor mode', () => {
     expect(get_npc_recovery_status().last_result).toBeUndefined()
   })
 
-  it('requests and forces spawn chunk generation before creating the NPC when no player ever generated it', () => {
+  it('forces only a bounded 3x3 spawn neighborhood before creating the NPC when no player ever generated it', () => {
     const surface = (globalThis as any).game.surfaces[1]
     const force = (globalThis as any).game.forces.player
     const character = fake_character(42)
@@ -126,7 +154,7 @@ describe('actor mode', () => {
     const actor = get_controlled_actor()
 
     expect(surface.is_chunk_generated).toHaveBeenCalledWith({ x: 0, y: 0 })
-    expect(surface.request_to_generate_chunks).toHaveBeenCalledWith({ x: 0, y: 0 }, 3)
+    expect(surface.request_to_generate_chunks).toHaveBeenCalledWith({ x: 0, y: 0 }, 1)
     expect(surface.force_generate_chunk_requests).toHaveBeenCalled()
     expect(actor?.status_snapshot().kind).toBe('standalone_character')
   })
@@ -144,6 +172,112 @@ describe('actor mode', () => {
 
     expect(surface.request_to_generate_chunks).not.toHaveBeenCalled()
     expect(surface.force_generate_chunk_requests).not.toHaveBeenCalled()
+  })
+
+  it('respawns a dead NPC at (0, 0) of the surface it was last alive on', () => {
+    const nauvis = (globalThis as any).game.surfaces[1]
+    const force = (globalThis as any).game.forces.player
+    const vulcanus = {
+      name: 'vulcanus',
+      index: 7,
+      valid: true,
+      find_entities_filtered: vi.fn(() => [] as any[]),
+      find_non_colliding_position: vi.fn(() => ({ x: 0.5, y: 0.5 })),
+      create_entity: vi.fn(),
+      is_chunk_generated: vi.fn(() => true),
+      request_to_generate_chunks: vi.fn(),
+      force_generate_chunk_requests: vi.fn(),
+    }
+    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 7 ? vulcanus : undefined))
+    const first = fake_character(42)
+    first.surface = nauvis
+    first.force = force
+    nauvis.create_entity.mockReturnValueOnce(first)
+
+    set_actor_mode('npc')
+    expect(get_controlled_actor()?.character).toBe(first)
+    expect((globalThis as any).storage.sgluna_npc_surface_index).toBe(1)
+
+    // It travels, then dies there.
+    first.surface = vulcanus
+    get_controlled_actor()
+    expect((globalThis as any).storage.sgluna_npc_surface_index).toBe(7)
+    first.valid = false
+    const replacement = fake_character(99)
+    replacement.surface = vulcanus
+    replacement.force = force
+    vulcanus.create_entity.mockReturnValueOnce(replacement)
+
+    expect(get_controlled_actor()?.character).toBe(replacement)
+    expect(vulcanus.find_non_colliding_position).toHaveBeenCalledWith('character', { x: 0, y: 0 }, 32, 0.5)
+    expect(nauvis.create_entity).toHaveBeenCalledTimes(1)
+    expect(force.get_spawn_position).not.toHaveBeenCalled()
+  })
+
+  it('respawns on Nauvis when the body died on a space platform', () => {
+    const nauvis = (globalThis as any).game.surfaces[1]
+    const force = (globalThis as any).game.forces.player
+    const platform = {
+      name: 'platform-1',
+      index: 8,
+      valid: true,
+      platform: { name: 'platform-1' },
+      find_entities_filtered: vi.fn(() => [] as any[]),
+      find_non_colliding_position: vi.fn(),
+      create_entity: vi.fn(),
+      is_chunk_generated: vi.fn(() => true),
+      request_to_generate_chunks: vi.fn(),
+      force_generate_chunk_requests: vi.fn(),
+    }
+    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 8 ? platform : undefined))
+    const first = fake_character(42)
+    first.surface = platform
+    first.force = force
+    nauvis.create_entity.mockReturnValueOnce(first)
+    set_actor_mode('npc')
+    get_controlled_actor()
+    expect((globalThis as any).storage.sgluna_npc_surface_index).toBe(8)
+
+    first.valid = false
+    const replacement = fake_character(99)
+    replacement.surface = nauvis
+    replacement.force = force
+    nauvis.create_entity.mockReturnValueOnce(replacement)
+
+    expect(get_controlled_actor()?.character).toBe(replacement)
+    expect(platform.create_entity).not.toHaveBeenCalled()
+  })
+
+  it('falls back to Nauvis when the body cannot be created on its last surface', () => {
+    const nauvis = (globalThis as any).game.surfaces[1]
+    const force = (globalThis as any).game.forces.player
+    const vulcanus = {
+      name: 'vulcanus',
+      index: 7,
+      valid: true,
+      find_entities_filtered: vi.fn(() => [] as any[]),
+      find_non_colliding_position: vi.fn(() => ({ x: 0.5, y: 0.5 })),
+      create_entity: vi.fn(() => undefined),
+      is_chunk_generated: vi.fn(() => true),
+      request_to_generate_chunks: vi.fn(),
+      force_generate_chunk_requests: vi.fn(),
+    }
+    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 7 ? vulcanus : undefined))
+    const first = fake_character(42)
+    first.surface = vulcanus
+    first.force = force
+    nauvis.create_entity.mockReturnValueOnce(first)
+    set_actor_mode('npc')
+    get_controlled_actor()
+
+    first.valid = false
+    const replacement = fake_character(99)
+    replacement.surface = nauvis
+    replacement.force = force
+    nauvis.create_entity.mockReturnValueOnce(replacement)
+
+    expect(get_controlled_actor()?.character).toBe(replacement)
+    expect(vulcanus.create_entity).toHaveBeenCalledTimes(1)
   })
 
   it('reacquires a persisted standalone character instead of creating a duplicate', () => {
@@ -181,7 +315,7 @@ describe('actor mode', () => {
     expect(actor?.character).toBe(first)
 
     first.valid = false
-    ;(globalThis as any).storage.airi_owned_crafting = {
+    ;(globalThis as any).storage.sgluna_owned_crafting = {
       actor_id: 42,
       actor_kind: 'standalone_character',
       force_index: 1,
@@ -192,7 +326,7 @@ describe('actor mode', () => {
     surface.find_entities_filtered.mockReturnValue([])
     surface.create_entity.mockImplementationOnce(() => {
       expect(recovery_handler).toHaveBeenCalledWith({ previous_actor_id: 42 })
-      expect((globalThis as any).storage.airi_owned_crafting).toBeUndefined()
+      expect((globalThis as any).storage.sgluna_owned_crafting).toBeUndefined()
       return replacement
     })
     const recovered = get_controlled_actor()
@@ -247,8 +381,12 @@ describe('actor mode', () => {
     character.mining_state = { mining: true, position: { x: 5, y: 5 } } as any
     character.shooting_state = { state: 'shooting_selected', position: { x: 6, y: 5 } }
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
+    const reconcile_logical = vi.fn(() => {
+      expect(character.walking_state.walking).toBe(true)
+    })
+    register_npc_single_player_load_handler(reconcile_logical)
 
     get_load_handler()()
     expect(get_load_reconciliation_status().pending).toBe(true)
@@ -256,6 +394,7 @@ describe('actor mode', () => {
     const actor = get_controlled_actor()
 
     expect(actor?.character).toBe(character)
+    expect(reconcile_logical).toHaveBeenCalledOnce()
     expect(surface.create_entity).not.toHaveBeenCalled()
     expect(character.walking_state).toEqual({ walking: false, direction: 'north' })
     expect(character.mining_state).toEqual({ mining: false })
@@ -283,9 +422,9 @@ describe('actor mode', () => {
       { index: 2, recipe: 'electronic-circuit', count: 2, prerequisite: false },
     ]
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
-    ;(globalThis as any).storage.airi_owned_crafting = {
+    ;(globalThis as any).storage.sgluna_owned_crafting = {
       actor_id: 42,
       actor_kind: 'standalone_character',
       force_index: 1,
@@ -299,7 +438,7 @@ describe('actor mode', () => {
 
     expect(character.cancel_crafting).toHaveBeenCalledWith({ index: 2, count: 2 })
     expect(character.cancel_crafting).toHaveBeenCalledWith({ index: 1, count: 6 })
-    expect((globalThis as any).storage.airi_owned_crafting).toBeUndefined()
+    expect((globalThis as any).storage.sgluna_owned_crafting).toBeUndefined()
     expect(get_load_reconciliation_status().owned_crafting).toEqual({
       actor_id: 42,
       item_name: 'electronic-circuit',
@@ -316,7 +455,7 @@ describe('actor mode', () => {
     character.force = force
     character.crafting_queue = [{ index: 1, recipe: 'copper-cable', count: 20, prerequisite: false }]
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
 
     get_load_handler()()
@@ -346,7 +485,7 @@ describe('actor mode', () => {
       cancel_crafting: vi.fn(),
     }
     ;(globalThis as any).game.connected_players = [player]
-    ;(globalThis as any).storage.airi_actor_mode = 'player'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'player'
 
     get_load_handler()()
     const actor = get_controlled_actor()
@@ -364,7 +503,7 @@ describe('actor mode', () => {
     character.force = (globalThis as any).game.forces.player
     character.walking_state = { walking: true, direction: 'east' }
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
     ;(globalThis as any).game.is_multiplayer.mockReturnValue(true)
     return character
@@ -372,6 +511,8 @@ describe('actor mode', () => {
 
   it('never reconciles a loaded NPC from on_load alone in multiplayer', () => {
     const character = loaded_multiplayer_npc()
+    const reconcile_logical = vi.fn()
+    register_npc_single_player_load_handler(reconcile_logical)
 
     get_load_handler()()
     const actor = get_controlled_actor()
@@ -380,6 +521,7 @@ describe('actor mode', () => {
     // flag at its load. Stopping the NPC here would change synchronized state on
     // one peer only while the server keeps walking it, which desyncs the game.
     expect(actor?.character).toBe(character)
+    expect(reconcile_logical).not.toHaveBeenCalled()
     expect(character.walking_state).toEqual({ walking: true, direction: 'east' })
     expect(character.shooting_state).toEqual({ state: 'not_shooting', position: { x: 4, y: 5 } })
     expect((globalThis as any).rendering.clear).not.toHaveBeenCalled()
@@ -406,7 +548,7 @@ describe('actor mode', () => {
   })
 
   it('keeps a replicated reconcile a no-op instead of spawning a body or touching a player actor', () => {
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     const surface = (globalThis as any).game.surfaces[1]
 
     expect(reconcile_npc_after_load()).toEqual({
@@ -416,7 +558,7 @@ describe('actor mode', () => {
     })
     expect(surface.create_entity).not.toHaveBeenCalled()
 
-    ;(globalThis as any).storage.airi_actor_mode = 'player'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'player'
     expect(reconcile_npc_after_load()).toEqual({
       reconciled: false,
       reason: 'actor_mode_is_player',

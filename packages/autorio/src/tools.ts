@@ -1,21 +1,281 @@
+import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
-import { remember_entity_reference } from './entity_reference'
+import type { ControlledActor } from './actors/types'
+import { crafted_item_count, craft_trigger_statistics_count } from './crafted_items'
+import { remember_entity_reference, resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
+import { entity_has_power, evaluate_world_condition, status_name, WORLD_CONDITION_KINDS } from './goal_world_conditions'
+import { machine_eta } from './production_eta'
+import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
+import { compact_spatial_summary } from './spatial_semantics'
+import { seen_now } from './visible_reads'
+import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
+import { count_world_entities, find_world_entities } from './npc_vision'
+import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
+import { get_pump_site_preparation } from './pump_site_preparation'
+import { nearest_pole_for_unpowered, protected_read, status_shows_no_power } from './electric_facts'
 
 const MAX_NEARBY_RADIUS = 64
-const MAX_NEARBY_RESULTS = 100
+const MAX_NEARBY_RESULTS = 40
 const MAX_ENTITY_STATUS_RADIUS = 32
 const MAX_ENTITY_INVENTORIES = 8
-const MAX_ENTITY_INVENTORY_ITEMS = 50
+const MAX_ENTITY_INVENTORY_ITEMS = 20
+const MAX_ENTITY_COUNT_RADIUS = 256
+const MAX_ENTITY_COUNT_SCAN = 2000
 
 function squared_distance(a: { x: number, y: number }, b: { x: number, y: number }) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
+}
+
+function positive_integer(value: unknown) {
+  return typeof value === 'number' && value === math.floor(value) && value > 0
+}
+
+function actor_item_count(actor: ControlledActor, item_name: string) {
+  const item = get_actor_inventory_items(actor).find(entry => entry.name === item_name)
+  return item?.count ?? 0
+}
+
+function entity_item_count(entity: LuaEntity, item_name: string) {
+  let count = 0
+  const max_inventory_index = math.min(entity.get_max_inventory_index(), MAX_ENTITY_INVENTORIES)
+  for (let index = 1; index <= max_inventory_index; index++) {
+    const inventory = entity.get_inventory(index)
+    if (!inventory) continue
+    for (const item of inventory.get_contents()) {
+      if (item.name === item_name) count += item.count
+    }
+  }
+  return count
+}
+
+// "At least `minimum` entities of this prototype exist" for a step contract (a build step). The live world decides: the NPC's
+// force's entities of the prototype on the actor's surface, never a placement receipt. Optional `radius` (around the actor, or
+// around `anchor` {x, y}) and `state` ('working': status working; 'powered': on an electric network and not short of power)
+// narrow the count. Ghosts are not entities of the prototype, so a planned (unbuilt) entity is never counted.
+function evaluate_entity_count(actor: ControlledActor, request: Record<string, unknown>) {
+  const prototype = request.prototype
+  const minimum = request.minimum
+  if (typeof prototype !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_entity_count_condition' }
+  if (!prototypes.entity[prototype]) return { ok: false, error: 'unknown_entity', prototype }
+  const state = request.state
+  if (state !== undefined && state !== 'working' && state !== 'powered') return { ok: false, error: 'invalid_entity_count_state', prototype }
+  const radius = request.radius
+  if (radius !== undefined && (!positive_integer(radius) || (radius as number) > MAX_ENTITY_COUNT_RADIUS)) return { ok: false, error: 'invalid_entity_count_radius', prototype }
+  const anchor = request.anchor as { x?: unknown, y?: unknown } | undefined
+  if (anchor !== undefined) {
+    if (radius === undefined || typeof anchor !== 'object' || typeof anchor.x !== 'number' || typeof anchor.y !== 'number') {
+      return { ok: false, error: 'invalid_entity_count_anchor', prototype }
+    }
+  }
+  const filters: Record<string, unknown> = { name: prototype, force: actor.force }
+  if (radius !== undefined) {
+    filters.position = anchor !== undefined ? { x: anchor.x as number, y: anchor.y as number } : actor.position
+    filters.radius = radius
+  }
+  const scope = {
+    prototype,
+    minimum,
+    ...(state !== undefined ? { state } : {}),
+    ...(radius !== undefined ? { radius } : {}),
+    ...(anchor !== undefined ? { anchor: { x: anchor.x, y: anchor.y } } : {}),
+    tick: game.tick,
+  }
+  if (state === undefined) {
+    const current = count_world_entities(actor.surface, filters as any)
+    return { ok: true, kind: 'entity_count', satisfied: current >= (minimum as number), current, found: current, truncated: false, ...scope, progress_known: false }
+  }
+  const found = find_world_entities(actor.surface, { ...filters, limit: MAX_ENTITY_COUNT_SCAN + 1 } as any)
+  const truncated = found.length > MAX_ENTITY_COUNT_SCAN
+  let current = 0
+  for (const entity of found) {
+    if (!entity.valid) continue
+    if (state === 'working' ? entity.status === defines.entity_status.working : entity_has_power(entity)) current += 1
+  }
+  // A scan cut at the bound cannot prove more than it counted, so the count never claims the minimum from a cut list alone.
+  return { ok: true, kind: 'entity_count', satisfied: current >= (minimum as number), current, found: math.min(found.length, MAX_ENTITY_COUNT_SCAN), truncated, ...scope, progress_known: false }
+}
+
+// Force-level goal conditions. These answer "is the user's goal met?" rather
+// than "is this step done?", and read game-wide state so they hold across a
+// long goal and across Space Age surfaces. Undefined for any other kind.
+function evaluate_force_condition(force: LuaForce | undefined, kind: unknown, request: Record<string, unknown>) {
+  if (kind !== 'research_completed' && kind !== 'rockets_launched' && kind !== 'items_produced' && kind !== 'space_location_unlocked') return undefined
+  if (!force) return { ok: false, error: 'no_force' }
+  if (kind === 'research_completed') {
+    const technology = request.technology
+    if (typeof technology !== 'string') return { ok: false, error: 'invalid_research_completed_condition' }
+    const tech = force.technologies[technology]
+    if (!tech) return { ok: false, error: 'unknown_technology', technology }
+    return { ok: true, kind, satisfied: tech.researched, technology, progress_known: false }
+  }
+
+  if (kind === 'rockets_launched') {
+    const minimum = request.minimum
+    if (!positive_integer(minimum)) return { ok: false, error: 'invalid_rockets_launched_condition' }
+    const current = force.rockets_launched
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
+  }
+
+  if (kind === 'items_produced') {
+    const item_name = request.item_name
+    const minimum = request.minimum
+    if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_items_produced_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
+    // Production statistics are per surface in 2.0; sum every surface so the
+    // count includes other planets and space platforms.
+    let production_statistics = 0
+    for (const [, surface] of game.surfaces) {
+      production_statistics += force.get_item_production_statistics(surface).get_input_count(item_name) as number
+    }
+    // The engine does not record a character's hand-crafted products in those
+    // statistics (see crafted_items.ts), so the crafts the NPC's own native
+    // queue really finished are added. Trigger-flow credits overlap and are subtracted.
+    const hand_crafted = crafted_item_count(force.index, item_name)
+    const hand_crafted_in_statistics = craft_trigger_statistics_count(force.index, item_name)
+    const current = production_statistics + hand_crafted - hand_crafted_in_statistics
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, production_statistics, hand_crafted, hand_crafted_in_statistics, minimum, progress_known: false }
+  }
+
+  if (kind === 'space_location_unlocked') {
+    const name = request.name
+    if (typeof name !== 'string') return { ok: false, error: 'invalid_space_location_condition' }
+    if (!prototypes.space_location[name]) return { ok: false, error: 'unknown_space_location', name }
+    // typed-factorio declares this as void; the runtime returns a boolean.
+    const unlocked = force.is_space_location_unlocked(name) as unknown as boolean
+    return { ok: true, kind, satisfied: unlocked === true, name, progress_known: false }
+  }
+
+  return undefined
+}
+
+// The force whose progress a goal is judged on. Force-level facts do not need
+// a live body: while the NPC is dead and awaiting respawn they are read from
+// the force it is always created on, so a goal met in that gap is not missed.
+function goal_force(actor: ControlledActor | undefined) {
+  return actor?.force ?? game.forces.player
+}
+
+function evaluate_runtime_condition(request: Record<string, unknown>) {
+  const actor = get_controlled_actor()
+  if (!request || typeof request !== 'object') return { ok: false, error: 'invalid_condition' }
+  const kind = request.kind
+  const force_result = evaluate_force_condition(goal_force(actor), kind, request)
+  if (force_result !== undefined) return force_result
+  // World-state goal conditions (plan 3.7): is the factory running, powered,
+  // producing at a rate. Force-level, so they are read without a live body.
+  if (typeof kind === 'string' && WORLD_CONDITION_KINDS[kind]) {
+    const force = goal_force(actor)
+    if (!force) return { ok: false, error: 'no_force' }
+    const actor_mining = actor !== undefined && actor.is_valid && actor.get_mining_state().mining === true
+    return evaluate_world_condition(force, kind, request, actor_mining)
+  }
+  if (!actor) return { ok: false, error: 'no_actor' }
+  if (kind === 'inventory_count') {
+    const item_name = request.item_name
+    const minimum = request.minimum
+    if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_inventory_count_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
+    const current = actor_item_count(actor, item_name)
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
+  }
+
+  if (kind === 'entity_count') return evaluate_entity_count(actor, request)
+
+  if (kind === 'entity_exists' || kind === 'entity_state' || kind === 'entity_inventory_count') {
+    const unit_number = request.unit_number
+    if (!positive_integer(unit_number)) return { ok: false, error: 'invalid_exact_identity', stale: true }
+    const entity = resolve_exact_entity(actor, unit_number as number)
+    if (!entity || !entity.valid) return { ok: false, error: 'stale_exact_identity', stale: true, unit_number }
+    const status = entity.status
+    const progress_known = status !== undefined
+    const progressing = status === defines.entity_status.working
+
+    if (kind === 'entity_exists') {
+      return { ok: true, kind, satisfied: true, unit_number, progressing, progress_known, entity_status: status }
+    }
+
+    if (kind === 'entity_state') {
+      const expected = request.expected
+      if (expected !== 'working' && expected !== 'not_working' && expected !== 'exists') return { ok: false, error: 'invalid_entity_state_condition' }
+      const satisfied = expected === 'exists'
+        ? true
+        : expected === 'working'
+          ? progressing
+          : !progressing
+      // A working crafting machine carries its expected time to run dry, so
+      // the harness can bound a passive wait from game data.
+      const eta = progressing ? machine_eta(entity) : undefined
+      return { ok: true, kind, satisfied, unit_number, progressing, progress_known, entity_status: status, eta }
+    }
+
+    const item_name = request.item_name
+    const minimum = request.minimum
+    if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_entity_inventory_count_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
+    const current = entity_item_count(entity, item_name)
+    const satisfied = current >= (minimum as number)
+    return {
+      ok: true,
+      kind,
+      satisfied,
+      current,
+      minimum,
+      unit_number,
+      progressing,
+      progress_known,
+      entity_status: status,
+      // Expected time to the checkpoint for a crafting machine (plan 2.5).
+      eta: satisfied ? undefined : machine_eta(entity, item_name, minimum as number, current),
+    }
+  }
+
+  return { ok: false, error: 'unsupported_condition_kind' }
+}
+
+const MAX_PROGRESS_TECHNOLOGIES = 16
+
+// Force-wide "where does this save stand" facts for classifying a new goal's
+// scope. Read-only; the runtime chooses which milestone technologies to ask
+// about so the list can differ between the base game and Space Age.
+function goal_progress_facts(request: Record<string, unknown>) {
+  const force = goal_force(get_controlled_actor())
+  if (!force) return { ok: false, error: 'no_force' }
+  const requested = request && typeof request === 'object' && Array.isArray(request.technologies)
+    ? request.technologies as unknown[]
+    : []
+  const milestones: Record<string, boolean> = {}
+  let asked = 0
+  for (const name of requested) {
+    if (asked >= MAX_PROGRESS_TECHNOLOGIES) break
+    if (typeof name !== 'string') continue
+    asked += 1
+    const tech = force.technologies[name]
+    if (tech !== undefined) milestones[name] = tech.researched
+  }
+  let researched = 0
+  let total = 0
+  for (const [, tech] of force.technologies) {
+    if (!tech.enabled) continue
+    total += 1
+    if (tech.researched) researched += 1
+  }
+  return {
+    ok: true,
+    rockets_launched: force.rockets_launched,
+    researched_technologies: researched,
+    enabled_technologies: total,
+    milestones,
+    space_age: script.active_mods['space-age'] !== undefined,
+  }
 }
 
 export function create_tools_remote_interface() {
   create_actor_remote_interface()
 
   remote.add_interface('autorio_tools', {
+    evaluate_condition: (request: Record<string, unknown>) => evaluate_runtime_condition(request),
+    goal_progress_facts: (request: Record<string, unknown>) => goal_progress_facts(request),
     get_inventory_items: () => {
       const actor = get_controlled_actor()
       if (!actor) {
@@ -92,6 +352,10 @@ export function create_tools_remote_interface() {
         }
       }
 
+      if (name !== undefined && !prototypes.entity[name]) {
+        return { ok: false, code: 'unknown_entity_prototype', field: 'name', identity: name,
+          ...(prototypes.fluid[name] ? { fluid_name: name, observation_tool: 'getFluidSourceTiles' } : {}) }
+      }
       const bounded_radius = math.max(1, math.min(MAX_NEARBY_RADIUS, radius || 20))
       const bounded_limit = math.max(1, math.min(MAX_NEARBY_RESULTS, limit || 50))
       const filters: Record<string, unknown> = {
@@ -105,13 +369,31 @@ export function create_tools_remote_interface() {
         filters.type = entity_type
       }
 
-      const matches = actor.surface.find_entities_filtered(filters as any)
+      const matches = find_world_entities(actor.surface, filters as any)
+      // Engine order is not meaningful and the result is capped, so keep
+      // entities with a unit_number (buildings, vehicles) ahead of resources
+      // and trees, nearest first. type_counts covers every match, so the model
+      // can see what the cap dropped and filter by name or type.
+      const type_counts: Record<string, number> = {}
+      const ranked: Array<{ entity: LuaEntity, identified: boolean, distance: number }> = []
+      for (const entity of matches) {
+        type_counts[entity.type] = (type_counts[entity.type] ?? 0) + 1
+        ranked.push({
+          entity,
+          identified: entity.unit_number !== undefined,
+          distance: squared_distance(actor.position, entity.position),
+        })
+      }
+      ranked.sort((a, b) => {
+        if (a.identified !== b.identified) return a.identified ? -1 : 1
+        return a.distance - b.distance
+      })
       const entities: Array<Record<string, unknown>> = []
-      const returned = math.min(matches.length, bounded_limit)
+      const returned = math.min(ranked.length, bounded_limit)
       for (let i = 0; i < returned; i++) {
-        const entity = matches[i]
+        const entity = ranked[i].entity
         remember_entity_reference(entity)
-        entities.push({
+        const summary: Record<string, unknown> = {
           name: entity.name,
           type: entity.type,
           position: entity.position,
@@ -121,19 +403,30 @@ export function create_tools_remote_interface() {
           supports_direction: entity.supports_direction,
           rotatable: entity.rotatable,
           amount: entity.type === 'resource' ? entity.amount : undefined,
-        })
+          status: entity.status,
+          status_name: status_name(entity.status),
+          working: status_name(entity.status) === 'working',
+        }
+        const spatial = compact_spatial_summary(entity, seen_now(actor.force, actor.surface))
+        if (spatial !== undefined) summary.spatial = spatial
+        entities.push(summary)
       }
 
       return {
         actor_position: actor.position,
+        observed_tick: game.tick,
+        actor_id: protected_read(() => actor.status_snapshot().actor_id),
+        surface_index: actor.surface.index,
+        force_index: actor.force.index,
         radius: bounded_radius,
         entities,
         matched_count: matches.length,
         returned_count: entities.length,
         truncated: matches.length > entities.length,
+        type_counts,
       }
     },
-    get_entity_status: (name: string, radius: number = 8) => {
+    get_entity_status: (name?: string, radius?: number, unit_number?: number) => {
       const actor = get_controlled_actor()
       if (!actor) {
         return {
@@ -142,21 +435,47 @@ export function create_tools_remote_interface() {
         }
       }
 
-      const bounded_radius = math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
-      const matches = actor.surface.find_entities_filtered({
-        position: actor.position,
-        radius: bounded_radius,
-        name,
-      })
+      const exact = unit_number !== undefined
+      if (exact && (name !== undefined || radius !== undefined || !positive_integer(unit_number) || unit_number > 9007199254740991)) {
+        return { found: false, error: 'invalid_exact_identity', unit_number }
+      }
+      if (!exact && typeof name !== 'string') return { found: false, error: 'invalid_entity_name' }
 
-      let entity = matches[0]
-      let nearest_distance = entity !== undefined ? squared_distance(actor.position, entity.position) : math.huge
-      for (let i = 1; i < matches.length; i++) {
-        const candidate = matches[i]
-        const candidate_distance = squared_distance(actor.position, candidate.position)
-        if (candidate_distance < nearest_distance) {
-          entity = candidate
-          nearest_distance = candidate_distance
+      const bounded_radius = exact ? undefined : math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
+      let entity: LuaEntity | undefined
+      if (exact) {
+        // A read of a model-named entity covers only chunks the NPC sees now (M3): in fog the answer is the same
+        // whether it still stands, and nothing there is scanned or refreshed.
+        const resolved = resolve_visible_entity_reference(actor, unit_number, 'actor_body')
+        if (resolved.code === 'not_visible') {
+          return {
+            found: false,
+            actor_position: actor.position,
+            unit_number,
+            error: 'entity_not_visible',
+            message: 'entity is in a chunk the NPC does not see now; observe it again from nearby',
+          }
+        }
+        entity = resolved.entity
+        // The resolver's direct engine-index path can return entities outside
+        // the body's scope. Enforce the read contract on every lookup path.
+        if (entity && (!entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index)) entity = undefined
+      }
+      else {
+        const matches = find_world_entities(actor.surface, {
+          position: actor.position,
+          radius: bounded_radius,
+          name,
+        })
+        entity = matches[0]
+        let nearest_distance = entity !== undefined ? squared_distance(actor.position, entity.position) : math.huge
+        for (let i = 1; i < matches.length; i++) {
+          const candidate = matches[i]
+          const candidate_distance = squared_distance(actor.position, candidate.position)
+          if (candidate_distance < nearest_distance) {
+            entity = candidate
+            nearest_distance = candidate_distance
+          }
         }
       }
 
@@ -166,6 +485,8 @@ export function create_tools_remote_interface() {
           actor_position: actor.position,
           radius: bounded_radius,
           name,
+          unit_number,
+          error: exact ? 'exact_entity_not_found' : undefined,
         }
       }
 
@@ -207,31 +528,73 @@ export function create_tools_remote_interface() {
       }
 
       let recipe_name: string | undefined
-      if (entity.type === 'assembling-machine') {
+      if (entity.type === 'assembling-machine' || entity.type === 'furnace') {
         const [recipe] = entity.get_recipe()
         recipe_name = recipe?.name
       }
 
+      const energy_source = energy_source_kind(entity.prototype)
+      const entity_summary: Record<string, unknown> = {
+        name: entity.name,
+        type: entity.type,
+        position: entity.position,
+        force: entity.force?.name,
+        unit_number: entity.unit_number,
+        direction: entity.direction,
+        supports_direction: entity.supports_direction,
+        rotatable: entity.rotatable,
+        amount: entity.type === 'resource' ? entity.amount : undefined,
+        recipe: recipe_name,
+        // Native fact: set_machine_recipe accepts an assembling machine only; a furnace picks its recipe from its inputs.
+        recipe_selection: entity.type === 'assembling-machine' ? 'configurable' : entity.type === 'furnace' ? 'automatic' : undefined,
+        crafting_progress: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_progress : undefined,
+        crafting_speed: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_speed : undefined,
+        // Native cumulative crafts, scoped to this exact machine. Compare samples
+        // with the same identity/recipe; this counter alone is not goal proof.
+        products_finished: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.products_finished : undefined,
+        status: entity.status,
+        status_name: status_name(entity.status),
+        working: entity.status === defines.entity_status.working,
+        energy_source,
+        inventories,
+        inventories_truncated: entity.get_max_inventory_index() > MAX_ENTITY_INVENTORIES,
+        inventory_items_truncated,
+      }
+      if (energy_source === 'electric') {
+        const energy = entity.energy
+        if (typeof energy === 'number' && energy >= 0 && energy < math.huge) entity_summary.energy = energy
+        const network = entity.electric_network_id
+        if (typeof network === 'number' && positive_integer(network) && network <= 9007199254740991) entity_summary.electric_network_id = network
+        // An entity short of power names the nearest known pole and how far its supply area is, from live positions.
+        if (status_shows_no_power(entity_summary.status_name as string | undefined)) entity_summary.power_gap = nearest_pole_for_unpowered(entity, seen_now(actor.force, entity.surface))
+      }
+      if (entity.type === 'rocket-silo') {
+        entity_summary.rocket_parts = entity.rocket_parts
+        entity_summary.rocket_parts_required = entity.prototype.rocket_parts_required
+        entity_summary.rocket_ready = entity.rocket_silo_status === defines.rocket_silo_status.rocket_ready
+      }
+      // Neighbours, the mining area and the pole search behind this entity are read only where the NPC sees now (M3).
+      const spatial = compact_spatial_summary(entity, seen_now(actor.force, entity.surface))
+      if (spatial !== undefined) entity_summary.spatial = spatial
+
       return {
         found: true,
+        observed_tick: game.tick,
+        actor_id: protected_read(() => actor.status_snapshot().actor_id),
+        surface_index: actor.surface.index,
+        force_index: actor.force.index,
         actor_position: actor.position,
         radius: bounded_radius,
-        entity: {
-          name: entity.name,
-          type: entity.type,
-          position: entity.position,
-          force: entity.force?.name,
-          unit_number: entity.unit_number,
-          direction: entity.direction,
-          supports_direction: entity.supports_direction,
-          rotatable: entity.rotatable,
-          amount: entity.type === 'resource' ? entity.amount : undefined,
-          recipe: recipe_name,
-          inventories,
-          inventories_truncated: entity.get_max_inventory_index() > MAX_ENTITY_INVENTORIES,
-          inventory_items_truncated,
-        },
+        unit_number,
+        entity: entity_summary,
       }
+    },
+    get_fluid_source_tiles: (request: FluidSourceRequest) => fluid_source_observation(get_controlled_actor(), request),
+    get_pump_site_preparation: (request: { x: number, y: number, direction?: number }) => get_pump_site_preparation(get_controlled_actor(), request),
+    get_placement_candidates: (request: PlacementCandidateRequest) => {
+      const actor = get_controlled_actor()
+      if (!actor) return { ok: false, error: 'no controlled actor' }
+      return create_placement_candidate_set(actor, request)
     },
   })
 }

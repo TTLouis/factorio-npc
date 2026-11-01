@@ -1,3 +1,4 @@
+import type { LuaForce, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './types'
 import { ConnectedPlayerActor } from './connected_player_actor'
 import { StandaloneCharacterActor } from './standalone_character_actor'
@@ -33,10 +34,55 @@ type NpcRecoveryHandler = (event: { previous_actor_id: number }) => void
 type ActorModeTransitionHandler = (event: { previous_mode: ActorMode, next_mode: ActorMode }) => void
 
 declare const storage: {
-  airi_actor_mode?: ActorMode
+  sgluna_actor_mode?: ActorMode
   standalone_character_unit_number?: number
-  airi_last_npc_recovery?: NpcRecoveryReceipt
-  airi_owned_crafting?: OwnedCraftingMarker
+  sgluna_last_npc_recovery?: NpcRecoveryReceipt
+  sgluna_owned_crafting?: OwnedCraftingMarker
+  // Surface the NPC body was last seen alive on; a replacement body respawns
+  // there, at (0, 0), rather than always on Nauvis.
+  sgluna_npc_surface_index?: number
+}
+
+const RESPAWN_POSITION = { x: 0, y: 0 }
+
+function npc_home_surface(): LuaSurface | undefined {
+  const index = storage.sgluna_npc_surface_index
+  if (index !== undefined) {
+    const surface = game.get_surface(index as LuaSurface['index'])
+    if (surface !== undefined && surface.valid) return surface
+  }
+  return game.surfaces[1]
+}
+
+// Where a dead body respawns. A space platform has no ground outside its hub
+// for a character to stand on, so a body that died on one respawns on Nauvis.
+// (Not yet verified in real Space Age.)
+function npc_respawn_surface(): LuaSurface | undefined {
+  const home = npc_home_surface()
+  if (home !== undefined && home.platform === undefined) return home
+  return game.surfaces[1]
+}
+
+function spawn_npc_body(surface: LuaSurface, force: LuaForce) {
+  const spawn_position = RESPAWN_POSITION
+  // With zero human players ever connecting, nothing else ever triggers chunk
+  // generation around spawn: normally a joining client's position does that.
+  // Creating the NPC really only needs the local spawn neighborhood. The old
+  // radius=3 request synchronously generated up to a 7x7 chunk square here,
+  // which could freeze the simulation during a cold standalone-NPC launch.
+  // A radius=1 (3x3) window is enough for the 32-tile collision search below
+  // and matches the awareness bubble that will continue generation afterwards.
+  if (!surface.is_chunk_generated({ x: Math.floor(spawn_position.x / 32), y: Math.floor(spawn_position.y / 32) })) {
+    surface.request_to_generate_chunks(spawn_position, 1)
+    surface.force_generate_chunk_requests()
+  }
+  const position = surface.find_non_colliding_position('character', spawn_position, 32, 0.5) ?? spawn_position
+  return StandaloneCharacterActor.create(surface, force, position)
+}
+
+function remember_npc_surface(actor: StandaloneCharacterActor) {
+  const index = actor.surface.index
+  if (storage.sgluna_npc_surface_index !== index) storage.sgluna_npc_surface_index = index
 }
 
 let standalone_actor: StandaloneCharacterActor | undefined
@@ -45,14 +91,14 @@ let last_reconciled_actor_id: number | undefined
 let last_reconciled_tick: number | undefined
 let last_reconciled_owned_crafting: OwnedCraftingLoadReceipt | undefined
 let npc_recovery_handler: NpcRecoveryHandler | undefined
+let npc_single_player_load_handler: (() => void) | undefined
 let actor_mode_transition_handler: ActorModeTransitionHandler | undefined
 let recovery_invalidated_actor_id: number | undefined
 
-// Factorio does not persist ordinary Lua module locals across save/load. Autorio's
-// logical task manager is therefore intentionally volatile for now, while the
-// standalone character entity and its engine control states are persisted in the
-// save. on_load cannot access `game` or mutate `storage`, so it only restores
-// module-local caches here.
+// Logical execution and engine controls are persisted so joining peers restore
+// the running server's work. An actual server startup explicitly discards logical
+// work and then reconciles controls through replicated commands. on_load cannot
+// access `game` or mutate `storage`, so it only restores module-local caches here.
 //
 // This handler runs on every peer that loads the map, including a client joining
 // a running server, so the flag it sets is NOT by itself permission to change
@@ -67,7 +113,7 @@ script.on_load(() => {
 })
 
 export function get_actor_mode(): ActorMode {
-  return storage.airi_actor_mode ?? 'player'
+  return storage.sgluna_actor_mode ?? 'player'
 }
 
 export function set_actor_mode(mode: ActorMode): ActorMode {
@@ -78,7 +124,7 @@ export function set_actor_mode(mode: ActorMode): ActorMode {
     // after cleanup do we select the new actor mode.
     actor_mode_transition_handler?.({ previous_mode, next_mode: mode })
   }
-  storage.airi_actor_mode = mode
+  storage.sgluna_actor_mode = mode
   standalone_actor = undefined
   recovery_invalidated_actor_id = undefined
   return mode
@@ -86,6 +132,10 @@ export function set_actor_mode(mode: ActorMode): ActorMode {
 
 export function register_npc_recovery_handler(handler: NpcRecoveryHandler | undefined) {
   npc_recovery_handler = handler
+}
+
+export function register_npc_single_player_load_handler(handler: (() => void) | undefined) {
+  npc_single_player_load_handler = handler
 }
 
 export function register_actor_mode_transition_handler(handler: ActorModeTransitionHandler | undefined) {
@@ -101,7 +151,7 @@ function get_player_actor(): ControlledActor | undefined {
 }
 
 function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
-  const marker = storage.airi_owned_crafting
+  const marker = storage.sgluna_owned_crafting
   if (!marker) {
     return undefined
   }
@@ -114,8 +164,9 @@ function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
     return undefined
   }
 
-  // The logical task that owned this native queue was module-local and is gone
-  // after load. Admission was allowed only from an empty native queue, so every
+  // Explicit server-startup reconciliation discarded the logical owner. A peer
+  // loading the running server must not take this path. Admission was allowed
+  // only from an empty native queue, so every
   // remaining queue entry belongs to that persisted request. Cancel from the
   // tail to avoid leaving orphaned prerequisite/target crafts running.
   const queue = actor.get_crafting_queue()
@@ -129,7 +180,7 @@ function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
     cancelled_queue_count += item.count
   }
 
-  storage.airi_owned_crafting = undefined
+  storage.sgluna_owned_crafting = undefined
   const receipt: OwnedCraftingLoadReceipt = {
     actor_id: identity.actor_id,
     item_name: marker.item_name,
@@ -141,7 +192,7 @@ function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
 }
 
 function reconcile_loaded_npc(actor: StandaloneCharacterActor) {
-  // Logical Autorio tasks are not resumed across a save/load boundary. Clear
+  // Actual server startup explicitly discards logical Autorio tasks. Clear
   // the engine-owned physical inputs that *are* serialized with the character,
   // otherwise a freshly loaded NPC could keep walking/mining/shooting with no
   // task left to own or stop that action. Owned native crafting gets the same
@@ -177,6 +228,7 @@ function maybe_reconcile_loaded_npc(actor: StandaloneCharacterActor) {
   if (game.is_multiplayer()) {
     return
   }
+  npc_single_player_load_handler?.()
   reconcile_loaded_npc(actor)
 }
 
@@ -191,10 +243,10 @@ function invalidate_missing_npc(previous_actor_id: number) {
   // invalidation handler for this boundary.
   recovery_invalidated_actor_id = previous_actor_id
   npc_recovery_handler?.({ previous_actor_id })
-  if (storage.airi_owned_crafting?.actor_id === previous_actor_id) {
+  if (storage.sgluna_owned_crafting?.actor_id === previous_actor_id) {
     // The dead/missing body took its native queue with it. Drop the marker so a
     // replacement body can never inherit or cancel work it did not own.
-    storage.airi_owned_crafting = undefined
+    storage.sgluna_owned_crafting = undefined
   }
   rendering.clear()
   log(`[AUTORIO] Invalidated work owned by missing NPC actor_id=${previous_actor_id}`)
@@ -206,7 +258,7 @@ function record_npc_recovery(previous_actor_id: number, actor: StandaloneCharact
     return
   }
 
-  storage.airi_last_npc_recovery = {
+  storage.sgluna_last_npc_recovery = {
     reason: 'missing_persisted_actor',
     previous_actor_id,
     replacement_actor_id: identity.actor_id,
@@ -220,11 +272,12 @@ function record_npc_recovery(previous_actor_id: number, actor: StandaloneCharact
 
 function get_npc_actor(): ControlledActor | undefined {
   if (standalone_actor?.is_valid) {
+    remember_npc_surface(standalone_actor)
     maybe_reconcile_loaded_npc(standalone_actor)
     return standalone_actor
   }
 
-  const surface = game.surfaces[1]
+  const surface = npc_home_surface()
   const force = game.forces.player
   if (!surface || !force) {
     return undefined
@@ -234,6 +287,7 @@ function get_npc_actor(): ControlledActor | undefined {
   standalone_actor = StandaloneCharacterActor.reacquire(surface)
   if (standalone_actor?.is_valid) {
     recovery_invalidated_actor_id = undefined
+    remember_npc_surface(standalone_actor)
     maybe_reconcile_loaded_npc(standalone_actor)
     return standalone_actor
   }
@@ -242,18 +296,17 @@ function get_npc_actor(): ControlledActor | undefined {
     invalidate_missing_npc(persisted_actor_id)
   }
 
-  const spawn_position = force.get_spawn_position(surface)
-  // With zero human players ever connecting, nothing else ever triggers chunk
-  // generation around spawn: normally a joining client's position does that.
-  // Without this, create_entity silently fails on a freshly created save
-  // because the target chunk was never generated.
-  if (!surface.is_chunk_generated({ x: Math.floor(spawn_position.x / 32), y: Math.floor(spawn_position.y / 32) })) {
-    surface.request_to_generate_chunks(spawn_position, 3)
-    surface.force_generate_chunk_requests()
+  // Respawn at (0, 0) of the surface the body was last alive on. If the body
+  // cannot be created there, fall back to Nauvis rather than retrying a
+  // failing create on every tick.
+  const respawn_surface = npc_respawn_surface() ?? surface
+  standalone_actor = spawn_npc_body(respawn_surface, force)
+  const nauvis = game.surfaces[1]
+  if (!standalone_actor?.is_valid && nauvis !== undefined && nauvis !== respawn_surface) {
+    standalone_actor = spawn_npc_body(nauvis, force)
   }
-  const position = surface.find_non_colliding_position('character', spawn_position, 32, 0.5) ?? spawn_position
-  standalone_actor = StandaloneCharacterActor.create(surface, force, position)
   if (standalone_actor?.is_valid) {
+    remember_npc_surface(standalone_actor)
     if (persisted_actor_id !== undefined) {
       record_npc_recovery(persisted_actor_id, standalone_actor)
     }
@@ -284,7 +337,7 @@ export function peek_controlled_actor(): ControlledActor | undefined {
   if (standalone_actor?.is_valid) {
     return standalone_actor
   }
-  const surface = game.surfaces[1]
+  const surface = npc_home_surface()
   return surface !== undefined ? StandaloneCharacterActor.peek(surface) : undefined
 }
 
@@ -311,7 +364,7 @@ export function reconcile_npc_after_load(): NpcLoadReconciliationResult {
     return { reconciled: false, reason: 'actor_mode_is_player', tick: game.tick }
   }
 
-  const surface = game.surfaces[1]
+  const surface = npc_home_surface()
   const actor = standalone_actor?.is_valid
     ? standalone_actor
     : surface !== undefined
@@ -352,7 +405,7 @@ export function get_npc_recovery_status() {
   return {
     policy: 'discard_autorio_tasks_and_create_empty_replacement',
     pending_from_actor_id: recovery_invalidated_actor_id,
-    last_result: storage.airi_last_npc_recovery,
+    last_result: storage.sgluna_last_npc_recovery,
   }
 }
 
@@ -376,6 +429,9 @@ export function create_actor_remote_interface() {
       return {
         mode: get_actor_mode(),
         actor: actor?.status_snapshot(),
+        observed_tick: game.tick,
+        surface_index: actor?.surface.index,
+        force_index: actor?.force.index,
         connected_players: game.connected_players.length,
         load_reconciliation: get_load_reconciliation_status(),
         death_recovery: get_npc_recovery_status(),

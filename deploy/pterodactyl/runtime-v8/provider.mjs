@@ -1,482 +1,614 @@
 import { check, DeploymentError } from './common.mjs'
-import { toolDefinitions } from './structured-policy.mjs'
+import { lastUserOutsideTail } from './prompt-prefix.mjs'
+import { providerCapabilityProfile, providerRequest as baseProviderRequest } from './provider-base.mjs'
+import { AGENT_ROLES, resolveAgentRole } from './agent-roles.mjs'
+
+export * from './provider-base.mjs'
 
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
 const FAILURE_MARKER = '[MOD] Autorio operation error:'
 const CHAT_MARKER = '[CHAT]'
-const STEERING_MARKER = '[STEERING]'
-const COMPLETION_MAX_TOKENS = 1000
-const DEFAULT_MAX_TOKENS = 2000
-const PLAN_STATE_MARKER = '[PLAN_STATE]'
-const MEMORY_MARKER = '[MEMORY]'
+const FULL_PLANNER_FALLBACK_OUTPUT_BUDGET = 12000
+// Turns whose job is to author or revise the plan.
+const PLAN_AUTHORING_TRIGGERS = new Set(['new_goal', 'amend_current', 'plan_slice_completed', 'post_step_replan', 'recovery_replan_high'])
 
-const COMPACT_CONTINUATION_PROMPT = `You are AIRI, an autonomous standalone Factorio NPC. This request is a successful Autorio batch-completion continuation for an existing user goal, not a new goal.
-
-Use the supplied [PLAN_STATE] as the canonical durable Task Board. Preserve its completed prefix and continue the active goal; do not restart or silently rewrite the plan. Mutable world state still requires observation when it is actually needed for the next decision.
-
-Token-efficient continuation rules:
-- Treat a provider turn as an observation/decision boundary, not as an operation boundary. If 2-4 consecutive operations are already fully parameterized from current observations and a later operation does not depend on a new identity/result created by an earlier one, return them together in execution order.
-- If the Task Board/receipt already contains deterministic_verification with verdict verified_complete for the action that just finished, do not spend a tool call re-checking that exact fact.
-- Call read-only tools only for unknown mutable facts required to choose or parameterize the next operation.
-- Prefer a tightly related deterministic operation batch when every operation can be fully specified now and no later operation needs an identity/result created by an earlier one. Multiple gather_resource operations for known resources may be submitted together. When one exact observed entity needs multiple item types, prefer one supply_entity operation over separate transfer turns.
-- Do not insert wait between finite Autorio operations merely to let them finish. The harness resumes you when the submitted batch completes or fails. Use wait only when actual world time must pass and no Autorio-owned finite operation already represents the work.
-- Runtime navigation/reach/obstacle recovery is internal progress, not a new plan step and not a reason to call the model again. Exact transfers, recipe configuration, rotation, and exact placement may auto-approach using the controlled character's real reach.
-- Do not walk AIRI onto an exact future build coordinate just to place there. place_entity can be issued from build range; the runtime approaches only as close as needed and can step AIRI aside when AIRI's own body is the likely placement blocker.
-- A cancelled batch stops the failing operation and its dependent queued operations. If the receipt says placing:not_placeable, that attempted placement did not create an entity. Never invent a new unit_number or claim that a cancelled placement succeeded; observe the world after a successful placement when a later exact operation needs the new identity.
-- For a bounded local construction batch, use validateConstructionPlan on the exact chosen placements, then execute only the returned validation_id and placement_count with execute_construction_plan. Do not edit coordinates or directions after validation; revalidate instead. A clean completed construction batch is deterministic evidence that every validated placement succeeded.
-- research_technology submission is not completed research; verify the actual technology before depending on it. wait is never proof that a world condition became true. Item transfers may be partial and need relevant verification before depending on an exact quantity.
-- When simply continuing with another operation and the human does not need to act, set chatMessage to an empty string. Use chatMessage for a blocker, a decision that needs the human, or verified final completion.
-- Never emit Lua, game.*, shell/console commands, or unapproved operations.
-
-Approved operations and bounded arguments:
-walk_to_entity {entity_name,search_radius}; walk_to_entity_exact {unit_number,reach_distance}; walk_to_position {x,y,reach_distance}; walk_to_player {player_name}; follow_player {player_name,follow_distance}; stop_follow_player {}; set_auto_defense {enabled}; equip_weapon {item_name,slot}; equip_ammo {item_name,slot}; equip_armor {item_name}; select_weapon_slot {slot}; mine_entity {entity_name,count}; mine_entity_exact {unit_number}; mine_resource_at {resource_name,x,y,count}; gather_resource {resource_name,count,search_radius}; supply_entity {unit_number,items:[{item_name,count}]}; execute_construction_plan {validation_id,placement_count}; place_entity {entity_name,x?,y?,direction?}; rotate_entity {unit_number,reverse}; move_items {item_name,entity_name,max_count,to_entity}; move_items_exact {item_name,unit_number,max_count,to_entity}; move_items_with_player {item_name,player_name,max_count,to_player}; set_machine_recipe {unit_number,recipe_name}; craft_item {item_name,count}; attack_nearest_enemy {search_radius}; clear_enemy_area {search_radius}; research_technology {technology_name}; wait {ticks}.
-
-Return exactly one strict JSON object with exactly these fields:
-{"chatMessage":"","plan":["observable step"],"currentStep":0,"operations":[{"name":"approved_operation","args":{}}]}
-plan is the visible canonical checklist proposal, currentStep indexes it, and operations contains only approved structured operations. If the whole goal is verified complete, return plan:[], currentStep:0, operations:[] and a short completion chatMessage.`
-
-function isSuccessfulCompletionContinuation(messages, { allowTools, recoveryAttempt }) {
-  if (!allowTools || recoveryAttempt > 0 || !Array.isArray(messages)) return false
-  const lastUser = [...messages].reverse().find(message => message?.role === 'user')
-  return typeof lastUser?.content === 'string' && lastUser.content.startsWith(COMPLETION_MARKER)
+function deepSeekModel(config) {
+  return /^deepseek(?:[-_./:]|$)/i.test(String(config?.model ?? ''))
 }
 
-function topLevelJsonObjectSpans(text) {
-  const spans = []
-  let depth = 0
-  let start = -1
-  let inString = false
-  let escaped = false
+function lastUserContent(messages) {
+  if (!Array.isArray(messages)) return ''
+  const lastUser = lastUserOutsideTail(messages)
+  return typeof lastUser?.content === 'string' ? lastUser.content : ''
+}
 
-  for (let index = 0; index < text.length; index++) {
-    const char = text[index]
-    if (inString) {
-      if (escaped) {
-        escaped = false
-        continue
-      }
-      if (char === '\\') {
-        escaped = true
-        continue
-      }
-      if (char === '"') inString = false
+function completionContinuation(messages, options = {}) {
+  if (options.allowTools === false || (options.recoveryAttempt ?? 0) > 0) return false
+  return lastUserContent(messages).startsWith(COMPLETION_MARKER)
+}
+
+function currentDifficultySignals(messages) {
+  if (!Array.isArray(messages)) return 0
+  let start = 0
+  for (let index = 0; index < messages.length; index++) {
+    const content = messages[index]?.role === 'user' && typeof messages[index].content === 'string'
+      ? messages[index].content
+      : ''
+    if (content.startsWith(CHAT_MARKER) || content.startsWith(COMPLETION_MARKER)) start = index
+  }
+
+  let failures = 0
+  for (let index = start + 1; index < messages.length; index++) {
+    const content = messages[index]?.role === 'user' && typeof messages[index].content === 'string'
+      ? messages[index].content
+      : ''
+    if (!content) continue
+    if (content.startsWith(FAILURE_MARKER)) {
+      failures++
       continue
     }
-
-    if (depth > 0 && char === '"') {
-      inString = true
-      continue
-    }
-    if (char === '{') {
-      if (depth === 0) start = index
-      depth++
-      continue
-    }
-    if (char === '}' && depth > 0) {
-      depth--
-      if (depth === 0 && start >= 0) {
-        spans.push([start, index + 1])
-        start = -1
-      }
+    if (!content.startsWith('[HARNESS]')) continue
+    if (/Tool-validation failure|Repeated tool observation loop|Recovery attempt \d+ was invalid|Invalid provider content|invalid tool call|admission|preflight/i.test(content)) {
+      failures++
     }
   }
-
-  return depth === 0 && !inString ? spans : []
+  return failures
 }
 
-export function normalizeProviderPlanContent(content) {
-  const text = String(content ?? '').trim()
-  if (!text) return text
+// Effort per round (plan item 1.3). The loop tells the provider what the round
+// has to do. `gather` is a round that cannot write or revise the plan: a
+// continuation round of a committed plan with the observation phase open.
+// Every round that offers submitPlan in a request that authors or revises a
+// plan is `decide`, because the model may write the plan in any of them (the
+// steam run's plan-writing round used 28,881 output units). So only the
+// continuation bracket (ordinary_planning) steps down for a gather round; the
+// authoring and replan brackets never do, and Jev's explicit budget ratings
+// and the recovery brackets are left alone.
+// Measured on the 2026-09-26 steam run (req_muhsihjg_1): completion requests
+// re-thought at high in every read round after round 0.
+export const ROUND_PHASES = Object.freeze(['gather', 'decide'])
+const GATHER_ROUND_POLICIES = Object.freeze({
+  ordinary_planning: { effort: 'low', reason: 'ordinary_planning_gather' },
+})
 
-  try {
-    JSON.parse(text)
-    return text
-  }
-  catch {}
-
-  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
-  if (fenced) {
-    const candidate = fenced[1].trim()
-    try {
-      JSON.parse(candidate)
-      return candidate
-    }
-    catch {}
-  }
-
-  const spans = topLevelJsonObjectSpans(text)
-  if (spans.length !== 1) return text
-  const candidate = text.slice(spans[0][0], spans[0][1]).trim()
-  try {
-    JSON.parse(candidate)
-    return candidate
-  }
-  catch {
-    return text
-  }
+function roundPhasePolicy(policy, options) {
+  if (!policy || options.roundPhase !== 'gather') return policy
+  return GATHER_ROUND_POLICIES[policy.reason] ?? policy
 }
 
-function leanTaskBoard(board) {
-  if (!board || typeof board !== 'object' || Array.isArray(board)) return undefined
-  return {
-    kind: board.kind,
-    goal_id: board.goal_id,
-    status: board.status,
-    blocker: board.blocker,
-    pause_reason: board.pause_reason,
-    revision: board.revision,
-    completed_count: board.completed_count,
-    total_steps: board.total_steps,
-    active_index: board.active_index,
-    active_step_id: board.active_step_id,
-    steps: Array.isArray(board.steps)
-      ? board.steps.slice(0, 30).map(step => ({
-          id: step?.id,
-          description: step?.description,
-          status: step?.status,
-        }))
-      : undefined,
-    evidence: Array.isArray(board.evidence) ? board.evidence.slice(-4) : undefined,
-  }
-}
-
-function parsePlanStateFromContent(content) {
-  const text = String(content ?? '')
-  const markerAt = text.lastIndexOf(PLAN_STATE_MARKER)
-  if (markerAt < 0) return undefined
-  const planText = text.slice(markerAt)
-  const newlineAt = planText.indexOf('\n')
-  if (newlineAt < 0) return undefined
-  try {
-    const state = JSON.parse(planText.slice(newlineAt + 1))
-    return state && typeof state === 'object' && !Array.isArray(state) ? state : undefined
-  }
-  catch {
-    return undefined
-  }
-}
-
-function currentPlanState(messages) {
-  if (!Array.isArray(messages)) return undefined
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]
-    if (message?.role !== 'user' || typeof message.content !== 'string' || !message.content.includes(PLAN_STATE_MARKER)) continue
-    const state = parsePlanStateFromContent(message.content)
-    if (state) return state
-  }
+function semanticBudgetPolicy(value) {
+  if (value === 'micro') return { effort: 'low', reason: 'jev_budget_micro' }
+  if (value === 'normal') return { effort: 'high', reason: 'jev_budget_normal' }
+  if (value === 'deep') return { effort: 'max', reason: 'jev_budget_deep' }
+  if (value === 'strategic') return { effort: 'max', reason: 'jev_budget_strategic' }
   return undefined
 }
 
-function latestDirectChat(messages) {
-  if (!Array.isArray(messages)) return undefined
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]
-    if (message?.role !== 'user' || typeof message.content !== 'string') continue
-    const text = message.content.trim()
-    if (!text.startsWith(CHAT_MARKER)) continue
-    const body = text.slice(CHAT_MARKER.length).trim()
-    const separator = body.indexOf(':')
-    const sender = separator >= 0 ? body.slice(0, separator).trim() : 'unknown'
-    const request = (separator >= 0 ? body.slice(separator + 1) : body).trim()
-    return { sender: sender.slice(0, 128), text: request.slice(0, 1200) }
-  }
-  return undefined
+export function selectReasoningPolicy(config, messages, options = {}) {
+  return roundPhasePolicy(baseReasoningPolicy(config, messages, options), options)
 }
 
-function isResumeText(value) {
-  const text = String(value ?? '').trim().toLocaleLowerCase()
-  if (!text) return false
-  const prefixes = ['continue', 'resume', '继续', '继续吧', '继续做', '接着', '接着做']
-  return prefixes.some(prefix => text === prefix || text.startsWith(`${prefix} `) || text.startsWith(`${prefix}，`) || text.startsWith(`${prefix},`))
+function baseReasoningPolicy(config, messages, options = {}) {
+  const capabilities = providerCapabilityProfile(config)
+  if (!capabilities.reasoning_effort) return undefined
+  // Auto may infer wire capabilities from the official endpoint, but dynamic
+  // reasoning policy still requires a DeepSeek model identity. This preserves
+  // conservative behavior for endpoint aliases while explicit profiles remain
+  // authoritative for compatible gateways.
+  if (capabilities.requested_profile === 'auto' && capabilities.id === 'deepseek' && !deepSeekModel(config)) return undefined
+  if (options.interactionRouter === true) {
+    return { effort: 'none', reason: 'interaction_router' }
+  }
+  if (options.recoveryKind === 'output_budget_exhaustion') {
+    return { effort: 'none', reason: 'output_budget_recovery' }
+  }
+  if (options.actionOmissionRepair === true) {
+    return { effort: 'low', reason: 'action_omission_repair' }
+  }
+  if (Number.isSafeInteger(options.recoveryAttempt) && options.recoveryAttempt > 0) {
+    return { effort: 'none', reason: 'strict_recovery' }
+  }
+  // One step's checkpoint from a harness packet of facts: a small bounded decision, not plan authoring.
+  if (options.triggerSource === 'step_contract') {
+    return { effort: 'low', reason: 'step_contract' }
+  }
+  // Authoring a plan is where extra reasoning pays off; it gets the largest
+  // bracket whatever Jev rated the turn, so it is not cut off and retried.
+  if (PLAN_AUTHORING_TRIGGERS.has(options.triggerSource)) {
+    return { effort: 'max', reason: 'plan_authoring' }
+  }
+  const semanticBudget = semanticBudgetPolicy(options.reasoningBudget)
+  if (semanticBudget) return semanticBudget
+  if (options.triggerSource === 'amend_current') {
+    return { effort: 'high', reason: 'same_goal_amendment' }
+  }
+  if (options.triggerSource === 'new_goal') {
+    return { effort: 'high', reason: 'new_goal' }
+  }
+  if (options.triggerSource === 'post_step_continue') {
+    return { effort: 'low', reason: 'jev_post_step_continue' }
+  }
+  if (options.triggerSource === 'post_step_observe') {
+    return { effort: 'low', reason: 'jev_post_step_observe' }
+  }
+  if (options.triggerSource === 'post_step_reanchor') {
+    return { effort: 'low', reason: 'jev_post_step_reanchor' }
+  }
+  if (options.triggerSource === 'post_step_replan') {
+    return { effort: 'high', reason: 'jev_post_step_replan' }
+  }
+  if (options.triggerSource === 'recovery_continue_low') {
+    return { effort: 'low', reason: 'jev_recovery_continue' }
+  }
+  if (options.triggerSource === 'recovery_replan_high') {
+    return { effort: 'high', reason: 'jev_recovery_replan' }
+  }
+  if (completionContinuation(messages, options)) {
+    return { effort: 'low', reason: 'deterministic_completion' }
+  }
+
+  const failures = currentDifficultySignals(messages)
+  if (failures >= 2) return { effort: 'low', reason: 'repeated_failure_compact_finalize' }
+  if (failures === 1 || options.triggerSource === 'failure') {
+    return { effort: 'high', reason: 'ordinary_replan' }
+  }
+
+  if (options.triggerSource === 'continue_current') {
+    return { effort: 'low', reason: 'same_goal_continue' }
+  }
+  return { effort: 'high', reason: 'ordinary_planning' }
 }
 
-export function classifyUserSteering(messages) {
-  const chat = latestDirectChat(messages)
-  if (!chat) return undefined
-  const state = currentPlanState(messages)
-  const hasPendingGoal = state && state.status !== 'completed'
-  const sameAsDurableObjective = hasPendingGoal
-    && typeof state?.objective === 'string'
-    && state.objective.trim() === chat.text.trim()
-  const mode = isResumeText(chat.text)
-    ? (hasPendingGoal ? 'resume_existing_goal' : 'new_goal')
-    : sameAsDurableObjective
-      ? 'current_goal'
-      : (hasPendingGoal ? 'steer_existing_goal' : 'new_goal')
-  return {
-    mode,
-    sender: chat.sender,
-    text: chat.text,
-    goal_id: state?.goal_id,
-    goal_status: state?.status,
-    active_step: state?.current_step_text,
+// Output caps are ceilings, not spend: a turn stops when it is done. A cap
+// that is too small costs twice, because the exhausted call is discarded and
+// retried, so every bracket leaves room for reasoning plus the plan itself.
+// The cap follows the effort (1.3): the one recorded max round that wrote a
+// plan (steam run, round 3) used 28,881 of a 32,000 cap, 90% of it
+// reasoning, so the writing bracket gets headroom; gather rounds run at a
+// lower effort and get that effort's bracket.
+function reasoningOutputBudget(policy) {
+  switch (policy?.reason) {
+    case 'plan_authoring': return 40000
+    case 'ordinary_planning_gather': return 6000
+    case 'jev_budget_strategic': return 24000
+    case 'jev_budget_deep': return 16000
+    case 'ordinary_replan':
+    case 'jev_post_step_replan':
+    case 'jev_recovery_replan':
+      return 16000
+    case 'jev_budget_normal': return 12000
+    case 'same_goal_continue':
+    case 'jev_post_step_observe':
+    case 'jev_recovery_continue':
+      return 8000
+    case 'repeated_failure_compact_finalize':
+      return 4000
+    default:
+      if (policy?.effort === 'max') return 16000
+      if (policy?.effort === 'high') return 12000
+      if (policy?.effort === 'low') return 6000
+      return 4000
   }
 }
 
-function latestFailure(messages) {
-  if (!Array.isArray(messages)) return ''
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]
-    if (message?.role !== 'user' || typeof message.content !== 'string') continue
-    if (message.content.startsWith(FAILURE_MARKER)) return message.content.slice(0, 5000)
+function reasoningBodyPatch(policy, capabilities) {
+  const patch = {}
+  if (capabilities.reasoning_effort_range === 'low_to_high') {
+    // A `none` round (interaction router at a 180-token cap, strict and output-budget recovery) sends no field: the
+    // proxy's own default, which those rounds ran on through runs H and I. Only a real effort is sent, max clamped to high.
+    if (policy.effort !== 'none') patch.reasoning_effort = policy.effort === 'max' ? 'high' : policy.effort
   }
-  return ''
+  else if (capabilities.reasoning_effort) {
+    patch.reasoning_effort = capabilities.id === 'openai-reasoning'
+      ? (policy.effort === 'none' ? 'minimal' : policy.effort === 'max' ? 'high' : policy.effort)
+      : policy.effort
+  }
+  if (capabilities.thinking_control === 'deepseek') {
+    patch.thinking = { type: policy.effort === 'none' ? 'disabled' : 'enabled' }
+  }
+  return patch
 }
 
-function failureRecoveryHint(failure) {
-  if (!failure) return ''
-  if (/PLANNED_COLLISION|WORLD_COLLISION|placing:not_placeable|not_placeable/i.test(failure)) {
-    return 'placement_failure: do not retry the same coordinate blindly; use returned footprint/blocker geometry or validate a revised local construction batch before execution'
-  }
-  if (/too_far/i.test(failure)) {
-    return 'range_failure: do not create a walk/action/model loop; use exact target identity when available and let runtime reach recovery handle deterministic approach, re-observing only if the target itself is stale'
-  }
-  if (/target[^\n]{0,80}(?:missing|not found)|entity[^\n]{0,80}not found/i.test(failure)) {
-    return 'stale_target: re-observe the exact entity identity instead of substituting an arbitrary same-name target'
-  }
-  if (/ITEMS_MISSING|missing items|insufficient inventory/i.test(failure)) {
-    return 'inventory_failure: satisfy the deterministic inventory deficit before retrying the blocked construction/action'
-  }
-  return 'operation_failure: the failed operation and dependent queued operations are not successful; use the receipt to choose the smallest necessary recovery'
+/**
+ * Provider policy shim.
+ *
+ * The runtime selects a deterministic reasoning policy from observable request
+ * state. Wire-level capability encoding is explicit through the configured
+ * provider profile. Auto mode recognizes only the official DeepSeek endpoint;
+ * unknown OpenAI-compatible gateways fail closed to generic fields.
+ */
+// Reports the effort and output cap chosen for one call to the caller, so the
+// behavior trace can name the decision. Observability only: a failing
+// listener never changes or fails the provider request.
+async function reportReasoningPolicy(options, decision) {
+  if (typeof options.onReasoningPolicy !== 'function') return
+  try { await options.onReasoningPolicy(decision) }
+  catch { /* never let tracing fail a provider call */ }
 }
 
-function steeringDomain(state, failure, userText = '') {
-  const haystack = JSON.stringify({
-    objective: state?.objective,
-    step: state?.current_step_text,
-    operations: state?.last_operations,
-    blocker: state?.blocker,
-    failure,
-    userText,
+export async function providerRequest(config, messages, options = {}) {
+  const capabilities = providerCapabilityProfile(config)
+  const policy = selectReasoningPolicy(config, messages, options)
+  const roundPhase = ROUND_PHASES.includes(options.roundPhase) ? options.roundPhase : undefined
+  if (!policy) {
+    const callerCap = options.requestBodyPatch?.max_tokens ?? options.requestBodyPatch?.max_completion_tokens
+    await reportReasoningPolicy(options, {
+      effort: undefined,
+      reason: capabilities.reasoning_effort ? 'reasoning_policy_not_applicable' : 'provider_has_no_reasoning_control',
+      round_phase: roundPhase,
+      output_cap: Number.isSafeInteger(callerCap) ? callerCap : undefined,
+      output_cap_source: Number.isSafeInteger(callerCap) ? 'caller' : 'provider_default',
+      capability_profile: capabilities.id,
+    })
+    return baseProviderRequest(config, messages, options)
+  }
+
+  const semanticBudgetNeedsFullPlanner = ['normal', 'deep', 'strategic'].includes(options.reasoningBudget)
+  const isCompletionContinuation = completionContinuation(messages, options)
+  const compactPath = options.recoveryKind === 'output_budget_exhaustion'
+    || (
+      isCompletionContinuation
+      && !PLAN_AUTHORING_TRIGGERS.has(options.triggerSource)
+      && !semanticBudgetNeedsFullPlanner
+    )
+  const forceFullPlanner = isCompletionContinuation && !compactPath
+  const callerPatch = options.requestBodyPatch && typeof options.requestBodyPatch === 'object' && !Array.isArray(options.requestBodyPatch)
+    ? options.requestBodyPatch
+    : {}
+  const policyBudget = !compactPath && callerPatch.max_tokens === undefined && callerPatch.max_completion_tokens === undefined
+    ? (reasoningOutputBudget(policy) ?? (forceFullPlanner ? FULL_PLANNER_FALLBACK_OUTPUT_BUDGET : undefined))
+    : undefined
+  const requestOptions = {
+    ...options,
+    forceFullPlanner,
+    requestBodyPatch: {
+      ...(policyBudget !== undefined ? { max_tokens: policyBudget } : {}),
+      ...callerPatch,
+      ...reasoningBodyPatch(policy, capabilities),
+    },
+    providerPolicy: {
+      ...policy,
+      capability_profile: capabilities.id,
+    },
+  }
+
+  const requestedCap = requestOptions.requestBodyPatch.max_tokens ?? requestOptions.requestBodyPatch.max_completion_tokens
+  await reportReasoningPolicy(options, {
+    effort: policy.effort,
+    reason: policy.reason,
+    round_phase: roundPhase,
+    output_cap: Number.isSafeInteger(requestedCap) ? requestedCap : undefined,
+    output_cap_source: policyBudget !== undefined
+      ? 'effort_bracket'
+      : Number.isSafeInteger(requestedCap) ? 'caller' : (compactPath ? 'compact_path' : 'provider_default'),
+    capability_profile: capabilities.id,
   })
-  if (/place_entity|placing|construction|PLANNED_COLLISION|WORLD_COLLISION|execute_construction_plan|validateConstructionPlan/i.test(haystack)) return 'construction'
-  if (/gather_resource|mine_entity|mine_resource|mining/i.test(haystack)) return 'mining'
-  if (/move_items|supply_entity|moving_items|transfer/i.test(haystack)) return 'logistics'
-  if (/water|shore|coast|river|lake|terrain|tile|水边|岸边|海岸|河|湖|水|地形|地图/i.test(haystack)) return 'terrain'
-  return 'general'
+  return baseProviderRequest(config, messages, requestOptions)
 }
 
-function receiptDelta(messages) {
-  if (!Array.isArray(messages)) return ''
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]
-    if (message?.role !== 'user' || typeof message.content !== 'string') continue
-    const text = message.content
-    if (!text.startsWith(COMPLETION_MARKER)) continue
-    const receiptAt = text.indexOf('Detailed task receipt:')
-    if (receiptAt < 0) return 'last_receipt=completed; treat the completion receipt as authoritative evidence for the submitted batch'
-    try {
-      const status = JSON.parse(text.slice(receiptAt + 'Detailed task receipt:'.length).trim())
-      const batch = status?.last_completed_batch
-      const types = Array.isArray(batch?.task_types) ? batch.task_types.slice(0, 6).join(',') : ''
-      const resultCode = status?.basic_operation?.last_result?.code
-      return `last_receipt=completed${Number.isSafeInteger(batch?.batch_id) ? ` batch=${batch.batch_id}` : ''}${types ? ` tasks=${types}` : ''}${resultCode ? ` result=${resultCode}` : ''}; do not re-check deterministic facts already proven by this receipt`
-    }
-    catch {
-      return 'last_receipt=completed; treat the completion receipt as authoritative evidence for the submitted batch'
-    }
-  }
-  return ''
-}
 
-export function buildSteeringContext(messages) {
-  if (!Array.isArray(messages) || messages.length === 0) return ''
-  const state = currentPlanState(messages)
-  const user = classifyUserSteering(messages)
-  const failure = latestFailure(messages)
-  const failureHint = failureRecoveryHint(failure)
-  const domain = steeringDomain(state, failure, user?.text)
-  const lines = [
-    `${STEERING_MARKER} Harness-generated decision guidance; this is not Factorio world state.`,
-    `domain=${domain}`,
-    'decision_order=exact observed identity > nearest-name lookup; deterministic validator > trial-and-error action; small fully-parameterized batch > one-operation-per-turn; runtime fact > prototype fact > remembered game knowledge',
-    'batch_boundary=stop before an operation that needs a new unit_number, mutable result, or other observation that does not exist yet',
-    'success_evidence=never claim a world-changing action succeeded from intent alone; require an operation receipt or subsequent observation',
-  ]
-
-  if (user) {
-    lines.push(`user_mode=${user.mode}${user.goal_id ? ` goal=${user.goal_id}` : ''}${user.goal_status ? ` status=${user.goal_status}` : ''}`)
-    lines.push(`latest_human=${JSON.stringify(user.text)}`)
-    if (user.mode === 'steer_existing_goal') {
-      lines.push('user_steering=the latest human instruction is authoritative for pending intent; preserve verified completed evidence, revise/reorder/drop remaining steps as needed, and do not treat the older durable objective as overriding this steering')
-    }
-    else if (user.mode === 'resume_existing_goal') {
-      lines.push('user_steering=resume the existing durable goal; do not reinterpret a bare continue/resume as a new independent goal')
-    }
-    else if (user.mode === 'current_goal') {
-      lines.push('user_steering=this is the original current durable goal, not a new mid-plan steering event; preserve completed evidence and continue the canonical active plan unless live evidence requires a replan')
-    }
-    else {
-      lines.push('user_steering=treat this as the current human goal; prior completed history is context, not an instruction to continue an older goal')
-    }
-  }
-
-  if (domain === 'construction') {
-    lines.push('construction=physical collision footprint != mining/working area != selection box != pickup/drop position; validate multiple exact placements together before executing them')
-  }
-  if (domain === 'terrain') {
-    lines.push('terrain=use getLocalSpatialObservation for live bounded terrain before terrain-dependent movement or construction; terrain_tiles.runs are compact exact tile runs, and water is a tile, not an entity')
-  }
-  if (failureHint) lines.push(`recovery=${failureHint}`)
-  const delta = receiptDelta(messages)
-  if (delta) lines.push(delta)
-  return lines.join('\n').slice(0, 3600)
-}
-
-export function applySteeringMessages(messages, sourceMessages = messages) {
-  const output = Array.isArray(messages) ? messages.map(message => ({ ...message })) : []
-  const steering = buildSteeringContext(sourceMessages)
-  if (!steering) return output
-  const steeringMessage = { role: 'user', content: steering }
-  const last = output.at(-1)
-  const terminalInstruction = last?.role === 'user'
-    && typeof last.content === 'string'
-    && (last.content.startsWith('[MOD]') || last.content.startsWith('[HARNESS]'))
-  if (terminalInstruction) {
-    output.splice(Math.max(0, output.length - 1), 0, steeringMessage)
-  }
-  else {
-    output.push(steeringMessage)
-  }
-  return output
-}
-
-export function compactPlanStateContent(content) {
-  const text = String(content ?? '')
-  const markerAt = text.lastIndexOf(PLAN_STATE_MARKER)
-  if (markerAt < 0) {
-    if (text.startsWith(MEMORY_MARKER)) {
-      return '[MEMORY COMPACTED] Prior dialogue is omitted for this successful deterministic continuation; use the original current chat request, previous assistant plan, and live tools when needed.'
-    }
-    return text
-  }
-
-  const planText = text.slice(markerAt)
-  const newlineAt = planText.indexOf('\n')
-  if (newlineAt < 0) return planText
-  try {
-    const state = JSON.parse(planText.slice(newlineAt + 1))
-    if (!state || typeof state !== 'object' || Array.isArray(state)) return planText
-    const lean = {
-      goal_id: state.goal_id,
-      owner: state.owner,
-      objective: state.objective,
-      status: state.status,
-      blocker: state.blocker,
-      pause_reason: state.pause_reason,
-      persistent_runtime: state.persistent_runtime,
-      task_board: leanTaskBoard(state.task_board),
-      plan: Array.isArray(state.plan) ? state.plan.slice(0, 30) : undefined,
-      current_step: state.current_step,
-      current_step_text: state.current_step_text,
-      revision: state.revision,
-      last_operations: Array.isArray(state.last_operations) ? state.last_operations.slice(-16) : undefined,
-    }
-    return `${PLAN_STATE_MARKER} Compact harness-owned durable goal/plan state for this successful continuation.\n${JSON.stringify(lean)}`
-  }
-  catch {
-    // Even if the state cannot be parsed, discard older dialogue before the
-    // marker. Recovery attempts use the original unmodified messages.
-    return planText
-  }
-}
-
-export function compactCompletionReceipt(content) {
-  const text = String(content ?? '')
-  if (!text.startsWith(COMPLETION_MARKER)) return text
-  const receiptAt = text.indexOf('Detailed task receipt:')
-  if (receiptAt < 0) return text
-  const raw = text.slice(receiptAt + 'Detailed task receipt:'.length).trim()
-  try {
-    const status = JSON.parse(raw)
-    if (!status || typeof status !== 'object' || Array.isArray(status)) return text
-    const lean = {
-      task_state: status.task_state,
-      queue_empty: status.queue_empty,
-      queue_length: status.queue_length,
-      last_completed_batch: status.last_completed_batch,
-      last_cancelled_batch: status.last_cancelled_batch,
-      basic_operation: status.basic_operation?.last_result
-        ? { last_result: status.basic_operation.last_result }
-        : undefined,
-    }
-    return `${COMPLETION_MARKER} Compact task receipt: ${JSON.stringify(lean)}`
-  }
-  catch {
-    return text
-  }
-}
-
-export function compactCompletionMessages(messages) {
-  let replacedSystem = false
-  return messages.map((message) => {
-    if (!replacedSystem && message?.role === 'system') {
-      replacedSystem = true
-      return { ...message, content: COMPACT_CONTINUATION_PROMPT }
-    }
-    if (message?.role === 'user' && typeof message.content === 'string') {
-      if (message.content.startsWith(COMPLETION_MARKER)) {
-        return { ...message, content: compactCompletionReceipt(message.content) }
-      }
-      if (message.content.startsWith(MEMORY_MARKER) || message.content.includes(PLAN_STATE_MARKER)) {
-        return { ...message, content: compactPlanStateContent(message.content) }
-      }
-    }
-    return { ...message }
+// Explicit CLI-proxy harness preflight, never an endpoint/model auto-detection
+// rule. Exercise the actual role serializers with an owned in-memory transport;
+// this function cannot call a provider, log credentials, or grant game authority.
+export async function verifyCliProxyProviderContracts(config, { requestId = 'cli_proxy_preflight' } = {}) {
+  check(typeof requestId === 'string' && /^[a-zA-Z0-9_.:-]{1,240}$/.test(requestId), 'Invalid CLI-proxy preflight request id')
+  check(config?.aiApiMethod === 'cli-proxy', 'CLI-proxy preflight requires AI_API_METHOD=cli-proxy')
+  const roles = AGENT_ROLES.map(role => {
+    const resolved = resolveAgentRole(config, role)
+    const capabilities = providerCapabilityProfile(resolved)
+    check(resolved.profile === 'cli-proxy' && capabilities.id === 'cli-proxy'
+      && capabilities.model_family === 'openai-gpt' && capabilities.tools_kept_when_closed === true
+      && capabilities.tool_support === true, `CLI-proxy ${role} requires the CLI-proxy GPT closed-tool contract`)
+    return { role, resolved, capabilities }
   })
-}
-
-export function compactCompletionTools(definitions = toolDefinitions) {
-  return definitions.map((tool) => {
-    if (tool?.type !== 'function' || !tool.function) return tool
-    const description = typeof tool.function.description === 'string'
-      ? tool.function.description.replace(/\s+/g, ' ').trim().slice(0, 120)
-      : undefined
-    return {
-      ...tool,
-      function: {
-        ...tool.function,
-        ...(description ? { description } : {}),
+  const proofs = []
+  for (const { role, resolved, capabilities } of roles) {
+    let body
+    await providerRequest(resolved, [
+      { role: 'system', content: 'Offline serializer preflight. No gameplay or model inference.' },
+      { role: 'user', content: 'Verify the closed decision transport.' },
+    ], {
+      role, allowTools: false, requestId: `${requestId}:${role}`, promptTraceFile: null,
+      requestBodyPatch: { max_tokens: 4000 },
+      fetchImpl: async (_url, options) => {
+        body = JSON.parse(options.body)
+        return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{}' } }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } })
       },
-    }
-  })
+    })
+    check(body?.model === resolved.model && body.tool_choice === 'none' && Array.isArray(body.tools)
+      && body.tools.length > 0 && body.tools.every(tool => tool.type === 'function')
+      && body.tools.some(tool => tool.function?.name === 'submitPlan'), `CLI-proxy ${role} closed serializer contract is missing`)
+    proofs.push({ role, model: resolved.model, profile: resolved.profile,
+      capabilities: { id: capabilities.id, model_family: capabilities.model_family,
+        tools_kept_when_closed: capabilities.tools_kept_when_closed, tool_support: capabilities.tool_support }, body })
+  }
+  return { event: 'provider.cli_proxy_contract_verified', request_id: requestId,
+    reason: 'explicit_cli_proxy_method_and_role_closed_wire_verified', status: 'pass',
+    ai_api_method: config.aiApiMethod, external_inference_calls: 0, roles: proofs }
 }
 
-export function providerEndpoint(base) {
+export const DECISION_PROVIDER_DEFAULTS = Object.freeze({
+  provider: 'typesafe',
+  url: 'https://api.typesafe.ai/v1/systemone',
+  model: 'jev-latest',
+  timeoutMs: 5000,
+  maxRequestsPerHour: 600,
+  // A local cost guard, not a TypeSafe API limit. The post-step boundary's 19
+  // questions alone serialize to ~15k characters, so the old 16k default made
+  // every live post-step call fall back before reaching Jev.
+  maxInputChars: 48000,
+  maxQuestions: 24,
+})
+
+function decisionProviderInteger(value, fallback, name, min, max) {
+  const parsed = value === undefined ? fallback : Number(value)
+  check(Number.isSafeInteger(parsed) && parsed >= min && parsed <= max, `${name} must be an integer from ${min} to ${max}`)
+  return parsed
+}
+
+export function decisionProviderEndpoint(value) {
   let url
-  try { url = new URL(base) }
-  catch { throw new DeploymentError('Invalid provider URL') }
-  check(!url.username && !url.password && !url.search && !url.hash, 'Provider URL cannot contain credentials, query, or fragment')
-  check(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)), 'Remote provider URL requires HTTPS')
-  url.pathname = url.pathname.replace(/\/?$/, '/') + 'chat/completions'
+  try { url = new URL(String(value ?? '')) }
+  catch { throw new DeploymentError('Invalid decision provider URL') }
+  check(!url.username && !url.password && !url.search && !url.hash, 'Decision provider URL cannot contain credentials, query, or fragment')
+  check(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)), 'Remote decision provider URL requires HTTPS')
+  check(url.pathname && url.pathname !== '/', 'Decision provider URL must include an API endpoint path')
   return url.toString()
 }
 
-export async function providerRequest(config, messages, { fetchImpl = fetch, signal, allowTools = true, recoveryAttempt = 0 } = {}) {
-  check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
-  check(typeof config.model === 'string' && /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model), 'Invalid model identifier')
-  check(Array.isArray(messages) && messages.length > 0 && messages.length <= 50, 'Invalid provider message history')
-  check(typeof allowTools === 'boolean', 'Invalid tool availability flag')
-  check(Number.isSafeInteger(recoveryAttempt) && recoveryAttempt >= 0 && recoveryAttempt <= 100, 'Invalid provider recovery attempt')
-  const timeoutMs = config.timeoutMs ?? 120000
-  check(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 600000, 'Provider timeout must be an integer from 1000 to 600000 ms')
+export function decisionProviderConfiguration(env = process.env) {
+  const key = env.DECISION_PROVIDER_API_KEY ?? env.TYPESAFE_API_KEY ?? ''
+  if (typeof key !== 'string' || key.trim().length === 0) return undefined
 
-  const timeoutSignal = AbortSignal.timeout(timeoutMs)
-  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
-  const compactContinuation = isSuccessfulCompletionContinuation(messages, { allowTools, recoveryAttempt })
-  const compactedMessages = compactContinuation ? compactCompletionMessages(messages) : messages
+  check(!/[\r\n\0]/.test(key), 'Decision provider API key is malformed')
+
+  const url = decisionProviderEndpoint(env.DECISION_PROVIDER_API_URL ?? DECISION_PROVIDER_DEFAULTS.url)
+  const model = String(env.DECISION_PROVIDER_MODEL ?? DECISION_PROVIDER_DEFAULTS.model).trim()
+  check(/^[a-zA-Z0-9._:/-]{1,200}$/.test(model), 'Invalid decision provider model identifier')
+
+  return {
+    provider: DECISION_PROVIDER_DEFAULTS.provider,
+    key,
+    url,
+    model,
+    timeoutMs: decisionProviderInteger(
+      env.DECISION_PROVIDER_TIMEOUT_MS,
+      DECISION_PROVIDER_DEFAULTS.timeoutMs,
+      'DECISION_PROVIDER_TIMEOUT_MS',
+      100,
+      30000,
+    ),
+    maxRequestsPerHour: decisionProviderInteger(
+      env.MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR,
+      DECISION_PROVIDER_DEFAULTS.maxRequestsPerHour,
+      'MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR',
+      1,
+      1200,
+    ),
+    maxInputChars: decisionProviderInteger(
+      env.DECISION_PROVIDER_MAX_INPUT_CHARS,
+      DECISION_PROVIDER_DEFAULTS.maxInputChars,
+      'DECISION_PROVIDER_MAX_INPUT_CHARS',
+      1024,
+      150000,
+    ),
+    maxQuestions: decisionProviderInteger(
+      env.DECISION_PROVIDER_MAX_QUESTIONS,
+      DECISION_PROVIDER_DEFAULTS.maxQuestions,
+      'DECISION_PROVIDER_MAX_QUESTIONS',
+      1,
+      512,
+    ),
+  }
+}
+
+// Largest per-value error of a probability reported with two decimals.
+const DECISION_PROBABILITY_ROUNDING = 0.005
+
+const DECISION_ENTRY_LIMITS = Object.freeze({
+  maxDepth: 12,
+  maxCollectionItems: 128,
+  maxStringChars: 8000,
+  maxNodes: 1024,
+  maxObjectKeyChars: 200,
+})
+
+function plainDecisionObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function validateDecisionEntryValue(value, label, depth, budget) {
+  check(depth <= DECISION_ENTRY_LIMITS.maxDepth, `${label} exceeds maximum structured depth ${DECISION_ENTRY_LIMITS.maxDepth}`)
+  budget.nodes++
+  check(budget.nodes <= DECISION_ENTRY_LIMITS.maxNodes, `${label} exceeds maximum structured node count ${DECISION_ENTRY_LIMITS.maxNodes}`)
+
+  if (value === null) return
+  if (typeof value === 'string') {
+    check(value.length <= DECISION_ENTRY_LIMITS.maxStringChars, `${label} contains a string longer than ${DECISION_ENTRY_LIMITS.maxStringChars} characters`)
+    return
+  }
+  if (typeof value === 'number') {
+    check(Number.isFinite(value), `${label} contains a non-finite number`)
+    return
+  }
+  if (typeof value === 'boolean') return
+
+  if (Array.isArray(value)) {
+    check(value.length <= DECISION_ENTRY_LIMITS.maxCollectionItems, `${label} contains an array larger than ${DECISION_ENTRY_LIMITS.maxCollectionItems} items`)
+    // JSON serializes an undefined array slot as null.
+    for (const entry of value) validateDecisionEntryValue(entry === undefined ? null : entry, label, depth + 1, budget)
+    return
+  }
+
+  check(plainDecisionObject(value), `${label} contains an unsupported value`)
+  // An undefined member is omitted on the wire, exactly like JSON.stringify.
+  // Rejecting it failed every live Jev call: runtime state objects routinely
+  // carry optional fields that are undefined.
+  const entries = Object.entries(value).filter(([, entry]) => entry !== undefined)
+  check(entries.length <= DECISION_ENTRY_LIMITS.maxCollectionItems, `${label} contains an object larger than ${DECISION_ENTRY_LIMITS.maxCollectionItems} entries`)
+  for (const [key, entry] of entries) {
+    check(key.length > 0 && key.length <= DECISION_ENTRY_LIMITS.maxObjectKeyChars, `${label} contains an invalid object key`)
+    validateDecisionEntryValue(entry, label, depth + 1, budget)
+  }
+}
+
+function validateDecisionEntry(value, label) {
+  check(
+    value === null || typeof value === 'string' || Array.isArray(value) || plainDecisionObject(value),
+    `${label} must be a string, object, array, or null`,
+  )
+  validateDecisionEntryValue(value, label, 0, { nodes: 0 })
+}
+
+function validateDecisionQuestion(id, question) {
+  check(/^[A-Za-z0-9_.-]{1,80}$/.test(id), 'Invalid decision question identifier')
+  check(plainDecisionObject(question), `Decision question ${id} must be an object`)
+  check(['choice', 'score', 'noul'].includes(question.type), `Decision question ${id} has an unsupported type`)
+  const allowedKeys = new Set(['type', 'instructions', 'criteria'])
+  for (const key of Object.keys(question)) check(allowedKeys.has(key), `Decision question ${id} has unsupported field ${key}`)
+  if (question.instructions !== undefined) {
+    validateDecisionEntry(question.instructions, `Decision question ${id} instructions`)
+  }
+
+  if (question.type === 'choice') {
+    check(plainDecisionObject(question.criteria), `Choice question ${id} requires criteria`)
+    const entries = Object.entries(question.criteria)
+    check(entries.length >= 1 && entries.length <= 255, `Choice question ${id} must have 1 to 255 criteria`)
+    for (const [key, description] of entries) {
+      check(/^[A-Za-z0-9_.-]{1,80}$/.test(key), `Choice question ${id} has an invalid criterion key`)
+      validateDecisionEntry(description, `Choice question ${id} criterion ${key}`)
+    }
+  }
+
+  if (question.type === 'score') {
+    check(Array.isArray(question.criteria) && question.criteria.length >= 2 && question.criteria.length <= 10, `Score question ${id} must have 2 to 10 criteria`)
+    for (let index = 0; index < question.criteria.length; index++) {
+      validateDecisionEntry(question.criteria[index], `Score question ${id} criterion ${index}`)
+    }
+  }
+
+  if (question.type === 'noul' && question.criteria !== undefined && question.criteria !== null) {
+    check(plainDecisionObject(question.criteria), `Noul question ${id} criteria must be an object or null when provided`)
+    const entries = Object.entries(question.criteria)
+    check(entries.length <= 2, `Noul question ${id} criteria may describe only true and/or false`)
+    for (const [key, description] of entries) {
+      check(key === 'true' || key === 'false', `Noul question ${id} has unsupported criterion ${key}`)
+      validateDecisionEntry(description, `Noul question ${id} criterion ${key}`)
+    }
+  }
+}
+
+export function normalizeDecisionProviderRequest(config, state, questions) {
+  check(config && typeof config === 'object', 'Decision provider is not configured')
+  check(questions && typeof questions === 'object' && !Array.isArray(questions), 'Decision questions must be an object')
+
+  const entries = Object.entries(questions)
+  check(entries.length >= 1 && entries.length <= config.maxQuestions, `Decision request must contain 1 to ${config.maxQuestions} questions`)
+  for (const [id, question] of entries) validateDecisionQuestion(id, question)
+  validateDecisionEntry(state, 'Decision provider state')
+
   const body = {
+    state,
     model: config.model,
-    messages: applySteeringMessages(compactedMessages, messages),
-    max_tokens: compactContinuation ? COMPLETION_MAX_TOKENS : DEFAULT_MAX_TOKENS,
+    questions,
   }
-  if (allowTools) {
-    body.tools = compactContinuation ? compactCompletionTools(toolDefinitions) : toolDefinitions
-    body.tool_choice = 'auto'
+
+  let serialized
+  try { serialized = JSON.stringify(body) }
+  catch { throw new DeploymentError('Decision provider request is not JSON serializable') }
+
+  check(serialized.length <= config.maxInputChars, `Decision provider request exceeds ${config.maxInputChars} characters`)
+  return { body, serialized }
+}
+
+function validProbability(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
+function exactDecisionKeys(value, expected) {
+  const actual = Object.keys(value).sort()
+  const wanted = [...expected].sort()
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index])
+}
+
+function probabilityDistribution(value, expectedKeys, label) {
+  check(value && typeof value === 'object' && !Array.isArray(value), `${label} has invalid probabilities`)
+  check(exactDecisionKeys(value, expectedKeys), `${label} probabilities do not match the declared rubric`)
+  let total = 0
+  for (const key of expectedKeys) {
+    check(validProbability(value[key]), `${label} has an invalid probability`)
+    total += value[key]
   }
+  // Jev reports probabilities with two decimals, so each value can be off by
+  // up to half a unit and a valid distribution can total 0.99 or 1.01.
+  const tolerance = Math.max(0.0001, expectedKeys.length * DECISION_PROBABILITY_ROUNDING)
+  check(Math.abs(total - 1) <= tolerance, `${label} probabilities must sum to 1`)
+}
+
+function decisionEntriesEqual(left, right) {
+  if (left === right) return true
+  if (typeof left !== typeof right || left === null || right === null) return false
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((entry, index) => decisionEntriesEqual(entry, right[index]))
+  }
+  if (!plainDecisionObject(left) || !plainDecisionObject(right)) return false
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && decisionEntriesEqual(left[key], right[key]))
+}
+
+function validateDecisionAnswer(id, question, answer) {
+  check(answer && typeof answer === 'object' && !Array.isArray(answer), `Decision provider answer ${id} is missing`)
+  check(answer.type === question.type, `Decision provider answer ${id} has the wrong type`)
+
+  if (question.type === 'choice') {
+    const criteriaKeys = Object.keys(question.criteria)
+    check(typeof answer.choice === 'string' && Object.prototype.hasOwnProperty.call(question.criteria, answer.choice), `Decision provider answer ${id} returned an unknown choice`)
+    probabilityDistribution(answer.probabilities, criteriaKeys, `Decision provider answer ${id}`)
+    check(validProbability(answer.confidence), `Decision provider answer ${id} has invalid confidence`)
+    const selectedProbability = answer.probabilities[answer.choice]
+    check(criteriaKeys.every(key => selectedProbability >= answer.probabilities[key] - 0.0000001), `Decision provider answer ${id} choice is not the highest-probability option`)
+  }
+  else if (question.type === 'score') {
+    check(typeof answer.score === 'number' && Number.isFinite(answer.score), `Decision provider answer ${id} has an invalid score`)
+    check(answer.score >= 0 && answer.score <= question.criteria.length - 1, `Decision provider answer ${id} score is outside the declared rubric`)
+    check(answer.legend && typeof answer.legend === 'object' && !Array.isArray(answer.legend), `Decision provider answer ${id} has an invalid legend`)
+    const expectedKeys = question.criteria.map((_, index) => String(index))
+    check(exactDecisionKeys(answer.legend, expectedKeys), `Decision provider answer ${id} legend does not match the declared rubric`)
+    probabilityDistribution(answer.probabilities, expectedKeys, `Decision provider answer ${id}`)
+    for (let index = 0; index < question.criteria.length; index++) {
+      const key = String(index)
+      check(decisionEntriesEqual(answer.legend[key], question.criteria[index]), `Decision provider answer ${id} legend does not match the declared rubric`)
+    }
+    check(validProbability(answer.confidence), `Decision provider answer ${id} has invalid confidence`)
+  }
+  else {
+    check(validProbability(answer.noul), `Decision provider answer ${id} has an invalid noul value`)
+  }
+}
+
+export async function decisionProviderRequest(config, state, questions, {
+  fetchImpl = fetch,
+  signal,
+  reserve,
+} = {}) {
+  check(config && typeof config === 'object' && typeof config.key === 'string' && config.key.trim().length > 0, 'Decision provider is not configured')
+  const { serialized } = normalizeDecisionProviderRequest(config, state, questions)
+  check(typeof reserve === 'function', 'Decision provider request requires a budget reservation callback')
+  await reserve()
+
+  const timeoutSignal = AbortSignal.timeout(config.timeoutMs)
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
 
   try {
-    const response = await fetchImpl(providerEndpoint(config.base), {
+    const response = await fetchImpl(config.url, {
       method: 'POST',
       redirect: 'error',
       signal: requestSignal,
@@ -484,49 +616,58 @@ export async function providerRequest(config, messages, { fetchImpl = fetch, sig
         'content-type': 'application/json',
         authorization: `Bearer ${config.key}`,
       },
-      body: JSON.stringify(body),
+      body: serialized,
     })
 
-    if (!response.ok) throw new DeploymentError(`Provider HTTP ${response.status}; request will not be retried automatically`)
-    check(response.body, 'Provider returned no response body')
-    const reader = response.body.getReader()
-    const chunks = []
-    let bytes = 0
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      bytes += value.length
-      if (bytes > 256 * 1024) {
-        await reader.cancel()
-        throw new DeploymentError('Provider response too large')
-      }
-      chunks.push(value)
-    }
+    if (!response.ok) throw new DeploymentError(`Decision provider HTTP ${response.status}; request will not be retried automatically`)
+    const responseText = await response.text()
+    check(Buffer.byteLength(responseText, 'utf8') <= 128 * 1024, 'Decision provider response too large')
 
     let data
-    try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')) }
-    catch { throw new DeploymentError('Provider returned invalid JSON') }
-    const choice = data?.choices?.[0]
-    const message = choice?.message
-    check(message && typeof message === 'object', 'Provider response has no assistant message')
-    if (message.tool_calls === undefined && typeof message.content === 'string') {
-      message.content = normalizeProviderPlanContent(message.content)
+    try { data = JSON.parse(responseText) }
+    catch { throw new DeploymentError('Decision provider returned invalid JSON') }
+
+    check(data && typeof data === 'object' && !Array.isArray(data), 'Decision provider returned an invalid response')
+    check(data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers), 'Decision provider response has no answers')
+
+    // An invalid answer is dropped on its own: every consumer already falls
+    // back to its default for a missing answer, and discarding the whole
+    // batch lost every valid judgment in it. All-invalid still fails.
+    const answers = {}
+    const invalidAnswers = {}
+    let firstError
+    for (const [id, question] of Object.entries(questions)) {
+      try {
+        validateDecisionAnswer(id, question, data.answers[id])
+        answers[id] = data.answers[id]
+      }
+      catch (error) {
+        if (!(error instanceof DeploymentError)) throw error
+        firstError ??= error
+        invalidAnswers[id] = { reason: error.message, answer: data.answers[id] }
+      }
     }
-    Object.defineProperty(message, '_airiProvider', {
-      configurable: true,
-      enumerable: false,
-      value: {
-        response_id: typeof data?.id === 'string' ? data.id : undefined,
-        model: typeof data?.model === 'string' ? data.model : config.model,
-        finish_reason: choice?.finish_reason,
-        usage: data?.usage && typeof data.usage === 'object' ? data.usage : undefined,
-      },
-    })
-    return message
+    if (Object.keys(answers).length === 0) throw firstError
+
+    if (data.usage !== undefined) {
+      check(data.usage && typeof data.usage === 'object' && !Array.isArray(data.usage), 'Decision provider returned invalid usage')
+      for (const field of ['input_tokens', 'output_tokens']) {
+        if (data.usage[field] !== undefined) check(Number.isSafeInteger(data.usage[field]) && data.usage[field] >= 0, `Decision provider returned invalid ${field}`)
+      }
+      if (data.usage.cost !== undefined) check(typeof data.usage.cost === 'number' && Number.isFinite(data.usage.cost) && data.usage.cost >= 0, 'Decision provider returned invalid cost')
+    }
+
+    return {
+      model: typeof data.model === 'string' ? data.model : config.model,
+      provider: typeof data.provider === 'string' ? data.provider : config.provider,
+      answers,
+      ...(firstError ? { invalid_answers: invalidAnswers } : {}),
+      usage: data.usage,
+    }
   }
   catch (error) {
-    if (signal?.aborted) throw new DeploymentError('Provider request cancelled')
-    if (timeoutSignal.aborted) throw new DeploymentError(`Provider timed out after ${timeoutMs} ms`)
+    if (signal?.aborted) throw new DeploymentError('Decision provider request cancelled')
+    if (timeoutSignal.aborted) throw new DeploymentError(`Decision provider timed out after ${config.timeoutMs} ms`)
     throw error
   }
 }

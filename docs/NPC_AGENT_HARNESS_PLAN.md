@@ -1,12 +1,56 @@
-# AIRI Factorio — NPC Agent Harness Roadmap
+# SGLuna Factorio — NPC Agent Harness Roadmap
 
 This is the current single-NPC roadmap. Historical pass-by-pass plans are retained under `docs/validation/` and should not be treated as current release gates.
 
 ## Current checkpoint
 
+October 7 Luna recovery candidate `61f70f54` adds typed missing-fact reads without changing committed intent. The sequentially integrated units, review outcomes and acceptance checklist are in [the targeted observation checkpoint](validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md). Autonomous red-to-green acceptance and multiplayer reliability remain open.
+
 The project has moved beyond the original "prove a zero-player character can wait/move/mine/craft" transition phase. The standalone-NPC architecture is now the baseline being prepared for promotion to `main`.
 
 As of the 2026-09-16 promotion cleanup, `feat/npc-transition-work` had a green ordinary CI at commit `02167ac690c46b056ba2f0a62db056438c702419`. The branch is long-lived and continues to move, so any actual promotion must freeze and record a fresh candidate SHA before heavyweight validation.
+
+
+
+## Planning architecture authority
+
+The planning subsystem now has a dedicated canonical roadmap:
+
+- `docs/NPC_PLANNING_ROADMAP.md`
+
+Its core direction is:
+
+- separate the durable user goal, the non-executable LOD Roadmap Shelf, and the current Active Plan;
+- use shelfed long-horizon intent as progressive-detail guidance for later planning rounds instead of discarding it;
+- evaluate strategic steering at plan boundaries using `vertical | horizontal | maintain | recover`, relative to the current critical path rather than action type;
+- treat Factorio's common vertical -> horizontal -> vertical cadence as an evidence-driven bias, not a mandatory alternation;
+- let the Main LLM author plan drafts;
+- use Jev for bounded selection, ranking and routing; never as a correctness gate, plan author or Plan Tracker writer;
+- make committed plans immutable;
+- freeze the old plan on structural blockers; a new version needs harness-verified standing Auto/player-task authority or explicit user approval for an out-of-scope change;
+- fix semantic completion contracts before commit;
+- make Plan Tracker a read-only view of the one committed plan and its accepted evidence;
+- consolidate plan advancement/replacement behind one transition authority.
+
+Where older Task Board, Project Board, hierarchy, checkpoint, or Jev planning experiments conflict with that roadmap, `NPC_PLANNING_ROADMAP.md` is authoritative.
+
+## Week 1 macro build requirements (2026-09-28 through 2026-10-04)
+
+The owner-approved [September 30 macro design](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md)
+defines this week's integration requirements, not completed capabilities:
+
+- Ongoing Auto resource expansion and recovery of temporary requests toward the same accepted result, using recorded authorization and new immutable plan versions.
+- Shared storage access excluding player inventories/reserved supplies; ask before removing or substantially redesigning player-built structures. Explain what happened and why meaningful changes are needed.
+- A durable ledger separate from the future Roadmap Shelf: preserve interrupted tasks, reconcile uncertain operations, resume older temporary tasks automatically, and isolate pending questions from independent authorized work.
+- Sequential planner/executor handoffs and restart recovery from authoritative packets, with no-Jev fallback and world-verified delivery/rate/win predicates.
+- One persistent campaign provider allowance across planner, executor and Jev, including recovery and handoffs; visibly pause provider-dependent work on exhaustion. The allowance amount and accounting unit remain undecided.
+
+The macro design's MW1–MW6 table specifies dependency order and acceptance evidence.
+Prove the integrated lifecycle with scripted provider replies plus relevant real-engine
+assertions; component tests and existing live traces do not establish this new checkpoint.
+Week 2 is October 5–11. Per-request visual feedback is recorded in the
+[weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
+Existing production and promotion gates remain in force. No paid run is authorized here.
 
 ## Promotion goal
 
@@ -14,16 +58,34 @@ Promote a **validated standalone-NPC baseline** to `main` without claiming that 
 
 A promotion checkpoint must preserve these baseline properties:
 
-- AIRI owns a standalone Factorio `character`, not a connected human body;
+- SGLuna owns a standalone Factorio `character`, not a connected human body;
 - zero-player simulation and NPC operation remain supported;
 - model mutations use bounded structured operations;
 - real inventory/crafting/mining/research/combat/navigation semantics remain engine-backed;
 - task completion/cancellation releases physical controls safely;
 - restart/death/replacement invalidate stale logical work rather than silently continuing it;
 - Pterodactyl install/update/rollback remains transactional;
-- environment/Egg configuration remains authoritative over `airi-config.json`;
+- environment/Egg configuration remains authoritative over `sgluna-config.json` (and its legacy `airi-config.json` fallback);
 - ordinary CI is green on the candidate;
 - package smoke and real Factorio integration pass for the frozen promotion candidate.
+
+
+
+## Production capability validation authority
+
+Use `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md` for real production-building promotion gates.
+
+Near-term priority is not additional factory-planning sophistication. The next unproven frontier is a **powered assembler production cell** whose input movement, recipe execution, and output movement are observed in real Factorio.
+
+The production ladder separates:
+
+```text
+A1 deterministic exact-layout harness proof
+-> A2 guided AI arrangement
+-> A3 autonomous AI production planning
+```
+
+The historical burner-drill -> furnace success is retained as a regression canary. Fluid construction/operation remains a separate known-red validation track and must restart from a minimal source -> pipe -> storage scenario before oil/refinery complexity.
 
 ## Validation ladder
 
@@ -45,6 +107,52 @@ Do not substitute lower layers for higher layers when the failure mode is engine
 
 ## Near-term single-NPC work
 
+### Priority 0 — Grounded capability / prototype discovery
+
+Treat this as a **high-priority harness gap before expanding deeper autonomous production-layout intelligence or compensating with a larger system prompt**.
+
+The current harness already has important pieces of deterministic discovery, but most of them start **after the model already knows an exact Factorio identity**:
+
+- `getRecipeDetails(item_or_recipe)` can resolve producers for an exact item/recipe and derive compatible crafting-machine prototypes from live recipe categories;
+- `getPrototypeDetails(name)` exposes static capability metadata for an exact item/fluid/entity prototype, including mining-drill resource categories;
+- `solveProduction` can recursively discover bounded enabled recipe routes from an exact target material and return bounded alternative candidates;
+- local observation can filter entities by Factorio type, and `findNearestEnemy` is an example of semantic discovery that does not require an exact hostile prototype name.
+
+The missing bootstrap layer is:
+
+```text
+human/model intent
+"I need something that can automatically mine this resource"
+        ↓
+bounded deterministic capability query
+        ↓
+current-game candidate prototype identities
+        ↓
+exact recipe/prototype inspection
+        ↓
+LLM chooses among grounded alternatives
+```
+
+Without that bridge, a model that does not already know Factorio names can still guess concepts such as "pickaxe", "miner", a recipe name, technology name, or modded machine identity and only discover the mistake during mutation admission.
+
+This capability layer must **not** become a complete prototype dump or a giant deterministic mod encyclopedia. Large overhaul mods make unbounded enumeration both expensive and cognitively useless. Preserve the same bounded-candidate design already used elsewhere:
+
+- query by narrow engine-backed capability/type/category rather than broad natural-language semantic search;
+- derive candidates from the running game's prototype/recipe data and current force state rather than a vanilla hardcoded catalogue;
+- prefer currently relevant/unlocked/craftable candidates when that distinction is deterministic;
+- cap candidate counts and return an explicit `LIMIT_EXCEEDED`/narrowing requirement rather than dumping hundreds of modded prototypes;
+- allow hierarchical refinement (capability/category first, exact candidate inspection second);
+- return canonical ordering and facts, **not a subjective "best machine" ranking**;
+- keep exact mutations gated by existing recipe/prototype validation and world observations.
+
+The architecture goal is not to teach the LLM all of Factorio or every installed mod. It is to make the running Factorio instance capable of answering bounded questions such as "what currently available entities can perform this engine-defined capability?" so the model can choose without inventing identities.
+
+Before adding a new API, audit whether an existing recipe/prototype/planning query can be generalized safely. Prefer a small composable discovery primitive over multiple hardcoded tools such as `getAvailableMiningDrills`, `getAvailableFurnaces`, etc.
+
+A representative E2E acceptance case should start from a high-level goal with no prototype names (for example early automatic resource extraction) and prove that a weaker model can reach valid exact identities entirely through deterministic game queries, without remembered Factorio wiki knowledge.
+
+Validation evidence from the 2026-09-17 early-resource E2E is recorded in `docs/validation/NPC_GROUNDED_BOOTSTRAP_E2E_2026-09-17.md`. That capture also exposed a separate high-severity Task Board correctness issue: a successful operation receipt must not, by positional plan advancement alone, mark an unrelated semantic step complete. Keep batch completion and semantic step completion as separate evidence claims.
+
 ### 1. Promotion cleanup and baseline freeze
 
 - keep ordinary CI green;
@@ -57,6 +165,8 @@ Do not substitute lower layers for higher layers when the failure mode is engine
 ### 2. E2E harness and observability
 
 Turn real gameplay failures into reproducible regressions. Prefer fixes in observations, tools, runtime semantics, receipts, recovery, and deterministic game knowledge over indefinitely expanding the system prompt.
+
+The detailed learning/bootstrap E2E sequence and acceptance gates are maintained in `docs/NPC_LEARNING_BOOTSTRAP_E2E.md`. That document is the handoff for fresh-start research progression, automated red science, skill verification/reuse, and the later Coal Snake discovery benchmark.
 
 Keep end-to-end behavior traceable:
 
@@ -102,6 +212,20 @@ Build these on top of validated map and actor primitives. Avoid creating a secon
 ### 6. Swarm / multi-agent coordination
 
 Swarm work remains a separate layer. Single-NPC ownership, receipts, exact actor identity, map operations, and deterministic planning should be solid before swarm coordination becomes part of the main baseline.
+
+### 7. Game-guide reference artifacts (later, optional)
+
+Owner idea, 2026-10-05: alongside skills, add reference artifacts such as a base-game guide and a Space Age guide that the planner can look up through the skill/knowledge bank.
+
+- Purpose: a crutch for smaller models that lack Factorio knowledge. It is not the main path.
+- The primary goal is beating Factorio under any mod set. Guides written for vanilla or Space Age do not carry over to other mods. That goal depends on live game facts (for example the `[REQUIREMENTS]` block) and skills the NPC learns and verifies itself.
+- Constraints if built:
+  - opt-in;
+  - tagged with the game version and mod set it describes;
+  - retrieved on demand, never inlined into the system prompt;
+  - never authoritative over live game data;
+  - no hard-coded build orders in the harness (the guide lives in the knowledge bank).
+- Not scheduled. It does not block the red-science acceptance week.
 
 ## What is not required for the next main promotion
 

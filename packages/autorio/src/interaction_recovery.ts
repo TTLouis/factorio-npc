@@ -2,12 +2,14 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_exact_entity } from './entity_reference'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
+import { placement_check_args } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type {
   PlayerParameters,
   PlayerParametersWalkToEntity,
 } from './types'
 import { TaskStates } from './types'
+import { find_world_entities } from './npc_vision'
 
 const LEGACY_ENTITY_SEARCH_DISTANCE = 8
 const PLACEMENT_ESCAPE_REACH = 0.75
@@ -146,6 +148,7 @@ export function new_interaction_recovery(manager: Manager) {
         position: task.position,
         direction: task.direction,
         force: actor.force,
+        ...placement_check_args(task.entity_name),
       })) return false
 
       const clearance = placement_clearance(task.entity_name)
@@ -156,7 +159,7 @@ export function new_interaction_recovery(manager: Manager) {
         manager,
         position_navigation(actor, escape, PLACEMENT_ESCAPE_REACH),
         task,
-        `AIRI occupies the requested build footprint; stepping aside to ${serpent.line(escape)}`,
+        `SGLuna occupies the requested build footprint; stepping aside to ${serpent.line(escape)}`,
       )
     }
 
@@ -180,6 +183,16 @@ export function new_interaction_recovery(manager: Manager) {
       return interrupt(manager, entity_navigation(actor, target, reach), task, `recipe-machine approach to <=${reach} tiles`)
     }
 
+    if (manager.player_state.task_state === TaskStates.LAUNCHING_ROCKET) {
+      const task = manager.player_state.parameters_launch_rocket
+      if (!task || task.launch_ordered_tick !== undefined) return false
+      const target = resolve_exact_entity(actor, task.target_unit_number)
+      if (!target || !target.valid || target.surface.index !== actor.surface.index || target.force.index !== actor.force.index) return false
+      const reach = entity_interaction_reach(actor)
+      if (squared_distance(actor.position, target.position) <= reach ** 2) return false
+      return interrupt(manager, entity_navigation(actor, target, reach), task, `rocket-silo approach to <=${reach} tiles`)
+    }
+
     if (manager.player_state.task_state !== TaskStates.MOVING_ITEMS) return false
     const task = manager.player_state.parameters_move_items
     if (!task) return false
@@ -200,7 +213,7 @@ export function new_interaction_recovery(manager: Manager) {
     }
 
     if (!task.entity_name || !prototypes.entity[task.entity_name]) return false
-    const nearby = actor.surface.find_entities_filtered({
+    const nearby = find_world_entities(actor.surface, {
       position: actor.position,
       radius: math.max(LEGACY_ENTITY_SEARCH_DISTANCE, reach),
       name: task.entity_name,

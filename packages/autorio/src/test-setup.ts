@@ -1,4 +1,4 @@
-import { event_handlers, set_load_handler } from './test-event-registry'
+import { event_handlers, set_configuration_changed_handler, set_init_handler, set_load_handler } from './test-event-registry'
 
 // Minimal stand-ins for the Factorio/Lua globals that control.ts touches at module
 // load time (remote.add_interface, script lifecycle registration, the closing log()
@@ -21,6 +21,12 @@ import { event_handlers, set_load_handler } from './test-event-registry'
   on_nth_tick: (_tick: number, _handler: ((event: any) => void) | undefined) => {},
   on_load: (handler: (() => void) | undefined) => {
     set_load_handler(handler)
+  },
+  on_init: (handler: (() => void) | undefined) => {
+    set_init_handler(handler)
+  },
+  on_configuration_changed: (handler: (() => void) | undefined) => {
+    set_configuration_changed_handler(handler)
   },
 }
 
@@ -47,6 +53,9 @@ import { event_handlers, set_load_handler } from './test-event-registry'
 
 ;(globalThis as any).helpers = {
   table_to_json: (value: unknown) => JSON.stringify(value),
+  // Every sprite the console asks for is one the mod's own data stage declares,
+  // so the stand-in answers the way a build that shipped its graphics would.
+  is_valid_sprite_path: () => true,
 }
 
 ;(globalThis as any).string = {
@@ -73,6 +82,7 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     pipe: {},
     'assembling-machine-1': {},
   },
+  recipe: {},
 }
 
 // Factorio 2.0's per-save persistence table. Real shape is declared locally
@@ -81,7 +91,14 @@ import { event_handlers, set_load_handler } from './test-event-registry'
 ;(globalThis as any).storage = {}
 
 ;(globalThis as any).defines = {
+  build_check_type: {
+    script: 'script',
+    manual: 'manual',
+    ghost_place: 'ghost_place',
+  },
   events: {
+    on_entity_died: 'on_entity_died',
+    on_post_entity_died: 'on_post_entity_died',
     on_selected_entity_changed: 'on_selected_entity_changed',
     on_script_path_request_finished: 'on_script_path_request_finished',
     on_player_mined_entity: 'on_player_mined_entity',
@@ -90,6 +107,10 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     on_research_finished: 'on_research_finished',
     on_player_joined_game: 'on_player_joined_game',
     on_gui_click: 'on_gui_click',
+    on_gui_selection_state_changed: 'on_gui_selection_state_changed',
+    on_gui_text_changed: 'on_gui_text_changed',
+    on_gui_confirmed: 'on_gui_confirmed',
+    on_gui_value_changed: 'on_gui_value_changed',
   },
   direction: {
     north: 'north',
@@ -107,6 +128,8 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     shooting_selected: 'shooting_selected',
   },
   inventory: {
+    character_corpse: 'character_corpse',
+    chest: 'chest',
     character_guns: 'character_guns',
     character_ammo: 'character_ammo',
     character_armor: 'character_armor',
@@ -115,6 +138,16 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     crafter_output: 'crafter_output',
     crafter_trash: 'crafter_trash',
     assembling_machine_dump: 'assembling_machine_dump',
+  },
+  rich_text_setting: {
+    enabled: 'enabled',
+    disabled: 'disabled',
+    highlight: 'highlight',
+  },
+  rocket_silo_status: {
+    building_rocket: 'building_rocket',
+    rocket_ready: 'rocket_ready',
+    launch_started: 'launch_started',
   },
 }
 

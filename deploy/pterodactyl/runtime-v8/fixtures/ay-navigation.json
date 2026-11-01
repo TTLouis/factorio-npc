@@ -1,0 +1,228 @@
+{
+  "pending": {
+    "operation_key": "recovery_mvo6q1lo/batch_101",
+    "request_id": "recovery_mvo6q1lo",
+    "attempt_id": "recovery_mvo6q1lo/batch_101",
+    "protocol_version": 2,
+    "ordinal": 101,
+    "scopes": [],
+    "state": "admitted",
+    "goal_id": "goal_19286yp_1",
+    "plan_id": "goal_19286yp_1_p6",
+    "step_id": "goal_19286yp_1_p6_v1_s1_0hwttcr",
+    "actor": {
+      "actor_id": 13,
+      "epoch": 1
+    },
+    "signature": "a4f270bab56cf40504d547f1112ba74462f55c01d82aeba077849fcdf9a9706a",
+    "operations": [
+      {
+        "trace_operation_id": "recovery_mvo6q1lo/op_1",
+        "name": "walk_to_position",
+        "effect_class": "other"
+      }
+    ],
+    "baseline": {
+      "generation": 1,
+      "max_batch_id": 100,
+      "active": null
+    },
+    "effect": "partial_unknown",
+    "verdict": "admitted_cancelled",
+    "reason": "exact_batch_cancelled",
+    "batch_id": null,
+    "sent_at": 1792954400008,
+    "reconciled_at": 1792954451297
+  },
+  "source": "AY retained snapshot 2026-10-25T18:53:31.244Z; unrelated journal rows removed",
+  "native": {
+    "task_state": "idle",
+    "batch_generation": 1,
+    "tasks_added": 123,
+    "queue_empty": true,
+    "queue_length": 0,
+    "queued_task_types": {},
+    "last_completed_batch": {
+      "batch_id": 100,
+      "batch_generation": 1,
+      "batch_ref": "batch-g1-100",
+      "task_count": 4,
+      "task_types": [
+        "mining",
+        "mining",
+        "mining",
+        "mining"
+      ],
+      "tick": 124982,
+      "started_count": 4,
+      "tasks_started": 4
+    },
+    "last_cancelled_batch": {
+      "batch_id": 101,
+      "batch_generation": 1,
+      "batch_ref": "batch-g1-101",
+      "task_count": 1,
+      "task_types": [
+        "walking_to_entity"
+      ],
+      "tick": 126443,
+      "reason": "navigation_unreachable",
+      "started_count": 1,
+      "tasks_started": 1
+    },
+    "receipt_journal": [
+      {
+        "batch_id": 101,
+        "batch_generation": 1,
+        "batch_ref": "batch-g1-101",
+        "task_count": 1,
+        "task_types": [
+          "walking_to_entity"
+        ],
+        "tick": 126443,
+        "reason": "navigation_unreachable",
+        "started_count": 1,
+        "tasks_started": 1,
+        "state": "cancelled"
+      }
+    ],
+    "admission_journal": [
+      {
+        "operation_key": "recovery_mvo6q1lo/batch_101",
+        "attempt_id": "recovery_mvo6q1lo/batch_101",
+        "actor_id": 13,
+        "epoch": 1,
+        "signature": "a4f270bab56cf40504d547f1112ba74462f55c01d82aeba077849fcdf9a9706a",
+        "ordinal": 101,
+        "operation_count": 1,
+        "state": "uncertain",
+        "generation": 1,
+        "tick": 126346,
+        "slots": [
+          {
+            "index": 1,
+            "ok": true,
+            "operation": "walk_to_position",
+            "batch_refs": [
+              {
+                "batch_id": 101,
+                "batch_generation": 1,
+                "batch_ref": "batch-g1-101"
+              }
+            ],
+            "queued_tasks": 1
+          }
+        ],
+        "work_mark": 123,
+        "ok": true,
+        "error": "batch_reconciliation_required"
+      }
+    ],
+    "actor": {
+      "kind": "standalone_character",
+      "valid": true,
+      "name": "Kite-1",
+      "npc_id": "npc-1",
+      "position": {
+        "y": 0.56640625,
+        "x": -115.83203125
+      },
+      "has_character": true,
+      "actor_id": 13,
+      "mining_state": {
+        "mining": false,
+        "position": {
+          "y": 0,
+          "x": 0
+        }
+      },
+      "mining_progress": 0
+    },
+    "basic_operation": {
+      "last_result": {
+        "operation_id": 102,
+        "type": "mining",
+        "accepted": true,
+        "completed": true,
+        "code": "completed",
+        "tick": 124982,
+        "actor_id": 13,
+        "actor_kind": "standalone_character",
+        "force_index": 1,
+        "target_unit_number": 36,
+        "requested_count": 1
+      },
+      "next_operation_id": 102
+    },
+    "follow": {
+      "active": false,
+      "state": "stopped",
+      "clear_obstacles": true,
+      "code": "stopped",
+      "updated_tick": 6,
+      "healthy": false,
+      "controller_live": false,
+      "last_position": {
+        "x": -115.83203125,
+        "y": 0.56640625
+      },
+      "last_failure": "unreachable",
+      "navigation": {
+        "active": false,
+        "state": "blocked",
+        "persistent_follow": false,
+        "blocked_reason": "unreachable"
+      },
+      "actor": {
+        "kind": "standalone_character",
+        "valid": true,
+        "name": "Kite-1",
+        "npc_id": "npc-1",
+        "position": {
+          "y": 0.56640625,
+          "x": -115.83203125
+        },
+        "has_character": true,
+        "actor_id": 13,
+        "mining_state": {
+          "mining": false,
+          "position": {
+            "y": 0,
+            "x": 0
+          }
+        },
+        "mining_progress": 0
+      }
+    },
+    "defense": {
+      "enabled": true,
+      "radius": 24,
+      "code": "armed",
+      "updated_tick": 6,
+      "actor": {
+        "kind": "standalone_character",
+        "valid": true,
+        "name": "Kite-1",
+        "npc_id": "npc-1",
+        "position": {
+          "y": 0.56640625,
+          "x": -115.83203125
+        },
+        "has_character": true,
+        "actor_id": 13,
+        "mining_state": {
+          "mining": false,
+          "position": {
+            "y": 0,
+            "x": 0
+          }
+        },
+        "mining_progress": 0
+      }
+    }
+  },
+  "actor": {
+    "actor_id": 13,
+    "epoch": 1
+  }
+}

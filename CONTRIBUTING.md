@@ -1,30 +1,69 @@
 # Contributing to Factorio NPC
 
-**Contribute to
-[`experiment/jev-agent-architecture`](https://github.com/TTLouis/factorio-npc/tree/experiment/jev-agent-architecture).**
-It is the current development branch, and it works without enabling Jev. The
-main LLM provider is still required; Docker users can leave `JEV_TYPESAFE_API_KEY`
-blank. `main` is an older snapshot, not the current contributor starting point.
+SGLuna is an experimental Factorio NPC runtime. Help with reproducible bugs,
+clear setup instructions, deterministic tests and bounded runtime improvements
+is welcome. You do not need to understand the entire planner to contribute.
 
-Use the [current contribution guide](https://github.com/TTLouis/factorio-npc/blob/experiment/jev-agent-architecture/CONTRIBUTING.md)
-for setup, first changes and pull requests. Helpful bounded contributions include
-setup feedback, clearer explanations and deterministic regressions for reproducible
-failures. New implementation and ordinary pull requests target the Jev branch.
-A maintainer-approved documentation backport to `main` is separate from runtime promotion.
+## Find a useful first change
 
-## Report a reproducible issue
+- Try the [external-harness setup](docs/EXTERNAL_HARNESS_SETUP.md) and report the
+  first confusing step, with your platform and source SHA.
+- Improve a specific explanation or broken link. Check the
+  [documentation index](docs/README.md) before creating another guide.
+- Turn a reproducible failure into a recorded/scripted regression. Offline
+  fixtures are useful contributions without paid model calls.
+- For larger architecture changes, describe the problem and proposed scope in an
+  issue first so a maintainer can check dependencies and existing work.
 
-Include the exact branch/SHA, platform, Factorio version, minimal steps, expected
-result and actual result. State whether the failure was offline, deterministic
-native-engine or provider-backed. Supply a small sanitized excerpt or fixture,
-with request/operation IDs where relevant. Never attach `.env`, credentials,
-private endpoints or an unreviewed data/save/trace bundle.
+These are contribution ideas, not a claim that matching open issues already exist.
+See [current status](docs/NPC_AGENT_HARNESS_STATUS.md) for known limits and
+[SPEC.md](SPEC.md) for the project contract.
 
-## If you maintain this main snapshot
+## Choose the right source
 
-Read [AGENTS.md](AGENTS.md), [TESTING.md](docs/TESTING.md) and the
-[development workflow](docs/DEVELOPMENT_WORKFLOW.md). Current Jev test scripts,
-configuration names and future design documents are not automatically present
-here. Keep a documentation backport focused and preserve historical evidence.
-Record unavailable checks honestly. Shared Windows dependency symlinks must remain
-untouched; do not install packages or hooks through host Node/pnpm.
+External-harness pull requests target **`main`**. Start a small task branch
+from its current head, using `<type>/<task-slug>`: `docs/setup-guide`,
+`fix/inventory-refresh` or `test/crafting-restart`, for example. The internal
+planner/Jev experiment remains on `experiment/jev-agent-architecture`; changes
+to that experiment are separate from the external-harness workflow.
+
+In an independent clone, fetch/check out `main` before creating
+your task branch. In the owner's shared workspace, first follow the parent
+`AGENTS.md` and `WORKTREES.md` ownership/worktree procedure; never reuse another
+chat's checkout. Those machine-local files are not required for outside contributors.
+
+## Set up and validate
+
+Factorio engine checks require Docker. Ordinary CI uses Node 24 and the package
+manager pinned in [package.json](package.json), with the frozen lockfile.
+Read [TESTING.md](docs/TESTING.md) for supported environments, exact commands and
+what each check proves. Dependency directories in the shared Windows checkout
+are WSL symlinks; installing packages on the Windows host can damage them.
+
+You do not need production credentials for offline fixtures or CI. Do not start
+a provider-backed server just to test a documentation or deterministic code change.
+Live trials have separate [authorization and evidence rules](docs/LIVE_E2E.md).
+
+Read [AGENTS.md](AGENTS.md) when using a coding agent, and preserve its runtime,
+planning, secret and evidence boundaries in any implementation.
+
+## Report a bug
+
+Include the exact commit, platform, Factorio version, minimal steps, expected
+result and actual result. Attach a small sanitized log excerpt or fixture with
+timestamps and request/operation IDs when relevant. Say whether the failure was
+offline, deterministic native-engine or provider-backed.
+
+Never attach `.env`, API keys, private endpoints, a whole data directory or an
+unreviewed save/trace bundle. Remove personal/provider details from evidence.
+
+## Submit a pull request
+
+Keep the change focused and use the repository's PR template. Explain the
+observable problem/result, tested SHA, commands and outcomes, and remaining
+limits. Record unavailable checks honestly. For an E2E-derived fix, include the
+required [prevention and self-correction proof](docs/E2E_REPAIR_REQUIREMENTS.md).
+
+Update the existing owning docs when behavior changes. Preserve historical
+validation records and license attribution. Maintainer review, integration checks
+and explicit release decisions govern publication; a local pass is not a release.

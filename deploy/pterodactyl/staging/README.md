@@ -10,9 +10,9 @@ The remaining work here is deployment integration: replacing the old v7 connecte
 
 - `npc-session.mjs` — deployment configuration, NPC readiness validation, chat-authorization separation and actor epoch helpers.
 - `npc-session.test.mjs` — zero-player, multi-human, replacement-body and load-reconciliation unit cases.
-- `guard.ts` — Factorio-side `airi_deployment` v8 guard. It captures actor mode/ID/kind and performs actor-epoch authorization without wrapping the native actor-aware Autorio interfaces.
+- `guard.ts` — Factorio-side `sgluna_deployment` v8 guard. It captures actor mode/ID/kind and performs actor-epoch authorization without wrapping the native actor-aware Autorio interfaces.
 - `guard.test.mjs` — VM fixture for zero-player authorization, body replacement, cancellation and legacy player-mode compatibility.
-- `source-preparer.mjs` — promotion bridge for the pinned Autorio source. It requires the native actor-aware controllers/interfaces, refuses v7 connected-player guard markers, injects only the v8 deployment guard import, and does not rewrite gameplay semantics.
+- `source-preparer.mjs` — promotion bridge for the pinned Autorio source. It requires the native actor-aware controllers/interfaces, refuses v7 connected-player guard markers, injects only the v8 deployment guard import, and does not rewrite gameplay semantics. It also refuses a package whose hidden NPC vision vehicle prototype (`sgluna-npc-vision`) is not hidden, is wider than a 5x5 chunk window, collides, is a military target, takes passengers, burns fuel, can be selected or mined, or has graphics.
 - `source-preparer.test.mjs` — copies the repository's real Autorio source into a temporary tree and verifies guard-only, idempotent source preparation plus fail-closed legacy/non-NPC detection.
 - `supervisor-adapter.mjs` — Node/RCON startup handshake plus authorized operation and **atomic dependency-batch** admission while preserving each Autorio operation's native boolean/tuple return shape.
 - `supervisor-adapter.test.mjs` — fake-RCON tests for configure retry, identity validation, stale epochs, no-replay failures, native return shapes, and one-transaction batch admission.
@@ -59,15 +59,15 @@ The validated runtime baseline is now on `main`, while `feat/npc-transition-work
 1. keep all new deployment work on `feat/npc-transition-work`;
 2. pin the payload to a validated NPC source SHA instead of the old connected-player source pin;
 3. use `source-preparer.mjs` to build the native actor-aware Autorio source — do **not** reapply the v7 connected-player control patch set;
-4. compile/inject the v8 `airi_deployment` guard alongside the native NPC interfaces;
+4. compile/inject the v8 `sgluna_deployment` guard alongside the native NPC interfaces;
 5. configure `npc` mode at startup and capture the standalone actor ID/kind/epoch;
-6. keep `AIRI_CHAT_PLAYERS` (who may issue `!airi`) separate from NPC ownership;
+6. keep `SGLUNA_CHAT_PLAYERS` (who may issue `!luna`) separate from NPC ownership; legacy `AIRI_CHAT_PLAYERS` / `!airi` remain compatibility aliases;
 7. replace `operationCommands` with the structured `operations` contract;
 8. use atomic dependency-batch admission for model mutations;
 9. expose the current actor-aware observation tools, including exact correlated research request lookup;
 10. replace the old installer smoke assumption `zero players => denied` with `zero players => standalone NPC authorized`;
 11. run clean-install, existing-save upgrade, graceful restart/save, rollback, and one real provider-to-NPC goal;
-12. only after those gates pass, regenerate `install.sh` and `egg-airi-factorio-server.json` from the v8 payload source and let `main` catch up again.
+12. only after those gates pass, regenerate `install.sh` and `egg-sgluna-factorio-server.json` from the v8 payload source and let `main` catch up again.
 
 `build-payload.mjs` currently refuses to regenerate the canonical egg while `payload-src/installer.sh` still contains v7 markers. This is intentional: a newly checksummed artifact must not make the legacy connected-player package look like the v8 NPC package.
 

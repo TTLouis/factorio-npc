@@ -12,15 +12,15 @@ if (!version || !sourceSha || !imageRef) {
 
 const code = value => `\`${value}\``
 const notes = [
-  `## AIRI Factorio ${version}`,
+  `## SGLuna Factorio ${version}`,
   '',
   'First packaged prerelease of the standalone-NPC fork. This is a prerelease baseline, not a feature-complete stable release.',
   '',
   '### Deployment artifacts',
   '',
-  `- **Pterodactyl:** ${code(`egg-airi-factorio-${version}.json`)} is pinned to commit ${code(sourceSha)}. Reinstall stays on this release unless ${code('AIRI_SOURCE_REF')} is explicitly changed.`,
+  `- **Pterodactyl:** ${code(`egg-sgluna-factorio-${version}.json`)} is pinned to commit ${code(sourceSha)}. Reinstall stays on this release unless ${code('SGLUNA_SOURCE_REF')} is explicitly changed.`,
   `- **Docker:** ${code(imageRef)}, built from the same exact commit. No ${code('latest')} tag is moved by this prerelease.`,
-  `- **Docker Compose:** the repository Compose deployment defaults local builds to ${code('main')}; set ${code('AIRI_SOURCE_REF=feat/npc-transition-work')} explicitly for ongoing NPC development.`,
+  `- **Docker Compose:** the repository Compose deployment defaults local builds to ${code('main')}; set ${code('SGLUNA_SOURCE_REF=feat/npc-transition-work')} explicitly for ongoing NPC development.`,
   '',
   '### Validation',
   '',

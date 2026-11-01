@@ -38,6 +38,10 @@ function fixture() {
     position: { x: 2, y: 0 },
     surface,
     force,
+    prototype: {
+      is_building: true,
+      mineable_properties: { minable: true, mining_time: 0.5, products: [] },
+    },
   }
 
   surface.find_entities_filtered.mockImplementation((query: any) => {
@@ -46,17 +50,22 @@ function fixture() {
     return []
   })
 
+  const character: Record<string, any> = {
+    valid: true,
+    resource_reach_distance: 2.7,
+    reach_distance: 10,
+    selected: undefined,
+  }
   const actor = {
     is_valid: true,
-    character: {
-      valid: true,
-      resource_reach_distance: 2.7,
-      reach_distance: 10,
-    },
+    character,
     position: { x: 0, y: 0 },
     surface,
     force,
-    update_selected_entity: vi.fn(),
+    update_selected_entity: vi.fn((position: { x: number, y: number }) => {
+      if (position.x !== 2 || position.y !== 0) character.selected = undefined
+      else character.selected = (globalThis as any).game.get_entity_by_unit_number(91) ?? exactResource
+    }),
     get_mining_state: vi.fn(() => ({ mining })),
     set_mining_state: vi.fn((state: { mining: boolean }) => { mining = state.mining }),
     set_walking_state: vi.fn(),
@@ -67,7 +76,7 @@ function fixture() {
       kind: 'standalone_character',
       valid: true,
       has_character: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
     }),
   } as unknown as ControlledActor

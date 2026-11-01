@@ -1,0 +1,979 @@
+{
+  "status": "pass",
+  "scenario": "first-plan-locked-red-science-grounding",
+  "candidate_sha": "b98d65b2fc9fae8a9af86fa3c5bc73e0f02685a3",
+  "provider_mode": "scripted",
+  "before": {
+    "actor_id": 1,
+    "connected_players": 0,
+    "inventory": [
+      {
+        "name": "iron-ore",
+        "quality": "normal",
+        "count": 3
+      },
+      {
+        "name": "iron-gear-wheel",
+        "quality": "normal",
+        "count": 2
+      }
+    ],
+    "crafting_queue": 0,
+    "recipe_enabled": false,
+    "researched": {},
+    "task_state": "idle",
+    "queue_length": 0,
+    "queue_empty": true,
+    "trigger": {
+      "type": "craft-item",
+      "item": {
+        "name": "lab"
+      },
+      "count": 1
+    }
+  },
+  "after": {
+    "actor_id": 1,
+    "connected_players": 0,
+    "inventory": [
+      {
+        "name": "iron-ore",
+        "quality": "normal",
+        "count": 3
+      },
+      {
+        "name": "iron-gear-wheel",
+        "quality": "normal",
+        "count": 2
+      }
+    ],
+    "crafting_queue": 0,
+    "recipe_enabled": false,
+    "researched": {},
+    "task_state": "idle",
+    "queue_length": 0,
+    "queue_empty": true,
+    "trigger": {
+      "type": "craft-item",
+      "item": {
+        "name": "lab"
+      },
+      "count": 1
+    }
+  },
+  "facts": {
+    "ok": true,
+    "tick": 671,
+    "targets": {
+      "items": 1,
+      "technologies": 0,
+      "entities": 0
+    },
+    "locked": [
+      {
+        "subject": "automation-science-pack",
+        "role": "target_recipe",
+        "recipe": "automation-science-pack",
+        "unlocked_by": "automation-science-pack",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack"
+        ]
+      },
+      {
+        "subject": "copper-ore",
+        "role": "ingredient_recipe",
+        "recipe": "advanced-metallic-asteroid-crushing",
+        "needed_for": "copper-plate",
+        "unlocked_by": "advanced-asteroid-processing",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "logistic-science-pack",
+          "landfill",
+          "steel-processing",
+          "advanced-material-processing",
+          "automation",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering"
+        ],
+        "path_truncated": true
+      },
+      {
+        "subject": "metallic-asteroid-chunk",
+        "role": "ingredient_recipe",
+        "recipe": "metallic-asteroid-crushing",
+        "needed_for": "copper-ore",
+        "unlocked_by": "space-platform",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "logistic-science-pack",
+          "steel-processing",
+          "advanced-material-processing",
+          "automation",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering",
+          "oil-processing"
+        ],
+        "path_truncated": true
+      },
+      {
+        "subject": "iron-ore",
+        "role": "ingredient_recipe",
+        "recipe": "metallic-asteroid-crushing",
+        "needed_for": "iron-plate",
+        "unlocked_by": "space-platform",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "logistic-science-pack",
+          "steel-processing",
+          "advanced-material-processing",
+          "automation",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering",
+          "oil-processing"
+        ],
+        "path_truncated": true
+      },
+      {
+        "subject": "assembling-machine-1",
+        "role": "machine",
+        "recipe": "assembling-machine-1",
+        "needed_for": "automation-science-pack",
+        "unlocked_by": "automation",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "automation"
+        ]
+      },
+      {
+        "subject": "assembling-machine-2",
+        "role": "machine",
+        "recipe": "assembling-machine-2",
+        "needed_for": "automation-science-pack",
+        "unlocked_by": "automation-2",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "automation",
+          "logistic-science-pack",
+          "steel-processing",
+          "automation-2"
+        ]
+      },
+      {
+        "subject": "assembling-machine-3",
+        "role": "machine",
+        "recipe": "assembling-machine-3",
+        "needed_for": "automation-science-pack",
+        "unlocked_by": "automation-3",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "automation",
+          "logistic-science-pack",
+          "steel-processing",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering",
+          "oil-processing",
+          "plastics"
+        ],
+        "path_truncated": true
+      },
+      {
+        "subject": "electronic-circuit",
+        "role": "ingredient_recipe",
+        "recipe": "electronic-circuit",
+        "needed_for": "assembling-machine-1",
+        "unlocked_by": "electronics",
+        "path": [
+          "electronics"
+        ]
+      },
+      {
+        "subject": "copper-cable",
+        "role": "ingredient_recipe",
+        "recipe": "copper-cable",
+        "needed_for": "electronic-circuit",
+        "unlocked_by": "electronics",
+        "path": [
+          "electronics"
+        ]
+      }
+    ],
+    "research": {
+      "electronics": {
+        "name": "electronics",
+        "mode": "trigger",
+        "status": "ready",
+        "trigger": {
+          "type": "craft-item",
+          "item": "copper-plate",
+          "count": 10
+        },
+        "requires": {}
+      },
+      "steam-power": {
+        "name": "steam-power",
+        "mode": "trigger",
+        "status": "ready",
+        "trigger": {
+          "type": "craft-item",
+          "item": "iron-plate",
+          "count": 50
+        },
+        "requires": {}
+      },
+      "automation-science-pack": {
+        "name": "automation-science-pack",
+        "mode": "trigger",
+        "status": "blocked_by_prerequisites",
+        "trigger": {
+          "type": "craft-item",
+          "item": "lab",
+          "count": 1
+        },
+        "requires": [
+          "electronics",
+          "steam-power"
+        ]
+      },
+      "logistic-science-pack": {
+        "name": "logistic-science-pack",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 75,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "automation-science-pack"
+        ]
+      },
+      "landfill": {
+        "name": "landfill",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 50,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "logistic-science-pack"
+        ]
+      },
+      "steel-processing": {
+        "name": "steel-processing",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 50,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "automation-science-pack"
+        ]
+      },
+      "advanced-material-processing": {
+        "name": "advanced-material-processing",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 75,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "logistic-science-pack",
+          "steel-processing"
+        ]
+      },
+      "automation": {
+        "name": "automation",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 10,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "automation-science-pack"
+        ]
+      },
+      "automation-2": {
+        "name": "automation-2",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 40,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "automation",
+          "logistic-science-pack",
+          "steel-processing"
+        ]
+      },
+      "engine": {
+        "name": "engine",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 100,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "logistic-science-pack",
+          "steel-processing"
+        ]
+      },
+      "fluid-handling": {
+        "name": "fluid-handling",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 50,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "automation-2",
+          "engine"
+        ]
+      },
+      "oil-gathering": {
+        "name": "oil-gathering",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 100,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "fluid-handling"
+        ]
+      },
+      "oil-processing": {
+        "name": "oil-processing",
+        "mode": "trigger",
+        "status": "blocked_by_prerequisites",
+        "trigger": {
+          "type": "mine-entity",
+          "entity": "crude-oil"
+        },
+        "requires": [
+          "oil-gathering"
+        ]
+      },
+      "plastics": {
+        "name": "plastics",
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "science": {
+          "count": 200,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        },
+        "requires": [
+          "oil-processing"
+        ]
+      }
+    },
+    "machines": [
+      {
+        "for_item": "automation-science-pack",
+        "recipe": "automation-science-pack",
+        "options": [
+          {
+            "entity": "assembling-machine-1",
+            "item": "assembling-machine-1",
+            "status": "locked",
+            "unlocked_by": "automation"
+          },
+          {
+            "entity": "assembling-machine-2",
+            "item": "assembling-machine-2",
+            "status": "locked",
+            "unlocked_by": "automation-2"
+          },
+          {
+            "entity": "assembling-machine-3",
+            "item": "assembling-machine-3",
+            "status": "locked",
+            "unlocked_by": "automation-3"
+          }
+        ],
+        "truncated": false,
+        "craftable": false
+      }
+    ],
+    "unknown": {},
+    "counts": {
+      "locked": 9,
+      "recipes_walked": 10,
+      "unlocked_recipes": 3,
+      "raw_items": 0
+    },
+    "truncated": {
+      "targets": false,
+      "walk_depth": false,
+      "walk_nodes": false,
+      "producers": false,
+      "locked": false,
+      "paths": true,
+      "research": false,
+      "unlock_candidates": false
+    }
+  },
+  "parsed": {
+    "ok": true,
+    "tick": 671,
+    "locked": [
+      {
+        "subject": "automation-science-pack",
+        "role": "target_recipe",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack"
+        ],
+        "recipe": "automation-science-pack",
+        "unlocked_by": "automation-science-pack"
+      },
+      {
+        "subject": "copper-ore",
+        "role": "ingredient_recipe",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "logistic-science-pack",
+          "landfill",
+          "steel-processing",
+          "advanced-material-processing",
+          "automation",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering"
+        ],
+        "recipe": "advanced-metallic-asteroid-crushing",
+        "needed_for": "copper-plate",
+        "unlocked_by": "advanced-asteroid-processing",
+        "path_truncated": true
+      },
+      {
+        "subject": "metallic-asteroid-chunk",
+        "role": "ingredient_recipe",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "logistic-science-pack",
+          "steel-processing",
+          "advanced-material-processing",
+          "automation",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering",
+          "oil-processing"
+        ],
+        "recipe": "metallic-asteroid-crushing",
+        "needed_for": "copper-ore",
+        "unlocked_by": "space-platform",
+        "path_truncated": true
+      },
+      {
+        "subject": "iron-ore",
+        "role": "ingredient_recipe",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "logistic-science-pack",
+          "steel-processing",
+          "advanced-material-processing",
+          "automation",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering",
+          "oil-processing"
+        ],
+        "recipe": "metallic-asteroid-crushing",
+        "needed_for": "iron-plate",
+        "unlocked_by": "space-platform",
+        "path_truncated": true
+      },
+      {
+        "subject": "assembling-machine-1",
+        "role": "machine",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "automation"
+        ],
+        "recipe": "assembling-machine-1",
+        "needed_for": "automation-science-pack",
+        "unlocked_by": "automation"
+      },
+      {
+        "subject": "assembling-machine-2",
+        "role": "machine",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "automation",
+          "logistic-science-pack",
+          "steel-processing",
+          "automation-2"
+        ],
+        "recipe": "assembling-machine-2",
+        "needed_for": "automation-science-pack",
+        "unlocked_by": "automation-2"
+      },
+      {
+        "subject": "assembling-machine-3",
+        "role": "machine",
+        "path": [
+          "electronics",
+          "steam-power",
+          "automation-science-pack",
+          "automation",
+          "logistic-science-pack",
+          "steel-processing",
+          "automation-2",
+          "engine",
+          "fluid-handling",
+          "oil-gathering",
+          "oil-processing",
+          "plastics"
+        ],
+        "recipe": "assembling-machine-3",
+        "needed_for": "automation-science-pack",
+        "unlocked_by": "automation-3",
+        "path_truncated": true
+      },
+      {
+        "subject": "electronic-circuit",
+        "role": "ingredient_recipe",
+        "path": [
+          "electronics"
+        ],
+        "recipe": "electronic-circuit",
+        "needed_for": "assembling-machine-1",
+        "unlocked_by": "electronics"
+      },
+      {
+        "subject": "copper-cable",
+        "role": "ingredient_recipe",
+        "path": [
+          "electronics"
+        ],
+        "recipe": "copper-cable",
+        "needed_for": "electronic-circuit",
+        "unlocked_by": "electronics"
+      }
+    ],
+    "research": {
+      "electronics": {
+        "mode": "trigger",
+        "status": "ready",
+        "requires": [],
+        "trigger": {
+          "type": "craft-item",
+          "item": "copper-plate",
+          "count": 10
+        }
+      },
+      "steam-power": {
+        "mode": "trigger",
+        "status": "ready",
+        "requires": [],
+        "trigger": {
+          "type": "craft-item",
+          "item": "iron-plate",
+          "count": 50
+        }
+      },
+      "automation-science-pack": {
+        "mode": "trigger",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "electronics",
+          "steam-power"
+        ],
+        "trigger": {
+          "type": "craft-item",
+          "item": "lab",
+          "count": 1
+        }
+      },
+      "logistic-science-pack": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "automation-science-pack"
+        ],
+        "science": {
+          "count": 75,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "landfill": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "logistic-science-pack"
+        ],
+        "science": {
+          "count": 50,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "steel-processing": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "automation-science-pack"
+        ],
+        "science": {
+          "count": 50,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "advanced-material-processing": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "logistic-science-pack",
+          "steel-processing"
+        ],
+        "science": {
+          "count": 75,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "automation": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "automation-science-pack"
+        ],
+        "science": {
+          "count": 10,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "automation-2": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "automation",
+          "logistic-science-pack",
+          "steel-processing"
+        ],
+        "science": {
+          "count": 40,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "engine": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "logistic-science-pack",
+          "steel-processing"
+        ],
+        "science": {
+          "count": 100,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "fluid-handling": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "automation-2",
+          "engine"
+        ],
+        "science": {
+          "count": 50,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "oil-gathering": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "fluid-handling"
+        ],
+        "science": {
+          "count": 100,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      },
+      "oil-processing": {
+        "mode": "trigger",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "oil-gathering"
+        ],
+        "trigger": {
+          "type": "mine-entity",
+          "entity": "crude-oil"
+        }
+      },
+      "plastics": {
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "requires": [
+          "oil-processing"
+        ],
+        "science": {
+          "count": 200,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            },
+            {
+              "name": "logistic-science-pack",
+              "amount": 1
+            }
+          ]
+        }
+      }
+    },
+    "machines": [
+      {
+        "for_item": "automation-science-pack",
+        "recipe": "automation-science-pack",
+        "craftable": false,
+        "truncated": false,
+        "options": [
+          {
+            "entity": "assembling-machine-1",
+            "item": "assembling-machine-1",
+            "status": "locked",
+            "unlocked_by": "automation"
+          },
+          {
+            "entity": "assembling-machine-2",
+            "item": "assembling-machine-2",
+            "status": "locked",
+            "unlocked_by": "automation-2"
+          },
+          {
+            "entity": "assembling-machine-3",
+            "item": "assembling-machine-3",
+            "status": "locked",
+            "unlocked_by": "automation-3"
+          }
+        ]
+      }
+    ],
+    "unknown": [],
+    "counts": {
+      "locked": 9,
+      "recipes_walked": 10,
+      "unlocked_recipes": 3,
+      "raw_items": 0
+    },
+    "truncated": {
+      "paths": true
+    }
+  },
+  "provider_calls": 2,
+  "blocker": {
+    "request_id": "req_muvyv5xv_1",
+    "operation_index": 1,
+    "operation_name": "craft_item",
+    "operation_args": {
+      "item_name": "automation-science-pack",
+      "count": 10
+    },
+    "reason_code": "recipe_locked",
+    "locked_recipe": {
+      "recipe": "automation-science-pack",
+      "unlocked_by": "automation-science-pack",
+      "next_actionable": {
+        "name": "electronics",
+        "mode": "trigger",
+        "status": "ready",
+        "trigger": {
+          "type": "craft-item",
+          "item": "copper-plate",
+          "count": 10
+        }
+      }
+    },
+    "factorio_error": "Operation preflight rejected operation 1 (craft_item): recipe_locked",
+    "no_replay": false
+  }
+}

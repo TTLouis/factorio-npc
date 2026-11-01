@@ -8,6 +8,7 @@ function fake_character(overrides: Record<string, unknown> = {}) {
     position: { x: 10, y: 20 },
     surface: { name: 'nauvis' },
     force: { name: 'player' },
+    color: undefined,
     selected: undefined,
     mining_state: { mining: false },
     character_mining_progress: 0,
@@ -30,6 +31,7 @@ function fake_surface(entities_by_query: Record<string, unknown[]> = {}) {
 
 beforeEach(() => {
   (globalThis as any).storage = {}
+  ;(globalThis as any).game = { get_entity_by_unit_number: vi.fn(() => undefined) }
 })
 
 describe('StandaloneCharacterActor.create', () => {
@@ -44,6 +46,7 @@ describe('StandaloneCharacterActor.create', () => {
     expect(surface.create_entity).toHaveBeenCalledWith({ name: 'character', position: { x: 10, y: 20 }, force })
     expect(actor).toBeDefined()
     expect(actor!.character).toBe(character)
+    expect((character as any).color).toEqual({ r: 0.35, g: 0.65, b: 1, a: 1 })
     expect((globalThis as any).storage.standalone_character_unit_number).toBe(42)
     expect((globalThis as any).storage.standalone_npc_identity).toEqual({ id: 'npc-1', name: 'Aster-1' })
   })
@@ -92,7 +95,20 @@ describe('StandaloneCharacterActor.reacquire', () => {
 
     expect(actor).toBeDefined()
     expect(actor!.character).toBe(character)
+    expect((character as any).color).toEqual({ r: 0.35, g: 0.65, b: 1, a: 1 })
     expect(actor!.status_snapshot()).toMatchObject({ npc_id: 'npc-1', name: 'Aster-1' })
+  })
+
+  it('finds the body on another surface (planet or space platform) instead of respawning it', () => {
+    (globalThis as any).storage.standalone_character_unit_number = 42
+    const character = fake_character({ unit_number: 42, name: 'character', surface: { name: 'vulcanus' } })
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => character)
+    const nauvis = fake_surface({ character: [] })
+
+    const actor = StandaloneCharacterActor.reacquire(nauvis)
+
+    expect(actor?.character).toBe(character)
+    expect(nauvis.find_entities_filtered).not.toHaveBeenCalled()
   })
 
   it('returns undefined when the persisted unit_number no longer exists (e.g. it died)', () => {
@@ -211,5 +227,48 @@ describe('StandaloneCharacterActor as a ControlledActor', () => {
       mining_state: { mining: false },
       mining_progress: 0,
     })
+  })
+})
+
+describe('StandaloneCharacterActor hand-mining target', () => {
+  function ore(name: string, x: number, y: number) {
+    return { valid: true, name, type: 'resource', position: { x, y } }
+  }
+
+  function mining_actor(selected: unknown, entities: unknown[]) {
+    const surface = { find_entities_filtered: vi.fn(() => entities) }
+    const character = fake_character({ selected, surface, force: { index: 1 } })
+    const actor = new StandaloneCharacterActor(character as any)
+    return { actor, surface }
+  }
+
+  beforeEach(() => {
+    ;(globalThis as any).prototypes = {
+      entity: {
+        'iron-ore': { mineable_properties: { minable: true, products: [{ type: 'item', name: 'iron-ore' }] } },
+        'copper-ore': { mineable_properties: { minable: true, products: [{ type: 'item', name: 'copper-ore' }] } },
+        'character': { mineable_properties: { minable: false } },
+      },
+    }
+  })
+
+  it('takes the mined items from the entity at the mining position, not from `selected`', () => {
+    const { actor, surface } = mining_actor(ore('copper-ore', 50, 50), [ore('iron-ore', 10.5, 20.5)])
+    actor.set_mining_state({ mining: true, position: { x: 10.5, y: 20.5 } })
+
+    expect(surface.find_entities_filtered).toHaveBeenCalledWith({ area: { left_top: { x: 10, y: 20 }, right_bottom: { x: 11, y: 21 } } })
+    expect(Object.keys((globalThis as any).storage.sgluna_hand_work[1].mining_active)).toEqual(['iron-ore'])
+  })
+
+  it('works when `selected` is unset', () => {
+    const { actor } = mining_actor(undefined, [ore('iron-ore', 10.5, 20.5)])
+    actor.set_mining_state({ mining: true, position: { x: 10.5, y: 20.5 } })
+    expect(Object.keys((globalThis as any).storage.sgluna_hand_work[1].mining_active)).toEqual(['iron-ore'])
+  })
+
+  it('ignores the body and entities away from the position, and voids every item when none is found', () => {
+    const { actor } = mining_actor(ore('copper-ore', 10.5, 20.5), [{ valid: true, name: 'character', type: 'character', position: { x: 10.5, y: 20.5 } }, ore('iron-ore', 11.5, 20.5)])
+    actor.set_mining_state({ mining: true, position: { x: 10.5, y: 20.5 } })
+    expect(Object.keys((globalThis as any).storage.sgluna_hand_work[1].mining_active)).toEqual(['*'])
   })
 })

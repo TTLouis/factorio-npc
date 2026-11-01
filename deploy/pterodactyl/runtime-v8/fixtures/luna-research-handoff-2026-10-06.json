@@ -1,0 +1,289 @@
+{
+  "source_candidate": "6b268031c8a2023a7ca973557022b3cd84e221c1",
+  "planner": {
+    "chatMessage": "This plan starts with the exact prerequisite research triggers. I’ll use the live recipes and inventory to choose the crafting actions when this milestone is active.",
+    "plan": [
+      "Complete the electronics and steam-power research triggers"
+    ],
+    "currentStep": 0,
+    "operations": [],
+    "goal": {
+      "scope": "long_horizon",
+      "summary": "Produce red science and use it to research logistic-science-pack and unlock green science. Finish when logistic-science-pack is researched and its recipe is enabled.",
+      "doneWhen": [
+        {
+          "kind": "research_completed",
+          "technology": "logistic-science-pack"
+        }
+      ]
+    },
+    "roadmap": [
+      {
+        "id": "research-prerequisites",
+        "intent": "Complete prerequisite research triggers",
+        "why_it_matters": "Perform the exact copper-plate and iron-plate triggers for electronics and steam-power, then unlock automation science before logistic science."
+      },
+      {
+        "id": "produce-red-science",
+        "intent": "Produce red science",
+        "why_it_matters": "Make red science as requested; determine its materials and method when this node is active.",
+        "depends_on": [
+          "research-prerequisites"
+        ]
+      },
+      {
+        "id": "research-logistic-science",
+        "intent": "Research logistic science",
+        "why_it_matters": "Use the required automation science to research logistic-science-pack and enable its recipe.",
+        "depends_on": [
+          "research-prerequisites",
+          "produce-red-science"
+        ]
+      }
+    ],
+    "roadmapNodeIds": [
+      "research-prerequisites"
+    ],
+    "developmentMode": "vertical",
+    "stepCompletions": [
+      {
+        "kind": "deterministic",
+        "checkpoint": {
+          "mode": "all",
+          "requirements": [
+            {
+              "kind": "research_completed",
+              "technology": "electronics"
+            },
+            {
+              "kind": "research_completed",
+              "technology": "steam-power"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "blocker": "BLOCKED: I need the exact live research-trigger requirements for electronics and steam-power before I can perform this committed step safely.",
+  "researchPath": {
+    "ok": true,
+    "target": "logistic-science-pack",
+    "target_researched": false,
+    "node_count": 4,
+    "pending_count": 4,
+    "nodes": [
+      {
+        "name": "electronics",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "trigger",
+        "status": "ready",
+        "prerequisites": {},
+        "unresolved_prerequisites": {},
+        "research_trigger": {
+          "type": "craft-item",
+          "item": "copper-plate",
+          "count": 10
+        },
+        "required_action": "perform_research_trigger_then_verify"
+      },
+      {
+        "name": "steam-power",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "trigger",
+        "status": "ready",
+        "prerequisites": {},
+        "unresolved_prerequisites": {},
+        "research_trigger": {
+          "type": "craft-item",
+          "item": "iron-plate",
+          "count": 50
+        },
+        "required_action": "perform_research_trigger_then_verify"
+      },
+      {
+        "name": "automation-science-pack",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "trigger",
+        "status": "blocked_by_prerequisites",
+        "prerequisites": [
+          "electronics",
+          "steam-power"
+        ],
+        "unresolved_prerequisites": [
+          "electronics",
+          "steam-power"
+        ],
+        "research_trigger": {
+          "type": "craft-item",
+          "item": "lab",
+          "count": 1
+        },
+        "required_action": "perform_research_trigger_then_verify"
+      },
+      {
+        "name": "logistic-science-pack",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "prerequisites": [
+          "automation-science-pack"
+        ],
+        "unresolved_prerequisites": [
+          "automation-science-pack"
+        ],
+        "science": {
+          "count": 75,
+          "energy": 300,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ],
+          "ingredients_truncated": false
+        },
+        "required_action": "research_technology_then_verify"
+      }
+    ],
+    "pending_path": [
+      {
+        "name": "electronics",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "trigger",
+        "status": "ready",
+        "prerequisites": {},
+        "unresolved_prerequisites": {},
+        "research_trigger": {
+          "type": "craft-item",
+          "item": "copper-plate",
+          "count": 10
+        },
+        "required_action": "perform_research_trigger_then_verify"
+      },
+      {
+        "name": "steam-power",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "trigger",
+        "status": "ready",
+        "prerequisites": {},
+        "unresolved_prerequisites": {},
+        "research_trigger": {
+          "type": "craft-item",
+          "item": "iron-plate",
+          "count": 50
+        },
+        "required_action": "perform_research_trigger_then_verify"
+      },
+      {
+        "name": "automation-science-pack",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "trigger",
+        "status": "blocked_by_prerequisites",
+        "prerequisites": [
+          "electronics",
+          "steam-power"
+        ],
+        "unresolved_prerequisites": [
+          "electronics",
+          "steam-power"
+        ],
+        "research_trigger": {
+          "type": "craft-item",
+          "item": "lab",
+          "count": 1
+        },
+        "required_action": "perform_research_trigger_then_verify"
+      },
+      {
+        "name": "logistic-science-pack",
+        "level": 1,
+        "max_level": 1,
+        "researched": false,
+        "enabled": true,
+        "mode": "science",
+        "status": "blocked_by_prerequisites",
+        "prerequisites": [
+          "automation-science-pack"
+        ],
+        "unresolved_prerequisites": [
+          "automation-science-pack"
+        ],
+        "science": {
+          "count": 75,
+          "energy": 300,
+          "ingredients": [
+            {
+              "name": "automation-science-pack",
+              "amount": 1
+            }
+          ],
+          "ingredients_truncated": false
+        },
+        "required_action": "research_technology_then_verify"
+      }
+    ],
+    "next_actionable": {
+      "name": "electronics",
+      "level": 1,
+      "max_level": 1,
+      "researched": false,
+      "enabled": true,
+      "mode": "trigger",
+      "status": "ready",
+      "prerequisites": {},
+      "unresolved_prerequisites": {},
+      "research_trigger": {
+        "type": "craft-item",
+        "item": "copper-plate",
+        "count": 10
+      },
+      "required_action": "perform_research_trigger_then_verify"
+    },
+    "blocked": false,
+    "blockers": {},
+    "semantics": "pending_path is dependency-first and contains only technologies not currently researched. trigger nodes require the exact returned research_trigger; science nodes use research_technology and must still be verified after submission."
+  },
+  "executorMessages": [
+    {
+      "role": "user",
+      "content": "[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.\n--- plan block (stable while this plan runs) ---\ngoal_id: goal_0mqy4p0_1\ngoal: Produce red science and use it to research logistic-science-pack and unlock green science. Hand crafting and hand-fed machines are allowed; factory automation is optional. Use natural resources and native game mechanics. Finish when logistic-science-pack is researched and its recipe is enabled.\nscope: long_horizon; Produce red science and use it to research logistic-science-pack and unlock green science. Finish when logistic-science-pack is researched and its recipe is enabled.\ndone_when done_1: research \"logistic-science-pack\" is completed\nroadmap_node: research-prerequisites: Complete prerequisite research triggers\nplan: goal_0mqy4p0_1_p3 v1\nstep 1: goal_0mqy4p0_1_p3_v1_s1_0xjgy2v | Complete the electronics and steam-power research triggers"
+    },
+    {
+      "role": "user",
+      "content": "--- step block ---\nrestage: role=executor checkpoint=C3 reason=executor_fresh_at_plan_commit\nactor: actor_id=9 actor_kind=standalone_character epoch=1 connected_players=0\nplan_status: COMMITTED; steps 1:active\nactive_step: 1 of 1 goal_0mqy4p0_1_p3_v1_s1_0xjgy2v | Complete the electronics and steam-power research triggers | batches=0 accepted_for_close=0\nactive_step_contract: all: research_completed; research_completed\nreceipt #1 step_completion_contract_validated checkpoint/step_1: {\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"research_completed\",\"technology\":\"electronics\"},{\"id\":\"requirement_2\",\"kind\":\"research_completed\",\"technolo\nauthority: active_step=goal_0mqy4p0_1_p3_v1_s1_0xjgy2v (committed plan) contract=all (committed) latest_receipt=#1 step_completion_contract_validated checkpoint/step_1 (this step) entity_ids_in_receipts_and_snapshots=historical_observations\nheld_counts (fresh live read of the actor inventory, as_of=epoch:1): logistic-science-pack=0 transport-belt=0 inserter=0\nrecipe_fact logistic-science-pack (stable recipe data, source=getRecipeDetails, as_of=epoch:1): categories=crafting | energy=6 | ingredients=1 transport-belt + 1 inserter | products=1 logistic-science-pack | machines=assembling-machine-1,assembling-machine-2,assembling-machine-3"
+    },
+    {
+      "role": "user",
+      "content": "[DECISION_ENVELOPE] planning_horizon=subgoal; observation_budget_remaining=0; observation_families=research_state. Plan only the bounded current milestone/subgoal; do not flatten later milestones into this Plan Tracker."
+    },
+    {
+      "role": "user",
+      "content": "[PLANNING_LOD] Your reply, including all reasoning, has a fixed output budget. Work at outline level. Before any reads, only decide which reads you need. In a plan, write the goal definition (on the first plan), one short line per step (plus Roadmap Shelf nodes for a long_horizon goal), and concrete operations only for the active step. Do not work out later steps' operations, counts, or positions now; each step is refined when it becomes active."
+    },
+    {
+      "role": "user",
+      "content": "[STEERING] Harness-generated decision guidance; this is not Factorio world state.\ndomain=general\ndecision_order=exact observed identity > nearest-name lookup; deterministic validator > trial-and-error action; small fully-parameterized batch > one-operation-per-turn; runtime fact > prototype fact > remembered game knowledge\nbatch_boundary=stop before an operation that needs a new unit_number, mutable result, or other observation that does not exist yet\nlocality=before intentionally crossing to another area, finish other already-decided operations on known current-area targets when their order is independent; do not invent targets or reorder user constraints, prerequisites, or observation-dependent work just to save walking\nsuccess_evidence=never claim a world-changing action succeeded from intent alone; require an operation receipt or subsequent observation"
+    }
+  ]
+}

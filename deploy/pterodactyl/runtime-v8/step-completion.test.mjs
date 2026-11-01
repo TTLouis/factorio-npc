@@ -1,0 +1,336 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import {
+  applyConditionObservation,
+  completionContractSupported,
+  authoredCompletionContractSupported,
+  evaluateCompletionContract,
+  makeConditionWait,
+  provePermanentlyUnsatisfiable,
+  sanitizeStepCompletionContract,
+  strictTaskTypesForOperation,
+} from './step-completion.mjs'
+
+test('receipt declarations share the verifier support policy, research still requires authoritative world state', () => {
+  for (const operation_name of ['wait', 'research_technology', 'unknown_operation']) {
+    assert.equal(strictTaskTypesForOperation({ name: operation_name, args: {} }), undefined)
+    const contract = { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name }] }
+    assert.equal(authoredCompletionContractSupported(contract), false)
+    assert.equal(sanitizeStepCompletionContract(contract).requirements[0].operation_name, operation_name,
+      'legacy contracts remain structurally preserved without acquiring invented completion proof')
+  }
+  for (const name of ['craft_item', 'place_entity', 'gather_resource']) {
+    assert.ok(strictTaskTypesForOperation({ name, args: {} }))
+    assert.equal(authoredCompletionContractSupported({ mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: name }] }), true)
+  }
+  assert.equal(authoredCompletionContractSupported({ mode: 'all', requirements: [{ kind: 'research_completed', technology: 'automation' }] }), true)
+})
+
+test('unsupported, mixed, truncated, or malformed completion semantics fail closed', () => {
+  assert.equal(sanitizeStepCompletionContract({ mode: 'all', requirements: [{ kind: 'natural_language', predicate: 'looks done' }] }).mode, 'semantic_unknown')
+  assert.equal(sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [
+      { id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
+      { id: 'guess', kind: 'natural_language', predicate: 'looks done' },
+    ],
+  }).mode, 'semantic_unknown')
+  assert.equal(sanitizeStepCompletionContract({
+    mode: 'javascript',
+    requirements: [{ id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 }],
+  }).mode, 'semantic_unknown')
+  assert.equal(sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: Array.from({ length: 9 }, (_, index) => ({ id: `item_${index}`, kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 })),
+  }).mode, 'semantic_unknown')
+  assert.equal(sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [
+      { id: 'same', kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
+      { id: 'same', kind: 'inventory_count', item_name: 'copper-plate', minimum: 9 },
+    ],
+  }).mode, 'semantic_unknown')
+  assert.equal(sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [{ id: 'receipt', kind: 'authoritative_operation_receipt' }],
+  }).mode, 'semantic_unknown')
+})
+
+test('inventory completion requires grounded count truth', () => {
+  const contract = sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [{ id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 }],
+  })
+  assert.equal(evaluateCompletionContract(contract, {
+    plates: { kind: 'inventory_count', item_name: 'iron-plate', current: 0, summary: 'iron-plate=0' },
+  }).satisfied, false)
+  assert.equal(evaluateCompletionContract(contract, {
+    plates: { kind: 'inventory_count', item_name: 'iron-plate', current: 9, summary: 'iron-plate=9' },
+  }).satisfied, true)
+  assert.equal(evaluateCompletionContract(contract, {
+    plates: { kind: 'inventory_count', item_name: 'copper-plate', current: 99, satisfied: true },
+  }).satisfied, false)
+})
+
+test('research checkpoint needs exact authoritative research evidence, not a craft receipt or model claim', () => {
+  const contract = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ kind: 'research_completed', technology: 'logistic-science-pack' }] })
+  assert.equal(completionContractSupported(contract), true)
+  const check = fact => evaluateCompletionContract(contract, { requirement_1: fact }).satisfied
+  assert.equal(check({ kind: 'research_completed', technology: 'logistic-science-pack', authoritative: true, satisfied: true }), true)
+  for (const fact of [
+    { kind: 'research_completed', technology: 'logistic-science-pack', satisfied: true },
+    { kind: 'research_completed', technology: 'electronics', authoritative: true, satisfied: true },
+    { kind: 'research_completed', technology: 'logistic-science-pack', authoritative: true, satisfied: false },
+    { kind: 'research_completed', technology: 'logistic-science-pack', authoritative: true, stale: true, satisfied: true },
+    { kind: 'authoritative_operation_receipt', authoritative: true, operation_name: 'craft_item' },
+  ]) assert.equal(check(fact), false)
+  assert.equal(completionContractSupported({ mode: 'all', requirements: [{ kind: 'research_completed', technology: 'bad\"technology' }] }), false)
+})
+
+test('entity inventory completion requires exact live identity', () => {
+  assert.equal(sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [{ kind: 'entity_inventory_count', item_name: 'iron-plate', minimum: 9 }],
+  }).mode, 'semantic_unknown')
+  const contract = sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [{ id: 'furnace', kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 9 }],
+  })
+  assert.equal(contract.requirements[0].unit_number, 582)
+  assert.equal(evaluateCompletionContract(contract, {
+    furnace: { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', current: 9, stale: false },
+  }).satisfied, true)
+  assert.equal(evaluateCompletionContract(contract, {
+    furnace: { kind: 'entity_inventory_count', unit_number: 583, item_name: 'iron-plate', current: 99, stale: false },
+  }).satisfied, false)
+  assert.equal(evaluateCompletionContract(contract, {
+    furnace: { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', current: 99, stale: true },
+  }).satisfied, false)
+})
+
+test('passive progress wait stays active while machine progresses and wakes when it stops', () => {
+  const wait = makeConditionWait(
+    { kind: 'entity_state', unit_number: 582, expected: 'working' },
+    { mode: 'passive_progress', goalId: 'goal_1', stepId: 'step_2', maxChecks: 10 },
+  )
+  const active = applyConditionObservation(wait, { satisfied: true, progressing: true, progress_known: true })
+  assert.equal(active.action, 'waiting')
+  assert.equal(active.wait.state, 'active')
+  const stopped = applyConditionObservation(active.wait, { satisfied: false, progressing: false, progress_known: true })
+  assert.equal(stopped.action, 'wake')
+  assert.equal(stopped.wait.state, 'failed')
+})
+
+test('completion wait verifies once and duplicate observations are stale after satisfaction', () => {
+  const wait = makeConditionWait(
+    { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
+    { goalId: 'goal_1', stepId: 'step_2', maxChecks: 10 },
+  )
+  const verified = applyConditionObservation(wait, { satisfied: true, summary: 'iron-plate=10' })
+  assert.equal(verified.action, 'verified')
+  assert.equal(applyConditionObservation(verified.wait, { satisfied: true }).action, 'stale')
+})
+
+test('timeout and exact-identity loss never fake completion', () => {
+  const wait = makeConditionWait(
+    { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 9 },
+    { maxChecks: 1 },
+  )
+  const timed = applyConditionObservation(wait, { satisfied: false, progressing: true })
+  assert.equal(timed.action, 'timeout')
+  assert.notEqual(timed.wait.state, 'satisfied')
+
+  const stale = applyConditionObservation(wait, { stale: true })
+  assert.equal(stale.action, 'failed')
+  assert.equal(stale.reason, 'stale_exact_identity')
+})
+
+
+test('passive progress wait is bounded by checks and elapsed timeout without treating time as completion', () => {
+  const byChecks = makeConditionWait(
+    { kind: 'entity_state', unit_number: 582, expected: 'working' },
+    { mode: 'passive_progress', goalId: 'goal_1', stepId: 'step_2', maxChecks: 1, timeoutMs: 60000, now: 1000 },
+  )
+  const checkTimeout = applyConditionObservation(byChecks, {
+    satisfied: true,
+    progressing: true,
+    progress_known: true,
+  }, { now: 1500 })
+  assert.equal(checkTimeout.action, 'timeout')
+  assert.equal(checkTimeout.wait.state, 'timeout')
+
+  const byTime = makeConditionWait(
+    { kind: 'entity_state', unit_number: 582, expected: 'working' },
+    { mode: 'passive_progress', goalId: 'goal_1', stepId: 'step_2', maxChecks: 10, timeoutMs: 1000, now: 1000 },
+  )
+  const elapsedTimeout = applyConditionObservation(byTime, {
+    satisfied: true,
+    progressing: true,
+    progress_known: true,
+  }, { now: 2000 })
+  assert.equal(elapsedTimeout.action, 'timeout')
+  assert.notEqual(elapsedTimeout.wait.state, 'satisfied')
+})
+
+test('condition wait carries bounded lifecycle identity when supplied', () => {
+  const wait = makeConditionWait(
+    { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
+    {
+      goalId: 'goal_1',
+      stepId: 'step_2',
+      actorId: 18,
+      actorEpoch: 3,
+      timeoutMs: 999999999,
+    },
+  )
+  assert.equal(wait.actor_id, 18)
+  assert.equal(wait.actor_epoch, 3)
+  assert.ok(wait.timeout_ms <= 2 * 60 * 60 * 1000)
+})
+
+test('unsatisfiability is proven only by a destroyed exact identity the contract names', () => {
+  const contract = {
+    mode: 'all',
+    requirements: [
+      { id: 'fuel', kind: 'entity_inventory_count', unit_number: 4412, item_name: 'coal', minimum: 5 },
+      { id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 },
+    ],
+  }
+
+  const proven = provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [4412] })
+  assert.equal(proven.proven, true)
+  assert.deepEqual(proven.requirement_ids, ['fuel'])
+  assert.deepEqual(proven.unit_numbers, [4412])
+
+  assert.equal(provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [] }), undefined)
+  assert.equal(provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [9999] }), undefined,
+    'an identity this contract never names proves nothing about it')
+})
+
+test('an unpinned requirement can never be proven unsatisfiable however often it failed', () => {
+  // `inventory_count`, receipts and controller state are not bound to an entity
+  // the world can destroy, so no amount of destruction makes them impossible.
+  const unpinned = {
+    mode: 'all',
+    requirements: [
+      { id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 },
+      { id: 'receipt', kind: 'authoritative_operation_receipt', operation_name: 'craft_item' },
+      { id: 'controller', kind: 'runtime_controller_state', controller: 'mining', expected: 'idle' },
+    ],
+  }
+  assert.equal(provePermanentlyUnsatisfiable(unpinned, { staleUnitNumbers: [1, 2, 3, 4412] }), undefined)
+})
+
+test('any-mode needs every branch dead, all-mode only needs one', () => {
+  const requirements = [
+    { id: 'a', kind: 'entity_exists', unit_number: 10 },
+    { id: 'b', kind: 'entity_state', unit_number: 11, expected: 'working' },
+  ]
+
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'any', requirements }, { staleUnitNumbers: [10] }), undefined,
+    'a surviving branch keeps an any-mode contract reachable')
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'any', requirements }, { staleUnitNumbers: [10, 11] }).proven, true)
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'all', requirements }, { staleUnitNumbers: [10] }).proven, true)
+})
+
+test('a contract with nothing to falsify is never proven unsatisfiable', () => {
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'semantic_unknown', requirements: [] }, { staleUnitNumbers: [10] }), undefined)
+  assert.equal(provePermanentlyUnsatisfiable(undefined, { staleUnitNumbers: [10] }), undefined)
+  // A malformed contract sanitizes to semantic_unknown rather than proving anything.
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'all', requirements: [{ id: 'x', kind: 'nonsense' }] }, { staleUnitNumbers: [10] }), undefined)
+})
+
+// Shapes live DeepSeek planners actually sent (sgluna-prompts 2026-09-21);
+// every one was rejected as invalid_semantic_checkpoint before normalization.
+test('live "at least N" checkpoint spellings normalize to minimum', () => {
+  const live = [
+    { kind: 'inventory_count', item_name: 'stone', count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', min_count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', comparison: '>=', count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', op: '>=', count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', comparator: '>=', count: '10' },
+    { kind: 'inventory_count', item_name: 'stone', comparison: '>', count: 9 },
+  ]
+  for (const requirement of live) {
+    const contract = sanitizeStepCompletionContract({ mode: 'all', requirements: [requirement] })
+    assert.equal(completionContractSupported(contract), true, JSON.stringify(requirement))
+    assert.deepEqual(contract.requirements[0], { id: 'requirement_1', kind: 'inventory_count', item_name: 'stone', minimum: 10 })
+  }
+})
+
+test('receipt checkpoints accept the operation alias', () => {
+  const contract = sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [{ kind: 'authoritative_operation_receipt', operation: 'gather_resource', detail: 'mining completed' }],
+  })
+  assert.deepEqual(contract.requirements[0], { id: 'requirement_1', kind: 'authoritative_operation_receipt', operation_name: 'gather_resource' })
+})
+
+test('exact and upper-bound quantities stay unsupported', () => {
+  for (const comparison of ['==', '=', '<=', '<']) {
+    const contract = sanitizeStepCompletionContract({
+      mode: 'all',
+      requirements: [{ kind: 'inventory_count', item_name: 'stone', comparison, count: 10 }],
+    })
+    assert.equal(completionContractSupported(contract), false, comparison)
+  }
+})
+
+// --- Unit 9: build steps (entity_count) -------------------------------------------------------------------------------
+
+test('entity_count: a build step names a prototype and a lower bound, with an optional scope; malformed scopes fail closed', () => {
+  const plain = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'boiler', kind: 'entity_count', prototype: 'boiler', minimum: 1 }] })
+  assert.deepEqual(plain.requirements, [{ id: 'boiler', kind: 'entity_count', prototype: 'boiler', minimum: 1 }])
+  assert.equal(completionContractSupported(plain), true)
+  assert.equal(authoredCompletionContractSupported(plain), true)
+  // The unambiguous "at least N" spellings the other count kinds accept, and entity_name for the prototype.
+  const aliased = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'poles', kind: 'entity_count', entity_name: 'small-electric-pole', count: 4, comparison: '>=' }] })
+  assert.deepEqual(aliased.requirements[0], { id: 'poles', kind: 'entity_count', prototype: 'small-electric-pole', minimum: 4 })
+  const scoped = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 2, radius: 40, anchor: { x: 12.5, y: -7 }, state: 'powered' }] })
+  assert.deepEqual(scoped.requirements[0], { id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 2, radius: 40, anchor: { x: 12.5, y: -7 }, state: 'powered' })
+  for (const bad of [
+    { prototype: 'boiler' },
+    { prototype: 'boiler', minimum: 0 },
+    { prototype: 'Boiler With Spaces', minimum: 1 },
+    { prototype: 'boiler', minimum: 1, radius: 0 },
+    { prototype: 'boiler', minimum: 1, radius: 257 },
+    { prototype: 'boiler', minimum: 1, anchor: { x: 1, y: 2 } },
+    { prototype: 'boiler', minimum: 1, radius: 5, anchor: { x: 'a', y: 2 } },
+    { prototype: 'boiler', minimum: 1, state: 'hovering' },
+  ]) {
+    assert.equal(sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'bad', kind: 'entity_count', ...bad }] }).mode, 'semantic_unknown', JSON.stringify(bad))
+  }
+})
+
+test('entity_count: only a live native count of that prototype under that scope satisfies it, and a placement receipt never does', () => {
+  const contract = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'engines', kind: 'entity_count', prototype: 'steam-engine', minimum: 2, state: 'working' }] })
+  const live = fact => evaluateCompletionContract(contract, { engines: { kind: 'entity_count', prototype: 'steam-engine', state: 'working', authoritative: true, current: 2, ...fact } }).satisfied
+  assert.equal(live({}), true)
+  assert.equal(live({ current: 1 }), false)
+  for (const fact of [
+    { authoritative: false },
+    { stale: true },
+    { prototype: 'boiler' },
+    { state: undefined },
+    { current: undefined },
+  ]) assert.equal(live(fact), false, JSON.stringify(fact))
+  // A receipt that a place_entity batch finished, however authoritative, is another kind of fact.
+  for (const fact of [
+    { kind: 'authoritative_operation_receipt', authoritative: true, operation_name: 'place_entity', operation_names: ['place_entity'] },
+    { kind: 'inventory_count', item_name: 'steam-engine', current: 5 },
+  ]) assert.equal(evaluateCompletionContract(contract, { engines: fact }).satisfied, false)
+  const scoped = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'engines', kind: 'entity_count', prototype: 'steam-engine', minimum: 1, radius: 30 }] })
+  assert.equal(evaluateCompletionContract(scoped, { engines: { kind: 'entity_count', prototype: 'steam-engine', authoritative: true, current: 3 } }).satisfied, false, 'a count taken under another scope is not this requirement')
+  assert.equal(evaluateCompletionContract(scoped, { engines: { kind: 'entity_count', prototype: 'steam-engine', radius: 30, authoritative: true, current: 3 } }).satisfied, true)
+  // Naming no identity, it is never pinned to a unit_number: no destroyed entity can prove it unsatisfiable.
+  assert.equal(provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [1, 2, 3] }), undefined)
+})
+
+test('an operation-receipt contract is met by one receipt whatever the entity count (why a build step declares entity_count)', () => {
+  const receipt = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'placed', kind: 'authoritative_operation_receipt', operation_name: 'place_entity' }] })
+  const oneReceipt = { placed: { kind: 'authoritative_operation_receipt', authoritative: true, operation_name: 'place_entity', operation_names: ['place_entity'] } }
+  assert.equal(evaluateCompletionContract(receipt, oneReceipt).satisfied, true, 'one place_entity receipt closes it with no count at all')
+  const count = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'placed', kind: 'entity_count', prototype: 'boiler', minimum: 3 }] })
+  assert.equal(evaluateCompletionContract(count, oneReceipt).satisfied, false)
+})

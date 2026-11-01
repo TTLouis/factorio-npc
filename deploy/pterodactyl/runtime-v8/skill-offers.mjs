@@ -1,0 +1,773 @@
+// Skill offers (plan item 2.8): the harness offers skill cards in the
+// plan-authoring context without the model having to call findSkills.
+//
+// - The mod scores the skill library against the goal (tags derived from
+//   outputs, topology entities and technology preconditions, plus a short
+//   hand-set goal_tags list) and checks each need against the live world
+//   (`autorio_skills.offer`): have, can_craft, locked (naming the technology)
+//   or unknown. This module never scores skills itself.
+// - Each card is rendered ONCE by `renderSkillCard`. The same text goes into
+//   the Main LLM's [SKILL_OFFERS] block and into Jev's candidate criteria, so
+//   Jev judges exactly what the model sees.
+// - When: a complete search runs for a new goal and whenever the next shelved
+//   goal is picked up into the active plan (shelf -> active plan boundary).
+//   The block is shown only in plan-authoring and revision rounds, never in
+//   rounds that carry out a committed step. No per-step re-offers.
+// - The live supervisor uses native deterministic ranking without a Jev skill
+//   provider (owner, 2026-10-27). Explicitly injected shadow providers remain
+//   supported by historical ledger/cancellation fixtures only.
+// - Protocol 3 planners open up to six ranked details from ten cards; legacy
+//   contexts open three from five. Cards alone never count as loaded; the
+//   executor renders at most three details selected for its committed step.
+//
+// Seam for 2.8 (e), meaning-based scoring with a local embedding model: it
+// belongs on the mod side next to the keyword score (see skills.ts), always
+// falling back to keywords. Nothing here depends on LM Studio.
+
+import { luaString, toolCommand } from '../staging/structured-policy.mjs'
+import { getActivePlan, nearestShelfRefinementTarget, PLAN_STATUS } from './planning-state.mjs'
+import { PLANNER_ROLE } from './agent-roles.mjs'
+import { createHash } from 'node:crypto'
+import { cleanMemoryText } from './durable-text.mjs'
+
+export const SKILL_OFFERS_PREFIX = '[SKILL_OFFERS]'
+const SKILL_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+export const SKILL_OFFER_LIMIT = 5
+export const SKILL_AUTOLOAD_LIMIT = 3
+export const PLANNER_SKILL_OFFER_LIMIT = 10
+export const PLANNER_SKILL_DETAIL_LIMIT = 6
+export const EXECUTOR_SKILL_CONTEXT_MAX_CHARS = 16000
+// The shared cache must survive planner -> executor -> planner. Rendering is
+// role-specific; the executor still sees at most three selected step skills.
+export function skillDiscoveryPolicy(loop) {
+  const separated = loop?.completionProtocolVersion >= 3
+  const planner = separated && loop?.agentContext?.role === PLANNER_ROLE
+  return {
+    offers: planner ? PLANNER_SKILL_OFFER_LIMIT : SKILL_OFFER_LIMIT,
+    autoload: planner ? PLANNER_SKILL_DETAIL_LIMIT : SKILL_AUTOLOAD_LIMIT,
+    stored: separated ? PLANNER_SKILL_DETAIL_LIMIT : 3,
+    rendered: planner ? PLANNER_SKILL_DETAIL_LIMIT : 3,
+    chars: planner ? 32000 : EXECUTOR_SKILL_CONTEXT_MAX_CHARS,
+  }
+}
+function boundedSkillValue(value, depth = 0) {
+  if (depth > 4) return undefined
+  if (typeof value === 'string') return cleanMemoryText(value, 600)
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
+  if (Array.isArray(value)) {
+    return value.slice(0, 12)
+      .map(item => boundedSkillValue(item, depth + 1))
+      .filter(item => item !== undefined)
+  }
+  if (!value || typeof value !== 'object') return undefined
+  const entries = Object.entries(value).slice(0, 24)
+    .map(([key, child]) => [key, boundedSkillValue(child, depth + 1)])
+    .filter(([, child]) => child !== undefined)
+  return Object.fromEntries(entries)
+}
+
+export function compactLoadedSkill(raw, expectedId) {
+  let skill
+  try { skill = typeof raw === 'string' ? JSON.parse(raw) : raw }
+  catch { return undefined }
+  if (!skill || typeof skill !== 'object' || Array.isArray(skill)) return undefined
+  const id = typeof skill.id === 'string' ? cleanMemoryText(skill.id, 80) : ''
+  if (!id || (expectedId && id !== expectedId)) return undefined
+
+  const keys = [
+    'schema_version', 'revision', 'id', 'name', 'kind', 'stage', 'status', 'summary',
+    'preconditions', 'inputs', 'outputs', 'topology', 'constraints', 'parameters',
+    'verification', 'known_failure_modes', 'confidence', 'examples',
+  ]
+  const compact = {}
+  for (const key of keys) {
+    if (skill[key] === undefined) continue
+    const value = boundedSkillValue(skill[key])
+    if (value !== undefined) compact[key] = value
+  }
+  let serialized = JSON.stringify(compact)
+  if (serialized.length <= 7000) return compact
+
+  delete compact.examples
+  delete compact.known_failure_modes
+  serialized = JSON.stringify(compact)
+  if (serialized.length <= 7000) return compact
+
+  return {
+    id,
+    revision: Number.isSafeInteger(skill.revision) ? skill.revision : undefined,
+    name: typeof skill.name === 'string' ? cleanMemoryText(skill.name, 160) : undefined,
+    kind: typeof skill.kind === 'string' ? cleanMemoryText(skill.kind, 80) : undefined,
+    stage: typeof skill.stage === 'string' ? cleanMemoryText(skill.stage, 80) : undefined,
+    status: typeof skill.status === 'string' ? cleanMemoryText(skill.status, 80) : undefined,
+    summary: typeof skill.summary === 'string' ? cleanMemoryText(skill.summary, 1200) : undefined,
+    preconditions: Array.isArray(skill.preconditions) ? boundedSkillValue(skill.preconditions.slice(0, 6)) : undefined,
+    topology: boundedSkillValue(skill.topology),
+    constraints: Array.isArray(skill.constraints) ? boundedSkillValue(skill.constraints.slice(0, 8)) : undefined,
+    parameters: Array.isArray(skill.parameters) ? boundedSkillValue(skill.parameters.slice(0, 8)) : undefined,
+    verification: boundedSkillValue(skill.verification),
+  }
+}
+
+const SKILL_HANDOFF_MAX_CHARS = 64000
+const skillHandoffHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+export function skillHandoffError(reason, cause) {
+  const error = new Error(`planner_skill_handoff_unavailable: ${reason}`, { cause })
+  error.code = error.failure_code = 'planner_skill_handoff_unavailable'
+  error.failureClass = 'harness_state'
+  error.pause_class = 'guard'
+  return error
+}
+
+function skillHandoffScope(key, planning) {
+  const plan = getActivePlan(planning)
+  if (!plan) return undefined
+  return {
+    memory_key: key, goal_id: planning.goal?.goal_id, plan_id: plan.plan_id, plan_version: plan.plan_version,
+    steps: plan.steps.map(step => ({ step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? null,
+      skill_ids: [...(step.execution_guidance?.skillIds ?? [])] })),
+  }
+}
+
+function handoffIds(scope) {
+  return [...new Set(scope.steps.flatMap(step => step.skill_ids))]
+}
+
+// Capture at commit, not at restart: a later library edit must never silently
+// replace the procedure the planner actually selected. These are static guides,
+// not live inventory, actor, geometry, placement or completion authority.
+export function capturePlannerSkillHandoff(key, planning, loaded, records) {
+  const scope = skillHandoffScope(key, planning)
+  if (!scope) return undefined
+  const ids = handoffIds(scope)
+  if (ids.length === 0) return undefined
+  if (records && !records.has(key) && records.size >= 128) throw skillHandoffError('snapshot_capacity')
+  if (scope.steps.length > 30 || ids.length > PLANNER_SKILL_DETAIL_LIMIT) throw skillHandoffError('capture_bounds')
+  const skills = ids.map(id => {
+    const skill = compactLoadedSkill(loaded?.get(id), id)
+    if (!skill || !SKILL_ID_PATTERN.test(id)) throw skillHandoffError('capture_missing')
+    return skill
+  })
+  const payload = { schema: 1, scope, skills }
+  if (JSON.stringify(payload).length > SKILL_HANDOFF_MAX_CHARS) throw skillHandoffError('capture_bounds')
+  return { ...payload, sha256: skillHandoffHash(payload) }
+}
+
+// Canonical memory retains a bounded copy. Invalid records remain a small
+// fault marker so another save cannot turn corrupted provenance into "absent".
+export function restorePlannerSkillHandoffs(raw) {
+  const records = new Map()
+  if (!Array.isArray(raw)) return records
+  for (const entry of raw.slice(0, 128)) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || entry[0].length === 0 || entry[0].length > 200) continue
+    const [key, record] = entry
+    records.set(key, record && typeof record === 'object' && JSON.stringify(record).length <= SKILL_HANDOFF_MAX_CHARS + 100
+      ? JSON.parse(JSON.stringify(record)) : { invalid: true })
+  }
+  return records
+}
+
+export function selectedPlannerSkillDetails(key, planning, record) {
+  const scope = skillHandoffScope(key, planning)
+  const plan = getActivePlan(planning)
+  const selected = plan?.steps?.[plan.active_step_index]?.execution_guidance?.skillIds ?? []
+  if (selected.length === 0) return { details: [], selected_ids: [] }
+  const fail = reason => { throw skillHandoffError(reason) }
+  if (!record || record.schema !== 1 || !Array.isArray(record.skills)) fail('missing_snapshot')
+  if (Object.keys(record).some(name => !['schema', 'scope', 'skills', 'sha256'].includes(name))) fail('snapshot_schema')
+  if (JSON.stringify(record.scope) !== JSON.stringify(scope)) fail('scope_mismatch')
+  const payload = { schema: record.schema, scope: record.scope, skills: record.skills }
+  if (JSON.stringify(payload).length > SKILL_HANDOFF_MAX_CHARS || record.sha256 !== skillHandoffHash(payload)) fail('snapshot_integrity')
+  const ids = handoffIds(scope)
+  if (ids.length > PLANNER_SKILL_DETAIL_LIMIT || record.skills.length !== ids.length) fail('snapshot_bounds')
+  const details = new Map()
+  for (const raw of record.skills) {
+    const skill = compactLoadedSkill(raw, raw?.id)
+    if (!skill || !ids.includes(skill.id) || details.has(skill.id)
+      || JSON.stringify(skill) !== JSON.stringify(raw)) fail('invalid_detail')
+    details.set(skill.id, skill)
+  }
+  if (selected.some(id => !details.has(id))) fail('missing_selected_detail')
+  const active = selected.map(id => details.get(id))
+  if (selected.length > 3 || JSON.stringify(active).length > EXECUTOR_SKILL_CONTEXT_MAX_CHARS) fail('executor_context_bounds')
+  return { details: active, selected_ids: [...selected], sha256: record.sha256, scope }
+}
+
+export const SKILL_AUTOLOAD_TIMEOUT_MS = 3000
+export const SKILL_CARD_MAX_CHARS = 600
+// The mod measures the goal in UTF-8 bytes (Lua strings are bytes).
+export const SKILL_OFFER_MAX_GOAL_BYTES = 500
+export const SKILL_CHOICE_MIN_CONFIDENCE = 0.6
+export const SKILL_CHOICE_CONTRACT = 'skill_choice'
+// 'shadow': trace Jev's pick only. 'advisory': also add one advisor line to
+// the block. Owner decision 2026-09-28: shadow first.
+export const SKILL_CHOICE_MODES = Object.freeze({ SHADOW: 'shadow', ADVISORY: 'advisory' })
+export const SKILL_CHOICE_MODE = SKILL_CHOICE_MODES.SHADOW
+export const SKILL_NEED_STATES = Object.freeze(['have', 'can_craft', 'locked', 'unknown'])
+const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/
+const STATUSES = new Set(['observed', 'candidate', 'verified', 'deprecated'])
+
+// Bounded single-line text, cut by code points so an emoji (a UTF-16
+// surrogate pair) is never split.
+function text(value, max) {
+  if (typeof value !== 'string') return ''
+  const clean = value.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
+  if (clean.length <= max) return clean
+  const points = Array.from(clean)
+  return points.length <= max ? clean : `${points.slice(0, max - 3).join('')}...`
+}
+
+// The longest prefix of `value` that fits in `maxBytes` UTF-8 bytes, cut on a
+// code point boundary (never half a character).
+export function utf8Prefix(value, maxBytes) {
+  const clean = text(value, Number.MAX_SAFE_INTEGER)
+  if (Buffer.byteLength(clean, 'utf8') <= maxBytes) return clean
+  let bytes = 0
+  let end = 0
+  for (const character of clean) {
+    const size = Buffer.byteLength(character, 'utf8')
+    if (bytes + size > maxBytes) break
+    bytes += size
+    end += character.length
+  }
+  return clean.slice(0, end)
+}
+
+function list(value, maxItems = 5, maxChars = 60) {
+  if (!Array.isArray(value)) return []
+  return value.map(entry => text(entry, maxChars)).filter(Boolean).slice(0, maxItems)
+}
+
+function name(value) {
+  return typeof value === 'string' && NAME_PATTERN.test(value) ? value : undefined
+}
+
+function sanitizeNeed(raw) {
+  if (typeof raw === 'string') return raw ? { subject: text(raw, 60), state: 'unknown' } : undefined
+  if (!raw || typeof raw !== 'object') return undefined
+  const subject = text(raw.subject, 60)
+  if (!subject) return undefined
+  const need = { subject, state: SKILL_NEED_STATES.includes(raw.state) ? raw.state : 'unknown' }
+  const technology = name(raw.technology)
+  const via = name(raw.via)
+  if (technology && need.state === 'locked') need.technology = technology
+  if (via && via !== subject) need.via = via
+  return need
+}
+
+export function skillOfferCommand(goal, limit = SKILL_OFFER_LIMIT) {
+  const request = JSON.stringify({ goal: utf8Prefix(goal, SKILL_OFFER_MAX_GOAL_BYTES), limit })
+  return `/silent-command local request=helpers.json_to_table(${luaString(request)}); rcon.print(helpers.table_to_json(remote.call("autorio_skills","offer",request)))`
+}
+
+export function sanitizeSkillCard(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const id = typeof raw.id === 'string' ? raw.id : ''
+  if (!SKILL_ID_PATTERN.test(id) || id.length > 80 || id === 'none') return undefined
+  return {
+    id,
+    name: text(raw.name, 80) || id,
+    status: STATUSES.has(raw.status) ? raw.status : 'candidate',
+    summary: text(raw.summary, 170),
+    produces: list(raw.produces),
+    // table_to_json renders an empty Lua table as {}.
+    needs: (Array.isArray(raw.needs) ? raw.needs : []).map(sanitizeNeed).filter(Boolean).slice(0, 5),
+    matched: list(raw.matched),
+    score: Number.isFinite(raw.score) ? Math.round(raw.score * 100) / 100 : 0,
+  }
+}
+
+// { ok, cards } on success; { ok: false, reason, error? } otherwise.
+export function parseSkillOffers(raw, limit = SKILL_OFFER_LIMIT) {
+  let parsed
+  try { parsed = JSON.parse(String(raw ?? '').trim()) }
+  catch { return { ok: false, reason: 'lookup_unreadable' } }
+  if (!parsed || typeof parsed !== 'object' || parsed.ok !== true) {
+    return { ok: false, reason: 'lookup_failed', error: text(parsed?.error, 200) || undefined }
+  }
+  const rawCards = Array.isArray(parsed.cards) ? parsed.cards : []
+  const cards = []
+  for (const card of rawCards) {
+    const clean = sanitizeSkillCard(card)
+    if (clean && !cards.some(existing => existing.id === clean.id)) cards.push(clean)
+    if (cards.length >= Math.min(PLANNER_SKILL_OFFER_LIMIT, Math.max(1, limit))) break
+  }
+  return { ok: true, cards }
+}
+
+function renderNeed(need) {
+  if (need.state === 'have') return `${need.subject} (have)`
+  if (need.state === 'can_craft') return `${need.subject} (can craft${need.via ? ` ${need.via}` : ''})`
+  if (need.state === 'locked') {
+    const what = need.via ?? need.subject
+    return need.technology
+      ? `${need.subject} (locked: ${what === need.technology ? `needs research ${what}` : `${what} needs ${need.technology}`})`
+      : `${need.subject} (locked)`
+  }
+  return need.subject
+}
+
+// The one card format, shared by the planner block and Jev's criteria.
+export function renderSkillCard(card) {
+  const parts = [
+    `${card.id} "${card.name}" [${card.status}]: ${card.summary}`,
+    `Produces: ${card.produces.join(', ') || 'none recorded'}.`,
+    `Needs: ${card.needs.map(renderNeed).join(', ') || 'none recorded'}.`,
+    `Matched: ${card.matched.join(', ') || 'text'}.`,
+  ]
+  return text(parts.join(' '), SKILL_CARD_MAX_CHARS)
+}
+
+export function needCounts(cards) {
+  const counts = { have: 0, can_craft: 0, locked: 0, unknown: 0 }
+  for (const card of cards) for (const need of card.needs) counts[need.state]++
+  return counts
+}
+
+export function skillOfferBlock(offer) {
+  if (!offer?.cards?.length) return ''
+  const lines = [
+    `${SKILL_OFFERS_PREFIX} Skills matched to this goal by the harness (tags and live needs), best first. Needs: have = held or already placed; can craft = recipe enabled; locked = research first. These cards are discovery only. The harness opens bounded top-ranked details into [SKILL_CONTEXT]; for any other card call getSkillDetails before following it. Compare patterns for time savings and setup cost; no layout is required. Revalidate live state. You may still use findSkills for a different sub-problem.`,
+    ...offer.cards.map((card, index) => `${index + 1}. ${renderSkillCard(card)}`),
+  ]
+  if (SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY && offer.advisor?.applied) {
+    lines.push(`Advisor: Jev ranked ${offer.advisor.pick} first (confidence ${offer.advisor.confidence.toFixed(2)}). Advisory only.`)
+  }
+  return lines.join('\n')
+}
+
+export function skillChoiceQuestions(cards) {
+  const criteria = {}
+  for (const card of cards) criteria[card.id] = renderSkillCard(card)
+  criteria.none = 'None of these skills fits the goal.'
+  return {
+    skill_choice: {
+      type: 'choice',
+      instructions: 'Judge from the goal text only. Which skill card is the best starting pattern for this goal? Each card lists what it produces, what it needs (have, can craft, or locked behind research), and which tags matched; locked needs are fine if the skill is still the right pattern to follow.',
+      criteria,
+    },
+  }
+}
+
+// Jev's ranking over the offered ids, highest probability first.
+export function parseSkillChoice(response, cards) {
+  const answer = response?.answers?.skill_choice
+  if (!answer || typeof answer.choice !== 'string') return undefined
+  const ids = cards.map(card => card.id)
+  if (answer.choice !== 'none' && !ids.includes(answer.choice)) return undefined
+  const confidence = Number.isFinite(answer.confidence) ? Math.min(1, Math.max(0, answer.confidence)) : 0
+  const probabilities = answer.probabilities && typeof answer.probabilities === 'object' ? answer.probabilities : {}
+  const order = [...ids].sort((left, right) => (Number(probabilities[right]) || 0) - (Number(probabilities[left]) || 0)
+    || ids.indexOf(left) - ids.indexOf(right))
+  if (answer.choice !== 'none') {
+    order.splice(order.indexOf(answer.choice), 1)
+    order.unshift(answer.choice)
+  }
+  return { pick: answer.choice, confidence, order }
+}
+
+function planningGoal(loop, memoryKey) {
+  const planning = loop.memory?.planningState?.(memoryKey)
+  return planning?.goal?.status === 'active' ? planning : undefined
+}
+
+function jevFailureOutcome(error, controller) {
+  if (controller.signal.aborted) return 'aborted'
+  const message = error instanceof Error ? error.message : String(error)
+  if (/timed out|timeout/i.test(message)) return 'timeout'
+  if (/abort|cancel/i.test(message)) return 'aborted'
+  return 'error'
+}
+
+// Aborts the in-flight Jev skill_choice call, if any. Hooked into loop
+// cancel/stop; a newer search calls it too.
+export function abortSkillChoice(loop, reason = 'cancelled') {
+  const controller = loop?.skillChoiceAbort
+  if (!controller) return
+  loop.skillChoiceAbort = null
+  controller.abort(new Error(`skill_choice cancelled: ${reason}`))
+}
+
+// One Jev skill_choice call over the offer's cards. Resolves to nothing and
+// never rejects: every outcome is traced as skill.ranked. The result is kept
+// only when the offer is still the current one for the same actor epoch; a
+// late answer for a replaced offer or a replaced actor is traced and dropped.
+async function runSkillChoice(loop, offer, trigger, base) {
+  const admission = loop.requestAdmissionOwner
+  // A shadow answer may arrive after the same intake legitimately entered its
+  // base turn. A new intake or trace still fences it before any ledger write.
+  const current = () => !admission || (loop.requestAdmissionOwner === admission
+    || (!loop.requestAdmissionOwner && admission.phase === 'turn')) && loop.traceRequest?.id === offer.request_id
+  let controller
+  try {
+    const questions = skillChoiceQuestions(offer.cards)
+    const decisionId = `decision_${Date.now().toString(36)}_skill_${(++loop.decisionRequestSequence).toString(36)}`
+    const state = { contract: SKILL_CHOICE_CONTRACT, goal: offer.goal, trigger, candidate_count: offer.cards.length }
+    // A newer search aborts the older Jev call.
+    abortSkillChoice(loop, 'superseded_by_newer_offer')
+    controller = new AbortController()
+    loop.skillChoiceAbort = controller
+    const epoch = { epoch: loop.epoch?.epoch, actor_id: loop.epoch?.actor_id }
+    const correlation = { decision_id: decisionId, offer_seq: offer.seq, offer_request_id: offer.request_id }
+    const shadow = SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.SHADOW
+    await loop.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: SKILL_CHOICE_CONTRACT,
+      mode: SKILL_CHOICE_MODE,
+      shadow,
+      question_ids: Object.keys(questions),
+    })
+    if (!current()) return
+    const startedAt = Date.now()
+    const staleFailure = async (outcome, reason, decisionWritten = false) => {
+      // Preserve the old call's diagnostic without routing it through current
+      // decision/behavior accounting or incrementing a replacement's sequence.
+      const actor = admission?.nativeActor ?? epoch
+      const failure = { decision_id: decisionId, contract: SKILL_CHOICE_CONTRACT,
+        reason, fallback: 'deterministic_skill_order', shadow }
+      if (!decisionWritten) await loop.decisionTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+        event: 'decision.fallback', decision_id: decisionId, request_id: offer.request_id,
+        actor_id: actor.actor_id, epoch: actor.epoch, data: failure })
+      const data = { ...base, ...correlation, source: 'deterministic', outcome,
+        reason: outcome === 'error' ? 'jev_error' : `jev_${outcome}`, error: reason,
+        latency_ms: Date.now() - startedAt, stale_callback: true, request_id: offer.request_id }
+      // Preserve the existing stop activity notification only when exactly that
+      // stop is still the latest lineage, with no replacement intake or trace.
+      if (admission && loop.generation === admission.generation + 1 && !loop.requestAdmissionOwner
+        && (!loop.traceRequest || loop.traceRequest.id === offer.request_id)) {
+        loop.onActivity?.('skill.ranked', data)
+      }
+      await loop.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), seq: 0,
+        event: 'skill.ranked', request_id: offer.request_id, actor_id: actor.actor_id, epoch: actor.epoch, data })
+    }
+    const failed = async (outcome, reason) => {
+      if (!current()) return staleFailure(outcome, reason)
+      await loop.decisionTraceEvent('decision.fallback', {
+        decision_id: decisionId,
+        contract: SKILL_CHOICE_CONTRACT,
+        reason,
+        fallback: 'deterministic_skill_order',
+        shadow,
+      })
+      if (!current()) return staleFailure(outcome, reason, true)
+      await loop.traceEvent('skill.ranked', {
+        ...base,
+        ...correlation,
+        source: 'deterministic',
+        outcome,
+        reason: outcome === 'error' ? 'jev_error' : `jev_${outcome}`,
+        error: reason,
+        latency_ms: Date.now() - startedAt,
+      })
+    }
+    let response
+    try {
+      response = await loop.skillDecisionProvider(state, questions, { epoch: epoch.epoch, actorId: epoch.actor_id, signal: controller.signal, decisionId })
+    }
+    catch (error) {
+      await failed(jevFailureOutcome(error, controller), text(error instanceof Error ? error.message : String(error), 300))
+      return
+    }
+    // A late answer: the call was aborted, the offer was replaced, or the actor changed.
+    const stale = controller.signal.aborted
+      ? text(controller.signal.reason instanceof Error ? controller.signal.reason.message : String(controller.signal.reason ?? 'skill_choice cancelled'), 200)
+      : loop.skillOffers !== offer
+        ? 'skill_choice cancelled: superseded_by_newer_offer'
+        // The offer can be made before the request captures its epoch; only
+        // a known epoch that later changed counts as a replaced actor.
+        : (epoch.epoch !== undefined && (loop.epoch?.epoch !== epoch.epoch || loop.epoch?.actor_id !== epoch.actor_id))
+            ? 'skill_choice cancelled: actor epoch changed'
+            : ''
+    if (stale) {
+      await failed('aborted', stale)
+      return
+    }
+    if (!current()) return
+    const choice = parseSkillChoice(response, offer.cards)
+    if (!choice) {
+      await failed('error', 'skill_choice answer missing or not one of the offered ids')
+      return
+    }
+    const latency = Date.now() - startedAt
+    await loop.decisionTraceEvent('decision.response', {
+      decision_id: decisionId,
+      contract: SKILL_CHOICE_CONTRACT,
+      mode: SKILL_CHOICE_MODE,
+      pick: choice.pick,
+      confidence: choice.confidence,
+      latency_ms: latency,
+      shadow,
+    })
+    if (!current()) return
+    const confident = choice.pick !== 'none' && choice.confidence >= SKILL_CHOICE_MIN_CONFIDENCE
+    const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
+    offer.jev = { pick: choice.pick, confidence: choice.confidence, order: choice.order }
+    offer.advisor = applied ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
+    // U11: the pick goes through the judgment ledger so it is scored against what the fresh agent then loads.
+    await loop.jev?.recordSkillOrder({ offer, choice, deterministicOrder: base.deterministic_order, latencyMs: latency, current })
+    if (!current()) return
+    await loop.traceEvent('skill.ranked', {
+      ...base,
+      ...correlation,
+      source: 'jev',
+      outcome: 'ranked',
+      reason: confident ? 'jev_confident_pick' : choice.pick === 'none' ? 'jev_none_fits' : 'jev_low_confidence',
+      jev_order: choice.order,
+      jev_pick: choice.pick,
+      confidence: choice.confidence,
+      agrees_with_top: choice.pick === base.deterministic_order[0],
+      prompt_applied: applied,
+      latency_ms: latency,
+    })
+  }
+  catch (error) {
+    loop.log?.(`[skills] skill_choice failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  finally {
+    if (controller && loop.skillChoiceAbort === controller) loop.skillChoiceAbort = null
+  }
+}
+
+// Shadow mode: nothing uses Jev's answer, so the call starts and the planner
+// goes on without waiting (plan 2.10, responsiveness). Advisory mode awaits,
+// because its answer would go into the prompt.
+async function rankWithJev(loop, offer, trigger) {
+  const base = { trigger, deterministic_order: offer.cards.map(card => card.id), mode: SKILL_CHOICE_MODE }
+  if (typeof loop.skillDecisionProvider !== 'function') {
+    await loop.traceEvent('skill.ranked', { ...base, mode: 'deterministic', offer_seq: offer.seq, source: 'deterministic', outcome: 'skipped', reason: 'deterministic_library_ranking' })
+    return
+  }
+  const job = runSkillChoice(loop, offer, trigger, base)
+  loop.skillChoicePending = job
+  if (SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY) await job
+}
+
+function skillReadFence(loop) {
+  const admission = loop.requestAdmissionOwner
+  const generation = loop.generation
+  const lineage = loop.agentContext?.lineageSequence
+  const request = loop.traceRequest
+  const { actor_id, epoch, session } = loop.epoch ?? {}
+  return () => (!admission || loop.requestAdmissionOwner === admission) && loop.generation === generation && loop.agentContext?.lineageSequence === lineage
+    && loop.traceRequest === request && loop.epoch?.actor_id === actor_id
+    && loop.epoch?.epoch === epoch && loop.epoch?.session === session
+}
+
+// Static library reads have their own small planning-boundary cap; they do not
+// consume or replenish the model's live-world observation allowance. Never run
+// this during execution. A failed detail remains only a discovery card.
+export async function loadOfferedSkillDetails(loop, offer, current = skillReadFence(loop)) {
+  if (typeof loop.recordLoadedSkillToolResult !== 'function') return
+  const deadline = Date.now() + SKILL_AUTOLOAD_TIMEOUT_MS
+  for (const card of offer.cards.slice(0, skillDiscoveryPolicy(loop).autoload)) {
+    if (!current() || loop.skillOffers !== offer || !offer.authoring) return
+    if (loop.loadedSkillContext?.has(card.id)) continue
+    let timer
+    try {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) break
+      const raw = await Promise.race([
+        loop.rcon.command(toolCommand('getSkillDetails', { id: card.id })),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('skill_detail_timeout')), remaining) }),
+      ])
+      if (!current() || loop.skillOffers !== offer || !offer.authoring) return
+      const skill = loop.recordLoadedSkillToolResult('getSkillDetails', { id: card.id }, raw)
+      if (!skill) throw new Error('skill_detail_invalid')
+      // The task context keeps its most recent entries when it hits its size
+      // ceiling. Keep the highest-ranked offered detail last so lower-ranked
+      // supporting patterns cannot crowd it out of the actual planner prompt.
+      for (const ranked of offer.cards.slice(0, skillDiscoveryPolicy(loop).autoload).reverse()) {
+        const loaded = loop.loadedSkillContext.get(ranked.id)
+        if (!loaded) continue
+        loop.loadedSkillContext.delete(ranked.id)
+        loop.loadedSkillContext.set(ranked.id, loaded)
+      }
+      await loop.traceEvent('skill.context_loaded', {
+        skill_id: skill.id, revision: skill.revision,
+        loaded_skill_count: loop.loadedSkillContext.size, source: 'harness_planning_boundary',
+      })
+      await traceSkillLoaded(loop, skill, 'harness_planning_boundary')
+    }
+    catch (error) {
+      if (!current() || loop.skillOffers !== offer) return
+      const reason = error?.message === 'skill_detail_timeout' ? 'timeout' : 'lookup_failed'
+      await loop.traceEvent('skill.load_skipped', { offer_seq: offer.seq, skill_id: card.id, reason, source: 'harness_planning_boundary' })
+      if (reason === 'timeout') break
+    }
+    finally { clearTimeout(timer) }
+  }
+}
+
+// One complete search: ask the mod, keep the cards, trace, then Jev's shadow
+// pick. Never throws; a failure leaves no offer and says why.
+async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
+  abortSkillChoice(loop, 'superseded_by_newer_search')
+  const fence = skillReadFence(loop)
+  const sequence = loop.skillSearchSequence = (loop.skillSearchSequence ?? 0) + 1
+  const current = () => fence() && loop.skillSearchSequence === sequence
+  const query = utf8Prefix(goal, SKILL_OFFER_MAX_GOAL_BYTES)
+  if (!query) {
+    loop.skillOffers = null
+    await loop.traceEvent('skill.offer_skipped', { trigger, reason: 'no_goal_text', intent })
+    return null
+  }
+  let raw
+  const policy = skillDiscoveryPolicy(loop)
+  try { raw = await loop.rcon.command(skillOfferCommand(query, policy.offers)) }
+  catch (error) {
+    if (!current()) return null
+    loop.skillOffers = null
+    await loop.traceEvent('skill.offer_skipped', { trigger, reason: 'lookup_failed', intent, error: text(error instanceof Error ? error.message : String(error), 200) })
+    return null
+  }
+  if (!current()) return null
+  const parsed = parseSkillOffers(raw, policy.offers)
+  if (!parsed.ok || parsed.cards.length === 0) {
+    loop.skillOffers = null
+    await loop.traceEvent('skill.offer_skipped', {
+      trigger,
+      reason: parsed.ok ? 'no_matching_skill' : parsed.reason,
+      intent,
+      ...(parsed.error ? { error: parsed.error } : {}),
+    })
+    return null
+  }
+  loop.skillOfferSequence = (loop.skillOfferSequence ?? 0) + 1
+  const offer = { seq: loop.skillOfferSequence, request_id: loop.traceRequest?.id, memoryKey, goal: query, trigger, cards: parsed.cards, advisor: null, jev: null, authoring: true }
+  loop.skillOffers = offer
+  loop.lastFollowedSkillKey = null
+  await loop.traceEvent('skill.offered', {
+    offer_seq: offer.seq,
+    trigger,
+    reason: trigger,
+    intent,
+    discovery_policy: policy,
+    role: loop.agentContext?.role,
+    offered_ids: offer.cards.map(card => card.id),
+    need_counts: needCounts(offer.cards),
+    cards: offer.cards.map(card => ({
+      id: card.id,
+      status: card.status,
+      score: card.score,
+      matched: card.matched,
+      need_counts: needCounts([card]),
+      locked: card.needs.filter(need => need.state === 'locked').map(need => ({ subject: need.subject, technology: need.technology })),
+    })),
+  })
+  if (!current()) return null
+  await rankWithJev(loop, offer, trigger)
+  if (!current()) return null
+  await loadOfferedSkillDetails(loop, offer, current)
+  return offer
+}
+
+export function isRevisionRound(loop, memoryKey, intent) {
+  if (intent === 'amend_current') return true
+  const planning = loop.memory?.planningState?.(memoryKey)
+  const plan = planning ? getActivePlan(planning) : undefined
+  return plan?.status === PLAN_STATUS.BLOCKED && plan.blocker?.user_choice?.choice === 'revise'
+}
+
+// One-line hook at the start of a planning request. A new goal runs a complete
+// search. A revision round (amendment, or a blocked plan the user chose to
+// revise) shows the goal's cards again, searching if there are none. Any other
+// request leaves offers alone. Never throws.
+export async function ensureSkillOffers(loop, { memoryKey, intent, text: requestText }) {
+  try {
+    if (intent === 'new_goal') {
+      return await searchSkills(loop, { memoryKey, goal: requestText, trigger: 'new_goal', intent })
+    }
+    if (!isRevisionRound(loop, memoryKey, intent)) return loop.skillOffers ?? null
+    const current = loop.skillOffers
+    if (current?.memoryKey === memoryKey) {
+      current.authoring = true
+      await loop.traceEvent('skill.offer_reshown', { trigger: 'revision', reason: 'revision_round', intent, offered_ids: current.cards.map(card => card.id) })
+      await loadOfferedSkillDetails(loop, current)
+      return current
+    }
+    const objective = planningGoal(loop, memoryKey)?.goal?.objective ?? requestText
+    return await searchSkills(loop, { memoryKey, goal: objective, trigger: 'revision', intent })
+  }
+  catch (error) {
+    loop.log?.(`[skills] offer failed: ${error instanceof Error ? error.message : String(error)}`)
+    return null
+  }
+}
+
+// One-line hook at the LOD shelf -> active plan boundary (a verified plan
+// slice completed and the planner is woken to refine the next shelf node).
+// Runs a complete search for that node. Never throws.
+export async function refreshSkillOffersAtShelfPickup(loop, planning) {
+  try {
+    const memoryKey = loop.activePlanKey()
+    const node = nearestShelfRefinementTarget(planning)
+    const goal = node
+      ? [node.intent, node.why_it_matters].filter(value => typeof value === 'string' && value).join('. ')
+      : planning?.goal?.objective
+    const offer = await searchSkills(loop, { memoryKey, goal, trigger: 'shelf_pickup', intent: 'shelf_pickup' })
+    if (offer && node?.node_id) offer.shelf_node_id = node.node_id
+    return offer
+  }
+  catch (error) {
+    loop.log?.(`[skills] shelf pickup offer failed: ${error instanceof Error ? error.message : String(error)}`)
+    return null
+  }
+}
+
+// The block, only while the planner is authoring or revising a plan.
+export function skillOffersContext(loop) {
+  if (loop.completionProtocolVersion >= 3 && loop.agentContext?.role === 'executor') return ''
+  const offer = loop.skillOffers
+  if (!offer || !offer.authoring || offer.memoryKey !== loop.activePlanKey?.()) return ''
+  return skillOfferBlock(offer)
+}
+
+function offerRank(loop, id) {
+  const index = loop.skillOffers?.cards?.findIndex(card => card.id === id) ?? -1
+  return index >= 0 ? index + 1 : undefined
+}
+
+export async function traceSkillLoaded(loop, skill, source = 'model_tool') {
+  if (!skill?.id) return
+  const rank = offerRank(loop, skill.id)
+  await loop.traceEvent('skill.loaded', {
+    skill_id: skill.id,
+    revision: skill.revision,
+    offered: rank !== undefined,
+    offer_rank: rank,
+    reason: rank !== undefined ? 'loaded_offered_skill' : 'loaded_unoffered_skill',
+    source,
+  })
+}
+
+// Hook in commitPlan. A committed plan ends the authoring round, so the block
+// leaves the prompt for the rounds that carry out its steps. "Followed" is the
+// harness's evidence, not the model's claim: a plan was committed while these
+// skills were loaded into [SKILL_CONTEXT]. Emitted once per distinct loaded set
+// per offer.
+export async function traceSkillsFollowed(loop, plan) {
+  const offer = loop.skillOffers
+  const fence = skillReadFence(loop)
+  const current = () => fence() && loop.skillOffers === offer
+  const loaded = loop.loadedSkillContext instanceof Map ? [...loop.loadedSkillContext.keys()] : []
+  if (loop.skillOffers?.authoring && Array.isArray(plan?.plan) && plan.plan.length > 0) {
+    loop.skillOffers.authoring = false
+    // What the fresh agent had loaded when it committed: a late Jev answer is still scored against it (U11).
+    loop.skillOffers.retired_loaded = loaded
+    await loop.traceEvent('skill.offer_retired', { reason: 'plan_committed', trigger: loop.skillOffers.trigger })
+    if (!current()) return
+    await loop.jev?.scoreSkillOrderAtCommit({ offer, loaded, current })
+    if (!current()) return
+  }
+  if (loaded.length === 0) return
+  const key = loaded.slice().sort().join(',')
+  if (loop.lastFollowedSkillKey === key) return
+  loop.lastFollowedSkillKey = key
+  const planText = JSON.stringify([plan?.chatMessage, plan?.plan]).toLowerCase()
+  await loop.traceEvent('skill.followed', {
+    skill_ids: loaded,
+    offered_ids: loaded.filter(id => offerRank(loop, id) !== undefined),
+    mentioned_in_plan: loaded.filter(id => planText.includes(id)),
+    reason: 'plan_committed_with_skill_context',
+  })
+}

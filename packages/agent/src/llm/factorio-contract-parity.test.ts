@@ -1,0 +1,129 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it } from 'vitest'
+import contract from '../../../../contracts/factorio-tool-contract.json'
+import { agentTools } from './tool-set'
+
+const operationsPath = fileURLToPath(new URL('./operations.ts', import.meta.url))
+const operationsSource = readFileSync(operationsPath, 'utf8')
+
+type ContractSurface = 'ordinary-agent' | 'pterodactyl-runtime-v8'
+type OperationContract = { surfaces: ContractSurface[], pterodactyl_layer: 'staging-base' | 'runtime-v8-extension' }
+type ToolContract = { remote: string[], category: string, surfaces: ContractSurface[], surface_policy: 'shared' | 'runtime-v8-only' | 'ordinary-agent-only' }
+const operationContract = contract.operations as Record<string, OperationContract>
+const toolContract = contract.tools as Record<string, ToolContract>
+
+function agentOperationNames() {
+  const union = operationsSource.match(/export const structuredOperationSchema = z\.discriminatedUnion\('name', \[([\s\S]*?)\n\]\)/)?.[1]
+  if (!union) throw new Error('structuredOperationSchema union must remain discoverable')
+  return [...union.matchAll(/name: z\.literal\('([^']+)'\)/g)].map(match => match[1]).sort()
+}
+
+function namesForSurface(definitions: Record<string, { surfaces: ContractSurface[] }>, surface: ContractSurface) {
+  return Object.entries(definitions)
+    .filter(([, definition]) => definition.surfaces.includes(surface))
+    .map(([name]) => name)
+    .sort()
+}
+
+function toolsWithPolicy(policy: ToolContract['surface_policy']) {
+  return Object.entries(toolContract)
+    .filter(([, definition]) => definition.surface_policy === policy)
+    .map(([name]) => name)
+    .sort()
+}
+
+describe('canonical Factorio provider contract parity', () => {
+  it('keeps ordinary-agent structured operations exactly aligned with declared surfaces', () => {
+    expect(agentOperationNames()).toEqual(namesForSurface(operationContract, 'ordinary-agent'))
+  })
+
+  it('documents intentional runtime-v8-only structured operations instead of pretending full symmetry', () => {
+    expect(Object.entries(operationContract)
+      .filter(([, definition]) => !definition.surfaces.includes('ordinary-agent'))
+      .map(([name]) => name)
+      .sort()).toEqual(['execute_construction_plan', 'gather_resource', 'launch_rocket', 'reserve_construction_area', 'supply_entity'])
+  })
+
+  it('keeps the complete ordinary-agent tool surface aligned with the manifest', () => {
+    expect(agentTools.map(tool => tool.name).sort()).toEqual(namesForSurface(toolContract, 'ordinary-agent'))
+  })
+
+  it('keeps ordinary-agent tool arguments aligned with the contract where it lists them', () => {
+    const withArgs = Object.entries(contract.tools as Record<string, ToolContract & { args?: string[] }>)
+      .filter(([, definition]) => Array.isArray(definition.args) && definition.surfaces.includes('ordinary-agent'))
+    expect(withArgs.map(([name]) => name)).toContain('getRecipeDetails')
+    for (const [name, definition] of withArgs) {
+      const tool = agentTools.find(entry => entry.name === name) as { schema: { shape: Record<string, unknown> } } | undefined
+      expect(Object.keys(tool?.schema.shape ?? {}).sort(), `${name} arguments drifted`).toEqual([...definition.args!].sort())
+    }
+  })
+
+  it('records current runtime-v8-only tools as intentional surface differences', () => {
+    expect(toolsWithPolicy('runtime-v8-only')).toEqual([
+      'estimateProductionTime',
+      'findSkills',
+      'getConstructionReservations',
+      'getFluidSourceTiles',
+      'getLocalSpatialObservation',
+      'getMapContext',
+      'getMiningDetails',
+      'getPumpSitePreparation',
+      'getResearchPath',
+      'getResearchRequest',
+      'getReservationDesignInput',
+      'getSkillDetails',
+      'measureTransportThroughput',
+      'planPlacement',
+      'proposeConstructionLayout',
+      'resumeConstructionLayout',
+      'validateConstructionPlan',
+      'validateConstructionReservation',
+    ])
+    expect(toolsWithPolicy('ordinary-agent-only')).toEqual([])
+  })
+
+  it('recognizes capabilities that became shared after the cleanup branch was cut', () => {
+    expect(toolContract.getPlacementCandidates?.surface_policy).toBe('shared')
+    expect(toolContract.findConstructionSites?.surface_policy).toBe('shared')
+    expect(toolContract.getPlacementCandidates?.surfaces.sort()).toEqual(['ordinary-agent', 'pterodactyl-runtime-v8'])
+    expect(toolContract.findConstructionSites?.surfaces.sort()).toEqual(['ordinary-agent', 'pterodactyl-runtime-v8'])
+  })
+
+  it('accepts the placement-candidate region as a circle or a box and rejects any other shape', () => {
+    const tool = agentTools.find(entry => entry.name === 'getPlacementCandidates') as { schema: { safeParse: (value: unknown) => { success: boolean } } }
+    const circle = { shape: 'circle', center: { x: 10, y: 10 }, radius: 6 }
+    const box = { shape: 'box', left_top: { x: 0, y: 0 }, right_bottom: { x: 4, y: 4 } }
+    expect(tool.schema.safeParse({ entity_name: 'burner-mining-drill', region: circle }).success).toBe(true)
+    expect(tool.schema.safeParse({ entity_name: 'burner-mining-drill', region: box }).success).toBe(true)
+    for (const region of [{ ...circle, radius: 0 }, { ...circle, radius: 257 }, { shape: 'ring', center: circle.center, radius: 3 }, { shape: 'circle', radius: 3 }]) {
+      expect(tool.schema.safeParse({ entity_name: 'burner-mining-drill', region }).success, JSON.stringify(region)).toBe(false)
+    }
+  })
+
+  it('keeps canonical planning remote mappings explicit', () => {
+    expect(toolContract.getPlacementCandidates?.remote).toEqual(['autorio_tools', 'get_placement_candidates'])
+    expect(toolContract.getProductionScope?.remote).toEqual(['autorio_planning', 'scope_context'])
+    expect(toolContract.solveProduction?.remote).toEqual(['autorio_planning', 'solve'])
+    expect(toolContract.getTransportCapacity?.remote).toEqual(['autorio_planning', 'capacity'])
+    expect(toolContract.findConstructionSites?.remote).toEqual(['autorio_planning', 'find_construction_sites'])
+    expect(toolContract.inspectConstructionIntent?.remote).toEqual(['autorio_map_construction', 'intent'])
+  })
+
+  it('keeps shared hard limits explicit for every adapter', () => {
+    expect(contract.limits).toMatchObject({
+      factorio_name_max_length: 200,
+      operation_batch_max: 16,
+      task_count_max: 1000,
+      transfer_count_max: 100000,
+      search_radius_max: 4096,
+      combat_search_radius_max: 256,
+      follow_distance_max: 64,
+      equipment_slot_max: 64,
+      placement_coordinate_abs_max: 1000000,
+      placement_direction_max: 15,
+      production_rate_max: 1000000000,
+      wait_ticks_max: 360000,
+    })
+  })
+})

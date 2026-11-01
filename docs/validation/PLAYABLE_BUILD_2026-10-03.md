@@ -1,0 +1,190 @@
+# Playable red-science implementation checklist — October 3, 2026
+
+This is a resumable implementation record, not gameplay acceptance or package
+promotion. Integration is `experiment/jev-agent-architecture`; reviewed native
+receipt fencing, physical corpse retrieval, planner stock guidance and the output
+candidate monitor have landed locally through **`38bd01c4`**. Its full Docker gate
+passed **1,561 runtime tests and 920 mod tests**, typecheck, Lua build and generated
+Lua checks. Main and live deployment have not changed. No push is authorized.
+
+### Situation at the owner's update request
+
+The reliability foundations are advancing, but **the companion is not yet at the
+playable red-science checkpoint**. No three-seed run, current powered production
+canary or five-minute automatic science proof has passed. The passing code above
+is native infrastructure; runtime orchestration and gameplay validation remain.
+
+New implementation was paused for this status update. The already-started output
+merge was resolved by retaining both corpse and output controllers and both test
+inventory definitions, then checked with the combined gate. Unmerged candidates
+remain isolated. No paid provider call, push, live deployment or package promotion
+was performed.
+
+## Acceptance contract
+
+Three consecutive assistant-driven fresh normal maps, seeds **424242, 424243,
+424244**, enemies enabled, natural terrain/resources, ordinary research, zero
+connected humans and one declared vanilla starter kit. Each run needs at least
+10 automatically delivered red science packs in **each of five consecutive
+game-minute windows**, into one exact named output chest with automated upstream
+supply. Measurement inputs may not be hand-fed. Science has no buffered stock cap.
+
+Only settled decision boundaries may pause while waiting for assistant replies.
+Actions, combat and measurement run normally. Separately test provider delays
+with the simulation running. Record exchanges and save/actor/operation identities.
+Assistant-driven acceptance does not establish actual NPC-provider autonomy.
+
+## Units and owners
+
+All paths below are siblings of the integration checkout under
+`D:/SideProjects/airi-factorio-npc`. Candidates are local and unpushed.
+
+| Unit | Owner / worktree | Candidate | Status |
+| --- | --- | --- | --- |
+| Native exact admission and prefix receipts | mod receipt migration / `playable-mod-receipts` | `8674ed27` | Separate review; original mod gate passed 901 tests plus typecheck/Lua checks |
+| Durable ordinal fence after receipt pruning | parent / `playable-mod-receipt-fence` | `78b90c1a` | Reviewed and integrated by `7f33e26e`; combined gate passed |
+| Campaign operation ledger and exact reconciliation | parent / `playable-durable-operations` | `a85b7c6b` | **Integrated 2026-10-05 by `9eda4404`, payload repinned `9e25244a`, pushed.** A review found that ordinary refusals became permanent global holds, so the refused-placement retry canary had been rewritten to block. Fix `fix/ledger-clearance` (`244575c3`, `1976219c`, `1589c7bd`): mod-proven pre-mutation refusals of validate-then-queue ops and pre-transport failures now settle exactly, and bounded placement retry is restored. Genuinely unknown effects stay held. Legacy records settle only with no open baseline batch; otherwise they raise one user question, which no production path can answer yet. Gate: 1,592 runtime / 933 mod tests, exit 0 |
+| 32-task retention, task-local authority/questions | task migration / `playable-task-retention` | `4ac4b8df` | Runtime 1,585/1,585; review caught missing clock fence on completion handoff; repair checkpoint paused for update |
+| Physical corpse tracking/retrieval and ammo compatibility | corpse migration / `playable-corpse-recovery` | `de137419` | Reviewed and integrated by `f54d850b`; combined gate passed; native engine pending |
+| Campaign allowance and manual provider bridge | provider migration / `playable-provider-allowance` | `f9c5bcf8` | New bridge/allowance tests passed; two inherited reservation tests require complete task integration |
+| Paid-transport admission and global campaign persistence | provider migration / `playable-campaign-transport` | Uncommitted work on `f9c5bcf8` | Default paid transport disabled; fixture/shipping closure fixes retained; paused for update |
+| Exact supplying-line output monitor | production migration / `playable-output-proof` | `10685826` | Reviewed candidate, integrated by `38bd01c4`; satisfaction and upstream automation flags remain false |
+| Buffered stock planner guidance | stock migration / `playable-buffer-stock-guidance` | `0ae5e392` | Reviewed and integrated by `9b03a240`; separate mod gate 903/903 |
+| Bounded buffered circuit API | circuit migration / `playable-buffer-circuits` | `29c14eb3` | Mod 920/920, typecheck/Lua passed; separate review pending; stop/restart unverified |
+
+## Dependency order and remaining work
+
+- [x] Run native admission/fence regression gates and runtime ledger gates.
+- [x] Complete final ledger review and integrate runtime foundation (`9eda4404`, 2026-10-05).
+- [ ] Complete task facade/scheduler wiring, including refusal before physical
+  cancellation, preserved queued constraints and pending FIFO resume.
+- [ ] Verify full 32-task queue, isolated questions, checkpoint omission from
+  prompts, ordering and 15-game-minute aging without downtime.
+- [ ] Wire standing authority into first commit and replacement plans; revocation
+  cannot silently become an ungranted ordinary task.
+- [ ] Retire chest reservations throughout commands/preflight; exclude human
+  inventories even through exact entity operations.
+- [ ] Implement committed-material/essential-equipment retention and surplus
+  returns to source then compatible shared storage, with physical return-chest
+  construction when necessary. Exclude science measurement storage.
+- [ ] Wire corpse tools into structured contracts and runtime priority. The
+  planner chooses the weapon/ammunition kit; verify compatible equipped ammo
+  before approaching danger. Reconcile old work before replacement-body actions.
+- [ ] Preserve recovery attempt/time limits across plans and deaths; full inventory
+  uses return trips, unsafe/expired corpse work remains visible.
+- [ ] Wire global campaign persistence and all planner/executor/interaction/Jev
+  transport admissions/usage receipts. Missing allowance profile disables paid
+  transport; missing billed usage is uncertainty, never zero.
+- [ ] Wire test bridge at the injection seam, deterministic replay and timing
+  scenarios (delay, changing world, attack, disconnect, cancellation, late reply).
+- [ ] Validate exact chest/item/force/surface/supplying-line output proof and
+  invalidate manual deposits, identity changes, deficient minutes and ambiguity.
+- [ ] Add bounded circuit connection/configuration/readback with existing-wiring,
+  identity and reach checks. Validate buffered line stop/restart and overshoot.
+- [x] Update in-game planner skill cards: buildings at least two live stacks;
+  belt tiers roughly 400–600, grounded planner target and explicit quantity wins.
+  No caps for science or other continuously consumed flows.
+- [ ] Revalidate burner/furnace, natural-water steam, powered assembler/inserters,
+  then complete automated red-science chain in dependency order.
+- [ ] Freeze a passing integrated SHA and run all Docker regression gates,
+  package promotion checks and all three real-engine acceptance runs.
+- [ ] Update playable status and conflicting roadmap notes with actual evidence.
+
+## Validation evidence and remaining gates
+
+Docker's Linux engine is available again. All regression runs below use the
+canonical Docker-only script; no host dependency installation or paid calls.
+
+- `logs/playable-integration-receipts-2026-10-03.log`: integration `7f33e26e`,
+  all gate exit 0: 1,561 runtime and 903 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-integration-corpses-2026-10-03.log`: integration `f54d850b`,
+  all gate exit 0: 1,561 runtime and 912 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-integration-stock-2026-10-03.log`: integration `9b03a240`,
+  all gate exit 0: 1,561 runtime and 912 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-integration-output-2026-10-03.log`: integration `38bd01c4`,
+  all gate exit 0: 1,561 runtime and 920 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-operations-runtime-2026-10-03-r7.log`: ledger `a85b7c6b`,
+  runtime gate exit 0, 1,570/1,570.
+- `logs/playable-task-maintenance.log`: retention `4ac4b8df`, runtime gate
+  exit 0, 1,585/1,585. Separate review repair needs a new gate.
+- `logs/output-proof-mod-2026-10-03.log`: output candidate `10685826`, mod
+  gate exit 0, 911/911 plus typecheck/Lua/generated guard.
+- `logs/buffer-circuits-mod-2026-10-03-final.log`: circuit `29c14eb3`, mod
+  gate exit 0, 920/920 plus typecheck/Lua/generated guard.
+
+- `logs/gate-remote-interface-self.log`: fix `ee553918`, merged `876157a5`
+  (2026-10-05), all gate exit 0: 1,592 runtime and 934 mod tests. The owner's
+  first Pterodactyl run of `7aea08a2` blocked on the very first game command with
+  `admission_begin_refused:invalid_correlation`. `autorio_operation_admission`
+  (and `autorio_output_delivery_proof`) were registered as controller objects
+  whose TSTL functions take `self`, so `remote.call` delivered a nil correlation.
+  Both are now arrow-function tables, and the generated-Lua guard rejects bare
+  controller registrations. Unit tests call TypeScript directly and could not
+  see this; it is the first real-engine evidence for the admission seam.
+
+No new real-engine acceptance, package promotion or actual provider autonomy
+claim is established by these gates. Candidate branches must be integrated,
+review repairs checked and the shipped payload repinned before promotion checks.
+
+## Review blockers and next dependency boundary
+
+1. **Task resume clock fencing:** `4ac4b8df` can resume an interrupted checkpoint
+   after detected rollback/map change, or start accepted pending work without
+   authoritative clock/start-tick evidence. These are corroborated review findings,
+   not failing regression results. Repair and new handoff scenarios are required
+   before integration. A surface/seed fingerprint cannot detect a same-seed forward
+   save swap; exact save identity remains a harness requirement.
+2. **Campaign transport:** the latest recorded work-in-progress gate is
+   1,609/1,612. One new Jev fixture issue needs a verified correction; two failures are
+   inherited legacy reservation expectations that the complete retention unit
+   retires. New code still requires a committed candidate and separate review.
+   The allowance/bridge modules alone do not prove every transport is metered.
+3. **Gameplay recovery:** native corpse transfer is physical and requires
+   compatible equipped weapon/ammunition. The structured recovery operation and
+   runtime cleanup priority are not wired. Runtime must derive a distinct durable
+   retrieval ordinal for every batch slot; inventory returns and safe-route
+   assessment remain required before recovery gameplay can be claimed.
+4. **Output proof:** the direct assembler/inserter/chest witness remains a
+   candidate. Native delivery attribution, complete upstream automation and proof
+   registry retirement/rebinding need validation before it can satisfy a goal.
+   Manual deposits, unrelated production and surplus returns cannot count.
+5. **Promotion:** integrate passing reviewed runtime foundations, expose native
+   tools through bounded contracts, complete recovery/returns, then revalidate
+   burner/furnace, natural-water power and powered production. Only then freeze
+   the SHA, repin/check the shipped package and run the three normal-map science
+   acceptance scenarios. The source integration SHA is not the shipped payload
+   candidate yet.
+
+The two unfinished workers were stopped at this update boundary; their isolated
+worktrees and logs are retained. Resume from these exact candidates and repairs,
+without repeating earlier completed units or starting paid/live transport.
+
+## Review findings incorporated
+
+- Preserve global operations through goal changes, interruption, resume and
+  goalless restore; omit the global ledger from task checkpoints.
+- Reconcile existing exact records after a goal stops; refuse new admissions
+  without an active goal. Never report settlement when the state change refused.
+- Missing exact receipts, changed generations and stale actors stay uncertain.
+  Legacy watermark-only records are conservatively migrated; changing quantities
+  or plans cannot bypass unresolved material/target conflicts.
+- Persist native ordinal high-water marks so pruned receipts cannot permit late
+  replay. Bind the exact canonical batch with SHA-256 and retain successful
+  prefixes before subsequent commands.
+- Exact sealed receipts can settle historical work by the original actor;
+  unfinished old-actor work remains uncertain. Local cancellation before the
+  transport call can prove absence; a restart alone cannot.
+- A refused uncertain retry followed by an explicit blocker uses exact harness
+  uncertainty evidence, instead of offering a provider-failure Resume.
+- Corpse deduplication includes full request identity; validate the live corpse's
+  surface and force. Runtime must derive distinct retrieval ordinals per slot.
+- Bound bridge tracing, filesystem waits and identity hooks; timeout/close/cancel
+  must release safe-boundary pause. No timeout falls through to paid transport.
+
+## Known proof limitation under investigation
+
+Factorio exposes held stacks, drop/pickup targets and machine output counters,
+but no native per-chest delivery event. The output unit must reject ambiguous
+intervals rather than count chest growth as automatic delivery. Its initial scope
+is a direct assembler-to-inserter-to-chest line. Complete upstream automation
+still requires separate world/evidence validation and the real-engine runs.

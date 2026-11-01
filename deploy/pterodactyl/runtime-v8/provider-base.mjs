@@ -1,0 +1,1836 @@
+import fsp from 'node:fs/promises'
+import path from 'node:path'
+
+import { check, DeploymentError } from './common.mjs'
+import { diagnoseDsmlRejection, parseDsmlToolCalls } from './dsml-tool-calls.mjs'
+import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
+import { EXECUTOR_ROLE } from './agent-roles.mjs'
+import { stepContractMessages, STEP_CONTRACT_TOOL_DEFINITIONS, STEP_CONTRACT_TRIGGER } from './luna-step-contracts.mjs'
+import { approvedOperationListText, executionOnlyProviderToolDefinitions, executorProviderToolDefinitions, parsePlan, planningOnlyProviderToolDefinitions, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
+import { executionOnlyPrompt, EXECUTION_ONLY_PROMPT, PLANNING_ONLY_PROMPT } from './role-contracts.mjs'
+
+const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
+const FAILURE_MARKER = '[MOD] Autorio operation error:'
+const CHAT_MARKER = '[CHAT]'
+const STEERING_MARKER = '[STEERING]'
+const COMPLETION_MAX_TOKENS = 3000
+const FALLBACK_CONTINUATION_MAX_TOKENS = 8000
+const DEFAULT_MAX_TOKENS = 4000
+const MAX_PROVIDER_OUTPUT_CAP = 65536
+const PROVIDER_PROFILE_IDS = new Set(['auto', 'generic', 'deepseek', 'openai-reasoning', 'openrouter', 'local', 'cli-proxy'])
+// AI_API_METHOD (plan 1.10) is the user-facing setting that replaces a
+// hand-picked PROVIDER_PROFILE: each method names exactly one existing
+// capability profile below. 'direct' keeps today's hostname-detected 'auto'
+// resolution, so it needs no new capability logic of its own.
+export const AI_API_METHOD_IDS = Object.freeze(['direct', 'router', 'local', 'cli-proxy'])
+const AI_API_METHOD_PROFILE = Object.freeze({ direct: 'auto', router: 'openrouter', local: 'local', 'cli-proxy': 'cli-proxy' })
+
+export function profileForApiMethod(method) {
+  check(Object.hasOwn(AI_API_METHOD_PROFILE, method), 'Invalid AI_API_METHOD')
+  return AI_API_METHOD_PROFILE[method]
+}
+// LM Studio's declared context window default (plan 1.9): the runtime has no
+// other way to learn it, so a conservative floor lets compaction stay ahead
+// of an overflow until a model config states its own value.
+const LOCAL_DEFAULT_CONTEXT_WINDOW = 65536
+// OpenRouter model ids carry a vendor prefix ("anthropic/claude-opus-4.5",
+// "deepseek/deepseek-chat-v3.1"); resolving capability from that prefix, per
+// call, is what lets one shared OpenRouter profile behave correctly for many
+// upstream families without a process-wide assumption. Verified against
+// OpenRouter's docs (reasoning-tokens, prompt-caching, provider-routing);
+// no API calls were made to confirm behavior beyond what those docs state.
+const OPENROUTER_MODEL_FAMILY_PATTERNS = [
+  [/^deepseek(?:[-_./:]|$)/i, 'deepseek'],
+  [/^anthropic\//i, 'anthropic'],
+  [/^openai\//i, 'openai'],
+  [/^(?:x-ai|xai)\//i, 'grok'],
+  [/^google\//i, 'google'],
+]
+export function openRouterModelFamily(model) {
+  const value = String(model ?? '')
+  for (const [pattern, family] of OPENROUTER_MODEL_FAMILY_PATTERNS) {
+    if (pattern.test(value)) return family
+  }
+  return 'generic'
+}
+// Local models currently in rotation (plan 1.9 "Local models") are all
+// non-thinking coder/instruct builds; none is documented to accept an
+// OpenAI-style reasoning_effort/thinking field through LM Studio's
+// OpenAI-compatible server, and no live call was made to check one that
+// might. The family table stays explicit and empty by default rather than
+// guessing a request shape LM Studio may reject.
+// GPT-6 behind the CLI proxy (owner, 2026-10-14) is the exception: it takes the
+// OpenAI chat-completions flat `reasoning_effort`. Without it the proxy applied its
+// own default, and runs H and I reasoned for 0 tokens on most calls. Its range is
+// limited to low/medium/high, the values every OpenAI reasoning model accepts: the
+// policy's max is clamped to high and a none round sends no field (provider.mjs).
+const LOCAL_REASONING_FAMILIES = new Set(['openai-gpt'])
+const LOCAL_REASONING_EFFORT_RANGES = Object.freeze({ 'openai-gpt': 'low_to_high' })
+export function localModelFamily(model) {
+  const value = String(model ?? '').toLowerCase()
+  if (/^gpt-6(?:[.-]|$)/.test(value)) return 'openai-gpt'
+  if (/qwen3-coder/.test(value)) return 'qwen3-coder'
+  if (/qwen3\.5/.test(value)) return 'qwen3.5'
+  if (/gemma/.test(value)) return 'gemma'
+  if (/deepseek-r1|(?:^|[-_])r1(?:[-_]|$)|reasoning/.test(value)) return 'reasoning-distill'
+  return 'generic'
+}
+function openRouterCapability(config, requested) {
+  const family = openRouterModelFamily(config.model)
+  const pin = config.upstreamProvider
+  const upstreamProvider = typeof pin === 'string' && pin.trim()
+    ? [pin.trim()]
+    : Array.isArray(pin) && pin.length > 0 && pin.every(entry => typeof entry === 'string' && entry.trim())
+      ? pin.map(entry => entry.trim())
+      : undefined
+  return {
+    id: 'openrouter',
+    token_field: 'max_tokens',
+    reasoning_effort: true,
+    // OpenRouter normalizes reasoning control through the `reasoning` body
+    // field for every upstream family; the vendor-native `thinking` field
+    // (DeepSeek's own API) is never sent through OpenRouter.
+    reasoning_field: 'reasoning',
+    thinking_control: 'none',
+    tool_support: true,
+    structured_output: 'tools_or_json',
+    model_family: family,
+    // DeepSeek narrates by default wherever it runs, including behind
+    // OpenRouter, so the same output-style block applies by model family
+    // rather than by transport profile id.
+    style_profile: family === 'deepseek' ? 'deepseek' : undefined,
+    // cache_control breakpoints only do anything for Anthropic models
+    // (https://openrouter.ai/docs/features/prompt-caching); sending them
+    // elsewhere would be inert at best.
+    cache_control: family === 'anthropic',
+    // 2.9, live check 2026-10-01: DeepSeek behind OpenRouter reproduced the
+    // direct-profile finding (live finding 3). With the tool list removed on a
+    // closed round, flash wrote a call as malformed DSML text and the round was
+    // lost to provider_content_invalid_json. DeepSeek therefore keeps the list
+    // (tool_choice "none", part of OpenRouter's OpenAI-compatible request
+    // schema), exactly like the direct deepseek profile. Every other family
+    // stays OFF until it has its own live check (see providerCapabilityProfile).
+    tools_kept_when_closed: family === 'deepseek',
+    cached_input_pricing: family === 'anthropic',
+    upstream_provider: upstreamProvider,
+    requested_profile: requested,
+    auto_resolved: requested === 'auto',
+  }
+}
+function cliProxyCapability(config, requested) {
+  // Verified proxy wire behavior for GPT-6, resolved independently per role.
+  // Other upstream families remain conservative until their own validation.
+  const family = /^gpt-6(?:[.-]|$)/i.test(String(config.model ?? '')) ? 'openai-gpt' : 'generic'
+  return {
+    id: 'cli-proxy',
+    token_field: 'max_tokens',
+    reasoning_effort: family === 'openai-gpt',
+    ...(family === 'openai-gpt' ? { reasoning_effort_range: 'low_to_high' } : {}),
+    tools_kept_when_closed: family === 'openai-gpt',
+    thinking_control: 'none',
+    tool_support: true,
+    structured_output: 'tools_or_json',
+    model_family: family,
+    // No LM Studio context floor or pricing assumption: inference is upstream.
+    ...(Number.isSafeInteger(config.contextWindow) && config.contextWindow > 0 ? { context_window: config.contextWindow } : {}),
+    requested_profile: requested,
+    auto_resolved: requested === 'auto',
+  }
+}
+function localCapability(config, requested) {
+  const family = localModelFamily(config.model)
+  const contextWindow = Number.isSafeInteger(config.contextWindow) && config.contextWindow > 0
+    ? config.contextWindow
+    : LOCAL_DEFAULT_CONTEXT_WINDOW
+  return {
+    id: 'local',
+    token_field: 'max_tokens',
+    reasoning_effort: LOCAL_REASONING_FAMILIES.has(family),
+    ...(LOCAL_REASONING_EFFORT_RANGES[family] ? { reasoning_effort_range: LOCAL_REASONING_EFFORT_RANGES[family] } : {}),
+    // CLIProxy Codex can attach generated images when tools/choice are omitted.
+    // The October 5 live replay stayed compact when closed rounds kept the
+    // function definitions and explicitly disallowed every tool invocation.
+    tools_kept_when_closed: family === 'openai-gpt',
+    thinking_control: 'none',
+    tool_support: true,
+    structured_output: 'tools_or_json',
+    model_family: family,
+    // LM Studio's OpenAI-compatible server reports no cache-hit breakdown;
+    // there is no cached-input rate to apply.
+    cached_input_pricing: false,
+    context_window: contextWindow,
+    requested_profile: requested,
+    auto_resolved: requested === 'auto',
+  }
+}
+const PROVIDER_PROFILES = Object.freeze({
+  generic: Object.freeze({
+    id: 'generic',
+    token_field: 'max_tokens',
+    reasoning_effort: false,
+    thinking_control: 'none',
+    tool_support: true,
+    structured_output: 'tools_or_json',
+  }),
+  deepseek: Object.freeze({
+    id: 'deepseek',
+    token_field: 'max_tokens',
+    reasoning_effort: true,
+    thinking_control: 'deepseek',
+    tool_support: true,
+    // 2.9: the tool block stays in closed rounds (tool_choice "none"). Keeps the
+    // prefix cache flat, and live finding 3 showed that removing the list makes
+    // flash write its calls as DSML text instead. Calls made anyway are salvaged
+    // by the loop (closed_round.calls_salvaged).
+    tools_kept_when_closed: true,
+    structured_output: 'tools_or_json',
+  }),
+  'openai-reasoning': Object.freeze({
+    id: 'openai-reasoning',
+    token_field: 'max_completion_tokens',
+    reasoning_effort: true,
+    thinking_control: 'none',
+    tool_support: true,
+    tools_kept_when_closed: false,
+    structured_output: 'tools_or_json',
+  }),
+})
+// Output style per provider profile, appended to the system message for that
+// profile only. DeepSeek narrates every turn (a status chatMessage and prose
+// before tool calls) although the shared rules ask for an empty chatMessage
+// while it is simply working, so its block restates that rule more firmly.
+const PROVIDER_STYLE_PROMPTS = Object.freeze({
+  deepseek: `## Output style for this provider
+
+Keep every turn terse. This refines the chatMessage guidance above; the "BLOCKED: " contract is unchanged.
+- chatMessage is posted to the player's in-game chat. Leave it "" while you are simply working, including before an ordinary operation batch. Fill it only to answer the player, to ask for a decision the player must make, for a "BLOCKED: " report, or for verified completion of the goal.
+- When you do write chatMessage, use one short sentence (two at most for a BLOCKED: report). Do not restate the plan, coordinates, unit numbers, receipts or what you just observed.
+- When you call tools, leave the assistant content empty. Do not announce what you are about to do or summarise tool results; the harness records them.`,
+})
+
+export function providerStylePrompt(profileId) {
+  return Object.hasOwn(PROVIDER_STYLE_PROMPTS, profileId) ? PROVIDER_STYLE_PROMPTS[profileId] : undefined
+}
+
+export function applyProviderStylePrompt(messages, profileId) {
+  const style = providerStylePrompt(profileId)
+  if (!style) return messages
+  const index = messages.findIndex(message => message?.role === 'system' && typeof message.content === 'string')
+  if (index < 0) return messages
+  const output = messages.slice()
+  output[index] = { ...output[index], content: `${output[index].content}
+
+${style}` }
+  return output
+}
+
+// Anthropic models bill and reuse a cached prompt prefix only where the
+// request marks a `cache_control` breakpoint on a content block
+// (https://openrouter.ai/docs/features/prompt-caching, up to 4 explicit
+// breakpoints; no caching happens without one). Breakpoints go where the
+// stable prefix ends (prompt-prefix.mjs): the end of the system message (the
+// tool block and system message are identical for every round of a role) and
+// the end of the request context (identical for every round of a request).
+// The tail after that (steering, skill offers, the newest exchange) is never
+// marked. Converting a message's content from a plain string to a
+// content-block array must happen last, after the style block has already
+// been appended as a string. Returns the breakpoint count placed, so the
+// caller can trace it.
+export function applyAnthropicCacheBreakpoints(messages, capability) {
+  if (!capability?.cache_control) return { messages, breakpoints: 0 }
+  const indexes = cacheBreakpointIndexes(messages)
+  if (indexes.length === 0) return { messages, breakpoints: 0 }
+  const output = messages.slice()
+  for (const index of indexes) {
+    output[index] = {
+      ...output[index],
+      content: [{ type: 'text', text: output[index].content, cache_control: { type: 'ephemeral' } }],
+    }
+  }
+  return { messages: output, breakpoints: indexes.length }
+}
+
+const REQUEST_BODY_PATCH_KEYS = new Set(['max_tokens', 'max_completion_tokens', 'reasoning_effort', 'thinking', 'response_format'])
+const PLAN_STATE_MARKER = '[PLAN_STATE]' // legacy persisted/runtime compatibility
+const RUNTIME_COMPAT_STATE_MARKER = '[RUNTIME_COMPAT_STATE]'
+const PLANNING_STATE_MARKER = '[PLANNING_STATE]'
+const MEMORY_MARKER = '[MEMORY]'
+const PROMPT_TRACE_MAX_BYTES = 10 * 1024 * 1024
+const PROMPT_TRACE_FILES = 5
+const PROMPT_RESPONSE_PREVIEW_CHARS = 4000
+const SENSITIVE_PROMPT_KEY = /^(?:authorization|api.?key|password|secret|cookie|session|token|access.?token|refresh.?token|factorio.?token|openai.?token|rcon.?token)$/i
+const promptTraceWriters = new Map()
+
+export const COMPACT_CONTINUATION_PROMPT = `You are SGLuna, an autonomous standalone Factorio NPC. This request is a successful Autorio batch-completion continuation for an existing user goal, not a new goal.
+
+Use [PLANNING_STATE] as the sole durable planning authority. [RUNTIME_COMPAT_STATE] may carry older Task Board evidence, runtime metadata and locators, but it cannot override Plan Tracker steps or progress. Older persisted runs may still supply [PLAN_STATE]; treat it as compatibility state, never as a second planning authority. Preserve the verified reducer prefix and continue the active goal; do not restart or silently rewrite the plan. Mutable world state still requires observation when it is actually needed for the next decision.
+
+Token-efficient continuation rules:
+- Treat a provider turn as an observation/decision boundary, not as an operation boundary. If 2-4 consecutive operations are already fully parameterized from current observations and a later operation does not depend on a new identity/result created by an earlier one, return them together in execution order.
+- If the Task Board/receipt already contains deterministic_verification with verdict verified_complete for the action that just finished, do not spend a tool call re-checking that exact fact.
+- Call read-only tools only for unknown mutable facts required to choose or parameterize the next operation.
+- Prefer a tightly related deterministic operation batch when every operation can be fully specified now and no later operation needs an identity/result created by an earlier one. Multiple gather_resource operations for known resources may be submitted together. When one exact observed entity needs multiple item types, prefer one supply_entity operation over separate transfer turns.
+- Prefer local completion over ping-pong movement: before intentionally moving to another area, finish other already-decided operations on known targets in the current area when their ordering is independent. Do not invent targets or reorder user constraints, prerequisites, or observation-dependent work just to save walking.
+- Do not insert wait between finite Autorio operations merely to let them finish. The harness resumes you when the submitted batch completes or fails. Use wait only when actual world time must pass and no Autorio-owned finite operation already represents the work; for a machine, set a checkpoint and let the runtime wait on it instead of guessing ticks.
+- Runtime navigation/reach/obstacle recovery is internal progress, not a new plan step and not a reason to call the model again. Exact transfers, recipe configuration, rotation, exact placement, and mine_entity_exact may auto-approach using the controlled character's real reach.
+- Treat absolute world coordinates as durable location references and unit_number as an ephemeral exact-entity binding. Use unit_number for an exact operation only after the current active request has live-observed that entity. Do not execute unit numbers copied only from durable plan/dialogue memory. To return to a known location, prefer walk_to_position using the stored absolute coordinate; then re-observe and bind the current entity before an exact mutation. A replacement at the same coordinate is a new identity. If a live observation supplied unit_number for the selected mineable entity, use mine_entity_exact and do not fall back to same-name mining. If no usable exact identity exists and the target was only observed beyond local mining range, approach it first; after navigation completes, continue the finite goal into mining automatically instead of waiting for another human message.
+- Do not walk SGLuna onto an exact future build coordinate just to place there. For ordinary unconstrained nearby placement, prefer place_entity {entity_name} with no invented coordinates; the runtime can choose a local non-colliding position. Use planPlacement/getLocalSpatialObservation/getPlacementCandidates when geometry matters or after a meaningful simple-placement blocker such as not_placeable/no_position.
+- For covered water, first read getFluidSourceTiles, then query getPumpSitePreparation at the desired pump center and direction using the native covered-water hints. Only an issued preparation_id permits prepare_pump_site. That bounded job uncovers water and reclaims landfill; its receipt does not place a pump or prove power. After completion, read water again, obtain fresh getPlacementCandidates and execute place_candidate. Refused or stale preparation requires a fresh read. Robot execution is not currently exposed.
+- For resource-bound, shoreline-bound, or fluid-port-sensitive placement, call getPlacementCandidates and execute the chosen result with place_candidate {candidate_set_id,candidate_id}. Do not copy candidate coordinates into place_entity; candidate-id execution preserves runtime semantic revalidation.
+- A failed operation cancels the operations queued behind it, but a refused item move into an entity (nothing moved, items still held) does not: independent operations still run and the receipt names the refusal cause, so read it for which operations completed. Keep an operation that depends on an item move (for example crafting from fuel you just moved into a furnace) out of the same batch as that move. If the receipt says placing:not_placeable, that attempted placement did not create an entity. Never invent a new unit_number or claim that a cancelled placement succeeded; observe the world after a successful placement when a later exact operation needs the new identity.
+- For a bounded local construction batch, use validateConstructionPlan on the exact chosen placements, then execute only the returned validation_id and placement_count with execute_construction_plan. Do not edit coordinates or directions after validation; revalidate instead. A clean completed construction batch is deterministic evidence that every validated placement succeeded.
+- launch_rocket needs the exact live-observed rocket-silo unit_number and a ready rocket (getEntityStatus on the silo reports rocket_parts, rocket_parts_required and rocket_ready; the silo builds rocket parts itself from supplied ingredients). It completes only after the force's rocket count rises; rocket_not_ready means keep supplying the silo, not retry the launch.
+- research_technology submission is not completed research; verify the actual technology before depending on it. wait is never proof that a world condition became true. Item transfers may be partial and need relevant verification before depending on an exact quantity.
+- When simply continuing with another operation and the human does not need to act, set chatMessage to an empty string. Use chatMessage for a blocker, a decision that needs the human, or verified final completion. Keep status claims grounded: navigation completion proves arrival only and never means mining/construction/transfer/crafting has started unless that mutation is actually admitted/running or authoritative runtime evidence proves it.
+- Never emit Lua, game.*, shell/console commands, or unapproved operations.
+
+Approved operations and bounded arguments (complete list; "?" marks an optional key):
+${approvedOperationListText()}.
+
+Answer with one submitPlan call when tool calls are enabled: {plan:["observable step"],currentStep,operations:[{name,args}]} plus the applicable completion fields. Do not mix submitPlan with observation tool calls. When tool calls are disabled, return the same control decision as exactly one strict JSON object in assistant content; checkpoint, semanticCompletion and stepCompletions remain allowed. Closing observations does not close the control decision. New drafts include stepCompletions aligned to plan: the currentStep entry is {kind:"deterministic",checkpoint:{mode,requirements}} and later entries are {kind:"deterministic",obligations}; {kind:"semantic",rationale:"..."} entries only with assessmentOnly:true. Luna authors the outcome; the harness validates it. Root checkpoint is the active-step compatibility form. semanticCompletion identifies the exact active prose-only step from [PLANNING_STATE], and may have operations:[] when closing the final step of a slice. Do not invent another operation merely to close a completed step.
+Every step of a new execution draft is deterministic. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Missing stock or unmet research describes work remaining, not an assessment-only result. research_completed {technology} is supported, including multiple requirements with mode:"all".
+plan is the visible canonical checklist proposal, currentStep indexes it, and operations contains only approved structured operations. For time or rate questions use getRecipeDetails, getMiningDetails and estimateProductionTime, not remembered numbers. If the whole goal is verified complete, return plan:[], currentStep:0, operations:[] and a short completion chatMessage.`
+
+export const CLOSED_CONTROL_PROMPT = `[CONTROL_OUTPUT] Tool invocations are disabled for this round (tool_choice none). Normal observations are closed; the harness still accepts your control decision as ONE strict JSON object in assistant content. Tool closure does not disable gameplay-operation proposals: put grounded approved operations in the JSON operations array; normal parsing, preflight and admission still apply. [CONTROL_DECISION_STATE].operationSubmission describes this proposal channel, not execution authority. Follow the current [CONTROL_DECISION_STATE] for eligible bounded missing-fact reads and draft versus committed-step authority. Do not call submitPlan or another tool, and do not omit completion fields merely because tools are closed.
+Use chatMessage, plan, currentStep and operations, plus the applicable checkpoint, semanticCompletion, stepCompletions, assessmentOnly, goal, roadmap, roadmapNodeIds, developmentMode or timeReview. New execution drafts require stepCompletions aligned to plan, {kind:"deterministic",checkpoint:{mode,requirements}} at currentStep and {kind:"deterministic",obligations} for each later step; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion uses research_completed {technology}, including mode:"all" for multiple technologies; an unmet result is a valid future checkpoint, not an assessment. Root checkpoint remains the active-step compatibility form.
+Approved operations and bounded arguments ("?" marks optional): ${approvedOperationListText()}.
+For ordinary unconstrained nearby placement of a held placeable item, place_entity {entity_name} needs neither coordinates nor an existing unit_number; native placement selects and validates a local position. Geometry-sensitive placement still requires approved spatial facts/candidates. End the placement batch before any exact operation that needs the new entity's identity; after its receipt, obtain a fresh live unit_number before supplying or configuring it. Do not invent an identity or treat inventory possession as a placed entity.
+An executor may close the exact active prose-only step with a grounded semanticCompletion. For the final step of a slice, operations:[] is valid; the harness checks the user goal and returns control to the planner if more work remains. Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion":{"stepId":"<exact active step id>","rationale":"<grounded judgment>"}}. Never bypass an unmet deterministic checkpoint or invent another gameplay action just to close a completed step. If genuinely blocked, start chatMessage with "BLOCKED: " and state the exact blocker.`
+
+// The executor sends stepId, not plan and currentStep (agent-roles.mjs EXECUTOR_ROLE_PROMPT; its submitPlan schema requires
+// stepId). Each pair below rewrites one sentence of the shared prompts that still told every role to send plan and
+// currentStep. The planner's text is the constants above, byte for byte; a pair that no longer matches fails at load, so
+// the shared wording cannot drift away from the executor's silently.
+function executorPrompt(text, substitutions) {
+  let out = text
+  for (const [from, to] of substitutions) {
+    if (!out.includes(from)) throw new Error(`executor prompt substitution no longer matches the shared prompt: ${from.slice(0, 60)}`)
+    out = out.replace(from, () => to)
+  }
+  return out
+}
+
+export const EXECUTOR_COMPACT_CONTINUATION_PROMPT = executorPrompt(COMPACT_CONTINUATION_PROMPT, [
+  ['Answer with one submitPlan call when tool calls are enabled: {plan:["observable step"],currentStep,operations:[{name,args}]} plus the applicable completion fields.',
+    'Answer with one submitPlan call when tool calls are enabled: {stepId,operations:[{name,args}]} plus the applicable completion fields, where stepId is the active step id from [CONTROL_DECISION_STATE].'],
+  ['plan is the visible canonical checklist proposal, currentStep indexes it, and operations contains only approved structured operations.',
+    'operations contains only approved structured operations.'],
+  ['return plan:[], currentStep:0, operations:[] and a short completion chatMessage.',
+    'return operations:[] and a short completion chatMessage.'],
+  ['checkpoint, semanticCompletion and stepCompletions remain allowed.',
+    'checkpoint and semanticCompletion remain allowed.'],
+  [' New drafts include stepCompletions aligned to plan: the currentStep entry is {kind:"deterministic",checkpoint:{mode,requirements}} and later entries are {kind:"deterministic",obligations}; {kind:"semantic",rationale:"..."} entries only with assessmentOnly:true. Luna authors the outcome; the harness validates it.',
+    ''],
+  ['Every step of a new execution draft is deterministic. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Missing stock or unmet research describes work remaining, not an assessment-only result. research_completed',
+    'research_completed'],
+])
+
+export const EXECUTOR_CLOSED_CONTROL_PROMPT = executorPrompt(CLOSED_CONTROL_PROMPT, [
+  ['Use chatMessage, plan, currentStep and operations, plus the applicable checkpoint, semanticCompletion, stepCompletions, assessmentOnly, goal, roadmap, roadmapNodeIds, developmentMode or timeReview.',
+    'Use chatMessage, stepId and operations, plus the applicable checkpoint, semanticCompletion or timeReview.'],
+  ['Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion"',
+    'Example shape (replace placeholders): {"chatMessage":"","stepId":"<exact active step id>","operations":[],"semanticCompletion"'],
+  ['New execution drafts require stepCompletions aligned to plan, {kind:"deterministic",checkpoint:{mode,requirements}} at currentStep and {kind:"deterministic",obligations} for each later step; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion',
+    'Research completion'],
+])
+
+function sanitizePromptTraceValue(value, key = '') {
+  if (SENSITIVE_PROMPT_KEY.test(key)) return '[REDACTED]'
+  if (typeof value === 'string') {
+    return value
+      .replace(/Bearer\s+[a-z0-9._~+/=-]+/gi, '[REDACTED]')
+      .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+      .replace(/\b(OPENAI_API_KEY|FACTORIO_TOKEN|API_KEY|PASSWORD|SECRET)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
+  }
+  if (Array.isArray(value)) return value.map(item => sanitizePromptTraceValue(item))
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, sanitizePromptTraceValue(childValue, childKey)]))
+}
+
+class PromptTraceWriter {
+  constructor(filename) {
+    this.filename = filename
+    this.queue = Promise.resolve()
+    this.bytes = null
+  }
+
+  async initialize() {
+    if (this.bytes !== null) return
+    await fsp.mkdir(path.dirname(this.filename), { recursive: true })
+    try { this.bytes = (await fsp.stat(this.filename)).size }
+    catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      this.bytes = 0
+    }
+  }
+
+  async rotate(incomingBytes) {
+    await this.initialize()
+    if (this.bytes + incomingBytes <= PROMPT_TRACE_MAX_BYTES) return
+    await fsp.rm(`${this.filename}.${PROMPT_TRACE_FILES - 1}`, { force: true })
+    for (let index = PROMPT_TRACE_FILES - 2; index >= 1; index--) {
+      try { await fsp.rename(`${this.filename}.${index}`, `${this.filename}.${index + 1}`) }
+      catch (error) { if (error?.code !== 'ENOENT') throw error }
+    }
+    try { await fsp.rename(this.filename, `${this.filename}.1`) }
+    catch (error) { if (error?.code !== 'ENOENT') throw error }
+    this.bytes = 0
+  }
+
+  emit(event) {
+    const line = `${JSON.stringify(sanitizePromptTraceValue(event))}\n`
+    const bytes = Buffer.byteLength(line)
+    // Each write starts fresh after a failed one (a full disk, a missing
+    // directory), so one failure does not stop tracing for the rest of the
+    // process. The failed write is re-measured from disk on the next one.
+    this.queue = this.queue.catch(() => { this.bytes = null }).then(async () => {
+      await this.rotate(bytes)
+      await fsp.appendFile(this.filename, line, { encoding: 'utf8', mode: 0o600 })
+      this.bytes += bytes
+    })
+    return this.queue
+  }
+}
+
+function promptTraceFile(options = {}) {
+  if (options.promptTraceFile === null) return null
+  if (typeof options.promptTraceFile === 'string' && options.promptTraceFile.trim()) return path.resolve(options.promptTraceFile)
+  if (typeof process.env.SGLUNA_PROMPT_TRACE_FILE === 'string' && process.env.SGLUNA_PROMPT_TRACE_FILE.trim()) {
+    return path.resolve(process.env.SGLUNA_PROMPT_TRACE_FILE)
+  }
+  if (typeof process.env.AIRI_PROMPT_TRACE_FILE === 'string' && process.env.AIRI_PROMPT_TRACE_FILE.trim()) {
+    return path.resolve(process.env.AIRI_PROMPT_TRACE_FILE)
+  }
+  if (process.env.NODE_TEST_CONTEXT) return null
+  return path.resolve(process.cwd(), 'logs', 'sgluna-prompts.jsonl')
+}
+
+function promptTraceWriter(filename) {
+  let writer = promptTraceWriters.get(filename)
+  if (!writer) {
+    writer = new PromptTraceWriter(filename)
+    promptTraceWriters.set(filename, writer)
+  }
+  return writer
+}
+
+function promptTraceTrigger(messages, recoveryAttempt) {
+  if (Number.isSafeInteger(recoveryAttempt) && recoveryAttempt > 0) return 'recovery'
+  if (!Array.isArray(messages)) return 'continuation'
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message?.role !== 'user' || typeof message.content !== 'string') continue
+    if (message.content.startsWith(COMPLETION_MARKER)) return 'completion'
+    if (message.content.startsWith(FAILURE_MARKER)) return 'failure'
+    if (message.content.startsWith(CHAT_MARKER)) return 'request'
+    if (message.content.startsWith('[HARNESS]')) return 'recovery'
+  }
+  return 'continuation'
+}
+
+function promptTraceMessageChars(message) {
+  return String(message?.content ?? '').length + JSON.stringify(message?.tool_calls ?? '').length
+}
+
+function promptTraceIdentity(options = {}) {
+  const providerPolicy = options.providerPolicy && typeof options.providerPolicy === 'object'
+    ? options.providerPolicy
+    : undefined
+  const capabilities = options.providerCapabilities && typeof options.providerCapabilities === 'object'
+    ? options.providerCapabilities
+    : undefined
+  return {
+    request_id: typeof options.requestId === 'string' ? options.requestId : undefined,
+    round: Number.isSafeInteger(options.round) ? options.round : undefined,
+    actor_id: Number.isSafeInteger(options.actorId) ? options.actorId : undefined,
+    epoch: Number.isSafeInteger(options.epoch) ? options.epoch : undefined,
+    recovery_attempt: Number.isSafeInteger(options.recoveryAttempt) ? options.recoveryAttempt : 0,
+    allow_tools: options.allowTools !== false,
+    reasoning_effort: typeof providerPolicy?.effort === 'string' ? providerPolicy.effort : undefined,
+    reasoning_policy_reason: typeof providerPolicy?.reason === 'string' ? providerPolicy.reason : undefined,
+    capability_profile: typeof capabilities?.id === 'string' ? capabilities.id : undefined,
+    provider_model_family: typeof capabilities?.model_family === 'string' ? capabilities.model_family : undefined,
+    provider_context_window: Number.isSafeInteger(capabilities?.context_window) ? capabilities.context_window : undefined,
+    upstream_provider_pin: Array.isArray(capabilities?.upstream_provider) ? capabilities.upstream_provider : undefined,
+    cache_control_breakpoints: Number.isSafeInteger(options.cacheControlBreakpoints) ? options.cacheControlBreakpoints : undefined,
+  }
+}
+
+async function traceProviderPayload(body, options = {}) {
+  const filename = promptTraceFile(options)
+  if (!filename) return false
+  try {
+    const rawBody = JSON.stringify(body)
+    const tools = Array.isArray(body?.tools) ? body.tools : []
+    const tokenField = typeof options.providerCapabilities?.token_field === 'string'
+      ? options.providerCapabilities.token_field
+      : undefined
+    await promptTraceWriter(filename).emit({
+      schema: 1,
+      event: 'provider.request',
+      ts: new Date().toISOString(),
+      ...promptTraceIdentity(options),
+      trigger_source: promptTraceTrigger(body?.messages, options.recoveryAttempt),
+      requested_token_field: tokenField,
+      requested_output_cap: tokenField ? body?.[tokenField] : undefined,
+      requested_reasoning_effort: requestedReasoningEffort(body),
+      requested_thinking_mode: typeof body?.thinking?.type === 'string' ? body.thinking.type : 'not_sent',
+      payload: body,
+      stats: {
+        body_chars: rawBody.length,
+        message_count: Array.isArray(body?.messages) ? body.messages.length : 0,
+        message_chars: Array.isArray(body?.messages) ? body.messages.reduce((total, message) => total + promptTraceMessageChars(message), 0) : 0,
+        tool_count: tools.length,
+        tool_schema_chars: tools.length > 0 ? JSON.stringify(tools).length : 0,
+        // 2.9: where the stable prefix ends and a short hash of each region,
+        // so a cache miss can be read against what changed.
+        prefix: options.promptLayout,
+      },
+    })
+    return true
+  }
+  catch {
+    // Observability must never turn a valid provider request into a runtime failure.
+    return false
+  }
+}
+
+async function traceProviderResult(event, data, options = {}) {
+  const filename = promptTraceFile(options)
+  if (!filename) return false
+  try {
+    await promptTraceWriter(filename).emit({
+      schema: 1,
+      event,
+      ts: new Date().toISOString(),
+      ...promptTraceIdentity(options),
+      ...data,
+    })
+    return true
+  }
+  catch {
+    // Response diagnostics are best-effort and must never change provider behavior.
+    return false
+  }
+}
+
+function providerReasoningChars(message) {
+  let total = 0
+  for (const key of ['reasoning_content', 'reasoning', 'analysis']) {
+    const value = message?.[key]
+    if (typeof value === 'string') total += value.length
+    else if (value && typeof value === 'object') {
+      try { total += JSON.stringify(value).length }
+      catch {}
+    }
+  }
+  if (Array.isArray(message?.reasoning_details)) {
+    try { total += JSON.stringify(message.reasoning_details).length }
+    catch {}
+  }
+  return total
+}
+
+function structuredContentDiagnostics(content, { planContract = true } = {}) {
+  const text = String(content ?? '')
+  if (!text) return { json_valid: false, plan_valid: false, error: 'empty content' }
+  let parsed
+  try { parsed = JSON.parse(text) }
+  catch (error) {
+    return {
+      json_valid: false,
+      plan_valid: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+  // The interaction router answers {intent, queue_conflict, reply}, not a
+  // plan; checking it against the plan schema marked every router reply as
+  // provider_content_schema_invalid in the trace. Its caller validates it.
+  if (!planContract) return { json_valid: true }
+  // The agent loop lifts these plan-surface extensions off before parsePlan;
+  // checking them here flagged every goal/roadmap plan as schema-invalid.
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    parsed = planSurfaceOf(parsed)
+  }
+  try {
+    parsePlan(parsed)
+    return { json_valid: true, plan_valid: true }
+  }
+  catch (error) {
+    return {
+      json_valid: true,
+      plan_valid: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function contentShape(content) {
+  const text = typeof content === 'string' ? content : ''
+  let nonAsciiChars = 0
+  let replacementChars = 0
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0
+    if (code > 0x7F) nonAsciiChars++
+    if (code === 0xFFFD) replacementChars++
+  }
+  return {
+    content_chars: text.length,
+    content_utf8_bytes: Buffer.byteLength(text, 'utf8'),
+    content_non_ascii_chars: nonAsciiChars,
+    content_replacement_chars: replacementChars,
+    content_preview: text.slice(0, PROMPT_RESPONSE_PREVIEW_CHARS),
+  }
+}
+
+function isSuccessfulCompletionContinuation(messages, { allowTools, recoveryAttempt }) {
+  if (!allowTools || recoveryAttempt > 0 || !Array.isArray(messages)) return false
+  const lastUser = lastUserOutsideTail(messages)
+  return typeof lastUser?.content === 'string' && lastUser.content.startsWith(COMPLETION_MARKER)
+}
+
+function providerHostname(base) {
+  try { return new URL(base).hostname.toLowerCase() }
+  catch { return '' }
+}
+
+// 2.9: closed rounds keep the tool block only after a live check has shown the
+// provider honours tool_choice "none" (done for the direct deepseek profile and,
+// 2026-10-01, for DeepSeek behind OpenRouter). Every other profile drops the
+// tools as before; `toolsKeptWhenClosed` is an in-code switch (static tests), not a
+// setting, and nothing maps an env variable to it.
+export function providerCapabilityProfile(config = {}) {
+  const capability = resolveProviderCapability(config)
+  return config.toolsKeptWhenClosed === true && capability.tool_support === true
+    ? { ...capability, tools_kept_when_closed: true }
+    : capability
+}
+
+function resolveProviderCapability(config = {}) {
+  const requested = String(config.profile ?? config.providerProfile ?? 'auto').trim().toLowerCase()
+  check(PROVIDER_PROFILE_IDS.has(requested), 'Invalid provider capability profile')
+  let resolved = requested
+  if (resolved === 'auto') {
+    // The official endpoint is a trustworthy capability signal even when the
+    // configured model uses an alias. Unknown compatible gateways remain
+    // generic unless the operator explicitly selects a provider profile.
+    const hostname = providerHostname(config.base)
+    resolved = hostname === 'api.deepseek.com'
+      ? 'deepseek'
+      : hostname === 'openrouter.ai'
+        ? 'openrouter'
+        : 'generic'
+  }
+  // openrouter/local/cli-proxy are resolved per call from the model config (model
+  // family, explicit overrides), not from a single process-wide profile, so
+  // several role configs in the same process can each resolve correctly.
+  if (resolved === 'openrouter') return openRouterCapability(config, requested)
+  if (resolved === 'local') return localCapability(config, requested)
+  if (resolved === 'cli-proxy') return cliProxyCapability(config, requested)
+  const profile = PROVIDER_PROFILES[resolved]
+  return {
+    ...profile,
+    requested_profile: requested,
+    auto_resolved: requested === 'auto',
+  }
+}
+
+function validOutputCap(value) {
+  check(Number.isSafeInteger(value) && value >= 1 && value <= MAX_PROVIDER_OUTPUT_CAP, `Provider output cap must be an integer from 1 to ${MAX_PROVIDER_OUTPUT_CAP}`)
+  return value
+}
+
+function validateResponseFormat(value) {
+  check(value && typeof value === 'object' && !Array.isArray(value), 'Invalid response_format override')
+  check(value.type === 'json_object' || value.type === 'json_schema', 'Unsupported response_format override')
+  check(JSON.stringify(value).length <= 32768, 'response_format override is too large')
+  return value
+}
+
+function applyRequestBodyPatch(body, patch, capability) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return
+  for (const key of Object.keys(patch)) check(REQUEST_BODY_PATCH_KEYS.has(key), `requestBodyPatch key is not allowed: ${key}`)
+
+  const hasMaxTokens = patch.max_tokens !== undefined
+  const hasMaxCompletionTokens = patch.max_completion_tokens !== undefined
+  if (hasMaxTokens && hasMaxCompletionTokens) {
+    check(patch.max_tokens === patch.max_completion_tokens, 'Conflicting provider output cap overrides')
+  }
+  const outputCap = hasMaxCompletionTokens ? patch.max_completion_tokens : (hasMaxTokens ? patch.max_tokens : undefined)
+  if (outputCap !== undefined) {
+    delete body.max_tokens
+    delete body.max_completion_tokens
+    body[capability.token_field] = validOutputCap(outputCap)
+  }
+
+  if (patch.reasoning_effort !== undefined) {
+    check(capability.reasoning_effort === true, 'Provider profile does not allow reasoning_effort')
+    check(['none', 'minimal', 'low', 'medium', 'high', 'max'].includes(patch.reasoning_effort), 'Invalid reasoning_effort override')
+    check(capability.reasoning_effort_range !== 'low_to_high' || ['low', 'medium', 'high'].includes(patch.reasoning_effort), 'reasoning_effort is outside the low-to-high range of this profile')
+    // OpenRouter's wire shape nests effort under `reasoning` instead of the
+    // flat `reasoning_effort` key every other profile here uses
+    // (https://openrouter.ai/docs/use-cases/reasoning-tokens); the caller
+    // (provider.mjs) stays profile-agnostic and always hands us the flat
+    // key, so the destination shape is decided here from the capability.
+    if (capability.reasoning_field === 'reasoning') {
+      body.reasoning = { effort: patch.reasoning_effort }
+    }
+    else {
+      body.reasoning_effort = patch.reasoning_effort
+    }
+  }
+  if (patch.thinking !== undefined) {
+    check(capability.thinking_control === 'deepseek', 'Provider profile does not allow thinking control')
+    check(patch.thinking && typeof patch.thinking === 'object' && !Array.isArray(patch.thinking), 'Invalid thinking override')
+    check(Object.keys(patch.thinking).length === 1 && ['enabled', 'disabled'].includes(patch.thinking.type), 'Invalid thinking override')
+    body.thinking = { type: patch.thinking.type }
+  }
+  if (patch.response_format !== undefined) body.response_format = validateResponseFormat(patch.response_format)
+}
+
+function usageSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+// Every profile but OpenRouter sends effort as the flat `reasoning_effort`
+// key; OpenRouter nests it under `reasoning.effort`. Trace fields read
+// whichever shape the body actually carries.
+function requestedReasoningEffort(body) {
+  if (typeof body?.reasoning_effort === 'string') return body.reasoning_effort
+  if (typeof body?.reasoning?.effort === 'string') return body.reasoning.effort
+  return undefined
+}
+
+function providerUsageNumbers(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return {}
+  const input = usageSafeInteger(usage.prompt_tokens) ?? usageSafeInteger(usage.input_tokens)
+  const output = usageSafeInteger(usage.completion_tokens) ?? usageSafeInteger(usage.output_tokens)
+  const total = usageSafeInteger(usage.total_tokens)
+  const reasoning = usageSafeInteger(usage.completion_tokens_details?.reasoning_tokens)
+    ?? usageSafeInteger(usage.output_tokens_details?.reasoning_tokens)
+    ?? usageSafeInteger(usage.reasoning_tokens)
+  // OpenRouter reports cache hits under prompt_tokens_details.cached_tokens
+  // (https://openrouter.ai/docs/features/prompt-caching); DeepSeek's native
+  // API instead uses prompt_cache_hit_tokens. LM Studio's plain OpenAI-shape
+  // usage carries none of these, so this stays undefined there.
+  const cached = usageSafeInteger(usage.prompt_tokens_details?.cached_tokens)
+    ?? usageSafeInteger(usage.input_tokens_details?.cached_tokens)
+    ?? usageSafeInteger(usage.prompt_cache_hit_tokens)
+  return { input, output, total, reasoning, cached }
+}
+
+function safeProviderErrorText(value, max = 800) {
+  const text = String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
+}
+
+async function boundedProviderErrorBody(response, maxBytes = 64 * 1024, onBytes = () => {}) {
+  if (!response?.body) return { text: '', bytes: 0, truncated: false }
+  const reader = response.body.getReader()
+  const chunks = []
+  let bytes = 0
+  let truncated = false
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    onBytes(bytes + value.length)
+    const remaining = maxBytes - bytes
+    if (remaining <= 0) {
+      truncated = true
+      await reader.cancel()
+      break
+    }
+    const chunk = value.length > remaining ? value.slice(0, remaining) : value
+    chunks.push(chunk)
+    bytes += chunk.length
+    if (value.length > remaining) {
+      truncated = true
+      await reader.cancel()
+      break
+    }
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), bytes, truncated }
+}
+
+function providerHttpErrorDiagnostics(responseText) {
+  let parsed
+  try { parsed = JSON.parse(String(responseText ?? '')) }
+  catch {}
+  const rawError = parsed?.error && typeof parsed.error === 'object' && !Array.isArray(parsed.error)
+    ? parsed.error
+    : parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : {}
+  const code = safeProviderErrorText(rawError.code, 120)
+  const type = safeProviderErrorText(rawError.type, 120)
+  const message = safeProviderErrorText(rawError.message || rawError.detail || responseText, 1200)
+  const classifier = `${code} ${type} ${message}`.toLowerCase()
+  const contextWindowExceeded = /context[_ -]?(?:length|window)[_ -]?exceeded|maximum context length|context window (?:is |was )?(?:too small|exceeded)|prompt (?:is )?too long|input (?:is )?too long|too many (?:input|prompt) tokens|(?:input|prompt) token limit|(?:input|prompt).{0,80}exceeds?.{0,80}(?:context|token limit)/i.test(classifier)
+  return {
+    diagnostic_code: contextWindowExceeded ? 'provider_context_window_exceeded' : 'provider_http_error',
+    provider_error_code: code || undefined,
+    provider_error_type: type || undefined,
+    provider_error_message: message || undefined,
+  }
+}
+
+function topLevelJsonObjectSpans(text) {
+  const spans = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') inString = false
+      continue
+    }
+
+    if (depth > 0 && char === '"') {
+      inString = true
+      continue
+    }
+    if (char === '{') {
+      if (depth === 0) start = index
+      depth++
+      continue
+    }
+    if (char === '}' && depth > 0) {
+      depth--
+      if (depth === 0 && start >= 0) {
+        spans.push([start, index + 1])
+        start = -1
+      }
+    }
+  }
+
+  return depth === 0 && !inString ? spans : []
+}
+
+// The agent loop lifts these plan-surface extensions off before parsePlan
+// (parsePlanMessage in npc-agent-loop.mjs), so a plan object that carries them
+// is still a plan. parsePlan itself is strict-exact-keys over the executable
+// surface only.
+const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'stepCompletions', 'assessmentOnly', 'observationRequest', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview']
+
+// The executable surface of a plan object once its extensions are lifted. An executor binds its operations to the
+// committed active step by `stepId` and then needs neither plan nor currentStep: parsePlanMessage defaults them the
+// same way, so this check agrees with it.
+function planSurfaceOf(object) {
+  const surface = Object.fromEntries(Object.entries(object).filter(([key]) => !PLAN_EXTENSION_KEYS.includes(key)))
+  if (typeof object.stepId === 'string' && object.stepId.trim()) {
+    if (surface.plan === undefined) surface.plan = []
+    if (surface.currentStep === undefined) surface.currentStep = 0
+  }
+  return surface
+}
+// Members a model wrapping the submitPlan arguments inside the plan object may
+// carry beside `submitPlan` (live 2026-10-01, deepseek-v4-flash through
+// OpenRouter). Anything else next to the wrapper is ambiguous and is refused.
+const SUBMIT_PLAN_WRAPPER_OUTER_KEYS = new Set(['chatMessage', 'plan', 'currentStep', 'operations', 'submitPlan', ...PLAN_EXTENSION_KEYS])
+const SUBMIT_PLAN_SHARED_MEMBERS = ['plan', 'currentStep', 'operations']
+
+function contentIsJson(text) {
+  try { JSON.parse(text); return true }
+  catch { return false }
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+// Result: { object } with the wrapper removed, { object: parsed } when there is
+// no wrapper, or { refused } with a named reason. The nested submitPlan
+// arguments win (they are the real tool arguments); the outer copy of
+// plan/currentStep/operations may only repeat them, never disagree.
+function unwrapSubmitPlan(parsed) {
+  if (!isPlainObject(parsed) || !Object.hasOwn(parsed, 'submitPlan')) return { object: parsed }
+  const nested = parsed.submitPlan
+  // The plan array satisfies the check, and so does an executor's step id (planSurfaceOf).
+  const namesStep = isPlainObject(nested) && typeof nested.stepId === 'string' && nested.stepId.trim() !== ''
+  if (!isPlainObject(nested) || (!Array.isArray(nested.plan) && !namesStep)) return { refused: 'submit_plan_wrapper_not_a_plan' }
+  if (Object.hasOwn(nested, 'submitPlan')) return { refused: 'submit_plan_wrapper_nested_twice' }
+  if (!Object.keys(parsed).every(key => SUBMIT_PLAN_WRAPPER_OUTER_KEYS.has(key))) return { refused: 'submit_plan_wrapper_unknown_members' }
+  for (const key of SUBMIT_PLAN_SHARED_MEMBERS) {
+    if (Object.hasOwn(parsed, key) && Object.hasOwn(nested, key) && JSON.stringify(parsed[key]) !== JSON.stringify(nested[key])) {
+      return { refused: 'submit_plan_wrapper_conflict' }
+    }
+  }
+  const { submitPlan: _submitPlan, ...outer } = parsed
+  return { object: { ...outer, ...nested }, unwrapped: true }
+}
+
+// { text, unwrapped } for a plan object, { refused } when it carries a
+// submitPlan wrapper that cannot be unwrapped safely, undefined when it is not a
+// valid plan.
+function planCandidate(candidate) {
+  let parsed
+  try { parsed = JSON.parse(candidate) }
+  catch { return undefined }
+  const lifted = unwrapSubmitPlan(parsed)
+  if (lifted.refused) return { refused: lifted.refused }
+  const object = lifted.object
+  if (!isPlainObject(object)) return undefined
+  try {
+    parsePlan(planSurfaceOf(object))
+  }
+  catch {
+    return undefined
+  }
+  return { text: lifted.unwrapped ? JSON.stringify(object) : candidate, object, unwrapped: lifted.unwrapped === true }
+}
+
+function canonicalPlanDecision(value) {
+  if (Array.isArray(value)) return value.map(canonicalPlanDecision)
+  if (!isPlainObject(value)) return value
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalPlanDecision(value[key])]))
+}
+
+function materialPlanDecision(object) {
+  const { chatMessage: _chatMessage, ...decision } = object
+  return JSON.stringify(canonicalPlanDecision(decision))
+}
+
+// DeepSeek sometimes leaks its native tool-call markup into `content` instead
+// of returning `tool_calls` (live: `<｜｜DSML｜｜ invoke name="submitPlan">`).
+// Parse it back into ordinary tool calls so they take the same admission path
+// as a native call. `string="false"` parameters carry JSON values. Anything
+// that does not parse completely is left as content for the format recovery.
+// The strict, bounded parser lives in dsml-tool-calls.mjs.
+export function recoverDsmlToolCalls(content) {
+  const parsed = parseDsmlToolCalls(content)
+  if (!parsed) return undefined
+  return {
+    content: parsed.content,
+    tool_calls: parsed.calls.map((call, index) => ({
+      id: `call_dsml_${index + 1}`,
+      type: 'function',
+      function: { name: call.name, arguments: JSON.stringify(call.args) },
+    })),
+  }
+}
+
+function closedRoundCall(call) {
+  return {
+    name: typeof call?.function?.name === 'string' ? call.function.name : '',
+    arguments: typeof call?.function?.arguments === 'string' ? call.function.arguments : '',
+  }
+}
+
+// Finds the plan object a content reply carries: bare, in a code fence, or
+// embedded in prose. `source` says where it was found, `submit_plan_unwrapped`
+// that the object held its plan inside a submitPlan member, and `refused` (with
+// no content change) names why a submitPlan-wrapped object was not accepted.
+export function normalizeProviderPlanContentDetailed(content) {
+  const text = String(content ?? '').trim()
+  const unchanged = extra => ({ content: text, source: 'none', submit_plan_unwrapped: false, ...extra })
+  if (!text) return unchanged()
+  let refused
+  const take = (candidate, source) => {
+    const found = planCandidate(candidate)
+    if (found?.text) return { content: found.text, source, submit_plan_unwrapped: found.unwrapped }
+    if (found?.refused && refused === undefined) refused = found.refused
+    return undefined
+  }
+
+  const bare = take(text, 'bare')
+  if (bare) return bare
+
+  if (text.startsWith('```') && text.endsWith('```') && text.length >= 6) {
+    let candidate = text.slice(3, -3).trim()
+    if (candidate.slice(0, 4).toLowerCase() === 'json') candidate = candidate.slice(4).trim()
+    const fenced = take(candidate, 'fence')
+    if (fenced) return fenced
+  }
+
+  const spans = topLevelJsonObjectSpans(text)
+  const plans = spans.map(([start, end]) => planCandidate(text.slice(start, end).trim())).filter(found => found?.text)
+  if (new Set(plans.map(found => materialPlanDecision(found.object))).size > 1) {
+    return unchanged({ refused: 'multiple_plan_objects_conflict' })
+  }
+  for (let index = spans.length - 1; index >= 0; index--) {
+    const embedded = take(text.slice(spans[index][0], spans[index][1]).trim(), 'embedded')
+    if (embedded) return embedded
+  }
+  return unchanged(refused ? { refused } : {})
+}
+
+export function normalizeProviderPlanContent(content) {
+  return normalizeProviderPlanContentDetailed(content).content
+}
+
+function leanTaskBoard(board) {
+  if (!board || typeof board !== 'object' || Array.isArray(board)) return undefined
+  return {
+    kind: board.kind,
+    goal_id: board.goal_id,
+    status: board.status,
+    blocker: board.blocker,
+    pause_reason: board.pause_reason,
+    revision: board.revision,
+    completed_count: board.completed_count,
+    total_steps: board.total_steps,
+    active_index: board.active_index,
+    active_step_id: board.active_step_id,
+    steps: Array.isArray(board.steps)
+      ? board.steps.slice(0, 30).map(step => ({
+          id: step?.id,
+          description: step?.description,
+          status: step?.status,
+        }))
+      : undefined,
+    evidence: Array.isArray(board.evidence) ? board.evidence.slice(-4) : undefined,
+  }
+}
+
+function parseStateBlock(content, marker, stopMarkers = []) {
+  const text = String(content ?? '')
+  const markerAt = text.lastIndexOf(marker)
+  if (markerAt < 0) return undefined
+  const block = text.slice(markerAt)
+  const newlineAt = block.indexOf('\n')
+  if (newlineAt < 0) return undefined
+  let body = block.slice(newlineAt + 1)
+  for (const stopMarker of stopMarkers) {
+    const stop = body.indexOf(`\n${stopMarker}`)
+    if (stop >= 0) body = body.slice(0, stop)
+  }
+  try {
+    const state = JSON.parse(body.trim())
+    return state && typeof state === 'object' && !Array.isArray(state) ? state : undefined
+  }
+  catch {
+    return undefined
+  }
+}
+
+function parsePlanStateFromContent(content) {
+  return parseStateBlock(content, RUNTIME_COMPAT_STATE_MARKER, [PLANNING_STATE_MARKER])
+    ?? parseStateBlock(content, PLAN_STATE_MARKER, [PLANNING_STATE_MARKER])
+}
+
+function parsePlanningStateFromContent(content) {
+  return parseStateBlock(content, PLANNING_STATE_MARKER)
+}
+
+function currentPlanState(messages) {
+  if (!Array.isArray(messages)) return undefined
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message?.role !== 'user' || typeof message.content !== 'string') continue
+    if (!message.content.includes(RUNTIME_COMPAT_STATE_MARKER) && !message.content.includes(PLAN_STATE_MARKER)) continue
+    const state = parsePlanStateFromContent(message.content)
+    if (state) return state
+  }
+  return undefined
+}
+
+function latestDirectChat(messages) {
+  if (!Array.isArray(messages)) return undefined
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message?.role !== 'user' || typeof message.content !== 'string') continue
+    const text = message.content.trim()
+    if (!text.startsWith(CHAT_MARKER)) continue
+    const body = text.slice(CHAT_MARKER.length).trim()
+    const separator = body.indexOf(':')
+    const sender = separator >= 0 ? body.slice(0, separator).trim() : 'unknown'
+    const request = (separator >= 0 ? body.slice(separator + 1) : body).trim()
+    return { sender: sender.slice(0, 128), text: request.slice(0, 1200) }
+  }
+  return undefined
+}
+
+function isResumeText(value) {
+  const text = String(value ?? '').trim().toLocaleLowerCase()
+  if (!text) return false
+  const prefixes = ['continue', 'resume', '继续', '继续吧', '继续做', '接着', '接着做']
+  return prefixes.some(prefix => text === prefix || text.startsWith(`${prefix} `) || text.startsWith(`${prefix}，`) || text.startsWith(`${prefix},`))
+}
+
+export function classifyUserSteering(messages) {
+  const chat = latestDirectChat(messages)
+  if (!chat) return undefined
+  const state = currentPlanState(messages)
+  const hasPendingGoal = state && state.status !== 'completed'
+  const sameAsDurableObjective = hasPendingGoal
+    && typeof state?.objective === 'string'
+    && state.objective.trim() === chat.text.trim()
+  const mode = isResumeText(chat.text)
+    ? (hasPendingGoal ? 'resume_existing_goal' : 'new_goal')
+    : sameAsDurableObjective
+      ? 'current_goal'
+      : (hasPendingGoal ? 'steer_existing_goal' : 'new_goal')
+  return {
+    mode,
+    sender: chat.sender,
+    text: chat.text,
+    goal_id: state?.goal_id,
+    goal_status: state?.status,
+    active_step: state?.current_step_text,
+  }
+}
+
+function latestFailure(messages) {
+  if (!Array.isArray(messages)) return ''
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message?.role !== 'user' || typeof message.content !== 'string') continue
+    if (message.content.startsWith(FAILURE_MARKER)) return message.content.slice(0, 5000)
+  }
+  return ''
+}
+
+function failureRecoveryHint(failure) {
+  if (!failure) return ''
+  if (/PLANNED_COLLISION|WORLD_COLLISION|placing:not_placeable|not_placeable/i.test(failure)) {
+    return 'placement_failure: do not retry the same coordinate blindly; use returned footprint/blocker geometry or validate a revised local construction batch before execution'
+  }
+  if (/too_far/i.test(failure)) {
+    return 'range_failure: do not create a walk/action/model loop; use exact target identity when available and let runtime reach recovery handle deterministic approach, re-observing only if the target itself is stale'
+  }
+  if (/target[^\n]{0,80}(?:missing|not found)|entity[^\n]{0,80}not found/i.test(failure)) {
+    return 'stale_target: re-observe the exact entity identity instead of substituting an arbitrary same-name target'
+  }
+  if (/ITEMS_MISSING|missing items|insufficient inventory/i.test(failure)) {
+    return 'inventory_failure: satisfy the deterministic inventory deficit before retrying the blocked construction/action'
+  }
+  return 'operation_failure: the failed operation is not successful and operations queued behind it were cancelled (a refused item move cancels none, so the receipt shows which completed); use the receipt to choose the smallest necessary recovery'
+}
+
+function steeringDomain(state, failure, userText = '') {
+  const haystack = JSON.stringify({
+    objective: state?.objective,
+    step: state?.current_step_text,
+    operations: state?.last_operations,
+    blocker: state?.blocker,
+    failure,
+    userText,
+  })
+  if (/place_entity|placing|construction|PLANNED_COLLISION|WORLD_COLLISION|execute_construction_plan|validateConstructionPlan/i.test(haystack)) return 'construction'
+  if (/gather_resource|mine_entity|mine_resource|mining/i.test(haystack)) return 'mining'
+  if (/move_items|supply_entity|moving_items|transfer/i.test(haystack)) return 'logistics'
+  if (/water|shore|coast|river|lake|terrain|tile|水边|岸边|海岸|[河湖水]|地形|地图/i.test(haystack)) return 'terrain'
+  return 'general'
+}
+
+function receiptDelta(messages) {
+  if (!Array.isArray(messages)) return ''
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message?.role !== 'user' || typeof message.content !== 'string') continue
+    const text = message.content
+    if (!text.startsWith(COMPLETION_MARKER)) continue
+    const receiptAt = text.indexOf('Detailed task receipt:')
+    if (receiptAt < 0) return 'last_receipt=completed; treat the completion receipt as authoritative evidence for the submitted batch'
+    try {
+      const status = JSON.parse(text.slice(receiptAt + 'Detailed task receipt:'.length).trim())
+      const batch = status?.last_completed_batch
+      const types = Array.isArray(batch?.task_types) ? batch.task_types.slice(0, 6).join(',') : ''
+      const resultCode = status?.basic_operation?.last_result?.code
+      return `last_receipt=completed${Number.isSafeInteger(batch?.batch_id) ? ` batch=${batch.batch_id}` : ''}${types ? ` tasks=${types}` : ''}${resultCode ? ` result=${resultCode}` : ''}; do not re-check deterministic facts already proven by this receipt`
+    }
+    catch {
+      return 'last_receipt=completed; treat the completion receipt as authoritative evidence for the submitted batch'
+    }
+  }
+  return ''
+}
+
+export function buildSteeringContext(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return ''
+  const state = currentPlanState(messages)
+  const user = classifyUserSteering(messages)
+  const failure = latestFailure(messages)
+  const failureHint = failureRecoveryHint(failure)
+  const domain = steeringDomain(state, failure, user?.text)
+  const lines = [
+    `${STEERING_MARKER} Harness-generated decision guidance; this is not Factorio world state.`,
+    `domain=${domain}`,
+    'decision_order=exact observed identity > nearest-name lookup; deterministic validator > trial-and-error action; small fully-parameterized batch > one-operation-per-turn; runtime fact > prototype fact > remembered game knowledge',
+    'batch_boundary=stop before an operation that needs a new unit_number, mutable result, or other observation that does not exist yet',
+    'locality=before intentionally crossing to another area, finish other already-decided operations on known current-area targets when their order is independent; do not invent targets or reorder user constraints, prerequisites, or observation-dependent work just to save walking',
+    'success_evidence=never claim a world-changing action succeeded from intent alone; require an operation receipt or subsequent observation',
+  ]
+
+  if (user) {
+    lines.push(`user_mode=${user.mode}${user.goal_id ? ` goal=${user.goal_id}` : ''}${user.goal_status ? ` status=${user.goal_status}` : ''}`)
+    lines.push(`latest_human=${JSON.stringify(user.text)}`)
+    if (user.mode === 'steer_existing_goal') {
+      lines.push('user_steering=the latest human instruction is authoritative for pending intent; preserve verified completed evidence, revise/reorder/drop remaining steps as needed, and do not treat the older durable objective as overriding this steering')
+    }
+    else if (user.mode === 'resume_existing_goal') {
+      lines.push('user_steering=resume the existing durable goal; do not reinterpret a bare continue/resume as a new independent goal')
+    }
+    else if (user.mode === 'current_goal') {
+      lines.push('user_steering=this is the original current durable goal, not a new mid-plan steering event; preserve completed evidence and continue the canonical active plan unless live evidence requires a replan')
+    }
+    else {
+      lines.push('user_steering=treat this as the current human goal; prior completed history is context, not an instruction to continue an older goal')
+    }
+  }
+
+  if (domain === 'construction') {
+    lines.push('construction=physical collision footprint != mining/working area != selection box != pickup/drop position; validate multiple exact placements together before executing them')
+  }
+  if (domain === 'terrain') {
+    lines.push('terrain=use getLocalSpatialObservation for live bounded terrain before terrain-dependent movement or construction; terrain_tiles.runs are compact exact tile runs, and water is a tile, not an entity')
+  }
+  if (failureHint) lines.push(`recovery=${failureHint}`)
+  const delta = receiptDelta(messages)
+  if (delta) lines.push(delta)
+  return lines.join('\n').slice(0, 3600)
+}
+
+export function applySteeringMessages(messages, sourceMessages = messages) {
+  const output = Array.isArray(messages) ? messages.map(message => ({ ...message })) : []
+  const steering = buildSteeringContext(sourceMessages)
+  if (!steering) return output
+  // Tail placement (prompt-prefix.mjs): steering is recomputed every round
+  // and never stored, so it goes after the stored history, in front of a
+  // trailing terminal instruction.
+  return insertTailBlock(output, { role: 'user', content: steering })
+}
+
+function compactRuntimeCompatState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined
+  return {
+    goal_id: state.goal_id,
+    owner: state.owner,
+    objective: state.objective,
+    status: state.status,
+    admission_status: state.admission_status,
+    blocker: state.blocker,
+    pause_reason: state.pause_reason,
+    persistent_runtime: state.persistent_runtime,
+    task_board: leanTaskBoard(state.task_board),
+    entity_references: Array.isArray(state.entity_references) ? state.entity_references.slice(-8) : undefined,
+    revision: state.revision,
+    last_operations: Array.isArray(state.last_operations) ? state.last_operations.slice(-16) : undefined,
+  }
+}
+
+function compactPlanningState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined
+  const roadmap = state.roadmap && typeof state.roadmap === 'object'
+    ? {
+        roadmap_revision_id: state.roadmap.roadmap_revision_id,
+        revision_index: state.roadmap.revision_index,
+        nodes: Array.isArray(state.roadmap.nodes)
+          ? state.roadmap.nodes.slice(0, 20).map(node => ({
+              id: node?.id,
+              intent: node?.intent,
+              status: node?.status,
+              depends_on: Array.isArray(node?.depends_on) ? node.depends_on.slice(0, 12) : undefined,
+              development_hint: node?.development_hint,
+            }))
+          : [],
+      }
+    : null
+  const tracker = state.plan_tracker && typeof state.plan_tracker === 'object'
+    ? {
+        plan_id: state.plan_tracker.plan_id,
+        plan_version: state.plan_tracker.plan_version,
+        status: state.plan_tracker.status,
+        development_mode: state.plan_tracker.development_mode,
+        active_step_id: state.plan_tracker.active_step_id,
+        active_step_index: state.plan_tracker.active_step_index,
+        roadmap_node_ids: Array.isArray(state.plan_tracker.roadmap_node_ids) ? state.plan_tracker.roadmap_node_ids.slice(0, 16) : [],
+        derived_from_plan_id: state.plan_tracker.derived_from_plan_id,
+        steps: Array.isArray(state.plan_tracker.steps)
+          ? state.plan_tracker.steps.slice(0, 30).map(step => ({
+              step_id: step?.step_id,
+              description: step?.description,
+              status: step?.status,
+              completion_contract: step?.completion_contract,
+              contract_status: step?.contract_status,
+              reduced_confidence: step?.reduced_confidence,
+              evidence_refs: Array.isArray(step?.evidence_refs) ? step.evidence_refs.slice(-8) : [],
+            }))
+          : [],
+      }
+    : state.plan_tracker
+  return {
+    goal: state.goal,
+    roadmap,
+    steering: state.steering,
+    plan_tracker: tracker,
+  }
+}
+
+export function compactPlanStateContent(content) {
+  const text = String(content ?? '')
+  const runtimeState = parsePlanStateFromContent(text)
+  const planningState = parsePlanningStateFromContent(text)
+  const runtimeMarkerAt = text.lastIndexOf(RUNTIME_COMPAT_STATE_MARKER)
+
+  if (!runtimeState && !planningState) {
+    if (text.startsWith(MEMORY_MARKER)) {
+      return '[MEMORY COMPACTED] Prior dialogue is omitted for this successful deterministic continuation; use the original current chat request, previous assistant plan, and live tools when needed.'
+    }
+    return text
+  }
+
+  const blocks = []
+  if (runtimeState) {
+    const marker = runtimeMarkerAt >= 0 ? RUNTIME_COMPAT_STATE_MARKER : PLAN_STATE_MARKER
+    const label = marker === PLAN_STATE_MARKER
+      ? 'Compact legacy compatibility state for this successful continuation.'
+      : 'Compact runtime compatibility state; not planning authority.'
+    blocks.push(`${marker} ${label}\n${JSON.stringify(compactRuntimeCompatState(runtimeState))}`)
+  }
+  if (planningState) {
+    blocks.push(`${PLANNING_STATE_MARKER} Compact reducer-owned planning authority for this successful continuation.\n${JSON.stringify(compactPlanningState(planningState))}`)
+  }
+  return blocks.join('\n')
+}
+
+export function compactCompletionReceipt(content) {
+  const text = String(content ?? '')
+  if (!text.startsWith(COMPLETION_MARKER)) return text
+  const receiptAt = text.indexOf('Detailed task receipt:')
+  if (receiptAt < 0) return text
+  const raw = text.slice(receiptAt + 'Detailed task receipt:'.length).trim()
+  try {
+    const status = JSON.parse(raw)
+    if (!status || typeof status !== 'object' || Array.isArray(status)) return text
+    const lean = {
+      task_state: status.task_state,
+      queue_empty: status.queue_empty,
+      queue_length: status.queue_length,
+      last_completed_batch: status.last_completed_batch,
+      last_cancelled_batch: status.last_cancelled_batch,
+      basic_operation: status.basic_operation?.last_result
+        ? { last_result: status.basic_operation.last_result }
+        : undefined,
+    }
+    // Harness lines placed between the marker and the receipt survive compaction.
+    const lead = text.slice(COMPLETION_MARKER.length, receiptAt).trim()
+    return `${COMPLETION_MARKER}${lead ? ` ${lead}` : ''} Compact task receipt: ${JSON.stringify(lean)}`
+  }
+  catch {
+    return text
+  }
+}
+
+export function compactCompletionMessages(messages, { role } = {}) {
+  let replacedSystem = false
+  return messages.map((message) => {
+    if (!replacedSystem && message?.role === 'system') {
+      replacedSystem = true
+      return { ...message, content: role === EXECUTOR_ROLE ? EXECUTOR_COMPACT_CONTINUATION_PROMPT : COMPACT_CONTINUATION_PROMPT }
+    }
+    if (message?.role === 'user' && typeof message.content === 'string') {
+      if (message.content.startsWith(COMPLETION_MARKER)) {
+        return { ...message, content: compactCompletionReceipt(message.content) }
+      }
+      if (message.content.startsWith(MEMORY_MARKER)
+        || message.content.includes(RUNTIME_COMPAT_STATE_MARKER)
+        || message.content.includes(PLANNING_STATE_MARKER)
+        || message.content.includes(PLAN_STATE_MARKER)) {
+        return { ...message, content: compactPlanStateContent(message.content) }
+      }
+    }
+    return { ...message }
+  })
+}
+
+export function compactCompletionTools(definitions = toolDefinitions) {
+  return definitions.map((tool) => {
+    if (tool?.type !== 'function' || !tool.function) return tool
+    const description = typeof tool.function.description === 'string'
+      ? tool.function.description.replace(/\s+/g, ' ').trim().slice(0, 120)
+      : undefined
+    return {
+      ...tool,
+      function: {
+        ...tool.function,
+        ...(description ? { description } : {}),
+      },
+    }
+  })
+}
+
+export function providerEndpoint(base) {
+  let url
+  try { url = new URL(base) }
+  catch { throw new DeploymentError('Invalid provider URL') }
+  check(!url.username && !url.password && !url.search && !url.hash, 'Provider URL cannot contain credentials, query, or fragment')
+  const localHttpHost = ['127.0.0.1', 'localhost', '[::1]', 'host.docker.internal'].includes(url.hostname)
+    || url.hostname.endsWith('.ts.net')
+  check(url.protocol === 'https:' || (url.protocol === 'http:' && localHttpHost), 'Remote provider URL requires HTTPS')
+  url.pathname = `${url.pathname.replace(/\/?$/, '/')}chat/completions`
+  return url.toString()
+}
+
+// providerEndpoint above restricts plain http to local hosts and Tailscale
+// .ts.net hosts for every profile; local and cli-proxy retain this
+// transport rule. Neither method implies a particular host or network.
+// 'direct'/'router' are stricter still: they need https
+// even to one of those same local hostnames, since they mean a real
+// (potentially remote) OpenAI-compatible or OpenRouter endpoint. This check
+// layers in front of providerEndpoint's own check, it does not replace it.
+export function checkApiMethodUrlRule(method, base) {
+  if (!method || method === 'local' || method === 'cli-proxy') return
+  let url
+  try { url = new URL(base) }
+  catch { throw new DeploymentError('Invalid provider URL') }
+  check(url.protocol === 'https:', `AI_API_METHOD=${method} requires an https OPENAI_API_BASEURL`)
+}
+
+export async function providerRequest(config, messages, {
+  fetchImpl = fetch,
+  signal,
+  allowTools = true,
+  recoveryAttempt = 0,
+  recoveryKind,
+  round,
+  epoch,
+  actorId,
+  requestId,
+  promptTraceFile: traceFile,
+  requestBodyPatch,
+  providerPolicy,
+  forceFullPlanner = false,
+  interactionRouter = false,
+  triggerSource,
+  role,
+  completionProtocolVersion = 1,
+} = {}) {
+  check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
+  check(typeof config.model === 'string' && /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model), 'Invalid model identifier')
+  check(Array.isArray(messages) && messages.length > 0 && messages.length <= 50, 'Invalid provider message history')
+  check(typeof allowTools === 'boolean', 'Invalid tool availability flag')
+  const stepContractRound = triggerSource === STEP_CONTRACT_TRIGGER
+  check(!stepContractRound || (!allowTools && !interactionRouter), 'Step contract calls require tools disabled and their own reply contract')
+  check(typeof forceFullPlanner === 'boolean', 'Invalid full-planner override')
+  check(Number.isSafeInteger(recoveryAttempt) && recoveryAttempt >= 0 && recoveryAttempt <= 100, 'Invalid provider recovery attempt')
+  check(recoveryKind === undefined || recoveryKind === 'output_budget_exhaustion', 'Invalid provider recovery kind')
+  const timeoutMs = config.timeoutMs ?? 120000
+  check(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 600000, 'Provider timeout must be an integer from 1000 to 600000 ms')
+
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+  const outputBudgetRecovery = recoveryKind === 'output_budget_exhaustion'
+  const compactContinuation = outputBudgetRecovery
+    || (!forceFullPlanner && isSuccessfulCompletionContinuation(messages, { allowTools, recoveryAttempt }))
+  // The executor has its own submitPlan schema and answer-shape wording; every other caller keeps the shared ones.
+  const executorRound = role === EXECUTOR_ROLE && !interactionRouter
+  const separatedRound = completionProtocolVersion >= 3 && !interactionRouter && !stepContractRound
+  const roleToolDefinitions = separatedRound
+    ? executorRound ? executionOnlyProviderToolDefinitions : planningOnlyProviderToolDefinitions
+    : executorRound ? executorProviderToolDefinitions : toolDefinitions
+  const compactedMessages = compactContinuation ? compactCompletionMessages(messages, { role: executorRound ? EXECUTOR_ROLE : undefined }) : messages
+  const capability = providerCapabilityProfile(config)
+  check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
+  const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
+  const compactReasoningDisabled = outputBudgetRecovery && capability.reasoning_effort === true
+  const steeredMessages = stepContractRound
+    ? stepContractMessages(compactedMessages)
+    : interactionRouter ? compactedMessages : applySteeringMessages(compactedMessages, messages)
+  // Keep the role-stable prefix and tool schemas unchanged. The closed-round
+  // control contract is dynamic guidance beside steering, before the receipt.
+  const controlledMessages = !stepContractRound && !interactionRouter && !allowTools
+    ? steeredMessages.map(message => message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith(STEERING_MARKER)
+      ? { ...message, content: `${message.content}\n\n${separatedRound && !executorRound ? '[CONTROL_OUTPUT] Tools are closed. Return one planning-only JSON control decision with operations:[] and the applicable plan, currentStep, goal, roadmap, stepCompletions and executionGuidance fields.' : executorRound ? EXECUTOR_CLOSED_CONTROL_PROMPT : CLOSED_CONTROL_PROMPT}` }
+      : message)
+    : steeredMessages
+  // The interaction router answers in JSON content, so it keeps its own
+  // prompt untouched by either the style block or a cache breakpoint.
+  // Compaction can replace a system prompt; restore the role contract there
+  // too, rather than letting a compact legacy continuation invite mutations.
+  const rolePrompt = executorRound ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT
+  const roleMessages = separatedRound ? controlledMessages.map(message => message.role === 'system' && !String(message.content).includes(rolePrompt)
+    ? { ...message, content: `${message.content}\n\n${rolePrompt}` } : message) : controlledMessages
+  const styledMessages = interactionRouter || stepContractRound
+    ? controlledMessages
+    : applyProviderStylePrompt(roleMessages, capability.style_profile ?? capability.id)
+  const separatedMessages = separatedRound && executorRound ? styledMessages.map(message => message.role === 'system'
+    || (message.role === 'user' && /^\[(?:STEERING|HARNESS|ACTION_OMISSION_RECOVERY)\]/.test(String(message.content)))
+    ? { ...message, content: executionOnlyPrompt(message.content) } : message) : styledMessages
+  const cacheBreakpoints = interactionRouter
+    ? { messages: separatedMessages, breakpoints: 0 }
+    : applyAnthropicCacheBreakpoints(separatedMessages, capability)
+  const body = {
+    model: config.model,
+    messages: cacheBreakpoints.messages,
+  }
+  if (Array.isArray(capability.upstream_provider) && capability.upstream_provider.length > 0) {
+    // Pins the request to one upstream so repeated runs compare and cache
+    // hits stay stable instead of drifting across OpenRouter's backends
+    // (https://openrouter.ai/docs/features/provider-routing).
+    body.provider = { order: capability.upstream_provider, allow_fallbacks: false }
+  }
+  body[capability.token_field] = compactContinuation
+    ? ((disableThinking || compactReasoningDisabled) ? COMPLETION_MAX_TOKENS : FALLBACK_CONTINUATION_MAX_TOKENS)
+    : DEFAULT_MAX_TOKENS
+  if (disableThinking) body.thinking = { type: 'disabled' }
+  // A round that closes tool use keeps the tool block where the profile
+  // honours tool_choice "none" (2.9): removing it changes the prompt prefix
+  // from its first token, so the whole cached history is lost.
+  const keepClosedTools = !allowTools && !interactionRouter && capability.tools_kept_when_closed === true && capability.tool_support === true
+  if (allowTools || keepClosedTools) {
+    body.tools = stepContractRound ? STEP_CONTRACT_TOOL_DEFINITIONS : compactContinuation ? compactCompletionTools(roleToolDefinitions) : roleToolDefinitions
+    body.tool_choice = allowTools ? 'auto' : 'none'
+  }
+  applyRequestBodyPatch(body, requestBodyPatch, capability)
+  const requestedOutputCap = body[capability.token_field]
+
+  const traceOptions = {
+    round,
+    epoch,
+    actorId,
+    requestId,
+    recoveryAttempt,
+    allowTools,
+    promptTraceFile: traceFile,
+    providerPolicy,
+    providerCapabilities: capability,
+    cacheControlBreakpoints: cacheBreakpoints.breakpoints,
+    promptLayout: promptLayout(styledMessages, { tools: body.tools }),
+  }
+  await traceProviderPayload(body, traceOptions)
+  if (executorRound) {
+    await traceProviderResult('provider.executor_control_contract', {
+      reason: 'executor_submit_plan_requires_step_id',
+      role: EXECUTOR_ROLE,
+      submit_plan_required: body.tools?.find(tool => tool?.function?.name === 'submitPlan')?.function?.parameters?.required,
+      prompt_variant: !allowTools ? 'executor_closed_control' : compactContinuation ? 'executor_compact_continuation' : 'executor_full',
+    }, traceOptions)
+  }
+  if (stepContractRound) {
+    await traceProviderResult('provider.step_contract_output_contract', {
+      reason: 'step_contract_requires_target_checkpoint_json',
+      allowed_fields: ['stepId', 'checkpoint'],
+      tool_choice: body.tool_choice ?? 'not_offered',
+      tool_count: body.tools?.length ?? 0,
+    }, traceOptions)
+  }
+  if (!stepContractRound && !interactionRouter && !allowTools) {
+    await traceProviderResult('provider.control_output_contract', {
+      reason: 'observations_closed_control_json_allowed',
+      allowed_completion_fields: ['checkpoint', 'semanticCompletion', 'stepCompletions'],
+    }, traceOptions)
+  }
+  if (keepClosedTools && ['local', 'cli-proxy'].includes(capability.id) && capability.model_family === 'openai-gpt') {
+    await traceProviderResult('provider.closed_tool_contract', {
+      reason: capability.id === 'cli-proxy' ? 'cli_proxy_openai_explicit_tool_choice_none' : 'local_openai_explicit_tool_choice_none',
+      tool_choice: body.tool_choice,
+      tool_count: body.tools.length,
+    }, traceOptions)
+  }
+
+  // Timeout diagnostics only: where the exchange stalled and how much arrived.
+  // Never retains or logs response content.
+  let responseStage = 'waiting_headers'
+  let responseBytes = 0
+  let httpStatus
+  let responseContentType
+  try {
+    const response = await fetchImpl(providerEndpoint(config.base), {
+      method: 'POST',
+      redirect: 'error',
+      signal: requestSignal,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${config.key}`,
+      },
+      body: JSON.stringify(body),
+    })
+    responseStage = 'reading_body'
+    httpStatus = response.status
+    responseContentType = String(response.headers?.get('content-type') ?? '').slice(0, 120)
+
+    if (!response.ok) {
+      responseStage = 'reading_error_body'
+      const errorBody = await boundedProviderErrorBody(response, 64 * 1024, bytes => { responseBytes = bytes })
+      const diagnostics = providerHttpErrorDiagnostics(errorBody.text)
+      await traceProviderResult('provider.response_error', {
+        ...diagnostics,
+        http_status: response.status,
+        response_bytes: errorBody.bytes,
+        response_truncated: errorBody.truncated,
+      }, traceOptions)
+      const failure = diagnostics.diagnostic_code === 'provider_context_window_exceeded'
+        ? new DeploymentError(`provider_context_window_exceeded: Provider HTTP ${response.status} reported context/input token limit exhaustion`)
+        : new DeploymentError(`Provider HTTP ${response.status}; request will not be retried automatically`)
+      failure.code = diagnostics.diagnostic_code
+      failure.http_status = response.status // structured transport class (pause-class.mjs): 429 and 5xx wait, other statuses do not
+      if (diagnostics.diagnostic_code === 'provider_context_window_exceeded') failure.failureClass = 'provider_budget'
+      throw failure
+    }
+    if (!response.body) {
+      await traceProviderResult('provider.response_error', {
+        diagnostic_code: 'provider_missing_response_body',
+        http_status: response.status,
+      }, traceOptions)
+      throw new DeploymentError('Provider returned no response body')
+    }
+    const reader = response.body.getReader()
+    const chunks = []
+    let bytes = 0
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      bytes += value.length
+      responseBytes = bytes
+      if (bytes > 256 * 1024) {
+        await reader.cancel()
+        await traceProviderResult('provider.response_error', {
+          diagnostic_code: 'provider_response_too_large',
+          response_bytes: bytes,
+        }, traceOptions)
+        throw new DeploymentError('Provider response too large')
+      }
+      chunks.push(value)
+    }
+
+    responseStage = 'parsing_body'
+    const responseText = Buffer.concat(chunks).toString('utf8')
+    let data
+    try { data = JSON.parse(responseText) }
+    catch (error) {
+      await traceProviderResult('provider.response_error', {
+        diagnostic_code: 'provider_body_invalid_json',
+        response_bytes: bytes,
+        response_chars: responseText.length,
+        parse_error: error instanceof Error ? error.message : String(error),
+        response_first_nonspace: responseText.trimStart().slice(0, 1),
+      }, traceOptions)
+      throw new DeploymentError('Provider returned invalid JSON')
+    }
+    const choice = data?.choices?.[0]
+    const message = choice?.message
+    if (!message || typeof message !== 'object') {
+      await traceProviderResult('provider.response_error', {
+        diagnostic_code: 'provider_missing_assistant_message',
+        response_bytes: bytes,
+        response_id: typeof data?.id === 'string' ? data.id : undefined,
+        model: typeof data?.model === 'string' ? data.model : config.model,
+        choice_keys: choice && typeof choice === 'object' ? Object.keys(choice) : [],
+      }, traceOptions)
+    }
+    check(message && typeof message === 'object', 'Provider response has no assistant message')
+
+    // LM Studio's OpenAI-compatible server returns `tool_calls: []` (or
+    // null) on a plain content reply instead of omitting the key. Every
+    // guard here and in npc-agent-loop.mjs tests `!== undefined` to detect
+    // an actual tool call, so a plain reply after tools were closed was
+    // read as "provider returned observation tools" and retried into
+    // blocked_before_mutation, even though the content was a valid decision
+    // and no DSML markup was involved. Normalize before anything below
+    // (including DSML recovery, which itself requires tool_calls to already
+    // be undefined) inspects tool_calls.
+    const emptyToolCallsNormalized = message.tool_calls === null
+      || (Array.isArray(message.tool_calls) && message.tool_calls.length === 0)
+    if (emptyToolCallsNormalized) delete message.tool_calls
+
+    // A round that closed tool use (tool_choice "none", or no tool block) can
+    // still get structured tool_calls from a model that ignores it. Treat them
+    // like the DSML branch below: a sole submitPlan is the plan the content was
+    // supposed to hold, anything else is dropped, and the loop never sees a
+    // tool call on a closed round.
+    let structuredToolsDropped
+    // Calls a closed round made anyway, kept so the loop can salvage them
+    // (2.9 follow-up): operations become plan operations, observations get one
+    // bounded look. Names and argument strings only; nothing here executes.
+    let closedRoundCalls
+    if (!allowTools && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      const calls = message.tool_calls
+      const sole = !stepContractRound && calls.length === 1 && calls[0]?.function?.name === 'submitPlan' && typeof calls[0].function.arguments === 'string'
+      if (sole) {
+        message.content = calls[0].function.arguments
+        structuredToolsDropped = 'submit_plan_content'
+      }
+      else {
+        structuredToolsDropped = 'dropped_tools_off'
+        closedRoundCalls = calls.map(closedRoundCall)
+      }
+      delete message.tool_calls
+    }
+
+    const rawContent = typeof message.content === 'string' ? message.content : ''
+    const rawShape = contentShape(rawContent)
+    const reasoningContentChars = providerReasoningChars(message)
+    const dsml = message.tool_calls === undefined && typeof message.content === 'string'
+      ? recoverDsmlToolCalls(message.content)
+      : undefined
+    let dsmlRecovered
+    if (dsml && !allowTools) {
+      // No tools were offered, so only a leaked submitPlan is usable: its
+      // arguments are the plan object the content was supposed to hold.
+      const sole = !stepContractRound && dsml.tool_calls.length === 1 && dsml.tool_calls[0].function.name === 'submitPlan'
+      if (sole) {
+        message.content = dsml.tool_calls[0].function.arguments
+        dsmlRecovered = 'submit_plan_content'
+      }
+      else {
+        // Tools are off, so any other recovered call (an observation tool,
+        // several invokes, a non-submitPlan single call) is not usable.
+        // Drop it: keep the cleaned leading text (the markup stripped out)
+        // and never reintroduce tool_calls, or the runtime will see a
+        // "provider returned tools after tools were closed" failure and
+        // retry into blocked_before_mutation. Traced so it is visible.
+        message.content = dsml.content
+        dsmlRecovered = 'dropped_tools_off'
+        if (closedRoundCalls === undefined) closedRoundCalls = dsml.tool_calls.map(closedRoundCall)
+      }
+    }
+    else if (dsml) {
+      message.content = dsml.content
+      message.tool_calls = dsml.tool_calls
+      dsmlRecovered = 'tool_calls'
+    }
+    const toolCallCount = Array.isArray(message.tool_calls) ? message.tool_calls.length : 0
+    let contentNormalization
+    if (!stepContractRound && message.tool_calls === undefined && typeof message.content === 'string') {
+      contentNormalization = normalizeProviderPlanContentDetailed(message.content)
+      message.content = contentNormalization.content
+    }
+    // Why content that carries DSML markup was not turned into tool calls. Only
+    // markup that did not parse is diagnosed (the strict parser never guesses), and
+    // only when the content holds no plan object and is not JSON at all.
+    const dsmlRejectedReason = !dsml && contentNormalization?.source === 'none' && !contentIsJson(message.content)
+      ? diagnoseDsmlRejection(message.content)
+      : undefined
+    const normalizedContent = typeof message.content === 'string' ? message.content : ''
+    const structured = message.tool_calls === undefined
+      ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true && triggerSource !== 'step_contract' })
+      : undefined
+    const finishReason = choice?.finish_reason
+    const usageNumbers = providerUsageNumbers(data?.usage)
+    const usageComplete = usageNumbers.input !== undefined
+      && usageNumbers.output !== undefined
+      && usageNumbers.total !== undefined
+      && usageNumbers.total >= usageNumbers.input
+      && usageNumbers.total >= usageNumbers.output
+      && (usageNumbers.reasoning === undefined || usageNumbers.reasoning <= usageNumbers.output)
+    const capEnforcementAnomaly = Number.isSafeInteger(requestedOutputCap)
+      && usageNumbers.output !== undefined
+      && usageNumbers.output > requestedOutputCap
+    const safetyFinish = ['content_filter', 'safety', 'blocked'].includes(String(finishReason ?? '').toLowerCase())
+    let diagnosticCode = finishReason === 'length'
+      ? (rawShape.content_chars === 0 && toolCallCount === 0 ? 'provider_output_budget_exhausted' : 'provider_output_truncated')
+      : safetyFinish
+        ? 'provider_safety_blocked'
+        : (rawShape.content_chars === 0 && toolCallCount === 0 ? 'provider_empty_content' : 'ok')
+    if (diagnosticCode === 'ok' && structured?.json_valid === false) diagnosticCode = 'provider_content_invalid_json'
+    else if (diagnosticCode === 'ok' && structured?.json_valid === true && structured?.plan_valid === false) diagnosticCode = 'provider_content_schema_invalid'
+    if (capEnforcementAnomaly && diagnosticCode === 'ok') diagnosticCode = 'provider_output_cap_ignored'
+    const providerDiagnostics = {
+      response_id: typeof data?.id === 'string' ? data.id : undefined,
+      model: typeof data?.model === 'string' ? data.model : config.model,
+      finish_reason: finishReason,
+      usage: data?.usage && typeof data.usage === 'object' ? data.usage : undefined,
+      diagnostic_code: diagnosticCode,
+      output_budget_exhausted: diagnosticCode === 'provider_output_budget_exhausted',
+      response_bytes: bytes,
+      choice_keys: choice && typeof choice === 'object' ? Object.keys(choice) : [],
+      message_keys: Object.keys(message),
+      tool_call_count: toolCallCount,
+      empty_tool_calls_normalized: emptyToolCallsNormalized,
+      dsml_recovery: dsmlRecovered ?? (dsmlRejectedReason ? 'rejected_malformed' : undefined),
+      dsml_rejected_reason: dsmlRejectedReason,
+      plan_content_source: contentNormalization && contentNormalization.source !== 'none' ? contentNormalization.source : undefined,
+      plan_content_submit_plan_unwrapped: contentNormalization?.submit_plan_unwrapped === true ? true : undefined,
+      plan_content_refused_reason: contentNormalization?.refused,
+      structured_tool_calls_dropped: structuredToolsDropped,
+      reasoning_content_chars: reasoningContentChars,
+      ...rawShape,
+      normalized_content_chars: normalizedContent.length,
+      structured_content: structured,
+      reasoning_effort: typeof providerPolicy?.effort === 'string' ? providerPolicy.effort : undefined,
+      reasoning_policy_reason: typeof providerPolicy?.reason === 'string' ? providerPolicy.reason : undefined,
+      capability_profile: capability.id,
+      requested_profile: capability.requested_profile,
+      requested_token_field: capability.token_field,
+      requested_output_cap: requestedOutputCap,
+      requested_reasoning_effort: requestedReasoningEffort(body),
+      requested_thinking_mode: typeof body.thinking?.type === 'string' ? body.thinking.type : 'not_sent',
+      provider_model_family: typeof capability.model_family === 'string' ? capability.model_family : undefined,
+      upstream_provider_pin: Array.isArray(capability.upstream_provider) ? capability.upstream_provider : undefined,
+      cache_control_breakpoints: cacheBreakpoints.breakpoints,
+      provider_context_window: Number.isSafeInteger(capability.context_window) ? capability.context_window : undefined,
+      reported_reasoning_tokens: usageNumbers.reasoning,
+      reported_output_tokens: usageNumbers.output,
+      reported_cached_tokens: usageNumbers.cached,
+      usage_complete: usageComplete,
+      cap_enforcement_anomaly: capEnforcementAnomaly,
+    }
+
+    await traceProviderResult('provider.response', providerDiagnostics, traceOptions)
+    // Named events for each way content was changed or refused, so a later live
+    // run can be read from the trace without diffing raw replies.
+    if (dsmlRejectedReason) {
+      await traceProviderResult('provider.dsml_rejected', {
+        reason: dsmlRejectedReason,
+        round,
+        allow_tools: allowTools,
+        content_chars: rawShape.content_chars,
+        content_preview: rawShape.content_preview,
+      }, traceOptions)
+    }
+    if (contentNormalization?.submit_plan_unwrapped) {
+      await traceProviderResult('provider.plan_content_unwrapped', {
+        reason: 'submit_plan_member_unwrapped',
+        source: contentNormalization.source,
+        round,
+        allow_tools: allowTools,
+        content_chars: rawShape.content_chars,
+      }, traceOptions)
+    }
+    else if (contentNormalization?.refused) {
+      await traceProviderResult('provider.plan_content_refused', {
+        reason: contentNormalization.refused,
+        round,
+        allow_tools: allowTools,
+        content_chars: rawShape.content_chars,
+        content_preview: rawShape.content_preview,
+      }, traceOptions)
+    }
+    if (closedRoundCalls !== undefined) {
+      Object.defineProperty(message, '_sglunaClosedRoundCalls', {
+        configurable: true,
+        enumerable: false,
+        value: closedRoundCalls,
+      })
+    }
+    Object.defineProperty(message, '_sglunaProvider', {
+      configurable: true,
+      enumerable: false,
+      value: providerDiagnostics,
+    })
+    return message
+  }
+  catch (error) {
+    if (signal?.aborted) {
+      await traceProviderResult('provider.response_error', {
+        diagnostic_code: 'provider_cancelled',
+        message: 'Provider request cancelled',
+      }, traceOptions)
+      throw new DeploymentError('Provider request cancelled')
+    }
+    if (timeoutSignal.aborted) {
+      await traceProviderResult('provider.response_error', {
+        diagnostic_code: 'provider_timeout',
+        timeout_ms: timeoutMs,
+        response_stage: responseStage,
+        response_bytes: responseBytes,
+        http_status: httpStatus,
+        response_content_type: responseContentType,
+      }, traceOptions)
+      throw Object.assign(new DeploymentError(`Provider timed out after ${timeoutMs} ms`), { transport_subkind: 'timeout' })
+    }
+    throw error
+  }
+}

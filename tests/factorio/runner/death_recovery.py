@@ -79,6 +79,8 @@ def run(client: Rcon, results: Path) -> None:
         "s.set_tiles(tiles,true,false,true); "
         "local inv=a.get_main_inventory(); assert(inv); inv.clear(); "
         "assert(inv.insert{name='iron-plate',count=23}==23); assert(inv.insert{name='copper-plate',count=11}==11); "
+        "local guns=a.get_inventory(defines.inventory.character_guns); guns.clear(); guns.insert{name='pistol',count=1}; "
+        "local ammo=a.get_inventory(defines.inventory.character_ammo); ammo.clear(); ammo.insert{name='firearm-magazine',count=3}; ammo[1].drain_ammo(2); "
         "local target=s.create_entity{name='stone-furnace',position={x=a.position.x+25,y=a.position.y},force=a.force}; assert(target); "
         "rcon.print(helpers.table_to_json({actor={valid=a.valid,kind='standalone_character',actor_id=a.unit_number},"
         "runtime={tick=game.tick,tick_paused=game.tick_paused,speed=game.speed,connected_players=#game.connected_players},"
@@ -197,6 +199,53 @@ def run(client: Rcon, results: Path) -> None:
     # Match the bounded navigation arrival contract and require the exact
     # target-bound `reached` receipt above; idle by itself is insufficient.
     require(squared_distance(final['position'], fresh_fixture['position']) <= 9.0, (final, fresh_fixture, navigation))
+
+    corpses = json_command(lua_json(remote_call('autorio_corpse_recovery', 'status')), 'native corpse registry')
+    owned = [entry for entry in corpses['corpses'] if entry['previous_actor_id'] == original_id]
+    require(len(owned) == 1 and owned[0]['state'] == 'available', corpses)
+    corpse_ref = owned[0]['corpse_ref']
+    recovery_ordinals: dict[str, int] = {}
+
+    def retrieve(request_id: str, slots: int = 16, count: int = 1000) -> dict:
+        recovery_ordinals.setdefault(request_id, len(recovery_ordinals) + 1)
+        return json_command(lua_json(remote_call('autorio_operations', 'recover_corpse', repr(corpse_ref), str(slots), str(count), str(replacement_id), repr(request_id), str(recovery_ordinals[request_id]))), request_id)
+
+    unarmed = retrieve('corpse-unarmed')
+    require(unarmed['accepted'] is False and unarmed['reason'] == 'compatible_weapon_and_ammo_required', unarmed)
+    # Declared combat fixture only: these supplies test equipment admission,
+    # not the production planner's ability to rebuild its recovery kit.
+    command(
+        "/silent-command local a=game.get_entity_by_unit_number("
+        f"{replacement_id}); assert(a); local inv=a.get_main_inventory(); "
+        "assert(inv.insert{name='pistol',count=1}==1); assert(inv.insert{name='firearm-magazine',count=2}==2)"
+    )
+    for operation, item in [('equip_weapon', 'pistol'), ('equip_ammo', 'firearm-magazine')]:
+        equipped = json_command(lua_json(remote_call('autorio_operations', operation, repr(item), '1')), operation)
+        require(equipped[0] is True, equipped)
+    readiness = json_command(lua_json(remote_call('autorio_equipment', 'status')), 'recovery equipment')
+    require(readiness['recovery_readiness']['ready'] is True, readiness)
+    position = owned[0]['position']
+    approached = json_command(lua_json(remote_call('autorio_operations', 'walk_to_position', str(position['x']), str(position['y']), '2')), 'physical corpse approach')
+    require(approached[0] is True, approached)
+    wait_until_idle(status, 'physical corpse approach', 35)
+    partial = retrieve('corpse-partial', 1, 5)
+    require(partial['accepted'] is True and partial['reason'] == 'partial' and 0 < partial['moved_count'] <= 5, partial)
+    duplicate = retrieve('corpse-partial', 1, 5)
+    require(duplicate == partial, (partial, duplicate))
+    restored = retrieve('corpse-finish')
+    require(restored['accepted'] is True and restored['reason'] == 'recovered', restored)
+    inventory = json_command(
+        "/silent-command local a=game.get_entity_by_unit_number("
+        f"{replacement_id}); assert(a); local inv=a.get_main_inventory(); local ammo=inv.find_item_stack('firearm-magazine'); "
+        "rcon.print(helpers.table_to_json({iron=inv.get_item_count('iron-plate'),copper=inv.get_item_count('copper-plate'),"
+        "guns=inv.get_item_count('pistol'),magazines=inv.get_item_count('firearm-magazine'),ammo=ammo and ammo.ammo,quality=ammo and ammo.quality.name}))",
+        'native recovered inventory',
+    )
+    require(inventory == {'iron': 23, 'copper': 11, 'guns': 1, 'magazines': 3, 'ammo': 8, 'quality': 'normal'}, inventory)
+    (results / 'corpse-retrieval.json').write_text(json.dumps({
+        'status': 'pass', 'registry': corpses, 'unarmed': unarmed,
+        'partial': partial, 'duplicate': duplicate, 'completion': restored, 'inventory': inventory,
+    }, indent=2))
 
     (results / 'death-recovery.json').write_text(json.dumps({
         'status': 'pass',

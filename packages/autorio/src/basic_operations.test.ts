@@ -10,6 +10,7 @@ function context() {
     is_valid: true,
     character: { valid: true },
     force: { index: 1 },
+    surface: { index: 1 },
     position: { x: 0, y: 0 },
     set_walking_state: vi.fn(),
     set_mining_state: vi.fn(),
@@ -19,7 +20,7 @@ function context() {
       kind: 'standalone_character',
       valid: true,
       has_character: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
     })),
   } as unknown as ControlledActor

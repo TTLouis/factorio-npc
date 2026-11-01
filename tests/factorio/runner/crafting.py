@@ -212,7 +212,7 @@ def run(client: Rcon, results: Path) -> None:
     assert_rejected(no_ingredients_status, actor_id, 'not_enough_ingredients')
 
     invalid_recipe = json_command(
-        lua_json(remote_call('autorio_operations', 'craft_item', repr('airi-not-a-recipe'), '1')),
+        lua_json(remote_call('autorio_operations', 'craft_item', repr('sgluna-not-a-recipe'), '1')),
         'craft invalid recipe admission',
     )
     require(invalid_recipe[0] is False, invalid_recipe)

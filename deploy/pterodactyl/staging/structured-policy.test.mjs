@@ -1,11 +1,25 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseOperation, parsePlan, renderOperation, toolCommand, toolDefinitions } from './structured-policy.mjs'
+import { approvedOperationNames, operationArgumentKeys, operationMetadataCatalog, operationMetadataForName, parseOperation, parsePlan, renderOperation, renderOperationPreflight, toolCommand, toolDefinitions } from './structured-policy.mjs'
 
 test('structured operations apply bounded defaults and render only approved Autorio calls', () => {
   assert.deepEqual(parseOperation({ name: 'mine_entity', args: { entity_name: 'iron-ore' } }), {
     name: 'mine_entity', args: { entity_name: 'iron-ore', count: 1 },
   })
+  assert.deepEqual(parseOperation({ name: 'harvest_product', args: { product_name: 'stone', count: 6 } }), {
+    name: 'harvest_product', args: { product_name: 'stone', count: 6, search_radius: 256 },
+  })
+  assert.deepEqual(parseOperation({ name: 'clear_construction_area', args: { x: 10, y: -4, width: 12, height: 8 } }), {
+    name: 'clear_construction_area', args: { x: 10, y: -4, width: 12, height: 8 },
+  })
+  assert.equal(
+    renderOperation({ name: 'clear_construction_area', args: { x: 10, y: -4, width: 12, height: 8 } }),
+    "remote.call('autorio_operations','clear_construction_area',10,-4,12,8)",
+  )
+  assert.equal(
+    renderOperation({ name: 'harvest_product', args: { product_name: 'wood', count: 10, search_radius: 128 } }),
+    "remote.call('autorio_operations','harvest_product','wood',10,128)",
+  )
   assert.deepEqual(parseOperation({ name: 'attack_nearest_enemy', args: {} }), {
     name: 'attack_nearest_enemy', args: { search_radius: 50 },
   })
@@ -87,6 +101,8 @@ test('operation policy rejects arbitrary code, extra args, and oversized bounded
     { name: 'stop_follow_player', args: { player_name: 'TTLouis' } },
     { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1001 } },
     { name: 'mine_entity', args: { entity_name: 'iron-ore\n/c game.clear()', count: 1 } },
+    { name: 'harvest_product', args: { product_name: 'stone', count: 100001, search_radius: 64 } },
+    { name: 'clear_construction_area', args: { x: 0, y: 0, width: 65, height: 1 } },
     { name: 'place_entity', args: { entity_name: 'steel-chest', x: 1 } },
     { name: 'place_entity', args: { entity_name: 'steel-chest', y: 1 } },
     { name: 'place_entity', args: { entity_name: 'steel-chest', x: 1, y: 1, direction: 16 } },
@@ -114,7 +130,10 @@ test('tool surface matches current NPC observation contract and uses strict sche
     'getEquipmentStatus',
     'getRecipe',
     'getRecipeDetails',
+    'discoverPrototypes',
     'getPrototypeDetails',
+    'findSkills',
+    'getSkillDetails',
     'getPlayerStatus',
     'getNearbyEntities',
     'findLongRangeEntities',
@@ -135,7 +154,10 @@ test('tool surface matches current NPC observation contract and uses strict sche
   for (const tool of toolDefinitions) assert.equal(tool.function.parameters.additionalProperties, false)
   assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'getRecipe').function.parameters.required, ['item'])
   assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'getRecipeDetails').function.parameters.required, ['item_or_recipe'])
+  assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'discoverPrototypes').function.parameters.required, ['capability'])
   assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'getPrototypeDetails').function.parameters.required, ['name'])
+  assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'findSkills').function.parameters.required, ['query'])
+  assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'getSkillDetails').function.parameters.required, ['id'])
   assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'getEntityGeometry').function.parameters.required, ['unit_number'])
   assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'getLogisticsTopology').function.parameters.required, ['unit_number'])
   assert.deepEqual(toolDefinitions.find(tool => tool.function.name === 'getPlayerStatus').function.parameters.required, ['player_name'])
@@ -151,8 +173,14 @@ test('read-only tool renderer targets native actor-aware interfaces without play
   assert.equal(toolCommand('getCraftingStatus', {}), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_crafting","status")))')
   assert.equal(toolCommand('getResearchRequest', { request_id: 42 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_research","request_result",42)))')
   assert.equal(toolCommand('getRecipe', { item: 'iron-gear-wheel' }), '/silent-command remote.call("autorio_tools","get_recipe",\'iron-gear-wheel\')')
-  assert.equal(toolCommand('getRecipeDetails', { item_or_recipe: "mod's-fluid" }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","recipe_details",\'mod\\\'s-fluid\')))')
+  assert.equal(toolCommand('getRecipeDetails', { item_or_recipe: "mod's-fluid" }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","recipe_details",\'mod\\\'s-fluid\',1)))')
+  assert.equal(toolCommand('getRecipeDetails', { item_or_recipe: 'iron-gear-wheel', requested_count: 3 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","recipe_details",\'iron-gear-wheel\',3)))')
+  assert.match(toolCommand('discoverPrototypes', { capability: 'mining', resource_name: 'iron-ore' }), /autorio_prototypes.*discover/)
+  assert.match(toolCommand('discoverPrototypes', { capability: 'harvest', product_name: 'stone' }), /"capability":"harvest".*"product_name":"stone"/)
   assert.equal(toolCommand('getPrototypeDetails', { name: "mod's-machine" }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_prototypes","details",\'mod\\\'s-machine\')))')
+  assert.equal(toolCommand('findSkills', { query: 'early iron plate smelting' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","find",\'early iron plate smelting\',3)))')
+  assert.equal(toolCommand('findSkills', { query: '煤蛇', limit: 2 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","find",\'煤蛇\',2)))')
+  assert.equal(toolCommand('getSkillDetails', { id: 'burner-coal-loop' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",\'burner-coal-loop\')))')
   assert.equal(toolCommand('getPlayerStatus', { player_name: 'TTLouis' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_player_status",\'TTLouis\')))')
   assert.equal(toolCommand('getNearbyEntities', { radius: 32, name: 'iron-ore', type: 'resource', limit: 25 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_nearby_entities",32,\'iron-ore\',\'resource\',25)))')
   assert.equal(toolCommand('findLongRangeEntities', { name: 'iron-ore', max_radius: 2048, limit: 4 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_discovery","find_entities",\'iron-ore\',2048,4)))')
@@ -165,6 +193,55 @@ test('read-only tool renderer targets native actor-aware interfaces without play
   assert.equal(toolCommand('getLogisticsTopology', { unit_number: 4242, radius: 16 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","logistics_topology",4242,16)))')
 })
 
+test('entity status accepts strict exclusive exact identity or legacy nearest-name queries', () => {
+  assert.equal(toolCommand('getEntityStatus', { unit_number: 4242 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",nil,nil,4242)))')
+  assert.equal(toolCommand('getEntityStatus', { name: 'stone-furnace', radius: 16 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",\'stone-furnace\',16)))')
+  for (const args of [
+    {}, { radius: 8 }, { unit_number: 0 }, { unit_number: -1 }, { unit_number: 1.5 },
+    { unit_number: Number.MAX_SAFE_INTEGER + 1 }, { unit_number: '4242' },
+    { unit_number: 4242, name: 'stone-furnace' }, { unit_number: 4242, radius: 8 },
+    { unit_number: 4242, surface: 1 }, { unit_number: 4242, force: 'player' },
+  ]) assert.throws(() => toolCommand('getEntityStatus', args), JSON.stringify(args))
+  const schema = toolDefinitions.find(tool => tool.function.name === 'getEntityStatus').function.parameters
+  assert.equal(schema.additionalProperties, false)
+  assert.equal(schema.properties.unit_number.maximum, Number.MAX_SAFE_INTEGER)
+  assert.deepEqual(schema.oneOf, [
+    { required: ['name'], not: { required: ['unit_number'] } },
+    { required: ['unit_number'], not: { anyOf: [{ required: ['name'] }, { required: ['radius'] }] } },
+  ])
+})
+
+test('mutation identity preflight is read-only and limited to operations that need deterministic identities', () => {
+  const craft = renderOperationPreflight({ name: 'craft_item', args: { item_name: 'burner-mining-drill', count: 1 } })
+  assert.match(craft, /^\/silent-command rcon\.print\(helpers\.table_to_json\(remote\.call\("autorio_preflight","operation",/)
+  assert.match(craft, /'craft_item'/)
+  assert.match(craft, /'burner-mining-drill'/)
+
+  const harvest = renderOperationPreflight({ name: 'harvest_product', args: { product_name: 'wood', count: 4, search_radius: 64 } })
+  assert.match(harvest, /'harvest_product'/)
+  assert.match(harvest, /'wood'/)
+
+  const gather = renderOperationPreflight({ name: 'gather_resource', args: { resource_name: 'tree-02-red', count: 4, search_radius: 64 } })
+  assert.match(gather, /'gather_resource'/)
+  assert.match(gather, /'tree-02-red'/)
+
+  const research = renderOperationPreflight({ name: 'research_technology', args: { technology_name: 'automation' } })
+  assert.match(research, /^\/silent-command rcon\.print\(helpers\.table_to_json\(remote\.call\("autorio_preflight","operation",/)
+  assert.match(research, /'research_technology'/)
+  assert.match(research, /'automation'/)
+
+  assert.equal(renderOperationPreflight({ name: 'wait', args: { ticks: 60 } }), null)
+  const playerTransfer = renderOperationPreflight({ name: 'move_items_with_player', args: {
+    item_name: 'copper-ore', player_name: 'SGLuna', max_count: 74, to_player: true,
+  } })
+  assert.match(playerTransfer, /autorio_preflight/)
+  assert.match(playerTransfer, /move_items_with_player/)
+  assert.match(playerTransfer, /\['player_name'\]='SGLuna'/)
+  const positionWalk = renderOperationPreflight({ name: 'walk_to_position', args: { x: 10, y: -4, reach_distance: 0.75 } })
+  assert.match(positionWalk, /autorio_preflight/)
+  assert.match(positionWalk, /walk_to_position/)
+})
+
 test('tool calls reject unknown names, unsafe names, extras, and out-of-bound scans', () => {
   assert.throws(() => toolCommand('shell', {}))
   assert.throws(() => toolCommand('getEquipmentStatus', { slot: 1 }))
@@ -173,8 +250,19 @@ test('tool calls reject unknown names, unsafe names, extras, and out-of-bound sc
   assert.throws(() => toolCommand('getRecipe', { item: 'iron-plate\n/c game.clear()' }))
   assert.throws(() => toolCommand('getRecipeDetails', { item_or_recipe: 'iron-plate', force: 'enemy' }))
   assert.throws(() => toolCommand('getRecipeDetails', { item_or_recipe: 'iron-plate\n/c game.clear()' }))
+  assert.equal(toolCommand('getRecipeDetails', { item_or_recipe: 'iron-plate', fuel_name: 'coal' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","recipe_details",\'iron-plate\',1,\'coal\')))')
+  assert.equal(toolCommand('getRecipeDetails', { item_or_recipe: 'iron-plate', requested_count: 5, fuel_name: 'wood' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","recipe_details",\'iron-plate\',5,\'wood\')))')
+  assert.throws(() => toolCommand('getRecipeDetails', { item_or_recipe: 'iron-plate', fuel_name: 'coal\n/c game.clear()' }))
+  assert.throws(() => toolCommand('getRecipeDetails', { item_or_recipe: 'iron-plate', fuel_name: '' }))
+  assert.throws(() => toolCommand('discoverPrototypes', { capability: 'mining', resource_name: 'iron-ore', limit: 13 }))
+  assert.throws(() => toolCommand('discoverPrototypes', { capability: 'mining', resource_name: 'iron-ore', lua: 'game.clear()' }))
   assert.throws(() => toolCommand('getPrototypeDetails', { name: 'inserter', force: 'enemy' }))
   assert.throws(() => toolCommand('getPrototypeDetails', { name: 'inserter\n/c game.clear()' }))
+  assert.throws(() => toolCommand('findSkills', { query: '' }))
+  assert.throws(() => toolCommand('findSkills', { query: 'coal', limit: 11 }))
+  assert.throws(() => toolCommand('findSkills', { query: 'coal', lua: 'game.clear()' }))
+  assert.throws(() => toolCommand('getSkillDetails', { id: '../escape' }))
+  assert.throws(() => toolCommand('getSkillDetails', { id: 'burner-coal-loop', extra: true }))
   assert.throws(() => toolCommand('getEntityGeometry', { unit_number: 0 }))
   assert.throws(() => toolCommand('getEntityGeometry', { unit_number: 1.5 }))
   assert.throws(() => toolCommand('getEntityGeometry', { unit_number: 42, radius: 8 }))
@@ -196,4 +284,62 @@ test('tool calls reject unknown names, unsafe names, extras, and out-of-bound sc
   assert.throws(() => toolCommand('getResearchRequest', { request_id: 0 }))
   assert.throws(() => toolCommand('getResearchRequest', { request_id: 1.5 }))
   assert.throws(() => toolCommand('getResearchRequest', { request_id: 42, force: 'enemy' }))
+})
+
+
+test('operation metadata is the authoritative base operation registry', () => {
+  const catalog = operationMetadataCatalog()
+  assert.deepEqual(Object.keys(catalog), approvedOperationNames())
+  assert.equal(new Set(approvedOperationNames()).size, approvedOperationNames().length)
+
+  for (const name of approvedOperationNames()) {
+    const metadata = operationMetadataForName(name)
+    assert.equal(metadata.name, name)
+    assert.deepEqual(Object.keys(metadata.arguments), operationArgumentKeys(name))
+    assert.ok(metadata.scopes.length >= 1)
+    assert.equal(new Set(metadata.scopes).size, metadata.scopes.length)
+    assert.ok(['low', 'moderate', 'high', 'combat'].includes(metadata.risk))
+    assert.equal(typeof metadata.preflight, 'boolean')
+    for (const spec of Object.values(metadata.arguments)) {
+      assert.ok([
+        'closed_enum',
+        'boolean',
+        'deterministic_numeric',
+        'planner_numeric',
+        'runtime_candidate',
+        'exact_entity_identity',
+        'planner_semantic_value',
+        'deterministic_default',
+      ].includes(spec.kind))
+      assert.equal(typeof spec.required, 'boolean')
+      assert.equal(typeof spec.defaulted, 'boolean')
+      assert.equal(spec.required && spec.defaulted, false)
+    }
+  }
+})
+
+test('operation metadata captures projection ownership for representative operations', () => {
+  assert.deepEqual(operationMetadataForName('gather_resource').arguments, {
+    resource_name: {
+      kind: 'runtime_candidate',
+      required: true,
+      defaulted: false,
+      provenance: 'nearby_resources',
+    },
+    count: {
+      kind: 'planner_numeric',
+      required: false,
+      defaulted: true,
+    },
+    search_radius: {
+      kind: 'deterministic_numeric',
+      required: false,
+      defaulted: true,
+    },
+  })
+
+  assert.equal(operationMetadataForName('mine_entity_exact').arguments.unit_number.kind, 'exact_entity_identity')
+  assert.equal(operationMetadataForName('set_machine_recipe').arguments.recipe_name.provenance, 'live_recipe_candidates')
+  assert.equal(operationMetadataForName('research_technology').arguments.technology_name.provenance, 'live_researchable_technologies')
+  assert.deepEqual(operationMetadataForName('supply_entity').scopes, ['logistics', 'production'])
 })

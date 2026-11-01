@@ -7,6 +7,7 @@ import { openaiConfig } from '../config'
 import { parseLLMMessage } from '../parser'
 import prompt from './prompt.md?raw'
 import productionPlanningPrompt from './production-planning-prompt.md?raw'
+import spatialPlacementPrompt from './spatial-placement-prompt.md?raw'
 import { agentTools } from './tool-set'
 
 const logger = createLogg('agent').useGlobalConfig()
@@ -26,7 +27,7 @@ export async function createMessageHandler() {
     tools: toolFunctions,
   })
 
-  const messages: Message[] = [system(`${prompt}\n\n${productionPlanningPrompt}`)]
+  const messages: Message[] = [system(`${prompt}\n\n${productionPlanningPrompt}\n\n${spatialPlacementPrompt}`)]
 
   async function handleMessage(message: StdoutMessage) {
     logger.withFields({ message }).debug('Handling message')

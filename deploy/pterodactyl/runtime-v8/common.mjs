@@ -1,3 +1,4 @@
+import { normalizeFluidReceiptBinding } from './contract-obligations.mjs'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import net from 'node:net'
@@ -186,6 +187,7 @@ export class Child {
     }
     stream.on('data', onData)
     this.input = { stream, onData }
+    if (typeof stream.resume === 'function') stream.resume()
     return this
   }
 
@@ -238,19 +240,32 @@ function encodePacket(id, type, text) {
   return packet
 }
 
-function taskBoardUiRconCommand(text) {
+export function taskBoardUiRconCommand(text) {
   const command = String(text)
   return command.includes('remote.call("autorio_task_board"') || command.includes("remote.call('autorio_task_board'")
 }
 
-const UI_RCON_READY_COMMAND = '/silent-command rcon.print("AIRI_UI_RCON_READY")'
+const UI_RCON_READY_COMMAND = '/silent-command rcon.print("SGLUNA_UI_RCON_READY")'
+
+export async function confirmLuaConsoleReady(rcon) {
+  let attempts = 1
+  let ready = String(await rcon.command(UI_RCON_READY_COMMAND) ?? '').trim()
+  // Repeat only this fixed read-only confirmation, never a native mutation.
+  if (ready === '' || ready === 'Please repeat the command to proceed.') {
+    attempts++
+    ready = String(await rcon.command(UI_RCON_READY_COMMAND) ?? '').trim()
+  }
+  check(ready === 'SGLUNA_UI_RCON_READY', 'Lua RCON handshake failed')
+  return { attempts }
+}
 
 export class Rcon {
-  constructor(port, password, timeout = 5000, { auxiliary = false } = {}) {
+  constructor(port, password, timeout = 5000, { auxiliary = false, host = '127.0.0.1' } = {}) {
     this.port = port
     this.password = password
     this.timeout = timeout
     this.auxiliary = auxiliary
+    this.host = host
     this.socket = null
     this.buffer = Buffer.alloc(0)
     this.sequence = 10
@@ -264,7 +279,7 @@ export class Rcon {
   async connect() {
     check(!this.socket, 'RCON is already connected')
     this.closed = false
-    const socket = net.createConnection({ host: '127.0.0.1', port: this.port })
+    const socket = net.createConnection({ host: this.host, port: this.port })
     this.socket = socket
     socket.on('data', chunk => this.receive(chunk))
     socket.on('error', error => this.failAll(error))
@@ -349,15 +364,10 @@ export class Rcon {
     }
 
     if (!this.uiConnect) {
-      const lane = new Rcon(this.port, this.password, this.timeout, { auxiliary: true })
+      const lane = new Rcon(this.port, this.password, this.timeout, { auxiliary: true, host: this.host })
       this.uiConnect = (async () => {
         await lane.connect()
-        let ready = String(await lane.command(UI_RCON_READY_COMMAND) ?? '').trim()
-        // Factorio asks for the first Lua console command to be repeated exactly
-        // before enabling it. Prime that confirmation on the dedicated UI socket
-        // so a changing set_snapshot payload cannot get stuck behind the prompt.
-        if (ready !== 'AIRI_UI_RCON_READY') ready = String(await lane.command(UI_RCON_READY_COMMAND) ?? '').trim()
-        check(ready === 'AIRI_UI_RCON_READY', 'Task Board RCON handshake failed')
+        await confirmLuaConsoleReady(lane)
         if (this.closed || !this.socket || this.socket.destroyed) {
           lane.close()
           throw new DeploymentError('RCON is not connected')
@@ -405,11 +415,43 @@ export class Rcon {
   }
 }
 
-export async function reserveBudget(filename, maximum, now = Date.now()) {
+// A supervisor owns these files, but its foreground and shadow requests can
+// overlap. Atomic rename protects file contents, not the read/check/increment
+// transaction. Queue that whole transaction per resolved file in this process.
+const budgetReservations = new Map()
+
+export async function reserveBudget(filename, maximum, now = Date.now(), options = {}) {
+  const resolved = path.resolve(filename)
+  const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  const previous = budgetReservations.get(key) ?? Promise.resolve()
+  const reservation = previous.catch(() => {}).then(() => reserveBudgetTransaction(resolved, maximum, now, options))
+  budgetReservations.set(key, reservation)
+  try { return await reservation }
+  finally {
+    // An older completion must not remove a newer queued reservation.
+    if (budgetReservations.get(key) === reservation) budgetReservations.delete(key)
+  }
+}
+
+async function reserveBudgetTransaction(filename, maximum, now, options) {
   const budget = await readJson(filename, { since: now, count: 0 })
   check(Number.isSafeInteger(budget.since) && Number.isSafeInteger(budget.count) && budget.count >= 0, 'Invalid persisted provider budget')
+  check(Number.isSafeInteger(maximum) && maximum >= 1, 'Invalid provider request budget maximum')
+  const requestedReserve = Number.isSafeInteger(options.reservedSlots) ? Math.max(0, options.reservedSlots) : 0
+  const reservedSlots = Math.min(requestedReserve, Math.max(0, maximum - 1))
+  const emergency = options.emergency === true
   if (now - budget.since >= 3600000) { budget.since = now; budget.count = 0 }
-  check(budget.count < maximum, 'Hourly provider request budget reached')
+  const limit = emergency ? maximum : maximum - reservedSlots
+  if (budget.count >= limit) {
+    // Declared at the source (pause-class.mjs): waiting for the hourly window to refill clears it.
+    throw Object.assign(new DeploymentError(
+      emergency
+        ? 'Hourly provider request budget reached, including recovery reserve'
+        : reservedSlots > 0
+          ? 'Hourly provider request budget reached; recovery reserve preserved'
+          : 'Hourly provider request budget reached',
+    ), { transport_subkind: 'budget' })
+  }
   budget.count++
   await atomicWrite(filename, `${JSON.stringify(budget)}\n`)
   return budget.count
@@ -482,11 +524,14 @@ function taskBoardStepStatus(index, activeIndex, boardStatus) {
 
 function applyTaskBoardStatuses(board, activeIndex = board.active_index ?? 0) {
   const safeIndex = clampTaskBoardIndex(activeIndex, board.steps.length)
+  const proposedIndex = clampTaskBoardIndex(board.proposed_focus_index, board.steps.length)
   return {
     ...board,
     active_index: safeIndex,
     active_step_id: board.status === 'completed' || board.steps.length === 0 ? undefined : board.steps[safeIndex]?.id,
     completed_count: board.status === 'completed' ? board.steps.length : safeIndex,
+    proposed_focus_index: board.status === 'completed' || board.steps.length === 0 ? undefined : proposedIndex,
+    proposed_focus_step_id: board.status === 'completed' || board.steps.length === 0 ? undefined : board.steps[proposedIndex]?.id,
     total_steps: board.steps.length,
     steps: board.steps.map((step, index) => ({ ...step, status: taskBoardStepStatus(index, safeIndex, board.status) })),
   }
@@ -494,7 +539,8 @@ function applyTaskBoardStatuses(board, activeIndex = board.active_index ?? 0) {
 
 export function createTaskBoard(plan, currentStep, { goalId = '', now = Date.now() } = {}) {
   const descriptions = boundedTaskBoardPlan(plan)
-  const activeIndex = clampTaskBoardIndex(currentStep, descriptions.length)
+  const activeIndex = 0
+  const proposedFocusIndex = clampTaskBoardIndex(currentStep, descriptions.length)
   let board = {
     kind: 'task_board_lite',
     goal_id: taskBoardText(goalId, 100),
@@ -505,7 +551,9 @@ export function createTaskBoard(plan, currentStep, { goalId = '', now = Date.now
     event_sequence: 0,
     active_index: activeIndex,
     active_step_id: undefined,
-    completed_count: descriptions.length ? activeIndex : 0,
+    proposed_focus_index: descriptions.length ? proposedFocusIndex : undefined,
+    proposed_focus_step_id: undefined,
+    completed_count: 0,
     total_steps: descriptions.length,
     steps: descriptions.map((description, index) => ({ id: taskBoardStepId(index), description, status: 'pending', revision: 1 })),
     evidence: [],
@@ -534,17 +582,38 @@ function taskBoardCompletedPrefixMatches(board, incoming) {
 
 function replanTaskBoardRemaining(board, incoming, incomingIndex, now) {
   const completed = board.steps.slice(0, board.completed_count).map(step => ({ ...step, status: 'completed' }))
-  const remainingDescriptions = incoming.slice(Math.max(incomingIndex, board.completed_count))
+  const incomingIncludesCompletedPrefix = taskBoardCompletedPrefixMatches(board, incoming)
+  const remainingDescriptions = incoming.slice(incomingIncludesCompletedPrefix ? board.completed_count : 0)
   if (remainingDescriptions.length === 0) return board
-  const steps = [
-    ...completed,
-    ...remainingDescriptions.map((description, offset) => ({
-      id: taskBoardStepId(completed.length + offset),
+
+  // Step ids are semantic identities, not array positions. Reuse an unfinished
+  // id only when the normalized step meaning is unchanged. A changed/new step
+  // gets a revision-scoped id so evidence from the replaced step cannot alias
+  // the new step just because both occupy the same plan index.
+  const priorRemaining = board.steps.slice(board.completed_count)
+  const usedStepIds = new Set(completed.map(step => step.id))
+  const replanRevision = (Number.isSafeInteger(board.revision) ? board.revision : 0) + 1
+  const remainingSteps = remainingDescriptions.map((description, offset) => {
+    const reusable = priorRemaining.find(step =>
+      !usedStepIds.has(step.id)
+      && normalizeTaskBoardStep(step.description) === normalizeTaskBoardStep(description))
+    const id = reusable?.id ?? `${taskBoardStepId(completed.length + offset)}_r${replanRevision}`
+    usedStepIds.add(id)
+    return {
+      id,
       description,
       status: 'pending',
-      revision: 1,
-    })),
+      revision: Number.isSafeInteger(reusable?.revision) ? reusable.revision : 1,
+    }
+  })
+  const steps = [
+    ...completed,
+    ...remainingSteps,
   ].slice(0, TASK_BOARD_MAX_STEPS)
+  const proposedDescription = incoming[incomingIndex]
+  const proposedFocusIndex = proposedDescription === undefined
+    ? completed.length
+    : steps.findIndex(step => normalizeTaskBoardStep(step.description) === normalizeTaskBoardStep(proposedDescription))
   let next = {
     ...board,
     status: 'active',
@@ -553,13 +622,14 @@ function replanTaskBoardRemaining(board, incoming, incomingIndex, now) {
     revision: board.revision + 1,
     steps,
     active_index: completed.length,
+    proposed_focus_index: proposedFocusIndex >= 0 ? proposedFocusIndex : completed.length,
     updated_at: now,
   }
   next = applyTaskBoardStatuses(next, completed.length)
   return taskBoardEvent(next, 'replanned', now, { preserved_completed: completed.length, total_steps: next.total_steps })
 }
 
-export function reconcileTaskBoard(board, plan, currentStep, { now = Date.now(), allowReplan = false } = {}) {
+export function reconcileTaskBoard(board, plan, currentStep, { now = Date.now(), allowReplan = false, authoritativeAdvance = false } = {}) {
   const incoming = boundedTaskBoardPlan(plan)
   if (!board || board.kind !== 'task_board_lite') return createTaskBoard(incoming, currentStep, { now })
   if (incoming.length === 0) return board
@@ -568,30 +638,68 @@ export function reconcileTaskBoard(board, plan, currentStep, { now = Date.now(),
   const incomingActive = incoming[incomingIndex]
   const matchedIndex = findTaskBoardStep(board, incomingActive)
   const currentIndex = board.active_index ?? 0
+  const exactSamePlan = incoming.length === board.steps.length
+    && incoming.every((description, index) => normalizeTaskBoardStep(description) === normalizeTaskBoardStep(board.steps[index]?.description))
 
-  if (matchedIndex >= currentIndex) {
-    if (matchedIndex === currentIndex) return board
+  if (allowReplan && !exactSamePlan) {
+    return replanTaskBoardRemaining(board, incoming, incomingIndex, now)
+  }
+
+  if (matchedIndex >= 0) {
+    const proposedChanged = board.proposed_focus_index !== matchedIndex
+    if (authoritativeAdvance && matchedIndex > currentIndex) {
+      let next = {
+        ...board,
+        status: 'active',
+        blocker: '',
+        pause_reason: '',
+        proposed_focus_index: matchedIndex,
+        revision: board.revision + 1,
+        updated_at: now,
+      }
+      next = applyTaskBoardStatuses(next, matchedIndex)
+      return taskBoardEvent(next, 'advanced', now, { from_step: board.active_step_id, to_step: next.active_step_id })
+    }
+    if (proposedChanged) {
+      let next = {
+        ...board,
+        proposed_focus_index: matchedIndex,
+        revision: board.revision + 1,
+        updated_at: now,
+      }
+      next = applyTaskBoardStatuses(next, currentIndex)
+      return taskBoardEvent(next, 'focus_proposed', now, {
+        active_step_id: next.active_step_id,
+        proposed_focus_step_id: next.proposed_focus_step_id,
+      })
+    }
+    if (matchedIndex >= currentIndex) return board
+  }
+
+  if (exactSamePlan && incomingIndex > currentIndex) {
     let next = {
       ...board,
-      status: 'active',
-      blocker: '',
-      pause_reason: '',
+      proposed_focus_index: incomingIndex,
       revision: board.revision + 1,
       updated_at: now,
     }
-    next = applyTaskBoardStatuses(next, matchedIndex)
-    return taskBoardEvent(next, 'advanced', now, { from_step: board.active_step_id, to_step: next.active_step_id })
+    if (authoritativeAdvance) {
+      next = { ...next, status: 'active', blocker: '', pause_reason: '' }
+      next = applyTaskBoardStatuses(next, incomingIndex)
+      return taskBoardEvent(next, 'advanced', now, { from_step: board.active_step_id, to_step: next.active_step_id })
+    }
+    next = applyTaskBoardStatuses(next, currentIndex)
+    return taskBoardEvent(next, 'focus_proposed', now, {
+      active_step_id: next.active_step_id,
+      proposed_focus_step_id: next.proposed_focus_step_id,
+    })
   }
 
-  const exactSamePlan = incoming.length === board.steps.length
-    && incoming.every((description, index) => normalizeTaskBoardStep(description) === normalizeTaskBoardStep(board.steps[index]?.description))
-  if (exactSamePlan && incomingIndex > currentIndex) {
-    let next = { ...board, status: 'active', blocker: '', pause_reason: '', revision: board.revision + 1, updated_at: now }
-    next = applyTaskBoardStatuses(next, incomingIndex)
-    return taskBoardEvent(next, 'advanced', now, { from_step: board.active_step_id, to_step: next.active_step_id })
-  }
-
-  if ((allowReplan || taskBoardCompletedPrefixMatches(board, incoming)) && incomingActive && normalizeTaskBoardStep(incomingActive) !== normalizeTaskBoardStep(board.steps[currentIndex]?.description)) {
+  // Matching a completed prefix is not authority to replace the remaining
+  // committed suffix. That legacy shortcut created an automatic replan/no-op
+  // loop after recoverable failures. Callers must carry explicit user-revision
+  // authority before allowing a replacement.
+  if (allowReplan && incomingActive && normalizeTaskBoardStep(incomingActive) !== normalizeTaskBoardStep(board.steps[currentIndex]?.description)) {
     return replanTaskBoardRemaining(board, incoming, incomingIndex, now)
   }
 
@@ -614,12 +722,180 @@ export function setTaskBoardStatus(board, status, { blocker = '', pauseReason = 
   return taskBoardEvent(next, status, now, { active_step_id: next.active_step_id })
 }
 
+// Monotonic per-step transfer-supply recovery counter, kept ON the board (not derived from the evidence window, which
+// is trimmed to TASK_BOARD_MAX_EVIDENCE): { counts: { [step_id]: n }, refs: [handled batch refs] }. Bounded in size.
+const TASK_BOARD_MAX_RECOVERY_STEPS = 64
+const TASK_BOARD_MAX_RECOVERY_REFS = 16
+
+export function taskBoardTransferSupplyRecoveries(board, stepId = board?.active_step_id) {
+  const count = board?.transfer_supply_recoveries?.counts?.[stepId]
+  return Number.isSafeInteger(count) && count > 0 ? count : 0
+}
+
+export function taskBoardTransferSupplyRefSeen(board, ref) {
+  return Boolean(ref) && (board?.transfer_supply_recoveries?.refs ?? []).includes(ref)
+}
+
+export function recordTaskBoardTransferSupplyRecovery(board, { ref = '', now = Date.now() } = {}) {
+  if (!board || board.kind !== 'task_board_lite' || !board.active_step_id) return board
+  const prior = board.transfer_supply_recoveries ?? { counts: {}, refs: [] }
+  const counts = { ...prior.counts, [board.active_step_id]: taskBoardTransferSupplyRecoveries(board) + 1 }
+  const keys = Object.keys(counts)
+  for (const key of keys.slice(0, Math.max(0, keys.length - TASK_BOARD_MAX_RECOVERY_STEPS))) delete counts[key]
+  const text = taskBoardText(ref, 160)
+  const refs = text ? [...(prior.refs ?? []), text].slice(-TASK_BOARD_MAX_RECOVERY_REFS) : [...(prior.refs ?? [])]
+  return { ...board, transfer_supply_recoveries: { counts, refs }, revision: board.revision + 1, updated_at: now }
+}
+
+function normalizeTransferSupplyRecoveries(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const counts = {}
+  const rawCounts = value.counts && typeof value.counts === 'object' && !Array.isArray(value.counts) ? value.counts : {}
+  for (const [key, count] of Object.entries(rawCounts).slice(-TASK_BOARD_MAX_RECOVERY_STEPS)) {
+    const id = taskBoardText(key, 80)
+    if (id && Number.isSafeInteger(count) && count > 0) counts[id] = count
+  }
+  const refs = (Array.isArray(value.refs) ? value.refs : []).slice(-TASK_BOARD_MAX_RECOVERY_REFS).map(ref => taskBoardText(ref, 160)).filter(Boolean)
+  return Object.keys(counts).length > 0 || refs.length > 0 ? { counts, refs } : undefined
+}
+
+// Monotonic per-step counter of refusals by the committed-checkpoint stock guard (a batch that would take the stock
+// the step's own checkpoint requires). Same shape and bounds as the transfer-supply counter, but separate, so the two
+// budgets never consume each other: { counts: { [step_id]: n } }.
+export function taskBoardCheckpointStockRefusals(board, stepId = board?.active_step_id) {
+  const count = board?.checkpoint_stock_refusals?.counts?.[stepId]
+  return Number.isSafeInteger(count) && count > 0 ? count : 0
+}
+
+export function recordTaskBoardCheckpointStockRefusal(board, { now = Date.now() } = {}) {
+  if (!board || board.kind !== 'task_board_lite' || !board.active_step_id) return board
+  const prior = board.checkpoint_stock_refusals ?? { counts: {} }
+  const counts = { ...prior.counts, [board.active_step_id]: taskBoardCheckpointStockRefusals(board) + 1 }
+  const keys = Object.keys(counts)
+  for (const key of keys.slice(0, Math.max(0, keys.length - TASK_BOARD_MAX_RECOVERY_STEPS))) delete counts[key]
+  return { ...board, checkpoint_stock_refusals: { counts }, revision: board.revision + 1, updated_at: now }
+}
+
+function normalizeCheckpointStockRefusals(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const counts = {}
+  const rawCounts = value.counts && typeof value.counts === 'object' && !Array.isArray(value.counts) ? value.counts : {}
+  for (const [key, count] of Object.entries(rawCounts).slice(-TASK_BOARD_MAX_RECOVERY_STEPS)) {
+    const id = taskBoardText(key, 80)
+    if (id && Number.isSafeInteger(count) && count > 0) counts[id] = count
+  }
+  return Object.keys(counts).length > 0 ? { counts } : undefined
+}
+
+// Admission blockers carry JSON, unlike prose evidence. Bound the object before
+// serialization: clipping its string at the board limit destroys the evidence.
+// These fields identify the refusal; optional facts are admitted whole and any
+// omission is explicit. This never supplies authority to replay an operation.
+export function serializeAdmissionBlockerEvidence(value) {
+  const original = JSON.stringify(value)
+  if (original.length <= 1200) return { summary: original, compacted: false }
+  // Work on the serialized snapshot, not caller-owned nested trigger data.
+  value = JSON.parse(original)
+  const essential = ['request_id', 'operation_index', 'operation_name', 'reason_code', 'no_replay']
+  const record = Object.fromEntries(essential.filter(key => value[key] !== undefined).map(key => [key, value[key]]))
+  const optional = Object.entries(value).filter(([key]) => !essential.includes(key) && key !== 'locked_recipe')
+  const locked = value.locked_recipe
+  if (locked && typeof locked === 'object') {
+    record.locked_recipe = Object.fromEntries(Object.entries(locked).filter(([key]) => key !== 'next_actionable'))
+    if (locked.next_actionable) {
+      const next = locked.next_actionable
+      const keys = ['name', 'mode', 'status', 'trigger']
+      record.locked_recipe.next_actionable = Object.fromEntries(keys.filter(key => next[key] !== undefined).map(key => [key, next[key]]))
+      // Unlock/trigger identities precede their potentially large capability or
+      // science detail. Preserve optional native facts without partial objects.
+      optional.unshift(...Object.entries(next).filter(([key]) => !keys.includes(key)).map(([key, item]) => [`locked_recipe.next_actionable.${key}`, item]))
+    }
+  }
+  record.omitted_fields = optional.map(([key]) => key)
+  // Normal runtime identities fit easily. Escaped or pathological long strings
+  // still cannot overflow the durable cap; identify every shortened field.
+  const strings = []
+  function visit(object, prefix = '') {
+    for (const [key, item] of Object.entries(object)) {
+      if (key === 'omitted_fields') continue
+      const field = prefix ? `${prefix}.${key}` : key
+      if (typeof item === 'string') strings.push({ object, key, field })
+      else if (item && typeof item === 'object') visit(item, field)
+    }
+  }
+  visit(record)
+  while (JSON.stringify(record).length > 1200) {
+    const largest = strings.filter(item => item.object[item.key].length > 1).sort((a, b) => JSON.stringify(b.object[b.key]).length - JSON.stringify(a.object[a.key]).length)[0]
+    if (!largest) throw new Error('Admission blocker identity exceeds durable evidence capacity')
+    record.truncated_fields ??= []
+    if (!record.truncated_fields.includes(largest.field)) record.truncated_fields.push(largest.field)
+    largest.object[largest.key] = `${largest.object[largest.key].slice(0, Math.max(0, Math.floor(largest.object[largest.key].length / 2) - 1))}…`
+  }
+  for (const [key, item] of optional) {
+    if (item === undefined) {
+      record.omitted_fields = record.omitted_fields.filter(field => field !== key)
+      continue
+    }
+    const candidate = structuredClone(record)
+    candidate.omitted_fields = candidate.omitted_fields.filter(field => field !== key)
+    if (key.startsWith('locked_recipe.next_actionable.')) candidate.locked_recipe.next_actionable[key.split('.').at(-1)] = item
+    else candidate[key] = item
+    if (JSON.stringify(candidate).length <= 1200) Object.assign(record, candidate)
+  }
+  return { summary: JSON.stringify(record), compacted: true, omitted_fields: record.omitted_fields, truncated_fields: record.truncated_fields ?? [] }
+}
+
+// Native preservation receipts contain an exact authority witness, not prose.
+// Keep only validated receipt/correlation fields as whole JSON on both add and
+// restore. Old receipts without a binding retain the original display behavior.
+function taskBoardEvidenceSummary(kind, summary) {
+  const original = typeof summary === 'string' ? summary : String(summary ?? '')
+  if (kind !== 'operation_receipt') return taskBoardText(original, 1200)
+  if (original.length > 8000) return original.includes('preservation_binding') ? '' : taskBoardText(original, 1200)
+  let raw
+  try { raw = JSON.parse(original) } catch { return original.includes('preservation_binding') ? '' : taskBoardText(original, 1200) }
+  const basic = raw?.basic_operation
+  if (!basic || !Object.hasOwn(basic, 'preservation_binding')) return taskBoardText(original, 1200)
+  const binding = normalizeFluidReceiptBinding(basic.preservation_binding)
+  const admitted = raw.admitted_batch
+  const correlation = raw.correlation
+  const positive = value => Number.isSafeInteger(value) && value > 0
+  const text = (value, max = 240) => typeof value === 'string' && value.length > 0 && value.length <= max
+  if (!binding || raw.outcome !== 'completed' || raw.task_state !== 'idle' || raw.queue_length !== 0
+    || raw.batch_id !== binding.batch_id || raw.batch_generation !== binding.batch_generation || raw.batch_ref !== binding.batch_ref
+    || basic.type !== 'placing' || basic.accepted !== true || basic.completed !== true || basic.code !== 'completed'
+    || basic.actor_id !== binding.owner.actor_id || !positive(basic.operation_id) || !positive(basic.placed_unit_number)
+    || !Number.isSafeInteger(basic.tick) || basic.tick < 0 || !positive(basic.placed_surface_index)
+    || !Number.isSafeInteger(basic.placed_direction) || basic.placed_direction < 0 || basic.placed_direction > 15
+    || !Number.isFinite(basic.placed_position?.x) || !Number.isFinite(basic.placed_position?.y)
+    || !text(basic.entity_name, 100) || !text(basic.placed_entity_type, 100)
+    || admitted?.operation_key !== binding.operation_key || admitted.signature !== binding.signature
+    || admitted.goal_id !== binding.owner.goal_id || admitted.plan_id !== binding.owner.plan_id || admitted.step_id !== binding.owner.step_id
+    || admitted.actor_id !== binding.owner.actor_id || admitted.actor_epoch !== binding.owner.actor_epoch
+    || admitted.batch_id !== binding.batch_id || admitted.batch_generation !== binding.batch_generation
+    || correlation?.goal_id !== binding.owner.goal_id || correlation.actor_id !== binding.owner.actor_id
+    || correlation.actor_epoch !== binding.owner.actor_epoch || !text(correlation.step_id, 80)) return ''
+  const record = {
+    outcome: 'completed', task_state: 'idle', queue_length: 0, batch_id: binding.batch_id, batch_generation: binding.batch_generation, batch_ref: binding.batch_ref,
+    task_count: raw.task_count, task_types: ['placing'], tick: basic.tick,
+    basic_operation: { operation_id: basic.operation_id, tick: basic.tick, actor_id: basic.actor_id, type: 'placing', accepted: true, completed: true,
+      code: 'completed', entity_name: basic.entity_name, placed_unit_number: basic.placed_unit_number, placed_entity_type: basic.placed_entity_type,
+      placed_position: { x: basic.placed_position.x, y: basic.placed_position.y }, placed_surface_index: basic.placed_surface_index,
+      placed_direction: basic.placed_direction, preservation_binding: binding },
+    correlation: { goal_id: correlation.goal_id, step_id: correlation.step_id, actor_id: correlation.actor_id, actor_epoch: correlation.actor_epoch },
+    admitted_batch: Object.fromEntries(['operation_key', 'signature', 'goal_id', 'plan_id', 'step_id', 'actor_id', 'actor_epoch', 'batch_id', 'batch_generation'].map(key => [key, admitted[key]])),
+  }
+  if (!positive(record.task_count) || record.task_count > 16 || !Array.isArray(raw.task_types) || raw.task_types.length !== 1 || raw.task_types[0] !== 'placing') return ''
+  const serialized = JSON.stringify(record)
+  return serialized.length <= 8000 ? serialized : ''
+}
+
 export function addTaskBoardEvidence(board, { kind = 'operation_receipt', summary = '', ref = '', now = Date.now() } = {}) {
   if (!board || board.kind !== 'task_board_lite') return board
   const record = {
     id: `evidence_${(board.evidence_sequence ?? 0) + 1}`,
     kind: taskBoardText(kind, 64),
-    summary: taskBoardText(summary, 1200),
+    summary: taskBoardEvidenceSummary(kind, summary),
     ref: taskBoardText(ref, 160),
     at: now,
     step_id: board.active_step_id,
@@ -644,6 +920,8 @@ export function taskBoardProgress(board) {
     index: board.status === 'completed' ? board.steps.length : (board.active_index ?? 0) + 1,
     step_id: board.active_step_id,
     step: active?.description ?? '',
+    proposed_focus_index: Number.isSafeInteger(board.proposed_focus_index) ? board.proposed_focus_index : board.active_index ?? 0,
+    proposed_focus_step_id: board.proposed_focus_step_id,
     blocker: board.blocker ?? '',
     pause_reason: board.pause_reason ?? '',
     revision: board.revision,
@@ -652,22 +930,41 @@ export function taskBoardProgress(board) {
 
 export function sanitizeTaskBoard(value, { fallbackPlan = [], fallbackCurrentStep = 0, goalId = '', now = Date.now() } = {}) {
   if (!value || value.kind !== 'task_board_lite' || !Array.isArray(value.steps)) {
+    // Historical planner current_step is not grounded completion evidence.
+    // Preserve it only as proposed focus when migrating a legacy plan; verified
+    // canonical progress must come from a persisted Task Board and its evidence.
     return createTaskBoard(fallbackPlan, fallbackCurrentStep, { goalId, now })
   }
   const descriptions = value.steps.slice(0, TASK_BOARD_MAX_STEPS).map(step => taskBoardText(step?.description, 500)).filter(Boolean)
   let board = createTaskBoard(descriptions, value.active_index, { goalId: value.goal_id ?? goalId, now: Number.isFinite(value.created_at) ? value.created_at : now })
+  const usedStepIds = new Set()
+  board.steps = board.steps.map((step, index) => {
+    const persistedId = taskBoardText(value.steps[index]?.id, 80)
+    const id = persistedId && !usedStepIds.has(persistedId) ? persistedId : step.id
+    usedStepIds.add(id)
+    return {
+      ...step,
+      id,
+      revision: Number.isSafeInteger(value.steps[index]?.revision) && value.steps[index].revision > 0
+        ? value.steps[index].revision
+        : step.revision,
+    }
+  })
   board = {
     ...board,
     status: ['active', 'blocked', 'paused', 'completed'].includes(value.status) ? value.status : board.status,
     blocker: taskBoardText(value.blocker, 500),
     pause_reason: taskBoardText(value.pause_reason, 300),
+    proposed_focus_index: Number.isSafeInteger(value.proposed_focus_index)
+      ? clampTaskBoardIndex(value.proposed_focus_index, descriptions.length)
+      : clampTaskBoardIndex(value.active_index, descriptions.length),
     revision: Number.isSafeInteger(value.revision) && value.revision > 0 ? value.revision : board.revision,
     event_sequence: Number.isSafeInteger(value.event_sequence) && value.event_sequence >= 0 ? value.event_sequence : board.event_sequence,
     evidence_sequence: Number.isSafeInteger(value.evidence_sequence) && value.evidence_sequence >= 0 ? value.evidence_sequence : 0,
     evidence: (Array.isArray(value.evidence) ? value.evidence : []).slice(-TASK_BOARD_MAX_EVIDENCE).map(item => ({
       id: taskBoardText(item?.id, 80),
       kind: taskBoardText(item?.kind, 64),
-      summary: taskBoardText(item?.summary, 1200),
+      summary: taskBoardEvidenceSummary(item?.kind, item?.summary),
       ref: taskBoardText(item?.ref, 160),
       at: Number.isFinite(item?.at) ? item.at : now,
       step_id: taskBoardText(item?.step_id, 80) || undefined,
@@ -684,9 +981,12 @@ export function sanitizeTaskBoard(value, { fallbackPlan = [], fallbackCurrentSte
       to_step: taskBoardText(item?.to_step, 80) || undefined,
       evidence_id: taskBoardText(item?.evidence_id, 80) || undefined,
       step_id: taskBoardText(item?.step_id, 80) || undefined,
+      proposed_focus_step_id: taskBoardText(item?.proposed_focus_step_id, 80) || undefined,
     })),
     created_at: Number.isFinite(value.created_at) ? value.created_at : now,
     updated_at: Number.isFinite(value.updated_at) ? value.updated_at : now,
+    ...(normalizeTransferSupplyRecoveries(value.transfer_supply_recoveries) ? { transfer_supply_recoveries: normalizeTransferSupplyRecoveries(value.transfer_supply_recoveries) } : {}),
+    ...(normalizeCheckpointStockRefusals(value.checkpoint_stock_refusals) ? { checkpoint_stock_refusals: normalizeCheckpointStockRefusals(value.checkpoint_stock_refusals) } : {}),
   }
   return applyTaskBoardStatuses(board, value.active_index)
 }

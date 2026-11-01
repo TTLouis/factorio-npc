@@ -1,33 +1,40 @@
 services:
-  airi-factorio:
+  sgluna-factorio:
     build:
       context: .
       dockerfile: deploy/docker/Dockerfile
-      no_cache: true
       args:
-        AIRI_SOURCE_REF: ${AIRI_SOURCE_REF:-main}
+        SGLUNA_SOURCE_REF: ${SGLUNA_SOURCE_REF:-main}
+        SGLUNA_LOCAL_SOURCE: ${SGLUNA_LOCAL_SOURCE:-0}
+        SGLUNA_SOURCE_NONCE: ${SGLUNA_SOURCE_NONCE:-}
         FACTORIO_VERSION: ${FACTORIO_VERSION:-latest}
-    image: airi-factorio:local
+    image: factorio-npc:local
     platform: linux/amd64
     restart: unless-stopped
     stdin_open: true
     tty: true
-    stop_grace_period: ${AIRI_STOP_GRACE_PERIOD:-90s}
+    stop_grace_period: ${SGLUNA_STOP_GRACE_PERIOD:-90s}
     ports:
       - "${SERVER_PORT:-34197}:${SERVER_PORT:-34197}/udp"
     volumes:
-      - "${AIRI_DATA_DIR:-./data}:/data"
+      - "${SGLUNA_DATA_DIR:-./data}:/data"
     environment:
       CONTAINER_ROOT: /data
-      AIRI_ACTOR_MODE: ${AIRI_ACTOR_MODE:-npc}
-      AIRI_CHAT_PLAYERS: ${AIRI_CHAT_PLAYERS:-}
+      SGLUNA_ACTOR_MODE: ${SGLUNA_ACTOR_MODE:-npc}
+      SGLUNA_CHAT_PLAYERS: ${SGLUNA_CHAT_PLAYERS:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
       OPENAI_API_BASEURL: ${OPENAI_API_BASEURL:?Set OPENAI_API_BASEURL in .env}
       OPENAI_MODEL: ${OPENAI_MODEL:?Set OPENAI_MODEL in .env}
-      PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-120000}
+      # Empty keeps the legacy PROVIDER_PROFILE-driven behaviour; set to
+      # direct/router/local to pick a wire contract explicitly (plan 1.10).
+      AI_API_METHOD: ${AI_API_METHOD:-}
+      PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-300000}
+      # Optional Jev critic; empty leaves it off. Same dedicated key as compose.e2e.yml.
+      TYPESAFE_API_KEY: ${JEV_TYPESAFE_API_KEY:-}
       SAVE_NAME: ${SAVE_NAME:-}
       FACTORIO_USERNAME: ${FACTORIO_USERNAME:-}
       FACTORIO_TOKEN: ${FACTORIO_TOKEN:-}
       MAX_PROVIDER_REQUESTS_PER_HOUR: ${MAX_PROVIDER_REQUESTS_PER_HOUR:-300}
+      MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN: ${MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN:-100000}
       SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-60000}
       SERVER_PORT: ${SERVER_PORT:-34197}

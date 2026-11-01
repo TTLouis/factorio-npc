@@ -20,7 +20,7 @@ function status(overrides = {}) {
     actor: {
       kind: 'standalone_character',
       valid: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
       has_character: true,
       actor_id: 18,
@@ -36,8 +36,8 @@ function status(overrides = {}) {
 
 test('npc staging configuration separates actor ownership from chat authorization', () => {
   const config = stagingConfiguration({}, {
-    AIRI_ACTOR_MODE: 'npc',
-    AIRI_CHAT_PLAYERS: 'Louis',
+    SGLUNA_ACTOR_MODE: 'npc',
+    SGLUNA_CHAT_PLAYERS: 'Louis',
     AIRI_PLAYER: 'LegacyName',
   })
   assert.equal(config.actorMode, 'npc')
@@ -178,4 +178,24 @@ test('startup commands are fixed allowlisted Autorio calls', () => {
     actorStatus: '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_actor","status")))',
     taskStatus: '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","status")))',
   })
+})
+
+test('SGLUNA staging variables override AIRI compatibility values', () => {
+  const config = stagingConfiguration({}, {
+    SGLUNA_ACTOR_MODE: 'npc',
+    AIRI_ACTOR_MODE: 'player',
+    SGLUNA_CHAT_PLAYERS: 'Primary',
+    AIRI_CHAT_PLAYERS: 'Legacy',
+  })
+  assert.equal(config.actorMode, 'npc')
+  assert.deepEqual(config.chatPlayers, { mode: 'allowlist', names: ['Primary'] })
+})
+
+test('seeded staging config prefers SGLUNA variables but accepts AIRI fallbacks', () => {
+  assert.deepEqual(seedStagingConfigFromEnv({
+    SGLUNA_ACTOR_MODE: 'npc',
+    AIRI_ACTOR_MODE: 'player',
+    SGLUNA_CHAT_PLAYERS: '',
+    AIRI_CHAT_PLAYERS: 'Legacy',
+  }), { actorMode: 'npc', chatPlayers: '' })
 })

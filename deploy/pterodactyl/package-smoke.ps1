@@ -1,7 +1,15 @@
 param(
     [string]$Image = 'ghcr.io/ptero-eggs/yolks:debian_bookworm',
-    [string]$FactorioSmokeVersion = '2.0.77'
+    [string]$FactorioSmokeVersion = '2.0.77',
+    # Exact 40-character commit SHA to install, matching package-smoke.sh's
+    # SGLUNA_SMOKE_SOURCE_REF/AIRI_SMOKE_SOURCE_REF. Defaults to either env
+    # var, then to the egg's own default channel (normally main) when unset.
+    [string]$SourceRef = $(if ($env:SGLUNA_SMOKE_SOURCE_REF) { $env:SGLUNA_SMOKE_SOURCE_REF } else { $env:AIRI_SMOKE_SOURCE_REF })
 )
+
+if ($SourceRef -and $SourceRef -notmatch '^[a-f0-9]{40}$') {
+    throw 'SourceRef must be an exact 40-character commit SHA.'
+}
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -9,11 +17,11 @@ Set-StrictMode -Version Latest
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Repo = (Resolve-Path (Join-Path $Here '..\..')).Path
 $InstallScript = (Resolve-Path (Join-Path $Here 'install.sh')).Path
-$EggPath = (Resolve-Path (Join-Path $Here 'egg-airi-factorio-server.json')).Path
+$EggPath = (Resolve-Path (Join-Path $Here 'egg-sgluna-factorio-server.json')).Path
 $Suffix = ([guid]::NewGuid().ToString('N')).Substring(0, 10)
-$Volume = "airi-ptero-smoke-$PID-$Suffix"
-$Container = "airi-ptero-smoke-$PID-$Suffix"
-$EggInstallScript = Join-Path ([System.IO.Path]::GetTempPath()) "airi-ptero-egg-install-$PID-$Suffix.sh"
+$Volume = "sgluna-ptero-smoke-$PID-$Suffix"
+$Container = "sgluna-ptero-smoke-$PID-$Suffix"
+$EggInstallScript = Join-Path ([System.IO.Path]::GetTempPath()) "sgluna-ptero-egg-install-$PID-$Suffix.sh"
 
 function Invoke-Docker {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -66,23 +74,25 @@ try {
         'run', '--rm',
         '-v', "${InstallScript}:/tmp/install.sh:ro",
         '-v', "${Volume}:/mnt/server",
-        '-e', 'AIRI_INSTALL_ROOT=/mnt/server',
+        '-e', 'SGLUNA_INSTALL_ROOT=/mnt/server',
         $Image,
         'bash', '/tmp/install.sh', '--verify-only'
     )
 
-    Write-Host '[pterodactyl-smoke] Performing clean installation through the egg loader.'
-    Invoke-Docker -Arguments @(
+    Write-Host "[pterodactyl-smoke] Performing clean installation through the egg loader.$(if ($SourceRef) { " Pinned source: $SourceRef" })"
+    $SourceRefArgs = if ($SourceRef) { @('-e', "SGLUNA_SOURCE_REF=$SourceRef") } else { @() }
+    Invoke-Docker -Arguments (@(
         'run', '--rm',
         '-v', "${EggInstallScript}:/tmp/egg-install.sh:ro",
         '-v', "${Volume}:/mnt/server",
-        '-e', 'AIRI_INSTALL_ROOT=/mnt/server',
-        '-e', 'AIRI_ACTOR_MODE=npc',
-        '-e', 'AIRI_CHAT_PLAYERS=SmokeOperator',
-        '-e', "FACTORIO_VERSION=$FactorioSmokeVersion",
+        '-e', 'SGLUNA_INSTALL_ROOT=/mnt/server',
+        '-e', 'SGLUNA_ACTOR_MODE=npc',
+        '-e', 'SGLUNA_CHAT_PLAYERS=SmokeOperator',
+        '-e', "FACTORIO_VERSION=$FactorioSmokeVersion"
+    ) + $SourceRefArgs + @(
         $Image,
         'bash', '/tmp/egg-install.sh'
-    )
+    ))
 
     Write-Host '[pterodactyl-smoke] Verifying installed release layout.'
     Invoke-Docker -Arguments @(
@@ -90,7 +100,7 @@ try {
         '-v', "${Volume}:/mnt/server",
         $Image,
         'bash', '-lc',
-        'set -Eeuo pipefail; test -L /mnt/server/start-airi.sh; test -x /mnt/server/rollback-airi.sh; test -s /mnt/server/client-mods/autorio_0.1.0.zip; test -s /mnt/server/client-mods/SHA256SUMS; test ! -e /mnt/server/autorio_0.1.0.zip; test -s /mnt/server/airi-config.json; ! grep -q smoke-secret /mnt/server/airi-config.json; target=$(readlink /mnt/server/start-airi.sh); case "$target" in .airi/releases/*/start-airi.sh) ;; *) echo "unexpected startup target: $target" >&2; exit 1;; esac; test -s "/mnt/server/${target%/start-airi.sh}/manifest.json"'
+        'set -Eeuo pipefail; test -L /mnt/server/start-sgluna.sh; test "$(readlink /mnt/server/start-airi.sh)" = start-sgluna.sh; test -x /mnt/server/rollback-sgluna.sh; test "$(readlink /mnt/server/rollback-airi.sh)" = rollback-sgluna.sh; test -s /mnt/server/client-mods/autorio_0.1.0.zip; test -s /mnt/server/client-mods/SHA256SUMS; test ! -e /mnt/server/autorio_0.1.0.zip; test -s /mnt/server/sgluna-config.json; test -s /mnt/server/README-SGLUNA.txt; test -d /mnt/server/mods; test -d /mnt/server/saves; ! grep -q smoke-secret /mnt/server/sgluna-config.json; target=$(readlink /mnt/server/start-sgluna.sh); case "$target" in .sgluna/releases/*/start-sgluna.sh) ;; *) echo "unexpected startup target: $target" >&2; exit 1;; esac; test -s "/mnt/server/${target%/start-sgluna.sh}/manifest.json"'
     )
 
     Write-Host '[pterodactyl-smoke] Starting packaged runtime with zero connected players.'
@@ -99,13 +109,13 @@ try {
         '-v', "${Volume}:/home/container",
         '-w', '/home/container',
         '-e', 'CONTAINER_ROOT=/home/container',
-        '-e', 'AIRI_ACTOR_MODE=npc',
+        '-e', 'SGLUNA_ACTOR_MODE=npc',
         '-e', 'OPENAI_API_KEY=smoke-secret',
         '-e', 'OPENAI_MODEL=smoke-model',
         '-e', 'OPENAI_API_BASEURL=https://api.example.invalid/v1',
         '-e', 'SERVER_PORT=34197',
         $Image,
-        'bash', './start-airi.sh'
+        'bash', './start-sgluna.sh'
     )
     if ([string]::IsNullOrWhiteSpace($startedId)) {
         throw 'Runtime container did not return a container ID.'
@@ -115,7 +125,7 @@ try {
     $lastLogs = ''
     for ($i = 0; $i -lt 180; $i++) {
         $lastLogs = (& docker logs $Container 2>&1) -join "`n"
-        if ($lastLogs -match 'AIRI Factorio ready;') {
+        if ($lastLogs -match 'SGLuna Factorio ready;') {
             $ready = $true
             break
         }
@@ -143,7 +153,7 @@ try {
     if ($logs -notmatch 'Goodbye') {
         throw 'Factorio clean Goodbye shutdown marker missing.'
     }
-    if ($logs -notmatch 'AIRI Factorio stopped cleanly') {
+    if ($logs -notmatch 'SGLuna Factorio stopped cleanly') {
         throw 'Clean shutdown acknowledgement missing.'
     }
 

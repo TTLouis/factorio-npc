@@ -10,11 +10,11 @@ import {
 } from './supervisor-adapter.mjs'
 
 const SESSION = '0123456789abcdef0123456789abcdef'
-const CONFIG_MARKER = 'AIRI_CONFIG_0123456789abcdef01234567:'
+const CONFIG_MARKER = 'SGLUNA_CONFIG_0123456789abcdef01234567:'
 
 function readyStatus(overrides = {}) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: SESSION,
     mode: 'npc',
     actor_id: 18,
@@ -56,8 +56,8 @@ test('configure handshake selects npc and verifies the native deployment status'
   const status = await configureNpcSession(rcon, SESSION, CONFIG_MARKER)
   assert.equal(status.actor_id, 18)
   assert.match(rcon.commands[0], /"configure","npc"/)
-  assert.match(rcon.commands[0], /AIRI_CONFIG_0123456789abcdef01234567:/)
-  assert.match(rcon.commands[1], /"airi_deployment","status"/)
+  assert.match(rcon.commands[0], /SGLUNA_CONFIG_0123456789abcdef01234567:/)
+  assert.match(rcon.commands[1], /"sgluna_deployment","status"/)
 })
 
 test('configure handshake rebinds once when the actor changes immediately after configure', async () => {
@@ -74,8 +74,8 @@ test('configure handshake rebinds once when the actor changes immediately after 
   assert.equal(status.epoch, 5)
   assert.equal(rcon.commands.length, 4)
   assert.equal(rcon.commands[0], rcon.commands[2])
-  assert.match(rcon.commands[1], /"airi_deployment","status"/)
-  assert.match(rcon.commands[3], /"airi_deployment","status"/)
+  assert.match(rcon.commands[1], /"sgluna_deployment","status"/)
+  assert.match(rcon.commands[3], /"sgluna_deployment","status"/)
 })
 
 test('configure handshake bounds repeated unauthorized rebinds and still fails closed', async () => {
@@ -139,7 +139,7 @@ test('deployment status requires native npc identity and interfaces', async () =
 })
 
 test('authorized operation wraps the mutation with an atomic actor-epoch check', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   const rcon = new FakeRcon([
     `tool output\n${marker}${JSON.stringify({ ok: true, result: [true, 'Task started'] })}`,
   ])
@@ -151,12 +151,12 @@ test('authorized operation wraps the mutation with an atomic actor-epoch check',
   )
   assert.deepEqual(result.result, [true, 'Task started'])
   assert.equal(result.output, 'tool output')
-  assert.match(rcon.commands[0], /airi_deployment","authorize",3/)
+  assert.match(rcon.commands[0], /sgluna_deployment","authorize",3/)
   assert.match(rcon.commands[0], /autorio_operations","wait",60/)
 })
 
 test('authorized dependency batch admits every operation in one RCON/Lua transaction', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   const rcon = new FakeRcon([
     `${marker}${JSON.stringify({ ok: true, result: [true, [true, 'second']] })}`,
   ])
@@ -167,17 +167,38 @@ test('authorized dependency batch admits every operation in one RCON/Lua transac
 
   assert.equal(rcon.commands.length, 1)
   assert.deepEqual(result.results, [true, [true, 'second']])
-  assert.equal((rcon.commands[0].match(/airi_deployment","authorize",3/g) ?? []).length, 1)
+  assert.equal((rcon.commands[0].match(/sgluna_deployment","authorize",3/g) ?? []).length, 1)
   const first = rcon.commands[0].indexOf('autorio_operations","mine_entity"')
   const second = rcon.commands[0].indexOf('autorio_operations","wait"')
   assert.ok(first >= 0 && second > first)
-  assert.match(rcon.commands[0], /local r1=remote\.call/)
-  assert.match(rcon.commands[0], /local r2=remote\.call/)
-  assert.match(rcon.commands[0], /type\(r1\)=="table" and r1\[1\]==false/)
+  assert.match(rcon.commands[0], /local ok1,r1=pcall\(function\(\) return remote\.call/)
+  assert.match(rcon.commands[0], /local ok2,r2=pcall\(function\(\) return remote\.call/)
+  assert.match(rcon.commands[0], /type\(r1\)=="table" and \(r1\[1\]==false or r1\.accepted==false or r1\.ok==false\)/)
+})
+
+test('correlated admissions persist each slot before continuing and expose a failed prefix without replay', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1,
+    signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'autorio rejected operation 2',
+    prefix: [[true, 'first admitted']], admission: { operation_key: 'req/batch_1', state: 'uncertain' } })}`])
+  await assert.rejects(executeAuthorizedBatch(rcon,3,[
+    'remote.call("autorio_operations","wait",60)', 'remote.call("autorio_operations","wait",60)',
+  ],marker,correlation), error => {
+    assert.equal(error.operationIndex,1)
+    assert.deepEqual(error.results,[[true,'first admitted']])
+    assert.equal(error.admission.state,'uncertain')
+    assert.equal(error.noReplay,true)
+    return true
+  })
+  assert.equal(rcon.commands.length,1)
+  assert.match(rcon.commands[0],/operation_count/)
+  assert.match(rcon.commands[0],/if not stored.ok then error/)
+  assert.ok(rcon.commands[0].indexOf('"slot"') < rcon.commands[0].indexOf('local ok2,r2'))
 })
 
 test('mutation rejection, missing acknowledgement, and stale authorization fail closed without retries', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   for (const raw of [
     `${marker}${JSON.stringify({ ok: false, result: 'stale npc actor epoch' })}`,
     `${marker}${JSON.stringify({ ok: true, result: false })}`,
@@ -191,7 +212,7 @@ test('mutation rejection, missing acknowledgement, and stale authorization fail 
 })
 
 test('batch rejection or missing acknowledgement fails closed without replaying admissions', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   for (const raw of [
     `${marker}${JSON.stringify({ ok: false, result: 'autorio rejected operation 1' })}`,
     'no acknowledgement here',
@@ -218,4 +239,123 @@ test('actor epoch comparison ignores connected-player count but notices actor/ep
   assert.equal(actorChanged(first, readyStatus({ actor_id: 42 })), true)
   assert.equal(actorChanged(first, readyStatus({ epoch: 4 })), true)
   assert.equal(actorChanged(first, readyStatus({ mode: 'player' })), true)
+})
+
+test('everything rejected before the first RCON byte is provably not sent', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const wait = 'remote.call("autorio_operations","wait",60)'
+  const base = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1, signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const attempts = [
+    [3, [wait], { ...base, ordinal: undefined }],
+    [3, [wait], { ...base, operation_key: 'k'.repeat(193) }],
+    [3, [wait], { ...base, actor: {} }],
+    [3, [], base],
+    [0, [wait], base],
+    [3, ['game.clear()'], base],
+  ]
+  for (const [epoch, commands, correlation] of attempts) {
+    const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true] })}`])
+    await assert.rejects(executeAuthorizedBatch(rcon, epoch, commands, marker, correlation), error => error.notSent === true)
+    assert.equal(rcon.commands.length, 0, 'nothing was sent')
+  }
+  // The runtime key limit equals the mod journal limit (192): exactly 192 is sent.
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true], admission: { state: 'completed' } })}`])
+  await executeAuthorizedBatch(rcon, 3, [wait], marker, { ...base, operation_key: 'k'.repeat(192) })
+  assert.equal(rcon.commands.length, 1)
+})
+
+test('a failure after the command was sent is never marked not sent, and only a begin refusal proves nothing was recorded', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1, signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const wait = 'remote.call("autorio_operations","wait",60)'
+  const lost = new FakeRcon(['no acknowledgement here'])
+  await assert.rejects(executeAuthorizedBatch(lost, 3, [wait], marker, correlation), error => error.notSent !== true && error.notAdmitted !== true)
+  for (const [code, expected] of [['admission_begin_refused:stale_actor_epoch', true], ['admission_begin_refused:expired_operation_ordinal', true],
+    ['admission_begin_refused:admission_journal_full', true], ['admission_begin_refused:invalid_correlation', true], ['stale npc actor epoch', true],
+    ['admission_begin_refused:operation_key_conflict', false], ['admission slot recording failed: invalid_slot', false],
+    // finish() or slot() can return the same code after operations queued work: never a begin refusal.
+    ['stale_actor_epoch', false], ['invalid_slot', false]]) {
+    const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: code, prefix: [] })}`])
+    await assert.rejects(executeAuthorizedBatch(rcon, 3, [wait], marker, correlation), error => error.notAdmitted === expected && error.notSent !== true, code)
+  }
+  // A begin-looking text after any slot ran (non-empty prefix) is not proof either.
+  const ranSlots = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'admission_begin_refused:stale_actor_epoch', prefix: [[true, 'Task started']] })}`])
+  await assert.rejects(executeAuthorizedBatch(ranSlots, 3, [wait], marker, correlation), error => error.notAdmitted === false)
+  const finishStale = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'stale_actor_epoch', prefix: [[true, 'Task started']] })}`])
+  await assert.rejects(executeAuthorizedBatch(finishStale, 3, [wait], marker, correlation), error => error.notAdmitted === false && error.notSent !== true)
+  const recorded = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'stale_actor_epoch', prefix: [], admission: { state: 'uncertain' } })}`])
+  await assert.rejects(executeAuthorizedBatch(recorded, 3, [wait], marker, correlation), error => error.notAdmitted === false)
+})
+
+test('correlated slots tell the mod the operation name and whether it was refused, never whether the refusal is safe', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1, signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true], admission: { state: 'completed' } })}`])
+  await executeAuthorizedBatch(rcon, 3, ['remote.call("autorio_operations","craft_item","iron-gear-wheel",1)'], marker, correlation)
+  const command = rcon.commands[0]
+  assert.match(command, /operation="craft_item",refused=refused/)
+  assert.match(command, /local refused=ok1 and not accepted/)
+  assert.doesNotMatch(command, /mutation_unknown/)
+  assert.doesNotMatch(command, /refused_before_mutation/)
+  assert.match(command, /"autorio rejected operation 1: "\.\.tostring\(detail\)/)
+})
+
+
+function fluidTransportFixture() {
+  const owner = { goal_id: 'goal', plan_id: 'plan', plan_version: 1, step_id: 'step', semantic_step_id: 'semantic', actor_id: 18, actor_epoch: 3, session: SESSION }
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/attempt_1', signature: 'a'.repeat(64), ordinal: 1,
+    actor: { actor_id: 18, epoch: 3 }, goal_id: 'goal', plan_id: 'plan', step_id: 'step' }
+  const envelope = { version: 2, operation_key: correlation.operation_key, attempt_id: correlation.attempt_id, signature: correlation.signature, ordinal: 1,
+    board_step_id: 'board_step', owner: Object.fromEntries(Object.entries(owner).filter(([key]) => key !== 'session')),
+    candidate: { version: 4, operation_key: correlation.operation_key, signature: correlation.signature, owner, candidate_set_id: 'set1', candidate_id: 'candidate1' } }
+  return { correlation, envelope, commands: ["remote.call('autorio_operations','place_candidate','set1','candidate1')"] }
+}
+
+test('fluid transport binds actual admission and always leaves outside admission pcall', async () => {
+  const { correlation, envelope, commands } = fluidTransportFixture()
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true] })}`])
+  await executeAuthorizedBatch(rcon, 3, commands, marker, correlation, envelope)
+  const wrapped = rcon.commands[0]
+  assert.match(wrapped, /fluid_preservation/)
+  assert.match(wrapped, /semantic_step_id/)
+  assert.match(wrapped, /session/)
+  assert.match(wrapped, /return results end\); local leaveOk,left=pcall/)
+  assert.match(wrapped, /left~=true/)
+  assert.ok(wrapped.indexOf('"leave"') < wrapped.indexOf('rcon.print'))
+})
+
+test('provided fluid envelope rejects mismatched operation, pending identity, owner, or composite before send', async () => {
+  const edits = [
+    f => { f.envelope.operation_key = 'other' }, f => { f.envelope.attempt_id = 'other' },
+    f => { f.envelope.signature = 'b'.repeat(64) }, f => { f.envelope.ordinal = 2 },
+    f => { f.envelope.candidate.operation_key = 'other' }, f => { f.envelope.candidate.signature = 'b'.repeat(64) },
+    f => { f.envelope.candidate.owner.actor_epoch = 4 }, f => { f.envelope.candidate.owner.actor_id = 19 },
+    f => { f.envelope.candidate.owner.session = '' }, f => { f.envelope.candidate.owner.extra = true },
+    f => { f.envelope.candidate.owner.goal_id = 'other' }, f => { f.envelope.owner.plan_id = 'other' },
+    f => { f.correlation.goal_id = 'other' }, f => { f.correlation.plan_id = 'other' },
+    f => { f.correlation.step_id = 'other' }, f => { f.correlation = undefined },
+    f => { f.commands.unshift('remote.call("autorio_operations","wait",60)') },
+    f => { f.commands = ["remote.call('autorio_operations','place_candidate','set1','candidate2')"] },
+    f => { f.envelope = null },
+  ]
+  for (const edit of edits) {
+    const fixture = fluidTransportFixture(); edit(fixture)
+    const rcon = new FakeRcon([])
+    await assert.rejects(executeAuthorizedBatch(rcon, 3, fixture.commands, undefined, fixture.correlation, fixture.envelope), error => error.notSent === true)
+    assert.equal(rcon.commands.length, 0)
+  }
+})
+
+test('fluid leave uncertainty preserves authoritative prefix and admission without replay', async () => {
+  const { correlation, envelope, commands } = fluidTransportFixture()
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const admission = { operation_key: correlation.operation_key, state: 'completed' }
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'fluid preservation admission leave unproven', prefix: [true], admission })}`])
+  await assert.rejects(executeAuthorizedBatch(rcon, 3, commands, marker, correlation, envelope), error => {
+    assert.equal(error.noReplay, true); assert.equal(error.notAdmitted, false)
+    assert.deepEqual(error.results, [true]); assert.deepEqual(error.admission, admission)
+    return true
+  })
+  assert.equal(rcon.commands.length, 1)
 })

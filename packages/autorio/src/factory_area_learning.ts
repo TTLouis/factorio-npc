@@ -1,7 +1,8 @@
-import type { LuaEntity } from 'factorio:runtime'
+import type { LuaEntity, LuaInventory } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { SkillDefinition } from './skills'
 import { local_spatial_observation } from './construction_planning'
+import { find_world_entities } from './npc_vision'
 
 const MAX_RADIUS = 16
 const MAX_AREA_SPAN = MAX_RADIUS * 2
@@ -135,35 +136,35 @@ export interface FactoryBlockSummary {
 }
 
 declare const storage: {
-  airi_factory_area_analyses?: Record<string, FactoryAreaAnalysis>
-  airi_factory_area_order?: string[]
-  airi_factory_area_next_id?: number
+  sgluna_factory_area_analyses?: Record<string, FactoryAreaAnalysis>
+  sgluna_factory_area_order?: string[]
+  sgluna_factory_area_next_id?: number
 }
 
 // Read-only views. The console renders the latest analysis on every multiplayer
 // peer, so these must not lazily create their tables: that write would land on
 // one peer only and desync the game.
 function analyses(): Record<string, FactoryAreaAnalysis> {
-  return storage.airi_factory_area_analyses ?? {}
+  return storage.sgluna_factory_area_analyses ?? {}
 }
 
 function analysis_order(): string[] {
-  return storage.airi_factory_area_order ?? []
+  return storage.sgluna_factory_area_order ?? []
 }
 
 function ensure_analyses() {
-  if (storage.airi_factory_area_analyses === undefined) storage.airi_factory_area_analyses = {}
-  return storage.airi_factory_area_analyses
+  if (storage.sgluna_factory_area_analyses === undefined) storage.sgluna_factory_area_analyses = {}
+  return storage.sgluna_factory_area_analyses
 }
 
 function ensure_analysis_order() {
-  if (storage.airi_factory_area_order === undefined) storage.airi_factory_area_order = []
-  return storage.airi_factory_area_order
+  if (storage.sgluna_factory_area_order === undefined) storage.sgluna_factory_area_order = []
+  return storage.sgluna_factory_area_order
 }
 
 function next_analysis_id() {
-  const next = storage.airi_factory_area_next_id ?? 1
-  storage.airi_factory_area_next_id = next + 1
+  const next = storage.sgluna_factory_area_next_id ?? 1
+  storage.sgluna_factory_area_next_id = next + 1
   return `factory-area-${next}`
 }
 
@@ -252,10 +253,14 @@ function sort_entities(values: LuaEntity[]) {
   }
 }
 
+// Factorio methods are called with dot syntax on typed values: TypeScriptToLua
+// turns a call on an untyped value into a colon call whose self argument the
+// engine rejects, and get_recipe raises on anything but a crafting machine.
+const CRAFTING_MACHINE_TYPES = ['assembling-machine', 'furnace', 'rocket-silo']
+
 function recipe_summary(entity: LuaEntity) {
-  const get_recipe = (entity as any).get_recipe
-  if (typeof get_recipe !== 'function') return undefined
-  const recipe = get_recipe(entity)
+  if (!CRAFTING_MACHINE_TYPES.includes(entity.type) || typeof entity.get_recipe !== 'function') return undefined
+  const [recipe] = entity.get_recipe()
   if (!recipe) return undefined
   const ingredients: Array<{ type: string, name: string, amount?: number }> = []
   for (const ingredient of recipe.ingredients ?? []) {
@@ -268,7 +273,7 @@ function recipe_summary(entity: LuaEntity) {
   return { name: recipe.name, ingredients, products }
 }
 
-function inventory_items(inventory: any) {
+function inventory_items(inventory: LuaInventory | undefined) {
   if (!inventory || inventory.valid === false || typeof inventory.get_contents !== 'function') return []
   const contents: any = inventory.get_contents()
   const result: Array<{ name: string, count: number }> = []
@@ -282,8 +287,7 @@ function inventory_items(inventory: any) {
 }
 
 function inventory_snapshots(entity: LuaEntity) {
-  const get_inventory = (entity as any).get_inventory
-  if (typeof get_inventory !== 'function') return []
+  if (typeof entity.get_inventory !== 'function') return []
   const slots: Array<{ role: string, id: any }> = []
   const inventory_defines = (defines.inventory as any)
   function add(role: string, id: any) { if (id !== undefined) slots.push({ role, id }) }
@@ -298,7 +302,7 @@ function inventory_snapshots(entity: LuaEntity) {
   else if (entity.type === 'container' || entity.type === 'logistic-container' || entity.type === 'infinity-container') add('storage', inventory_defines.chest)
   const result: FactoryInventorySnapshot[] = []
   for (const slot of slots) {
-    const items = inventory_items(get_inventory(entity, slot.id))
+    const items = inventory_items(entity.get_inventory(slot.id))
     if (items.length > 0) result.push({ role: slot.role, items })
   }
   return result
@@ -315,7 +319,7 @@ function target_id(entity: LuaEntity | undefined) {
 
 function mining_resources(entity: LuaEntity) {
   if (entity.type !== 'mining-drill') return []
-  const matches = entity.surface.find_entities_filtered({ area: entity.bounding_box, type: 'resource', limit: MAX_RESOURCE_MATCHES })
+  const matches = find_world_entities(entity.surface, { area: entity.bounding_box, type: 'resource', limit: MAX_RESOURCE_MATCHES })
   const names: string[] = []
   for (const resource of matches) if (!names.includes(resource.name)) names.push(resource.name)
   names.sort()
@@ -324,8 +328,8 @@ function mining_resources(entity: LuaEntity) {
 
 function fluid_connections(entity: LuaEntity) {
   const result: FactoryEntityObservation['fluid_connections'] = []
-  const fluidbox: any = (entity as any).fluidbox
-  if (!fluidbox || typeof fluidbox.length !== 'number' || typeof fluidbox.get_pipe_connections !== 'function') return result
+  const fluidbox = entity.fluidbox
+  if (fluidbox === undefined) return result
   for (let index = 1; index <= fluidbox.length && result.length < MAX_FLUID_CONNECTIONS; index++) {
     const connections = fluidbox.get_pipe_connections(index) ?? []
     for (const connection of connections) {
@@ -439,8 +443,8 @@ function build_relations(live_entities: LuaEntity[], entities: FactoryEntityObse
       if (point_in_area(entity.drop_target.position, area) && find_observation(entities, drop_id)) add('direct_item_output', id, drop_id, undefined, 'Mining drill engine drop target is inside the selected area.', mining_resources(entity))
       else add('boundary_output', id, drop_id, undefined, 'Mining drill engine drop target is outside the selected area.', mining_resources(entity))
     }
-    const fluidbox: any = (entity as any).fluidbox
-    if (fluidbox && typeof fluidbox.length === 'number' && typeof fluidbox.get_pipe_connections === 'function') {
+    const fluidbox = entity.fluidbox
+    if (fluidbox !== undefined) {
       for (let index = 1; index <= fluidbox.length; index++) {
         for (const connection of fluidbox.get_pipe_connections(index) ?? []) {
           const target = connection.target?.owner as LuaEntity | undefined
@@ -602,7 +606,7 @@ export function analyze_factory_area(actor: ControlledActor, request: FactoryAre
   if ('error' in resolved) return { ok: false as const, error: resolved.error }
   const spatial: any = local_spatial_observation(actor, { position: resolved.center, half_size: resolved.half_size })
   if (!spatial?.ok) return { ok: false as const, error: spatial?.error ?? 'local spatial observation failed' }
-  const matches = actor.surface.find_entities_filtered({ area: resolved.area })
+  const matches = find_world_entities(actor.surface, { area: resolved.area })
   const relevant: LuaEntity[] = []
   for (const entity of matches) {
     if (relevant.length >= MAX_ENTITIES) break

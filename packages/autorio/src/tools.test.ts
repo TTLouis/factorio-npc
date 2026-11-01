@@ -1,0 +1,382 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const actor_state: { actor: unknown } = { actor: undefined }
+
+vi.mock('./actors/actor_controller', () => ({
+  create_actor_remote_interface: () => {},
+  get_controlled_actor: () => actor_state.actor,
+}))
+
+vi.mock('./spatial_semantics', () => ({
+  compact_spatial_summary: () => undefined,
+}))
+
+// Lua tables are both indexable and iterable with pairs(); the TS source
+// iterates them with for..of, so the stand-in supports both.
+function lua_table<T>(entries: Record<string, T>) {
+  return Object.assign(Object.create({
+    *[Symbol.iterator]() { yield* Object.entries(entries) },
+  }), entries)
+}
+
+function force(rockets_launched: number) {
+  return {
+    index: 1,
+    rockets_launched,
+    technologies: lua_table({
+      'automation': { enabled: true, researched: true },
+      'rocket-silo': { enabled: true, researched: false },
+    }),
+    get_item_production_statistics: () => ({ get_input_count: () => 7 }),
+  }
+}
+
+async function tools_interface() {
+  const interfaces: Record<string, Record<string, (...args: any[]) => any>> = {}
+  ;(globalThis as any).remote.add_interface = (name: string, functions: Record<string, (...args: any[]) => any>) => {
+    interfaces[name] = functions
+  }
+  const { create_tools_remote_interface } = await import('./tools')
+  create_tools_remote_interface()
+  return interfaces.autorio_tools
+}
+
+beforeEach(() => {
+  actor_state.actor = undefined
+  ;(globalThis as any).script.active_mods = { base: '2.0.0' }
+  ;(globalThis as any).prototypes = { item: { 'iron-gear-wheel': {} }, space_location: {} }
+})
+
+describe('goal conditions while the NPC body is dead', () => {
+  it('refuses water as an entity name before an engine query and supplies the native fluid-read alternative', async () => {
+    const find = vi.fn()
+    actor_state.actor = { position: { x: 0, y: 0 }, force: { index: 1 }, status_snapshot: () => ({ actor_id: 7 }), surface: { index: 1, find_entities_filtered: find } }
+    ;(globalThis as any).prototypes.entity = {}
+    ;(globalThis as any).prototypes.fluid = { water: {} }
+    const tools = await tools_interface()
+    expect(tools.get_nearby_entities(64, 'water', 'resource', 5)).toEqual({ ok: false, code: 'unknown_entity_prototype',
+      field: 'name', identity: 'water', fluid_name: 'water', observation_tool: 'getFluidSourceTiles' })
+    expect(tools.get_nearby_entities(64, 'unknown-tile', undefined, 5)).toMatchObject({ ok: false, code: 'unknown_entity_prototype' })
+    expect(find).not.toHaveBeenCalled()
+  })
+  it('reads force-level conditions from the player force when there is no live actor', async () => {
+    ;(globalThis as any).game.forces = { player: force(2) }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    const tools = await tools_interface()
+
+    expect(tools.evaluate_condition({ kind: 'rockets_launched', minimum: 1 })).toMatchObject({ ok: true, satisfied: true, current: 2 })
+    expect(tools.evaluate_condition({ kind: 'research_completed', technology: 'automation' })).toMatchObject({ ok: true, satisfied: true })
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 5 })).toMatchObject({ ok: true, current: 7 })
+  })
+
+  it('adds the crafts the NPC finished to the production statistics for items_produced', async () => {
+    ;(globalThis as any).game.forces = { player: force(0) }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 3, 'pipe': 9 } } }
+    const tools = await tools_interface()
+
+    // 7 from machine statistics + 3 hand-crafted; another item's count is not mixed in.
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 10 }))
+      .toMatchObject({ ok: true, satisfied: true, current: 10, production_statistics: 7, hand_crafted: 3 })
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 11 }))
+      .toMatchObject({ satisfied: false, current: 10 })
+    ;(globalThis as any).storage = {}
+  })
+
+  it('does not count trigger craft flow twice, including older unmirrored crafts', async () => {
+    ;(globalThis as any).game.forces = { player: force(0) }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 3 } }, sgluna_craft_trigger_statistics: { 1: { 'iron-gear-wheel': 2 } } }
+    const tools = await tools_interface()
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 8 }))
+      .toMatchObject({ current: 8, production_statistics: 7, hand_crafted: 3, hand_crafted_in_statistics: 2 })
+  })
+
+  it('counts hand crafting alone when the machine statistics are empty (goal baseline still reads the same evaluator)', async () => {
+    const empty_force = { ...force(0), get_item_production_statistics: () => ({ get_input_count: () => 0 }) }
+    ;(globalThis as any).game.forces = { player: empty_force }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 1 } } }
+    const tools = await tools_interface()
+
+    const baseline = tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 1 })
+    expect(baseline).toMatchObject({ satisfied: true, current: 1, hand_crafted: 1, production_statistics: 0 })
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 4 } } }
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 1 }))
+      .toMatchObject({ current: 4 })
+    ;(globalThis as any).storage = {}
+  })
+
+  it('reads world-state goal conditions (plan 3.7) without a body, and passes whether the body is mining', async () => {
+    const rate_force = { ...force(0), get_item_production_statistics: () => ({ get_flow_count: () => 12 }) }
+    ;(globalThis as any).game.forces = { player: rate_force }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).defines.flow_precision_index = { one_minute: 1, ten_minutes: 2 }
+    ;(globalThis as any).storage = {}
+    const tools = await tools_interface()
+
+    expect(tools.evaluate_condition({ kind: 'production_rate', item_name: 'iron-gear-wheel', per_minute: 10 }))
+      .toMatchObject({ ok: true, kind: 'production_rate', satisfied: true, current: 12 })
+
+    // Hand mining in progress on the live body voids the window.
+    ;(globalThis as any).storage = { sgluna_hand_work: { 1: { mining_active: { 'iron-gear-wheel': 0 } } } }
+    actor_state.actor = { force: rate_force, is_valid: true, get_mining_state: () => ({ mining: true }) }
+    expect(tools.evaluate_condition({ kind: 'production_rate', item_name: 'iron-gear-wheel', per_minute: 10 }))
+      .toMatchObject({ satisfied: false, void_reason: 'hand_mined' })
+    ;(globalThis as any).storage = {}
+  })
+
+  it('still needs a body for conditions about the NPC itself', async () => {
+    ;(globalThis as any).game.forces = { player: force(0) }
+    const tools = await tools_interface()
+
+    expect(tools.evaluate_condition({ kind: 'inventory_count', item_name: 'iron-gear-wheel', minimum: 1 })).toEqual({ ok: false, error: 'no_actor' })
+  })
+
+  it('reports save progress facts without a body', async () => {
+    ;(globalThis as any).game.forces = { player: force(1) }
+    const tools = await tools_interface()
+
+    expect(tools.goal_progress_facts({ technologies: ['automation', 'rocket-silo', 'not-a-tech'] })).toEqual({
+      ok: true,
+      rockets_launched: 1,
+      researched_technologies: 1,
+      enabled_technologies: 2,
+      milestones: { 'automation': true, 'rocket-silo': false },
+      space_age: false,
+    })
+  })
+
+  it('prefers the live actor force when there is one', async () => {
+    ;(globalThis as any).game.forces = { player: force(0) }
+    actor_state.actor = { force: force(5) }
+    const tools = await tools_interface()
+
+    expect(tools.evaluate_condition({ kind: 'rockets_launched', minimum: 1 })).toMatchObject({ current: 5 })
+  })
+})
+
+describe('nearby entity observation', () => {
+  function nearby_entity(name: string, type: string, x: number, unit_number?: number) {
+    return { valid: true, name, type, unit_number, position: { x, y: 0 }, surface: { index: 1 }, force: { index: 1, name: 'player' } }
+  }
+
+  it('keeps buildings ahead of resource tiles, nearest first, and counts every match', async () => {
+    ;(globalThis as any).storage = {}
+    ;(globalThis as any).game.tick = 10
+    // Engine order puts the ore tiles first; a cap of 3 used to drop both buildings.
+    const matches = [
+      nearby_entity('iron-ore', 'resource', 1),
+      nearby_entity('iron-ore', 'resource', 2),
+      nearby_entity('iron-ore', 'resource', 3),
+      nearby_entity('stone-furnace', 'furnace', 9, 42),
+      nearby_entity('burner-mining-drill', 'mining-drill', 5, 41),
+    ]
+    const find = vi.fn(() => matches)
+    actor_state.actor = { position: { x: 0, y: 0 }, force: { index: 1 }, status_snapshot: () => ({ actor_id: 7 }), surface: { index: 1, find_entities_filtered: find } }
+    const tools = await tools_interface()
+
+    const result = tools.get_nearby_entities(20, undefined, undefined, 3)
+
+    expect(result.entities.map((entity: any) => entity.unit_number ?? entity.name)).toEqual([41, 42, 'iron-ore'])
+    expect(result.entities[2].position).toEqual({ x: 1, y: 0 })
+    expect(result).toMatchObject({ matched_count: 5, returned_count: 3, truncated: true })
+    expect(result).toMatchObject({ observed_tick: 10, actor_id: 7, surface_index: 1, force_index: 1 })
+    expect(result.type_counts).toEqual({ 'resource': 3, 'furnace': 1, 'mining-drill': 1 })
+    expect((globalThis as any).storage.sgluna_entity_reference_hints[41]).toMatchObject({ name: 'burner-mining-drill' })
+  })
+})
+
+describe('exact entity status observation', () => {
+  function fixture() {
+    ;(globalThis as any).storage = {}
+    ;(globalThis as any).game.tick = 12
+    ;(globalThis as any).defines.entity_status = { working: 1 }
+    const actor_force = { index: 1, name: 'player', is_chunk_visible: () => true, is_chunk_charted: () => true }
+    const find = vi.fn(() => [] as any[])
+    const surface = { index: 1, find_entities_filtered: find }
+    actor_state.actor = { position: { x: 0, y: 0 }, surface, force: actor_force }
+    const lookup = vi.fn((_unit: number) => undefined as any)
+    ;(globalThis as any).game.get_entity_by_unit_number = lookup
+    function furnace(unit_number: number, x: number, count: number) {
+      return {
+        valid: true, name: 'stone-furnace', type: 'furnace', unit_number,
+        position: { x, y: 0 }, surface, force: actor_force, status: 1,
+        bounding_box: { left_top: { x: x - 1, y: -1 }, right_bottom: { x: x + 1, y: 1 } },
+        get_max_inventory_index: () => 1,
+        get_inventory: () => ({ get_contents: () => [{ name: 'iron-plate', count, quality: 'normal' }] }),
+        get_recipe: () => [{ name: 'iron-plate' }, undefined],
+      }
+    }
+    return { surface, actor_force, find, lookup, furnace }
+  }
+
+  it('reads the requested same-name furnace and its native inventory and recipe, even when another is nearer', async () => {
+    const { find, lookup, furnace } = fixture()
+    const near = furnace(41, 2, 1)
+    const far = furnace(42, 80, 17)
+    Object.assign(far, { crafting_progress: 0.25, crafting_speed: 1.5, products_finished: 23 })
+    find.mockReturnValue([near])
+    lookup.mockImplementation(unit => unit === 42 ? far : near)
+    const tools = await tools_interface()
+    const result = tools.get_entity_status(undefined, undefined, 42)
+    expect(result).toMatchObject({ found: true, unit_number: 42, entity: {
+      unit_number: 42, position: { x: 80, y: 0 }, recipe: 'iron-plate', working: true,
+      crafting_progress: 0.25, crafting_speed: 1.5, products_finished: 23,
+      inventories: [{ index: 1, items: [{ name: 'iron-plate', count: 17, quality: 'normal' }] }],
+    } })
+    expect(result.radius).toBeUndefined()
+    expect(find).not.toHaveBeenCalled()
+    expect((globalThis as any).storage.sgluna_entity_reference_hints[42]).toMatchObject({ surface_index: 1, force_index: 1 })
+  })
+
+  it('states whether a crafting machine\'s recipe is configurable (assembling machine) or automatic (furnace), and nothing for other types', async () => {
+    const { lookup, furnace } = fixture()
+    const assembler = { ...furnace(43, 4, 2), name: 'assembling-machine-1', type: 'assembling-machine' }
+    const lab = { ...furnace(44, 5, 2), name: 'lab', type: 'lab' }
+    lookup.mockImplementation(unit => unit === 41 ? furnace(41, 2, 1) : unit === 43 ? assembler : lab)
+    const tools = await tools_interface()
+    expect(tools.get_entity_status(undefined, undefined, 41).entity).toMatchObject({ type: 'furnace', recipe_selection: 'automatic' })
+    expect(tools.get_entity_status(undefined, undefined, 43).entity).toMatchObject({ type: 'assembling-machine', recipe_selection: 'configurable' })
+    expect(tools.get_entity_status(undefined, undefined, 44).entity.recipe_selection).toBeUndefined()
+  })
+
+  it('rejects direct-index entities on another surface or force without a nearest fallback', async () => {
+    const { find, lookup, furnace } = fixture()
+    const own = furnace(41, 2, 1)
+    const foreign_force = { ...furnace(42, 3, 9), force: { index: 2, name: 'enemy' } }
+    const foreign_surface = { ...furnace(43, 4, 11), surface: { index: 2 } }
+    find.mockReturnValue([own])
+    lookup.mockImplementation(unit => unit === 42 ? foreign_force : foreign_surface)
+    const tools = await tools_interface()
+    for (const unit of [42, 43]) {
+      expect(tools.get_entity_status(undefined, undefined, unit)).toMatchObject({ found: false, error: 'exact_entity_not_found', unit_number: unit })
+    }
+    expect(find).not.toHaveBeenCalled()
+  })
+
+  it('exposes native electric status names and stored energy without claiming supply sufficiency', async () => {
+    const { lookup, furnace } = fixture()
+    ;(globalThis as any).defines.entity_status = { working: 1, no_power: 87 }
+    const lab = { ...furnace(42, 80, 75), name: 'lab', type: 'lab', status: 87,
+      prototype: { electric_energy_source_prototype: {} }, energy: 0, electric_network_id: undefined as number | undefined }
+    lookup.mockReturnValue(lab)
+    const tools = await tools_interface()
+    expect(tools.get_entity_status(undefined, undefined, 42).entity).toMatchObject({
+      unit_number: 42, status: 87, status_name: 'no_power', working: false, energy_source: 'electric', energy: 0,
+    })
+    lab.status = 1; lab.energy = 1200; lab.electric_network_id = 23
+    expect(tools.get_entity_status(undefined, undefined, 42).entity).toMatchObject({
+      status_name: 'working', working: true, energy: 1200, electric_network_id: 23,
+    })
+    lab.status = 9999; lab.energy = Infinity; lab.electric_network_id = -1
+    const unknown = tools.get_entity_status(undefined, undefined, 42).entity
+    expect(unknown.status_name).toBeUndefined(); expect(unknown.energy).toBeUndefined()
+    expect(unknown.electric_network_id).toBeUndefined()
+    const burner = { ...furnace(43, 3, 2), prototype: { burner_prototype: {} },
+      get energy(): number { throw new Error('non-electric energy must not be read') },
+      get electric_network_id(): number { throw new Error('non-electric network must not be read') } }
+    lookup.mockReturnValue(burner)
+    expect(tools.get_entity_status(undefined, undefined, 43).entity).toMatchObject({ energy_source: 'burner' })
+  })
+
+  it('resolves a remembered ordinary building but never substitutes its replacement', async () => {
+    const { find, lookup, furnace } = fixture()
+    const observed = furnace(42, 3, 17)
+    find.mockReturnValue([observed])
+    const tools = await tools_interface()
+    expect(tools.get_entity_status('stone-furnace', 8).entity.unit_number).toBe(42)
+    // Ordinary buildings need the persisted lookup hint when the engine index misses.
+    expect(tools.get_entity_status(undefined, undefined, 42).entity.unit_number).toBe(42)
+    expect(find).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'stone-furnace', radius: 0.25, force: observed.force }))
+    find.mockReturnValue([furnace(99, 3, 20)])
+    expect(tools.get_entity_status(undefined, undefined, 42)).toMatchObject({ found: false, error: 'exact_entity_not_found', unit_number: 42 })
+    expect(lookup).toHaveBeenCalledWith(42)
+  })
+
+  it('truthfully rejects unknown identities and invalid or mixed direct arguments', async () => {
+    const { find, lookup } = fixture()
+    const tools = await tools_interface()
+    expect(tools.get_entity_status(undefined, undefined, 404)).toMatchObject({ found: false, error: 'exact_entity_not_found', unit_number: 404 })
+    lookup.mockClear()
+    for (const args of [
+      [undefined, undefined, 0], [undefined, undefined, 1.5], [undefined, undefined, Infinity],
+      [undefined, undefined, 9007199254740992], ['stone-furnace', undefined, 42], [undefined, 8, 42],
+    ]) expect(tools.get_entity_status(...args)).toMatchObject({ found: false, error: 'invalid_exact_identity' })
+    expect(tools.get_entity_status()).toMatchObject({ found: false, error: 'invalid_entity_name' })
+    expect(find).not.toHaveBeenCalled()
+    expect(lookup).not.toHaveBeenCalled()
+  })
+
+  it('keeps the legacy nearest-name scan and radius bounds', async () => {
+    const { find, lookup, furnace } = fixture()
+    find.mockReturnValue([furnace(42, 7, 17), furnace(41, 2, 1)])
+    const tools = await tools_interface()
+    expect(tools.get_entity_status('stone-furnace').entity.unit_number).toBe(41)
+    expect(find).toHaveBeenLastCalledWith({ name: 'stone-furnace', position: { x: 0, y: 0 }, radius: 8 })
+    tools.get_entity_status('stone-furnace', 90)
+    expect(find).toHaveBeenLastCalledWith(expect.objectContaining({ radius: 32 }))
+    expect(lookup).not.toHaveBeenCalled()
+  })
+})
+
+describe('entity_count conditions (build steps)', () => {
+  function fixture(entities: any[]) {
+    ;(globalThis as any).game.tick = 77
+    ;(globalThis as any).defines.entity_status = { working: 1, no_power: 2, low_power: 3 }
+    ;(globalThis as any).prototypes = { item: {}, entity: { 'boiler': {}, 'steam-engine': {}, 'small-electric-pole': {} }, space_location: {} }
+    const force = { index: 1, name: 'player' }
+    const count = vi.fn((_filters: any) => entities.length)
+    const find = vi.fn((_filters: any) => entities)
+    actor_state.actor = { position: { x: 5, y: 6 }, force, surface: { index: 1, count_entities_filtered: count, find_entities_filtered: find } }
+    return { force, count, find }
+  }
+  const engine = (status: number, network?: number) => ({ valid: true, name: 'steam-engine', status, electric_network_id: network })
+
+  it('counts the force\'s placed entities of the prototype from the live world, never a receipt, and never a ghost', async () => {
+    const { force, count } = fixture([engine(1), engine(1), engine(1)])
+    const tools = await tools_interface()
+    const met = tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 3 })
+    expect(met).toMatchObject({ ok: true, kind: 'entity_count', prototype: 'steam-engine', minimum: 3, current: 3, found: 3, truncated: false, satisfied: true, tick: 77 })
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 4 })).toMatchObject({ satisfied: false, current: 3 })
+    // A name filter on the prototype and the NPC's force; no ghost filter, so a ghost (name entity-ghost) is not counted.
+    expect(count).toHaveBeenLastCalledWith({ name: 'steam-engine', force })
+  })
+
+  it('narrows by a radius around the actor or around a recorded anchor', async () => {
+    const { force, count } = fixture([engine(1)])
+    const tools = await tools_interface()
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 1, radius: 30 })).toMatchObject({ ok: true, satisfied: true, radius: 30 })
+    expect(count).toHaveBeenLastCalledWith({ name: 'steam-engine', force, position: { x: 5, y: 6 }, radius: 30 })
+    const anchored = tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 1, radius: 12, anchor: { x: -40, y: 8 } })
+    expect(anchored).toMatchObject({ ok: true, radius: 12, anchor: { x: -40, y: 8 } })
+    expect(count).toHaveBeenLastCalledWith({ name: 'steam-engine', force, position: { x: -40, y: 8 }, radius: 12 })
+  })
+
+  it('counts only entities in the requested state: working, or powered (on a network, not short of power)', async () => {
+    fixture([engine(1, 7), engine(2, 7), engine(3, 8), engine(1, undefined)])
+    const tools = await tools_interface()
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 2, state: 'working' })).toMatchObject({ ok: true, current: 2, found: 4, state: 'working', satisfied: true })
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 2, state: 'powered' })).toMatchObject({ ok: true, current: 1, satisfied: false, state: 'powered' })
+  })
+
+  it('refuses malformed or unknown requests without an engine query, and needs a body', async () => {
+    const { count, find } = fixture([])
+    const tools = await tools_interface()
+    for (const [request, error] of [
+      [{ prototype: 'not-an-entity', minimum: 1 }, 'unknown_entity'],
+      [{ prototype: 'boiler', minimum: 0 }, 'invalid_entity_count_condition'],
+      [{ minimum: 1 }, 'invalid_entity_count_condition'],
+      [{ prototype: 'boiler', minimum: 1, state: 'hovering' }, 'invalid_entity_count_state'],
+      [{ prototype: 'boiler', minimum: 1, radius: 257 }, 'invalid_entity_count_radius'],
+      [{ prototype: 'boiler', minimum: 1, anchor: { x: 1, y: 2 } }, 'invalid_entity_count_anchor'],
+      [{ prototype: 'boiler', minimum: 1, radius: 5, anchor: { x: 'a', y: 2 } }, 'invalid_entity_count_anchor'],
+    ] as Array<[Record<string, unknown>, string]>) {
+      expect(tools.evaluate_condition({ kind: 'entity_count', ...request })).toMatchObject({ ok: false, error })
+    }
+    expect(count).not.toHaveBeenCalled()
+    expect(find).not.toHaveBeenCalled()
+    actor_state.actor = undefined
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'boiler', minimum: 1 })).toEqual({ ok: false, error: 'no_actor' })
+  })
+})

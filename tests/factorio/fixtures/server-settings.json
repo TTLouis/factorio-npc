@@ -1,5 +1,5 @@
 {
-  "name": "AIRI zero-player NPC integration",
+  "name": "SGLuna zero-player NPC integration",
   "description": "Private deterministic test world; simulation must run with no players.",
   "visibility": {
     "public": false,

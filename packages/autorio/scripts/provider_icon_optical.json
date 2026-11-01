@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Per-avatar optical corrections applied by import_provider_icon.py after automatic head normalization. Keep provider-specific visual tuning here, never in runtime UI code.",
+  "avatars": {
+    "claude-2": {
+      "scale": 1.1,
+      "offset_x": 0,
+      "offset_y": 0,
+      "reason": "Bonnet and side curls make the silhouette head measure too wide."
+    },
+    "deepseek-2": {
+      "scale": 1.1,
+      "offset_x": 0,
+      "offset_y": 0,
+      "reason": "Hair volume plus the hairpin make the silhouette head measure too wide."
+    },
+    "gemini-1": {
+      "scale": 1.1,
+      "offset_x": 0,
+      "offset_y": 0,
+      "reason": "Arc and star ornaments sit outside the head and inflate the silhouette measure."
+    }
+  }
+}

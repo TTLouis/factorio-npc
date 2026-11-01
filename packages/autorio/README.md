@@ -1,7 +1,7 @@
 # autorio.ts
 
 > [!NOTE]
-> This package is a heavily modified fork of the original `autorio` implementation from [`moeru-ai/airi-factorio`](https://github.com/moeru-ai/airi-factorio), originally authored by **LemonNekoGH**. The current fork is maintained by **TTLouis** as part of the standalone-NPC AIRI Factorio work.
+> This package is a heavily modified fork of the original `autorio` implementation from [`moeru-ai/airi-factorio`](https://github.com/moeru-ai/airi-factorio), originally authored by **LemonNekoGH**. The current fork is maintained by **TTLouis** as the Factorio execution mod for the SGLuna / Factorio NPC project.
 >
 > The Factorio mod name remains `autorio` for compatibility with existing saves and deployment tooling; the retained name does not imply that this fork is maintained by the original author.
 

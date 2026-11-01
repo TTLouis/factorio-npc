@@ -4,6 +4,7 @@ import { create_map_construction_remote_interface } from './map_construction'
 import { create_map_deconstruction_remote_interface } from './map_deconstruction'
 import { create_map_remote_interface } from './map_remote'
 import { create_map_upgrade_remote_interface } from './map_upgrade'
+import { count_world_entities, find_world_entities } from './npc_vision'
 
 const MIN_LONG_RANGE_RADIUS = 64
 const MAX_LONG_RANGE_RADIUS = 4096
@@ -19,7 +20,7 @@ function squared_distance(a: { x: number, y: number }, b: { x: number, y: number
 }
 
 function count_matches(actor: ControlledActor, name: string, radius: number) {
-  return actor.surface.count_entities_filtered({
+  return count_world_entities(actor.surface, {
     position: actor.position,
     radius,
     name,
@@ -126,7 +127,7 @@ export function find_long_range_entities(actor: ControlledActor, name: string, m
     }
   }
 
-  const matches = actor.surface.find_entities_filtered({
+  const matches = find_world_entities(actor.surface, {
     position: actor.position,
     radius: search.searched_radius,
     name,

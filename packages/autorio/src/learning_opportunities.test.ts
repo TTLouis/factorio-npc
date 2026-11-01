@@ -11,9 +11,12 @@ import {
   list_learning_verification_queue,
   merge_duplicate_skill,
   queue_learning_verification,
+  revise_skill_from_semantic_counterexample,
+  semantic_counterexample_from_failure,
   set_learning_policy,
   skill_novelty_key,
 } from './learning_opportunities'
+import { create_skill_candidate, get_skill_definition } from './skills'
 
 function skill(x = 10, relationKind: SkillDefinition['topology']['relations'][number]['kind'] = 'item_transfer'): SkillDefinition {
   return {
@@ -72,6 +75,89 @@ describe('autonomous learning opportunity state', () => {
 
   it('does not incorrectly deduplicate materially different topology', () => {
     expect(skill_novelty_key(skill(10, 'item_transfer'))).not.toBe(skill_novelty_key(skill(10, 'belt_output')))
+  })
+
+  it('does not deduplicate constraints that share kind/validation but have different semantics', () => {
+    const weakCoverage = skill(10)
+    weakCoverage.constraints = [{
+      kind: 'resource',
+      description: 'Mining placement must cover at least one target resource tile.',
+      validation: 'validated',
+      evidence_refs: ['coverage:1'],
+      predicate: { type: 'resource_coverage', resource: 'iron-ore', minimum_entities: 1 },
+    }]
+    const strongCoverage = skill(10)
+    strongCoverage.constraints = [{
+      kind: 'resource',
+      description: 'Mining placement must cover at least eight target resource tiles.',
+      validation: 'validated',
+      evidence_refs: ['coverage:8'],
+      predicate: { type: 'resource_coverage', resource: 'iron-ore', minimum_entities: 8 },
+    }]
+
+    expect(skill_novelty_key(weakCoverage)).not.toBe(skill_novelty_key(strongCoverage))
+    expect(() => merge_duplicate_skill(weakCoverage, strongCoverage)).toThrow('different semantic novelty keys')
+  })
+
+  it('derives structured semantic counterexamples without parsing free-form failure text', () => {
+    const candidate = skill(10)
+    const counterexample = semantic_counterexample_from_failure(candidate, {
+      id: 'run-7',
+      skill_id: candidate.id,
+      skill_revision: candidate.revision,
+      state: 'failed',
+      failure_kind: 'semantic',
+      reason: 'arbitrary human-readable explanation that is not parsed',
+      evidence_refs: ['factory-analysis:broken'],
+    })
+
+    expect(counterexample).toBeDefined()
+    expect(counterexample?.predicates).toEqual([
+      {
+        type: 'required_topology_relation',
+        relation_kind: 'item_transfer',
+        from: 'gear-10',
+        to: 'belt-10',
+        via: undefined,
+      },
+      { type: 'output_delta', item: 'transport-belt', minimum_delta: 1 },
+    ])
+  })
+
+  it('creates one revised candidate from a counterexample and refuses an identical second revision', () => {
+    const original = create_skill_candidate(skill(10))
+    const counterexample = semantic_counterexample_from_failure(original, {
+      id: 'run-8',
+      skill_id: original.id,
+      skill_revision: original.revision,
+      state: 'failed',
+      failure_kind: 'semantic',
+      reason: 'Missing required reusable semantics.',
+      evidence_refs: ['verification-run:run-8'],
+    })!
+
+    const revised = revise_skill_from_semantic_counterexample(original, counterexample)
+    expect(revised?.revision).toBe(2)
+    expect(revised?.status).toBe('candidate')
+    expect(revised?.constraints.map(value => value.predicate)).toEqual(expect.arrayContaining([
+      { type: 'required_topology_relation', relation_kind: 'item_transfer', from: 'gear-10', to: 'belt-10' },
+      { type: 'output_delta', item: 'transport-belt', minimum_delta: 1 },
+    ]))
+    expect(revised?.verification.placement_rebuild).toBe('not_tested')
+    expect(revised?.verification.production_output).toBe('not_tested')
+    expect(revised?.verification.acceptance_conditions).toEqual([])
+
+    const repeated = semantic_counterexample_from_failure(revised!, {
+      id: 'run-9',
+      skill_id: revised!.id,
+      skill_revision: revised!.revision,
+      state: 'failed',
+      failure_kind: 'semantic',
+      reason: 'Same structured semantic failure again.',
+      evidence_refs: ['verification-run:run-9'],
+    })!
+    expect(revise_skill_from_semantic_counterexample(revised!, repeated)).toBeUndefined()
+    expect(get_skill_definition(original.id)?.revision).toBe(2)
   })
 
   it('rejects trivial single-node candidates but accepts reusable multi-entity structure', () => {

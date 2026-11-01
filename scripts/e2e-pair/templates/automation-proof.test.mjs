@@ -1,0 +1,23 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {evaluateMeasurement,idle,topologyReviewApproved} from './automation-proof.mjs';
+const names=['iron-ore','copper-ore','coal','iron-plate','copper-plate','iron-gear-wheel','automation-science-pack'];
+const baseSample=(end=false)=>({wall_ms:end?300001:0,tick:end?36000:0,speed:2,humans:0,actor_id:42,health:250,operations:{task_state:'idle',queue_empty:true,queue_length:0},crafting_queue:[],production:Object.fromEntries(names.map(n=>[n,{produced:end?10:0}])),machines:[{id:1,recipe:'automation-science-pack',health:350,products_finished:end?10:0},{id:2,recipe:'iron-gear-wheel',health:350,products_finished:end?10:0}]});
+const unpoweredSample=baseSample;
+const sample=end=>{const s=unpoweredSample(end);s.machines.forEach(m=>{m.network=7;m.energy=100});s.machines.push({id:3,type:'electric-pole',network:7,health:100,network_producers:[{name:'steam-engine',flow:10}]},{id:4,name:'steam-engine',health:400,fluids:[{name:'steam',amount:10}]});return s;};
+test('rate uses new native output and game ticks',()=>{const p=evaluateMeasurement([sample(),sample(true)]);assert.equal(p.satisfied,true);assert.equal(p.red_per_game_minute,1);assert.equal(p.topology_review_required,true)});
+test('measurement requires at least ten newly produced red packs',()=>{const end=sample(true);end.production['automation-science-pack'].produced=9;const p=evaluateMeasurement([sample(),end]);assert.equal(p.new_red_packs,9);assert.ok(p.failures.includes('fewer_than_ten_new_red_packs'));assert.ok(p.failures.includes('red_rate_below_one_per_game_minute'));});
+test('stored packs or hand-crafted output cannot substitute for assembler production',()=>{const e=sample(true);e.machines[0].products_finished=0;assert.equal(evaluateMeasurement([sample(),e]).satisfied,false)});
+test('upstream starvation, queued work, short window and damage fail',()=>{for(const edit of [e=>e.production['copper-ore'].produced=0,e=>e.operations.queue_length=1,e=>e.wall_ms=299999,e=>e.tick=35999,e=>e.machines[0].health--]){const e=sample(true);edit(e);assert.equal(evaluateMeasurement([sample(),e]).satisfied,false)}assert.equal(idle({...sample(),crafting_queue:[{}]}),false)});
+test('mutation during lockout fails',()=>assert.equal(evaluateMeasurement([sample(),sample(true)],[{event:'operations.admitted'}]).satisfied,false));
+test('topology approval is bound to immutable packet, candidate, goal and actor',()=>{
+ const source='a'.repeat(40),hash='b'.repeat(64);
+ const packet={goal_id:'goal_p',source,native:{actor_id:42}};
+ const review={approved:true,native_chain_verified:true,packet_sha256:hash,goal_id:'goal_p',source,actor_id:42};
+ const current={goal_id:'goal_p',source,actor_id:42};
+ assert.equal(topologyReviewApproved(packet,review,hash,current),true);
+ for(const r of [undefined,{}, {...review,approved:false},{...review,native_chain_verified:false},{...review,packet_sha256:'c'.repeat(64)},{...review,actor_id:43},{...review,goal_id:'other'},{...review,source:'d'.repeat(40)}])assert.equal(topologyReviewApproved(packet,r,hash,current),false);
+ for(const c of [{...current,actor_id:43},{...current,goal_id:'other'},{...current,source:'d'.repeat(40)}])assert.equal(topologyReviewApproved(packet,review,hash,c),false);
+});
+test('actor change during measurement fails',()=>{const end=sample(true);end.actor_id=43;assert.equal(evaluateMeasurement([sample(),end]).satisfied,false)});
+test('stored output without native steam flow, steam fluid or connected assembler energy fails',()=>{for(const edit of [e=>e.machines[2].network_producers[0].flow=0,e=>e.machines[3].fluids=[],e=>e.machines[0].network=8,e=>e.machines[1].energy=0]){const end=sample(true);edit(end);assert.equal(evaluateMeasurement([sample(),end]).satisfied,false)}});

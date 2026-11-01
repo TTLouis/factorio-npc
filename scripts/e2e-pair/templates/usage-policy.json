@@ -1,0 +1,9 @@
+{
+  "window_duration_minutes": 10080,
+  "policy_reserve_remaining_percent": 5,
+  "live_stop_remaining_percent": 7,
+  "stop_condition": "weekly_remaining_7_percent",
+  "bucket_selection": "exactly one usage window where windowDurationMins === 10080",
+  "missing_ambiguous_or_unreadable": "fail_closed_before_inference_or_trigger_hard_floor_during_live",
+  "budget_resets_authorized": false
+}

@@ -1,0 +1,502 @@
+// Agent context and the restage seam (delegation plan U4, design note sections
+// 4 and 10).
+//
+// One AgentContext per NpcAgentLoop: it holds the conversation the loop is
+// running (`messages`, `baseMessages`), the role that conversation runs as, the
+// `handoff_id` that names it, per-conversation counters and the size counter the
+// restage policy reads. Exactly one conversation is active at a time. A restage
+// swaps that conversation for a fresh one built from a handoff packet and gives
+// it a new `handoff_id` and the next value of a monotonic conversation sequence.
+// Staleness is decided by that sequence, never by the id: a request is stale when
+// the sequence it was sent under is no longer current (so an A, B, A restage
+// pattern cannot make an old A reply look current, and an id already used in the
+// lineage is refused). The `handoff_id` is the name traces and the reducer log use.
+//
+// Planner parking (delegation U6). When a live planner conversation hands a committed plan
+// slice to an executor (C3), the planner conversation is parked whole and the executor
+// conversation becomes the active one; resumePlanner() brings the planner back at the slice
+// close and drops the executor. Parking and resuming both take the next conversation
+// sequence, so a reply still in flight for the other conversation is stale.
+//
+// Executor keeping (fold C3 into C8). A planner review round returns the same step to the executor that asked for it. When that
+// executor was restaged at the step close and has done nothing since, the planner return keeps its conversation (resumePlanner
+// with keepExecutor) and the handback resumes it whole (resumeExecutor) instead of restaging a second, identical packet. Any
+// restage and any new lineage drops a kept executor.
+//
+// Pure: no I/O, no clock. The loop owns the effects (reducer dispatch, trace
+// rows, counter resets outside this object); see NpcAgentLoop.restageContext.
+//
+// Byte-identical default. `role` and `handoff_id` appear on provider trace rows
+// and `role` on the provider context ONLY once the current conversation lineage
+// has restaged at least once (`delegationActive`). A run that never restages
+// writes exactly the rows and sends exactly the requests it did before this
+// module existed. A lineage is one chat request's conversation; the loop starts
+// a new lineage on every reset, so a new request is unrestaged again. The
+// initial conversation's handoff id (`ho_initial_<n>`) exists so a reply that
+// outlives a restage can be recognised and dropped; it is written to a row only
+// for such a stale reply. A reply that outlives a reset (a new lineage) is stale
+// too (the conversation sequence is monotonic across lineages).
+
+import { AGENT_ROLES, EXECUTOR_ROLE, PLANNER_ROLE, resolveAgentRole } from './agent-roles.mjs'
+import { CONTEXT_RESTAGE_CHECKPOINTS } from './planning-state.mjs'
+import { contextSizeState, estimateTokensFromChars, observeContextSize } from './restage-policy.mjs'
+
+export const INITIAL_HANDOFF_PREFIX = 'ho_initial_'
+// Same message the loop's other cancellation paths use, so the existing
+// /cancelled|superseded/ handling treats a dropped stale reply as a cancelled
+// turn, never as a provider failure.
+export const STALE_REPLY_MESSAGE = 'Model turn was cancelled or superseded'
+export const STALE_REPLY_ERROR_CODE = 'stale_handoff_reply'
+export const STALE_REPLY_REASON = 'handoff_superseded'
+// How many times a turn is re-driven on the active conversation after a stale drop.
+export const STALE_REDRIVE_LIMIT = 2
+
+function finiteNonNegative(value) {
+  return Number.isFinite(value) && value > 0 ? value : 0
+}
+
+// Same formula as the loop's and the base loop's messageChars.
+export function messageChars(message) {
+  return String(message?.content ?? '').length + JSON.stringify(message?.tool_calls ?? '').length
+}
+
+export function conversationChars(messages) {
+  return (Array.isArray(messages) ? messages : []).reduce((total, message) => total + messageChars(message), 0)
+}
+
+function freshCounters() {
+  return { requests: 0, replies: 0, input_tokens: 0, output_units: 0, last_input_tokens: 0 }
+}
+
+function copyMessages(messages) {
+  return messages.map(message => ({ ...message }))
+}
+
+function leadingSystemMessages(messages) {
+  const out = []
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message?.role !== 'system') break
+    out.push(message)
+  }
+  return out
+}
+
+export class AgentContext {
+  /**
+   * @param {object} [options]
+   * @param {object} [options.config] provider config (`models`, `base`, ...); only used to name `model`
+   * @param {'planner'|'executor'} [options.role]
+   */
+  constructor({ config, role = PLANNER_ROLE } = {}) {
+    this.config = config
+    this.messages = []
+    this.baseMessages = []
+    this.lineageSequence = 0
+    this.conversationSeq = 0 // monotonic for the life of this object: every lineage start and every restage is a new conversation
+    // conversationState: facts that only mean something while the conversation
+    // that delivered them is the one being sent (an "already shown" cache, a diff
+    // baseline). Each new conversation starts empty; a parked planner keeps its own.
+    this.beginLineage(role)
+  }
+
+  /**
+   * Start a fresh conversation lineage (a chat request begins from scratch).
+   * Nothing has restaged; delegation attribution is off until the first
+   * restage. The conversation sequence advances, so a reply still in flight
+   * for the previous lineage no longer matches.
+   */
+  beginLineage(role = PLANNER_ROLE) {
+    if (!AGENT_ROLES.includes(role)) throw new RangeError(`agent role must be one of ${AGENT_ROLES.join(', ')}`)
+    this.role = role
+    this.handoffId = `${INITIAL_HANDOFF_PREFIX}${++this.lineageSequence}`
+    this.conversationSeq += 1
+    this.usedHandoffIds = new Set([this.handoffId])
+    this.restageCount = 0
+    this.parkedPlanner = null // U6: the planner conversation set aside while an executor conversation acts; a new lineage starts with none
+    this.parkedExecutor = null // an executor conversation kept while the planner answers its review; a new lineage starts with none
+    this.conversationState = new Map()
+    this.resetCounters()
+  }
+
+  resetCounters() {
+    this.counters = freshCounters()
+    this.size = contextSizeState()
+    this.requestCharsHighWater = 0
+  }
+
+  /** Model the current role runs on (agent-roles.mjs); undefined without a provider config. */
+  get model() {
+    return this.config ? resolveAgentRole(this.config, this.role).model : undefined
+  }
+
+  get delegationActive() {
+    return this.restageCount > 0
+  }
+
+  /**
+   * True when the config runs the planner and the executor on different models
+   * (a two-model OPENAI_MODEL list). With one model both roles resolve to it,
+   * so naming the role on a provider call changes nothing.
+   */
+  get rolesDiffer() {
+    return this.config
+      ? resolveAgentRole(this.config, PLANNER_ROLE).model !== resolveAgentRole(this.config, EXECUTOR_ROLE).model
+      : false
+  }
+
+  /**
+   * Restage-policy size counter, in tokens: monotonic since the last restage;
+   * the larger of provider-reported input tokens of any request and chars/4 of
+   * the growth seen so far (so it is meaningful before the first reply).
+   */
+  get sizeTokens() {
+    return this.size.tokens
+  }
+
+  // --- requests and replies -------------------------------------------------------------
+
+  /**
+   * Call before a provider request. `requestChars` is the size of the messages
+   * about to be sent. Returns the attribution to hold for that request; hand it
+   * back to isStale / traceFields / observeReply.
+   */
+  beginRequest(requestChars, { prefixChars } = {}) {
+    const chars = finiteNonNegative(requestChars)
+    const prefix = finiteNonNegative(prefixChars)
+    if (prefix > 0) this.lastPrefixChars = prefix
+    const grown = Math.max(0, chars - this.requestCharsHighWater)
+    this.requestCharsHighWater = Math.max(this.requestCharsHighWater, chars)
+    this.size = observeContextSize(this.size, { appendedChars: grown })
+    this.counters.requests += 1
+    return Object.freeze({
+      role: this.role,
+      handoffId: this.handoffId,
+      lineage: this.lineageSequence,
+      seq: this.conversationSeq,
+      delegated: this.delegationActive,
+      ...(prefix > 0 ? { prefixChars: prefix, requestChars: chars } : {}),
+    })
+  }
+
+  /**
+   * True when a restage or a reset has replaced the request's conversation
+   * since it was sent. The sequence is monotonic across lineages (every
+   * lineage start and every restage takes the next value), so a reply that
+   * outlives a whole lineage (the loop was reset for a new request or an actor
+   * replacement) is stale too, not only a reply that outlives a restage.
+   */
+  isStale(attribution) {
+    return !!attribution && attribution.seq !== this.conversationSeq
+  }
+
+  /**
+   * Record a reply for the active conversation. A stale reply is not counted
+   * (its cost is the loop's request-wide usage, not this conversation's).
+   * @returns {boolean} whether the reply was counted
+   */
+  observeReply(attribution, usage) {
+    if (!attribution || attribution.lineage !== this.lineageSequence || attribution.seq !== this.conversationSeq) return false
+    const input = finiteNonNegative(usage?.input_units)
+    this.size = observeContextSize(this.size, { providerInputTokens: input })
+    this.counters.replies += 1
+    this.counters.input_tokens += input
+    this.counters.output_units += finiteNonNegative(usage?.output_units)
+    if (input > 0) this.counters.last_input_tokens = input
+    // The first reply that reports input tokens measures the fixed prefix: what
+    // the provider counted beyond the (chars/4) messages after the system prompt
+    // is the tool schemas, so prefix = input - estimate(messages), never below
+    // the system prompt's own estimate. The prefix is the same for every
+    // conversation of this loop (same system prompt and tools), so it is kept
+    // across restages and lineages.
+    if (input > 0 && this.measuredPrefixTokens === undefined && attribution.prefixChars > 0) {
+      const messageChars = Math.max(0, (attribution.requestChars ?? 0) - attribution.prefixChars)
+      this.measuredPrefixTokens = Math.max(estimateTokensFromChars(attribution.prefixChars), input - estimateTokensFromChars(messageChars))
+    }
+    return true
+  }
+
+  /**
+   * Tokens of the fixed prefix (system prompt and tool schemas): measured from
+   * the first reply that reported input tokens, else chars/4 of the system
+   * prompt (the latest request's, or the base messages'). The prefix limits are
+   * added on top of it (NpcAgentLoop.restageSoftLimitTokens), so a limit
+   * measures what the conversation grew beyond its prefix.
+   */
+  get prefixTokens() {
+    if (this.measuredPrefixTokens !== undefined) return this.measuredPrefixTokens
+    const chars = this.lastPrefixChars ?? conversationChars(leadingSystemMessages(this.baseMessages.length > 0 ? this.baseMessages : this.messages))
+    return estimateTokensFromChars(chars)
+  }
+
+  /**
+   * `data.role` / `data.handoff_id` for a provider request/response/error row:
+   * both or neither. Present once delegation is active for the request, and
+   * always on a stale reply (so the drop row can be paired with it).
+   */
+  traceFields(attribution) {
+    if (!attribution) return {}
+    if (!attribution.delegated && !this.isStale(attribution)) return {}
+    return { role: attribution.role, handoff_id: attribution.handoffId }
+  }
+
+  /** Extra fields for the provider call's context object; empty until delegation is active. */
+  providerContextFields(attribution) {
+    return attribution?.delegated ? { role: attribution.role } : {}
+  }
+
+  /** `context.stale_reply_dropped` row data, exactly as DELEGATION_TRACE_ROWS specifies. */
+  staleReplyRow(attribution) {
+    return {
+      role: attribution.role,
+      handoff_id: attribution.handoffId,
+      active_handoff_id: this.handoffId,
+      reason: STALE_REPLY_REASON,
+    }
+  }
+
+  // --- restage --------------------------------------------------------------------------
+
+  /**
+   * Validate a restage without changing anything. Returns the normalized
+   * arguments for commitRestage; throws RangeError/TypeError on a packet that
+   * does not fit (so the loop can refuse before it touches the reducer).
+   */
+  prepareRestage({ checkpoint, reason, packet, role, prefixMessages, parkPlanner = false } = {}) {
+    if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`restage checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
+    if (!packet || typeof packet !== 'object') throw new TypeError('restage needs a handoff packet')
+    for (const field of ['stableText', 'volatileText', 'handoff_id']) {
+      if (typeof packet[field] !== 'string' || packet[field].length === 0) throw new TypeError(`restage packet is missing ${field}`)
+    }
+    const eventRole = packet.event?.role
+    const nextRole = role ?? eventRole ?? this.role
+    if (!AGENT_ROLES.includes(nextRole)) throw new RangeError(`agent role must be one of ${AGENT_ROLES.join(', ')}`)
+    if (eventRole && eventRole !== nextRole) throw new RangeError(`restage role ${nextRole} does not match the packet's role ${eventRole}`)
+    if (packet.event?.checkpoint && packet.event.checkpoint !== checkpoint) {
+      throw new RangeError(`restage checkpoint ${checkpoint} does not match the packet's checkpoint ${packet.event.checkpoint}`)
+    }
+    if (this.usedHandoffIds.has(packet.handoff_id)) throw new RangeError('restage packet handoff id was already used in this conversation lineage')
+    const prefix = prefixMessages ?? leadingSystemMessages(this.baseMessages.length > 0 ? this.baseMessages : this.messages)
+    if (!Array.isArray(prefix)) throw new TypeError('restage prefixMessages must be an array')
+    return { checkpoint, reason: typeof reason === 'string' ? reason : (packet.event?.reason ?? ''), packet, role: nextRole, prefix, parkPlanner: parkPlanner === true }
+  }
+
+  /**
+   * Swap in the fresh conversation: system + tools prefix unchanged, then the
+   * packet's stable block, then its volatile block. Counters and the size
+   * counter reset, the handoff id becomes the packet's, the role becomes the
+   * packet's role. Anything in flight for the previous conversation is stale
+   * from this call on.
+   *
+   * Planner parking (U6). `parkPlanner` is set by the caller that hands a live
+   * planner conversation to an executor (C3): the planner's conversation is set
+   * aside whole (messages, base messages, handoff id, counters, size) and comes
+   * back with resumePlanner() at the slice close. The executor conversation never
+   * writes into it. An executor-to-executor restage leaves the parked planner
+   * alone; a restage as the planner replaces it (a fresh planner from a packet).
+   *
+   * @returns {object} what changed, for the caller's trace row
+   */
+  commitRestage(prepared) {
+    const { checkpoint, reason, packet, role, prefix, parkPlanner } = prepared
+    const parked = parkPlanner === true && this.role === PLANNER_ROLE && role === EXECUTOR_ROLE ? this.conversationSnapshot() : undefined
+    const previous = {
+      role: this.role,
+      handoff_id: this.handoffId,
+      restage_count: this.restageCount,
+      message_count: this.messages.length,
+      chars: conversationChars(this.messages),
+      size_tokens: this.sizeTokens,
+      counters: { ...this.counters },
+    }
+    if (parked) this.parkedPlanner = parked
+    else if (role === PLANNER_ROLE) this.parkedPlanner = null
+    this.parkedExecutor = null // a restage is a new conversation: the one kept for a review handback is no longer the step's
+    this.baseMessages = [
+      ...copyMessages(prefix),
+      { role: 'user', content: packet.stableText },
+      { role: 'user', content: packet.volatileText },
+    ]
+    this.messages = copyMessages(this.baseMessages)
+    this.role = role
+    this.handoffId = packet.handoff_id
+    this.usedHandoffIds.add(packet.handoff_id)
+    this.conversationSeq += 1
+    this.conversationState = new Map()
+    this.restageCount += 1
+    this.resetCounters()
+    return {
+      role,
+      checkpoint,
+      reason,
+      handoff_id: packet.handoff_id,
+      packet_hash: packet.hash,
+      packet_chars: packet.chars,
+      packet_estimated_tokens: packet.estimated_tokens,
+      previous_context_chars: previous.chars,
+      previous,
+    }
+  }
+
+  /**
+   * B2: replace what the conversation holds without starting a new one (an
+   * epoch rebuild, a capsule fallback, a recovered plan). Role, handoff id,
+   * counters and the conversation sequence stand, so a reply in flight is
+   * admitted or dropped exactly as before; what the old messages had shown is
+   * forgotten with them.
+   */
+  replaceConversation({ baseMessages = this.baseMessages, messages = copyMessages(baseMessages) } = {}) {
+    this.baseMessages = baseMessages
+    this.messages = messages
+    this.conversationState = new Map()
+  }
+
+  /** prepareRestage + commitRestage. */
+  restage(args) {
+    return this.commitRestage(this.prepareRestage(args))
+  }
+
+  // --- planner parking (U6) -------------------------------------------------------------
+
+  get hasParkedPlanner() {
+    return this.parkedPlanner !== null && this.parkedPlanner !== undefined
+  }
+
+  /** Discard the parked planner (its context went stale while it was parked). Returns whether one was dropped. */
+  dropParkedPlanner() {
+    const had = this.hasParkedPlanner
+    this.parkedPlanner = null
+    return had
+  }
+
+  /**
+   * Control returns to the planner (the slice close): the parked planner
+   * conversation becomes the active one again and the executor conversation is
+   * dropped. The conversation sequence advances, so any reply still in flight
+   * for the executor (or for the planner from before it was parked) is stale.
+   * The planner's own size counter comes back with it: executor traffic never
+   * counted against it. Returns undefined when nothing is parked.
+   */
+  resumePlanner({ keepExecutor } = {}) {
+    const parked = this.parkedPlanner
+    if (!parked || this.role !== EXECUTOR_ROLE) return undefined
+    // Fold C3 into C8: a planner review round hands the same step back to the executor that asked for it. The caller keeps that
+    // conversation (with the review request it sent as its last turn) so resumeExecutor() can bring it back whole.
+    this.parkedExecutor = keepExecutor
+      ? {
+          ...this.conversationSnapshot(),
+          meta: keepExecutor.meta,
+          seq: this.conversationSeq, // the sequence its reads were delivered under (the step read ledger is rebased from it)
+          reply: typeof keepExecutor.reply === 'string' && keepExecutor.reply ? keepExecutor.reply : undefined,
+        }
+      : null
+    const dropped = {
+      role: this.role,
+      handoff_id: this.handoffId,
+      message_count: this.messages.length,
+      chars: conversationChars(this.messages),
+      size_tokens: this.sizeTokens,
+    }
+    this.messages = parked.messages
+    this.baseMessages = parked.baseMessages
+    this.role = PLANNER_ROLE
+    this.handoffId = parked.handoffId
+    this.counters = parked.counters
+    this.size = parked.size
+    this.requestCharsHighWater = parked.requestCharsHighWater
+    this.conversationState = parked.conversationState
+    this.parkedPlanner = null
+    this.conversationSeq += 1
+    return {
+      role: PLANNER_ROLE,
+      handoff_id: this.handoffId,
+      message_count: this.messages.length,
+      dropped_executor: dropped,
+      ...(this.parkedExecutor ? { executor_kept: true } : {}),
+    }
+  }
+
+  // --- the executor kept for a planner review handback (fold C3 into C8) ----------------------
+
+  get hasParkedExecutor() {
+    return this.parkedExecutor !== null && this.parkedExecutor !== undefined
+  }
+
+  /** Discard the kept executor (the handback cannot use it). Returns whether one was dropped. */
+  dropParkedExecutor() {
+    const had = this.hasParkedExecutor
+    this.parkedExecutor = null
+    return had
+  }
+
+  /**
+   * The planner round is over and hands the step back: the executor conversation kept by resumePlanner({ keepExecutor }) becomes
+   * the active one again, whole (messages, handoff id, counters, size), with the review request it sent as its last turn, and the
+   * planner conversation is parked again. This is not a restage: no packet, no new handoff id, the restage count stands. The
+   * conversation sequence advances, so a reply still in flight for the planner is stale. Returns undefined when no executor is
+   * kept or the planner is not the active conversation.
+   */
+  resumeExecutor() {
+    const kept = this.parkedExecutor
+    if (!kept || this.role !== PLANNER_ROLE) return undefined
+    const planner = this.conversationSnapshot()
+    this.parkedPlanner = planner
+    this.parkedExecutor = null
+    this.messages = kept.messages
+    // The review request is the executor's last turn, unless the conversation already ends on an assistant turn (a blocker reply the
+    // review was raised from): two assistant turns in a row are invalid.
+    if (kept.reply && this.messages.at(-1)?.role !== 'assistant') this.messages.push({ role: 'assistant', content: kept.reply })
+    this.baseMessages = kept.baseMessages
+    this.role = EXECUTOR_ROLE
+    this.handoffId = kept.handoffId
+    this.counters = kept.counters
+    this.size = kept.size
+    this.requestCharsHighWater = kept.requestCharsHighWater
+    this.conversationState = kept.conversationState
+    this.conversationSeq += 1
+    return {
+      role: EXECUTOR_ROLE,
+      handoff_id: this.handoffId,
+      message_count: this.messages.length,
+      meta: kept.meta,
+      planner_handoff_id: planner.handoffId,
+      kept_seq: kept.seq,
+      seq: this.conversationSeq,
+    }
+  }
+
+  /** The active conversation set aside whole (messages, base messages, handoff id, counters, size, per-conversation state). */
+  conversationSnapshot() {
+    return {
+      messages: this.messages,
+      baseMessages: this.baseMessages,
+      handoffId: this.handoffId,
+      counters: this.counters,
+      size: this.size,
+      requestCharsHighWater: this.requestCharsHighWater,
+      conversationState: this.conversationState,
+    }
+  }
+}
+
+/**
+ * `context.restaged` row data, exactly as DELEGATION_TRACE_ROWS specifies.
+ * `plan_id` / `step_id` are the active plan and step at the restage;
+ * `soft_limit_tokens` is the restage-policy limit that applied, when known.
+ * Undefined fields are omitted.
+ */
+export function contextRestagedRow(result, { planId, stepId, softLimitTokens } = {}) {
+  const row = {
+    role: result.role,
+    checkpoint: result.checkpoint,
+    handoff_id: result.handoff_id,
+    packet_hash: result.packet_hash,
+    packet_chars: result.packet_chars,
+    packet_estimated_tokens: result.packet_estimated_tokens,
+    previous_context_chars: result.previous_context_chars,
+    reason: result.reason,
+    plan_id: planId,
+    step_id: stepId,
+    soft_limit_tokens: softLimitTokens,
+  }
+  return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined))
+}

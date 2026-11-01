@@ -6,6 +6,7 @@ import {
   buildSteeringContext,
   classifyUserSteering,
   providerRequest,
+  selectReasoningPolicy,
 } from './provider.mjs'
 
 function planState(overrides = {}) {
@@ -99,6 +100,22 @@ test('terrain goals steer the model toward live tile observations instead of ent
   assert.match(context, /water is a tile, not an entity/)
 })
 
+test('dynamic steering prefers local completion without becoming a route solver', () => {
+  const context = buildSteeringContext([
+    { role: 'user', content: planState({
+      current_step_text: 'fuel and configure the local furnace before returning to the miner patch',
+      last_operations: [
+        'move_items_exact {"unit_number":582,"item_name":"coal","max_count":10,"to_entity":true}',
+        'set_machine_recipe {"unit_number":583,"recipe_name":"iron-gear-wheel"}',
+      ],
+    }) },
+    { role: 'user', content: '[CHAT] TTLouis: 继续' },
+  ])
+  assert.match(context, /locality=before intentionally crossing to another area/)
+  assert.match(context, /known current-area targets/)
+  assert.match(context, /do not invent targets or reorder user constraints, prerequisites, or observation-dependent work/)
+})
+
 test('steering is inserted before a MOD receipt so completion remains the final observation', () => {
   const messages = [
     { role: 'system', content: 'system' },
@@ -151,8 +168,22 @@ test('provider request injects steering while preserving compact completion beha
     })}` },
   ], { fetchImpl, allowTools: true, recoveryAttempt: 0 })
 
-  assert.equal(body.max_tokens, 1000)
+  assert.equal(body.max_tokens, 8000)
   assert.match(body.messages.at(-2).content, /^\[STEERING\]/)
   assert.match(body.messages.at(-2).content, /last_receipt=completed batch=9 tasks=placing/)
   assert.match(body.messages.at(-1).content, /Compact task receipt/)
+})
+
+
+test('action omission repair stays low reasoning even though it is a bounded recovery call', () => {
+  const policy = selectReasoningPolicy({
+    model: 'deepseek-chat',
+    profile: 'deepseek',
+  }, [
+    { role: 'user', content: '[CHAT] TTLouis: continue' },
+  ], {
+    recoveryAttempt: 1,
+    actionOmissionRepair: true,
+  })
+  assert.deepEqual(policy, { effort: 'low', reason: 'action_omission_repair' })
 })

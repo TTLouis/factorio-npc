@@ -1,4 +1,5 @@
 import type { ControlledActor } from './actors/types'
+import { crafting_categories_support_recipe } from './recipe_categories'
 import type {
   ProductionEvidenceRef,
   ProductionMachineSelection,
@@ -10,6 +11,7 @@ import type {
   ProductionTarget,
 } from './production_planning'
 import { solve_production } from './production_planning'
+import * as rates from './production_rates'
 
 export interface LiveProductionMachineSelection {
   recipe_name: string
@@ -109,15 +111,7 @@ function machine_selection_for(selections: LiveProductionMachineSelection[], rec
 }
 
 function machine_supports_recipe(machine: any, recipe: any) {
-  const supported = machine?.crafting_categories
-  if (!supported) return false
-  const categories: string[] = []
-  for (const category of recipe.categories ?? []) categories.push(category)
-  if (categories.length === 0) return false
-  for (const category of categories) {
-    if (supported[category] === true) return true
-  }
-  return false
+  return crafting_categories_support_recipe(machine?.crafting_categories, recipe)
 }
 
 function fixed_amount_or_placeholder(product: any) {
@@ -233,7 +227,8 @@ export function solve_live_production(actor: ControlledActor, request: LiveProdu
     const selection = machine_selection_for(selections, recipe.name)
     if (selection) {
       const prototype = (prototypes.entity as any)[selection.machine_name]
-      if (!prototype || !valid_positive_number(prototype.crafting_speed)) {
+      const crafting_speed = prototype ? rates.crafting_speed_of(prototype) : 0
+      if (!prototype || !valid_positive_number(crafting_speed)) {
         adapter_failure = fail(request.calculation_id, `machine prototype is missing or has no crafting speed: ${selection.machine_name}`)
         return
       }
@@ -245,7 +240,7 @@ export function solve_live_production(actor: ControlledActor, request: LiveProdu
       add_evidence(machine_evidence, 'engine_read')
       machine = {
         name: selection.machine_name,
-        crafting_speed: prototype.crafting_speed,
+        crafting_speed,
         evidence_ids: [machine_evidence],
       }
     }

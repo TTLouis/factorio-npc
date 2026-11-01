@@ -1,0 +1,587 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import fsp from 'node:fs/promises'
+import path from 'node:path'
+import process from 'node:process'
+import { setTimeout as delay } from 'node:timers/promises'
+import { promisify } from 'node:util'
+
+import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from '../pterodactyl/runtime-v8/npc-agent-loop.mjs'
+import { getActivePlan, PLAN_STATUS } from '../pterodactyl/runtime-v8/planning-state.mjs'
+import { configureNpcSession, deploymentStatus } from '../pterodactyl/staging/supervisor-adapter.mjs'
+
+const execFileAsync = promisify(execFile)
+const key = 'npc:sgluna'
+
+function requiredArg(name) {
+  const index = process.argv.indexOf(`--${name}`)
+  assert.ok(index >= 0 && process.argv[index + 1], `missing --${name}`)
+  return process.argv[index + 1]
+}
+
+class OneShotRcon {
+  constructor({ host, port, password }) {
+    this.host = host
+    this.port = port
+    this.password = password
+  }
+
+  async command(command) {
+    const { stdout } = await execFileAsync('/usr/bin/python3', [
+      '/test/runner/rcon_once.py',
+      '--host', this.host,
+      '--port', String(this.port),
+      '--password', this.password,
+      '--command', command,
+    ], {
+      maxBuffer: 1024 * 1024,
+      timeout: 15000,
+    })
+    return stdout.trim()
+  }
+}
+
+function operationStatusCommand() {
+  return '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","status")))'
+}
+
+function actorIronCommand() {
+  return '/silent-command local request={kind="inventory_count",item_name="iron-ore",minimum=1}; local result=remote.call("autorio_tools","evaluate_condition",request); rcon.print(helpers.table_to_json({iron=result and result.current or 0,ok=result and result.ok or false}))'
+}
+
+function actorInventoryCommand(actorId) {
+  assert.ok(Number.isSafeInteger(actorId) && actorId > 0)
+  return `/silent-command local a=game.get_entity_by_unit_number(${actorId}); assert(a and a.valid); local inv=a.get_main_inventory(); assert(inv); local items={}; for _,item in pairs(inv.get_contents()) do local key=item.name..":"..(item.quality or "normal"); items[key]=(items[key] or 0)+item.count end; rcon.print(helpers.table_to_json({actor_id=a.unit_number,force_index=a.force.index,surface_index=a.surface.index,connected_players=#game.connected_players,items=items}))`
+}
+
+async function waitForIdle(rcon, timeoutMs = 15000) {
+  const started = Date.now()
+  let last
+  while (Date.now() - started < timeoutMs) {
+    last = JSON.parse(await rcon.command(operationStatusCommand()))
+    if (last.task_state === 'idle' && Number(last.queue_length ?? 0) === 0) return last
+    await delay(100)
+  }
+  throw new Error(`Autorio did not become idle: ${JSON.stringify(last)}`)
+}
+
+function checkpoint(itemName, minimum) {
+  return {
+    mode: 'all',
+    requirements: [{
+      id: 'inventory_target',
+      kind: 'inventory_count',
+      item_name: itemName,
+      minimum,
+    }],
+  }
+}
+
+function planMessage({
+  chatMessage,
+  step,
+  resourceName = 'iron-ore',
+  count = 1,
+  minimum = 1,
+  roadmap,
+  roadmapNodeIds,
+  developmentMode,
+  includeCheckpoint = true,
+  operations,
+}) {
+  return {
+    content: JSON.stringify({
+      chatMessage,
+      plan: [step],
+      currentStep: 0,
+      operations: operations ?? [{
+        name: 'gather_resource',
+        args: {
+          resource_name: resourceName,
+          count,
+          search_radius: 32,
+        },
+      }],
+      ...(includeCheckpoint ? { checkpoint: checkpoint(resourceName, minimum) } : {}),
+      ...(roadmap ? { roadmap } : {}),
+      ...(roadmapNodeIds ? { roadmapNodeIds } : {}),
+      ...(developmentMode ? { developmentMode } : {}),
+    }),
+  }
+}
+
+function steeringAnswer(questions, mode, reasonCode, candidateShelfNodes = []) {
+  const answers = {
+    development: { choice: mode, confidence: 0.95 },
+  }
+  for (const key of Object.keys(questions)) {
+    if (key.startsWith('pressure_')) {
+      answers[key] = { type: 'noul', noul: key === `pressure_${reasonCode}` ? 0.95 : 0.05 }
+    }
+  }
+  if (questions.next_shelf_node) {
+    const wanted = candidateShelfNodes[0]
+    const selected = Object.entries(questions.next_shelf_node.criteria)
+      .find(([, description]) => description?.node_id === wanted)?.[0] ?? 'none'
+    answers.next_shelf_node = { choice: selected, confidence: wanted ? 0.9 : 0.7 }
+  }
+  return {
+    answers,
+    provider: 'fixture-jev',
+    model: 'fixture-steering',
+  }
+}
+function makeAgent({
+  rcon,
+  stateFile,
+  memory,
+  provider,
+  steeringDecisionProvider,
+}) {
+  return new NpcAgentLoop({
+    rcon,
+    provider,
+    steeringDecisionProvider,
+    systemPrompt: 'real Factorio full planning lifecycle acceptance test',
+    stateFile,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'sgluna',
+    memory,
+  })
+}
+
+function assertPlannerMode(messages, mode, label) {
+  const text = messages.map(message => String(message?.content ?? '')).join('\n')
+  assert.match(text, /\[PLANNING_STATE\]/, `${label}: planner did not receive planning state`)
+  assert.match(text, new RegExp(`"current_mode":"${mode}"`), `${label}: planner did not receive ${mode} steering`)
+  assert.match(text, new RegExp(`"recommended_mode":"${mode}"`), `${label}: planner did not receive Jev ${mode} recommendation provenance`)
+}
+
+function nodeById(planning, id) {
+  return planning?.roadmap?.nodes?.find(node => node.id === id)
+}
+
+function assertUnmeasuredShelfProgress(planning, id, planId) {
+  const node = nodeById(planning, id)
+  assert.ok(node, `${id}: shelf node must survive the lifecycle`)
+  assert.equal(node.capability_frontier ?? null, null, `${id}: this fixture declares no separate recognition contract`)
+  assert.equal(node.status, 'partially_realized', `${id}: a completed linked slice proves progress, not the broader shelf intent`)
+  assert.ok(node.resolved_by.includes(planId), `${id}: progress must retain its exact completed plan lineage`)
+  assert.ok(node.verified_results.length > 0, `${id}: partial progress still requires verified results`)
+}
+
+function assertUnreadyFrontierRecorded(planning, plan) {
+  assert.equal(nodeById(planning, 'next-capability-frontier')?.status, 'tentative', 'unmeasured support cannot unblock its dependent frontier')
+  assert.deepEqual(plan.refinement_grounding.ready_node_ids, [], 'intentional refinement must not invent dependency readiness')
+  assert.deepEqual(plan.refinement_grounding.not_ready, [{ node_id: 'next-capability-frontier', reason: 'dependencies_unsatisfied' }])
+}
+
+async function prepare({ rcon, results, stateFile }) {
+  await configureNpcSession(rcon, 'sgluna-factorio-planning-lifecycle-prepare-0001')
+
+  const ironBefore = JSON.parse(await rcon.command(actorIronCommand())).iron
+  const roadmap = [
+    {
+      id: 'acquisition-frontier',
+      intent: 'The NPC has demonstrated a working iron acquisition capability.',
+      why_it_matters: 'The long-horizon factory needs a verified material acquisition frontier.',
+      development_hint: 'vertical',
+    },
+    {
+      id: 'acquisition-support',
+      intent: 'The demonstrated acquisition path has enough repeated support for the next push.',
+      why_it_matters: 'The next capability should not rest on a one-off acquisition.',
+      depends_on: ['acquisition-frontier'],
+      development_hint: 'horizontal',
+    },
+    {
+      id: 'next-capability-frontier',
+      intent: 'The next capability frontier can be attempted from the supported foundation.',
+      why_it_matters: 'This is the next vertical slice on the user goal critical path.',
+      depends_on: ['acquisition-support'],
+      development_hint: 'vertical',
+    },
+  ]
+
+  let providerCalls = 0
+  let steeringCalls = 0
+  const memory = new CanonicalTaskBoardMemory()
+
+  const provider = async (messages) => {
+    providerCalls++
+    const expectedModes = ['vertical', 'horizontal', 'vertical']
+    const expectedMode = expectedModes[providerCalls - 1]
+    const durableSteering = memory.planningState(key)?.steering
+    assert.equal(
+      durableSteering?.current_mode,
+      expectedMode,
+      `planner call ${providerCalls}: durable steering mismatch before provider context; steeringCalls=${steeringCalls}; steering=${JSON.stringify(durableSteering)}`,
+    )
+    assertPlannerMode(messages, expectedMode, `planner call ${providerCalls}`)
+
+    if (providerCalls === 1) {
+      return planMessage({
+        chatMessage: 'Using the bounded first capability slice.',
+        step: 'Demonstrate the first iron acquisition capability',
+        minimum: ironBefore + 1,
+        roadmap,
+        roadmapNodeIds: ['acquisition-frontier'],
+        developmentMode: 'vertical',
+      })
+    }
+    if (providerCalls === 2) {
+      return planMessage({
+        chatMessage: 'Strengthening the reached acquisition frontier.',
+        step: 'Exercise the iron acquisition path again as supporting capacity',
+        minimum: ironBefore + 2,
+        roadmapNodeIds: ['acquisition-support'],
+        developmentMode: 'horizontal',
+      })
+    }
+    if (providerCalls === 3) {
+      return planMessage({
+        chatMessage: 'Starting the next vertical frontier slice.',
+        step: 'Advance the next capability frontier',
+        // Keep this committed step genuinely unmet before restart. A satisfied
+        // checkpoint now settles at idle admission, so it cannot be used to
+        // test blocking/revision of an unfinished immutable plan.
+        minimum: ironBefore + 4,
+        roadmapNodeIds: ['next-capability-frontier'],
+        developmentMode: 'vertical',
+      })
+    }
+    throw new Error(`unexpected prepare provider call ${providerCalls}`)
+  }
+
+  const steeringDecisionProvider = async (state, questions) => {
+    steeringCalls++
+    assert.ok(questions.development, 'M11B must use the typed development steering head')
+    assert.equal(questions.steering, undefined, 'duplicate/generated steering head must stay retired')
+    if (steeringCalls === 1) {
+      assert.equal(state.boundary, 'goal_admission')
+      return steeringAnswer(
+        questions,
+        'vertical',
+        'goal_requires_new_capability',
+      )
+    }
+    if (steeringCalls === 2) {
+      assert.equal(state.boundary, 'plan_completed')
+      return steeringAnswer(
+        questions,
+        'horizontal',
+        // This advisory proposes support work; refinement grounding below
+        // records that the unmeasured dependency is still unsatisfied.
+        'shelf_support_node_ready',
+        ['acquisition-support'],
+      )
+    }
+    if (steeringCalls === 3) {
+      assert.equal(state.boundary, 'plan_completed')
+      return steeringAnswer(
+        questions,
+        'vertical',
+        'shelf_node_ready_to_refine',
+        ['next-capability-frontier'],
+      )
+    }
+    throw new Error(`unexpected steering call ${steeringCalls}`)
+  }
+
+  const agent = makeAgent({
+    rcon,
+    stateFile,
+    memory,
+    provider,
+    steeringDecisionProvider,
+  })
+
+  const first = await agent.request('Build a staged long-horizon factory through successive capability frontiers.', { sender: 'Louis' })
+  assert.equal(providerCalls, 1, 'a structurally valid first draft must not require retired Jev correctness review')
+  assert.equal(first.goalStatus, 'active')
+  await waitForIdle(rcon)
+
+  const second = await agent.completed()
+  const afterV1 = memory.planningState(key)
+  assert.equal(
+    providerCalls,
+    2,
+    `v1 completion must automatically wake the next shelf slice; steeringCalls=${steeringCalls}; second=${JSON.stringify(second)}; legacy=${JSON.stringify(memory.currentPlan(key))}; planning=${JSON.stringify(afterV1)}`,
+  )
+  assert.equal(second?.goalStatus, 'active')
+  await waitForIdle(rcon)
+
+  const third = await agent.completed()
+  assert.equal(providerCalls, 3, 'v2 completion must automatically wake the next vertical shelf slice')
+  assert.equal(third?.goalStatus, 'active')
+  await waitForIdle(rcon)
+
+  const planning = memory.planningState(key)
+  const active = getActivePlan(planning)
+  const completedV1 = planning.plans.find(plan =>
+    plan.status === PLAN_STATUS.COMPLETED
+    && plan.roadmap_node_ids.includes('acquisition-frontier'))
+  const completedV2 = planning.plans.find(plan =>
+    plan.status === PLAN_STATUS.COMPLETED
+    && plan.roadmap_node_ids.includes('acquisition-support'))
+
+  assert.ok(completedV1, 'vertical v1 did not complete')
+  assert.ok(completedV2, 'horizontal v2 did not complete')
+  assert.ok(active && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(active.status), 'v3 must be committed before restart')
+  assert.deepEqual(active.roadmap_node_ids, ['next-capability-frontier'])
+  assert.equal(completedV1.development_mode, 'vertical')
+  assert.equal(completedV2.development_mode, 'horizontal')
+  assert.equal(active.development_mode, 'vertical')
+  assert.deepEqual(completedV1.steps.map(step => step.description), ['Demonstrate the first iron acquisition capability'])
+  assert.deepEqual(completedV2.steps.map(step => step.description), ['Exercise the iron acquisition path again as supporting capacity'])
+  assert.deepEqual(active.steps.map(step => step.description), ['Advance the next capability frontier'])
+  assert.equal(completedV1.steering_at_draft?.mode, 'vertical')
+  assert.equal(completedV2.steering_at_draft?.mode, 'horizontal')
+  assert.equal(active.steering_at_draft?.mode, 'vertical')
+
+  assertUnmeasuredShelfProgress(planning, 'acquisition-frontier', completedV1.plan_id)
+  assertUnmeasuredShelfProgress(planning, 'acquisition-support', completedV2.plan_id)
+  assertUnreadyFrontierRecorded(planning, active)
+  assert.equal(planning.goal.status, 'active')
+  assert.equal(planning.steering.current_mode, 'vertical')
+  assert.deepEqual(
+    planning.steering.history.slice(-3).map(entry => entry.mode),
+    ['vertical', 'horizontal', 'vertical'],
+  )
+  assert.equal(steeringCalls, 3)
+
+  const ironAfter = JSON.parse(await rcon.command(actorIronCommand())).iron
+  assert.ok(ironAfter >= ironBefore + 3, `real Factorio inventory did not reflect three admitted acquisition slices: before=${ironBefore} after=${ironAfter}`)
+  const activeIron = active.steps[0].completion_contract?.requirements.find(requirement => requirement.kind === 'inventory_count' && requirement.item_name === 'iron-ore')
+  assert.equal(activeIron?.minimum, ironBefore + 4, 'v3 retains its declared unfinished target')
+  assert.ok(ironAfter < activeIron.minimum, 'the committed v3 checkpoint must remain unmet before restart')
+
+  await agent.persistState()
+  await fsp.writeFile(path.join(results, 'planning-lifecycle-prepare.json'), JSON.stringify({
+    status: 'prepared',
+    goal_id: planning.goal.goal_id,
+    roadmap_revision_id: planning.roadmap.roadmap_revision_id,
+    reasoning_epoch: memory.planningReasoningEpoch(key),
+    steering: planning.steering,
+    shelf: planning.roadmap.nodes.map(node => ({
+      id: node.id,
+      status: node.status,
+      resolved_by: node.resolved_by,
+      verified_results: node.verified_results,
+    })),
+    completed_v1: completedV1.plan_id,
+    completed_v2: completedV2.plan_id,
+    active_v3: active.plan_id,
+    active_v3_version: active.plan_version,
+    plan_count: planning.plans.length,
+    iron_before: ironBefore,
+    iron_after: ironAfter,
+  }, null, 2))
+
+  process.stdout.write(`PASS: real Factorio planning lifecycle reached VERTICAL -> HORIZONTAL -> VERTICAL with v3 committed before restart plan_id=${active.plan_id}\n`)
+}
+
+async function verify({ rcon, results, stateFile }) {
+  await configureNpcSession(rcon, 'sgluna-factorio-planning-lifecycle-verify-0002')
+  const before = JSON.parse(await fsp.readFile(path.join(results, 'planning-lifecycle-prepare.json'), 'utf8'))
+  // Disable an existing recipe on this fixture's actual NPC force. An invented
+  // prototype is only a correctable argument error and must never prove a
+  // structural world blocker. No inventory or completion evidence is fabricated.
+  const deployment = await deploymentStatus(rcon)
+  assert.ok(Number.isSafeInteger(deployment.actor_id) && deployment.actor_id > 0)
+  const lockedRecipe = JSON.parse(await rcon.command(`/silent-command local a=game.get_entity_by_unit_number(${deployment.actor_id}); assert(a and a.valid); local r=a.force.recipes["iron-gear-wheel"]; assert(r); local was_enabled=r.enabled; r.enabled=false; rcon.print(helpers.table_to_json({recipe=r.name,enabled=r.enabled,was_enabled=was_enabled}))`))
+  assert.equal(lockedRecipe.recipe, 'iron-gear-wheel')
+  assert.equal(lockedRecipe.enabled, false)
+  assert.equal(typeof lockedRecipe.was_enabled, 'boolean')
+
+  let providerCalls = 0
+  const memory = new CanonicalTaskBoardMemory()
+  const provider = async (messages) => {
+    providerCalls++
+    assertPlannerMode(messages, 'vertical', `restored planner call ${providerCalls}`)
+    // A locked recipe is a plan-level blocker, with no executor correction turn.
+    if (providerCalls === 1) {
+      return planMessage({
+        chatMessage: 'Testing the committed frontier against its now-known structural dependency.',
+        step: 'Advance the next capability frontier',
+        operations: [{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }],
+        includeCheckpoint: false,
+        roadmapNodeIds: ['next-capability-frontier'],
+        developmentMode: 'vertical',
+      })
+    }
+    if (providerCalls === 2) {
+      return planMessage({
+        chatMessage: 'Following the user-approved bounded alternate route.',
+        step: 'Use the verified iron route while the unavailable frontier dependency is reconsidered',
+        minimum: before.iron_after + 1,
+        roadmapNodeIds: ['next-capability-frontier'],
+        developmentMode: 'vertical',
+      })
+    }
+    throw new Error(`unexpected verify provider call ${providerCalls}`)
+  }
+
+  const agent = makeAgent({
+    rcon,
+    stateFile,
+    memory,
+    provider,
+    steeringDecisionProvider: async () => {
+      throw new Error('restoring or blocking an in-flight plan must not invent a new steering boundary')
+    },
+  })
+
+  const persistedSnapshot = JSON.parse(await fsp.readFile(stateFile, 'utf8'))
+  const persistedPlanning = (persistedSnapshot.planning_states ?? []).find(item => item?.key === key)?.state
+  assert.equal(
+    persistedPlanning?.active_plan_id,
+    before.active_v3,
+    `persisted lifecycle snapshot drifted before restore; expected=${before.active_v3}; active=${persistedPlanning?.active_plan_id}; plans=${JSON.stringify((persistedPlanning?.plans ?? []).map(plan => ({ id: plan.plan_id, status: plan.status })))}`,
+  )
+
+  await agent.loadPersistentState()
+  let planning = memory.planningState(key)
+  const active = getActivePlan(planning)
+  assert.equal(
+    active?.plan_id,
+    persistedPlanning?.active_plan_id,
+    `restore changed authoritative active plan identity; persisted=${persistedPlanning?.active_plan_id}; restored=${active?.plan_id}; persistedPlans=${JSON.stringify((persistedPlanning?.plans ?? []).map(plan => ({ id: plan.plan_id, status: plan.status })))}; restoredPlans=${JSON.stringify((planning?.plans ?? []).map(plan => ({ id: plan.plan_id, status: plan.status })))}`,
+  )
+  assert.equal(providerCalls, 0, 'restore itself must not wake the Main LLM')
+  assert.equal(planning.goal.goal_id, before.goal_id)
+  assert.equal(planning.goal.status, 'active')
+  assert.equal(planning.roadmap.roadmap_revision_id, before.roadmap_revision_id)
+  assert.equal(active.plan_id, before.active_v3)
+  assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(active.status))
+  assert.equal(planning.steering.current_mode, 'vertical')
+  assert.deepEqual(
+    planning.steering.history.slice(-3).map(entry => entry.mode),
+    ['vertical', 'horizontal', 'vertical'],
+  )
+  assertUnmeasuredShelfProgress(planning, 'acquisition-frontier', before.completed_v1)
+  assertUnmeasuredShelfProgress(planning, 'acquisition-support', before.completed_v2)
+  assertUnreadyFrontierRecorded(planning, active)
+
+  // The independent persistence fixture between prepare/verify deliberately
+  // replaces inventory. Refusal effects must be measured at this request's
+  // boundary, not against the earlier planning acquisition snapshot.
+  const refusalBefore = JSON.parse(await rcon.command(actorInventoryCommand(deployment.actor_id)))
+  assert.equal(refusalBefore.actor_id, deployment.actor_id)
+  assert.equal(refusalBefore.connected_players, 0)
+  assert.ok(refusalBefore.items['iron-plate:normal'] >= 2, 'the locked recipe has sufficient native ingredients; refusal must be structural')
+  const blockedResult = await agent.request('continue', { sender: 'Louis' })
+  planning = memory.planningState(key)
+  const blocked = getActivePlan(planning)
+  assert.equal(providerCalls, 1, 'a verified plan-level blocker gets no executor correction turn')
+  assert.equal(blockedResult.goalStatus, 'blocked', 'the committed plan remains blocked even though the guard pause is durable')
+  assert.equal(memory.pauseRecord(key).paused, true)
+  assert.equal(blockedResult.blocker.code, 'recipe_locked')
+  assert.equal(memory.pauseRecord(key).pause_class, 'guard')
+  const refusalAfter = JSON.parse(await rcon.command(actorInventoryCommand(deployment.actor_id)))
+  assert.deepEqual(refusalAfter, refusalBefore, 'the refused batch changed no inventory or actor identity')
+  assert.equal(blockedResult.operations.length, 0)
+  assert.equal(
+    blocked.plan_id,
+    before.active_v3,
+    `blocker request replaced committed v3 unexpectedly; expected=${before.active_v3}; blocked=${blocked.plan_id}; blockedResult=${JSON.stringify(blockedResult)}; legacy=${JSON.stringify(memory.currentPlan(key))}; plans=${JSON.stringify(planning.plans.map(plan => ({
+      id: plan.plan_id,
+      status: plan.status,
+      origin: plan.origin,
+      derived_from: plan.derived_from_plan_id,
+      superseded_by: plan.superseded_by_plan_id,
+      steps: plan.steps.map(step => step.description),
+      roadmap_node_ids: plan.roadmap_node_ids,
+    })))}`,
+  )
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(blocked.blocker?.reason_code, 'operation_preflight_failed:recipe_locked')
+  assert.equal(planning.plans.length, before.plan_count, 'structural blocker must not create an automatic suffix')
+  assert.equal(planning.goal.goal_id, before.goal_id)
+  assert.equal(planning.roadmap.roadmap_revision_id, before.roadmap_revision_id)
+  assert.equal(planning.steering.current_mode, 'vertical')
+
+  const restoredRecipe = JSON.parse(await rcon.command(`/silent-command local a=game.get_entity_by_unit_number(${deployment.actor_id}); assert(a and a.valid); local r=a.force.recipes["iron-gear-wheel"]; r.enabled=${lockedRecipe.was_enabled ? 'true' : 'false'}; rcon.print(helpers.table_to_json({enabled=r.enabled}))`))
+  assert.equal(restoredRecipe.enabled, lockedRecipe.was_enabled)
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.BLOCKED, 'restoring recipe availability alone cannot silently revise a frozen plan')
+
+  memory.recordBlockedChoice(key, 'revise', 'Louis', { now: Date.now() })
+  await agent.persistState()
+  assert.equal(getActivePlan(memory.planningState(key)).blocker?.user_choice?.choice, 'revise')
+
+  const revisedResult = await agent.request(
+    'Use the verified iron acquisition route as the bounded alternate while we reconsider the unavailable frontier dependency.',
+    { sender: 'Louis' },
+  )
+  planning = memory.planningState(key)
+  const successor = getActivePlan(planning)
+
+  assert.equal(providerCalls, 2)
+  assert.equal(revisedResult.goalStatus, 'active')
+  assert.equal(successor.derived_from_plan_id, before.active_v3)
+  assert.equal(successor.plan_version, before.active_v3_version + 1)
+  assert.deepEqual(successor.roadmap_node_ids, ['next-capability-frontier'])
+  assert.equal(successor.development_mode, 'vertical')
+  assert.equal(planning.goal.goal_id, before.goal_id)
+  assert.equal(planning.goal.status, 'active')
+  assert.equal(planning.roadmap.roadmap_revision_id, before.roadmap_revision_id)
+  assert.equal(planning.steering.current_mode, 'vertical')
+  assert.deepEqual(
+    planning.steering.history.slice(-3).map(entry => entry.mode),
+    ['vertical', 'horizontal', 'vertical'],
+  )
+  assertUnmeasuredShelfProgress(planning, 'acquisition-frontier', before.completed_v1)
+  assertUnmeasuredShelfProgress(planning, 'acquisition-support', before.completed_v2)
+  assert.equal(memory.planningReasoningEpoch(key) > before.reasoning_epoch, true, 'explicit user revision must invalidate predecessor reasoning')
+
+  await waitForIdle(rcon)
+  await agent.persistState()
+  await fsp.writeFile(path.join(results, 'planning-lifecycle-verify.json'), JSON.stringify({
+    status: 'pass',
+    goal_id: planning.goal.goal_id,
+    predecessor_plan_id: before.active_v3,
+    successor_plan_id: successor.plan_id,
+    successor_version: successor.plan_version,
+    steering_modes: planning.steering.history.slice(-3).map(entry => entry.mode),
+    roadmap_revision_id: planning.roadmap.roadmap_revision_id,
+    provider_calls: providerCalls,
+    refusal_before: refusalBefore,
+    refusal_after: refusalAfter,
+  }, null, 2))
+
+  process.stdout.write(`PASS: full planning lifecycle survived real Factorio restart, froze on structural blocker, and resumed only through explicit user successor=${successor.plan_id}\n`)
+}
+
+async function main() {
+  const mode = requiredArg('mode')
+  const host = requiredArg('host')
+  const port = Number(requiredArg('port'))
+  const password = requiredArg('password')
+  const results = path.resolve(requiredArg('results'))
+  assert.ok(Number.isSafeInteger(port) && port > 0 && port < 65536, 'invalid --port')
+  assert.ok(mode === 'prepare' || mode === 'verify', 'mode must be prepare or verify')
+
+  await fsp.mkdir(results, { recursive: true })
+  const stateFile = path.join(results, 'planning-lifecycle-state.json')
+  const rcon = new OneShotRcon({ host, port, password })
+
+  if (mode === 'prepare') await prepare({ rcon, results, stateFile })
+  else await verify({ rcon, results, stateFile })
+}
+
+main().catch(async (error) => {
+  const resultsIndex = process.argv.indexOf('--results')
+  if (resultsIndex >= 0 && process.argv[resultsIndex + 1]) {
+    const results = path.resolve(process.argv[resultsIndex + 1])
+    await fsp.mkdir(results, { recursive: true }).catch(() => {})
+    await fsp.writeFile(
+      path.join(results, 'planning-lifecycle-factorio-error.txt'),
+      `${error?.stack ?? error}\n`,
+    ).catch(() => {})
+  }
+  console.error(error)
+  process.exitCode = 1
+})

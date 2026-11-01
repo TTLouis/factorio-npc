@@ -95,12 +95,16 @@ function world() {
   return { actor, target, enemies, character, gun, ammo, guns, magazines, main, surface, identity, get_actor, manager, controller }
 }
 
-function makeTurret(unit_number: number, insertedAmmo?: number) {
+function makeTurret(unit_number: number, insertedAmmo?: number, position = { x: 0, y: 0 }) {
   const turretAmmo = inventory([])
   if (insertedAmmo !== undefined) turretAmmo.insert.mockReturnValue(insertedAmmo)
   const turret: any = {
     valid: true,
+    name: 'gun-turret',
+    type: 'ammo-turret',
     unit_number,
+    position: { ...position },
+    prototype: { turret_range: 18 },
     get_inventory: vi.fn(() => turretAmmo),
     destroy: vi.fn(),
   }
@@ -320,7 +324,7 @@ describe('bounded combat controller', () => {
 })
 
 describe('bounded area-clearing combat', () => {
-  it('reacquires enemies until the bounded area is actually clear', () => {
+  it('reacquires enemies until the bounded area is actually clear, then waits for stable local safety', () => {
     const { actor, target, enemies, manager, controller } = world()
     const second: any = {
       valid: true,
@@ -340,6 +344,16 @@ describe('bounded area-clearing combat', () => {
     expect(controller.status()).toMatchObject({ mode: 'clear_area', targets_destroyed: 1, target: { name: 'biter-spawner' } })
 
     second.valid = false
+    ;(globalThis as any).game.tick += 1
+    controller.tick(actor)
+    expect(controller.status()).toMatchObject({ combat_phase: 'safety', targets_destroyed: 2 })
+    expect(controller.status().last_result).not.toMatchObject({ code: 'area_cleared' })
+    expect(manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+
+    ;(globalThis as any).game.tick += 119
+    controller.tick(actor)
+    expect(manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+
     ;(globalThis as any).game.tick += 1
     controller.tick(actor)
     expect(controller.status()).toMatchObject({ last_result: { code: 'area_cleared', completed: true, targets_destroyed: 2 } })
@@ -370,7 +384,49 @@ describe('bounded area-clearing combat', () => {
     controller.tick(actor)
 
     expect(controller.status()).toMatchObject({ target: { name: 'small-biter', unit_number: 91 } })
+    // Target handoff is atomic: movement toward/away from the new mobile target
+    // starts on the following combat tick rather than continuing stale nest logic.
+    ;(globalThis as any).game.tick += 1
+    controller.tick(actor)
     expect(actor.set_walking_state).toHaveBeenLastCalledWith(expect.objectContaining({ walking: true }))
+  })
+
+  it('returns to the locked static encounter after a mobile preemption instead of chaining to distant units', () => {
+    const { actor, target, enemies, controller } = world()
+    target.type = 'unit-spawner'
+    target.name = 'biter-spawner'
+    target.unit_number = 92
+    target.position = { x: 30, y: 0 }
+
+    controller.submit_clear(80)
+    controller.tick(actor)
+
+    const immediate: any = {
+      valid: true,
+      name: 'small-biter',
+      type: 'unit',
+      unit_number: 93,
+      position: { x: 8, y: 0 },
+      health: 15,
+    }
+    const distant: any = {
+      valid: true,
+      name: 'medium-biter',
+      type: 'unit',
+      unit_number: 94,
+      position: { x: 20, y: 0 },
+      health: 75,
+    }
+    enemies.push(immediate, distant)
+    ;(globalThis as any).game.tick += 1
+    controller.tick(actor)
+    expect(controller.status()).toMatchObject({ target: { unit_number: 93 } })
+
+    immediate.valid = false
+    ;(globalThis as any).game.tick += 1
+    controller.tick(actor)
+
+    expect(controller.status()).toMatchObject({ target: { name: 'biter-spawner', unit_number: 92 } })
   })
 
   it('does not place the first support turret at the task origin and stages only after advancing toward a nest', () => {
@@ -387,6 +443,7 @@ describe('bounded area-clearing combat', () => {
     expect(c.surface.create_entity).not.toHaveBeenCalled()
     expect(c.controller.status()).toMatchObject({
       initial_static_threats: 1,
+      initial_threat_score: 4,
       support_turret_budget: 1,
       support_stage_started: false,
     })
@@ -417,7 +474,46 @@ describe('bounded area-clearing combat', () => {
     expect(c.controller.status()).toMatchObject({ turrets_placed: 0, support_stage_started: true })
   })
 
-  it('scales the deterministic support budget with static nest size and places the bounded staged batch', () => {
+  it('scales support budget with enemy count and tier, capped at eight turrets', () => {
+    const c = world()
+    c.enemies.length = 0
+    c.enemies.push(
+      { valid: true, name: 'biter-spawner', type: 'unit-spawner', unit_number: 600, position: { x: 30, y: 0 }, health: 350 },
+      { valid: true, name: 'medium-biter', type: 'unit', unit_number: 601, position: { x: 34, y: 1 }, health: 75 },
+      { valid: true, name: 'big-spitter', type: 'unit', unit_number: 602, position: { x: 36, y: -1 }, health: 200 },
+      { valid: true, name: 'behemoth-worm-turret', type: 'turret', unit_number: 603, position: { x: 38, y: 2 }, health: 750 },
+    )
+
+    c.controller.submit_clear(80)
+    c.controller.tick(c.actor)
+    expect(c.controller.status()).toMatchObject({
+      initial_static_threats: 2,
+      initial_threat_score: 18,
+      support_turret_budget: 5,
+    })
+
+    c.enemies.length = 0
+    for (let i = 0; i < 8; i++) {
+      c.enemies.push({
+        valid: true,
+        name: 'behemoth-worm-turret',
+        type: 'turret',
+        unit_number: 700 + i,
+        position: { x: 30 + i, y: i },
+        health: 750,
+      })
+    }
+    // This is a separate simulated world, not a peer loading c's active task.
+    ;(globalThis as any).storage = {}
+    const c2 = world()
+    c2.enemies.length = 0
+    c2.enemies.push(...c.enemies)
+    c2.controller.submit_clear(80)
+    c2.controller.tick(c2.actor)
+    expect(c2.controller.status()).toMatchObject({ initial_threat_score: 64, support_turret_budget: 8 })
+  })
+
+  it('deploys a threat-sized support batch without restaging merely because SGLuna advances', () => {
     const c = world()
     c.enemies.length = 0
     for (let i = 0; i < 5; i++) {
@@ -425,35 +521,42 @@ describe('bounded area-clearing combat', () => {
         valid: true,
         name: i % 2 === 0 ? 'biter-spawner' : 'small-worm-turret',
         type: i % 2 === 0 ? 'unit-spawner' : 'turret',
-        unit_number: 600 + i,
+        unit_number: 800 + i,
         position: { x: 30 + i * 2, y: i },
         health: 350,
       })
     }
-    c.main.push(itemStack('gun-turret', 4), itemStack('piercing-rounds-magazine', 100))
-    let nextTurret = 700
-    c.surface.create_entity.mockImplementation(() => makeTurret(nextTurret++).turret)
+    c.main.push(itemStack('gun-turret', 8), itemStack('piercing-rounds-magazine', 200))
+    let nextTurret = 900
+    c.surface.create_entity.mockImplementation(({ position }: { position: { x: number, y: number } }) => makeTurret(nextTurret++, undefined, position).turret)
 
     c.controller.submit_clear(80)
     c.controller.tick(c.actor)
-    expect(c.controller.status()).toMatchObject({ initial_static_threats: 5, support_turret_budget: 3, turrets_placed: 0 })
+    expect(c.controller.status()).toMatchObject({ initial_threat_score: 16, support_turret_budget: 4, turrets_placed: 0 })
 
     c.actor.position = { x: 6, y: 0 }
     for (let i = 0; i < 3; i++) {
       ;(globalThis as any).game.tick += 1
       c.controller.tick(c.actor)
     }
-
     expect(c.surface.create_entity).toHaveBeenCalledTimes(3)
     expect(c.controller.status()).toMatchObject({
-      support_turret_budget: 3,
-      turrets_placed: 3,
-      support_stage_started: true,
+      support_stage_anchor_position: { x: 6, y: 0 },
+      support_stage_start_turret_count: 0,
+      support_stage_target_turret_count: 3,
+      encounter_owned_turret_count: 3,
     })
 
     ;(globalThis as any).game.tick += 1
     c.controller.tick(c.actor)
     expect(c.surface.create_entity).toHaveBeenCalledTimes(3)
+
+    c.actor.position = { x: 14, y: 0 }
+    ;(globalThis as any).game.tick += 1
+    c.controller.tick(c.actor)
+    expect(c.surface.create_entity).toHaveBeenCalledTimes(3)
+
+    expect(c.controller.status()).toMatchObject({ support_turret_budget: 4, turrets_placed: 3, encounter_owned_turret_count: 3 })
   })
 
   it('places and loads a paid gun turret only after support staging is established', () => {
@@ -514,7 +617,7 @@ describe('bounded area-clearing combat', () => {
   it('returns ammunition the turret could not accept and records only the amount actually loaded', () => {
     const c = world()
     c.main.push(itemStack('gun-turret', 1), itemStack('piercing-rounds-magazine', 20))
-    const { turret, turretAmmo } = makeTurret(504, 5)
+    const { turret } = makeTurret(504, 5)
     c.surface.create_entity.mockReturnValue(turret)
     c.character.can_shoot.mockReturnValue(false)
 
@@ -530,51 +633,59 @@ describe('bounded area-clearing combat', () => {
     })
   })
 
-  it('pathfinds back to the latest support turret while firing instead of retreating blindly through terrain', () => {
-    const { actor, character, manager, surface, controller } = world()
+  it('keeps healthy mobile kiting bounded instead of pulling back to a support turret', () => {
+    const { actor, target, character, manager, surface, controller } = world()
     controller.submit_clear(80)
     const task = manager.player_state.parameters_attack_nearest_enemy!
+    const support = makeTurret(520, undefined, { x: -10, y: 0 }).turret
     task.last_turret_position = { x: -10, y: 0 }
+    ;(task as any).encounter_owned_turrets = [support]
     task.turrets_placed = 1
     character.can_shoot.mockReturnValue(true)
     actor.position = { x: 15, y: 0 }
+    target.position = { x: 20, y: 0 }
 
     controller.tick(actor)
     expect(actor.set_shooting_state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'shooting_selected' }))
     expect(surface.request_path).toHaveBeenCalledWith(expect.objectContaining({
       start: { x: 15, y: 0 },
-      goal: { x: -10, y: 0 },
+      goal: { x: 8, y: 0 },
       radius: 1.5,
     }))
-    expect(controller.status()).toMatchObject({ path: { mode: 'retreat', attempts: 1 } })
+    expect(surface.request_path).not.toHaveBeenCalledWith(expect.objectContaining({ goal: { x: -10, y: 0 } }))
+    expect(controller.status()).toMatchObject({ path: { mode: 'retreat', attempts: 1, target_position: { x: 8, y: 0 } } })
 
     const requestId = controller.status().path.request_id
-    controller.on_path_finished({ id: requestId, path: [waypoint(10, 4), waypoint(0, 4), waypoint(-10, 0)], try_again_later: false } as any)
+    controller.on_path_finished({ id: requestId, path: [waypoint(12, 4), waypoint(8, 0)], try_again_later: false } as any)
     ;(globalThis as any).game.tick += 1
     controller.tick(actor)
     expect(actor.set_shooting_state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'shooting_selected' }))
     expect(actor.set_walking_state).toHaveBeenLastCalledWith(expect.objectContaining({ walking: true }))
   })
 
-  it('low health with an established support position retreats by path instead of aborting or walking straight through obstacles', () => {
-    const { actor, character, manager, surface, controller } = world()
+  it('low health retreats only far enough to enter a live support turret firing envelope', () => {
+    const { actor, target, character, manager, surface, controller } = world()
     character.health = 50
     character.max_health = 250
     character.can_shoot.mockReturnValue(false)
     controller.submit_clear(80)
     const task = manager.player_state.parameters_attack_nearest_enemy!
-    task.last_turret_position = { x: -12, y: 3 }
+    const support = makeTurret(530, undefined, { x: 0, y: 0 }).turret
+    task.last_turret_position = { x: 0, y: 0 }
+    ;(task as any).encounter_owned_turrets = [support]
     task.turrets_placed = 1
-    actor.position = { x: 10, y: 0 }
+    actor.position = { x: 25, y: 0 }
+    target.position = { x: 30, y: 0 }
 
     controller.tick(actor)
 
     expect(surface.request_path).toHaveBeenCalledWith(expect.objectContaining({
-      start: { x: 10, y: 0 },
-      goal: { x: -12, y: 3 },
+      start: { x: 25, y: 0 },
+      goal: { x: 16, y: 0 },
       radius: 1.5,
     }))
-    expect(controller.status()).toMatchObject({ path: { mode: 'retreat' } })
+    expect(surface.request_path).not.toHaveBeenCalledWith(expect.objectContaining({ goal: { x: 0, y: 0 } }))
+    expect(controller.status()).toMatchObject({ path: { mode: 'retreat', target_position: { x: 16, y: 0 } } })
     expect(controller.status().last_result).not.toMatchObject({ code: 'low_health' })
   })
 
