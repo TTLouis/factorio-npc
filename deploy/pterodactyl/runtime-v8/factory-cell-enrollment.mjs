@@ -10,6 +10,13 @@ import { REFUSAL_CLASS } from './refusal-class.mjs'
 import { validateFactoryMiningSource, factoryBlockStartupRecipe } from './factory-cell-observation.mjs'
 
 const fail = code => { throw new FactoryRegistryError(code, code) }
+// Only a fresh pre-claim eligibility miss may fall back to the original close guard.
+const ineligibleStartupRecovery = new WeakSet()
+const refuseStartupEligibility = (code, residual) => {
+  const error = new FactoryRegistryError(code, code)
+  if (residual) ineligibleStartupRecovery.add(error)
+  throw error
+}
 const placement = op => ['place_entity', 'place_candidate'].includes(op?.name)
 
 export class FactoryCellBoundaryError extends FactoryRegistryError {
@@ -343,11 +350,11 @@ export async function ensureCommittedFactoryCellBeforeClose(agent, owner, { resi
         step_id: scope.step_id, intent_signature: current.signature, receipt_ids: enrollment.receipt_ids,
         state: observation.state, codes: observation.checks.map(row => row.code), native_tick: observation.native.tick })
       agent.assertCheckpointOwnerIdentity(owner); access.fence()
-      fail(observation.state === 'mismatch' ? 'factory_enrollment_native_mismatch' : 'factory_enrollment_native_unverified')
+      refuseStartupEligibility(observation.state === 'mismatch' ? 'factory_enrollment_native_mismatch' : 'factory_enrollment_native_unverified', residual)
     }
     const startups = current.intent.kind === 'production_block' ? observation.native.members
       .map(row => ({ row, recipe: factoryBlockStartupRecipe(declaration, row) })).filter(value => value.recipe) : []
-    if (residual && !startups.length) fail('factory_block_startup_recovery_unproven')
+    if (residual && !startups.length) refuseStartupEligibility('factory_block_startup_recovery_unproven', residual)
     if (startups.length) {
       startupProofUsed = true
       if (!agent.stateFile) fail('factory_enrollment_persistence_unavailable')
@@ -420,6 +427,7 @@ export async function recoverCommittedFactoryBlockClose(agent, error, owner) {
     return true
   } catch (failure) {
     agent.assertCheckpointOwnerIdentity(owner)
+    if (ineligibleStartupRecovery.has(failure)) return false
     await agent.traceEvent('factory_cell.block_startup_recovery_failed', { request_id: agent.traceRequest.id,
       goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId, code: failure.code ?? failure.message,
       disposition: 'no_continuation', world_operations_replayed: 0 })

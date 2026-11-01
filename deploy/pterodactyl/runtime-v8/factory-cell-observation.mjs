@@ -62,7 +62,7 @@ function assignedOutput(row, product, kind) {
 // Explicit output roles select capability, never a recipe inferred from supplied
 // ore or prose. This does not change the observed recipe or commission a block.
 // Publication/use callers separately own current authority and retained custody.
-export function factoryBlockStartupRecipe(cell, row, { retainedOutput = false } = {}) {
+export function factoryBlockOutputPorts(cell, row) {
   if (cell?.assignment?.method !== 'production_block' || row?.state !== 'observed' || row.type !== 'furnace'
     || row.recipe?.state !== 'none' || row.recipe.truncated !== false) return undefined
   const member = cell.members.find(member => identity(row.locator, member))
@@ -71,6 +71,12 @@ export function factoryBlockStartupRecipe(cell, row, { retainedOutput = false } 
   const outputs = cell.enrollment.output_roles.filter(output => output.role === role.role)
     .map(output => cell.ports.find(port => port.port_id === output.port_id))
   if (!outputs.length || outputs.some(port => port?.direction !== 'output' || port.kind !== 'item' || !token(port.resource))) return undefined
+  return outputs
+}
+
+export function factoryBlockStartupRecipe(cell, row) {
+  const outputs = factoryBlockOutputPorts(cell, row)
+  if (!outputs) return undefined
   const candidates = row.startup_recipe_candidates
   if (candidates?.schema_version !== 1 || candidates.state !== 'known' || candidates.truncated !== false
     || candidates.coverage !== 'complete' || candidates.selection !== 'unselected'
@@ -84,7 +90,7 @@ export function factoryBlockStartupRecipe(cell, row, { retainedOutput = false } 
     return Array.isArray(items) ? items : items && typeof items === 'object' && Object.keys(items).length === 0 ? [] : undefined
   }
   const input = inventory('input'); const output = inventory('output')
-  if (!input || input.length || !output || !retainedOutput && output.length) return undefined
+  if (!input || input.length || !output || output.length) return undefined
   const matches = candidates.candidates.filter(recipe => token(recipe?.name) && Array.isArray(recipe.ingredients)
     && recipe.ingredients.length <= 32 && Array.isArray(recipe.products) && recipe.products.length > 0 && recipe.products.length <= 32
     && [...recipe.ingredients, ...recipe.products].every(item => token(item?.name) && ['item', 'fluid'].includes(item.type))

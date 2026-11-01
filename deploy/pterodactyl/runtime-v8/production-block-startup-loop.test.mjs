@@ -13,7 +13,7 @@ import { FakeFactorio, answersStepContract, planReply } from './task-loop-fixtur
 const KEY = 'npc:block-startup'
 const INTENT = { kind: 'production_block', purpose: 'Keep the explicit bootstrap assignment',
   members: [{ role: 'producer', entity: 'stone-furnace' }], outputs: [{ role: 'producer', kind: 'item', resource: 'iron-plate' }] }
-const recipe = { name: 'iron-plate', enabled: true, hand_craftable_category: false, energy: 1,
+const recipe = { name: 'iron-plate', applicability: { state: 'available' }, enabled: true, hand_craftable_category: false, energy: 1,
   ingredients: [{ type: 'item', name: 'iron-ore', amount: 1 }], products: [{ type: 'item', name: 'iron-plate', amount: 1 }],
   crafting_machines_truncated: false, crafting_machines: [{ name: 'stone-furnace', energy_source: 'burner', energy_watts: 1, burner_effectivity: 1, fuel_categories: ['synthetic'] }] }
 function loopFixture(stateFile, { residual = false, onTrace } = {}) {
@@ -45,6 +45,9 @@ function loopFixture(stateFile, { residual = false, onTrace } = {}) {
         burner_fuel_requirement: { state: 'known', required: true, truncated: false, fuel_categories: ['synthetic'] },
         fuel_item_facts: { state: 'known', coverage: 'complete', truncated: false, items: [{ name: 'coal', category: 'synthetic', fuel_value: 10 }] },
         endpoint_facts: { schema_version: 1, inventories: { state: 'known', truncated: false, endpoints: [{ state: 'known', inventory_index: 3, roles: { state: 'known', values: ['output'] } }] } } }
+      if (machine.inventories.some(value => [2, 3].includes(value.index) && value.items.length)) {
+        row.startup_recipe_candidates = { ...row.startup_recipe_candidates, state: 'not_applicable', code: 'startup_inventory_not_empty', candidates: {} }
+      }
       game.factoryMembers.set(37, row)
     }
     return native(text)

@@ -868,8 +868,9 @@ for (const fault of ['actor', 'epoch', 'request', 'cancel', 'native_busy']) test
 const BLOCK_INTENT = { kind: 'production_block', purpose: 'Dedicated bootstrap output',
   members: [{ role: 'iron-smelter', entity: 'stone-furnace' }],
   outputs: [{ role: 'iron-smelter', kind: 'item', resource: 'iron-plate' }] }
-async function emptyBlockFixture({ mixedBlock = false } = {}) {
+async function emptyBlockFixture({ mixedBlock = false, product = 'iron-plate' } = {}) {
   const intent = clone(BLOCK_INTENT)
+  intent.outputs[0].resource = product
   if (mixedBlock) { intent.members.push({ role: 'other-smelter', entity: 'stone-furnace' }); intent.outputs.push({ role: 'other-smelter', kind: 'item', resource: 'other-product' }) }
   const w = fixture({ intent, checkpoint: { mode: 'all', requirements: [
     { kind: 'entity_count', prototype: 'stone-furnace', minimum: 1 } ] } })
@@ -881,7 +882,7 @@ async function emptyBlockFixture({ mixedBlock = false } = {}) {
       startup_recipe_candidates: { schema_version: 1, state: 'known', truncated: false, coverage: 'complete', tick: response.tick,
         selection: 'unselected', commissioning: 'unverified', basis: 'enabled_native_recipe_category_and_surface', candidates: [
           { name: 'synthetic-iron', applicability: { state: 'available' }, ingredients: [{ type: 'item', name: 'iron-ore', amount: 1 }],
-            products: [{ type: 'item', name: 'iron-plate', amount: 1 }] },
+            products: [{ type: 'item', name: product, amount: 1 }] },
           { name: 'synthetic-other', applicability: { state: 'available' }, ingredients: [{ type: 'item', name: 'other-ore', amount: 1 }],
             products: [{ type: 'item', name: 'other-product', amount: 1 }] } ] },
       inventories: ['input', 'output', 'fuel'].map((role, index) => ({ role, index: index + 1, state: 'known', truncated: false, items: {} })),
@@ -896,8 +897,8 @@ async function emptyBlockFixture({ mixedBlock = false } = {}) {
   }
   const command = w.agent.rcon.command
   w.agent.rcon.command = async text => text.includes('recipe_details') ? JSON.stringify({ found: true, truncated: false, recipes: [{
-    name: 'synthetic-iron', enabled: true, crafting_machines_truncated: false, crafting_machines: [{ name: 'stone-furnace' }],
-    ingredients: [{ type: 'item', name: 'iron-ore', amount: 1 }], products: [{ type: 'item', name: 'iron-plate', amount: 1 }],
+    name: 'synthetic-iron', applicability: { state: 'available' }, enabled: true, crafting_machines_truncated: false, crafting_machines: [{ name: 'stone-furnace' }],
+    ingredients: [{ type: 'item', name: 'iron-ore', amount: 1 }], products: [{ type: 'item', name: product, amount: 1 }],
   }] }) : command(text)
   await w.place('stone-furnace', 37)
   if (mixedBlock) await w.place('stone-furnace', 38)
@@ -1012,7 +1013,7 @@ test('BL production_block restore preserves job and uses new native capability; 
   w.memory.restore(clone(w.memory.snapshot()))
   await reconcileFactoryCellUse(w.agent, { operations: [{ name: 'move_items_exact', args: { unit_number: 37, to_entity: true, item_name: 'iron-ore', max_count: 1 } }] })
   w.alterNative = response => { response.members[0].inventories[1].items = [{ name: 'other-product', count: 1 }] }
-  await assert.rejects(reconcileFactoryCellUse(w.agent, { operations: [{ name: 'move_items_exact', args: { unit_number: 37, to_entity: false, item_name: 'iron-plate', max_count: 1 } }] }), /resolution_required|job_mismatch/)
+  await assert.rejects(reconcileFactoryCellUse(w.agent, { operations: [{ name: 'move_items_exact', args: { unit_number: 37, to_entity: false, item_name: 'iron-plate', max_count: 1 } }] }), /resolution_required|job_mismatch|dormant_output_mismatch/)
   assert.deepEqual(w.memory.getFactoryRegistry(), original)
 })
 
@@ -1043,9 +1044,83 @@ test('BL mixed two-role block recovers empty member and collects its exact dorma
   const original = clone(w.memory.getFactoryRegistry())
   assert.deepEqual(original.cells[0].assignment.products, ['iron-plate', 'other-product'])
   w.memory.restore(clone(w.memory.snapshot()))
-  w.alterNative = response => { response.members.find(row => row.locator.unit_number === 37).inventories[1].items = [{ name: 'iron-plate', count: 1 }] }
+  w.alterNative = response => {
+    const row = response.members.find(row => row.locator.unit_number === 37)
+    row.inventories[1].items = [{ name: 'iron-plate', count: 1 }]
+    row.startup_recipe_candidates = unavailableOutputCandidates()
+  }
   await reconcileFactoryCellUse(w.agent, { operations: [{ name: 'move_items_exact', args: { unit_number: 37, to_entity: false, item_name: 'iron-plate', max_count: 1 } }],
     productionIntent: { producers: [{ unit_number: 37, recipe_name: 'synthetic-iron' }] } })
   assert.deepEqual(w.memory.getFactoryRegistry(), original)
   assert.ok(w.events.some(row => row.event === 'factory_cell.dormant_output_recipe_evidence'))
 })
+
+// Native B704: produced ten, actor held eight, output two. The mod deliberately
+// omits startup candidates; no recipe or authority may be inferred from stock.
+const unavailableOutputCandidates = () => ({ schema_version: 1, state: 'not_applicable', coverage: 'complete', truncated: false,
+  code: 'startup_inventory_not_empty', selection: 'unselected', commissioning: 'unverified',
+  basis: 'enabled_native_recipe_category_and_surface', candidates: {}, scanned: 0, multiplicity: 'none' })
+async function retainedBlockOutput() {
+  const w = await emptyBlockFixture({ product: 'copper-plate' }); await w.enroll()
+  w.actorHeld = { 'copper-plate': 8 } // Opaque fixture context, never passed as job authority.
+  w.alterNative = response => {
+    const row = response.members[0]
+    row.inventories[1].items = [{ name: 'copper-plate', count: 2, quality: 'normal' }]
+    row.progress_facts.products_finished.value = 10
+    row.startup_recipe_candidates = unavailableOutputCandidates()
+    w.nativeOutput = clone(row)
+  }
+  w.collect = [{ name: 'move_items_exact', args: { unit_number: 37, to_entity: false, item_name: 'copper-plate', max_count: 2 } }]
+  return w
+}
+for (const ownedFinite of [false, true]) test(`BL native-shaped retained block output resolves without startup candidates (finite=${ownedFinite})`, async () => {
+  const w = await retainedBlockOutput(); const before = clone(w.memory.snapshot()); const planning = clone(w.memory.planningState(KEY))
+  w.memory.restore(clone(before))
+  await reconcileFactoryCellUse(w.agent, { operations: w.collect,
+    ...(ownedFinite ? { productionIntent: { producers: [{ unit_number: 37, recipe_name: 'synthetic-iron' }] } } : {}) })
+  assert.equal(w.nativeOutput.recipe.state, 'none')
+  assert.equal(w.nativeOutput.startup_recipe_candidates.state, 'not_applicable')
+  assert.equal(w.nativeOutput.progress_facts.products_finished.value, 10)
+  assert.equal(w.actorHeld['copper-plate'], 8)
+  assert.deepEqual(w.memory.planningState(KEY), planning)
+  assert.deepEqual(w.memory.getFactoryRegistry(), before.factory_registry)
+  assert.deepEqual(w.memory.snapshot().factory_placement_receipts, before.factory_placement_receipts)
+  assert.equal(factoryOperationUseDecision(w.memory, KEY, w.collect, { requestId: w.agent.traceRequest.id, actor: w.agent.epoch }).ok, true)
+  const evidence = w.events.find(row => row.event === 'factory_cell.dormant_output_recipe_evidence')
+  assert.equal(evidence.data.disposition, 'retained_typed_block_output_capability_only')
+  assert.deepEqual(evidence.data.output, [{ name: 'copper-plate', count: 2, quality: 'normal' }])
+  assert.equal(w.memory.pendingOperations(KEY).length, 0, 'resolution never submits collection itself')
+})
+for (const fault of ['ambiguous', 'disabled', 'unavailable', 'unknown applicability', 'truncated', 'wrong machine', 'mixed products', 'wrong output', 'unknown input', 'unknown coverage', 'missing recipe name', 'active progress', 'grant during read', 'grant during trace'])
+  test(`BL native-shaped retained output refuses ${fault}`, async () => {
+    const w = await retainedBlockOutput(); const original = clone(w.memory.getFactoryRegistry())
+    const command = w.agent.rcon.command
+    w.agent.rcon.command = async text => {
+      const raw = await command(text)
+      if (!text.includes('recipe_details')) return raw
+      const detail = JSON.parse(raw); const recipe = detail.recipes[0]
+      if (fault === 'ambiguous') detail.recipes.push({ ...recipe, name: 'second-enabled' })
+      if (fault === 'disabled') recipe.enabled = false
+      if (fault === 'unavailable') recipe.applicability.state = 'unavailable'
+      if (fault === 'unknown applicability') delete recipe.applicability
+      if (fault === 'truncated') detail.truncated = true
+      if (fault === 'missing recipe name') delete recipe.name
+      if (fault === 'wrong machine') recipe.crafting_machines = [{ name: 'other-machine' }]
+      if (fault === 'mixed products') recipe.products.push({ type: 'item', name: 'other-product' })
+      if (fault === 'grant during read') w.memory.currentGoalGrant = () => null
+      return JSON.stringify(detail)
+    }
+    const alter = w.alterNative
+    w.alterNative = response => {
+      alter(response)
+      if (fault === 'wrong output') response.members[0].inventories[1].items[0].name = 'other-product'
+      if (fault === 'unknown input') response.members[0].inventories[0].state = 'unknown'
+      if (fault === 'unknown coverage') delete response.members[0].inventories[1].truncated
+      if (fault === 'active progress') response.members[0].progress_facts.crafting_progress.value = 0.5
+    }
+    w.game.onTrace = row => { if (fault === 'grant during trace' && row.event === 'factory_cell.dormant_output_recipe_evidence') w.memory.currentGoalGrant = () => null }
+    await assert.rejects(reconcileFactoryCellUse(w.agent, { operations: w.collect }))
+    assert.deepEqual(w.memory.getFactoryRegistry(), original)
+    assert.equal(factoryOperationUseDecision(w.memory, KEY, w.collect, { requestId: w.agent.traceRequest.id, actor: w.agent.epoch }).ok, false)
+    assert.equal(w.memory.pendingOperations(KEY).length, 0)
+  })

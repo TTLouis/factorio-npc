@@ -77,3 +77,25 @@ require a non-null active furnace recipe. Preserve the pre-reload ZIP separately
 Finally stop/remove only owned resources, verify absence and retain all logs,
 state and saves. Native failure remains failure even if a partial assertion
 passed; no automatic extra native or live trial follows from this document.
+
+
+### Native gate follow-up (2026-11-01)
+
+The first engine proof completed startup and produced output, then exposed a
+retained-collection defect: once output remained, native correctly returned
+`startup_recipe_candidates.state=not_applicable` with
+`startup_inventory_not_empty`. Startup candidates apply only to empty startup.
+The retained registered member now uses its exact typed output role for a fresh
+live recipe query, requiring one enabled, applicable machine-compatible result,
+complete empty input, zero progress and only matching output. Current grant and
+owner fences cover the query, trace and operation certificate. This does not
+make nonempty machines eligible for new enrollment or claim a selected recipe,
+commissioning or delivery. The corrected mock follows the native omission.
+
+The full gate also exposed an unrelated shoreline capability omission entering
+startup recovery. A private fresh pre-claim eligibility miss now returns to the
+original close refusal/pause without consuming an allowance. Errors after a
+claim, persistence errors and authority changes still fail recovery. Existing
+shoreline assertions remain intact, with additional zero-allowance assertions.
+The original failed full/native evidence is retained; these fixes require new
+parent full and exact-engine gates before claiming the candidate verified.
