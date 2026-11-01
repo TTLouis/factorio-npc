@@ -201,7 +201,8 @@ async function reconcileProductionFactoryUse(agent, s, task, phase, operations =
     } : undefined
     try {
       const cells = await checked(agent, s.owner, enrollFactoryProductionProducers(agent, productionIntent.producers, { beforeRegister }))
-      const result = await checked(agent, s.owner, reconcileFactoryCellUse(agent, { step: s.step, phase, productionIntent, operations }))
+      const result = await checked(agent, s.owner, reconcileFactoryCellUse(agent, { step: s.step, phase, productionIntent, operations,
+        productionProposal: phase === 'production_admission' && !residual && !agent.entityRefreshAdmission }))
       if (allowance?.allowed) await checked(agent, s.owner, agent.traceEvent('factory_cell.enrollment_recovery_completed', {
         ...detail, ...allowance, cell_ids: cells.map(cell => cell.cell_id), disposition: 'fresh_factory_use_resolved', world_operations_replayed: 0,
       }))

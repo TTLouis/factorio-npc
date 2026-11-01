@@ -16,6 +16,8 @@ const certificates = new WeakMap()
 const operationCertificates = new WeakMap()
 const failures = new WeakMap()
 const failureRefreshes = new WeakMap()
+const assignedConflicts = new WeakMap()
+export const assignedFactoryConflict = error => assignedConflicts.get(error?.cause ?? error)
 const startupRecipes = new WeakMap()
 export const factoryUseFailureWitness = error => failures.get(error?.cause ?? error)
 // The original read's private capability owns native identity, restore, world
@@ -277,7 +279,7 @@ function matchingDirectFeed(registry, cell, native, requirement) {
   return undefined
 }
 
-function validateAssignedOperations(cell, native, operations) {
+function validateAssignedOperations(cell, native, operations, inputRefused) {
   for (const operation of operations.filter(op => cell.members.some(member => member.unit_number === op.args?.unit_number))) {
     const row = native.members.find(row => row.locator.unit_number === operation.args.unit_number)
     if (operation.name === 'move_items_exact' && operation.args.to_entity === false) {
@@ -293,6 +295,7 @@ function validateAssignedOperations(cell, native, operations) {
       // burner's existence nor a model fuel label permits another ore.
       if (!supplied?.length || supplied.some(item => !materials.includes(item) && !(known(fuel) && fuel.required === true
         && known(fuelItems) && fuelItems.items?.some(candidate => candidate.name === item && candidate.fuel_value > 0 && fuel.fuel_categories.includes(candidate.category))))) {
+        inputRefused?.(cell, row, operation)
         fail('factory_cell_input_unproven', { cell_id: cell.cell_id, unit_number: operation.args.unit_number })
       }
     }
@@ -304,6 +307,36 @@ function currentStep(agent) {
   if (plan) return plan.steps[plan.active_step_index]
   const legacy = agent.memory.currentPlan?.(key)
   return legacy?.task_board?.steps?.[legacy.task_board.active_index] ?? { execution_guidance: legacy?.execution_guidance?.[legacy.current_step] }
+}
+
+// Durable assignments are useful context, never fresh geometry, stock or a
+// permission to use/change a cell. Include only products in the active stock
+// contract or exact members named there, bounded independently of registry size.
+export function relevantFactoryAssignments(agent, state = agent.memory.planningState?.(agent.activePlanKey())) {
+  if (agent.memory.factoryRegistryStatus?.().status !== 'initialized') return
+  const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
+  const requirements = step?.completion_contract?.requirements ?? []
+  const products = new Set(requirements.filter(row => row.kind === 'inventory_count').map(row => row.item_name))
+  const units = new Set(requirements.map(row => row.unit_number).filter(Number.isSafeInteger))
+  const goalContext = !step && state?.goal?.status === 'active'
+  if (!products.size && !units.size && !goalContext) return
+  const registry = agent.memory.getFactoryOperationalRegistry()
+  if (registry.world_id !== agent.memory.factoryWorldBinding().world_id) return
+  const cells = registry.cells.filter(cell => !['retired', 'degraded'].includes(cell.lifecycle_state)
+    && cell.surface_index === agent.epoch?.surface_index && cell.force_index === agent.epoch?.force_index
+    && (goalContext && cell.origin?.goal_id === state.goal.goal_id
+      || cell.assignment.products.some(product => products.has(product)) || cell.members.some(member => units.has(member.unit_number))))
+  const rows = []; let chars = 0
+  for (const cell of cells.slice(0, 8)) {
+    const row = { cell_id: cell.cell_id, revision: cell.revision, assignment: { method: cell.assignment.method, products: cell.assignment.products },
+      members: cell.members.slice(0, 8).map(({ unit_number, name, position }) => ({ unit_number, name, position })),
+      members_truncated: cell.members.length > 8 }
+    const size = JSON.stringify(row).length
+    if (chars + size > 3000) break
+    chars += size; rows.push(clone(row))
+  }
+  return rows.length ? { world_id: registry.world_id, registry_revision: registry.revision, cells: rows, truncated: rows.length !== cells.length,
+    status: 'retained_assignments_not_live_facts_or_authority', next_read: 'getFactoryCell_then_fresh_operation_admission' } : undefined
 }
 
 /** Mandatory host resolver. Absence of a model cell field cannot disable a
@@ -365,6 +398,58 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
     const evidence = []
     const nativeByCell = new Map()
     const accepted = new Set()
+    // A wrong proposal is not a structural blocker. Only this private fresh
+    // read can issue an advisory-review witness; serialized errors cannot.
+    const conflictFacts = (cell, row, operation, producer) => {
+      const resource = step?.execution_guidance?.materialSupply?.resource
+      const recipe = producerRecipe(row)
+      const owned = [...(agent.memory.productionTasks?.values() ?? [])].some(task => task.owner?.goal_id === scope.goal_id
+        && task.owner?.step_id === scope.step_id && !['complete', 'cancelled'].includes(task.status))
+      if (agent.completionProtocolVersion < 3 || agent.agentContext.role !== 'executor' || agent.productionAdmission || owned
+        || step?.execution_guidance?.materialSupply?.mode !== 'manual_bootstrap' || !resource || !step.completion_contract
+        || intent || cell.assignment.method !== `native_recipe:${recipe?.name}` || cell.members.length !== 1
+        || row?.state !== 'observed' || !known(recipe) || recipe.truncated !== false || !Array.isArray(recipe.ingredients)
+        || !Array.isArray(recipe.products) || !cell.assignment.products.every(name => recipe.products.some(item => item.type === 'item' && item.name === name))) return
+      const material = recipe.ingredients.filter(item => item.type === 'item').map(item => item.name)
+      if (material.includes(resource)) return
+      if (producer) {
+        if (!productionProposal || operations.length || productionIntent.producers.length !== 1
+          || producer.recipe_name === recipe.name) return
+      } else {
+        if (productionIntent || operations.length !== 1 || !['supply_entity', 'move_items_exact'].includes(operation?.name)
+          || operation.name === 'move_items_exact' && operation.args.to_entity !== true) return
+        const items = operation.name === 'supply_entity' ? operation.args.items : [{ item_name: operation.args.item_name, count: operation.args.max_count }]
+        const fuel = row.burner_fuel_requirement; const facts = row.fuel_item_facts
+        if (!known(fuel) || fuel.truncated !== false || !known(facts) || facts.truncated !== false || facts.coverage !== 'complete'
+          || !Array.isArray(fuel.fuel_categories) || !Array.isArray(facts.items)
+          || !items?.some(item => item.item_name === resource)
+          || !items.every(item => Number.isSafeInteger(item.count) && item.count > 0 && (item.item_name === resource
+            || fuel.required === true && facts.items.some(value => value.name === item.item_name && value.fuel_value > 0 && fuel.fuel_categories.includes(value.category))))) return
+      }
+      return { cell_id: cell.cell_id, cell_revision: cell.revision, member: clone(row.locator), assignment: clone(cell.assignment),
+        selected_resource: resource, recipe: clone(recipe), proposed: clone(producer ?? operation), kind: producer ? 'producer_job' : 'assigned_input' }
+    }
+    const conflictRefused = (cell, row, operation, producer) => {
+      const facts = conflictFacts(cell, row, operation, producer)
+      if (!facts) return
+      const code = producer ? 'factory_cell_producer_job_mismatch' : 'factory_cell_input_unproven'
+      const error = new FactoryRegistryError(code, code)
+      error.details = { cell_id: cell.cell_id, unit_number: row.locator.unit_number }
+      const witness = { code, scope: clone(scope), facts, native_tick: nativeByCell.get(cell.cell_id)?.tick,
+        registry_revision: snapshot.revision, physical_revision: physicalRevision(agent.memory),
+        requirement: { kind: 'assigned_producer_advisory', step_id: scope.step_id, contract: clone(step.completion_contract) } }
+      assignedConflicts.set(error, witness)
+      failureRefreshes.set(error, async () => {
+        await access.refresh(); access.fence()
+        const fresh = await observer.observe({ cell_id: cell.cell_id }); access.fence()
+        const member = fresh.native.members.find(value => value.locator.unit_number === row.locator.unit_number)
+        if (cell.members[0].provenance?.receipt_id) await readFactoryProducerRecipe(agent, access, member, cell.assignment.method.slice('native_recipe:'.length), { retainedCell: cell })
+        access.fence()
+        if (fresh.state !== 'compatible' && !(member?.recipe?.state === 'none' && cell.ports.filter(port => port.direction === 'output').every(port => factoryNativeOutput(member, port)))) fail('factory_cell_conflict_evidence_changed')
+        if (factoryMetadataDigest(conflictFacts(cell, member, operation, producer) ?? null) !== factoryMetadataDigest(facts)) fail('factory_cell_conflict_evidence_changed')
+      })
+      throw error
+    }
     const unresolved = (code, details) => {
       const error = new FactoryRegistryError(code, code); error.details = details
       if (requirement && evidence.every(row => ['compatible', 'mismatch'].includes(row.state))) {
@@ -392,7 +477,7 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
       if (requirement?.kind === 'direct_feed') {
         const match = matchingDirectFeed(snapshot, cell, observed.native, requirement)
         if (match) {
-          validateAssignedOperations(cell, observed.native, operations)
+          validateAssignedOperations(cell, observed.native, operations, conflictRefused)
           const delivery = observeDirectFactoryDelivery(agent.memory, { scope, cell, native: observed.native, source: match.source, target: match.target,
             resource: requirement.resource, mutation: agent.factoryDeliveryMutationSeq ?? 0, connectedPlayers: access.readContext().connected_players })
           selected = { kind: 'existing', cell_id: cell.cell_id, cell_revision: cell.revision, physical_revision: cell.physical_revision ?? 0, ...match,
@@ -408,11 +493,14 @@ export async function reconcileFactoryCellUse(agent, { step = currentStep(agent)
         for (const producer of productionIntent?.producers ?? []) {
           if (!cell.members.some(member => member.unit_number === producer.unit_number)) continue
           const row = observed.native.members.find(row => row.locator.unit_number === producer.unit_number)
-          if (producerRecipe(row)?.name !== producer.recipe_name || !known(producerRecipe(row))) fail('factory_cell_producer_job_mismatch', { cell_id: cell.cell_id, unit_number: producer.unit_number })
+          if (producerRecipe(row)?.name !== producer.recipe_name || !known(producerRecipe(row))) {
+            conflictRefused(cell, row, undefined, producer)
+            fail('factory_cell_producer_job_mismatch', { cell_id: cell.cell_id, unit_number: producer.unit_number })
+          }
           const outputs = cell.ports.filter(port => port.direction === 'output').map(port => factoryNativeOutput(row, port)).filter(Boolean)
           if (!outputs.length) fail('factory_cell_producer_output_unknown', { cell_id: cell.cell_id, unit_number: producer.unit_number })
         }
-        validateAssignedOperations(cell, observed.native, operations)
+        validateAssignedOperations(cell, observed.native, operations, conflictRefused)
         selected = { kind: 'existing', cell_id: cell.cell_id, cell_revision: cell.revision, commissioning: 'unverified', delivery: { state: 'manual_or_unverified' } }
         accepted.add(cell.cell_id)
       }

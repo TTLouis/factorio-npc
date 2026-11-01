@@ -441,6 +441,37 @@ Natural area clearing independently excludes placed buildings in the native
 implementation. Compound construction is placement-only with clearance refused;
 the registry does not claim to validate a complete new construction design.
 
+For a committed manual-bootstrap stock step, a fresh exact assigned-recipe
+conflict in one raw input operation (including inbound `move_items_exact`) or a
+new finite producer proposal can request the existing healthy-plan advisory
+review. A private host witness must prove the selected material conflicts with
+the retained job using complete native recipe/fuel facts. Unknown, mixed,
+unassigned and controller-owned failures retain their ordinary guards. Repeated
+reads revalidate actor/world/request/plan/step, native idle and the same facts.
+
+The rejected batch remains unsent. Review spends the existing strictly persisted
+three-attempt factory allowance across the goal and the existing one-review-per-
+step allowance. Restage, slices and restart cannot renew either. The configured
+planner receives factual conflict evidence and returns advisory notes; a fresh
+executor must author any subsequent proposal. Neither notes nor one wrong-unit
+submission establish a structural blocker, authorize replacement or convert a
+producer. Goal, committed plan/guidance, contract and assignments remain exact;
+ordinary fresh operation admission independently validates the next action.
+Exhaustion is `factory_cell_assigned_review_exhausted`, an expected guard failure.
+Review-provider failures retain provider classification and do not trigger a
+provider retry.
+
+Restaged planner/executor packets may carry bounded retained assignment metadata
+for the active stock contract (or same-goal cells at a planning boundary), scoped
+to the current world/surface/force. It is labelled historical metadata, never
+live stock, compatibility, commissioning or admission authority. The named
+`factory_cell.assigned_review_started` and `_exhausted` events retain the original
+proposal, exact member, immutable assignment, native-read scope and allowance.
+`planner.review_round`, `planner.committed_slice_returned` and
+`context.review_notes_delivered` distinguish requested review, actual reply and
+delivered notes; only subsequent ordinary admission and native receipts prove
+progress. See the [repair proof and native recipe](ASSIGNED_PRODUCER_REVIEW_REPAIR.md).
+
 ## Physical update invariants
 
 Keep a stable cell ID for expansion or modification that preserves its job. The
