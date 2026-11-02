@@ -447,6 +447,13 @@ describe('durable operation admission', () => {
       admission.begin({ ...identity, operation_count: 3 })
       expect((globalThis as any).log.mock.calls.filter(([line]: [string]) => line.includes('operation.admission.partial'))).toHaveLength(1)
     })
+    it.each(['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item'])('accounts for exact zero-movement diagnostics %s without relaxing receipt completeness', (cause) => {
+      const world = setup()
+      world.receipt.refusals[0].cause = cause
+      expect(world.admission.status().records[0]).toMatchObject({ state: 'partial', error: 'exact_terminal_transfer_refusal' })
+      delete (world.receipt as any).completed_count
+      expect(world.admission.status().records[0].state).not.toBe('partial')
+    })
     it('can close previously uncertain work and deduplicates a shared batch reference across slots', () => {
       const { admission, stored } = setup()
       stored.state = 'uncertain'

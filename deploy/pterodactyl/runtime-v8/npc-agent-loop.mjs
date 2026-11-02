@@ -134,6 +134,7 @@ import {
   reconciliationFacts,
   reconciliationGuidance,
   RECONCILE_VERDICT,
+  TERMINAL_TRANSFER_REFUSAL_CAUSES,
 } from './operation-reconciliation.mjs'
 import {
   boundarySteeringGate,
@@ -13643,7 +13644,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (partialRecovery) await this.traceEvent('transfer.partial_recovery', {
           request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
           operation_key: supplyRecovery.operation_key, attempt: supplyRecovery.attempt,
-          retry_budget: supplyRecovery.retry_budget, reason: 'exact_terminal_target_rejection_same_step',
+          retry_budget: supplyRecovery.retry_budget, refusal_cause: supplyRecovery.refusal_cause, reason: 'exact_terminal_target_rejection_same_step',
         })
         if (targetRecovery) await this.traceEvent('transfer.target_recovery', {
           request_id: this.traceRequest?.id,
@@ -13683,7 +13684,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
       }
       const supplyGuidance = partialRecovery
-        ? ` [HARNESS] The exact native transfer receipt accounts for the completed tasks and the target_rejects_item refusal without moving that item. The completed prefix remains applied; this is partial work, not success of the whole batch. Do not replay the original batch or its prefix. Re-observe the actual target and held counts, then choose only the missing effects inside this same committed step. A furnace may finish an in-progress craft after its input is cleared; inspect its output before changing ingredients. The committed plan and checkpoint remain unchanged. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer allowance; all other limits remain unchanged.`
+        ? ` [HARNESS] The exact native transfer receipt accounts for the completed tasks and the ${TERMINAL_TRANSFER_REFUSAL_CAUSES.includes(supplyRecovery.refusal_cause) ? supplyRecovery.refusal_cause : 'terminal'} refusal without moving that item. The completed prefix remains applied; this is partial work, not success of the whole batch. Do not replay the original batch or its prefix. Re-observe the actual target and held counts, then choose only the missing effects inside this same committed step. A furnace may finish an in-progress craft after its input is cleared; inspect its output before changing ingredients. The committed plan and checkpoint remain unchanged. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer allowance; all other limits remain unchanged.`
         : targetRecovery
         ? ` [HARNESS] The legacy name-based transfer found no ${cleanMemoryText(supplyRecovery.entity_name, 200)} within interaction reach (no_target). This is a bounded local target-reacquisition dependency inside the same committed step, not evidence that a historical machine was destroyed or WORLD_BLOCKED. The plan, step contract and requested result are unchanged. Historical coordinates are travel guidance only: choose travel if appropriate, wait for its receipt, then re-observe the actual spatial target and current inventories before proposing an exact transfer. Do not substitute a same-name machine or use a cached unit number as execution authority. The original batch may have a successful prefix; its uncertainty and duplicate-effect guard remain authoritative. Do not replay that batch or its cancelled tail; propose only effects justified by fresh counts. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer recovery allowance; all other limits and authority checks remain unchanged.`
         : supplyRecovery

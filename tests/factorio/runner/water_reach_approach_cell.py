@@ -144,7 +144,17 @@ def run(client, results):
 
     # --- 3. Native confirmation of the 18ab failure, then the walk that works -------------------------------
     # The operation itself performs no preflight: this is the doomed request the preflight now stops.
-    doomed, doomed_position = walk(water['x'], water['y'], 'walk to the water tile (no preflight)')
+    # A reach circle touching land can legitimately succeed. Select an engine-verified
+    # interior water goal with no standing position anywhere in the larger search radius.
+    deep = lua(f"local out=nil;for dx=-8,8 do for dy=-8,8 do local p={{x={water['x']}+dx+0.5,y={water['y']}+dy+0.5}}; "
+               "local tile=s.get_tile(p);local collision=false;for layer,_ in pairs(prototypes.entity[a.name].collision_mask.layers) do "
+               "if tile.prototype.collision_mask.layers[layer] then collision=true end end; "
+               f"if collision and not s.find_non_colliding_position(a.name,p,{WALK_REACH+1},0.03125) then out=p;break end end;if out then break end end; "
+               "rcon.print(helpers.table_to_json({position=out}))", 'engine: unreachable water goal with clearance beyond reach')
+    require(deep.get('position'), deep)
+    wet_goal = deep['position']
+    require(preflight(wet_goal['x'], wet_goal['y'], WALK_REACH, 'preflight unreachable water').get('ok') is False, deep)
+    doomed, doomed_position = walk(wet_goal['x'], wet_goal['y'], 'walk to unreachable interior water (no preflight)')
     require(doomed.get('code') == 'unreachable' and doomed.get('accepted') is False and doomed.get('path_attempts') == 4, doomed)
     evidence['doomed_walk'] = {'result': doomed, 'position': doomed_position}
     place_actor(*ACTOR_START, 'back to the start')
@@ -166,19 +176,19 @@ def run(client, results):
     # Both points come from the engine: walk from the approach towards the water tile centre; the first point whose tile
     # collides with the character and where it cannot be placed is the wet goal, the last point before it where the character
     # can be placed is the land goal.
-    pair = lua(f"local ap={{x={approach['x']},y={approach['y']}}}; local tc={{x={water['x']}+0.5,y={water['y']}+0.5}}; "
+    pair = lua(f"local ap={{x={approach['x']},y={approach['y']}}}; local tc={{x={wet_goal['x']},y={wet_goal['y']}}}; "
                "local layers=prototypes.entity[a.name].collision_mask.layers; "
                "local function collides(p) local t=s.get_tile(math.floor(p.x),math.floor(p.y)); "
                "for l,_ in pairs(layers) do if t.prototype.collision_mask.layers[l] then return true end end return false end; "
                "local land=nil; local wet=nil; "
                "for i=0,400 do local f=i/400; local p={x=ap.x+(tc.x-ap.x)*f,y=ap.y+(tc.y-ap.y)*f}; "
                "local fits=s.can_place_entity{name=a.name,position=p,force=a.force}; "
-               "if fits then land=p elseif collides(p) then wet=p; break end end; "
+               "if fits then land=p elseif collides(p) and not s.find_non_colliding_position(a.name,p,0.5,0.03125) then wet=p; break end end; "
                "rcon.print(helpers.table_to_json({land=land,wet=wet}))", 'engine: shoreline points between the approach and the water')
     require(pair.get('land') and pair.get('wet'), pair)
     gap = math.hypot(pair['land']['x'] - pair['wet']['x'], pair['land']['y'] - pair['wet']['y'])
     require(gap < 1.0, pair)
-    shore_reach = 0.5
+    shore_reach = 0.25
     land_reach = 1.0  # the character stops against the shore a little short of a goal at the water's edge
     place_actor(approach['x'] - 15, approach['y'], 'near the shoreline')
     require(preflight(pair['land']['x'], pair['land']['y'], land_reach, 'preflight where the character fits').get('ok') is True, pair)
@@ -199,6 +209,12 @@ def run(client, results):
     require(len(positive.get('samples') or []) > 0, positive)
     empty = tool('get_fluid_source_tiles', f"{{fluid_name='{fluid_name}',search_radius=128,limit=8}}", 'empty narrower re-read')
     require(empty.get('returned_count') == 0 and empty.get('empty_result_is_conclusive') is True, empty)
+    # Remembered water locates the query, but does not grant fresh placement visibility.
+    # Approach the previously observed shore without another water read, preserving
+    # the positive-then-empty evidence while refreshing the actual visible window.
+    visible_result, visible_position = walk(approach['x'], approach['y'], 'return to observed shore before placement query')
+    require(visible_result.get('code') == 'reached' and visible_result.get('completed') is True, visible_result)
+    evidence['placement_visibility_approach'] = {'result': visible_result, 'position': visible_position}
     sites = tool('get_placement_candidates', "{entity_name='offshore-pump',radius=8,limit=5}", 'pump sites after the empty re-read')
     require(sites.get('code') not in ('water_source_not_exposed', 'water_search_required'), sites)
     require(sites.get('ok') is True and len(sites.get('candidates') or []) > 0, sites)

@@ -246,7 +246,7 @@ function terminal_transfer_refusal(record: OperationAdmission, status: { receipt
     const ids: number[] = []
     for (const refusal of receipt.refusals) {
       if (!refusal || refusal.type !== 'moving_items' || refusal.code !== 'nothing_moved'
-        || refusal.cause !== 'target_rejects_item' || !integer(refusal.operation_id)
+        || typeof refusal.cause !== 'string' || !['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item'].includes(refusal.cause) || !integer(refusal.operation_id)
         || !integer(refusal.target_unit_number) || !integer(refusal.held_count)
         || typeof refusal.tick !== 'number' || refusal.tick < 0 || refusal.tick > receipt.tick
         || refusal.tick !== math.floor(refusal.tick) || ids.includes(refusal.operation_id)) return false

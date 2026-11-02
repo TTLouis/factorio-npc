@@ -4,6 +4,7 @@
 // The declared pre-objective layout reproduces W's shoreline obstruction;
 // every gameplay mutation after setup is an admitted scripted model action.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -20,7 +21,7 @@ let fetchCalls = 0
 globalThis.fetch = async () => { fetchCalls++; throw new Error('inference forbidden in fresh-topology native fixture') }
 const arg = name => { const i = process.argv.indexOf(`--${name}`); assert.ok(i >= 0); return process.argv[i + 1] }
 const results = path.resolve(arg('results'))
-const roleContracts = process.env.NPC_TEST_ROLE_CONTRACTS === '1'
+const roleContracts = true // Current typed construction/enrollment contract in every topology lane
 const transcript = []; const sent = []; const seen = {}; const identities = {}; const placements = {}
 let connection, ctx, setup
 const rcon = { command: async (command, options) => {
@@ -69,7 +70,7 @@ async function completion() {
 const checkpoint = { mode: 'all', requirements: [{ id: 'powered_load', kind: 'entity_count', prototype: 'inserter', minimum: 1, state: 'powered' }] }
 const goal = { scope: 'finite', summary: 'Use the held steam engine to power one inserter through the existing boiler', doneWhen: [{ kind: 'electric_network_satisfied', entity_name: 'inserter', minimum: 1 }] }
 const STEP = 'Route steam inland around the shoreline obstruction and power an inserter using the held steam engine'
-const reply = (operations = [], extra = {}) => planReply({ plan: [STEP], currentStep: 0, operations, checkpoint, stepCompletions: [{ kind: 'deterministic', checkpoint }], ...extra })
+const reply = (operations = [], extra = {}) => planReply({ stepId: ctx?.world.memory.planningState(KEY)?.plans?.find(row => ['COMMITTED', 'EXECUTING'].includes(row.status))?.steps[0].step_id, plan: [STEP], currentStep: 0, operations, checkpoint, stepCompletions: [{ kind: 'deterministic', checkpoint }], ...extra })
 let call = 0
 const reads = tools => ({ content: null, tool_calls: tools.map(([name, args]) => ({ id: `topology-${++call}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) })
 const lastTool = messages => JSON.parse(messages.findLast(row => row.role === 'tool').content)
@@ -112,7 +113,9 @@ const model = new ScriptedModel()
   .push('planner', 'sol:fresh-lean-world-context', messages => { contextFacts(messages, 'planner'); return reply([], { goal,
     ...(roleContracts ? { executionGuidance: [{ approach: 'Route steam around the shoreline to the held engine and power the inserter.',
       rationale: 'Use the held engine and retain room for future expansion; extra capacity is optional.',
-      constraints: ['Preserve existing poles.', 'Build one engine for this requested result.'], skillIds: ['steam-power-bootstrap'], materialSupply: null }] } : {}),
+      constraints: ['Preserve existing poles.', 'Build one engine for this requested result.'], skillIds: ['steam-power-bootstrap'], materialSupply: null,
+      cellIntent: { kind: 'production_block', purpose: STEP, members: [{ role: 'steam_outlet', entity: 'pipe' }, { role: 'steam_route', entity: 'pipe' }, { role: 'generation', entity: 'steam-engine' }, { role: 'load', entity: 'inserter' }],
+        outputs: [{ role: 'generation', kind: 'power', resource: null }] } }] } : {}),
   }) })
   .push('executor', 'luna:fresh-held-engine-and-topology', messages => {
     contextFacts(messages, 'executor')
@@ -207,7 +210,7 @@ const model = new ScriptedModel()
       return second.right_bottom.x <= first.left_top.x || second.left_top.x >= first.right_bottom.x
         || second.right_bottom.y <= first.left_top.y || second.left_top.y >= first.right_bottom.y
     }), 'future engine footprint must not overlap the placed engine')
-    return reply([{ name: 'craft_item', args: { item_name: 'inserter', count: 1 } }, { name: 'supply_entity', args: { unit_number: setup.boiler, items: [{ item_name: 'coal', count: 5 }] } }])
+    return reply([{ name: 'craft_item', args: { item_name: 'inserter', count: 1 } }])
   })
   .push('executor', 'luna:legal-load-within-retained-pole-coverage', () => reads([['getPlacementCandidates', { entity_name: 'inserter', center: { x: -21.5, y: -92.5 }, radius: 3, limit: 8 }]]))
   .push('executor', 'luna:place-real-inserter-load', messages => place(messages, 'inserter', rows => rows.find(row => Math.abs(row.position.x + 21.5) <= 2 && Math.abs(row.position.y + 92.5) <= 2)))
@@ -219,9 +222,9 @@ try {
   setup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a); game.speed=1; remote.call("autorio_operations","cancel_all_tasks"); '
     + 'local s=game.create_surface("fresh-topology",{seed=424242,width=0,height=0,water=0,cliff_settings={cliff_elevation_interval=0},autoplace_settings={entity={treat_missing_as_default=false,settings={}}}}); s.request_to_generate_chunks({-24,-94},2); s.force_generate_chunk_requests(); for _,e in pairs(s.find_entities()) do e.destroy() end; '
     + 'local tiles={}; for x=-64,31 do for y=-128,-33 do tiles[#tiles+1]={name=((x>=-20) or (x==-21 and y>=-91)) and "water" or "landfill",position={x,y}} end end; s.set_tiles(tiles,true,false,true); assert(a.teleport({-26,-97},s)); s.always_day=true; '
-    + 'local pump=s.create_entity{name="offshore-pump",position={-19.5,-95.5},direction=4,force=a.force}; local boiler=s.create_entity{name="boiler",position={-21.5,-95},direction=8,force=a.force}; assert(pump and boiler); '
+    + 'local pump=s.create_entity{name="offshore-pump",position={-19.5,-95.5},direction=4,force=a.force}; local boiler=s.create_entity{name="boiler",position={-21.5,-95},direction=8,force=a.force}; assert(pump and boiler); assert(boiler.get_fuel_inventory().insert{name="coal",count=5}==5); '
     + 'local p1=s.create_entity{name="small-electric-pole",position={-21.5,-92.5},force=a.force}; local p2=s.create_entity{name="small-electric-pole",position={-19.5,-94.5},force=a.force}; assert(p1 and p2); '
-    + 'a.get_main_inventory().clear(); for _,v in pairs({{"steam-engine",1},{"iron-plate",8},{"copper-plate",9},{"coal",5}}) do assert(a.insert{name=v[1],count=v[2]}==v[2]) end; for _,n in pairs({"steam-power","electronics"}) do a.force.technologies[n].researched=true end; '
+    + 'a.get_main_inventory().clear(); for _,v in pairs({{"steam-engine",1},{"iron-plate",8},{"copper-plate",9}}) do assert(a.insert{name=v[1],count=v[2]}==v[2]) end; for _,n in pairs({"steam-power","electronics"}) do a.force.technologies[n].researched=true end; '
     + 'rcon.print(helpers.table_to_json({actor_id=a.unit_number,boiler=boiler.unit_number,pump=pump.unit_number,poles={p1.unit_number,p2.unit_number},surface_index=s.index}))'))
   // Setup boundary. No terrain, stock, teleport, fuel insertion or arbitrary
   // world write occurs below: only production Session-authorized operations.
@@ -257,8 +260,13 @@ try {
       usage: { prompt_tokens: 2000, completion_tokens: 120 } }), { status: 200 })
   } })
   const world = recoveryWorld({ game: rcon, model, decisionScript, agentRoleConfig: bridge.config, roleProvider: (messages, context) => bridge.roleProvider(messages, context),
-    completionProtocolVersion: roleContracts ? 3 : 2 })
+    completionProtocolVersion: roleContracts ? 3 : 2, stateFile: path.join(results, 'fresh-topology-state.json') })
   world.modelRequests = wires
+  // Real native fixtures need the same save-scoped registry and durable storage as the supervisor.
+  const factoryWorld = await lua(`local id=storage.sgluna_factory_world_id or "${randomUUID()}";rcon.print(helpers.table_to_json(remote.call("sgluna_factory","bind_world_id",id)))`)
+  assert.equal(factoryWorld.ok, true)
+  world.memory.initializeFactoryRegistry(factoryWorld.world_id)
+  await world.agent.persistState({ strict: true })
   const status = await deploymentStatus(rcon, { requireAllowed: true })
   ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })

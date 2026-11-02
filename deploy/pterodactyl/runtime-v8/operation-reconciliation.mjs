@@ -366,6 +366,10 @@ function canonicalJson(value) {
   return JSON.stringify(value ?? null)
 }
 
+// Native zero-movement causes that prove an exact transfer target refused the item without moving any of it.
+// Mirrors operation_admission.ts terminal_transfer_refusal.
+export const TERMINAL_TRANSFER_REFUSAL_CAUSES = Object.freeze(['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item'])
+
 // The full canonical batch is bound to its admission with a collision-resistant digest.
 export function operationSignature(operations) {
   const source = canonicalJson((Array.isArray(operations) ? operations : []).map(operation => ({ name: operation?.name, args: operation?.args ?? {} })))
@@ -579,7 +583,7 @@ function terminalTransferRefusal(admission, status, pending) {
       || !Array.isArray(receipt.refusals) || receipt.refusals.length !== receipt.refused_count
       || new Set(receipt.refusals.map(row => row.operation_id)).size !== receipt.refused_count
       || !receipt.refusals.every(row => row?.type === 'moving_items' && row.code === 'nothing_moved'
-        && row.cause === 'target_rejects_item' && Number.isSafeInteger(row.operation_id) && row.operation_id > 0
+        && TERMINAL_TRANSFER_REFUSAL_CAUSES.includes(row.cause) && Number.isSafeInteger(row.operation_id) && row.operation_id > 0
         && Number.isSafeInteger(row.target_unit_number) && row.target_unit_number > 0 && Number.isSafeInteger(row.held_count) && row.held_count > 0
         && Number.isSafeInteger(row.tick) && row.tick >= 0 && row.tick <= receipt.tick)) return null
     completed += receipt.completed_count; refused += receipt.refused_count
