@@ -43,7 +43,7 @@ export function capabilities() {
 // 2026-11-01 trial. Facts about this bridge, not strategy advice.
 export const OPERATION_NOTES = Object.freeze({
   craft_item: 'count is the number of recipe crafts, not items. A recipe with N products per craft yields count x N items (read getRecipeDetails products).',
-  place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. No pickup or deconstruct operation exists, so placements are permanent.',
+  place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. getPlacementCandidates rows with external_footprint.eligible=false will be refused. No pickup or deconstruct operation exists, so placements are permanent.',
   research_technology: 'A completed receipt means research was started and queued, not finished. Read getResearchStatus or getTechnology for progress and researched.',
   walk_to_position: 'Target must be within 128 tiles of the current actor position.',
   move_items_exact: 'May walk the actor into reach first. A terminal receipt includes observed_effect with the actor inventory delta for item_name and the actor position before and after.',
@@ -99,21 +99,25 @@ function preflightExpression(operation) {
     return `(function() local p=${expression}; if p.ok~=true then return p end; local t=p.target; local a=remote.call("sgluna_deployment","status"); local e=game.get_entity_by_unit_number(${unit}); if not e and t and t.position and t.surface_index==a.surface_index and t.force_index==a.force_index then local s=game.surfaces[t.surface_index]; if s then for _,candidate in pairs(s.find_entities_filtered({position=t.position,radius=0.25,name=t.name,force=a.force_index,limit=2})) do if candidate.valid and candidate.unit_number==${unit} then e=candidate end end end end; if not t or t.unit_number~=${unit} or not e or not e.valid or e.unit_number~=t.unit_number or e.name~="assembling-machine-1" or e.name~=t.name or e.type~="assembling-machine" or e.surface.index~=a.surface_index or e.force.index~=a.force_index or e.surface.index~=t.surface_index or e.force.index~=t.force_index then return {ok=false,code="external_recipe_target_unproven"} end; local ok,w=pcall(function() local boxes=e.prototype.fluidbox_prototypes; if type(boxes)~="table" then return nil end; for _,box in pairs(boxes) do return nil end; if #e.fluidbox~=0 then return nil end; return {version=1,unit_number=e.unit_number,entity_name=e.name,surface_index=e.surface.index,force_index=e.force.index,prototype_fluidbox_count=0,fluidbox_count=0} end); if not ok or not w then return {ok=false,code="external_recipe_target_unproven"} end; p.external_recipe_nonfluid=w; return p end)()`
   }
   if (!['place_entity', 'place_candidate'].includes(operation.name)) return expression
-  if (operation.name === 'place_candidate') return `(function() local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or not (${FLUID_PLACEMENT_PROTOTYPES.map(name => `n==${luaString(name)}`).join(' or ')}) or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; local found=surface.find_entities_filtered({area=f.world_box,limit=129}); if #found>=129 then return {ok=false,code="placement_footprint_dense"} end; ${FOOTPRINT_BLOCKERS_LUA} return p end)()`
+  if (operation.name === 'place_candidate') return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or not (${FLUID_PLACEMENT_PROTOTYPES.map(name => `n==${luaString(name)}`).join(' or ')}) or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; ${FOOTPRINT_CHECK_LUA} return p end)()`
   const { entity_name: name, x, y, direction = 0 } = operation.args
   // Consume the same native footprint and nonfluid witness as the full runtime;
   // never infer dimensions, snapping or fluid ports from a vanilla name.
-  return `(function() local p=${expression}; if p.ok~=true then return p end; local w=p.preservation_nonfluid_output; local f=p.planned_footprint; if not w or w.fluid_port_count~=0 or w.entity_name~=${luaString(name)} or not f or not f.world_box then return {ok=false,code="nonfluid_footprint_unproven"} end; if f.position.x~=${x} or f.position.y~=${y} then return {ok=false,code="exact_grid_required",planned_footprint=f} end; local surface=game.surfaces[w.surface_index]; local force=game.forces[w.force_index]; if not surface or not force or not surface.can_place_entity({name=${luaString(name)},position=f.position,direction=${direction},force=force,build_check_type=defines.build_check_type.manual}) then return {ok=false,code="placement_not_clear"} end; local found=surface.find_entities_filtered({area=f.world_box,limit=129}); if #found>=129 then return {ok=false,code="placement_footprint_dense"} end; ${FOOTPRINT_BLOCKERS_LUA} return p end)()`
+  return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local w=p.preservation_nonfluid_output; local f=p.planned_footprint; if not w or w.fluid_port_count~=0 or w.entity_name~=${luaString(name)} or not f or not f.world_box then return {ok=false,code="nonfluid_footprint_unproven"} end; if f.position.x~=${x} or f.position.y~=${y} then return {ok=false,code="exact_grid_required",planned_footprint=f} end; local surface=game.surfaces[w.surface_index]; local force=game.forces[w.force_index]; if not surface or not force or not surface.can_place_entity({name=${luaString(name)},position=f.position,direction=${direction},force=force,build_check_type=defines.build_check_type.manual}) then return {ok=false,code="placement_not_clear"} end; ${FOOTPRINT_CHECK_LUA} return p end)()`
 }
 
 // Any non-resource entity in the footprint blocks external placement, including
-// items on the ground and characters that can_place_entity (and therefore
-// getPlacementCandidates) accepts. Name up to eight so the operator can tell an
-// item on the ground from a real structure; clearing is still never attempted.
-const FOOTPRINT_BLOCKERS_LUA = 'local blockers={}; for _,e in pairs(found) do if e.valid and e.type~="resource" and #blockers<8 then blockers[#blockers+1]={name=e.name,type=e.type,position=e.position,unit_number=e.unit_number,item=e.type=="item-entity" and e.stack and e.stack.valid_for_read and e.stack.name or nil} end end; if #blockers>0 then return {ok=false,code="placement_footprint_occupied",blockers=blockers,planned_footprint=f} end;'
+// items on the ground and characters that can_place_entity (and therefore the
+// native candidate search) accepts. One Lua definition serves placement preflight
+// and candidate annotation so they cannot disagree. It names up to eight blockers
+// so the operator can tell an item on the ground from a real structure; clearing
+// is still never attempted.
+const FOOTPRINT_RULE_LUA = 'local function external_footprint(surface,box) local found=surface.find_entities_filtered({area=box,limit=129}); if #found>=129 then return "placement_footprint_dense",{} end; local blockers={}; for _,e in pairs(found) do if e.valid and e.type~="resource" and #blockers<8 then blockers[#blockers+1]={name=e.name,type=e.type,position=e.position,unit_number=e.unit_number,item=e.type=="item-entity" and e.stack and e.stack.valid_for_read and e.stack.name or nil} end end; if #blockers>0 then return "placement_footprint_occupied",blockers end; return nil,blockers end;'
+const FOOTPRINT_CHECK_LUA = 'local code,blockers=external_footprint(surface,f.world_box); if code=="placement_footprint_dense" then return {ok=false,code=code} end; if code then return {ok=false,code=code,blockers=blockers,planned_footprint=f} end;'
+const ANNOTATED_CANDIDATES = 8 // getPlacementCandidates limit maximum
 
 const PREFLIGHT_HINTS = Object.freeze({
-  placement_footprint_occupied: 'The footprint contains non-resource entities (see details.blockers). getPlacementCandidates only checks can_place_entity; external placement also refuses items on the ground and characters, and never clears them. Choose another position.',
+  placement_footprint_occupied: 'The footprint contains non-resource entities (see details.blockers). getPlacementCandidates marks such candidates external_footprint.eligible=false; external placement refuses items on the ground and characters and never clears them. Choose another position.',
   placement_not_clear: 'can_place_entity refused this exact position and direction. Read fresh getPlacementCandidates for the same prototype.',
   exact_grid_required: 'The native footprint snaps to a different center; use details.planned_footprint.position exactly.',
   placement_footprint_dense: 'The footprint area holds too many entities to inspect; choose another position.',
@@ -122,13 +126,17 @@ const PREFLIGHT_HINTS = Object.freeze({
 
 function prototypeName(value) { return typeof value === 'string' && /^[a-z0-9_-]{1,100}$/.test(value) ? value : 'unknown' }
 
-function preflightFailure(preflight) {
-  const code = typeof preflight?.code === 'string' && /^[a-z0-9_]{1,80}$/.test(preflight.code) ? preflight.code : 'unknown'
-  const blockers = Array.isArray(preflight?.blockers) ? preflight.blockers.slice(0, 8).map(row => ({
+function footprintBlockers(rows) {
+  return (Array.isArray(rows) ? rows : []).slice(0, 8).map(row => ({
     name: prototypeName(row?.name), type: prototypeName(row?.type),
     ...(Number.isFinite(row?.position?.x) && Number.isFinite(row?.position?.y) ? { position: { x: row.position.x, y: row.position.y } } : {}),
     ...(Number.isSafeInteger(row?.unit_number) ? { unit_number: row.unit_number } : {}),
-    ...(typeof row?.item === 'string' ? { item: prototypeName(row.item) } : {}) })) : undefined
+    ...(typeof row?.item === 'string' ? { item: prototypeName(row.item) } : {}) }))
+}
+
+function preflightFailure(preflight) {
+  const code = typeof preflight?.code === 'string' && /^[a-z0-9_]{1,80}$/.test(preflight.code) ? preflight.code : 'unknown'
+  const blockers = Array.isArray(preflight?.blockers) ? footprintBlockers(preflight.blockers) : undefined
   const footprint = object(preflight?.planned_footprint) ? { position: preflight.planned_footprint.position, world_box: preflight.planned_footprint.world_box } : undefined
   const summary = blockers?.length ? ` Blockers: ${blockers.map(b => b.item ? `${b.type} (${b.item})` : `${b.name} [${b.type}]`).join(', ')}.` : ''
   return new BridgeError('preflight_rejected', `Native preflight rejected: ${code}. The operation was not sent to the game.${summary} ${Object.hasOwn(PREFLIGHT_HINTS, code) ? PREFLIGHT_HINTS[code] : 'Re-observe the target before choosing different arguments.'}`.trim(),
@@ -241,8 +249,42 @@ export class NativeBridge {
     // Observations remain allowed after a control loss, to support diagnosis.
     const raw = await this.rcon.command(command)
     check(typeof raw === 'string' && Buffer.byteLength(raw) <= 48 * 1024, 'observation_too_large', 'Narrow the observation; replies are limited to 48 KiB')
-    try { return JSON.parse(raw.trim()) }
+    let result
+    try { result = JSON.parse(raw.trim()) }
     catch { return { text: raw } }
+    return name === 'getPlacementCandidates' ? this.annotateCandidates(result) : result
+  }
+
+  // The native candidate search applies can_place_entity only. Re-check each
+  // returned footprint with the external placement rule so the operator sees
+  // which candidates external placement would refuse. Native fields are kept.
+  async annotateCandidates(result) {
+    if (result?.ok !== true || !Array.isArray(result.candidates) || result.candidates.length === 0) return result
+    const rule = 'Footprint rule only: non-resource entities in the footprint (items on the ground, characters) block external placement, which never clears them. Other preflight checks still apply.'
+    const rows = result.candidates.slice(0, ANNOTATED_CANDIDATES)
+    const boxes = rows.map(row => row?.footprint?.world_box)
+    if (!boxes.every(box => [box?.left_top?.x, box?.left_top?.y, box?.right_bottom?.x, box?.right_bottom?.y].every(Number.isFinite))) {
+      return { ...result, external_placement: { rule, checked: false, reason: 'candidate_geometry_missing' } }
+    }
+    const literal = boxes.map(box => `{{${box.left_top.x},${box.left_top.y}},{${box.right_bottom.x},${box.right_bottom.y}}}`).join(',')
+    let checked
+    try {
+      checked = json(await this.rcon.command(`${JSON_PREFIX}(function() ${FOOTPRINT_RULE_LUA} local a=remote.call("sgluna_deployment","status"); local surface=game.surfaces[a.surface_index]; if not surface then return {ok=false} end; local out={}; for i,box in ipairs({${literal}}) do local code,blockers=external_footprint(surface,box); out[i]={code=code or "clear",blockers=blockers} end; return {ok=true,tick=game.tick,rows=out} end)()))`))
+    }
+    catch { checked = undefined }
+    if (checked?.ok !== true || !Array.isArray(checked.rows) || checked.rows.length !== rows.length) {
+      return { ...result, external_placement: { rule, checked: false, reason: 'footprint_check_unavailable' } }
+    }
+    const candidates = result.candidates.map((candidate, index) => {
+      if (index >= rows.length) return { ...candidate, external_footprint: { checked: false } }
+      const code = checked.rows[index]?.code
+      if (code === 'clear') return { ...candidate, external_footprint: { eligible: true } }
+      return { ...candidate, external_footprint: { eligible: false, code: prototypeName(code), blockers: footprintBlockers(checked.rows[index]?.blockers) } }
+    })
+    const blocked = candidates.filter(candidate => candidate.external_footprint.eligible === false).length
+    return { ...result, candidates, external_placement: { rule, checked: true, tick: checked.tick,
+      eligible_candidate_count: candidates.filter(candidate => candidate.external_footprint.eligible === true).length, blocked_candidate_count: blocked,
+      ...(candidates.length > rows.length ? { unchecked_candidate_count: candidates.length - rows.length } : {}) } }
   }
 
   async prepare(rawOperation, key) {

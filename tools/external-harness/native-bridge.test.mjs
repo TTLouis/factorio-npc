@@ -27,6 +27,7 @@ function fixture() {
   const fake = { state, calls, preflight: { ok: true }, onSubmit: undefined, onCancel: undefined }
   const rcon = { command: async command => {
     calls.push(command)
+    if (fake.onCommand) { const reply = fake.onCommand(command); if (reply !== undefined) return reply }
     if (command.includes('local refusal=')) {
       if (fake.onSubmit) return fake.onSubmit(command)
       const marker = command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]
@@ -469,4 +470,64 @@ test('effect probe guards each item count natively', async () => {
   const f = fixture()
   await f.bridge.effectProbe({ name: 'mine_resource_at', args: { resource_name: 'crude-oil', x: 0, y: 0 } })
   assert.match(f.calls.at(-1), /pcall\(e\.get_item_count,n\)/)
+})
+
+test('placement candidates are annotated with the same footprint rule external placement enforces', async () => {
+  const f = fixture()
+  const box = (x, y) => ({ left_top: { x: x - 0.25, y: y - 0.25 }, right_bottom: { x: x + 0.25, y: y + 0.25 } })
+  const native = { ok: true, entity_name: 'transport-belt', legal_candidate_count: 2, execution_eligibility: 'eligible', candidates: [
+    { id: 'candidate-1', position: { x: 4.5, y: 0.5 }, footprint: { world_box: box(4.5, 0.5) } },
+    { id: 'candidate-2', position: { x: 6.5, y: 0.5 }, footprint: { world_box: box(6.5, 0.5) } }] }
+  f.onCommand = command => command.includes('rows=out')
+    ? JSON.stringify({ ok: true, tick: 5361, rows: [{ code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }] }, { code: 'clear', blockers: {} }] })
+    : command.includes('get_placement_candidates') ? JSON.stringify(native) : undefined
+  const result = await f.bridge.observe('getPlacementCandidates', { entity_name: 'transport-belt', covers_position: { x: 4.5, y: 0.5 } })
+  assert.equal(result.legal_candidate_count, 2, 'native fields are preserved')
+  assert.deepEqual(result.candidates[0].external_footprint, { eligible: false, code: 'placement_footprint_occupied',
+    blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }] })
+  assert.deepEqual(result.candidates[1].external_footprint, { eligible: true })
+  assert.equal(result.external_placement.checked, true)
+  assert.equal(result.external_placement.blocked_candidate_count, 1)
+  assert.equal(result.external_placement.eligible_candidate_count, 1)
+  const annotation = f.calls.at(-1)
+  assert.ok(annotation.includes('{{4.25,0.25},{4.75,0.75}}'))
+  // The candidate check and placement preflight must send one identical rule.
+  const rule = command => command.match(/local function external_footprint\(surface,box\).*?return nil,blockers end;/)?.[0]
+  f.state.status.placement_no_clear_supported = true; f.onCommand = undefined
+  await f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'transport-belt', x: 6.5, y: 0.5 } }, 'run/rule')
+  assert.ok(rule(annotation))
+  assert.equal(rule(f.calls[1]), rule(annotation))
+})
+
+test('candidate annotation fails visibly, never by dropping or inventing eligibility', async () => {
+  const f = fixture()
+  const native = { ok: true, candidates: [{ id: 'candidate-1', footprint: { world_box: { left_top: { x: 0, y: 0 }, right_bottom: { x: 1, y: 1 } } } }] }
+  f.onCommand = command => command.includes('rows=out') ? '{"ok":false}' : command.includes('get_placement_candidates') ? JSON.stringify(native) : undefined
+  const unavailable = await f.bridge.observe('getPlacementCandidates', { entity_name: 'transport-belt' })
+  assert.deepEqual(unavailable.external_placement, { rule: unavailable.external_placement.rule, checked: false, reason: 'footprint_check_unavailable' })
+  assert.equal(unavailable.candidates[0].external_footprint, undefined)
+  const calls = f.calls.length
+  native.candidates[0].footprint = {}
+  const missing = await f.bridge.observe('getPlacementCandidates', { entity_name: 'transport-belt' })
+  assert.equal(missing.external_placement.reason, 'candidate_geometry_missing')
+  assert.equal(f.calls.length, calls + 1, 'no footprint command without native geometry')
+})
+
+test('candidate annotation survives a transport failure and place_candidate shares the rule', async () => {
+  const f = fixture()
+  const native = { ok: true, candidates: [{ id: 'candidate-1', footprint: { world_box: { left_top: { x: 0, y: 0 }, right_bottom: { x: 1, y: 1 } } } }] }
+  f.onCommand = command => {
+    if (command.includes('rows=out')) throw new Error('socket closed')
+    return command.includes('get_placement_candidates') ? JSON.stringify(native) : undefined
+  }
+  const result = await f.bridge.observe('getPlacementCandidates', { entity_name: 'transport-belt' })
+  assert.equal(result.external_placement.checked, false)
+  assert.equal(result.candidates[0].id, 'candidate-1')
+  f.onCommand = undefined
+  f.state.status.placement_no_clear_supported = true; f.state.status.external_fluid_candidates_supported = 1
+  f.preflight = { ok: false, code: 'placement_footprint_occupied' }
+  await assert.rejects(f.bridge.prepare({ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }, 'run/fluid'))
+  const preflight = f.calls.find(command => command.includes('external_candidate_unproven'))
+  assert.match(preflight, /local function external_footprint\(surface,box\)/)
+  assert.match(preflight, /local code,blockers=external_footprint\(surface,f\.world_box\)/)
 })

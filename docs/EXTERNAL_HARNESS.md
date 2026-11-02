@@ -298,6 +298,15 @@ not show: `craft_item` counts recipe crafts rather than items, inserter
 `direction` names the pickup side, and a completed `research_technology` receipt
 means research started.
 
+`getPlacementCandidates` results carry `external_footprint` on each returned
+candidate (up to 8) and an `external_placement` summary. The native search
+applies `can_place_entity` only, while external placement also refuses any
+non-resource entity in the footprint, such as items on the ground or the actor.
+The bridge re-checks each footprint with that same rule: `eligible: false`
+names the blockers. `eligible: true` covers this footprint rule only; the other
+preflight checks still apply. Native candidate fields are unchanged, and
+`checked: false` means the re-check was unavailable.
+
 A `factorio_submit` error with `"effect": "not_happened"` and
 `"journal_slot_used": false` means this call was refused before its operation
 was sent to the game.
