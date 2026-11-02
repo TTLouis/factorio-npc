@@ -35,6 +35,13 @@ test('declared external bounds agree with executable capability limits', () => {
   assert.equal(wait, external.limits.receipt_wait_ms)
 })
 
+test('external operation notes match the canonical manifest and name real operations', () => {
+  const notes = capabilities().operation_notes
+  assert.deepEqual(Object.keys(notes), external.operation_notes)
+  for (const name of Object.keys(notes)) assert.ok(name === 'submit_refusals' || external.operations.includes(name), name)
+  assert.ok(notes.walk_to_position.includes(String(external.limits.walk_distance)))
+})
+
 
 test('external library manifest agrees with typed local capability metadata', () => {
   const meta = libraryMetadata()

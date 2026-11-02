@@ -105,12 +105,21 @@ function toolResult(value, isError = false) {
   return { content: [{ type: 'text', text }], structuredContent, isError }
 }
 
+function boundedJson(value, bytes) {
+  try { return Buffer.byteLength(JSON.stringify(value)) <= bytes }
+  catch { return false }
+}
+
 function executionError(error) {
   const code = typeof error?.code === 'string' && /^[a-z_][a-z0-9_]{0,79}$/.test(error.code) ? error.code : 'runtime_error'
+  const notSent = error?.effect === 'not_happened'
   const message = typeof error?.publicMessage === 'string'
     ? error.publicMessage.slice(0, 1000)
-    : 'The runtime refused or could not complete this call. Read context or resume the operation; do not assume no effect occurred.'
-  return toolResult({ code, message }, true)
+    : notSent
+      ? 'The runtime refused this call before the operation was sent to the game. No journal slot was used.'
+      : 'The runtime refused or could not complete this call. Read context or resume the operation; do not assume no effect occurred.'
+  const details = typeof error?.publicMessage === 'string' && isObject(error.details) && boundedJson(error.details, 4096) ? error.details : undefined
+  return toolResult({ code, message, ...(notSent ? { effect: 'not_happened', journal_slot_used: false } : {}), ...(details ? { details } : {}) }, true)
 }
 
 /**

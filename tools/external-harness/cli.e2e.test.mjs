@@ -97,6 +97,7 @@ async function fakeEngine() {
       return '{"ok":true,"code":"cancel_requested"}'
     }
     if (command.includes('autorio_preflight') || command.includes('validation="not_required"')) return '{"ok":true}'
+    if (command.includes('get_item_count')) return '{"ok":false}'
     throw new Error('Unexpected RCON fixture command')
   }
   const server = net.createServer(socket => {

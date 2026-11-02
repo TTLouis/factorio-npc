@@ -32,6 +32,7 @@ function fixture() {
       const marker = command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]
       return `${marker}${JSON.stringify({ ok: true, result: [[true, 'queued']], admission: fake.admission })}`
     }
+    if (command.includes('get_item_count')) return JSON.stringify(fake.probe ?? { example: true })
     if (command.includes('local g=') && command.includes('cancel_all_tasks')) {
       if (fake.onCancel) return fake.onCancel(command)
       return '{"ok":true,"code":"cancel_requested"}'
@@ -39,6 +40,7 @@ function fixture() {
     if (command.includes('local g=') && command.includes('configure')) return '{"ok":true}'
     if (command.includes('{guard=remote.call')) return JSON.stringify(state)
     if (command.includes('\"fluid_preservation_candidate\"')) {
+      if (fake.freezeThrows) throw new Error('socket closed after freeze write')
       if (fake.freezeError) return JSON.stringify({ ok: false, code: fake.freezeError })
       const encoded = command.match(/helpers\.json_to_table\('([^']*)'\)/)[1]
       const context = JSON.parse(encoded)
@@ -77,8 +79,10 @@ test('prepare uses canonical parsing, native preflight and exact v2 lineage', as
   assert.equal(prepared.pending.ordinal, 5)
   assert.equal(prepared.pending.surface_index, 1)
   assert.equal(prepared.pending.operation_key, 'run/op_1')
-  assert.equal(f.calls.length, 2)
+  assert.equal(f.calls.length, 3)
   assert.match(f.calls[1], /autorio_preflight.*craft_item/)
+  assert.match(f.calls[2], /get_item_count/, 'read-only effect probe follows a passing preflight')
+  assert.equal(prepared.observed_before, null, 'an unreadable probe never blocks preparation')
 })
 
 test('prepare rejects native preflight without sending a mutation', async () => {
@@ -118,7 +122,7 @@ test('submit reuses real v2 admission wrapper under an atomic external boundary'
   f.admission = row(prepared.pending)
   const answer = await f.bridge.submit(prepared)
   assert.equal(answer.admitted, true)
-  assert.equal(f.calls.length, 3)
+  assert.equal(f.calls.length, 4)
   const command = f.calls.at(-1)
   for (const fragment of ['g.session~=', 'g.actor_id~=7', 'g.epoch~=3', 's.task_state~="idle"', 'j.high_water~=4', 's.batch_generation~=2', 'unresolved_native_operation', 'autorio_preflight', 'autorio_operation_admission","begin', 'autorio_operation_admission","slot', 'autorio_operation_admission","finish']) assert.ok(command.includes(fragment), fragment)
   assert.ok(command.indexOf('autorio_preflight') < command.indexOf('autorio_operation_admission","begin'))
@@ -144,7 +148,7 @@ test('tampered prepared operation cannot use the original durable signature', as
   const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
   prepared.operation.args.count = 2
   await assert.rejects(f.bridge.submit(prepared), { code: 'prepared_signature_mismatch' })
-  assert.equal(f.calls.length, 2)
+  assert.equal(f.calls.length, 3)
 })
 
 test('exact admission completion is execution evidence, never goal success', async () => {
@@ -343,8 +347,8 @@ test('lab and pole use native fractional-grid footprints while fluid coordinate 
   for (const entity_name of ['lab', 'small-electric-pole']) {
     const operation = { name: 'place_entity', args: { entity_name, x: 0.5, y: -1.5 } }
     assert.deepEqual((await f.bridge.prepare(operation, 'run/nonfluid')).operation, operation)
-    assert.match(f.calls.at(-1), /preservation_nonfluid_output/)
-    assert.match(f.calls.at(-1), /exact_grid_required/)
+    assert.match(f.calls.at(-2), /preservation_nonfluid_output/)
+    assert.match(f.calls.at(-2), /exact_grid_required/)
     assert.match(renderExternalOperation(operation), /,true\)$/)
   }
   for (const entity_name of ['boiler', 'steam-engine', 'pipe', 'offshore-pump', 'electric-mining-drill']) {
@@ -391,4 +395,78 @@ test('unknown fluid capability, native refusal and malformed relation cannot sen
   f.freezeError = 'preservation_guard_geometry_unproven'
   await assert.rejects(f.bridge.prepare(operation, 'run/fluid'), error => error.code === 'fluid_preservation_refused' && error.notAdmitted)
   assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
+})
+
+// Operator-feedback regressions from the 2026-11-01 cheap-model trial
+// (test-results/external-cheap-redscience-20261101/FINDINGS.md findings 1-6).
+test('walk limit refusal states distance, limit and actor position without any game call', async () => {
+  const f = fixture(); f.state.status.actor.position = { x: 10, y: 0 }
+  await assert.rejects(f.bridge.prepare({ name: 'walk_to_position', args: { x: 150, y: 0 } }, 'run/walk'), error => error.code === 'operation_limit'
+    && /140\.0 tiles/.test(error.publicMessage) && /limit is 128/.test(error.publicMessage)
+    && error.details.maximum === 128 && error.details.distance === 140 && error.details.actor_position.x === 10)
+  assert.equal(f.calls.length, 1, 'only the snapshot read ran')
+})
+
+test('placement refusal names footprint blockers such as items on the ground', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true
+  f.preflight = { ok: false, code: 'placement_footprint_occupied', planned_footprint: { position: { x: -48.5, y: 24.5 }, world_box: { left_top: { x: -49, y: 24 }, right_bottom: { x: -48, y: 25 } } },
+    blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: -48.4, y: 24.6 }, item: 'copper-plate' }] }
+  await assert.rejects(f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'transport-belt', x: -48.5, y: 24.5, direction: 12 } }, 'run/belt'), error =>
+    error.code === 'preflight_rejected' && error.notAdmitted && error.details.native_code === 'placement_footprint_occupied'
+    && error.details.blockers[0].item === 'copper-plate' && error.details.planned_footprint.position.x === -48.5
+    && /item-entity \(copper-plate\)/.test(error.publicMessage) && /never clears/.test(error.publicMessage))
+  assert.match(f.calls[1], /blockers\[#blockers\+1\]=\{name=e\.name,type=e\.type/, 'native preflight collects blockers rather than a bare code')
+  assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
+})
+
+test('unknown or unsafe native preflight codes are not echoed verbatim', async () => {
+  const f = fixture(); f.preflight = { ok: false, code: 'Raw <native> text' }
+  await assert.rejects(f.bridge.prepare(operation, 'run/op_1'), error => error.details.native_code === 'unknown' && !/Raw/.test(error.publicMessage))
+})
+
+test('observation argument errors name the expected schema before any game call', async () => {
+  const f = fixture()
+  await assert.rejects(f.bridge.observe('getEntityGeometry', { unit: 5 }), error => error.code === 'invalid_observation_arguments'
+    && /unit_number/.test(error.publicMessage) && error.details.observation === 'getEntityGeometry')
+  assert.equal(f.calls.length, 0)
+})
+
+test('effect probe records actor position and the operation item count before submission', async () => {
+  const f = fixture(); f.probe = { ok: true, tick: 120, actor_id: 7, position: { x: 3, y: 4 }, items: { 'iron-gear-wheel': 2 } }
+  const prepared = await f.bridge.prepare(operation, 'run/op_1')
+  assert.deepEqual(prepared.observed_before, { tick: 120, actor_id: 7, position: { x: 3, y: 4 }, items: { 'iron-gear-wheel': 2 } })
+  assert.match(f.calls.at(-1), /get_entity_by_unit_number\(g\.actor_id\).*e\.type~="character".*\{'iron-gear-wheel'\}/)
+})
+
+test('capabilities state craft count, inserter direction and research receipt semantics', () => {
+  const notes = capabilities().operation_notes
+  assert.match(notes.craft_item, /number of recipe crafts, not items/)
+  assert.match(notes.place_entity, /inserters it names the pickup side/)
+  assert.match(notes.research_technology, /started and queued, not finished/)
+  assert.match(notes.walk_to_position, /128 tiles/)
+})
+
+test('only read-only prepare refusals are marked not sent; a native claim freeze fault never is', async () => {
+  const f = fixture(); f.state.status.task_state = 'mining'
+  await assert.rejects(f.bridge.prepare(operation, 'run/busy'), error => error.code === 'native_busy' && error.notSent === true)
+  const g = fixture(); g.state.status.placement_no_clear_supported = true; g.state.status.external_fluid_candidates_supported = 1
+  g.preflight = { ok: true, preservation_join: { connects_to: { unit_number: 42 } } }
+  const candidate = { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }
+  g.freezeThrows = true
+  await assert.rejects(g.bridge.prepare(candidate, 'run/fluid'), error => /socket closed/.test(error.message) && error.notSent !== true)
+  g.freezeThrows = false; g.freezeError = 'preservation_guard_already_claimed'
+  await assert.rejects(g.bridge.prepare(candidate, 'run/fluid'), error => error.code === 'fluid_preservation_refused' && error.notSent !== true)
+})
+
+test('native blocker text is pattern-checked and unknown codes never index object prototypes', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true
+  f.preflight = { ok: false, code: 'constructor', blockers: [{ name: 'Bad Name<script>', type: 'item-entity', position: { x: 1, y: 2 }, item: 'x y' }] }
+  await assert.rejects(f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 0, y: 0 } }, 'run/odd'), error =>
+    !/function|script|x y/.test(error.publicMessage) && error.details.blockers[0].name === 'unknown' && error.details.blockers[0].item === 'unknown')
+})
+
+test('effect probe guards each item count natively', async () => {
+  const f = fixture()
+  await f.bridge.effectProbe({ name: 'mine_resource_at', args: { resource_name: 'crude-oil', x: 0, y: 0 } })
+  assert.match(f.calls.at(-1), /pcall\(e\.get_item_count,n\)/)
 })

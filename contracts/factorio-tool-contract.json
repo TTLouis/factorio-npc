@@ -17,7 +17,10 @@
     "limits": { "wait_ticks": 3600, "count": 100, "transfer_count": 1000, "walk_distance": 128, "harvest_radius": 64, "receipt_wait_ms": 30000, "journal_records": 512 },
     "library": { "tool": "factorio_library", "read_only": true, "advisory_only": true, "donor_commit": "20cdcd072b512c814c8af071f4f9ad1fe087f942", "knowledge": 7, "skills": 54, "result_bytes": 7168 },
     "resume_semantics": "read-and-reconcile-never-replay",
-    "completion_semantics": "native-execution-receipt-not-overall-goal-proof"
+    "completion_semantics": "native-execution-receipt-not-overall-goal-proof",
+    "refusal_semantics": "not-happened-effect-with-bounded-details",
+    "receipt_observed_effect": "actor-observation-not-attribution",
+    "operation_notes": ["craft_item", "place_entity", "research_technology", "walk_to_position", "move_items_exact", "harvest_product", "submit_refusals"]
   },
   "surfaces": [
     "ordinary-agent",

@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
 import { operationSignature } from '../../deploy/pterodactyl/runtime-v8/operation-reconciliation.mjs'
+import { PolicyError } from '../../deploy/pterodactyl/staging/structured-policy.mjs'
 import { parseExternalOperation as parseOperation } from './native-bridge.mjs'
 import { libraryMetadata, readLibrary } from './library.mjs'
 
@@ -16,6 +17,13 @@ const windowsReplace = fileURLToPath(new URL('./replace-journal-windows.ps1', im
 
 export function failure(code, publicMessage = code) {
   return Object.assign(new Error(publicMessage), { code, publicMessage })
+}
+
+// Marks a refusal raised before the write-ahead record: no journal slot was
+// used and the operation was never sent, so its effect is known not to happen.
+function notSent(error) {
+  if (error && typeof error === 'object') { error.effect = 'not_happened'; error.journalSlotUsed = false }
+  return error
 }
 
 function object(value, keys) {
@@ -40,8 +48,24 @@ function receipt(record) {
     receipt_scope: 'historical_execution',
     current_world_verified: false,
     goal_verified: false,
+    ...(record.observed_effect ? { observed_effect: record.observed_effect } : {}),
     ...(record.result ? { execution: record.result } : {}),
   }
+}
+
+// Before/after actor observation captured once when the receipt first turns
+// terminal. Other world activity can also change these values; it is labelled
+// as an observation, not an attributed native quantity.
+function observedEffect(before, after) {
+  if (!after || after.actor_id !== before.actor_id) return { scope: 'actor_observation_not_attribution', available: false }
+  const items = {}
+  for (const [name, count] of Object.entries(before.items ?? {})) {
+    if (Number.isSafeInteger(after.items?.[name])) items[name] = { before: count, after: after.items[name], delta: after.items[name] - count }
+  }
+  return { scope: 'actor_observation_not_attribution', available: true, ticks: { before: before.tick, after: after.tick },
+    actor_position: { before: before.position, after: after.position,
+      moved_tiles: Math.round(Math.hypot(after.position.x - before.position.x, after.position.y - before.position.y) * 10) / 10 },
+    actor_items: items }
 }
 
 // The local journal is a write-ahead duplicate fence, not a second world state.
@@ -182,6 +206,12 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
         || !Number.isSafeInteger(result.evidence?.tick) || result.evidence.tick < ledger.native_tick) throw failure('world_rollback_detected')
       ledger.native_high_water = result.high_water
       ledger.native_tick = result.evidence.tick
+      if (row.terminal && row.effect !== 'not_happened' && row.prepared?.observed_before && !row.observed_effect && typeof bridge.effectProbe === 'function') {
+        let after = null
+        try { after = await bridge.effectProbe(row.operation) }
+        catch { after = null } // Observation only: never affects the receipt state.
+        row.observed_effect = observedEffect(row.prepared.observed_before, after)
+      }
     }
     catch {
       row.state = 'uncertain'
@@ -231,7 +261,13 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
     submit: input => serialized(async () => {
       object(input, ['request_id', 'operation'])
       if (typeof input.request_id !== 'string' || !ID.test(input.request_id)) throw failure('invalid_request_id')
-      const operation = parseOperation(input.operation)
+      let operation
+      try { operation = parseOperation(input.operation) }
+      catch (error) {
+        if (typeof error?.publicMessage === 'string') throw notSent(error)
+        if (!(error instanceof PolicyError)) throw notSent(error)
+        throw notSent(failure('invalid_operation_arguments', `${error.message.slice(0, 200)}. Check factorio_capabilities operations[].args for this operation.`))
+      }
       const signature = operationSignature([operation])
       const id = operationId(session, input.request_id)
       const previous = ledger.records.find(row => row.operation_id === id)
@@ -244,7 +280,11 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
       if (ledger.records.some(row => !row.terminal || row.current_fence)) throw failure('operation_unsettled', 'Reconcile the outstanding operation before scheduling more work')
       if (ledger.records.length >= MAX_RECORDS) throw failure('ledger_full', 'Journal capacity reached; archive this world/session rather than deleting replay protection')
       await snapshot()
-      const prepared = await bridge.prepare(operation, id)
+      let prepared
+      try { prepared = await bridge.prepare(operation, id) }
+      // Only refusals the bridge proves came from its read-only phase are labelled;
+      // a fault during a native claim freeze or transport stays uncertain.
+      catch (error) { throw error?.notSent === true ? notSent(error) : error }
       if (prepared?.pending?.operation_key !== id || prepared.pending.signature !== signature) throw failure('invalid_preparation')
       const row = { operation_id: id, request_id: input.request_id, signature, operation, prepared,
         state: 'uncertain', reason: 'write_ahead_before_send', effect: 'unknown', terminal: false,
