@@ -1042,6 +1042,7 @@ for (const form of ['assistant_json', 'submitPlan']) for (const residual of [fal
     await observeManualMachine(w)
     const original = structuredClone(w.held().steps); const goal = structuredClone(w.memory.planningState(an.key).goal.definition)
     const receipts = structuredClone(w.memory.snapshot().factory_placement_receipts)
+    const effortBefore = w.memory.planningState(an.key).goal.effort.total
     if (residual) {
       const normalize = w.agent.normalizeManualBootstrapProduction.bind(w.agent)
       w.agent.normalizeManualBootstrapProduction = (plan, options) => options?.residual ? normalize(plan, options) : plan
@@ -1062,6 +1063,7 @@ for (const form of ['assistant_json', 'submitPlan']) for (const residual of [fal
     assert.deepEqual(w.memory.snapshot().factory_placement_receipts, receipts)
     assert.equal(w.ops.filter(op => op === 'move_items_exact').length, 10)
     assert.equal(w.ops.includes('place_entity'), false); assert.equal(w.providers.length, 1)
+    assert.equal(w.memory.planningState(an.key).goal.effort.total, effortBefore + 1, 'preserve legacy effort plus one model decision; bounded deterministic production admissions do not spend additional model effort')
     assert.equal(w.events.filter(row => row.event.startsWith('production.manual_bootstrap_')).length, residual ? 2 : 1, 'controller supply never renormalizes')
   })
 }

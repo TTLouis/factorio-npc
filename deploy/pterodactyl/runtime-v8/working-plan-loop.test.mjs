@@ -10,7 +10,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 for (const bypassCommitPrevention of [false, true]) test(`assignment refusal revises canonical strategy then legally continues (${bypassCommitPrevention ? 'residual' : 'prevention'})`, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'working-plan-'))
   try {
-    const w = assignedReviewFixture(path.join(directory, 'state.json'), { plannerRevision: true, bypassCommitPrevention, operationForm: 'move_items_exact' })
+    const w = assignedReviewFixture(path.join(directory, 'state.json'), { plannerRevision: true, bypassCommitPrevention, operationForm: 'move_items_exact', submissionForm: bypassCommitPrevention ? 'submitPlan' : 'json' })
     const result = await w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' })
     const state = w.memory.planningState(ASSIGNED_KEY); const plan = getActivePlan(state)
     assert.equal(plan.plan_version, 2)

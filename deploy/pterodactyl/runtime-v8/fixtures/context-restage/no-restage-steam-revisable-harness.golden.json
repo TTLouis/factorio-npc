@@ -1,0 +1,869 @@
+{
+  "calls": [
+    {
+      "body": "dfd7179c2314a36b",
+      "context": "d1cd83efd9119c14",
+      "messages": 7
+    },
+    {
+      "body": "36033ba093608a8a",
+      "context": "fc692382fd4fbd9e",
+      "messages": 11
+    },
+    {
+      "body": "7482843fc809da07",
+      "context": "c51081091f8bad92",
+      "messages": 13
+    },
+    {
+      "body": "f0cf768b359de717",
+      "context": "da8f379fd5fb1353",
+      "messages": 14
+    },
+    {
+      "body": "bb82411adf2e550f",
+      "context": "4357955560255795",
+      "messages": 10
+    },
+    {
+      "body": "f4ce1d2144d9e439",
+      "context": "2f6995293af92ca5",
+      "messages": 13
+    },
+    {
+      "body": "d28d025e1971565f",
+      "context": "4e21d90ef4cb5b39",
+      "messages": 16
+    },
+    {
+      "body": "2b92dd346503a54a",
+      "context": "b94658aadb52ffc8",
+      "messages": 16
+    },
+    {
+      "body": "046517f78f1d1d09",
+      "context": "762450d8ff62934a",
+      "messages": 11
+    },
+    {
+      "body": "d525818eecd1cd0f",
+      "context": "7217558eeb84fb0c",
+      "messages": 14
+    },
+    {
+      "body": "3cd143ae82af7c31",
+      "context": "69e185a12395f799",
+      "messages": 15
+    }
+  ],
+  "trace": [
+    {
+      "event": "request.received",
+      "sha": "b5dd1a8b19815f11"
+    },
+    {
+      "event": "chat.acknowledged",
+      "sha": "d89ab869f6132e90"
+    },
+    {
+      "event": "lifecycle.entered",
+      "sha": "e6ea1984391f7688"
+    },
+    {
+      "event": "planning.goal_admitted",
+      "sha": "05efa8c425da7210"
+    },
+    {
+      "event": "skill.offer_skipped",
+      "sha": "2d3859b4046c3fd3"
+    },
+    {
+      "event": "lifecycle.entered",
+      "sha": "8b105893bbf22f9b"
+    },
+    {
+      "event": "actor.bound",
+      "sha": "851992d25d9d89e9"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "3133114572ee3298"
+    },
+    {
+      "event": "compaction.ceiling",
+      "sha": "1aaf3613fe77f395"
+    },
+    {
+      "event": "context.topology_refreshed",
+      "sha": "99c412aa78de0525"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "0f89af02d52b6bf0"
+    },
+    {
+      "event": "provider.request",
+      "sha": "1a8ba1afef2da3d3"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "0c5482d1ca219a93"
+    },
+    {
+      "event": "provider.response",
+      "sha": "22727d336331da4e"
+    },
+    {
+      "event": "tool.call",
+      "sha": "47384c311dbbd651"
+    },
+    {
+      "event": "tool.call",
+      "sha": "166891d68389c5af"
+    },
+    {
+      "event": "tool.call",
+      "sha": "05ccdb90351aa06f"
+    },
+    {
+      "event": "tool.result",
+      "sha": "c77029b3f82423c2"
+    },
+    {
+      "event": "tool.result",
+      "sha": "f56e6a3ffb5ce798"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "629d2bee4568d53f"
+    },
+    {
+      "event": "tool.result",
+      "sha": "b7e85523b8f98b33"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "d18882c89de31185"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "619d69a09a0484f2"
+    },
+    {
+      "event": "provider.request",
+      "sha": "a3f3b39389146e1d"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "a3aaf4186ff93c04"
+    },
+    {
+      "event": "provider.response",
+      "sha": "aa125aee6df0a8ab"
+    },
+    {
+      "event": "tool.call",
+      "sha": "b4868156bded4ad3"
+    },
+    {
+      "event": "tool.call",
+      "sha": "e4153830182352db"
+    },
+    {
+      "event": "tool.call",
+      "sha": "06757c65b922209b"
+    },
+    {
+      "event": "tool.call",
+      "sha": "7810be5b89bfe068"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "4775f5bd7aceeefb"
+    },
+    {
+      "event": "tool.result",
+      "sha": "7887d95e8c256ba0"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "d7621a8cbabe445f"
+    },
+    {
+      "event": "tool.result",
+      "sha": "4fa3fd8beb5481ad"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "d1ba5b6a7746eff5"
+    },
+    {
+      "event": "tool.result",
+      "sha": "2d8d7304e0b74298"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "e02cbc0c9ea496f3"
+    },
+    {
+      "event": "tool.result",
+      "sha": "c87f212912fbb3f9"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "8008bcd1a175f375"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "f473d7dc4377a1a4"
+    },
+    {
+      "event": "provider.request",
+      "sha": "0ccf8fc84c2ac0b3"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "1e7c6b94d9db8160"
+    },
+    {
+      "event": "provider.response",
+      "sha": "0b7df0131c89d6b2"
+    },
+    {
+      "event": "tool.call",
+      "sha": "d71a24324f6a8a3a"
+    },
+    {
+      "event": "tool.call",
+      "sha": "d603d1a1cb222017"
+    },
+    {
+      "event": "tool.call",
+      "sha": "72d20f8423e2d26e"
+    },
+    {
+      "event": "tool.call",
+      "sha": "8ae5c2de560c3659"
+    },
+    {
+      "event": "tool.result",
+      "sha": "12aa7256af669c63"
+    },
+    {
+      "event": "tool.result",
+      "sha": "b3509edd23461301"
+    },
+    {
+      "event": "tool.result",
+      "sha": "19d88eecadda698d"
+    },
+    {
+      "event": "tool.result",
+      "sha": "d74eb8cbf36c60d9"
+    },
+    {
+      "event": "recovery.classified",
+      "sha": "bac1766c9f602aed"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "9c269b98f1973420"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "a07b785ec86bba1e"
+    },
+    {
+      "event": "provider.request",
+      "sha": "e9f186d154c2488e"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "9c141453317ed34d"
+    },
+    {
+      "event": "provider.response",
+      "sha": "1e08a233dd09afd1"
+    },
+    {
+      "event": "provider.plan_submission",
+      "sha": "0e55817195b48189"
+    },
+    {
+      "event": "plan.accepted",
+      "sha": "ccb96777d4628613"
+    },
+    {
+      "event": "plan.persisted",
+      "sha": "f783d206b40e2e6c"
+    },
+    {
+      "event": "lifecycle.entered",
+      "sha": "6462f5066ef5d36f"
+    },
+    {
+      "event": "step.checkpoint_validated",
+      "sha": "fd9802180612415a"
+    },
+    {
+      "event": "operations.preflight_ok",
+      "sha": "1bc6a39d1fca8a6b"
+    },
+    {
+      "event": "operation.pending_recorded",
+      "sha": "83f1456e5749ac39"
+    },
+    {
+      "event": "operations.admit",
+      "sha": "46e2ce17bcce793d"
+    },
+    {
+      "event": "lifecycle.entered",
+      "sha": "2eb1726a486edbaa"
+    },
+    {
+      "event": "operations.ack",
+      "sha": "7997791318f6fb49"
+    },
+    {
+      "event": "plan.time_estimate",
+      "sha": "a54381652c196d48"
+    },
+    {
+      "event": "request.waiting",
+      "sha": "3379cdc47a33197b"
+    },
+    {
+      "event": "decision.budgets_restored",
+      "sha": "15e3c92d4161d358"
+    },
+    {
+      "event": "factorio.completed_signal",
+      "sha": "1700d45fa0c8d269"
+    },
+    {
+      "event": "operation.completed_receipt_ingested",
+      "sha": "cc782efe1e3d9947"
+    },
+    {
+      "event": "factorio.status",
+      "sha": "c0a0f59d7baa21aa"
+    },
+    {
+      "event": "step.completion_checked",
+      "sha": "e39573f4bb94ce15"
+    },
+    {
+      "event": "step.verified",
+      "sha": "792253c946427dfb"
+    },
+    {
+      "event": "step.time_measured",
+      "sha": "7491b6ff4380bbd4"
+    },
+    {
+      "event": "budget.generation_rolled",
+      "sha": "5ac699ac9816744c"
+    },
+    {
+      "event": "lifecycle.entered",
+      "sha": "b56fa5dd361b9ed9"
+    },
+    {
+      "event": "factorio.completion_continuation",
+      "sha": "cd0b89a9eeff9fae"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "46aef31ec4b7ab50"
+    },
+    {
+      "event": "context.topology_refreshed",
+      "sha": "9aaad81d07d0229e"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "f113cd7b915e6586"
+    },
+    {
+      "event": "provider.request",
+      "sha": "15de56d764f75f78"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "942632ec5da69c7c"
+    },
+    {
+      "event": "provider.response",
+      "sha": "c36731b8bb59ff75"
+    },
+    {
+      "event": "tool.call",
+      "sha": "e60a58da120d693a"
+    },
+    {
+      "event": "tool.call",
+      "sha": "79681651cff7d2bb"
+    },
+    {
+      "event": "tool.result",
+      "sha": "53d835cd45994155"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "598dc6d8e238d14d"
+    },
+    {
+      "event": "tool.result",
+      "sha": "8d8b2e24ab4c9575"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "7ccdee0cac8999a1"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "e4196bf37bdb3546"
+    },
+    {
+      "event": "provider.request",
+      "sha": "035a8197c9c03ddb"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "44dcb4f30b6f5723"
+    },
+    {
+      "event": "provider.response",
+      "sha": "97fcca192b8391e8"
+    },
+    {
+      "event": "tool.call",
+      "sha": "3c29a60f42284b0a"
+    },
+    {
+      "event": "tool.call",
+      "sha": "25c04e5c8f536f30"
+    },
+    {
+      "event": "tool.call",
+      "sha": "33c3310166ba9de9"
+    },
+    {
+      "event": "tool.call",
+      "sha": "74aa0a3bdac3c655"
+    },
+    {
+      "event": "tool.result",
+      "sha": "de1a9e11b851258a"
+    },
+    {
+      "event": "tool.result",
+      "sha": "4f2189f4d70eb083"
+    },
+    {
+      "event": "tool.result",
+      "sha": "148c2f59bef4ce24"
+    },
+    {
+      "event": "tool.result",
+      "sha": "72f89585f41f44c5"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "6e2f74a27795cf97"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "418351edfcda52fb"
+    },
+    {
+      "event": "provider.request",
+      "sha": "d40e0f395de406cd"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "264012703e407afe"
+    },
+    {
+      "event": "provider.response",
+      "sha": "04d4b60b812e4330"
+    },
+    {
+      "event": "tool.call",
+      "sha": "8346b9afc1512469"
+    },
+    {
+      "event": "tool.call",
+      "sha": "76e3066e940a3f59"
+    },
+    {
+      "event": "tool.call",
+      "sha": "655f0d5f0babd795"
+    },
+    {
+      "event": "tool.result",
+      "sha": "3d4acbe332e18124"
+    },
+    {
+      "event": "tool.result",
+      "sha": "98a742dbf5cfaac6"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "e28b3a5d36e45965"
+    },
+    {
+      "event": "tool.result",
+      "sha": "2b519856cdc5ff78"
+    },
+    {
+      "event": "recovery.classified",
+      "sha": "d76d9f28d276b2f1"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "0857cab5577b8bf9"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "98c02c808833efd4"
+    },
+    {
+      "event": "provider.request",
+      "sha": "8b10c1dfa3bed6b8"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "d7dcb0bfecd9531c"
+    },
+    {
+      "event": "provider.response",
+      "sha": "202c96242614963c"
+    },
+    {
+      "event": "provider.plan_submission",
+      "sha": "230b81bcd52ca017"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "e6d4d37ff88d91b3"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "38566126bbb1cbc8"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "2662eb6c48945c2a"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "5b5ccc6a9f5a732e"
+    },
+    {
+      "event": "factory_cell.use_resolved",
+      "sha": "67112adb7c729c73"
+    },
+    {
+      "event": "factory_cell.world_bound",
+      "sha": "362a6b509333a1e8"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "471984007752a266"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "731e50a66cc9db41"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "465855661259cfe7"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "faafaa87308dc56a"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "de707d2aea0b001d"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "e4ca76183622790d"
+    },
+    {
+      "event": "plan.accepted",
+      "sha": "3bbe1ca3a97e5537"
+    },
+    {
+      "event": "plan.persisted",
+      "sha": "2ee2caf971b67592"
+    },
+    {
+      "event": "operations.batch_stock_checked",
+      "sha": "a1acfeff704c10e6"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "015e3045359a16db"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "4580f0c75ac8283c"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "89faa32de0c0d0bc"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "7a5fda5e53d8391c"
+    },
+    {
+      "event": "factory_cell.use_resolved",
+      "sha": "468a3e819e47dd1a"
+    },
+    {
+      "event": "factory_cell.world_bound",
+      "sha": "88fa2c1a5d1fac75"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "a3f00cb3c3292c8a"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "40efb652725ce1c9"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "6dcee0f9e573e1ef"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "9686257bdd89511e"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "1384139d61c7bf9f"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "e30eda623b01ec85"
+    },
+    {
+      "event": "operations.preflight_ok",
+      "sha": "54057658bf8463a0"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "c6405a18aa23fed3"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "7a20ba3ce11263f3"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "bd076abbfcfbd180"
+    },
+    {
+      "event": "factory_cell.native_evidence",
+      "sha": "d2e5571ead120615"
+    },
+    {
+      "event": "factory_cell.use_resolved",
+      "sha": "218d42b87f1e19f5"
+    },
+    {
+      "event": "factory_cell.world_bound",
+      "sha": "e18d81be55f47632"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "798ed973302488e4"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "799501f3b7b8d3e9"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "6290e9fc9b7b20aa"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "f8521c2d01152f30"
+    },
+    {
+      "event": "factory_cell.observation_started",
+      "sha": "c1c4a9aef3f1ee7f"
+    },
+    {
+      "event": "factory_cell.observation_completed",
+      "sha": "6af06d3e244152d0"
+    },
+    {
+      "event": "operation.pending_recorded",
+      "sha": "a190ad7678937d5c"
+    },
+    {
+      "event": "operations.admit",
+      "sha": "d5e7608171033642"
+    },
+    {
+      "event": "lifecycle.entered",
+      "sha": "f50ea52aa4bfdaf1"
+    },
+    {
+      "event": "operations.ack",
+      "sha": "88ebb4739ffcc038"
+    },
+    {
+      "event": "request.waiting",
+      "sha": "8b17126dc70d9ec1"
+    },
+    {
+      "event": "decision.budgets_restored",
+      "sha": "a66f3f0273b1cd57"
+    },
+    {
+      "event": "operation.reconciled",
+      "sha": "ad984fb56d6120e4"
+    },
+    {
+      "event": "factorio.status",
+      "sha": "bb1764933e9345ec"
+    },
+    {
+      "event": "lifecycle.entered",
+      "sha": "447959a31b3245af"
+    },
+    {
+      "event": "factorio.error_continuation",
+      "sha": "5e590ab514432279"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "feffd1255635cc7f"
+    },
+    {
+      "event": "context.topology_refreshed",
+      "sha": "59f7523aff9576f5"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "398ef3084782b0f5"
+    },
+    {
+      "event": "provider.request",
+      "sha": "b83c89b54598fa67"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "cc3b35aaa2073ce3"
+    },
+    {
+      "event": "provider.response",
+      "sha": "ae9faf4881a70500"
+    },
+    {
+      "event": "tool.call",
+      "sha": "bbe28c0d1bf3452b"
+    },
+    {
+      "event": "tool.call",
+      "sha": "b73c0be5a523a425"
+    },
+    {
+      "event": "tool.result",
+      "sha": "b23514fae6b0cbd9"
+    },
+    {
+      "event": "entity.observation_bound",
+      "sha": "259bd1a3b0698d3c"
+    },
+    {
+      "event": "tool.result",
+      "sha": "620f847df0f6fec3"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "194869960fb59239"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "5d35e155587d035f"
+    },
+    {
+      "event": "provider.request",
+      "sha": "65518ddd5c7a2ae5"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "3ba50cf172bf4c38"
+    },
+    {
+      "event": "provider.response",
+      "sha": "52163ce8da752a53"
+    },
+    {
+      "event": "tool.call",
+      "sha": "3b7e614a0b31ea57"
+    },
+    {
+      "event": "tool.call",
+      "sha": "fbafee419723b043"
+    },
+    {
+      "event": "tool.result",
+      "sha": "3151dcd093630cb3"
+    },
+    {
+      "event": "tool.result",
+      "sha": "98497a34b3487281"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "ca6cc8b721fb5311"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "c006c3f725203ed3"
+    },
+    {
+      "event": "provider.request",
+      "sha": "0bd4911ff14d5dbd"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "4f1633505c2b0bb1"
+    },
+    {
+      "event": "provider.response",
+      "sha": "8c40a44568a71022"
+    },
+    {
+      "event": "plan.accepted",
+      "sha": "904b720416b48220"
+    },
+    {
+      "event": "plan.persisted",
+      "sha": "23fc2184989d91fb"
+    },
+    {
+      "event": "request.time_split",
+      "sha": "265a04b411c1ecbd"
+    },
+    {
+      "event": "request.completed",
+      "sha": "b743ade4d06b6c44"
+    },
+    {
+      "event": "decision.budgets_restored",
+      "sha": "b1b1e881a58fba05"
+    }
+  ]
+}

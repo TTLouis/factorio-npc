@@ -92,7 +92,8 @@ export class AgentNotebookStore {
   }
   stage(world, npc, goal, scope, expectedRevision, text) {
     validateNotebookTool('updateNotebook', { scope, expectedRevision, text })
-    const key = this.#key(world, npc), restoreEpoch = this.#restoreEpoch
+    const key = this.#key(world, npc)
+    const restoreEpoch = this.#restoreEpoch
     const check = () => {
       if (this.#restoreEpoch !== restoreEpoch) fail('notebook_store_replaced')
       if (this.read(world, npc, goal, scope).revision !== expectedRevision) fail('notebook_revision_conflict')
@@ -106,7 +107,8 @@ export class AgentNotebookStore {
       return row
     }
     return { check, snapshot: () => {
-      const row = next(), records = new Map(this.#records)
+      const row = next()
+      const records = new Map(this.#records)
       records.set(key, row)
       return { schema: 1, records: structuredClone([...records.values()]) }
     }, commit: snapshot => {
@@ -121,13 +123,21 @@ export async function handleNotebookToolBatch(loop, message, prepared) {
   if (!isValidatedNotebookBatch(prepared) || message?.tool_calls?.length !== 1
     || JSON.stringify(message.tool_calls[0]) !== JSON.stringify(prepared[0].tool)) fail('notebook_requires_separate_single_call')
   if (loop.observationDecisionForced || loop.actionOmissionRepairActive) fail('notebook_unavailable_in_closed_or_targeted_recovery')
-  const { tool, args } = prepared[0], name = tool.function.name, writing = name === 'updateNotebook'
+  const { tool, args } = prepared[0]
+  const name = tool.function.name
+  const writing = name === 'updateNotebook'
   const budget = spendContextCalls(loop, 1, writing ? 1 : 0)
-  const request = loop.traceRequest, generation = loop.generation, context = loop.agentContext
-  const sequence = context.conversationSeq, lineage = context.lineageSequence, role = context.role
+  const request = loop.traceRequest
+  const generation = loop.generation
+  const context = loop.agentContext
+  const sequence = context.conversationSeq
+  const lineage = context.lineageSequence
+  const role = context.role
   if (typeof loop.memory.planningState !== 'function') fail('notebook_storage_unavailable')
   const memory = loop.memory
-  const npc = loop.npcId, key = loop.activePlanKey(), goal = loop.memory.planningState(key)?.goal?.goal_id
+  const npc = loop.npcId
+  const key = loop.activePlanKey()
+  const goal = loop.memory.planningState(key)?.goal?.goal_id
   const actor = { actor_id: loop.epoch?.actor_id, epoch: loop.epoch?.epoch, session: loop.epoch?.session }
   if (!token(request?.id) || !['planner', 'executor'].includes(role) || !token(npc) || !Number.isSafeInteger(actor.actor_id) || !Number.isSafeInteger(actor.epoch) || !token(actor.session)) fail('notebook_owner_unavailable')
   const sync = () => {
@@ -152,7 +162,8 @@ export async function handleNotebookToolBatch(loop, message, prepared) {
       if (typeof raw !== 'string' || raw.length > 2000) fail('notebook_world_identity_invalid')
       try { return JSON.parse(raw) } catch { fail('notebook_world_identity_invalid') }
     }
-    let identity = await native('world_identity'), allocated = false
+    let identity = await native('world_identity')
+    let allocated = false
     if (identity.schema_version === 1 && identity.code === 'world_unbound' && !identity.world_id) {
       const candidate = randomUUID()
       identity = await native('bind_world_id', candidate)
@@ -161,7 +172,8 @@ export async function handleNotebookToolBatch(loop, message, prepared) {
     }
     if (identity.schema_version !== 1 || identity.ok !== true || !uuid(identity.world_id)) fail('notebook_world_identity_invalid')
     if (allocated) await trace('notebook.world_identity_allocated', { world_id: identity.world_id, metadata_only: true })
-    const world = identity.world_id, store = loop.memory.notebooks
+    const world = identity.world_id
+    const store = loop.memory.notebooks
     if (!(store instanceof AgentNotebookStore)) fail('notebook_storage_unavailable')
     if (writing) {
       const ticket = store.stage(world, npc, goal, args.scope, args.expectedRevision, args.text)

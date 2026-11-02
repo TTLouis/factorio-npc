@@ -3,7 +3,7 @@ import test from 'node:test'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { AgentNotebookStore, NOTEBOOK_LIMITS } from './agent-notebook.mjs'
+import { AgentNotebookStore } from './agent-notebook.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { FakeFactorio, answersStepContract, planReply } from './task-loop-fixtures.mjs'
@@ -31,7 +31,9 @@ class NotebookGame extends FakeFactorio {
 async function fixture(t, role = 'planner') {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-notebook-'))
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
-  const game = new NotebookGame(), events = [], stateFile = path.join(dir, 'state.json')
+  const game = new NotebookGame()
+  const events = []
+  const stateFile = path.join(dir, 'state.json')
   const agent = new NpcAgentLoop({ rcon: game, memory: new CanonicalTaskBoardMemory(), provider: async () => { throw new Error('No inference') }, npcId: 'sgluna', completionProtocolVersion: 3,
     stateFile, traceFile: null, decisionTraceFile: null, onActivity: (event, data) => events.push({ event, data }) })
   Object.assign(agent, { active: true, epoch: { ...game.status }, traceRequest: { id: 'notebook-request', usage: { tool_calls: 0, tool_result_chars: 0, duplicate_tool_calls: 0 } } })
@@ -48,7 +50,8 @@ const read = (f, scope, id) => f.invoke('readNotebook', { scope }, id)
 const nextRequest = agent => { agent.traceRequest = { id: `${agent.traceRequest.id}-next`, usage: { tool_calls: 0, tool_result_chars: 0, duplicate_tool_calls: 0 } } }
 
 for (const role of ['planner', 'executor']) test(`${role} explicitly shares goal/persistent notes without fact, skill, plan or operation authority`, async t => {
-  const f = await fixture(t, role), before = f.agent.memory.snapshot()
+  const f = await fixture(t, role)
+  const before = f.agent.memory.snapshot()
   f.agent.observationBudgetRemaining = 0; f.agent.observationDecisionPressureRemaining = 1
   f.agent.jev = { noteObservations: () => { throw new Error('No Jev for notebook') } }
   assert.equal((await read(f, 'goal')).text, '')
@@ -110,7 +113,8 @@ test('CAS executes inside the existing persistence queue; same revision wins onc
 
 for (const operation of ['mkdir', 'writeFile', 'rename']) test(`failed ${operation} leaves memory and durable revision intact; queue and later ordinary save contain no phantom write`, async t => {
   const f = await fixture(t); await write(f, 'goal', 0, 'committed')
-  const original = await fs.readFile(f.stateFile, 'utf8'), method = fs[operation]
+  const original = await fs.readFile(f.stateFile, 'utf8')
+  const method = fs[operation]
   const mocked = t.mock.method(fs, operation, async (...args) => { if (String(args[0]).startsWith(f.dir)) throw new Error(`injected-${operation}`); return method(...args) })
   await assert.rejects(write(f, 'goal', 1, 'PHANTOM'), new RegExp(`injected-${operation}`))
   mocked.mock.restore()
@@ -123,7 +127,8 @@ for (const operation of ['mkdir', 'writeFile', 'rename']) test(`failed ${operati
 
 for (const phase of ['before-rename', 'after-rename']) test(`supersession ${phase} respects atomic commit point and suppresses success acknowledgement`, async t => {
   const f = await fixture(t); await write(f, 'goal', 0, 'before')
-  const method = phase === 'before-rename' ? 'writeFile' : 'rename', original = fs[method]
+  const method = phase === 'before-rename' ? 'writeFile' : 'rename'
+  const original = fs[method]
   const mocked = t.mock.method(fs, method, async (...args) => {
     const result = await original(...args)
     if (String(args[0]).startsWith(f.dir)) f.agent.agentContext.conversationSeq++
@@ -141,7 +146,8 @@ for (const phase of ['before-rename', 'after-rename']) test(`supersession ${phas
 })
 
 for (const change of ['role', 'lineage', 'actor', 'epoch', 'session', 'goal', 'request', 'generation']) test(`owner ${change} changed during native await refuses before note persistence`, async t => {
-  const f = await fixture(t), command = f.game.command.bind(f.game)
+  const f = await fixture(t)
+  const command = f.game.command.bind(f.game)
   f.game.command = async value => {
     const result = await command(value)
     if (value.includes('"world_identity"')) {
@@ -209,11 +215,13 @@ test('store bounds, corrupted restores and old snapshots fail locally without re
 })
 
 test('faulted restore retains the exact original recovery envelope through ordinary saves and a second restart', async t => {
-  const f = await fixture(t), store = new AgentNotebookStore()
+  const f = await fixture(t)
+  const store = new AgentNotebookStore()
   for (const [world, npc, text] of [[WORLD, 'sgluna', 'first personal text'], [OTHER, 'other-npc', 'second personal text']]) {
     const ticket = store.stage(world, npc, 'goal-a', 'persistent', 0, text); ticket.commit(ticket.snapshot())
   }
-  const valid = store.snapshot(), baseline = f.agent.memory.snapshot()
+  const valid = store.snapshot()
+  const baseline = f.agent.memory.snapshot()
   for (const malformed of [
     { schema: 1, records: [...valid.records, { invalid: true }] },
     { schema: 1, records: [...valid.records, valid.records[0]] },
@@ -243,7 +251,8 @@ for (const binding of [
   { schema_version: 1, ok: true, world_id: 'malformed' },
   { schema_version: 1, ok: true, world_id: OTHER },
 ]) test(`refused or invalid UUID allocation has no success marker: ${JSON.stringify(binding)}`, async t => {
-  const f = await fixture(t), command = f.game.command.bind(f.game)
+  const f = await fixture(t)
+  const command = f.game.command.bind(f.game)
   f.game.command = async text => text.includes('"world_identity"') ? JSON.stringify({ schema_version: 1, ok: false, code: 'world_unbound' })
     : text.includes('"bind_world_id"') ? JSON.stringify(binding) : command(text)
   await assert.rejects(write(f, 'goal', 0), /world_identity_invalid/)
@@ -271,7 +280,9 @@ test('notebook tool bodies and acknowledgements never enter automatic compacted 
 })
 
 test('scripted planner/executor full loop uses explicit shared notes without promoting notes to handoff or fresh world evidence', async t => {
-  const f = await fixture(t), requests = [], stages = new Map()
+  const f = await fixture(t)
+  const requests = []
+  const stages = new Map()
   const description = 'Hold the starting iron plate.'
   const checkpoint = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 }] }
   const provider = answersStepContract(async (messages, context) => {

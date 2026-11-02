@@ -4077,22 +4077,26 @@ export class Session {
     const received = this.currentActorCorrelation() // what the request arrived under: an intake retry is fenced to it
     const stopAgent = this.agent
     const stopKey = stopAgent.activePlanKey?.()
-    const stopGoal = stopAgent.memory?.planningState?.(stopKey)?.goal?.goal_id
+    const completedStop = stop ? stopAgent.memory?.completedGoalControl?.(stopKey) : undefined
+    const stopGoalIdentity = () => stopAgent.memory?.planningState?.(stopKey)?.goal?.goal_id ?? stopAgent.memory?.completedGoalControl?.(stopKey)?.goal_id
+    const stopGoal = stopGoalIdentity()
     const stopSession = this.lastStatus?.session
     const stopEpoch = JSON.stringify(stopAgent.epoch)
     const ownsStop = () => this.agent === stopAgent && this.cancelGeneration === generation
       && this.currentActorCorrelation().actor_id === received.actor_id && this.currentActorCorrelation().epoch === received.epoch
       && this.lastStatus?.session === stopSession && JSON.stringify(stopAgent.epoch) === stopEpoch
-      && stopAgent.activePlanKey?.() === stopKey && stopAgent.memory?.planningState?.(stopKey)?.goal?.goal_id === stopGoal
+      && stopAgent.activePlanKey?.() === stopKey && stopGoalIdentity() === stopGoal
     this.queueEvent(async () => {
       try {
         if (stop) {
           if (!ownsStop()) return
           let state, saveError
           try {
-            state = typeof stopAgent.pausePersistentPlan === 'function'
-              ? await stopAgent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
-              : undefined
+            state = completedStop && typeof stopAgent.pauseCompletedGoalControl === 'function'
+              ? await stopAgent.pauseCompletedGoalControl(completedStop, { ...received, session: stopSession }, ownsStop, () => this.rawStatus())
+              : typeof stopAgent.pausePersistentPlan === 'function'
+                ? await stopAgent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
+                : undefined
           } catch (error) { saveError = error }
           // A storage failure must not leave this owner's native work running.
           // A superseded stop must not cancel the replacement actor/goal either.

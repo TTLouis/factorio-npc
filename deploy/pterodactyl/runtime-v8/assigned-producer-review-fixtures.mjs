@@ -65,7 +65,7 @@ export function assignedReviewFixture(stateFile, { onTrace, onProvider, onComman
       if (override) return override
       let reply
       if (context.role === 'planner') {
-        plannerCalls++; assert.ok(plannerCalls <= 2, 'only one bounded advisory review: ' + JSON.stringify(events.filter(row => /refus|fail|recover|invalid/.test(row.event))))
+        plannerCalls++; assert.ok(plannerCalls <= 2, `only one bounded advisory review: ${JSON.stringify(events.filter(row => /refus|fail|recover|invalid/.test(row.event)))}`)
         reply = plannerCalls === 1 ? planReply({ plan: ['Use the existing furnace to obtain at least 50 iron plates and one copper plate'], operations: [],
           goal: { scope: 'long_horizon', summary: ASSIGNED_OBJECTIVE, doneWhen: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 100 }] },
           stepCompletions: [{ kind: 'deterministic', checkpoint: ASSIGNED_CHECKPOINT }], executionGuidance: [assignedGuidance()] })
@@ -73,7 +73,7 @@ export function assignedReviewFixture(stateFile, { onTrace, onProvider, onComman
             ...(plannerRevision ? { workingPlanRevision: true, stepCompletions: [{ kind: 'deterministic', checkpoint: ASSIGNED_CHECKPOINT }],
               executionGuidance: [{ ...assignedGuidance(), approach: 'Use the compatible iron producer; preserve the assigned copper producer.' }] } : {}), chatMessage: 'Retain the stock checkpoint and all assigned jobs. Observe the registered iron producer 37 and propose only a compatible operation; preserve copper producer 36.' })
       } else {
-        executorCalls++; assert.ok(executorCalls <= 4, 'bounded original and post-review executor: ' + JSON.stringify(messages.slice(-4)))
+        executorCalls++; assert.ok(executorCalls <= 4, `bounded original and post-review executor: ${JSON.stringify(messages.slice(-4))}`)
         if ([1, 3].includes(executorCalls)) reply = { content: '', tool_calls: [{ id: `discover-assigned-${executorCalls}`, type: 'function', function: {
           name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 64, limit: 16 }) } }] }
         else {
@@ -89,6 +89,7 @@ export function assignedReviewFixture(stateFile, { onTrace, onProvider, onComman
           reply = submissionForm === 'submitPlan' ? { content: '', tool_calls: [{ id: `submit-${executorCalls}`, type: 'function', function: { name: 'submitPlan', arguments: JSON.stringify(payload) } }] } : planReply(payload)
         }
       }
+      if (submissionForm === 'submitPlan' && context.role === 'planner') reply = { content: '', tool_calls: [{ id: `planner-submit-${plannerCalls}`, type: 'function', function: { name: 'submitPlan', arguments: reply.content } }] }
       replies.push({ role: context.role, messages: structuredClone(messages), reply: structuredClone(reply) }); return reply
     }) })
   agent.behaviorTrace = { emit: async row => { events.push(row); await onTrace?.(row, w) } }

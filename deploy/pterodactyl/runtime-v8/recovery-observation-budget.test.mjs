@@ -37,6 +37,16 @@ function world(script) {
     return native(command)
   }
   const memory = new CanonicalTaskBoardMemory()
+
+  // Inject the retired one-review policy solely to exercise the existing C7
+  // supervisor recovery path. The default harness uses durable goal effort.
+  const claimReview = memory.claimReviewContinuation.bind(memory)
+  const legacyReviewedSteps = new Set()
+  memory.claimReviewContinuation = (key, stepId, options) => {
+    if (legacyReviewedSteps.has(stepId)) return false
+    legacyReviewedSteps.add(stepId)
+    return claimReview(key, stepId, options)
+  }
   const calls = []
   const trace = []
   const agent = new NpcAgentLoop({ rcon: game, memory, completionProtocolVersion: 3, replacementWake: true,
@@ -106,7 +116,7 @@ function assertAJPausedAfterSpendingTheAllowance(w) {
   assert.equal(w.memory.pauseRecord(KEY).pause_class, 'model_recoverable')
 }
 
-test('Run AJ: the C7 auto-resume executor starts a fresh traced observation decision and can still read placement candidates', async t => {
+test('Run AJ with injected legacy review cap: the C7 auto-resume executor starts a fresh traced observation decision and can still read placement candidates', async t => {
   const w = await runAJToPause()
   assertAJPausedAfterSpendingTheAllowance(w)
   const { session } = sessionFor(w.agent)
@@ -151,7 +161,7 @@ test('Run AJ: the C7 auto-resume executor starts a fresh traced observation deci
   assert.equal(getActivePlan(w.memory.planningState(KEY)).plan_id, planBefore.plan_id, 'no plan was created or replaced')
 })
 
-test('Run AJ: a decision budget set inside the slice close does not outlive the completion wake that closed the slice', async () => {
+test('Run AJ with injected legacy review cap: a decision budget set inside the slice close does not outlive the completion wake that closed the slice', async () => {
   const w = await runAJToPause()
   assertAJPausedAfterSpendingTheAllowance(w)
   assert.deepEqual(w.afterCompleted, w.beforeCompleted, 'completed() leaves the decision budgets as it found them')

@@ -209,7 +209,7 @@ test('a steam power goal completes only once the game reports the drill powered 
 
 test('the goal-definition prompt and submitPlan schema teach the running kinds as static text', () => {
   const doneWhen = plannerControlToolDefinitions[0].function.parameters.properties.goal.properties.doneWhen.items
-  assert.deepEqual(doneWhen.properties.kind.enum.slice(-3), ['entity_working', 'electric_network_satisfied', 'production_rate'])
+  assert.deepEqual(doneWhen.properties.kind.enum.slice(-4), ['entity_working', 'electric_network_satisfied', 'production_rate', 'automated_starter_base'])
   assert.deepEqual(doneWhen.properties.window_minutes.enum, [1, 10])
   assert.equal(doneWhen.properties.per_minute.type, 'number')
   assert.match(doneWhen.properties.kind.description, /never with items_produced/)

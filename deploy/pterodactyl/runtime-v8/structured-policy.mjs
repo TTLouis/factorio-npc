@@ -1333,7 +1333,12 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview', 'productionTask', 'defaults'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview', 'productionTask', 'defaults', 'workingPlanRevision', 'factoryReassignment', 'starterBaseBindings'])
+  check(args.workingPlanRevision === undefined || args.workingPlanRevision === true, 'submitPlan.workingPlanRevision must be true')
+  for (const [name, limit] of [['factoryReassignment', 1000], ['starterBaseBindings', 12000]]) {
+    const value = args[name]
+    check(value === undefined || value !== null && typeof value === 'object' && !Array.isArray(value) && JSON.stringify(value).length <= limit, `submitPlan.${name} must be a bounded object`)
+  }
   // An executor binds its operations to the committed active step by id; plan and currentStep are then not needed.
   const stepIdGiven = typeof args.stepId === 'string' && args.stepId.trim().length > 0
   check(args.stepId === undefined || stepIdGiven, 'submitPlan.stepId must be the active step id')
@@ -1359,6 +1364,11 @@ export function plannerControlPayloadFromMessage(message) {
     operations: args.operations,
     ...(args.productionTask !== undefined ? { productionTask: normalizeProductionIntent(args.productionTask) } : {}),
     ...(args.defaults !== undefined ? { defaults: args.defaults } : {}),
+    // Transport preserves declarations; the shared loop enforces planner role,
+    // review boundary, unchanged authority and native bindings before effects.
+    ...(args.workingPlanRevision !== undefined ? { workingPlanRevision: args.workingPlanRevision } : {}),
+    ...(args.factoryReassignment !== undefined ? { factoryReassignment: args.factoryReassignment } : {}),
+    ...(args.starterBaseBindings !== undefined ? { starterBaseBindings: args.starterBaseBindings } : {}),
     ...(args.executionGuidance !== undefined ? { executionGuidance: args.executionGuidance } : {}),
     ...(args.plannerReview !== undefined ? { plannerReview: args.plannerReview } : {}),
     ...(stepIdGiven ? { stepId: args.stepId.trim() } : {}),

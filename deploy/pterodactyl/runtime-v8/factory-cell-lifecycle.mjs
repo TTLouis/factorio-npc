@@ -79,7 +79,9 @@ function snapshotDomain(snapshot) {
   const indexes = new Set(); let slots = 0
   const actual = nativeList(snapshot.inventories, 32).reduce((sum, inventory) => {
     if (!integer(inventory.index) || inventory.index < 1 || inventory.index > 32 || !integer(inventory.size)
-      || indexes.has(inventory.index) || (slots += inventory.size) > 512) fail('factory_lifecycle_custody_unknown')
+      || indexes.has(inventory.index)) fail('factory_lifecycle_custody_unknown')
+    slots += inventory.size
+    if (slots > 512) fail('factory_lifecycle_custody_unknown')
     indexes.add(inventory.index)
     return add(sum, items(inventory.items))
   }, new Map())

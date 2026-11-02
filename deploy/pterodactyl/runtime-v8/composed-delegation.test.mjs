@@ -116,6 +116,16 @@ async function runScenario(t, { refusePrefix = false } = {}) {
   const world = recoveryWorld({ game, model, completionProtocolVersion: 3, stateFile: path.join(directory, 'state.json') })
   world.agent.restageSoftLimitOption = { executor: EXECUTOR_SOFT_LIMIT_TOKENS }
   const { memory } = world
+
+  // Inject the retired one-review policy solely to exercise the existing C7
+  // supervisor recovery path. The default harness uses durable goal effort.
+  const claimReview = memory.claimReviewContinuation.bind(memory)
+  const legacyReviewedSteps = new Set()
+  memory.claimReviewContinuation = (key, stepId, options) => {
+    if (legacyReviewedSteps.has(stepId)) return false
+    legacyReviewedSteps.add(stepId)
+    return claimReview(key, stepId, options)
+  }
   const { session, chat, logs } = recoverySession(world)
   const ctx = { t, game, model, world, session, chat, logs }
   const rows = name => world.trace.filter(row => row.event === name)
@@ -241,7 +251,7 @@ async function gates(t, ctx) {
   })
 }
 
-test('composed delegation: planner draft, direct-feed placement with ground pickup, fresh executor, planner review, second review, auto-resume, verified goal', async (t) => {
+test('composed delegation with injected legacy review cap: planner draft, direct-feed placement with ground pickup, fresh executor, planner review, second review, auto-resume, verified goal', async (t) => {
   const ctx = await runScenario(t)
   const { game, model, world, chat, rows, data, observed } = ctx
   const calls = model.calls
@@ -326,14 +336,14 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
     assert.equal(data('executor.planner_review_requested').length, 2, 'the executor asked twice')
     const [round, ...more] = data('planner.review_round')
     assert.equal(more.length, 0, 'exactly one planner review round for the step')
-    assert.deepEqual([round.reason, round.bound, round.authority], ['local_recovery_exhausted', 'one_planner_round_per_step', 'advisory_only'])
+    assert.deepEqual([round.reason, round.bound, round.authority], ['local_recovery_exhausted', 'durable_goal_no_progress_effort', 'advisory_only'])
     assert.equal(round.step_id, observed.plan.steps[1].step_id)
     const plannerCalls = calls.filter(call => call.role === 'planner')
     assert.equal(plannerCalls.length, 2, 'the draft and the review round; nothing else woke the planner')
     const reviewCall = plannerCalls.find(call => call.messages.some(message => String(message.content).startsWith('[EXECUTOR_REVIEW]')))
     assert.ok(reviewCall, 'a planner-role provider call carried [EXECUTOR_REVIEW]')
     assert.match(textOf(reviewCall.messages), new RegExp(RATIONALE.slice(0, 60)))
-    assert.match(textOf(reviewCall.messages), /one planner review round for this step/)
+    assert.match(textOf(reviewCall.messages), /Revise the working plan within the unchanged user grant|Review the structured refusal and current facts/)
     assert.equal(reviewCall.context.allowTools, true)
     // The planner's reply was a contract draft with no operation: it cannot change the committed step, and the step goes back.
     const [returned, ...extra] = data('planner.committed_slice_returned')
@@ -472,7 +482,7 @@ test('composed delegation: planner draft, direct-feed placement with ground pick
 // the furnace (task 2) is refused before it creates anything, and the game proves it with the mod's native no-mutation claim. The
 // settled prefix is a fact (operation 1 applied, operation 2 refused), the built drill is not placed again, and the corrected batch
 // places the furnace alone, picking the spilled ore up. Everything after that is the main scenario.
-test('composed delegation, Z/AA prefix: a refused second placement settles with the built drill applied and only the furnace is placed again', async (t) => {
+test('composed delegation with injected legacy review cap, Z/AA prefix: a refused second placement settles with the built drill applied and only the furnace is placed again', async (t) => {
   const ctx = await runScenario(t, { refusePrefix: true })
   const { game, data, rows, observed } = ctx
 

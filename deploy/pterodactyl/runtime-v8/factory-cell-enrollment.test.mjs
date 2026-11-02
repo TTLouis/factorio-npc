@@ -3,7 +3,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
-import { ensureCommittedFactoryCellBeforeClose, recoverCommittedFactoryBlockClose, validateFactoryCellDraft, enrollFactoryProductionProducers, factoryPlacementAdmissionScope, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
+import { ensureCommittedFactoryCellBeforeClose, validateFactoryCellDraft, enrollFactoryProductionProducers, factoryPlacementAdmissionScope, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
 import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { classifyRequestFailure, isProviderFailurePause } from './pause-class.mjs'
 import { appendFactoryCellMetadata, factoryCellMetadataHead, registerFactoryCell } from './factory-registry.mjs'
@@ -608,7 +608,7 @@ test('actual request failure and supervisor pause preserve factory precommit/pre
   }
 })
 
-for (const startup of [false, true]) test('plain construction pair closes with exact new custody before fuel, unselected=' + startup, async () => {
+for (const startup of [false, true]) test(`plain construction pair closes with exact new custody before fuel, unselected=${startup}`, async () => {
   const w = await implicitFixture({ startup, construction: true })
   const before = clone(getActivePlan(w.memory.planningState(KEY)).steps)
   const result = await w.enroll()
@@ -986,7 +986,7 @@ test('BL residual allowance persists before publication; restore cannot renew du
 test('BL residual uses shared per-goal cap, survives restore, and refuses before metadata after three attempts', async () => {
   const w = await emptyBlockFixture()
   for (let index = 0; index < 3; index++) w.memory.consumeFactoryUseRecovery(KEY, { other: index }, {
-    request_id: 'other-' + index, plan_id: getActivePlan(w.memory.planningState(KEY)).plan_id, code: 'prior_recovery', evidence_digest: 'a'.repeat(64) })
+    request_id: `other-${index}`, plan_id: getActivePlan(w.memory.planningState(KEY)).plan_id, code: 'prior_recovery', evidence_digest: 'a'.repeat(64) })
   w.memory.restore(clone(w.memory.snapshot()))
   await assert.rejects(ensureCommittedFactoryCellBeforeClose(w.agent, w.agent.captureCheckpointOwner(), { residual: true }), /recovery_exhausted/)
   assert.equal(w.events.find(row => row.event === 'factory_cell.block_startup_recovery_exhausted').data.used, 3)
