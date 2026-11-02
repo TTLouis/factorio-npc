@@ -284,7 +284,7 @@ for (const work of ['native_busy', 'new_pending']) {
   })
 }
 
-for (const fault of ['missing_receipt', 'wrong_resource', 'receiver_type', 'mixed_output', 'stale_owner']) test('partial miner close refuses ' + fault + ' without commissioning', async () => {
+for (const fault of ['missing_receipt', 'wrong_resource', 'receiver_type', 'mixed_output', 'stale_owner']) test(`partial miner close refuses ${fault} without commissioning`, async () => {
   const w = recordedWorld({ partialEvidence: fault !== 'missing_receipt', mixedOutput: fault === 'mixed_output' })
   const row = w.game.factoryMembers.get(203)
   if (fault === 'wrong_resource') { row.source_resources.resources[0].name = 'iron-ore'; row.source_resources.resources[0].products[0].name = 'iron-ore' }

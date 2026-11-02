@@ -242,7 +242,8 @@ test('legacy mixed pinned records survive disk restore byte-for-byte but selecte
   const restarted = await restartedProcess(first.file, first.game, { check: false })
   assert.deepEqual(restarted.memory.plannerSkillHandoffs.get(KEY), record)
   assert.deepEqual(getActivePlan(restarted.memory.planningState(KEY)).steps, getActivePlan(first.memory.planningState(KEY)).steps)
-  const reads = first.game.libraryReads, mutations = first.game.mutations.length
+  const reads = first.game.libraryReads
+  const mutations = first.game.mutations.length
   await assert.rejects(restarted.agent.runTurn(), /legacy_knowledge_selected_as_skill/)
   assert.deepEqual(restarted.calls, [])
   assert.equal(first.game.libraryReads, reads)

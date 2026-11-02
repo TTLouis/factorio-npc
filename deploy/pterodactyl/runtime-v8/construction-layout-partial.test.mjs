@@ -14,7 +14,7 @@ import { Session } from './supervisor.mjs'
 // the layout and add up to the batch), treats it as an exact terminal partial (partial_known, released, never replayed), and does
 // not take the mod's string on trust.
 
-const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8').replace(/^﻿/, ''))
+const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8').replace(/^\uFEFF/, ''))
 const LAYOUT_ID = 41
 
 // The receipt evidence a sealed row carries (what the mod copies from the journal when it seals).

@@ -8,7 +8,9 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 const arg = (name, fallback) => { const i = process.argv.indexOf(`--${name}`); if (i < 0) { assert.notEqual(fallback, undefined, `missing --${name}`); return fallback } return process.argv[i + 1] }
-const repo = path.resolve(arg('repo')), results = path.resolve(arg('results')), phase = arg('phase')
+const repo = path.resolve(arg('repo'))
+const results = path.resolve(arg('results'))
+const phase = arg('phase')
 assert.ok(['prepare', 'reload', 'cold'].includes(phase))
 const load = name => import(pathToFileURL(path.join(repo, 'deploy/pterodactyl', name)).href)
 const { Rcon, confirmLuaConsoleReady } = await load('runtime-v8/common.mjs')
@@ -17,7 +19,9 @@ const { configureNpcSession, deploymentStatus } = await load('staging/supervisor
 const { NpcAgentLoop } = await load('runtime-v8/npc-agent-loop.mjs')
 const { CanonicalTaskBoardMemory } = await load('runtime-v8/canonical-task-board-memory.mjs')
 const pack = JSON.parse(await fs.readFile(path.join(repo, 'packages/autorio/src/fixtures/leveled-library-v1.json'), 'utf8'))
-const transcript = [], events = [], evidence = { phase, status: 'failed', providers: 0, operations: 0, notes: [] }
+const transcript = []
+const events = []
+const evidence = { phase, status: 'failed', providers: 0, operations: 0, notes: [] }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const preparedFile = path.join(results, 'notebook-prepared-state.json')
 const stateFile = path.join(results, `notebook-${phase}-state.json`)
@@ -110,7 +114,8 @@ try {
     evidence.world_id = identity.world_id; evidence.host_state_sha256 = hash(bytes)
   }
   else {
-    const expected = JSON.parse(await fs.readFile(expectedFile, 'utf8')), original = await fs.readFile(preparedFile)
+    const expected = JSON.parse(await fs.readFile(expectedFile, 'utf8'))
+    const original = await fs.readFile(preparedFile)
     assert.equal(hash(original), expected.host_state_sha256)
     await fs.copyFile(preparedFile, stateFile)
     assert.equal(hash(await fs.readFile(stateFile)), expected.host_state_sha256)
@@ -122,7 +127,8 @@ try {
     for (const role of ['planner', 'executor']) {
       const agent = await makeAgent(role)
       assert.equal(agent.memory.planningState('npc:notebook-native').goal.goal_id, expected.goal_id)
-      const goal = await invoke(agent, 'readNotebook', { scope: 'goal' }), persistent = await invoke(agent, 'readNotebook', { scope: 'persistent' })
+      const goal = await invoke(agent, 'readNotebook', { scope: 'goal' })
+      const persistent = await invoke(agent, 'readNotebook', { scope: 'persistent' })
       if (phase === 'cold') {
         assert.notEqual(goal.world_id, expected.world_id)
         assert.equal(goal.text, ''); assert.equal(goal.revision, 0)

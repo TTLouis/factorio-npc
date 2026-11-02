@@ -43,8 +43,6 @@ const CARDINAL_DIRECTIONS = [0, 4, 8, 12]
 const MAX_COORDINATE = 1000000
 const DISTANCE_SCALE = 1000000
 
-type Position = { x: number, y: number }
-
 interface ProposalSlot {
   index: number
   slot: string

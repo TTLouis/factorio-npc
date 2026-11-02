@@ -28,7 +28,6 @@ globalThis.fetch = async () => { evidence.providers++; throw new Error('Inferenc
 const rcon = { command: async command => { const response = await connection.command(command); transcript.push({ command, response }); return response } }
 const lua = async body => { const raw = await rcon.command(`/silent-command ${body}`); try { return JSON.parse(raw) } catch { throw new Error(`native JSON invalid: ${raw}`) } }
 const tool = async (name, args = {}) => JSON.parse(await rcon.command(toolCommand(name, args)))
-const loc = row => Object.fromEntries(['unit_number', 'name', 'position', 'surface_index', 'force_index'].map(key => [key, row[key]]))
 const exactLua = locator => `local s=game.surfaces[${locator.surface_index}];local e;for _,v in pairs(s.find_entities_filtered{name=${luaString(locator.name)},position={${locator.position.x},${locator.position.y}},force=${locator.force_index},limit=9}) do if v.unit_number==${locator.unit_number} and v.position.x==${locator.position.x} and v.position.y==${locator.position.y} then assert(not e);e=v end end;`
 async function settle() {
   const deadline = Date.now() + 60000
