@@ -35,6 +35,17 @@ function world({ required = false, progressAudit = false, onRead, onTrace, first
   const initialDescription = bootstrapFuel ? 'Fuel the existing iron drill with one coal while preserving its cell.' : description
   if (bootstrapFuel) firstIntent = normalizeObligations({ outcome: { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: 'supply_entity' }] }, preserve: [21, 22] })
   const memory = new CanonicalTaskBoardMemory()
+  if (legacy) {
+    // Inject the retired one-review policy solely to exercise the existing C7
+    // supervisor recovery path. The default harness uses durable goal effort.
+    const claimReview = memory.claimReviewContinuation.bind(memory)
+    const legacyReviewedSteps = new Set()
+    memory.claimReviewContinuation = (key, stepId, options) => {
+      if (legacyReviewedSteps.has(stepId)) return false
+      legacyReviewedSteps.add(stepId)
+      return claimReview(key, stepId, options)
+    }
+  }
   // Scripted native preflight: a coordinate place_entity reports its planned footprint centre, as the mod does (the fixture's
   // coordinates are already on the grid, so the snapped centre is the requested one).
   const preflight = text => {
@@ -333,7 +344,7 @@ for (const unsupported of ['transport-belt', 'underground-belt', 'splitter', 'el
   })
 }
 
-test('exact legacy AV checkpoint reproduces native-success/count-failure and both bounded supervisor resumes', async t => {
+test('exact legacy AV checkpoint with injected legacy review cap reproduces native-success/count-failure and bounded resumes', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   // Fixture starts at the already-bound checkpoint, omitting the earlier
   // bootstrap/native history. Exact taps 62/63 and the final original plan are

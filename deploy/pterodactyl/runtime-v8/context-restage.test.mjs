@@ -17,7 +17,7 @@ import { STEAM_SCRIPTED_BLOCKED_ANSWER, steamReplayHarness } from './steam-run-f
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const GOLDEN_FILE = path.join(here, 'fixtures', 'context-restage', 'no-restage-steam-synthetic-factory-current.golden.json')
+const GOLDEN_FILE = path.join(here, 'fixtures', 'context-restage', 'no-restage-steam-revisable-harness.golden.json')
 
 const sha = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex').slice(0, 16)
 

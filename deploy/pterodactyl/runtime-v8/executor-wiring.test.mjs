@@ -1367,6 +1367,7 @@ test('issue 2: an executor reply while no plan is committed is ignored whatever 
   agent.active = true
   agent.traceRequest = { id: 'req_executor_authoring', seq: 0, usage: {} }
   const plansBefore = world.memory.planningState(KEY).plans.length
+  const effortBefore = structuredClone(world.memory.planningState(KEY).goal.effort)
   const mutationsBefore = world.game.mutations.length
 
   const result = await agent.commitPlan({ chatMessage: '', plan: ['Author my own slice'], currentStep: 0, operations: [gather('coal', 9)], roadmapNodeIds: ['node_power'] })
@@ -1374,6 +1375,7 @@ test('issue 2: an executor reply while no plan is committed is ignored whatever 
   const [ignored] = world.rows('executor.plan_semantics_ignored')
   assert.ok(ignored)
   assert.equal(ignored.data.reason, 'executor_cannot_author_plan:plan_status_COMPLETED')
+  assert.deepEqual(world.memory.planningState(KEY).goal.effort, effortBefore, 'ignored executor reply cannot consume goal effort')
   assert.equal(ignored.data.role, 'executor')
   assert.ok(ignored.request_id)
   assert.equal(world.memory.planningState(KEY).plans.length, plansBefore, 'no draft was created')

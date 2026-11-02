@@ -284,10 +284,10 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
   const definition = runtime.plannerControlToolDefinitions
     .find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME)
   const advertised = Object.keys(definition.function.parameters.properties).sort()
-  assert.deepEqual(advertised, ['assessmentOnly', 'chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'goal', 'observationRequest', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'stepCompletions', 'stepId', 'timeReview'])
+  assert.deepEqual(advertised, ['assessmentOnly', 'chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'factoryReassignment', 'goal', 'observationRequest', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'starterBaseBindings', 'stepCompletions', 'stepId', 'timeReview', 'workingPlanRevision'])
   assert.equal(advertised.includes('project'), false)
 
-  const sample = { observationRequest: { stepId: 's', tool: 'getInventoryItems', args: {}, rationale: 'Need current inventory.' }, assessmentOnly: true, chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, stepCompletions: [], stepId: 'step_1', goal: { scope: 'finite', summary: 'x', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }, timeReview: { decision: 'keep_serial', reason: 'x' } }
+  const sample = { workingPlanRevision: true, factoryReassignment: { cell_id: 'cell', product: 'iron-plate', resource: 'iron-ore' }, starterBaseBindings: { members: [1], science: { producer: 1, inserter: 2, lab: 3 }, supplies: [{ item_name: 'iron-plate', producer: 4 }], stocks: [{ item_name: 'transport-belt', producer: 5, inserter: 6, container: 7 }] }, observationRequest: { stepId: 's', tool: 'getInventoryItems', args: {}, rationale: 'Need current inventory.' }, assessmentOnly: true, chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, stepCompletions: [], stepId: 'step_1', goal: { scope: 'finite', summary: 'x', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }, timeReview: { decision: 'keep_serial', reason: 'x' } }
   for (const field of advertised) {
     assert.ok(Object.hasOwn(sample, field), `no parity sample for advertised field ${field}`)
     assert.doesNotThrow(() => runtime.plannerControlPayloadFromMessage({
@@ -302,6 +302,16 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
       }],
     }), `submitPlan advertises ${field} but its parser refuses it`)
   }
+})
+
+test('planner control transport preserves new declarations and rejects malformed modes', () => {
+  const transport = fields => runtime.plannerControlPayloadFromMessage({ content: '', tool_calls: [{ type: 'function',
+    function: { name: 'submitPlan', arguments: JSON.stringify({ plan: [], currentStep: 0, operations: [], ...fields }) } }] })
+  for (const fields of [{ workingPlanRevision: true }, { factoryReassignment: { cell_id: 'cell', product: 'iron-plate', resource: 'iron-ore' } }, { starterBaseBindings: { members: [1] } }]) {
+    const parsed = transport(fields)
+    for (const [key, value] of Object.entries(fields)) assert.deepEqual(parsed[key], value)
+  }
+  for (const fields of [{ workingPlanRevision: false }, { workingPlanRevision: null }, { factoryReassignment: null }, { starterBaseBindings: [] }]) assert.throws(() => transport(fields))
 })
 
 // The executor has its own submitPlan (same name): stepId and operations are required, plan and currentStep are not

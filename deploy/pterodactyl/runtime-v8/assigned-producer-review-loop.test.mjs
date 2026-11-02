@@ -4,10 +4,8 @@ import path from 'node:path'
 import test from 'node:test'
 import { getActivePlan } from './planning-state.mjs'
 import { assignedReviewFixture, ASSIGNED_KEY, ASSIGNED_OBJECTIVE } from './assigned-producer-review-fixtures.mjs'
-import { assignedFactoryConflict, relevantFactoryAssignments } from './factory-cell-use.mjs'
+import { assignedFactoryConflict, relevantFactoryAssignments, reconcileFactoryCellUse } from './factory-cell-use.mjs'
 import { recoverFactoryCellUse } from './factory-cell-use-recovery.mjs'
-import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
-import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 
 async function withFixture(run, options) {
@@ -31,9 +29,9 @@ for (const bypassCommitPrevention of [false, true]) test(`BK assigned input conf
     assert.equal(result.operations[0].args.unit_number, 37)
     assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 1)
     assert.equal(w.events.filter(row => row.event === 'plan.replacement_committed').length, 0)
-    assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
+    assert.equal(Object.entries(w.memory.planningState(ASSIGNED_KEY).goal.effort.blockers).filter(([key]) => key.startsWith('assignment:')).reduce((n, [, count]) => n + count, 0), 1)
     const saved = JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8'))
-    assert.equal(saved.factory_use_recovery.records[0].attempts.length, 1)
+    assert.equal(saved.planning_states.find(row => row.key === ASSIGNED_KEY).state.goal.effort.blockers.executor_decision, 2)
     assert.ok(state.goal.review_notes[plan.steps[0].step_id].includes('producer 37'))
     const restored = new CanonicalTaskBoardMemory(); restored.restore(saved)
     assert.deepEqual(restored.planningState(ASSIGNED_KEY).goal.review_notes, state.goal.review_notes)
@@ -86,24 +84,31 @@ for (const [name, mutate] of Object.entries(fences)) test(`awaited refusal ${nam
   } })
 })
 
-test('repeating the wrong target after actual notes exhausts rather than renewing review', async () => {
+test('repeating the wrong target exhausts the remaining durable goal effort after actual notes', async () => {
+  let seeded = false
   await withFixture(async w => {
     await assert.rejects(w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' }), { code: 'factory_cell_assigned_review_exhausted' })
     assert.equal(w.plannerCalls(), 2); assert.equal(w.game.mutations.length, 0)
-    assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
+    assert.equal(Object.entries(w.memory.planningState(ASSIGNED_KEY).goal.effort.blockers).filter(([key]) => key.startsWith('assignment:')).reduce((n, [, count]) => n + count, 0), 1)
     assert.equal(w.events.filter(row => row.event === 'factory_cell.assigned_review_exhausted').length, 1)
-  }, { repeatWrong: true })
+  }, { repeatWrong: true, onProvider: (context, w) => {
+    if (seeded || context.role !== 'executor') return
+    seeded = true
+    for (let i = 0; i < 21; i++) assert.equal(w.memory.spendGoalEffort(ASSIGNED_KEY, 'prior_attempt'), true)
+  } })
 })
 
-test('global factory allowance survives disk restore and unrelated prior slice reasons', async () => {
+test('goal effort exhaustion survives disk restore alongside unchanged legacy factory attempts', async () => {
   let seeded = false
   await withFixture(async w => {
-    let error; try { await w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' }) } catch (caught) { error = caught }
-    assert.equal(error?.code, 'factory_cell_assigned_review_exhausted')
+    const result = await w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' })
+    assert.equal(result.goalStatus, 'paused')
+    assert.equal(w.memory.pauseRecord(ASSIGNED_KEY).pause_class, 'guard')
+    assert.match(w.memory.pauseRecord(ASSIGNED_KEY).pause_reason, /goal_no_progress_exhausted/)
     assert.equal(w.plannerCalls(), 1); assert.equal(w.game.mutations.length, 0)
-    await pauseStrandedPlanAfterRequestError({ agent: w.agent, currentPlanState: () => w.memory.currentPlan(ASSIGNED_KEY), syncTaskBoardUi: async () => {} }, error)
     const saved = JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8'))
     assert.equal(saved.factory_use_recovery.records.reduce((n, row) => n + row.attempts.length, 0), 3)
+    assert.equal(w.memory.planningState(ASSIGNED_KEY).goal.effort.spent, 24)
     assert.equal(w.memory.planningState(ASSIGNED_KEY).run.paused, true)
   }, { onProvider: async (context, w) => {
     if (seeded || context.role !== 'executor') return
@@ -111,6 +116,7 @@ test('global factory allowance survives disk restore and unrelated prior slice r
     const plan = getActivePlan(w.memory.planningState(ASSIGNED_KEY))
     for (let index = 0; index < 3; index++) w.memory.consumeFactoryUseRecovery(ASSIGNED_KEY, { prior: index }, {
       request_id: `prior-${index}`, plan_id: plan.plan_id, code: 'factory_cell_resolution_required', evidence_digest: 'a'.repeat(64) })
+    for (let i = 0; i < 24; i++) assert.equal(w.memory.spendGoalEffort(ASSIGNED_KEY, 'prior_attempt'), true)
     await w.agent.persistState({ strict: true }); w.memory.restore(JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8')))
   } })
 })
@@ -184,12 +190,13 @@ test('owner cancellation while durable allowance is being persisted suppresses a
   } })
 })
 
-test('a previously consumed same-step review remains exhausted after disk restore', async () => {
+test('a previously consumed same-step review survives restore without imposing an obsolete one-review cap', async () => {
   let seeded = false
   await withFixture(async w => {
-    await assert.rejects(w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' }), { code: 'factory_cell_assigned_review_exhausted', pause_class: 'guard' })
-    assert.equal(w.plannerCalls(), 1); assert.equal(w.game.mutations.length, 0)
-    assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
+    const result = await w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' })
+    assert.equal(result.operations[0].args.unit_number, 37)
+    assert.equal(w.plannerCalls(), 2); assert.equal(w.game.mutations.length, 1)
+    assert.equal(Object.entries(w.memory.planningState(ASSIGNED_KEY).goal.effort.blockers).filter(([key]) => key.startsWith('assignment:')).reduce((n, [, count]) => n + count, 0), 1)
   }, { onProvider: async (context, w) => {
     if (seeded || context.role !== 'executor') return
     seeded = true
@@ -211,7 +218,7 @@ test('an advisory provider failure stays a provider failure with no retry, mutat
     assert.equal(failure?.data.role, 'planner')
     assert.equal(w.events.findLast(row => row.event === 'request.completed')?.data.outcome, 'paused_provider_failure')
     assert.equal(w.events.findLast(row => row.event === 'goal.paused')?.data.provider_failure, true)
-    assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
+    assert.equal(Object.entries(w.memory.planningState(ASSIGNED_KEY).goal.effort.blockers).filter(([key]) => key.startsWith('assignment:')).reduce((n, [, count]) => n + count, 0), 1)
     assert.equal(w.events.filter(row => row.event === 'plan.replacement_committed').length, 0)
   }, { onProvider: (context, w) => {
     if (context.role === 'planner' && w.agent.reviewContinuation) { reviewCalls++; throw new Error('fixture_planner_provider_failure') }

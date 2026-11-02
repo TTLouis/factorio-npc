@@ -1,7 +1,6 @@
 import { AgentNotebookStore } from './agent-notebook.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 import { boardPlanAlignment, carriedPrefixLength } from './board-plan-alignment.mjs'
-export { boardPlanAlignment } from './board-plan-alignment.mjs'
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
@@ -71,6 +70,7 @@ import {
   taskLedgerView,
   TASK_LEDGER_REFUSAL,
 } from './task-ledger.mjs'
+export { boardPlanAlignment } from './board-plan-alignment.mjs'
 export { completionFinalizationDecision } from './completion-finalization.mjs'
 
 // Which reducer event carries each legacy run field.
@@ -668,7 +668,16 @@ function sanitizeIntakeRetry(record) {
   }
 }
 
+function validCompletedControl(value) {
+  return value?.version === 1 && value.goal_status === 'completed' && typeof value.goal_id === 'string' && value.goal_id.length > 0 && value.goal_id.length <= 120
+    && Number.isSafeInteger(value.actor_id) && value.actor_id > 0 && Number.isSafeInteger(value.actor_epoch) && value.actor_epoch >= 0
+    && typeof value.session_id === 'string' && value.session_id.length > 0 && value.session_id.length <= 200 && Number.isFinite(value.completed_at)
+    && (value.operator_pause === undefined || value.operator_pause?.reason === 'user_stop' && value.operator_pause.pause_class === 'operator' && Number.isFinite(value.operator_pause.at))
+}
+
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
+  #completedControls = new Map()
+  #completedControlsFault
   #factoryRegistry
   #factoryUseRecovery = new FactoryUseRecoveryStore()
   #factoryControlRevision = 0
@@ -817,6 +826,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       objective: objective.slice(0, 1000),
     })
     this.planningByNpc.set(key, next)
+    if (next !== current && next.goal?.status === GOAL_STATUS.ACTIVE) this.#completedControls.delete(key)
     return next
   }
 
@@ -844,6 +854,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
     if (!next?.goal || next === planning) return undefined
     this.planningByNpc.set(key, next)
+    this.#completedControls.delete(key)
     return next.goal.goal_id
   }
 
@@ -1287,6 +1298,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const before = this.planningByNpc.get(key) ?? createEmptyPlanningState()
     const after = applyPlanningEvent(before, event)
     if (after !== before || this.planningByNpc.has(key)) this.planningByNpc.set(key, after)
+    if (event.type === PLANNING_EVENT.GOAL_ACCEPTED && after !== before && after.goal?.status === GOAL_STATUS.ACTIVE) this.#completedControls.delete(key)
     this.syncPlanningState(key)
     return after
   }
@@ -1513,6 +1525,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // exists. Otherwise the first slice can never be linked to the shelf it is
     // supposed to refine.
     this.planningByNpc.set(key, planning)
+    if (goalAdmitted && planning.goal?.status === GOAL_STATUS.ACTIVE) this.#completedControls.delete(key)
     if (Array.isArray(roadmap) && roadmap.length > 0) {
       planning = this.reviseRoadmap(key, roadmap, {
         now,
@@ -2600,6 +2613,35 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
   }
 
+  // A terminal control receipt is history, never an executable task or grant.
+  recordCompletedGoalControl(key, actor, now = Date.now()) {
+    const goal = this.planningByNpc.get(key)?.goal
+    const receipt = { version: 1, goal_id: goal?.goal_id, goal_status: goal?.status, completed_at: now,
+      actor_id: actor?.actor_id, actor_epoch: actor?.epoch, session_id: actor?.session }
+    if (this.#completedControlsFault !== undefined || !validCompletedControl(receipt)) return undefined
+    if (!this.#completedControls.has(key) && this.#completedControls.size >= 128) return undefined
+    const prior = this.#completedControls.get(key)
+    if (prior?.goal_id === receipt.goal_id) return structuredClone(prior)
+    this.#completedControls.set(key, receipt)
+    return structuredClone(receipt)
+  }
+
+  completedGoalControl(key) {
+    const held = this.#completedControls.get(key)
+    const goal = this.planningByNpc.get(key)?.goal
+    if (!held || this.#completedControlsFault !== undefined || goal && (goal.goal_id !== held.goal_id || goal.status !== 'completed')) return undefined
+    return structuredClone(held)
+  }
+
+  pauseCompletedGoalControl(key, expected, actor, now = Date.now()) {
+    const held = this.completedGoalControl(key)
+    if (!held || JSON.stringify(held) !== JSON.stringify(expected) || held.actor_id !== actor?.actor_id
+      || held.actor_epoch !== actor?.epoch || held.session_id !== actor?.session) return undefined
+    const paused = { ...held, operator_pause: { reason: 'user_stop', pause_class: 'operator', at: now } }
+    this.#completedControls.set(key, paused)
+    return structuredClone(paused)
+  }
+
   retireCompletedPlan(key) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || state.status !== 'completed') return state
@@ -3230,6 +3272,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return {
       ...snapshot,
       agent_notebooks: this.notebooks.snapshot(),
+      ...(this.#completedControlsFault !== undefined ? { completed_goal_controls: structuredClone(this.#completedControlsFault) }
+        : this.#completedControls.size ? { completed_goal_controls: { version: 1, records: [...this.#completedControls.entries()] } } : {}),
       ...this.#factoryRegistry.snapshot(),
       ...this.#factoryUseRecovery.snapshot(),
       factory_control_revision: this.#factoryControlRevision,
@@ -3377,6 +3421,15 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   restore(snapshot) {
+    this.#completedControls = new Map()
+    this.#completedControlsFault = undefined
+    const terminal = snapshot?.completed_goal_controls
+    if (terminal !== undefined) {
+      if (terminal?.version !== 1 || !Array.isArray(terminal.records) || terminal.records.length > 128
+        || terminal.records.some(row => !Array.isArray(row) || row.length !== 2 || typeof row[0] !== 'string' || !row[0] || row[0].length > 200 || !validCompletedControl(row[1]))
+        || new Set(terminal.records.map(row => row[0])).size !== terminal.records.length) this.#completedControlsFault = structuredClone(terminal)
+      else this.#completedControls = new Map(structuredClone(terminal.records))
+    }
     this.notebooks.restore(snapshot?.agent_notebooks)
     this.#factoryUseRecovery.restore(snapshot)
     const controlRevision = snapshot.factory_control_revision ?? 0

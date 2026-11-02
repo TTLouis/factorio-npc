@@ -62,7 +62,7 @@ export function recoveryFixture(stateFile, { onTrace, onProvider, onCommand, byp
       if (context.role === 'planner') {
         plannerCalls++; assert.ok(plannerCalls <= 2, 'bounded scripted replacement')
         reply = planReply({ plan: [plannerCalls === 1 ? 'Produce iron using the existing pair' : 'Produce iron using the correctly assigned iron pair'], operations: [],
-          ...(plannerCalls === 1 ? { goal: { scope: 'finite', summary: RECOVERY_OBJECTIVE, doneWhen: RECOVERY_CHECKPOINT.requirements } } : {}),
+          ...(plannerCalls === 1 ? { goal: { scope: 'finite', summary: RECOVERY_OBJECTIVE, doneWhen: RECOVERY_CHECKPOINT.requirements } } : { workingPlanRevision: true }),
           stepCompletions: [{ kind: 'deterministic', checkpoint: RECOVERY_CHECKPOINT }], executionGuidance: [recoveryGuidance()] })
       } else {
         executorCalls++; assert.ok(executorCalls <= 4, 'bounded scripted executor')

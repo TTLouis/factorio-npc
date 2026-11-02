@@ -3136,6 +3136,11 @@ export function restatedPlanVerdict(incoming, committed, activeIndex = 0) {
 }
 
 export class NpcAgentLoop extends BaseNpcAgentLoop {
+  // Only returned provider messages can own a model-effort charge. Private
+  // identity maps cannot be forged by model JSON or deterministic controllers.
+  #providerEffort = new WeakMap()
+  #exhaustedEffortPlans = new WeakMap()
+
   ensureFactoryCellClose(owner) { return ensureCommittedFactoryCellBeforeClose(this, owner) }
 
   constructor(options) {
@@ -3539,8 +3544,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   rolePrefixMessages(role) {
     if (this.completionProtocolVersion >= 3) {
       const sharedPrompt = protocol3SharedPrompt(this.systemPrompt)
-      const executorPrompt = sharedPrompt.replace(DURABLE_PLAN_PROMPT,
-        `${EXECUTOR_STATE_PROMPT}\n\n### Complete operation list\n\n${approvedOperationListText()}.`)
+      const executorPrompt = protocol3SharedPrompt(this.systemPrompt.replace(DURABLE_PLAN_PROMPT,
+        `${EXECUTOR_STATE_PROMPT}\n\n### Complete operation list\n\n${approvedOperationListText()}.`))
       const ratePrompt = role === EXECUTOR_ROLE && this.executorObservationRate
         ? '\n[OBSERVATION RATE] Fresh native reads replenish over time; CONTROL_DECISION_STATE reports the burst, refill interval and available tokens. The harness waits for credit without another model call. Reuse cached facts first. Do not poll, change the plan or invent gameplay waits to refill credit. Closed-round, targeted-read, no-progress and total-call guards still apply.' : ''
       return [{ role: 'system', content: `${role === EXECUTOR_ROLE ? executionOnlyPrompt(roleSystemPrompt(executorPrompt, role)) : sharedPrompt}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}${ratePrompt}` }]
@@ -3711,12 +3716,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (woke !== undefined) return woke
     }
     await assertReviewCurrent()
-    // Run AC: a review used to end the request in a guard pause that nothing resumes. Each step now gets one
-    // in-turn planner round (durable, capped per goal). The committed plan cannot change in it; an empty reply
-    // returns the same step to a fresh executor with the planner's notes. A second review of the step pauses.
-    // Runs AD-AF: that pause was guard, which nothing resumes, so an unattended goal ended about 8 minutes in. A review is
-    // advisory model output, not world evidence, so the pause is model_recoverable: the supervisor's bounded auto-resume
-    // (MODEL_RECOVERABLE_RESUME_LIMITS, per step and per goal) restages a fresh executor onto the same step.
+    // Reviews spend the durable goal allowance; verified native progress alone
+    // refreshes it. Legacy review claims remain history, not an additional cap.
     const effortClaimed = this.memory.spendGoalEffort?.(key, plan.factoryAssignmentEvidence
       ? `assignment:${plan.factoryAssignmentEvidence.code}:${plan.factoryAssignmentEvidence.facts?.member?.unit_number}:${plan.factoryAssignmentEvidence.facts?.selected_resource}`
       : plan.factoryFailureEvidence ? `factory:${plan.factoryFailureEvidence.code}` : `review:${review.reason}`) !== false
@@ -11703,6 +11704,33 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // `pauseInfo.pause_class` is the pause's declared class (pause-class.mjs). Every caller declares one; a missing class is recorded as
   // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
+  async pauseCompletedGoalControl(expected, actor, ownsStop, readNativeActor) {
+    const key = this.activePlanKey()
+    let ownedControl = expected
+    const current = () => ownsStop() && this.activePlanKey() === key
+      && JSON.stringify(this.memory.completedGoalControl?.(key)) === JSON.stringify(ownedControl)
+    const fresh = async () => {
+      if (!current()) throw new AgentLoopError('Completed-goal stop superseded')
+      const native = await readNativeActor()
+      if (!current() || native?.actor_id !== expected.actor_id || native.epoch !== expected.actor_epoch || native.session !== expected.session_id) {
+        throw new AgentLoopError('Completed-goal stop native identity changed')
+      }
+    }
+    await fresh()
+    const receipt = this.memory.pauseCompletedGoalControl?.(key, expected, actor)
+    if (!receipt) throw new AgentLoopError('Completed-goal stop actor or terminal receipt changed')
+    ownedControl = receipt
+    await this.persistState({ strict: true })
+    if (!current()) throw new AgentLoopError('Completed-goal stop superseded during persistence')
+    await fresh()
+    await this.traceEvent('goal.paused', { goal_id: receipt.goal_id, goal_status: 'completed', control_only: true,
+      cause: 'user_stop', pause_class: PAUSE_CLASS.OPERATOR, actor_id: receipt.actor_id, actor_epoch: receipt.actor_epoch,
+      session_id: receipt.session_id, completed_at: receipt.completed_at, paused_at: receipt.operator_pause.at,
+      authority: 'durable_completed_goal_control' })
+    if (!current()) throw new AgentLoopError('Completed-goal stop superseded during diagnostic')
+    return undefined // No executable Task Board is revived or marked paused.
+  }
+
   async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}, expectedOwner) {
     const guardPause = pauseInfo.pause_class === PAUSE_CLASS.GUARD
     // A projection may return a fresh object for the same pending amendment.
@@ -12200,6 +12228,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
       rationale: 'goal_definition_conditions_satisfied',
     })
+    this.memory.recordCompletedGoalControl?.(fence.key, fence.actor)
     await this.persistState()
     await this.assertGoalEvaluationCurrent(fence)
   }
@@ -14366,10 +14395,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // not block the restage of the current generation (C7 recovery runs right
   // after the supervisor cancelled the old turn).
   async callProvider(current, generation, options) {
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const effortOwner = this.agentContext.role === EXECUTOR_ROLE && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(held?.status)
+      ? this.captureCheckpointOwner() : undefined
     this.providerCallsInFlight++
     this.providerCallsByGeneration.set(generation, (this.providerCallsByGeneration.get(generation) ?? 0) + 1)
     try {
-      return await this.callProviderRound(current, generation, options)
+      const message = await this.callProviderRound(current, generation, options)
+      if (!effortOwner || !message || typeof message !== 'object') return message
+      // A provider may reuse its object; each returned decision still owns a
+      // fresh private ticket, while reparsing that same decision cannot recharge.
+      const ownedMessage = providerMessageWith(message, {})
+      this.#providerEffort.set(ownedMessage, { owner: effortOwner, spent: false })
+      return ownedMessage
     }
     finally {
       this.providerCallsInFlight--
@@ -15445,6 +15483,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!plan) throw error
     }
     if (plan[REFRESHED_ENTITY_PLAN]?.action !== undefined && plan[REFRESHED_ENTITY_PLAN].action !== 'bound') return plan
+    const decision = this.#providerEffort.get(message)
+    if (decision && !decision.spent && !plan.plannerReview && !plan.executorCannotAuthor && this.memory.spendGoalEffort) {
+      await this.assertCheckpointOwnerCurrent(decision.owner)
+      if (!this.memory.spendGoalEffort(this.activePlanKey(), 'executor_decision')) {
+        this.#exhaustedEffortPlans.set(plan, decision.owner)
+        return plan
+      }
+      decision.spent = true
+      await this.persistState({ strict: true })
+      await this.assertCheckpointOwnerCurrent(decision.owner)
+    }
     await this.validatePreflightCorrectionScope(plan)
     await this.validateLocalFluidSearchBlocker(plan)
     // Refused here, an intent the active step cannot admit is an ordinary plan_category correction; refused only in
@@ -17996,14 +18045,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async commitPlan(plan) {
-    if (this.agentContext.role === EXECUTOR_ROLE && !plan.plannerReview && this.memory.spendGoalEffort
-      && this.memory.planningState?.(this.activePlanKey())?.goal?.status === 'active') {
-      const effortOwner = this.captureCheckpointOwner()
-      if (!this.memory.spendGoalEffort(this.activePlanKey(), 'executor_decision')) {
-        return this.pauseForExecutorCorrection('goal_no_progress_exhausted', plan.stepId, 'Goal effort exhausted without new relevant native progress; preserved the goal and blocker history.')
-      }
-      await this.persistState({ strict: true })
-      await this.assertCheckpointOwnerCurrent(effortOwner)
+    const exhaustedOwner = this.#exhaustedEffortPlans.get(plan)
+    if (exhaustedOwner) {
+      await this.assertCheckpointOwnerCurrent(exhaustedOwner)
+      return this.pauseForExecutorCorrection('goal_no_progress_exhausted', exhaustedOwner.stepId, 'Goal effort exhausted without new relevant native progress; preserved the goal and blocker history.')
     }
     if (!this.stockDependencyAdmission && activeStockDependencyBarrier(this)) return continueStockDependencyBarrier(this)
     let refreshed = plan[REFRESHED_ENTITY_PLAN]

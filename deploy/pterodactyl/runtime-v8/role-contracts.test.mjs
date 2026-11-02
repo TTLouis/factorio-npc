@@ -5,12 +5,12 @@ import fs from 'node:fs/promises'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { AgentLoopError, NpcAgentLoop } from './npc-agent-loop.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
-import { applyPlanningEvent, getActivePlan, MAX_REVIEW_CONTINUATIONS_PER_GOAL, PLANNING_EVENT } from './planning-state.mjs'
+import { applyPlanningEvent, getActivePlan, PLANNING_EVENT } from './planning-state.mjs'
 import { POST_BATCH_COVERAGE_REASON } from './post-batch-facts.mjs'
 import { buildPendingOperation, EFFECT } from './operation-reconciliation.mjs'
 import { manualSupplyDrift, normalizeExecutionGuidance, normalizePlannerReview } from './role-contracts.mjs'
+import { recoverySession, settle } from './recovery-loop-fixtures.mjs'
 import { classifyRequestFailure } from './pause-class.mjs'
-import { Session } from './supervisor.mjs'
 import { providerRequest } from './provider.mjs'
 import { executionOnlyControlToolDefinitions, planningOnlyControlToolDefinitions } from './structured-policy.mjs'
 import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
@@ -65,6 +65,20 @@ test('submitPlan tool transport carries the planner brief and executor step iden
   assert.deepEqual(w.plan().steps[0].execution_guidance, brief())
   assert.equal(w.game.mutations.length, 1)
   assert.equal(w.events.filter(row => row.event === 'provider.plan_submission_invalid').length, 0)
+})
+
+test('protocol 3 shared prompt permits validated planner revisions while preserving executor and outside-grant fences', () => {
+  const w = world([])
+  const planner = w.agent.rolePrefixMessages('planner')[0].content
+  assert.match(planner, /planner may explicitly revise the remaining working plan/)
+  assert.match(planner, /acting outside the grant requires user approval/)
+  assert.doesNotMatch(planner, /replaced only by an explicit user-approved revision/)
+  const executor = w.agent.rolePrefixMessages('executor')[0].content
+  assert.match(executor, /Execute only the active stepId\. Never change its meaning, order, completion contract, resource method or the goal/)
+  assert.match(executor, /read-only Plan Tracker/)
+  assert.match(executor, /Do not author or revise the plan/)
+  w.agent.completionProtocolVersion = 2
+  assert.match(w.agent.rolePrefixMessages('planner')[0].content, /replaced only by an explicit user-approved revision/)
 })
 
 test('protocol 3 commits planning-only guidance before the executor chooses the first action', async () => {
@@ -202,7 +216,6 @@ for (const reason of ['approach_infeasible', 'scope_change', 'local_recovery_exh
   })
 }
 
-const PLANNER_NOTES = 'Planner notes: read the furnace footprint first.'
 
 test('actual repeated review exhausts the goal effort and restart preserves exhaustion', async () => {
   const w = world([draft(), ctx => {
@@ -1486,7 +1499,7 @@ test('the facts a fold carries are traced as a fold, not as a rebuilt context', 
 })
 
 
-test('bound starter observation waits and finishes through native goal reads without further model calls or effort', async () => {
+for (const stopCase of ['normal', 'actor_changed', 'new_goal_during_save', 'save_failure']) test(`bound starter observation waits, retires and stops with completed-goal control: ${stopCase}`, async () => {
   const game = new FakeFactorio(); const command = game.command.bind(game); let satisfied = false; let bindingSeen = false; let stopped = false
   game.command = async text => {
     if (text.includes('automated_starter_base')) {
@@ -1512,5 +1525,56 @@ test('bound starter observation waits and finishes through native goal reads wit
     assert.equal(w.memory.planningState(KEY).goal.status, 'completed')
     assert.equal(stopped, true, 'durable canonical completion closes the native sampler')
     assert.equal(w.calls.length, 3)
+    const control = w.memory.completedGoalControl(KEY)
+    assert.equal(control.goal_status, 'completed')
+    assert.equal(control.actor_id, game.status.actor_id)
+    await w.agent.finalizeCompletedTaskContext({ goalId: control.goal_id, goalStatus: 'completed', taskBoard: { goal_id: control.goal_id, status: 'completed' } })
+    assert.equal(w.memory.planningState(KEY)?.goal, undefined, 'task retirement stays intact')
+    const saved = JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8'))
+    w.memory.restore(saved)
+    assert.deepEqual(w.memory.completedGoalControl(KEY), control, 'terminal identity survives restart without reopening the goal')
+    if (stopCase === 'normal') for (const admit of [
+      m => m.resolveReducerGoalId(KEY, { sender: 'owner', text: 'Later goal' }),
+      m => m.ensurePlanningDraft(KEY, { goal_id: 'later-goal', owner: 'owner', objective: 'Later goal', plan: ['Later work'], current_step: 0 }),
+      m => m.dispatchPlanningEvent(KEY, { type: PLANNING_EVENT.GOAL_ACCEPTED, source: 'runtime', goal_id: 'later-goal', owner: 'owner', objective: 'Later goal', now: Date.now() }),
+    ]) {
+      const later = new CanonicalTaskBoardMemory(); later.restore(saved)
+      admit(later); later.clearTaskContext(KEY)
+      assert.equal(later.completedGoalControl(KEY), undefined, 'intervening goal admission permanently invalidates the old terminal control')
+    }
+
+    const { session } = recoverySession(w, { actorId: game.status.actor_id, epoch: game.status.epoch })
+    const onActivity = w.agent.onActivity
+    w.agent.onActivity = (event, data) => { w.events.push({ event, data }); onActivity(event, data) }
+    if (stopCase === 'actor_changed') game.status.actor_id++ // stale cached supervisor identity must not authorize a receipt
+
+    const persist = w.agent.persistState.bind(w.agent)
+    if (stopCase === 'save_failure') w.agent.persistState = async () => { throw new Error('injected completed control save failure') }
+    if (stopCase === 'new_goal_during_save') w.agent.persistState = async options => {
+      await persist(options)
+      w.memory.admitPlanningGoal(KEY, { owner: 'new-owner', objective: 'A replacement goal', goalId: 'replacement-goal' })
+    }
+    const first = w.events.length
+    assert.equal(session.queuePlayerRequest('owner', 'stop'), true)
+    await settle(session)
+    const receipt = w.events.slice(first).find(row => row.event === 'goal.paused' && row.data.control_only === true)
+    assert.equal(Boolean(receipt), stopCase === 'normal')
+    if (stopCase === 'normal') {
+      assert.equal(receipt.data.goal_id, control.goal_id)
+      assert.equal(receipt.data.goal_status, 'completed')
+      assert.equal(receipt.data.pause_class, 'operator')
+      assert.ok(w.events.slice(first).some(row => row.event === 'request.cancelled' && row.data.reason === 'user_stop_immediate'))
+      const final = JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8')).completed_goal_controls.records[0][1]
+      assert.equal(final.operator_pause.reason, 'user_stop')
+      assert.equal(final.goal_status, 'completed')
+    }
+    if (stopCase === 'new_goal_during_save') {
+      assert.equal(w.memory.planningState(KEY).goal.goal_id, 'replacement-goal')
+      assert.equal(w.memory.planningState(KEY).goal.status, 'active')
+      assert.equal(w.memory.completedGoalControl(KEY), undefined)
+    }
+    if (stopCase === 'save_failure') assert.equal(JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8')).completed_goal_controls.records[0][1].operator_pause, undefined)
+    assert.equal(w.calls.length, 3, 'stop never calls a model')
+
   } finally { await fs.rm(w.agent.stateFile, { force: true }) }
 })

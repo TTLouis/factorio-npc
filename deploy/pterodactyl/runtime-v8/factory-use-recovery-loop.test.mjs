@@ -3,7 +3,6 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 import { getActivePlan } from './planning-state.mjs'
-import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { factoryStepRequirement } from './factory-cell-use.mjs'
 import { recoveryFixture, RECOVERY_KEY, RECOVERY_OBJECTIVE } from './factory-use-recovery-fixtures.mjs'
 
@@ -22,18 +21,18 @@ test('actual request residual mismatch automatically commits same-goal successor
     assert.equal(w.plannerCalls(), 2, JSON.stringify(w.events.slice(-8)))
     assert.equal(w.executorCalls(), 4)
     assert.equal(current.plan_version, 2)
-    assert.equal(current.derived_from_plan_id, state.plans[0].plan_id)
+    assert.equal(current.working_revision.predecessor_plan_id, state.plans[0].plan_id)
     assert.equal(state.goal.objective, RECOVERY_OBJECTIVE)
     assert.ok(state.plans.every(plan => plan.goal_id === state.goal.goal_id))
     assert.equal(state.plans[0].steps[0].description, 'Produce iron using the existing pair')
     assert.deepEqual(w.memory.getFactoryRegistry().cells[0], copper)
     assert.equal(w.game.mutations.length, 1, 'wrong copper submission was completely unsent')
     assert.equal(result.operations[0].args.unit_number, 138)
-    assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
+    assert.equal(w.memory.planningState(RECOVERY_KEY).goal.effort.blockers['factory:factory_cell_assigned_job_mismatch'], 1)
     assert.equal(w.events.filter(row => row.event === 'factory_cell.recovery_started').length, 1)
-    assert.equal(w.events.filter(row => row.event === 'plan.replacement_committed').length, 1)
+    assert.equal(w.events.filter(row => row.event === 'plan.working_revision_committed').length, 1)
     const saved = JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8'))
-    assert.equal(saved.factory_use_recovery.records[0].attempts.length, 1)
+    assert.equal(saved.planning_states.find(row => row.key === RECOVERY_KEY).state.goal.effort.blockers['factory:factory_cell_assigned_job_mismatch'], 1)
   })
 })
 
@@ -45,7 +44,7 @@ test('deliberate commit-prevention miss reaches real pre-send detector and autom
     assert.equal(refusal.data.factory_boundary, 'pre_send')
     assert.equal(w.plannerCalls(), 2); assert.equal(w.game.mutations.length, 1)
     assert.equal(result.operations[0].args.unit_number, 138)
-    assert.equal(w.memory.snapshot().factory_use_recovery.records[0].attempts.length, 1)
+    assert.equal(w.memory.planningState(RECOVERY_KEY).goal.effort.blockers['factory:factory_cell_assigned_job_mismatch'], 1)
     assert.equal(w.memory.planningState(RECOVERY_KEY).plans.length, 2)
     assert.deepEqual(w.memory.getFactoryRegistry().cells[0], w.registry.cells[0])
   }, { bypassCommitPrevention: true })
@@ -82,17 +81,15 @@ for (const [name, mutate] of Object.entries(fences)) test(`residual ${name} arri
   } })
 })
 
-test('same-goal exhaustion persists through real canonical restore and is durably paused by the supervisor', async () => {
+test('same-goal exhaustion persists through real canonical restore and is durably paused before another executor action', async () => {
   let seeded = false
   await withFixture(async w => {
-    let failure
-    try { await w.agent.request(RECOVERY_OBJECTIVE, { sender: 'owner' }) } catch (error) { failure = error }
-    assert.equal(seeded, true); assert.equal(failure?.code, 'factory_cell_recovery_exhausted')
+    const result = await w.agent.request(RECOVERY_OBJECTIVE, { sender: 'owner' })
+    assert.equal(seeded, true); assert.equal(result.goalStatus, 'paused')
+    assert.equal(w.memory.pauseRecord(RECOVERY_KEY).pause_class, 'guard')
+    assert.match(w.memory.pauseRecord(RECOVERY_KEY).pause_reason, /goal_no_progress_exhausted/)
     assert.equal(w.plannerCalls(), 1); assert.equal(w.game.mutations.length, 0)
-    assert.equal(w.events.filter(row => row.event === 'factory_cell.recovery_exhausted').length, 1)
-    const paused = await pauseStrandedPlanAfterRequestError({ agent: w.agent,
-      currentPlanState: () => w.memory.currentPlan(RECOVERY_KEY), syncTaskBoardUi: async () => {} }, failure)
-    assert.equal(paused.status, 'paused')
+    assert.equal(w.memory.planningState(RECOVERY_KEY).goal.effort.spent, 24)
     const saved = JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8'))
     assert.equal(saved.factory_use_recovery.records.reduce((n, row) => n + row.attempts.length, 0), 3)
     assert.equal(w.memory.planningState(RECOVERY_KEY).run.paused, true, 'guard pause retains the accepted goal while durably stopping its run')
@@ -103,6 +100,7 @@ test('same-goal exhaustion persists through real canonical restore and is durabl
     for (let index = 0; index < 3; index++) w.memory.consumeFactoryUseRecovery(RECOVERY_KEY,
       { ...factoryStepRequirement(plan.steps[0]), resource: `prior-slice-${index}` },
       { request_id: `prior-${index}`, plan_id: plan.plan_id, code: 'factory_cell_resolution_required', evidence_digest: 'a'.repeat(64) })
+    for (let i = 0; i < 24; i++) assert.equal(w.memory.spendGoalEffort(RECOVERY_KEY, 'prior_attempt'), true)
     await w.agent.persistState({ strict: true })
     w.memory.restore(JSON.parse(await fs.readFile(w.agent.stateFile, 'utf8')))
   } })
