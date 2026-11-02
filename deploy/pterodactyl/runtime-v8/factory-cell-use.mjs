@@ -10,6 +10,8 @@ import { observeDirectFactoryDelivery, observeElectricFactoryDelivery } from './
 import { operationSignature } from './operation-reconciliation.mjs'
 import { enrollImplicitDirectFeed } from './factory-cell-enrollment.mjs'
 
+const fail = (code, details) => { const error = new FactoryRegistryError(code, code); error.details = details; throw error }
+
 // Host capabilities are intentionally ephemeral. Serialized declarations and
 // old native observations cannot authorize the next process's operations.
 const certificates = new WeakMap()
@@ -34,7 +36,6 @@ export async function refreshFactoryUseFailure(error) {
 const PENDING_DELIVERY_WINDOW = new Set(['direct_delivery_window_started', 'direct_delivery_window_no_new_tick', 'direct_delivery_window_rebased'])
 export const factoryDeliveryWindowPending = error => error?.code === 'factory_cell_delivery_unverified'
   && error.details?.phase === 'close' && PENDING_DELIVERY_WINDOW.has(error.details.selected?.delivery?.observation?.code)
-const fail = (code, details) => { const error = new FactoryRegistryError(code, code); error.details = details; throw error }
 const clone = value => structuredClone(value)
 const known = value => value?.state === 'known' && value.truncated !== true
 const nativeList = value => Array.isArray(value) ? value : value && typeof value === 'object' && Object.keys(value).length === 0 ? [] : undefined

@@ -6,7 +6,9 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 const arg = (name, fallback) => { const i = process.argv.indexOf(`--${name}`); if (i < 0) { assert.notEqual(fallback, undefined, `missing --${name}`); return fallback } return process.argv[i + 1] }
-const repo = path.resolve(arg('repo')), results = path.resolve(arg('results')), phase = arg('phase')
+const repo = path.resolve(arg('repo'))
+const results = path.resolve(arg('results'))
+const phase = arg('phase')
 assert.ok(['prepare', 'reload'].includes(phase))
 const load = name => import(pathToFileURL(path.join(repo, 'deploy/pterodactyl', name)).href)
 const { Rcon, confirmLuaConsoleReady } = await load('runtime-v8/common.mjs')
@@ -15,7 +17,9 @@ const { configureNpcSession, deploymentStatus } = await load('staging/supervisor
 const { NpcAgentLoop } = await load('runtime-v8/npc-agent-loop.mjs')
 const pack = JSON.parse(await fs.readFile(path.join(repo, 'packages/autorio/src/fixtures/leveled-library-v1.json'), 'utf8'))
 const referenceId = pack.knowledge[0].id
-const transcript = [], events = [], evidence = { phase, status: 'failed', providers: 0, operations_submitted: 0 }
+const transcript = []
+const events = []
+const evidence = { phase, status: 'failed', providers: 0, operations_submitted: 0 }
 let connection
 const rcon = { command: async command => { assert.ok(!command.includes('"submit"'), 'No native operation submission permitted'); const response = await connection.command(command); transcript.push({ command, response }); return response } }
 const lua = async body => JSON.parse(await rcon.command(`/silent-command ${body}`))

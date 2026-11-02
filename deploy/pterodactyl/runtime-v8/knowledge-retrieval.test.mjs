@@ -25,7 +25,8 @@ class ReferenceGame extends FakeFactorio {
   }
 }
 function fixture(role = 'planner') {
-  const game = new ReferenceGame(), events = []
+  const game = new ReferenceGame()
+  const events = []
   const agent = new NpcAgentLoop({ rcon: game, provider: async () => { throw new Error('No inference') }, completionProtocolVersion: 3,
     stateFile: null, traceFile: null, decisionTraceFile: null, onActivity: (event, data) => events.push({ event, data }) })
   Object.assign(agent, { active: true, epoch: { ...game.status }, traceRequest: { id: 'reference-test', usage: { tool_calls: 0, tool_result_chars: 0, duplicate_tool_calls: 0 } } })
@@ -117,7 +118,8 @@ test('a mixed historical snapshot holds only an active selected knowledge refere
   record.skills.find(item => item.id === reference.id).content_type = 'knowledge'
   const payload = { schema: record.schema, scope: record.scope, skills: record.skills }
   record.sha256 = createHash('sha256').update(JSON.stringify(payload)).digest('hex')
-  const before = JSON.stringify(record), restored = restorePlannerSkillHandoffs([['key', record]]).get('key')
+  const before = JSON.stringify(record)
+  const restored = restorePlannerSkillHandoffs([['key', record]]).get('key')
   assert.deepEqual(selectedPlannerSkillDetails('key', planning, restored).selected_ids, [skill.id])
   planning.plans[0].active_step_index = 1
   assert.throws(() => selectedPlannerSkillDetails('key', planning, restored), /legacy_knowledge_selected_as_skill/)
@@ -125,7 +127,9 @@ test('a mixed historical snapshot holds only an active selected knowledge refere
 })
 
 test('scripted full planner-executor loop reads references only when each role asks, with no planning authority transfer', async () => {
-  const game = new ReferenceGame(), memory = new CanonicalTaskBoardMemory(), requests = []
+  const game = new ReferenceGame()
+  const memory = new CanonicalTaskBoardMemory()
+  const requests = []
   const description = 'Hold the starting iron plate.'
   const checkpoint = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 }] }
   const readRoles = new Set()

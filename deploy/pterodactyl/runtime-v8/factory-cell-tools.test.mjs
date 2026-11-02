@@ -311,7 +311,7 @@ test('factory host re-proves exact durable per-slot settlement while provider re
   assert.equal(results(w).at(-1).parsed.refused, true)
 })
 
-for (const fault of ['signature', 'attempt', 'ordinal', 'receipt', 'actor', 'goal', 'stale-owner']) test('factory host settled uncertain admission refuses ' + fault, async () => {
+for (const fault of ['signature', 'attempt', 'ordinal', 'receipt', 'actor', 'goal', 'stale-owner']) test(`factory host settled uncertain admission refuses ${fault}`, async () => {
   const w = await settledHostFixture()
   if (fault === 'signature') w.game.task.admission_journal[0].signature = 'f'.repeat(64)
   if (fault === 'attempt') w.game.task.admission_journal[0].attempt_id += '-other'

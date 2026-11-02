@@ -29,14 +29,15 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
     for (const [query, id] of cases) expect(find_knowledge_references(query, 3).map(row => row.id), query).toContain(id)
     for (const query of ['banana poetry telescope', 'purple penguins', 'zzqvflorp']) expect(find_knowledge_references(query, 3)).toEqual([])
     for (const entry of LEVELED_KNOWLEDGE_DEFINITIONS) {
-      const canonical = canonicalize_skill_definition(entry), reference = knowledge_reference(canonical)!
+      const canonical = canonicalize_skill_definition(entry)
+      const reference = knowledge_reference(canonical)!
       expect(reference.search_aliases).toEqual(entry.search_aliases)
       expect(canonicalize_skill_definition(reference).search_aliases).toEqual(entry.search_aliases)
       expect(reference.summary).not.toBe(`${entry.guidance.when_to_use} ${entry.guidance.completion[0]}`)
       expect(reference.reference!.concepts.filter(text => text.startsWith('Contrast:'))).toHaveLength(1)
       expect(JSON.stringify(reference)).not.toMatch(/executable_candidate|production_output|recipe_ids":\["/)
     }
-    expect(() => canonicalize_skill_definition({ ...LEVELED_KNOWLEDGE_DEFINITIONS[0], search_aliases: Array(25).fill('alias') })).toThrow(/search_aliases/)
+    expect(() => canonicalize_skill_definition({ ...LEVELED_KNOWLEDGE_DEFINITIONS[0], search_aliases: Array.from({ length: 25 }, () => 'alias') })).toThrow(/search_aliases/)
   })
 
   it('matches aliases alone using the same stopword and plural normalization as queries', () => {

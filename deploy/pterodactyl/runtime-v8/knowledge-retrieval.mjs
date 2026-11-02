@@ -105,8 +105,10 @@ export async function handleKnowledgeToolBatch(loop, message, prepared) {
   if (state.calls + prepared.length > KNOWLEDGE_LIMITS.calls) refuse('knowledge_request_budget_exhausted')
   spendContextCalls(loop, prepared.length)
   state.calls += prepared.length
-  const generation = loop.generation, sequence = loop.agentContext.conversationSeq
-  const lineage = loop.agentContext.lineageSequence, role = loop.agentContext.role
+  const generation = loop.generation
+  const sequence = loop.agentContext.conversationSeq
+  const lineage = loop.agentContext.lineageSequence
+  const role = loop.agentContext.role
   const actor = { actor_id: loop.epoch?.actor_id, epoch: loop.epoch?.epoch, session: loop.epoch?.session }
   const fence = async () => {
     await loop.assertCurrent()

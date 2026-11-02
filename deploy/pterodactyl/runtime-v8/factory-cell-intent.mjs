@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 
 const NAME_PATTERN = '^[a-z0-9][a-z0-9_-]{0,79}$'
-const PURPOSE_PATTERN = '^(?!\\s)(?![\\s\\S]*\\s$)[^\\u0000-\\u001f\\u007f]+$'
+const PURPOSE_PATTERN = '^(?!\\s)(?![\\s\\S]+\\s$)[^\\u0000-\\u001f\\u007f]+$'
 const name = value => typeof value === 'string' && new RegExp(NAME_PATTERN).test(value)
 const FIELDS = ['kind', 'product', 'sourceEntity', 'targetEntity', 'purpose']
 

@@ -68,7 +68,7 @@ function loopFixture(stateFile, { residual = false, onTrace } = {}) {
     } else if (op === 'move_items_exact') {
       machine.inventories[2].items = []; game.inventory['iron-plate'] = 1
       game.lastBasicResult = { ...base, type: 'moving_items', target_unit_number: 37, item_name: 'iron-plate', moved_count: 1, to_entity: false }
-    } else throw new Error('Unexpected fixture operation ' + op)
+    } else throw new Error(`Unexpected fixture operation ${op}`)
   }
   const agent = new NpcAgentLoop({ rcon: game, memory, npcId: 'block-startup', stateFile, traceFile: null, decisionTraceFile: null,
     completionProtocolVersion: 3, replacementWake: true, jevCheckpoints: false, systemPrompt: 'Offline synthetic production-block lifecycle.',
@@ -84,7 +84,7 @@ function loopFixture(stateFile, { residual = false, onTrace } = {}) {
           stepCompletions: [{ kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'entity_count', prototype: 'stone-furnace', minimum: 1 }] } },
             { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 1 }] } }] })
       } else {
-        assert.ok(++executor <= 2, 'No corrective provider request: ' + JSON.stringify(events.slice(-6)))
+        assert.ok(++executor <= 2, `No corrective provider request: ${JSON.stringify(events.slice(-6))}`)
         const plan = getActivePlan(memory.planningState(KEY)); const step = plan.steps[plan.active_step_index]
         reply = plan.active_step_index === 0 ? planReply({ stepId: step.step_id, operations: [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 62.5, y: 79.5 } }] })
           : planReply({ stepId: step.step_id, operations: [], productionTask: { targets: [{ item_name: 'iron-plate', count: 1 }],
@@ -138,7 +138,7 @@ for (const fault of ['exhausted', 'strict persistence']) test(`BL real residual 
   const plan = getActivePlan(w.memory.planningState(KEY)); const original = structuredClone(plan.steps)
   if (fault === 'exhausted') {
     for (let i = 0; i < 3; i++) w.memory.consumeFactoryUseRecovery(KEY, { previous: i }, {
-      request_id: 'previous-' + i, plan_id: plan.plan_id, code: 'prior_recovery', evidence_digest: 'a'.repeat(64) })
+      request_id: `previous-${i}`, plan_id: plan.plan_id, code: 'prior_recovery', evidence_digest: 'a'.repeat(64) })
     await w.agent.persistState({ strict: true })
     w.memory.restore(JSON.parse(await fs.readFile(path.join(dir, 'state.json'), 'utf8')))
   } else {
