@@ -62,7 +62,7 @@ import {
   STEERING_BOUNDARY,
   steeringContextForDraft,
 } from './planning-state.mjs'
-import { operationSignature } from './operation-reconciliation.mjs'
+import { operationSignature, TERMINAL_TRANSFER_REFUSAL_CAUSES } from './operation-reconciliation.mjs'
 import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
 import {
   mostRecentResumable,
@@ -426,9 +426,9 @@ function correctableTransferTarget(evidence, state, plan) {
   const basic = receipt?.basic_operation
   const admitted = receipt?.admitted_batch
   const correlation = receipt?.correlation
+  const refusalCause = TERMINAL_TRANSFER_REFUSAL_CAUSES.find(cause => receipt?.reason === `moving_items:nothing_moved:${cause}`)
   const partial = admitted?.terminal_partial === true && basic?.code === 'nothing_moved'
-    && basic.to_entity === true && basic.moved_count === 0
-    && receipt.reason === 'moving_items:nothing_moved:target_rejects_item'
+    && basic.to_entity === true && basic.moved_count === 0 && refusalCause !== undefined
   if (evidence?.kind !== 'operation_error_receipt' || basic?.type !== 'moving_items'
     || (!partial && basic.code !== 'no_target') || basic.accepted !== false || basic.completed !== false
     || (!partial && basic.target_unit_number !== undefined) || basic.player_name !== undefined
@@ -459,6 +459,7 @@ function correctableTransferTarget(evidence, state, plan) {
     item_name: basic.item_name, requested_count: basic.requested_count, to_entity: basic.to_entity,
     target_unit_number: basic.target_unit_number,
     recovery: partial ? 'terminal_transfer_refusal' : 'local_target_reacquisition', operation_key: admitted.operation_key,
+    ...(partial ? { refusal_cause: refusalCause } : {}),
   }
 }
 

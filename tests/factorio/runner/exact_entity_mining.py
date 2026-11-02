@@ -2,6 +2,7 @@
 import argparse
 import json
 import sys
+import subprocess
 import time
 from pathlib import Path
 
@@ -49,7 +50,7 @@ def run(client: Rcon, results: Path) -> None:
         "for _,e in pairs(s.find_entities_filtered{name='wooden-chest',position=a.position,radius=40}) do e.destroy() end; "
         "local p=s.find_non_colliding_position('wooden-chest',{x=a.position.x+12,y=a.position.y},8,0.5); assert(p); "
         "local c=s.create_entity{name='wooden-chest',position=p,force=a.force}; assert(c and c.unit_number); "
-        "rcon.print(helpers.table_to_json({actor_id=a.unit_number,chest_id=c.unit_number,actor_position=a.position,chest_position=c.position}))",
+        "rcon.print(helpers.table_to_json({actor_id=a.unit_number,chest_id=c.unit_number,actor_position=a.position,chest_position=c.position,surface_index=a.surface.index}))",
         'exact mining fixture',
     )
     require(fixture['actor_id'] == actor_id, fixture)
@@ -88,10 +89,12 @@ def run(client: Rcon, results: Path) -> None:
     legacy_result = (legacy_after.get('basic_operation') or {}).get('last_result') or {}
     require(legacy_result.get('code') == 'no_target', legacy_after)
 
-    exact = operation_admission(
-        remote_call('autorio_operations', 'mine_entity_exact', str(fixture['chest_id'])),
-        'exact remote mining',
-    )
+    admitted = subprocess.run(['node', str(Path(__file__).with_name('exact_entity_mining_admission.mjs'))],
+        input=json.dumps(dict(host=client.host, port=client.port, password=client.password,
+            actor_id=actor_id, unit_number=fixture['chest_id'], surface_index=fixture['surface_index'])),
+        text=True, capture_output=True, check=True)
+    exact = json.loads(admitted.stdout)
+    (results / 'exact-entity-mining-admission.json').write_text(json.dumps(exact, indent=2))
     require(exact.get('accepted') is True, exact)
     exact_after = wait_until_idle(status, 'exact remote mining auto approach', 20)
     exact_result = (exact_after.get('basic_operation') or {}).get('last_result') or {}

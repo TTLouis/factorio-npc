@@ -26,9 +26,10 @@ const observe = () => ({ content: null, tool_calls: [{ id: 'fresh-furnace', type
 // extraction and fuel delivery. One reserved copper craft produces the residual
 // output; no input withdrawal or furnace job change is authorized.
 class PartialFurnace extends FurnaceFactorio {
-  constructor() {
+  constructor(cause = 'target_rejects_item') {
     super({ inventory: { 'copper-plate': 10, 'copper-ore': 10, coal: 5 },
       factoryJob: 'copper-plate', furnace: { unit_number: 49, source: {}, output: { 'copper-plate': 17 } } })
+    this.refusalCause = cause
     this.receiptOverride = null
     this.reservedCopperCraft = 1 // explicit synthetic in-flight material at fixture creation
   }
@@ -60,7 +61,7 @@ class PartialFurnace extends FurnaceFactorio {
     const ref = { batch_id: batch.batch_id, batch_generation: 1, batch_ref: `batch-g1-${batch.batch_id}` }
     this.cancelledBatch = { ...ref, task_count: 3, task_types: Array.from({ length: 3 }, () => 'moving_items'), started_count: 3,
       completed_count: 2, refused_count: 1, outcome: 'refused', tick: 700,
-      reason: 'moving_items:nothing_moved:target_rejects_item', refusals: [{ operation_id: 21, type: 'moving_items', code: 'nothing_moved', cause: 'target_rejects_item', item_name: 'copper-ore', target_unit_number: 49, held_count: 10, tick: 699 }] }
+      reason: `moving_items:nothing_moved:${this.refusalCause}`, refusals: [{ operation_id: 21, type: 'moving_items', code: 'nothing_moved', cause: this.refusalCause, item_name: 'copper-ore', target_unit_number: 49, held_count: 10, tick: 699 }] }
     this.receipts.push({ ...this.cancelledBatch, state: 'cancelled' })
     this.lastBasicResult = { operation_id: 21, type: 'moving_items', accepted: false, completed: false, code: 'nothing_moved', tick: 700,
       actor_id: this.status.actor_id, item_name: 'copper-ore', target_unit_number: 49, requested_count: 5, moved_count: 0, to_entity: true, held_count: 10 }
@@ -69,9 +70,9 @@ class PartialFurnace extends FurnaceFactorio {
   }
 }
 
-function fixture(t) {
+function fixture(t, cause) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new PartialFurnace(); const model = new ScriptedModel(); const wire = []
+  const game = new PartialFurnace(cause); const model = new ScriptedModel(); const wire = []
   const bridge = Object.create(Session.prototype)
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only', OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'cli-proxy', OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' })
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null, fetchImpl: async (_url, options) => {
@@ -92,7 +93,7 @@ function fixture(t) {
     session.queuePlayerRequest('TTLouis', SYNTHETIC_STEP); await settle(session)
     assert.equal(game.sent.length, 1, JSON.stringify({ logs, violations: model.violations, calls: model.calls.map(row => ({ label: row.label, tail: row.messages.slice(-2) })), trace: world.trace.map(row => ({ event: row.event, data: row.data })) }))
   }
-  ctx.fail = async () => { game.completeBatch(); session.lastErrorAt = 0; session.onGameLine('[AUTORIO] [ERROR] moving_items failed: nothing_moved; cause=target_rejects_item'); await settle(session) }
+  ctx.fail = async () => { game.completeBatch(); session.lastErrorAt = 0; session.onGameLine(`[AUTORIO] [ERROR] moving_items failed: nothing_moved; cause=${game.refusalCause}`); await settle(session) }
   return ctx
 }
 function healthy(ctx) {
@@ -174,6 +175,22 @@ test('Synthetic same-job full loop: exact terminal partial transfer, fresh furna
   healthy(ctx)
 })
 
+test('Synthetic same-job exact partial with a non-rejection native cause reaches the same bounded recovery', async t => {
+  const ctx = fixture(t, 'input_slot_holds_other_item'); const { game, model, world } = ctx
+  await ctx.start()
+  let recoveryGuidance = ''
+  model.push('executor', 'luna:observe', messages => {
+    recoveryGuidance = messages.map(row => String(row.content)).join('\n')
+    return observe()
+  }).push('executor', 'luna:repair', () => ctx.action(REPAIR, { checkpoint: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 1 }] } }))
+  await ctx.fail()
+  assert.notEqual(world.memory.currentPlan(KEY).status, 'blocked')
+  assert.equal(transferSupplyRecoveryCount(world.memory.currentPlan(KEY).task_board), 1)
+  assert.equal(world.named('transfer.partial_recovery')[0].refusal_cause, 'input_slot_holds_other_item')
+  assert.match(recoveryGuidance, /input_slot_holds_other_item refusal without moving that item/)
+  assert.deepEqual(game.sent[1].operations, REPAIR)
+})
+
 for (const mode of ['missing-count', 'cancelled-tail', 'wrong-ref', 'wrong-generation', 'wrong-signature', 'wrong-actor', 'wrong-epoch', 'wrong-item', 'wrong-cause', 'non-transfer', 'truncated-refusals', 'slot-operation', 'absent-basic-actor', 'capture-failure']) {
   test(`Synthetic same-job exact partial proof fails closed: ${mode}`, async t => {
     const ctx = fixture(t); const { game, world } = ctx
@@ -221,4 +238,21 @@ test('Synthetic same-job unresolved partial blocks continuation before any repla
   const after = getActivePlan(world.memory.planningState(KEY))
   assert.equal(after.plan_id, before.plan_id); assert.deepEqual(after.steps, before.steps)
   assert.deepEqual(model.violations, []); assert.deepEqual(model.remaining, [])
+})
+
+test('exact typed zero-movement causes reconcile partial effects only with complete native evidence', async t => {
+  const ctx = fixture(t)
+  await ctx.start(); ctx.game.completeBatch()
+  const pending = ctx.world.memory.pendingOperations(KEY)[0]
+  const original = JSON.parse(await ctx.game.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","status")))'))
+  for (const cause of ['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item']) {
+    const raw = structuredClone(original)
+    raw.receipt_journal[0].refusals[0].cause = cause
+    assert.equal(reconcilePendingOperation(pending, { status: raw, actor: ctx.game.status }).verdict, 'admitted_partial', cause)
+    delete raw.receipt_journal[0].completed_count
+    assert.notEqual(reconcilePendingOperation(pending, { status: raw, actor: ctx.game.status }).verdict, 'admitted_partial', cause)
+  }
+  const unknown = structuredClone(original)
+  unknown.receipt_journal[0].refusals[0].cause = 'unknown'
+  assert.notEqual(reconcilePendingOperation(pending, { status: unknown, actor: ctx.game.status }).verdict, 'admitted_partial')
 })

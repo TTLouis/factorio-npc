@@ -3,6 +3,7 @@
 // The fixture starts with held machines and a declared natural-resource patch.
 // After setup, only admitted scripted executor operations change the world.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -76,7 +77,8 @@ const model = new ScriptedModel()
     goal: { scope: 'finite', summary: objective, doneWhen: checkpoint.requirements },
     stepCompletions: [{ kind: 'deterministic', checkpoint }],
     executionGuidance: [{ approach: 'Validate native drill coverage and output, place a receiving furnace, fuel separately and collect a plate.',
-      rationale: 'Use the held machines without substituting hand-mined or hand-delivered iron ore.', constraints: [], skillIds: [], materialSupply: { mode: 'direct_feed', resource: 'iron-ore' } }] }))
+      rationale: 'Use the held machines without substituting hand-mined or hand-delivered iron ore.', constraints: [], skillIds: [], materialSupply: { mode: 'direct_feed', resource: 'iron-ore' },
+      cellIntent: { kind: 'direct_feed', product: 'iron-plate', sourceEntity: 'burner-mining-drill', targetEntity: 'stone-furnace', purpose: objective } }] }))
   .push('executor', 'luna:typed-resource-search', (m, c) => typed(m, c, 'getNearbyEntities', { name: 'iron-ore', radius: 32, limit: 8 }, 'json'))
   .push('executor', 'luna:approach-native-resource', m => { seen.resource = fact(m).entities[0]; assert.equal(seen.resource.name, 'iron-ore'); return decision(m, [{ name: 'walk_to_entity', args: { entity_name: 'iron-ore', search_radius: 32 } }]) })
   .push('executor', 'luna:typed-drill-coverage', (m, c) => typed(m, c, 'getPlacementCandidates', { entity_name: 'burner-mining-drill', center: seen.resource.position, target_resource: 'iron-ore', radius: 5, limit: 2 }))
@@ -109,11 +111,16 @@ try {
     const message = await model.provide(body.messages, context)
     return new Response(JSON.stringify({ model: body.model, choices: [{ finish_reason: message.tool_calls ? 'tool_calls' : 'stop', message: { role: 'assistant', ...message } }], usage: { prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100 } }), { status: 200 })
   } })
-  const world = recoveryWorld({ game: rcon, model, completionProtocolVersion: 3, agentRoleConfig: bridge.config,
+  const world = recoveryWorld({ game: rcon, model, completionProtocolVersion: 3, stateFile: path.join(results, 'direct-feed-state.json'), agentRoleConfig: bridge.config,
     roleProvider: (messages, context) => bridge.roleProvider(messages, context) })
   // The typed Run AD gate answer: only research is predicted, one fresh read.
   world.agent.routePostStepDecision = async () => ({ route: 'targeted_observation', decision_called: true,
     steering: { observation_budget: 1, observation_relevance: { source: 'typed_relevance', threshold: 0.5, selected_families: ['research_state'], budget: 1 } } })
+  // Real native fixtures need the same save-scoped registry and durable storage as the supervisor.
+  const factoryWorld = await lua(`local id=storage.sgluna_factory_world_id or "${randomUUID()}";rcon.print(helpers.table_to_json(remote.call("sgluna_factory","bind_world_id",id)))`)
+  assert.equal(factoryWorld.ok, true)
+  world.memory.initializeFactoryRegistry(factoryWorld.world_id)
+  await world.agent.persistState({ strict: true })
   const status = await deploymentStatus(rcon, { requireAllowed: true })
   ctx = { world, model, ...recoverySession(world, { actorId: status.actor_id, epoch: status.epoch, sessionId: status.session }) }
   ctx.session.ensureAuthorization = async () => deploymentStatus(rcon, { requireAllowed: true })
