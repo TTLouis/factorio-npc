@@ -321,6 +321,19 @@ observation of the actor, not attribution. Other activity in the same ticks can
 contribute, and `available: false` means the actor could not be re-read. It is
 absent when the actor could not be read before submission.
 
+A running receipt carries the same observation as `observed_progress`, read
+once per reply (not per poll) and never stored. With reason
+`exact_admission_in_flight` it also carries `guidance`: the game admitted the
+operation and is executing it. The reason names the native admission record; it
+does not mean the operation is waiting for admission.
+
+`observation_notes` in `factorio_capabilities` state two native rules. The
+`getNearbyEntities` radius is centred on the actor's current position, so an
+operation that walks the actor moves it. `getEntityStatus` reads only chunks the
+force sees live now (near the actor, or radar coverage): `entity_not_visible`
+means there is no live vision there, not that the entity is gone. Status names
+are the native `defines.entity_status` values.
+
 ## Read-only method library
 
 `factorio_library` exposes separate `knowledge` references and `skill` methods.

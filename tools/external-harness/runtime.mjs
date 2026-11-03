@@ -13,6 +13,7 @@ import { libraryMetadata, readLibrary } from './library.mjs'
 const MAX_RECORDS = 512
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/
+const IN_FLIGHT_GUIDANCE = 'Admitted and executing in the game. exact_admission_in_flight names the native admission record; it does not mean the operation is waiting for admission. Wait with factorio_get wait_ms; observed_progress shows the actor so far.'
 const windowsReplace = fileURLToPath(new URL('./replace-journal-windows.ps1', import.meta.url))
 
 export function failure(code, publicMessage = code) {
@@ -224,6 +225,19 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
     return receipt(row)
   }
 
+  // A running receipt names what the in-flight reason means and the actor so
+  // far. Probed once per reply, never per poll, and never stored: progress is an
+  // observation, not a native count, and never affects the receipt state.
+  async function running(row, result) {
+    if (result.terminal || result.state !== 'running') return result
+    const guidance = result.reason === 'exact_admission_in_flight' ? { guidance: IN_FLIGHT_GUIDANCE } : {}
+    if (!row.prepared?.observed_before || typeof bridge.effectProbe !== 'function') return { ...result, ...guidance }
+    let now = null
+    try { now = await bridge.effectProbe(row.operation) }
+    catch { now = null }
+    return { ...result, ...guidance, observed_progress: observedEffect(row.prepared.observed_before, now) }
+  }
+
   async function snapshot() {
     const snap = await bridge.snapshot()
     if (snap?.guard?.session !== session) throw failure('world_session_mismatch')
@@ -273,7 +287,7 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
       const previous = ledger.records.find(row => row.operation_id === id)
       if (previous) {
         if (signature !== previous.signature) throw failure('request_id_conflict', 'Request ID was already used with different operation arguments')
-        return refresh(previous)
+        return running(previous, await refresh(previous))
       }
       for (const row of ledger.records.filter(row => !row.terminal)) await refresh(row)
       if (ledger.records.at(-1)?.terminal) await refresh(ledger.records.at(-1))
@@ -301,7 +315,7 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
         else row.reason = 'submission_acknowledgement_unavailable'
         await save()
       }
-      return refresh(row) // Admission is never reported as completion.
+      return running(row, await refresh(row)) // Admission is never reported as completion.
     }),
     get: async input => {
       object(input, ['operation_id', 'wait_ms'])
@@ -311,14 +325,18 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
       let result
       while (true) {
         result = await serialized(() => refresh(find(input.operation_id)))
-        if (result.terminal || result.state !== 'running' || Date.now() >= deadline) return result
+        if (result.terminal || result.state !== 'running') return result
+        if (Date.now() >= deadline) return serialized(() => running(find(input.operation_id), result))
         await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())))
         if (closed) return result
       }
     },
     resume: input => {
       object(input, ['operation_id'])
-      return serialized(() => refresh(find(input.operation_id)))
+      return serialized(async () => {
+        const row = find(input.operation_id)
+        return running(row, await refresh(row))
+      })
     },
     cancel: input => serialized(async () => {
       object(input, ['operation_id'])

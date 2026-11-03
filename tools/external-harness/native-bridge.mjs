@@ -36,7 +36,7 @@ export function capabilities() {
     observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
       name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
     })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false },
-    operation_notes: { ...OPERATION_NOTES } }
+    operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES } }
 }
 
 // Semantics the shared catalog leaves implicit and operators misread in the
@@ -49,6 +49,13 @@ export const OPERATION_NOTES = Object.freeze({
   move_items_exact: 'May walk the actor into reach first. A terminal receipt includes observed_effect with the actor inventory delta for item_name and the actor position before and after.',
   harvest_product: 'Searches up to 64 tiles and may walk the actor there. A terminal receipt includes observed_effect with the actor inventory delta for product_name and the actor position before and after.',
   submit_refusals: 'A factorio_submit error with effect "not_happened" means this call was refused before its operation was sent to the game and used no journal slot. An error without that field may have had an effect; read the receipt or native state. Placement refusals name blockers in details. A refusal during atomic admission instead returns a rejected receipt.',
+  running_receipts: 'A running receipt includes observed_progress: the actor position and inventory delta for the operation\'s item so far, read when the reply is sent. It is an observation of the actor, not a native progress count.',
+})
+// Native observation semantics the same operator misread: where a radius is
+// centred and what a visibility refusal means.
+export const OBSERVATION_NOTES = Object.freeze({
+  getNearbyEntities: 'radius is centred on the actor\'s current position (actor_position in the result), not where an earlier call ran. Operations that walk the actor move that centre.',
+  getEntityStatus: 'Reads only chunks the force sees live now (Factorio force chunk visibility: near the actor, or radar coverage). entity_not_visible means there is no live vision there, not that the entity is gone. status and status_name are the native defines.entity_status values.',
 })
 const MAX_REPLY_BYTES = 512 * 1024
 const PREFIX = '/silent-command '
