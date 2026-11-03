@@ -426,6 +426,9 @@ test('running receipt explains in-flight and reports progress once per reply, ne
   assert.equal(probes, 1, 'one progress probe per reply')
   assert.equal(waited.observed_progress.available, true)
   assert.equal((await fs.readFile(path.join(f.directory, 'ledger.json'), 'utf8')).includes('observed_progress'), false, 'progress is never stored')
+  assert.equal((await runtime.resume({ operation_id: admitted.operation_id })).observed_progress.available, true)
+  assert.equal((await runtime.submit({ request_id: 'long-mine', operation })).observed_progress.available, true, 'idempotent resubmit reports progress')
+  assert.equal(probes, 3)
   f.bridge.effectProbe = async () => { throw new Error('probe failed') }
   const unprobed = await runtime.resume({ operation_id: admitted.operation_id })
   assert.equal(unprobed.state, 'running')
@@ -435,7 +438,21 @@ test('running receipt explains in-flight and reports progress once per reply, ne
   assert.equal(completed.observed_progress, undefined); assert.equal(completed.guidance, undefined)
 })
 
-test('a running receipt with another reason gets progress but no in-flight guidance', async t => {
+test('a cancel during a receipt wait ends it with the cancelled state, never stale running progress', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const prepare = f.bridge.prepare
+  f.bridge.prepare = async (value, key) => ({ ...await prepare(value, key), observed_before: { tick: 100, actor_id: 1, position: { x: 0, y: 0 }, items: {} } })
+  f.bridge.effectProbe = async () => ({ tick: 300, actor_id: 1, position: { x: 0, y: 0 }, items: {} })
+  const admitted = await runtime.submit({ request_id: 'cancel-wait', operation })
+  const waiting = runtime.get({ operation_id: admitted.operation_id, wait_ms: 1000 })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await runtime.cancel({ operation_id: admitted.operation_id })
+  const result = await waiting
+  assert.equal(result.state, 'cancelled'); assert.equal(result.terminal, true)
+  assert.equal(result.observed_progress, undefined); assert.equal(result.guidance, undefined)
+})
+
+test('a running receipt with another reason gets no in-flight guidance', async t => {
   const f = await fixture(t); const runtime = await f.open()
   const admitted = await runtime.submit({ request_id: 'other-running', operation })
   assert.equal(admitted.state, 'running'); assert.equal(admitted.reason, 'native_running')

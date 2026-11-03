@@ -13,7 +13,7 @@ import { libraryMetadata, readLibrary } from './library.mjs'
 const MAX_RECORDS = 512
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/
-const IN_FLIGHT_GUIDANCE = 'Admitted and executing in the game. exact_admission_in_flight names the native admission record; it does not mean the operation is waiting for admission. Wait with factorio_get wait_ms; observed_progress shows the actor so far.'
+const IN_FLIGHT_GUIDANCE = 'Admitted by the game: queued or executing. exact_admission_in_flight names the native admission record; it does not mean the operation is waiting for admission. Wait with factorio_get wait_ms; observed_progress, when present, shows the actor so far.'
 const windowsReplace = fileURLToPath(new URL('./replace-journal-windows.ps1', import.meta.url))
 
 export function failure(code, publicMessage = code) {
@@ -226,10 +226,11 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
   }
 
   // A running receipt names what the in-flight reason means and the actor so
-  // far. Probed once per reply, never per poll, and never stored: progress is an
-  // observation, not a native count, and never affects the receipt state.
+  // far. Probed once per reply (a waiting get probes once, at the end of its
+  // wait) and never stored: progress is an observation, not a native count, and
+  // never affects the receipt state. Callers hold the serialized section.
   async function running(row, result) {
-    if (result.terminal || result.state !== 'running') return result
+    if (row.terminal || result.terminal || result.state !== 'running') return result
     const guidance = result.reason === 'exact_admission_in_flight' ? { guidance: IN_FLIGHT_GUIDANCE } : {}
     if (!row.prepared?.observed_before || typeof bridge.effectProbe !== 'function') return { ...result, ...guidance }
     let now = null
@@ -324,9 +325,17 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
       const deadline = Date.now() + wait
       let result
       while (true) {
-        result = await serialized(() => refresh(find(input.operation_id)))
-        if (result.terminal || result.state !== 'running') return result
-        if (Date.now() >= deadline) return serialized(() => running(find(input.operation_id), result))
+        // The last refresh and its progress probe share one critical section, so
+        // a cancel or close between them cannot pair progress with stale state.
+        const step = await serialized(async () => {
+          const row = find(input.operation_id)
+          const current = await refresh(row)
+          if (current.terminal || current.state !== 'running') return { done: true, result: current }
+          if (Date.now() < deadline) return { done: false, result: current }
+          return { done: true, result: await running(row, current) }
+        })
+        result = step.result
+        if (step.done) return result
         await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())))
         if (closed) return result
       }
