@@ -250,3 +250,32 @@ startMcpServer({runtime});`
   assert.equal(replies.length, 2)
   assert.equal(replies[1].result.structuredContent.name, 'context')
 })
+
+test('not-sent refusals report effect and bounded details instead of the uncertain fallback', async t => {
+  const f = fixture({ submit: async () => { throw Object.assign(new Error('private'), { code: 'preflight_rejected', effect: 'not_happened',
+    publicMessage: 'Native preflight rejected: placement_footprint_occupied. The operation was not sent to the game.',
+    details: { native_code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', item: 'copper-plate' }] } }) } })
+  t.after(f.server.stop); await f.initialize()
+  const reply = await f.request(1, 'tools/call', { name: 'factorio_submit', arguments: { request_id: 'x', operation: { name: 'wait', args: { ticks: 1 } } } })
+  const content = reply.result.structuredContent
+  assert.equal(reply.result.isError, true)
+  assert.equal(content.effect, 'not_happened'); assert.equal(content.journal_slot_used, false)
+  assert.equal(content.details.blockers[0].item, 'copper-plate')
+  assert.doesNotMatch(content.message, /do not assume no effect/)
+})
+
+test('unknown failures keep the conservative uncertain message and no details', async t => {
+  const f = fixture({ submit: async () => { throw Object.assign(new Error('private'), { details: { secret: 'x'.repeat(5000) } }) } })
+  t.after(f.server.stop); await f.initialize()
+  const content = (await f.request(1, 'tools/call', { name: 'factorio_submit', arguments: { request_id: 'x', operation: { name: 'wait', args: { ticks: 1 } } } })).result.structuredContent
+  assert.match(content.message, /do not assume no effect occurred/)
+  assert.equal(content.details, undefined); assert.equal(content.effect, undefined)
+})
+
+test('details from errors without a bridge-authored public message are never echoed', async t => {
+  const f = fixture({ submit: async () => { throw Object.assign(new Error('private'), { effect: 'not_happened', details: { token: 'small' } }) } })
+  t.after(f.server.stop); await f.initialize()
+  const content = (await f.request(1, 'tools/call', { name: 'factorio_submit', arguments: { request_id: 'x', operation: { name: 'wait', args: { ticks: 1 } } } })).result.structuredContent
+  assert.equal(content.details, undefined)
+  assert.equal(content.effect, 'not_happened')
+})

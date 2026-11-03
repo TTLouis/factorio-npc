@@ -343,3 +343,61 @@ test('CLI configuration requires private state, strong session and loopback-only
   assert.throws(() => configuration({ ...env, SGLUNA_RCON_PASSWORD: '' }), { code: 'rcon_password_required' })
   assert.throws(() => configuration({ ...env, EXTERNAL_HARNESS_STATE_DIR: '' }), { code: 'state_directory_required' })
 })
+
+// Operator-feedback regressions (FINDINGS.md 2026-11-01): terminal receipts carry a
+// labelled before/after actor observation; pre-journal refusals say the operation was not sent.
+test('terminal receipt carries one labelled before/after actor observation', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const prepare = f.bridge.prepare
+  f.bridge.prepare = async (value, key) => ({ ...await prepare(value, key), observed_before: { tick: 100, actor_id: 1, position: { x: 0, y: 0 }, items: { coal: 30 } } })
+  let probes = 0
+  f.bridge.effectProbe = async () => { probes++; return { tick: 400, actor_id: 1, position: { x: 30, y: 40 }, items: { coal: 10 } } }
+  const admitted = await runtime.submit({ request_id: 'effect', operation })
+  assert.equal(admitted.observed_effect, undefined, 'no observation before the receipt is terminal')
+  f.setState('completed')
+  const completed = await runtime.get({ operation_id: admitted.operation_id })
+  assert.deepEqual(completed.observed_effect, { scope: 'actor_observation_not_attribution', available: true, ticks: { before: 100, after: 400 },
+    actor_position: { before: { x: 0, y: 0 }, after: { x: 30, y: 40 }, moved_tiles: 50 }, actor_items: { coal: { before: 30, after: 10, delta: -20 } } })
+  assert.equal(completed.goal_verified, false)
+  const again = await runtime.resume({ operation_id: admitted.operation_id })
+  assert.deepEqual(again.observed_effect, completed.observed_effect, 'captured once and retained on later reads')
+  assert.equal(probes, 1)
+})
+
+test('an actor change between probes yields an unavailable observation, never a fabricated delta', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const prepare = f.bridge.prepare
+  f.bridge.prepare = async (value, key) => ({ ...await prepare(value, key), observed_before: { tick: 100, actor_id: 1, position: { x: 0, y: 0 }, items: { coal: 30 } } })
+  f.bridge.effectProbe = async () => ({ tick: 400, actor_id: 2, position: { x: 0, y: 0 }, items: { coal: 0 } })
+  const admitted = await runtime.submit({ request_id: 'replaced', operation })
+  f.setState('completed')
+  assert.deepEqual((await runtime.get({ operation_id: admitted.operation_id })).observed_effect, { scope: 'actor_observation_not_attribution', available: false })
+})
+
+test('refusals before the write-ahead record are marked not sent and use no journal slot', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  f.bridge.prepare = async () => { throw Object.assign(new Error('Walk target is 135.0 tiles'), { code: 'operation_limit', publicMessage: 'Walk target is 135.0 tiles', notSent: true }) }
+  await assert.rejects(runtime.submit({ request_id: 'far', operation }), error => error.code === 'operation_limit' && error.effect === 'not_happened' && error.journalSlotUsed === false)
+  await assert.rejects(runtime.submit({ request_id: 'shape', operation: { name: 'wait', args: { tick: 60 } } }), error =>
+    error.code === 'invalid_operation_arguments' && error.effect === 'not_happened' && /capabilities/.test(error.publicMessage))
+  assert.equal((await runtime.context()).journal_capacity_remaining, 512)
+  assert.equal(f.calls.length, 0)
+})
+
+test('prepare faults the bridge did not mark as read-only refusals keep uncertain semantics', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  f.bridge.prepare = async () => { throw new Error('socket closed after freeze write') }
+  await assert.rejects(runtime.submit({ request_id: 'freeze', operation }), error => error.effect === undefined && error.journalSlotUsed === undefined)
+})
+
+test('a throwing or empty after-probe never changes the terminal receipt', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const prepare = f.bridge.prepare
+  f.bridge.prepare = async (value, key) => ({ ...await prepare(value, key), observed_before: { tick: 100, actor_id: 1, position: { x: 0, y: 0 }, items: {} } })
+  f.bridge.effectProbe = async () => { throw new Error('probe failed') }
+  const admitted = await runtime.submit({ request_id: 'probe-fails', operation })
+  f.setState('completed')
+  const completed = await runtime.get({ operation_id: admitted.operation_id })
+  assert.equal(completed.state, 'completed')
+  assert.deepEqual(completed.observed_effect, { scope: 'actor_observation_not_attribution', available: false })
+})

@@ -293,6 +293,34 @@ counts and destination state. Prove a crafting/mining quantity from native
 result/inventory evidence, navigation from the observed position, and production
 from actual output, not merely a placed machine.
 
+`factorio_capabilities` returns `operation_notes` for semantics the schemas do
+not show: `craft_item` counts recipe crafts rather than items, inserter
+`direction` names the pickup side, and a completed `research_technology` receipt
+means research started.
+
+`getPlacementCandidates` results carry `external_footprint` on each returned
+candidate (up to 8) and an `external_placement` summary. The native search
+applies `can_place_entity` only, while external placement also refuses any
+non-resource entity in the footprint, such as items on the ground or the actor.
+The bridge re-checks each footprint with that same rule: `eligible: false`
+names the blockers. `eligible: true` covers this footprint rule only; the other
+preflight checks still apply. Native candidate fields are unchanged, and
+`checked: false` means the re-check was unavailable.
+
+A `factorio_submit` error with `"effect": "not_happened"` and
+`"journal_slot_used": false` means this call was refused before its operation
+was sent to the game.
+Its message names the cause, such as the walk distance and limit or invalid
+arguments. Bounded `details` may name placement blockers (for example items on
+the ground or the actor) and the planned footprint. Any other error keeps the
+uncertain wording: read the receipt or native state before assuming no effect.
+
+A terminal receipt may include `observed_effect`: the actor position before and
+after, and the actor inventory delta for the operation's item. It is an
+observation of the actor, not attribution. Other activity in the same ticks can
+contribute, and `available: false` means the actor could not be re-read. It is
+absent when the actor could not be read before submission.
+
 ## Read-only method library
 
 `factorio_library` exposes separate `knowledge` references and `skill` methods.
