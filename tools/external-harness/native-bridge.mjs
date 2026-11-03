@@ -35,7 +35,7 @@ export function capabilities() {
   return { operations: operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)),
     observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
       name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
-    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false },
+    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false },
     operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES } }
 }
 
@@ -44,6 +44,7 @@ export function capabilities() {
 export const OPERATION_NOTES = Object.freeze({
   craft_item: 'count is the number of recipe crafts, not items. A recipe with N products per craft yields count x N items (read getRecipeDetails products).',
   place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. getPlacementCandidates rows with external_footprint.eligible=false will be refused. No pickup or deconstruct operation exists, so placements are permanent.',
+  place_candidate: 'A fluid candidate that joins an entity (connects_to) needs the native preservation guard to prove that entity\'s whole connected fluid network, at most 16 entities. getPlacementCandidates reports this as connects_to.preservation_network (provable, entity_count, limit; unit_number names an entity the guard cannot read, for example one not visible now) and marks such candidates external_preservation.eligible=false. They are refused before they are sent. A join to a network of 16 brings it to 17; a network of 17 or more cannot be joined.',
   research_technology: 'A completed receipt means research was started and queued, not finished. Read getResearchStatus or getTechnology for progress and researched.',
   walk_to_position: 'Target must be within 128 tiles of the current actor position.',
   move_items_exact: 'May walk the actor into reach first. A terminal receipt includes observed_effect with the actor inventory delta for item_name and the actor position before and after.',
@@ -265,9 +266,16 @@ export class NativeBridge {
   // The native candidate search applies can_place_entity only. Re-check each
   // returned footprint with the external placement rule so the operator sees
   // which candidates external placement would refuse. Native fields are kept.
-  async annotateCandidates(result) {
-    if (result?.ok !== true || !Array.isArray(result.candidates) || result.candidates.length === 0) return result
-    const rule = 'Footprint rule only: non-resource entities in the footprint (items on the ground, characters) block external placement, which never clears them. Other preflight checks still apply.'
+  // A fluid join also needs the native guard to prove the joined network
+  // (connects_to.preservation_network is the guard's own walk), so every
+  // candidate of an unprovable join is marked too.
+  async annotateCandidates(native) {
+    if (native?.ok !== true || !Array.isArray(native.candidates) || native.candidates.length === 0) return native
+    const network = native.connects_to?.preservation_network
+    const result = network?.provable === false
+      ? { ...native, candidates: native.candidates.map(candidate => ({ ...candidate, external_preservation: { eligible: false, code: prototypeName(network.reason) } })) }
+      : native
+    const rule = 'Footprint rule: non-resource entities in the footprint (items on the ground, characters) block external placement, which never clears them. Fluid joins: external_preservation.eligible=false when connects_to.preservation_network is not provable. Other preflight checks still apply.'
     const rows = result.candidates.slice(0, ANNOTATED_CANDIDATES)
     const boxes = rows.map(row => row?.footprint?.world_box)
     if (!boxes.every(box => [box?.left_top?.x, box?.left_top?.y, box?.right_bottom?.x, box?.right_bottom?.y].every(Number.isFinite))) {
@@ -288,9 +296,9 @@ export class NativeBridge {
       if (code === 'clear') return { ...candidate, external_footprint: { eligible: true } }
       return { ...candidate, external_footprint: { eligible: false, code: prototypeName(code), blockers: footprintBlockers(checked.rows[index]?.blockers) } }
     })
-    const blocked = candidates.filter(candidate => candidate.external_footprint.eligible === false).length
+    const blocked = candidates.filter(candidate => candidate.external_footprint.eligible === false || candidate.external_preservation).length
     return { ...result, candidates, external_placement: { rule, checked: true, tick: checked.tick,
-      eligible_candidate_count: candidates.filter(candidate => candidate.external_footprint.eligible === true).length, blocked_candidate_count: blocked,
+      eligible_candidate_count: candidates.filter(candidate => candidate.external_footprint.eligible === true && !candidate.external_preservation).length, blocked_candidate_count: blocked,
       ...(candidates.length > rows.length ? { unchecked_candidate_count: candidates.length - rows.length } : {}) } }
   }
 
@@ -335,7 +343,12 @@ export class NativeBridge {
         semantic_step_id: pending.step_id, actor_id: pending.actor.actor_id, actor_epoch: pending.actor.epoch, session: this.session }
       const context = { signature: pending.signature, owner, ...(isolated ? { isolated: true } : {}) }
       const frozen = json(await this.rcon.command(`${JSON_PREFIX}remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(operation.args.candidate_set_id)},${luaString(operation.args.candidate_id)},${luaString(key)},{${isolated ? '' : target}},helpers.json_to_table(${luaString(JSON.stringify(context))}))))`))
-      check(frozen.ok === true && frozen.preservation_join?.version === 4, 'fluid_preservation_refused', `Native fluid preservation refused: ${typeof frozen.code === 'string' && /^[a-z0-9_]{1,80}$/.test(frozen.code) ? frozen.code : 'unknown'}. The operation was not sent to the game.`, { notAdmitted: true })
+      const nativeCode = typeof frozen.code === 'string' && /^[a-z0-9_]{1,80}$/.test(frozen.code) ? frozen.code : 'unknown'
+      const overLimit = nativeCode === 'preservation_guard_network_over_limit' && positive(frozen.limit) && positive(frozen.entity_count_at_least)
+      check(frozen.ok === true && frozen.preservation_join?.version === 4, 'fluid_preservation_refused', `Native fluid preservation refused: ${nativeCode}.${overLimit
+        ? ` The fluid network this candidate joins has at least ${frozen.entity_count_at_least} entities; the native preservation guard proves at most ${frozen.limit} (connects_to.preservation_network in getPlacementCandidates).`
+        : ''} The operation was not sent to the game.`, { notAdmitted: true, details: { native_code: nativeCode,
+        ...(overLimit ? { limit: frozen.limit, entity_count_at_least: frozen.entity_count_at_least } : {}) } })
       preservation = { version: 2, operation_key: key, attempt_id: pending.attempt_id, ordinal: pending.ordinal,
         signature: pending.signature, owner, candidate: frozen.preservation_join }
     }
