@@ -42,7 +42,7 @@ function fixture() {
     if (command.includes('{guard=remote.call')) return JSON.stringify(state)
     if (command.includes('\"fluid_preservation_candidate\"')) {
       if (fake.freezeThrows) throw new Error('socket closed after freeze write')
-      if (fake.freezeError) return JSON.stringify({ ok: false, code: fake.freezeError })
+      if (fake.freezeError) return JSON.stringify({ ok: false, code: fake.freezeError, ...fake.freezeExtra })
       const encoded = command.match(/helpers\.json_to_table\('([^']*)'\)/)[1]
       const context = JSON.parse(encoded)
       return JSON.stringify({ ok: true, preservation_join: { version: 4, candidate_set_id: 'placement-1', candidate_id: 'candidate-1',
@@ -530,4 +530,49 @@ test('candidate annotation survives a transport failure and place_candidate shar
   const preflight = f.calls.find(command => command.includes('external_candidate_unproven'))
   assert.match(preflight, /local function external_footprint\(surface,box\)/)
   assert.match(preflight, /local code,blockers=external_footprint\(surface,f\.world_box\)/)
+})
+
+// 2026-11-03 trial finding 1 (test-results/external-sonnet-redscience-20261103):
+// a 17th pipe was listed eligible, then refused by the 16-entity network guard.
+test('candidates of an unprovable fluid join are marked ineligible with the native reason', async () => {
+  const f = fixture()
+  const box = { left_top: { x: 0, y: 0 }, right_bottom: { x: 1, y: 1 } }
+  const native = { ok: true, entity_name: 'pipe', candidates: [{ id: 'candidate-1', footprint: { world_box: box } }, { id: 'candidate-2', footprint: { world_box: box } }],
+    connects_to: { unit_number: 42, preservation_network: { version: 1, limit: 16, provable: false, reason: 'protected_network_over_limit', entity_count_at_least: 17 } } }
+  f.onCommand = command => command.includes('rows=out')
+    ? JSON.stringify({ ok: true, tick: 9, rows: [{ code: 'clear', blockers: {} }, { code: 'clear', blockers: {} }] })
+    : command.includes('get_placement_candidates') ? JSON.stringify(native) : undefined
+  const result = await f.bridge.observe('getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: 42 } })
+  for (const candidate of result.candidates) {
+    assert.deepEqual(candidate.external_footprint, { eligible: true }, 'the footprint rule alone still passes')
+    assert.deepEqual(candidate.external_preservation, { eligible: false, code: 'protected_network_over_limit' })
+  }
+  assert.deepEqual(result.connects_to.preservation_network, native.connects_to.preservation_network, 'native fact is preserved')
+  assert.equal(result.external_placement.eligible_candidate_count, 0)
+  assert.equal(result.external_placement.blocked_candidate_count, 2)
+
+  native.connects_to.preservation_network = { version: 1, limit: 16, provable: true, entity_count: 16 }
+  const provable = await f.bridge.observe('getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: 42 } })
+  assert.equal(provable.candidates[0].external_preservation, undefined)
+  assert.equal(provable.external_placement.eligible_candidate_count, 2)
+
+  native.connects_to.preservation_network = { version: 1, limit: 16, provable: false, reason: 'protected_geometry_unavailable', unit_number: 77 }
+  native.candidates = [{ id: 'candidate-1', footprint: {} }]
+  const unreadable = await f.bridge.observe('getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: 42 } })
+  assert.equal(unreadable.external_placement.reason, 'candidate_geometry_missing')
+  assert.deepEqual(unreadable.candidates[0].external_preservation, { eligible: false, code: 'protected_geometry_unavailable' }, 'marked even when the footprint check cannot run')
+})
+
+test('a network over the guard limit is refused with the limit and count, before any admission', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true; f.state.status.external_fluid_candidates_supported = 1
+  f.preflight = { ok: true, preservation_join: { connects_to: { unit_number: 42 } } }
+  const candidate = { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }
+  f.freezeError = 'preservation_guard_network_over_limit'; f.freezeExtra = { limit: 16, entity_count_at_least: 17 }
+  await assert.rejects(f.bridge.prepare(candidate, 'run/fluid'), error => error.code === 'fluid_preservation_refused' && error.notAdmitted
+    && /at least 17 entities/.test(error.publicMessage) && /at most 16/.test(error.publicMessage)
+    && error.details.native_code === 'preservation_guard_network_over_limit' && error.details.limit === 16 && error.details.entity_count_at_least === 17)
+  f.freezeError = 'preservation_guard_geometry_unproven'; f.freezeExtra = { limit: 16, entity_count_at_least: 17 }
+  await assert.rejects(f.bridge.prepare(candidate, 'run/fluid'), error => !/at most/.test(error.publicMessage)
+    && error.details.native_code === 'preservation_guard_geometry_unproven' && error.details.limit === undefined)
+  assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
 })

@@ -58,3 +58,10 @@ test('external library manifest agrees with typed local capability metadata', ()
   assert.equal(external.library.result_bytes, meta.result_bytes)
   assert.equal(external.library.read_only, true)
 })
+
+test('the declared fluid network limit is the native preservation guard bound', () => {
+  const source = readFileSync(new URL('../../packages/autorio/src/placement_candidates.ts', import.meta.url), 'utf8')
+  assert.equal(Number(source.match(/const MAX_PROTECTED_FLUID_ENTITIES = (\d+)/)?.[1]), external.limits.fluid_network_entities)
+  assert.equal(capabilities().limits.fluid_network_entities, external.limits.fluid_network_entities)
+  assert.ok(capabilities().operation_notes.place_candidate.includes(`at most ${external.limits.fluid_network_entities} entities`))
+})

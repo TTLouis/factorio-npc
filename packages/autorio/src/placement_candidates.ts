@@ -22,6 +22,7 @@ const MAX_RADIUS = 24
 const MAX_LIMIT = 8
 const MAX_SCANNED_POSITIONS = 10000
 const MAX_CANDIDATE_SETS = 16
+const MAX_PROTECTED_FLUID_ENTITIES = 16
 const CANDIDATE_TTL_TICKS = 60 * 60
 // Refused footprints that pass the request's own filters are each checked for clearable blockers; past this
 // many checks the rest count as rejected, so a dense forest or base cannot stall the single simulation thread.
@@ -959,6 +960,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
             filter: port.filter,
             flow_direction: port.flow_direction,
           })),
+          preservation_network: protected_network_fact(actor, join_target.unit_number),
         },
     terrain_preparation,
     electric_pole: reach,
@@ -1235,13 +1237,19 @@ function claim_registry_valid() {
     })
 }
 
-function protected_geometry(actor: ControlledActor, ids: number[]) {
+type ProtectedGeometry = { ok: true, rows: any[] }
+  | { ok: false, reason: 'protected_network_over_limit', entity_count_at_least: number }
+  | { ok: false, reason: 'protected_geometry_unavailable', unit_number: number }
+
+// The guard proves the whole connected fluid network a candidate joins, at most
+// MAX_PROTECTED_FLUID_ENTITIES entities; the candidate listing reports the same walk.
+function protected_geometry_result(actor: ControlledActor, ids: number[]): ProtectedGeometry {
   const pending = [...ids]
   const rows: any[] = []
   for (let index = 0; index < pending.length; index++) {
-    if (pending.length > 16) return undefined
+    if (pending.length > MAX_PROTECTED_FLUID_ENTITIES) return { ok: false, reason: 'protected_network_over_limit', entity_count_at_least: pending.length }
     const geometry = preservation_geometry_for_actor(actor, pending[index])
-    if (!geometry) return undefined
+    if (!geometry) return { ok: false, reason: 'protected_geometry_unavailable', unit_number: pending[index] }
     rows.push(geometry)
     const storages: any[] = geometry.fluid_storages
     for (const storage of storages) {
@@ -1249,7 +1257,23 @@ function protected_geometry(actor: ControlledActor, ids: number[]) {
       for (const port of ports) if (port.connected && !pending.includes(port.target.unit_number)) pending.push(port.target.unit_number)
     }
   }
-  return rows
+  return { ok: true, rows }
+}
+
+function protected_geometry(actor: ControlledActor, ids: number[]) {
+  const result = protected_geometry_result(actor, ids)
+  return result.ok ? result.rows : undefined
+}
+
+/** Whether the preservation guard can prove the fluid network that joining unit_number would extend. */
+export function protected_network_fact(actor: ControlledActor, unit_number: number) {
+  const result = protected_read(() => protected_geometry_result(actor, [unit_number]))
+  const fact = { version: 1, limit: MAX_PROTECTED_FLUID_ENTITIES }
+  // A read fault is reported, never a reason to drop the candidate answer.
+  if (result === undefined) return { ...fact, provable: false, reason: 'protected_network_read_failed' }
+  if (result.ok) return { ...fact, provable: true, entity_count: result.rows.length }
+  if (result.reason === 'protected_network_over_limit') return { ...fact, provable: false, reason: result.reason, entity_count_at_least: result.entity_count_at_least }
+  return { ...fact, provable: false, reason: result.reason, unit_number: result.unit_number }
 }
 
 function preservation_guard_matches(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate) {
@@ -1293,7 +1317,11 @@ export function freeze_fluid_preservation_candidate(actor: ControlledActor | und
   const { set, candidate } = resolved
   if (actor.status_snapshot().actor_id !== set.actor_id) return { ok: false, code: 'preservation_guard_actor_changed' }
   const join: any = preservation_candidate_join(actor, set, candidate, context.isolated === true)
-  const geometry = protected_geometry(actor, protected_ids)
+  const protected_result = protected_geometry_result(actor, protected_ids)
+  if (!protected_result.ok && protected_result.reason === 'protected_network_over_limit') {
+    return { ok: false, code: 'preservation_guard_network_over_limit', limit: MAX_PROTECTED_FLUID_ENTITIES, entity_count_at_least: protected_result.entity_count_at_least }
+  }
+  const geometry = protected_result.ok ? protected_result.rows : undefined
   const native_baseline = native_admission_baseline()
   if (!geometry || join.complete !== true || !native_baseline) return { ok: false, code: 'preservation_guard_geometry_unproven' }
   const guard = { operation_key, signature: context.signature, owner: { ...context.owner }, candidate_set_id, candidate_id,

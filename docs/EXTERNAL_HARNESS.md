@@ -61,6 +61,17 @@ current prototype, source-tile and placement facts with `getPrototypeDetails`,
 relation is accepted only when a complete native scan proves zero possible fluid
 joins. A connection candidate must prove exactly its declared single additive
 join; the target's connected geometry is frozen by the shared native guard.
+That guard walks the target's whole connected fluid network and proves at most
+16 entities (`capabilities.limits.fluid_network_entities`); every entity it walks
+must be visible and of a supported prototype. `getPlacementCandidates` reports the
+same walk as `connects_to.preservation_network` (`provable`, `entity_count` or
+`entity_count_at_least`, `limit`, and `unit_number` for an entity it cannot read)
+and marks every candidate of an unprovable join `external_preservation.eligible=false`
+with the native reason. Those candidates are refused before admission; a network
+that grew past the limit after listing is refused with `native_code`
+`preservation_guard_network_over_limit`, `limit` and `entity_count_at_least`.
+A join to a 16-entity network brings it to 17; a larger network cannot be joined
+through this path.
 The bridge persists the exact frozen claim before sending the v2 operation;
 queued execution rechecks owner, session, epoch, candidate lifetime, native
 admission and protected geometry, and refuses clearance. Missing guard capability,

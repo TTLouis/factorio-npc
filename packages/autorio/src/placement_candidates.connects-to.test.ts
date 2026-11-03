@@ -328,6 +328,7 @@ describe('placement candidates that join a live fluid port', () => {
         : scope === 'autorio_crafting' ? { task_active: false, native_queue: [] }
           : method === 'authorize' ? epoch === nativeEpoch : ({ allowed: true, actor_id: 18, epoch: nativeEpoch, session: nativeSession }) }
     const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+    expect(set.connects_to.preservation_network).toEqual({ version: 1, limit: 16, provable: true, entity_count: 1 })
     const candidate = set.candidates[0]
     try {
       const frozen: any = freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100], context)
