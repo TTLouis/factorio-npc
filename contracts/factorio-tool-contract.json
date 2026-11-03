@@ -21,7 +21,9 @@
     "refusal_semantics": "not-happened-effect-with-bounded-details",
     "receipt_observed_effect": "actor-observation-not-attribution",
     "placement_candidate_annotation": "external-footprint-same-rule-as-placement",
-    "operation_notes": ["craft_item", "place_entity", "research_technology", "walk_to_position", "move_items_exact", "harvest_product", "submit_refusals"]
+    "operation_notes": ["craft_item", "place_entity", "research_technology", "walk_to_position", "move_items_exact", "harvest_product", "submit_refusals", "running_receipts"],
+    "observation_notes": ["getNearbyEntities", "getEntityStatus"],
+    "running_receipt_progress": "actor-observation-not-attribution"
   },
   "surfaces": [
     "ordinary-agent",

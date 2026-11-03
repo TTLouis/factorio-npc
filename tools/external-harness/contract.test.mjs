@@ -38,8 +38,14 @@ test('declared external bounds agree with executable capability limits', () => {
 test('external operation notes match the canonical manifest and name real operations', () => {
   const notes = capabilities().operation_notes
   assert.deepEqual(Object.keys(notes), external.operation_notes)
-  for (const name of Object.keys(notes)) assert.ok(name === 'submit_refusals' || external.operations.includes(name), name)
+  for (const name of Object.keys(notes)) assert.ok(['submit_refusals', 'running_receipts'].includes(name) || external.operations.includes(name), name)
   assert.ok(notes.walk_to_position.includes(String(external.limits.walk_distance)))
+})
+
+test('external observation notes match the canonical manifest and name real observations', () => {
+  const notes = capabilities().observation_notes
+  assert.deepEqual(Object.keys(notes), external.observation_notes)
+  for (const name of Object.keys(notes)) assert.ok(external.observations.includes(name), name)
 })
 
 

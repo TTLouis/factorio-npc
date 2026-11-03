@@ -354,6 +354,7 @@ test('terminal receipt carries one labelled before/after actor observation', asy
   f.bridge.effectProbe = async () => { probes++; return { tick: 400, actor_id: 1, position: { x: 30, y: 40 }, items: { coal: 10 } } }
   const admitted = await runtime.submit({ request_id: 'effect', operation })
   assert.equal(admitted.observed_effect, undefined, 'no observation before the receipt is terminal')
+  probes = 0 // The running reply's progress probe is covered by its own test.
   f.setState('completed')
   const completed = await runtime.get({ operation_id: admitted.operation_id })
   assert.deepEqual(completed.observed_effect, { scope: 'actor_observation_not_attribution', available: true, ticks: { before: 100, after: 400 },
@@ -400,4 +401,60 @@ test('a throwing or empty after-probe never changes the terminal receipt', async
   const completed = await runtime.get({ operation_id: admitted.operation_id })
   assert.equal(completed.state, 'completed')
   assert.deepEqual(completed.observed_effect, { scope: 'actor_observation_not_attribution', available: false })
+})
+
+// Trial findings 9 and 18: a long running receipt said only exact_admission_in_flight,
+// with no sign of progress. It now explains the reason and shows the actor so far.
+test('running receipt explains in-flight and reports progress once per reply, never per poll or stored', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const prepare = f.bridge.prepare
+  f.bridge.prepare = async (value, key) => ({ ...await prepare(value, key), observed_before: { tick: 100, actor_id: 1, position: { x: 0, y: 0 }, items: { 'iron-ore': 0 } } })
+  const nativeReceipt = f.bridge.receipt
+  f.bridge.receipt = async pending => ({ ...await nativeReceipt(pending), reason: 'exact_admission_in_flight' })
+  let probes = 0
+  f.bridge.effectProbe = async () => { probes++; return { tick: 300, actor_id: 1, position: { x: 3, y: 4 }, items: { 'iron-ore': 37 } } }
+  const admitted = await runtime.submit({ request_id: 'long-mine', operation })
+  assert.equal(admitted.state, 'running')
+  assert.match(admitted.guidance, /does not mean the operation is waiting for admission/)
+  assert.equal(admitted.observed_progress.scope, 'actor_observation_not_attribution')
+  assert.deepEqual(admitted.observed_progress.actor_items, { 'iron-ore': { before: 0, after: 37, delta: 37 } })
+  assert.equal(admitted.observed_progress.actor_position.moved_tiles, 5)
+  probes = 0
+  const polled = f.calls.filter(([name]) => name === 'receipt').length
+  const waited = await runtime.get({ operation_id: admitted.operation_id, wait_ms: 60 })
+  assert.ok(f.calls.filter(([name]) => name === 'receipt').length - polled > 1, 'the wait polled more than once')
+  assert.equal(probes, 1, 'one progress probe per reply')
+  assert.equal(waited.observed_progress.available, true)
+  assert.equal((await fs.readFile(path.join(f.directory, 'ledger.json'), 'utf8')).includes('observed_progress'), false, 'progress is never stored')
+  assert.equal((await runtime.resume({ operation_id: admitted.operation_id })).observed_progress.available, true)
+  assert.equal((await runtime.submit({ request_id: 'long-mine', operation })).observed_progress.available, true, 'idempotent resubmit reports progress')
+  assert.equal(probes, 3)
+  f.bridge.effectProbe = async () => { throw new Error('probe failed') }
+  const unprobed = await runtime.resume({ operation_id: admitted.operation_id })
+  assert.equal(unprobed.state, 'running')
+  assert.deepEqual(unprobed.observed_progress, { scope: 'actor_observation_not_attribution', available: false })
+  f.setState('completed')
+  const completed = await runtime.get({ operation_id: admitted.operation_id })
+  assert.equal(completed.observed_progress, undefined); assert.equal(completed.guidance, undefined)
+})
+
+test('a cancel during a receipt wait ends it with the cancelled state, never stale running progress', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const prepare = f.bridge.prepare
+  f.bridge.prepare = async (value, key) => ({ ...await prepare(value, key), observed_before: { tick: 100, actor_id: 1, position: { x: 0, y: 0 }, items: {} } })
+  f.bridge.effectProbe = async () => ({ tick: 300, actor_id: 1, position: { x: 0, y: 0 }, items: {} })
+  const admitted = await runtime.submit({ request_id: 'cancel-wait', operation })
+  const waiting = runtime.get({ operation_id: admitted.operation_id, wait_ms: 1000 })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await runtime.cancel({ operation_id: admitted.operation_id })
+  const result = await waiting
+  assert.equal(result.state, 'cancelled'); assert.equal(result.terminal, true)
+  assert.equal(result.observed_progress, undefined); assert.equal(result.guidance, undefined)
+})
+
+test('a running receipt with another reason gets no in-flight guidance', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const admitted = await runtime.submit({ request_id: 'other-running', operation })
+  assert.equal(admitted.state, 'running'); assert.equal(admitted.reason, 'native_running')
+  assert.equal(admitted.guidance, undefined); assert.equal(admitted.observed_progress, undefined, 'no before-observation, no progress')
 })
