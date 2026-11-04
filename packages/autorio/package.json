@@ -1,7 +1,7 @@
 {
   "name": "autorio.ts",
   "version": "0.1.0",
-  "description": "Factorio-side runtime for standalone NPC actors, deterministic observations, planning helpers, and validated operations.",
+  "description": "Factorio NPC mod runtime and deterministic game-side helper layer.",
   "author": "TTLouis; original autorio by LemonNekoGH",
   "license": "MIT",
   "keywords": [

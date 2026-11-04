@@ -11,7 +11,7 @@ rules in [AGENTS.md](../AGENTS.md) remain authoritative.
 Read `AGENTS.md` and `SPEC.md`. In the owner's shared workspace, also read its
 parent policy and ownership registry; independent clones do not require those
 machine-local files.
-Confirm the actual checkout, branch, upstream and current Jev source SHA. Reuse
+Confirm the actual checkout, branch, upstream and current main source SHA. Reuse
 the task branch when resuming. Preserve occupied checkouts and historical evidence.
 Open only the relevant subsystem and design references; use exact searches before
 loading long status histories. Do not create a second project roadmap.
@@ -56,8 +56,10 @@ Use the guide's repair closeout fields in the task note and PR evidence.
 | Installer / shipped runtime | Payload repin as a separate commit, payload check/tests, appropriate package gates at promotion |
 | Workflow / docs | Executable command checks, config parsing and link/diff review; no gameplay capability claim |
 
-Run `git diff --check`. For implementation and integration, run the repository's
-offline gate; documentation-only validation also checks links, paths and commands:
+Run `git diff --check` and the smallest meaningful check for the changed boundary.
+Reuse valid results for unchanged code; broaden only for an observed failure,
+a specific unresolved risk or a required release gate. Documentation validation
+also checks links, paths and commands. The full offline gate remains available:
 
 ```sh
 bash scripts/test-local.sh all

@@ -196,6 +196,9 @@ jobs:
         timeout-minutes: 10
         run: node --test deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
 
+      - name: Test external-harness contracts, MCP and local method library
+        run: node --test tools/external-harness/contract.test.mjs tools/external-harness/mcp-server.test.mjs tools/external-harness/library.test.mjs
+
   factorio-npc-deterministic:
     if: github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.base_ref == 'experiment/jev-agent-architecture'
     runs-on: ubuntu-latest

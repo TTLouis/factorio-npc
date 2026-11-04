@@ -154,21 +154,87 @@ describe('placement candidates that join a live fluid port', () => {
     ] }])
   }
 
-  it('certifies the exact native candidate join only while every nearby possible connection is proved', () => {
+  it.each(['boiler', 'electric-mining-drill'])('freezes isolated %s with the same durable claim, admission and queued fences', (entityName) => {
+    const actor = actor_at(10, 20)
+    actor.character = { valid: true }
+    ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity[entityName] = { ...boiler, name: entityName, type: entityName === 'electric-mining-drill' ? 'mining-drill' : 'boiler', items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    actor.get_main_inventory = () => ({ get_item_count: () => 1 })
+    actor.surface.find_entities_filtered = () => Object.values(world)
+    const manager = new_task_manager(() => actor)
+    const basic = new_basic_operation_controller(() => actor, manager)
+    const journal = new_operation_admission(() => actor, () => manager.get_status_snapshot())
+    const owner = { goal_id: 'external', plan_id: 'external-fluid', plan_version: 1, step_id: 'isolated',
+      semantic_step_id: 'isolated', actor_id: 18, actor_epoch: 3, session: 'native-session' }
+    const context = { signature: 'isolated-exact-signature', owner, isolated: true }
+    const originalRemote = (globalThis as any).remote
+    ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { status: true, authorize: true }, autorio_operations: { status: true }, autorio_crafting: { status: true } },
+      call: (scope: string, method: string) => scope === 'autorio_operations'
+        ? { ...manager.get_status_snapshot(), actor: {}, follow: { active: false } }
+        : scope === 'autorio_crafting' ? { task_active: false, native_queue: [] }
+          : method === 'authorize' ? true : ({ allowed: true, actor_id: 18, epoch: 3, session: owner.session }) }
+    try {
+      const set: any = create_placement_candidate_set(actor, { entity_name: entityName, radius: 1, limit: 1 })
+      const candidate = set.candidates[0]
+      const freeze = (extra: any = {}) => freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/isolated', [], { ...context, ...extra })
+      expect(freeze({ isolated: false })).toMatchObject({ ok: false, code: 'preservation_guard_invalid' })
+      expect(freeze({ owner: { ...owner, session: 'foreign' } })).toMatchObject({ ok: false, code: 'preservation_guard_invalid' })
+      const frozen: any = freeze()
+      expect(frozen).toMatchObject({ ok: true, preservation_join: { version: 4, isolated: true, protected_geometry: [], owner } })
+      expect(execute_placement_candidate(actor, set.candidate_set_id, candidate.id, basic.submit_placement)[0]).toBe(false)
+      expect(journal.begin({ operation_key: 'req/isolated', attempt_id: 'attempt', signature: context.signature,
+        actor_id: 18, epoch: 3, ordinal: 1, operation_count: 1, fluid_preservation: owner }).ok).toBe(true)
+      expect(execute_placement_candidate(actor, set.candidate_set_id, candidate.id, basic.submit_placement)[0]).toBe(true)
+      const task = manager.player_state.parameters_place_entity!
+      expect(task.refuse_clearance).toBe(true)
+      const batch = manager.get_status_snapshot().active_batch!
+      expect(journal.slot('req/isolated', 1, { ok: true, operation: 'place_candidate', batch_refs: [batch] }).ok).toBe(true)
+      expect(journal.finish('req/isolated', { ok: true }).ok).toBe(true)
+      const allowed = () => placement_preservation_execution_allowed(actor, task.entity_name, task.position?.x, task.position?.y,
+        task.direction, task.placement_candidate, task.preservation_binding, manager.get_status_snapshot())
+      expect(allowed()).toBe(true)
+      // Copy/restore the JS storage fixture without deleting undefined-valued
+      // object keys. JSON drops those keys, unlike an in-memory clone; Lua never
+      // stores nil keys. This checks restored fixture ownership, not a real
+      // Factorio save/load (which requires the separate exact-version proof).
+      const saved = structuredClone((globalThis as any).storage)
+      ;(globalThis as any).storage = structuredClone(saved)
+      expect(allowed()).toBe(true, 'the copied storage retains the exact claim and queued owner')
+      const port = candidate.fluid_ports[0]
+      const vector = port.direction === 0 ? { x: 0, y: -1 } : port.direction === 4 ? { x: 1, y: 0 }
+        : port.direction === 8 ? { x: 0, y: 1 } : { x: -1, y: 0 }
+      world[101] = live_entity(101, 'pipe', [{ filter: port.filter, ports: [{
+        position: { x: port.position.x + vector.x, y: port.position.y + vector.y }, target_position: port.position,
+        flow_direction: 'input-output',
+      }] }])
+      expect(allowed()).toBe(false, 'a late accidental edge cannot replace the frozen zero-join proof')
+      delete world[101]
+      actor.surface.can_place_entity = () => false
+      expect(allowed()).toBe(false, 'a late blocker cannot authorize clearance')
+      actor.surface.can_place_entity = () => true
+      delete (globalThis as any).storage.sgluna_fluid_preservation_claims['req/isolated']
+      expect(allowed()).toBe(false, 'missing durable claim history cannot be renewed')
+    } finally {
+      delete (globalThis as any).prototypes.item['fluid-proof-test-kit']
+      ;(globalThis as any).remote = originalRemote
+    }
+  })
+
+  it.each(['boiler', 'electric-mining-drill'])('certifies %s join only while every nearby possible connection is proved', (entityName) => {
     build_pump()
     ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
-    ;(globalThis as any).prototypes.entity.boiler = { ...boiler, items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    ;(globalThis as any).prototypes.entity[entityName] = { ...boiler, name: entityName, type: entityName === 'electric-mining-drill' ? 'mining-drill' : 'boiler', items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
     const actor = actor_at(0, 0)
     actor.is_valid = true
     actor.status_snapshot = () => ({ actor_id: 18 })
     actor.get_main_inventory = () => ({ get_item_count: () => 1 })
     actor.surface.find_entities_filtered = () => Object.values(world)
-    const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+    const set: any = create_placement_candidate_set(actor, { entity_name: entityName, connects_to: { unit_number: 100 } })
     const read = () => placement_candidate_preflight(actor, set.candidate_set_id, 'candidate-1') as any
     try {
       expect(read()).toMatchObject({ ok: true, preservation_join: { version: 2, complete: true,
         candidate_storages: [{ index: 1, production_type: 'input-output', filter: 'water' }, { index: 2, production_type: 'output', filter: 'steam' }],
-        actor_id: 18, surface_index: 1, force_index: 1, entity_name: 'boiler',
+        actor_id: 18, surface_index: 1, force_index: 1, entity_name: entityName,
         connects_to: { unit_number: 100, target_port: { storage_index: 1, connection_index: 1 } } } })
       // The other boiler water port must not silently join an existing object.
       world[101] = live_entity(101, 'pipe', [{ filter: 'water', ports: [
@@ -182,6 +248,21 @@ describe('placement candidates that join a live fluid port', () => {
       const original = world[100].fluidbox.get_pipe_connections
       world[100].fluidbox.get_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
       expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_ports_incomplete' })
+    } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
+  })
+
+  it('refuses an unlisted fluid miner even when its synthetic port shape matches an allowed candidate', () => {
+    build_pump()
+    const entityName = 'unlisted-fluid-miner'
+    ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity[entityName] = { ...boiler, name: entityName, type: 'mining-drill', items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    const actor = actor_at(0, 0)
+    actor.get_main_inventory = () => ({ get_item_count: () => 1 })
+    actor.surface.find_entities_filtered = () => Object.values(world)
+    try {
+      const set: any = create_placement_candidate_set(actor, { entity_name: entityName, connects_to: { unit_number: 100 } })
+      const result: any = placement_candidate_preflight(actor, set.candidate_set_id, set.candidates[0].id)
+      expect(result.preservation_join).toMatchObject({ complete: false, reason: 'candidate_storage_constraints_unproven' })
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
   })
 
@@ -247,6 +328,7 @@ describe('placement candidates that join a live fluid port', () => {
         : scope === 'autorio_crafting' ? { task_active: false, native_queue: [] }
           : method === 'authorize' ? epoch === nativeEpoch : ({ allowed: true, actor_id: 18, epoch: nativeEpoch, session: nativeSession }) }
     const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
+    expect(set.connects_to.preservation_network).toEqual({ version: 1, limit: 16, provable: true, entity_count: 1 })
     const candidate = set.candidates[0]
     try {
       const frozen: any = freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100], context)

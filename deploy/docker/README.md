@@ -1,5 +1,7 @@
 # Docker deployment
 
+For the external assistant/MCP workflow, follow the [portable setup guide](../../docs/EXTERNAL_HARNESS_SETUP.md). This ordinary server wrapper starts the built-in planner.
+
 The Docker wrapper packages the same standalone-NPC runtime used by the Pterodactyl deployment. Local builds resolve `SGLUNA_SOURCE_REF` to an exact Git commit during the image build, so restarting a container never silently updates SGLuna code.
 
 ## Published prerelease image
@@ -23,7 +25,7 @@ Published release images are built from the exact GitHub release commit. The pre
 ```bash
 cp .env.example .env
 # Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
-# For current SGLuna, set SGLUNA_SOURCE_REF=experiment/jev-agent-architecture (or an exact SHA).
+# Main is the default; pin SGLUNA_SOURCE_REF to an exact main SHA for reproduction.
 docker compose up -d --build
 ```
 
@@ -85,7 +87,7 @@ SGLUNA_SOURCE_REF=main
 
 When the source install layer runs, the Docker build resolves that ref to an exact SHA and bakes that exact SGLuna runtime into the image. Restarting the container does not update code. A rebuild can reuse a cached source layer; use an exact SHA or change `SGLUNA_SOURCE_NONCE` as described below to pick up branch updates.
 
-To test ongoing NPC development instead, set `SGLUNA_SOURCE_REF=experiment/jev-agent-architecture` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
+For the separate internal planner/Jev experiment, set `SGLUNA_SOURCE_REF=experiment/jev-agent-architecture` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
 
 The build is layered so a source change doesn't download Factorio again. The system packages and the official Factorio archive (verified against Factorio's published checksums) are cached. Docker also caches the Node archive and package manager stores across source revisions. The source install layer reruns whenever its build arguments change. With an exact commit SHA, a rebuild installs exactly that commit, and a new SHA reinstalls only the source. A branch ref such as `main` is resolved only when that layer reruns, so to pick up a branch's newer commits, set a new `SGLUNA_SOURCE_NONCE` (for example `SGLUNA_SOURCE_NONCE=$(date +%s) docker compose up -d --build`) or use a SHA. The installer re-verifies the cached archive and downloads Factorio itself if the cached version differs from the one it resolves. Published prerelease images are already pinned and do not need this rebuild behavior.
 
@@ -115,7 +117,7 @@ Changing `FACTORIO_VERSION` requires rebuilding the image. A published release i
 - The current tested/published container platform is `linux/amd64`.
 - RCON remains internal to the container and is not exposed on the host.
 - The legacy top-level `docker/` directory is not used by this deployment.
-- `main` is the release baseline; `experiment/jev-agent-architecture` is the development/integration branch.
+- `main` includes the external harness. The internal planner/Jev experiment remains separate on `experiment/jev-agent-architecture`.
 
 
 ### Legacy deployment aliases

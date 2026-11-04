@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { entity_geometry_for_actor, mining_details_for_actor, recipe_details_for_actor } from './knowledge'
+import { entity_geometry_for_actor, mining_details_for_actor, preservation_geometry_for_actor, recipe_details_for_actor } from './knowledge'
 
 function luaPairs(value: Record<string, unknown>) {
   return Object.entries(value)
@@ -665,6 +665,13 @@ describe('entity geometry knowledge', () => {
       fluid_box_count: 2,
       non_fluidbox_storage_count: 0,
     })
+    // A synthetic fluid-capable drill reuses the same complete geometry proof.
+    // The identical unlisted machine remains unsupported by preservation.
+    expect(preservation_geometry_for_actor(actor, 77)).toBeUndefined()
+    const electricDrill = { ...chemicalPlant, name: 'electric-mining-drill', type: 'mining-drill', drop_position: { x: 20, y: 19 } }
+    ;(globalThis as any).game.get_entity_by_unit_number = () => electricDrill
+    expect(preservation_geometry_for_actor(actor, 77)).toMatchObject({ found: true, entity: { name: 'electric-mining-drill' }, fluid_box_count: 2 })
+    ;(globalThis as any).game.get_entity_by_unit_number = () => chemicalPlant
     expect(result.fluid_storages).toHaveLength(2)
     expect(result.fluid_storages[0]).toMatchObject({
       index: 1,

@@ -6,6 +6,9 @@ humans. This is a navigation summary; the linked design documents own the detail
 Use the [documentation index](docs/README.md) to choose a guide and
 [CONTRIBUTING.md](CONTRIBUTING.md) for a first contribution.
 
+The primary setup path on `main` is the [external harness](docs/EXTERNAL_HARNESS_SETUP.md),
+where the user's assistant owns planning and the game owns native execution.
+The built-in planner and Jev experiment are a separate workflow.
 Jev is optional on `experiment/jev-agent-architecture`. With no decision-provider
 key configured, the runtime uses non-Jev decision paths; a main LLM provider is
 still required. In Docker, leave `JEV_TYPESAFE_API_KEY` blank. These configuration

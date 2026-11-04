@@ -4,11 +4,31 @@
 standalone character with real inventory, crafting and mining, and can operate
 on a headless server with nobody connected.
 
-> [!NOTE]
-> **Use this branch for current development. Jev is optional:**
-> `experiment/jev-agent-architecture` also runs without a Jev/TypeSafe key.
-> For Docker, leave `JEV_TYPESAFE_API_KEY` blank to disable Jev. Your main LLM
-> provider is still required; the runtime uses its non-Jev decision paths.
+---
+
+## Connect your AI assistant to Factorio
+
+The `main` branch lets a local AI harness control your
+standalone Factorio NPC through MCP. Your assistant
+plans the work and directs native game actions through a local connection.
+
+This mode is experimental and separate from the built-in autonomous planner.
+For an assistant with local command access and automatic setup enabled, use:
+
+```text
+Set up https://github.com/TTLouis/factorio-npc/tree/main
+for this harness. Follow the repository setup instructions and stop when ready
+for my goal.
+```
+
+The [portable setup instructions](docs/EXTERNAL_HARNESS_SETUP.md) let the
+assistant prepare a private game, connect your harness and verify it is ready.
+They cover different local harnesses and explain what remote-only clients need.
+Setup requires local runtime permissions and authorized Factorio access; it does
+not start gameplay. For manual setup and the tool contract, see the
+[runtime guide](docs/EXTERNAL_HARNESS.md). The assistant can also consult the
+[knowledge and gameplay method library](docs/EXTERNAL_HARNESS.md#read-only-method-library)
+on demand before planning your goal.
 
 The runtime gives models structured game observations and bounded actions.
 Deterministic code handles game facts, validation and recovery; Factorio remains
@@ -20,14 +40,32 @@ Repeatable autonomous science production remains unproven. Read the
 [current status and exact-commit evidence](docs/NPC_AGENT_HARNESS_STATUS.md) before
 choosing a checkpoint; newer development is not automatically a stable release.
 
+---
+
+## Latest demonstrated progress
+
+**Semi-automated red science — October 31, 2026:** **12 new packs in two
+minutes** at normal game speed, collected in a chest rather than fed to a lab.
+The agent manually supplied fuel to individual burner machines and the boiler;
+continued fuel servicing was not automated.
+
+See the [latest proofs](docs/proofs/README.md) for in-game screenshots, measured
+results and limitations. This single-run milestone is not a full-automation
+pass; the formal trial failed a furnace observation check.
+
+---
+
 ## Start here
 
 | Your goal | Next step |
 | --- | --- |
+| Connect an external AI harness | [Portable setup](docs/EXTERNAL_HARNESS_SETUP.md), [runtime/tool guide](docs/EXTERNAL_HARNESS.md) |
 | Run SGLuna on your own server | [Docker setup](deploy/docker/README.md) or [Pterodactyl setup](deploy/pterodactyl/README.md) |
 | Help with a bug, test or explanation | [Contributing](CONTRIBUTING.md) |
 | Understand the design | [Project contract](SPEC.md) and [documentation index](docs/README.md) |
 | Work with a coding agent | [AGENTS.md](AGENTS.md) |
+
+---
 
 ## What is in the project?
 
@@ -46,9 +84,15 @@ for acceptance criteria and the status page for current limits.
 Single-NPC reliability and grounded production are the current focus. Wider
 swarm coordination, vehicles/trains/platforms and optional vision are later work.
 
-## Run a server
+---
 
-You need Docker or a Pterodactyl host, a compatible Factorio setup, and credentials
+## Optional built-in planner server
+
+The external-harness setup above starts only the game and MCP connection. The
+ordinary Docker/Pterodactyl paths below start the built-in planner instead. For
+the separate Jev experiment, explicitly select `experiment/jev-agent-architecture`.
+
+For the built-in planner, you need Docker or a Pterodactyl host, a compatible Factorio setup, and credentials
 for your chosen model provider. Provider-backed operation may incur API charges.
 Offline contribution/tests do not require production credentials.
 
@@ -58,7 +102,7 @@ startup, after configuration, is:
 ```sh
 cp .env.example .env
 # Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
-# For this branch, set SGLUNA_SOURCE_REF=experiment/jev-agent-architecture (or an exact SHA).
+# Main is the default source; pin SGLUNA_SOURCE_REF to an exact main SHA for reproduction.
 docker compose up -d --build
 ```
 
@@ -71,7 +115,7 @@ For Pterodactyl, choose a channel and follow its
 
 | Egg | Default source | Purpose |
 | --- | --- | --- |
-| [Main](deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Stable baseline |
+| [Main](deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Main built-in planner package |
 | [NPC E2E / Jev Experiment](deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json) | `experiment/jev-agent-architecture` | Experimental development |
 
 Restart keeps the installed code. Pterodactyl reinstall resolves the selected
@@ -83,10 +127,12 @@ user mods and non-secret configuration across completed releases.
 SGLuna uses `SGLUNA_*` settings, `sgluna-config.json` and `!luna` chat input.
 Legacy AIRI settings/input aliases are documented in the deployment guide.
 
+---
+
 ## Contribute
 
-Development integrates into **`experiment/jev-agent-architecture`**; `main` is the
-stable baseline. See [CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
+External-harness development integrates into **`main`**. The internal
+planner/Jev experiment remains separate on `experiment/jev-agent-architecture`. See [CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
 bug reports and pull requests, and [TESTING.md](docs/TESTING.md) for commands.
 The shared Windows checkout requires Docker tests because its dependency
 folders are WSL symlinks; do not run a Windows host package install there.
@@ -97,6 +143,8 @@ defines scope, evidence and review. [Authorized live trials](docs/LIVE_E2E.md)
 are separate from ordinary tests. The opt-in
 [desktop operator adapter](tools/desktop-rcon-operator.mjs) is an operator/test
 surface, not autonomous provider operation.
+
+---
 
 ## Origin, license and credits
 

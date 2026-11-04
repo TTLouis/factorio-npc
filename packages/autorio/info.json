@@ -5,5 +5,5 @@
   "author": "TTLouis; original autorio by LemonNekoGH",
   "factorio_version": "2.0",
   "dependencies": ["base >= 2.0"],
-  "description": "Factorio-side runtime for standalone NPC actors, deterministic observations, planning helpers, and validated operations. The internal mod id remains autorio for compatibility."
+  "description": "Factorio mod runtime for standalone autonomous NPC actors, structured observations, validated operations, and deterministic planning helpers."
 }

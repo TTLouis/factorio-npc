@@ -1,0 +1,88 @@
+name: Publish external-harness prerelease
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/external-harness-release.yml
+      - docs/releases/external-harness-v0.1.0-pre.1.md
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: external-harness-prerelease
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: external-harness-v0.1.0-pre.1
+  SOURCE_SHA: c4108ab1a485274db9b950bd9041bc1cc8da860e
+  RELEASE_NOTES: docs/releases/external-harness-v0.1.0-pre.1.md
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Validate the pinned external source and its checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_TAG" =~ ^external-harness-v[0-9]+\.[0-9]+\.[0-9]+-pre\.[0-9]+$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA"
+          for path in docs/EXTERNAL_HARNESS_SETUP.md docs/proofs/README.md docs/proofs/2026-10-31-red-science.md; do
+            git cat-file -e "$SOURCE_SHA:$path"
+          done
+          grep -Fq "$SOURCE_SHA" "$RELEASE_NOTES"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SOURCE_SHA&per_page=100" > "$RUNNER_TEMP/source-checks.json"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'
+          const { workflow_runs: runs } = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/source-checks.json`, 'utf8'))
+          for (const name of ['CI', 'Security', 'Pterodactyl release gates']) {
+            const run = runs.filter(run => run.name === name && run.event === 'push').sort((a, b) => b.id - a.id)[0]
+            if (!run || run.status !== 'completed') throw new Error(`${name}: completed source check required`)
+            if (run.conclusion !== 'success') {
+              throw new Error(`${name}: ${run.conclusion}; publication blocked`)
+            }
+            console.log(`${name}: ${run.conclusion}`)
+          }
+          NODE
+
+      - name: Publish only the external-harness source prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Refuse to overwrite a release or reuse a pre-existing tag.
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'External release already exists; refusing to overwrite it.' >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'External tag already exists; refusing to reuse it.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" \
+            --title 'SGLuna external harness v0.1.0-pre.1' \
+            --notes-file "$RELEASE_NOTES" \
+            --prerelease --latest=false
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)
+          [[ "$actual" == "$SOURCE_SHA" ]]
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json url,isDraft,isPrerelease,targetCommitish

@@ -4,6 +4,39 @@ Instructions for coding agents contributing to SGLuna, the standalone Factorio
 NPC. Read this file first, then only the references relevant to the task.
 Explicit user instructions remain authoritative.
 
+## External-harness setup requests
+
+When asked to set up the external harness on main, including when given only its
+repository/branch link in auto mode, follow
+[docs/EXTERNAL_HARNESS_SETUP.md](docs/EXTERNAL_HARNESS_SETUP.md). Inspect local
+capabilities, make routine path/port/layout choices, build the exact requested
+source in isolation, bind once, register stdio MCP through the host's supported
+mechanism (or use the bundled process adapter) and verify the actual connection
+with `setup-check.mjs --fresh` and host-level read-only calls. Stop ready for the user's goal;
+setup does not authorize gameplay. Preserve private credentials and paired
+save/ledger state. Report only unavoidable prerequisite/permission blockers.
+This installation path stays on the requested source revision and does not start
+the internal planner/Jev or use the ordinary server installers below.
+
+For a gameplay goal, search `factorio_library` separately for knowledge references
+and skill methods, then read the relevant full entries. This local library is
+advisory content, not an unlock, native proof or operation authority; obtain
+recipes, sizing, availability and geometry from current game tools.
+
+For this owner's full-automation goals, read
+`knowledge-owner-electrical-first-automation`: automate centralized electricity
+and its service first, use electric mining and electric transfers where live
+availability permits, then separated smelting arrays with automatic feed, output
+and service. No agent fuel runs to individual machines; manual priming is a
+declared finite bootstrap only. Central power fuel and smelting fuel, if required
+by live machines, need automatic supply. Check the admitted placement catalog
+before a future goal; never silently substitute a burner line if a required
+electric miner is unsupported. Electric miners reuse `getPlacementCandidates`
+and `place_candidate` with native fluid-port preservation, not the nonfluid
+coordinate shortcut. A short run on prefilled fuel is not
+full automation. See the [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
+This guidance does not authorize gameplay, tool expansion or another trial.
+
 ## Start here
 
 1. Identify the requested outcome, affected subsystem and acceptance evidence.
@@ -15,9 +48,9 @@ Explicit user instructions remain authoritative.
    Register ownership before creating a checkout; use its naming, source and
    integration rules. Those local files are not prerequisites for an independent
    contributor's clone. See [CONTRIBUTING.md](CONTRIBUTING.md).
-4. Start development from the current Jev candidate. The sole development target
-   is `experiment/jev-agent-architecture`; `main` is the stable baseline.
-   `feat/npc-transition-work` is historical. Do not switch another session's branch.
+4. External-harness development and setup target `main`. The internal planner/Jev
+   experiment remains on `experiment/jev-agent-architecture`; keep that work
+   separate unless explicitly requested. Do not switch another session's branch.
 5. Keep one bounded task per branch. For substantial work, record owner, source
    SHA, dependencies, acceptance criteria and a resumable checkpoint using the
    [development workflow](docs/DEVELOPMENT_WORKFLOW.md).
@@ -67,9 +100,14 @@ together. Preserve intentional provider differences; see
   On this shared Windows workspace, dependency directories are WSL symlinks:
   never run host `pnpm`, `vitest`, `eslint`, `tstl` or dependency/hook installation.
   Use the existing Docker runner and its reviewed mounts.
-- Run the offline gate `bash scripts/test-local.sh all` for implementation work
-  and before integration. Documentation changes also need link, command and
-  diff review. Keep full logs and real exit codes; do not hide failures with pipes.
+- Build first and use the smallest meaningful focused checks for changed
+  behavior, regressions and material failure cases. Reuse valid results for
+  unchanged code. Do not repeat or broaden checks without a specific failure,
+  unresolved material risk, explicit owner request or required release/CI gate.
+  The full offline gate is not the default for each implementation iteration.
+  Preserve required native, recovery and release gates when their claims apply.
+  Documentation changes need focused link, command and diff review. Keep full
+  logs and real exit codes; do not hide failures with pipes.
 - Unit/type checks protect contracts. Engine claims require deterministic real
   Factorio coverage under `tests/factorio/`, with the exact version and layout.
   Never weaken an assertion to obtain a pass or give models unmeasured transport,
@@ -87,6 +125,13 @@ together. Preserve intentional provider differences; see
 
 ## Configuration, secrets and live activity
 
+- For authorized external-harness setup on a user's machine, follow the
+  [portable setup workflow](docs/EXTERNAL_HARNESS_SETUP.md) and
+  [runtime guide](docs/EXTERNAL_HARNESS.md): build the exact guarded
+  source; choose native Windows or Windows-host-to-Docker with loopback-only
+  RCON; keep the Windows ledger on local fixed NTFS with the PowerShell helper
+  permitted. Keep runtime credentials and state private, and verify native
+  execution receipts rather than treating admission as completion.
 - Deployment environment/Egg variables override non-secret config mirrors.
   `sgluna-config.json` is canonical; `airi-config.json` is a compatibility input.
 - Never read, print or copy `.env`, credentials or private provider endpoints
@@ -115,7 +160,8 @@ resolve actionable findings before integration. Delegate only authorized,
 independent work with clear ownership and completion criteria.
 
 The integrator must own the integration checkout, verify the reported tests,
-merge with `--no-ff` and run the merged offline gate. Do not push automatically:
+merge with `--no-ff` and check the changed integration boundary, reusing valid
+results for unchanged code. Do not push automatically:
 publication and promotion retain their explicit authorization and release gates.
 Never force-push or rewrite shared history without an explicit request.
 

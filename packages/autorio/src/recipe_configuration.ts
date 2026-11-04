@@ -79,6 +79,19 @@ export function new_recipe_configuration_runtime(manager: Manager, controller: B
       return
     }
 
+    // Even a first assignment must not displace native stock or active work.
+    // Recheck at execution, after any reach recovery and queued-world changes.
+    let occupied = target.is_crafting() || target.get_fluid_count() > 0
+    for (let index = 1; index <= target.get_max_inventory_index(); index++) {
+      const inventory = target.get_inventory(index)
+      if (inventory && !inventory.is_empty()) occupied = true
+    }
+    if (occupied) {
+      controller.fail(actor, task, 'set_recipe_failed')
+      log(`[AUTORIO] Refused first recipe assignment with native contents or active crafting on machine unit ${task.target_unit_number}`)
+      return
+    }
+
     target.set_recipe(task.recipe_name)
     const [verified_recipe] = target.get_recipe()
     if (verified_recipe?.name !== task.recipe_name) {

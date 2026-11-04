@@ -549,6 +549,9 @@ export function create_tools_remote_interface() {
         recipe_selection: entity.type === 'assembling-machine' ? 'configurable' : entity.type === 'furnace' ? 'automatic' : undefined,
         crafting_progress: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_progress : undefined,
         crafting_speed: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_speed : undefined,
+        // Native cumulative crafts, scoped to this exact machine. Compare samples
+        // with the same identity/recipe; this counter alone is not goal proof.
+        products_finished: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.products_finished : undefined,
         status: entity.status,
         status_name: status_name(entity.status),
         working: entity.status === defines.entity_status.working,
