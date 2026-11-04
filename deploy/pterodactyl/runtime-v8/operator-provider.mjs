@@ -54,7 +54,9 @@ export function createOperatorCompletion({ base, key, model, fetchImpl = fetch, 
     const usage = json.usage ?? {}
     return {
       message: { content: typeof choice.message.content === 'string' ? choice.message.content : '', tool_calls: Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : [] },
-      usage: { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, cached_tokens: usage.prompt_tokens_details?.cached_tokens },
+      usage: { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, cached_tokens: usage.prompt_tokens_details?.cached_tokens,
+        reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens, total_tokens: usage.total_tokens },
+      provider: { id: json.id, model: json.model, created: json.created, finish_reason: choice.finish_reason },
     }
   }
 }

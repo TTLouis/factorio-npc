@@ -18,6 +18,8 @@ function fakeRuntime(refuse = () => false) {
     if (refuse(input)) throw Object.assign(new Error('x'), { code: 'preflight_rejected', effect: 'not_happened', publicMessage: 'refused' })
     return { operation_id: `op-${input.request_id}`, status: 'admitted' }
   }
+  runtime.get = async input => ({ operation_id: input.operation_id, state: 'completed', terminal: true, effect: 'happened',
+    operation: { name: input.operation_id.startsWith('op-w') ? 'wait' : 'walk_to_position', args: {} } })
   return runtime
 }
 
@@ -132,4 +134,34 @@ test('chat-completions client sends tools and parses tool calls without leaking 
   const failing = createOperatorCompletion({ base: 'http://127.0.0.1:8317/v1', key: 'test-key', model: 'm', fetchImpl: async () => ({ ok: false, status: 429 }) })
   await assert.rejects(failing({ messages: [], tools: [] }), error => error.code === 'provider_rate_limited' && !String(error.message).includes('test-key'))
   assert.throws(() => createOperatorCompletion({ base: 'http://remote.example/v1', key: 'k', model: 'm' }))
+})
+
+test('completed native receipts count as progress while goal conditions stay unchanged', async () => {
+  const replies = []
+  for (let index = 0; index < 8; index++) {
+    replies.push(submit(`r${index}`))
+    replies.push({ message: { tool_calls: [call(`g${index}`, 'factorio_receipt', { operation_id: `op-r${index}`, wait_ms: 1000 })] } })
+  }
+  const t = setup({ replies, evaluations: [{ satisfied: false, current: 0 }], options: { progressCheckEverySubmits: 2, noProgressChecks: 2 } })
+  const result = await t.run()
+  // Receipts report completed work each time, so the stop is the exhausted script, not no_progress.
+  assert.equal(result.outcome, 'paused_provider_error')
+  assert.equal(t.state.pursuit.progressed_operations.length, 8)
+  assert.equal(t.state.pursuit.stale_checks, 0)
+})
+
+test('the same completed operation read twice counts once, and waits never count', async () => {
+  const replies = [submit('w1')]
+  for (let index = 0; index < 6; index++) replies.push({ message: { tool_calls: [call(`g${index}`, 'factorio_receipt', { operation_id: 'op-r0' })] } }, submit(`x${index}`))
+  const t = setup({ replies, evaluations: [{ satisfied: false, current: 0 }], options: { progressCheckEverySubmits: 2, noProgressChecks: 2 } })
+  const result = await t.run()
+  assert.equal(result.outcome, 'paused_no_progress')
+  assert.deepEqual(t.state.pursuit.progressed_operations, ['op-r0'])
+})
+
+test('token budget pauses the goal across conversations', async () => {
+  const replies = Array.from({ length: 5 }, (_, index) => ({ message: { tool_calls: [call(`c${index}`, 'factorio_context', {})] }, usage: { prompt_tokens: 600, completion_tokens: 50 } }))
+  const t = setup({ replies, evaluations: [{ satisfied: false }], options: { loop: { maxTotalTokens: 1200 } } })
+  assert.equal((await t.run()).outcome, 'paused_token_budget_exhausted')
+  assert.equal(t.state.requests, 2)
 })

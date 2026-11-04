@@ -20,9 +20,9 @@ export const PURSUIT_DEFAULTS = Object.freeze({
 
 // First pursuit comparison (owner 2026-11-04): red science to unlock
 // automation. Research completion plus a sustained native production rate.
-// Hand-crafted packs also count in production statistics; machine-only
-// attribution needs automated_starter_base bindings, which pursuit mode does
-// not submit yet. Callers that need that bar must pass their own definition.
+// Native production_rate voids windows containing hand crafting, mining or
+// input feeding. It does not establish the stronger automated_starter_base
+// contract (power/fuel supply and replenished construction stocks).
 export const RED_SCIENCE_AUTOMATION_GOAL = Object.freeze({
   scope: 'long_horizon',
   summary: 'Make red science automatically and research automation.',
@@ -33,7 +33,7 @@ export const RED_SCIENCE_AUTOMATION_GOAL = Object.freeze({
 })
 
 export function createPursuitState() {
-  return { ...createOperatorState(), pursuit: { schema: 1, evaluations: 0, stale_checks: 0, refused_streak: 0, yields: 0, submits_at_check: 0, progress: null, outcome: null } }
+  return { ...createOperatorState(), pursuit: { schema: 1, evaluations: 0, stale_checks: 0, refused_streak: 0, yields: 0, submits_at_check: 0, progress: null, progressed_operations: [], progressed_at_check: 0, outcome: null } }
 }
 
 function progressSignature(evaluation) {
@@ -66,14 +66,22 @@ export async function runPursuitGoal({ goal = RED_SCIENCE_AUTOMATION_GOAL, comma
   const evaluateNow = async samples => {
     const evaluation = await evaluate(definition, command, samples === 1 ? { samples: 1 } : {})
     p.evaluations++
-    onEvent({ type: 'goal_evaluated', satisfied: evaluation.satisfied, unmet: unmetSummary(evaluation) })
+    onEvent({ type: 'goal_evaluated', satisfied: evaluation.satisfied, unmet: unmetSummary(evaluation), evaluation })
     return evaluation
   }
 
   const afterResponse = async ({ outcomes }) => {
     for (const { tool, result } of outcomes) {
-      if (tool !== 'factorio_submit') continue
-      p.refused_streak = result.isError ? p.refused_streak + 1 : 0
+      if (tool === 'factorio_submit') p.refused_streak = result.isError ? p.refused_streak + 1 : 0
+      if (!['factorio_submit', 'factorio_receipt', 'factorio_resume'].includes(tool) || result.isError) continue
+      // Construction changes no final goal condition, so completed native work
+      // also counts as progress: a terminal, completed, effect-happened receipt,
+      // each operation once, whichever tool reported it. Waits, admissions and
+      // model claims are not progress. Budgets still bound busy-but-useless work.
+      const receipt = result.structuredContent
+      if (receipt?.terminal === true && receipt.state === 'completed' && receipt.effect === 'happened'
+        && receipt.operation?.name !== 'wait' && typeof receipt.operation_id === 'string'
+        && !p.progressed_operations.includes(receipt.operation_id)) p.progressed_operations.push(receipt.operation_id)
     }
     if (p.refused_streak >= limits.maxConsecutiveRefusedSubmits) return 'refused_submit_streak'
     if (state.submits - p.submits_at_check < limits.progressCheckEverySubmits) return undefined
@@ -81,8 +89,10 @@ export async function runPursuitGoal({ goal = RED_SCIENCE_AUTOMATION_GOAL, comma
     const evaluation = await evaluateNow(1)
     if (evaluation.satisfied) return 'acceptance_candidate'
     const signature = progressSignature(evaluation)
-    p.stale_checks = signature === p.progress ? p.stale_checks + 1 : 0
+    const progressed = p.progressed_operations.length
+    p.stale_checks = signature === p.progress && progressed === p.progressed_at_check ? p.stale_checks + 1 : 0
     p.progress = signature
+    p.progressed_at_check = progressed
     return p.stale_checks >= limits.noProgressChecks ? 'no_progress' : undefined
   }
 
@@ -90,7 +100,7 @@ export async function runPursuitGoal({ goal = RED_SCIENCE_AUTOMATION_GOAL, comma
   for (;;) {
     const run = await runOperatorLoop({ complete, tools, notebook, brief, state, options: limits.loop, signal, onEvent, saveState, afterResponse, seedNote: note })
     if (run.stop === 'aborted') { await saveState(state); return { outcome: 'aborted', state } }
-    if (['request_budget_exhausted', 'tool_call_budget_exhausted', 'provider_error', 'refused_submit_streak', 'no_progress'].includes(run.stop)) {
+    if (['request_budget_exhausted', 'tool_call_budget_exhausted', 'token_budget_exhausted', 'provider_error', 'refused_submit_streak', 'no_progress'].includes(run.stop)) {
       return finish(run.stop === 'provider_error' ? 'paused_provider_error' : `paused_${run.stop}`)
     }
     // operator_yield or acceptance_candidate: judge natively with full sampling.

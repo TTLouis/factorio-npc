@@ -7,6 +7,7 @@ import { toolResult } from './operator-tool-surface.mjs'
 export const OPERATOR_LOOP_DEFAULTS = Object.freeze({
   maxRequests: 400,
   maxToolCalls: 2000,
+  maxTotalTokens: 50000000,
   // Rotate before the provider's history cap (50 messages) and before the
   // prompt grows past the model's useful context.
   rotateAtMessages: 44,
@@ -95,6 +96,7 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
     if (signal?.aborted) return { stop: 'aborted', state }
     if (state.requests >= limits.maxRequests) { emit('budget_exhausted', { budget: 'requests' }); return { stop: 'request_budget_exhausted', state } }
     if (state.tool_calls >= limits.maxToolCalls) { emit('budget_exhausted', { budget: 'tool_calls' }); return { stop: 'tool_call_budget_exhausted', state } }
+    if (state.prompt_tokens + state.output_tokens >= limits.maxTotalTokens) { emit('budget_exhausted', { budget: 'tokens' }); return { stop: 'token_budget_exhausted', state } }
     if (messages.length >= limits.rotateAtMessages || lastPromptTokens >= limits.rotateAtPromptTokens) {
       state.rotations++
       await saveState(state)
@@ -105,6 +107,7 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
 
     state.requests++
     await saveState(state)
+    emit('provider_request', { messages, tools: definitions })
     let reply
     try { reply = await complete({ messages, tools: definitions, signal }) }
     catch (cause) {
@@ -117,6 +120,7 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
     state.prompt_tokens += lastPromptTokens
     state.output_tokens += Number.isSafeInteger(usage.completion_tokens) ? usage.completion_tokens : 0
     const message = reply?.message ?? {}
+    emit('provider_response', { message, usage, provider: reply?.provider })
     const calls = Array.isArray(message.tool_calls) ? message.tool_calls : []
     messages.push({ role: 'assistant', content: message.content ?? '', ...(calls.length ? { tool_calls: calls } : {}) })
     if (calls.length === 0) {
@@ -128,9 +132,13 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
     let submitted = false
     const outcomes = []
     for (const [index, call] of calls.entries()) {
+      if (signal?.aborted) return { stop: 'aborted', state }
       const name = call?.function?.name
       let result
-      if (index >= limits.maxToolCallsPerResponse) {
+      if (state.tool_calls >= limits.maxToolCalls) {
+        result = refusal('tool_call_budget_exhausted', 'The durable tool call allowance is exhausted.')
+      }
+      else if (index >= limits.maxToolCallsPerResponse) {
         result = refusal('too_many_tool_calls', `At most ${limits.maxToolCallsPerResponse} tool calls per response; this one was not run.`)
       }
       else {
@@ -153,7 +161,8 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
         }
         state.tool_calls++
       }
-      emit('tool_result', { tool: name, is_error: result.isError, code: result.isError ? result.structuredContent?.code : undefined })
+      emit('tool_result', { tool: name, tool_call_id: call?.id, arguments: call?.function?.arguments,
+        result, is_error: result.isError, code: result.isError ? result.structuredContent?.code : undefined })
       outcomes.push({ tool: name, result })
       messages.push({ role: 'tool', tool_call_id: call?.id, content: result.content[0].text })
     }
