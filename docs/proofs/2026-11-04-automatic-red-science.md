@@ -108,8 +108,9 @@ metrics and the save remain owner-local under
 offline audit are in its `report-20261104/` folder. Neither screenshots nor this
 summary replace those records.
 
-**[Open the preserved map in Factorio editor](<D:/SideProjects/airi-factorio-npc/test-results/map-editor-external-redscience-3/Open in Factorio editor.lnk>)**
-opens an isolated inspection copy with the crash-site caveat described above.
+A [privacy-reviewed save and its matching NPC mod](README.md#download-saves)
+are available for inspection, with the crash-site caveat described above. The
+public ZIP has normalized archive metadata; its game-state payload is unchanged.
 
 ---
 

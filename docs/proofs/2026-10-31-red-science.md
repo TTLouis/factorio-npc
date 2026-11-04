@@ -45,7 +45,9 @@ a failed recipe read, so the result has not been retrospectively marked passed.
 Strict stop, save integrity, pristine exact-version load and cleanup passed.
 Original plans, native/tool traces, metrics and the post-stop save remain
 owner-local; this page is a summary, not a replacement for those records.
-The preserved save's SHA-256 is
+A [privacy-reviewed save and its matching NPC mod](README.md#download-saves)
+are available for inspection. The public ZIP has normalized archive metadata;
+its game-state payload is unchanged. The original sealed save's SHA-256 is
 `6d577ec9e163e6f6d45c0fc6109ca2f81223f95304342cecefe0ab98f1472438`.
 
 ---
