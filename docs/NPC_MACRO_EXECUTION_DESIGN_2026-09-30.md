@@ -6,7 +6,7 @@ Owner Q&A: 2026-09-30. Week 1 is September 28â€“October 4; Week 2 is October 5â€
 This is the authority for the September 30 macro decisions. It refines the lifecycle
 in [NPC_PLANNING_ROADMAP.md](NPC_PLANNING_ROADMAP.md) and the sequential context split
 in [NPC_DELEGATION_DESIGN_2026-09-29.md](NPC_DELEGATION_DESIGN_2026-09-29.md).
-The [weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md) preserves the Q&A and
+The [weekly plan](validation/NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md) preserves the Q&A and
 Week 2 UX follow-up. These requirements are not evidence that the runtime implements
 them, and do not authorize a provider run or deployment.
 

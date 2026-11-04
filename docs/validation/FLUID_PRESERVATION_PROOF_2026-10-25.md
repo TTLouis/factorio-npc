@@ -193,7 +193,7 @@ are unchanged, so no repeated compile or primary engine is claimed or needed.
 ## Validation addendum — 2026-10-25, runtime `152ac475` / native-07
 
 The historical pending/failure paragraphs above are preserved. Current bounded
-validation is recorded in [AW harness repair validation](validation/AW_HARNESS_REPAIR_2026-10-25.md).
+validation is recorded in [AW harness repair validation](AW_HARNESS_REPAIR_2026-10-25.md).
 Runtime `152ac475d418ac0198344bb33eecd79488bde674` contains corrected F1/F2
 composition; native-07 is compiled from `f2d1cb7608dfa98ab33822107b1ab87dce380e9e`
 with exact compiler/native-file equivalence verified against that runtime.

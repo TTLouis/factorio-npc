@@ -90,7 +90,7 @@ regression checks35distinct game/RCON mappings; its frozen negative control
 fails at the original collision. No remaining merge blockers. Local merge
 `6beb6dc72de590ff35c97d4ffc6012f9e1d6df87` passed fresh3343runtime/1378mod,
 type/Lua/generated-Lua and payload9/check gates. Details and immutable identities:
-[validation closeout](validation/RUN_AS_ENTITY_REFRESH_FIX_2026-10-23.md).
+[validation closeout](RUN_AS_ENTITY_REFRESH_FIX_2026-10-23.md).
 
 - [x] Exact baseline control; shared prevention and composed residual correction.
 - [x] Partial output, stale/busy/uncertain fences, durable restart/exhaustion/checker.

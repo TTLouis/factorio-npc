@@ -2,7 +2,7 @@
 
 The combined repair passes deterministic host and Factorio 2.0.77 proofs on runtime **`152ac475d418ac0198344bb33eecd79488bde674`**, with native-07 compiled from **`f2d1cb7608dfa98ab33822107b1ab87dce380e9e`**. The tested native inputs are unchanged in that runtime. The real loop preserved the pump, admitted one boiler, recovered an injected missing certificate from disk, and executed the exact unchanged fuel step. Actual Session tests also recover an injected completed-plan orphan through counted same-goal authoring. These are bounded harness proofs, **not autonomous red-science success**. Final independent source/native review accepts this runtime (tree `c1d50cedea47b4256f311ab31cec8115faa8021b`); documentation/package review, separate payload repin and integration validation remain pending.
 
-See the owning [fluid proof history](../FLUID_PRESERVATION_PROOF_2026-10-25.md), [F2 checkpoint history](../../handoffs/red-science-loop-2026-10-25/next-slice-liveness-checkpoint.md) and [repair requirements](../E2E_REPAIR_REQUIREMENTS.md). Earlier pending/failure entries in those histories remain historical evidence.
+See the owning [fluid proof history](FLUID_PRESERVATION_PROOF_2026-10-25.md), [F2 checkpoint history](../../handoffs/red-science-loop-2026-10-25/next-slice-liveness-checkpoint.md) and [repair requirements](../E2E_REPAIR_REQUIREMENTS.md). Earlier pending/failure entries in those histories remain historical evidence.
 
 ## Original failure and authority
 
