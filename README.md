@@ -95,7 +95,6 @@ come from the original native measurements, not the screenshot.*
 > external-operator result does not validate built-in plan or pursuit mode.
 
 **[Read the proof and screenshots](docs/proofs/2026-11-04-automatic-red-science.md)
-· [View the metrics](docs/proofs/2026-11-04-automatic-red-science.metrics.json)
 · [Browse all proofs](docs/proofs/README.md)**
 
 ---

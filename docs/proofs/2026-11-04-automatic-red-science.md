@@ -102,14 +102,54 @@ a pristine Factorio 2.0.77 load and removal of the trial's Docker resources.
 It does not establish the internal runner's strict stop protocol or 60-minute
 construction limit; the external operator-call span was about 2 h 8 min.
 
-[Detailed metrics and qualifications](2026-11-04-automatic-red-science.metrics.json)
-include tool counts, errors, usage and unavailable telemetry. Original findings,
-Claude's closeout, plans, traces and the save remain owner-local under
+Original findings, Claude's closeout, plans, traces, detailed machine-readable
+metrics and the save remain owner-local under
 `test-results/external-sonnet-redscience-3-20261103/`. The full error index and
 offline audit are in its `report-20261104/` folder. Neither screenshots nor this
 summary replace those records.
 
 **[Open the preserved map in Factorio editor](<D:/SideProjects/airi-factorio-npc/test-results/map-editor-external-redscience-3/Open in Factorio editor.lnk>)**
 opens an isolated inspection copy with the crash-site caveat described above.
+
+---
+
+## Run statistics
+
+The audit covers all **808 tool calls** in the retained operator log. A successful
+tool reply is separate from a completed game operation; receipt calls observe
+operations already submitted.
+
+| Tool | Calls | Successful replies | Errors or refusals |
+| --- | ---: | ---: | ---: |
+| Capabilities | 7 | 7 | 0 |
+| World context | 7 | 7 | 0 |
+| Method library | 4 | 3 | 1 |
+| Game observations | 200 | 194 | 6 |
+| Operation submissions | 330 | 325 | 5 |
+| Operation receipts | 260 | 250 | 10 |
+| **Total** | **808** | **786** | **22** |
+
+The submissions produced **325 completed operations and 5 preflight refusals**,
+with no admitted operation left unresolved in the audit. The 22 non-success
+replies comprised 14 invalid or missing argument errors, 5 preflight refusals,
+2 process exits and 1 durable-journal write failure. Three receipt-retrieval
+recoveries completed after those process/journal failures by reading the same
+admitted operation; they did not replay mutations. No operator resume or cancel
+was recorded. Internal planner reviews and harness auto-resumes do not apply to
+this external workflow.
+
+**Time:** the operator-call span was **2 h 8 min 5.502 s**, followed by the
+**10 min 19.017 s** hands-off production measurement. Tool-call intervals cover
+about **1 h 24 min 23 s** of that operator span, counting overlapping intervals
+once. These durations do not provide a separate measure of model thinking time.
+
+**Model usage:** the historical closeout records **215 Sonnet 5.5 operator
+requests**, **26,147,280 cache-read input tokens**, **542,205 cache-creation input
+tokens**, **432 other input tokens** and **135,129 output tokens**. These totals
+exclude the coordinating model's unavailable usage. Request failure/retry/fallback
+counts, reasoning-token counts, model-request latency, context-restage counts and
+separate build/stop/cleanup durations were unavailable. Usage came through a
+Claude Code subscription; no actual billed cost or token-price estimate is
+reported because billing evidence and applicable rates were not retained.
 
 [Back to evidence list](README.md)
