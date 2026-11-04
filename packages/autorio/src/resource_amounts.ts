@@ -63,7 +63,7 @@ export function resource_amount_observation(actor: ControlledActor | undefined, 
   const surface = actor.surface
   const force = actor.force
 
-  const totals = new Map<string, ResourceTotal>()
+  const totals: Record<string, ResourceTotal> = {}
   const tiles: { name: string, position: { x: number, y: number }, amount: number, distance: number }[] = []
   const unseen: { x: number, y: number, distance: number }[] = []
   let visible_chunks = 0
@@ -99,7 +99,9 @@ export function resource_amount_observation(actor: ControlledActor | undefined, 
         if (position.x < part.left_top.x || position.x >= part.right_bottom.x
           || position.y < part.left_top.y || position.y >= part.right_bottom.y) continue
         const amount = entity.amount
-        let total = totals.get(entity.name)
+        // Prefix keys so resource names cannot collide with object prototype properties.
+        const resource_key = `resource:${entity.name}`
+        let total = totals[resource_key]
         if (!total) {
           total = {
             name: entity.name,
@@ -110,7 +112,7 @@ export function resource_amount_observation(actor: ControlledActor | undefined, 
             infinite: entity.prototype.infinite_resource === true,
             bounding_box: { left_top: { x: position.x, y: position.y }, right_bottom: { x: position.x, y: position.y } },
           }
-          totals.set(entity.name, total)
+          totals[resource_key] = total
         }
         total.tile_count++
         total.total_amount += amount
@@ -131,7 +133,7 @@ export function resource_amount_observation(actor: ControlledActor | undefined, 
   }
 
   const resources: ResourceTotal[] = []
-  for (const [, total] of totals) resources.push(total)
+  for (const total of Object.values(totals)) resources.push(total)
   resources.sort((a, b) => b.total_amount - a.total_amount || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   tiles.sort((a, b) => a.distance - b.distance || a.position.y - b.position.y || a.position.x - b.position.x)
   unseen.sort((a, b) => a.distance - b.distance)
