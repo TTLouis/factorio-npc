@@ -29,6 +29,7 @@ export const OBSERVATION_NAMES = Object.freeze([
   'getPrototypeDetails', 'discoverPrototypes', 'getNearbyEntities', 'getEntityStatus',
   'getCraftingStatus', 'getNavigationStatus', 'getTechnology', 'getResearchStatus',
   'getPlacementCandidates', 'getFluidSourceTiles', 'getEntityGeometry', 'getTransportCapacity',
+  'getResourceAmounts',
 ])
 export const observationDefinitions = toolDefinitions.filter(tool => OBSERVATION_NAMES.includes(tool.function.name))
 export function capabilities() {
@@ -45,7 +46,7 @@ export const OPERATION_NOTES = Object.freeze({
   craft_item: 'count is the number of recipe crafts, not items. A recipe with N products per craft yields count x N items (read getRecipeDetails products).',
   place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. getPlacementCandidates rows with external_footprint.eligible=false will be refused. No pickup or deconstruct operation exists, so placements are permanent.',
   place_candidate: 'A fluid candidate that joins an entity (connects_to) needs the native preservation guard to prove that entity\'s whole connected fluid network, at most 16 entities. getPlacementCandidates reports this as connects_to.preservation_network (provable, entity_count, limit; unit_number names an entity the guard cannot read, for example one not visible now) and marks such candidates external_preservation.eligible=false. They are refused before they are sent. A join to a network of 16 brings it to 17; a network of 17 or more cannot be joined.',
-  research_technology: 'A completed receipt means research was started and queued, not finished. Read getResearchStatus or getTechnology for progress and researched.',
+  research_technology: 'A completed receipt means research was started and queued, not finished. While other force research is active the request is appended behind it in the native queue (queued_behind) and the labs reach it when the earlier work finishes; queue the next technology before the current one completes so labs never idle. Read getResearchStatus or getTechnology for progress and researched.',
   walk_to_position: 'Target must be within 128 tiles of the current actor position.',
   move_items_exact: 'May walk the actor into reach first. A terminal receipt includes observed_effect with the actor inventory delta for item_name and the actor position before and after.',
   harvest_product: 'Searches up to 64 tiles and may walk the actor there. A terminal receipt includes observed_effect with the actor inventory delta for product_name and the actor position before and after.',
@@ -222,6 +223,27 @@ export class NativeBridge {
     const result = json(await this.rcon.command(command))
     check(result.ok === true, typeof result.code === 'string' && /^[a-z0-9_]{1,80}$/.test(result.code) ? result.code : 'bind_failed')
     return this.snapshot()
+  }
+
+  // Operator setup only, never an agent tool: the one-time freeplay start a
+  // joining human would trigger (crashed ship, debris and starting items),
+  // given to the bound NPC. The session must already be bound and idle. The
+  // mod records it once; a repeat reports that first result and changes nothing.
+  async spawnCrashSite() {
+    await this.snapshot()
+    const command = `${PREFIX}local g=remote.call("sgluna_deployment","status"); if not g.allowed or g.session~=${luaString(this.session)} then rcon.print(helpers.table_to_json({ok=false,code="session_not_owned"})) elseif not remote.interfaces.autorio_setup then rcon.print(helpers.table_to_json({ok=false,code="crash_site_setup_unsupported"})) else local j=remote.call("autorio_operation_admission","status"); local unresolved=false; for _,r in pairs(j.records) do if r.state=="admitting" or r.state=="admitted" or r.state=="uncertain" then unresolved=true end end; if unresolved then rcon.print(helpers.table_to_json({ok=false,code="unresolved_native_operation"})) else rcon.print(helpers.table_to_json(remote.call("autorio_setup","spawn_crash_site"))) end end`
+    const result = json(await this.rcon.command(command))
+    check(result?.ok === true, typeof result?.code === 'string' && /^[a-z0-9_]{1,80}$/.test(result.code) ? result.code : 'crash_site_setup_failed')
+    const items = Array.isArray(result.starter_items) ? result.starter_items : []
+    return {
+      already_done: result.already_done === true,
+      tick: result.tick,
+      position: result.position,
+      entity_count: result.entity_count,
+      entities: Array.isArray(result.entities) ? result.entities.map(entity => entity.name) : [],
+      starter_items: items.map(item => ({ name: item.name, requested: item.requested, inserted: item.inserted })),
+      freeplay_crash_site_disabled: result.freeplay_crash_site_disabled === true,
+    }
   }
 
   async snapshot({ requireOwned = true } = {}) {

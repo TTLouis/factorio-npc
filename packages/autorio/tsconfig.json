@@ -17,7 +17,8 @@
     "buildMode": "default",
     "luaLibImport": "require",
     "luaBundle": "control.lua",
-    "luaBundleEntry": "src/control.ts"
+    "luaBundleEntry": "src/control.ts",
+    "noResolvePaths": ["crash-site"]
   },
   "include": [
     "src/**/*.ts"

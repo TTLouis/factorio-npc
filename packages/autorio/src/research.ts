@@ -10,7 +10,7 @@ const MAX_REQUEST_RECORDS = 20
 const STALL_TICKS = 60 * 60
 const PROGRESS_EPSILON = 0.000001
 
-type ResearchCode = 'queued' | 'started' | 'already_queued' | 'already_researched'
+type ResearchCode = 'queued' | 'started' | 'queued_behind' | 'already_queued' | 'already_researched'
   | 'completed' | 'stalled' | 'interrupted'
   | 'invalid_name' | 'no_actor' | 'unknown_technology' | 'technology_disabled'
   | 'research_disabled' | 'missing_prerequisites' | 'trigger_research'
@@ -123,11 +123,16 @@ export function research_error(actor: ControlledActor | undefined, name: string)
   if (!tech.enabled) return 'technology_disabled'
   if (tech.prototype.research_trigger) return 'trigger_research'
   if (queued(force, name)) return undefined
-  for (const [, prerequisite] of pairs(tech.prerequisites)) {
-    if (!prerequisite.researched) return 'missing_prerequisites'
+  // A prerequisite already current or queued finishes first, because a new
+  // request is appended to the back of the native research queue.
+  for (const [prerequisite_name, prerequisite] of pairs(tech.prerequisites)) {
+    if (!prerequisite.researched && !queued(force, prerequisite_name)) return 'missing_prerequisites'
   }
-  if (force.current_research || (force.research_queue ?? []).length > 0) return 'force_busy'
   return undefined
+}
+
+function force_busy(force: LuaForce) {
+  return force.current_research !== undefined || (force.research_queue ?? []).length > 0
 }
 
 function push_result(result: ResearchResult) {
@@ -269,11 +274,22 @@ export function execute_research_request(actor: ControlledActor, task: PlayerPar
     })
   }
 
-  const accepted = force.add_research(tech)
+  // Existing force research is never replaced or reordered: a busy force gets
+  // this technology appended behind it, so the labs continue when it finishes.
+  const behind = force_busy(force)
+  const accepted = force.add_research(tech) && queued(force, tech.name)
   if (!accepted) {
-    return record_result(request_id, actor, task.technology_name, false, false, 'engine_rejected', {
+    return record_result(request_id, actor, task.technology_name, false, false, behind ? 'force_busy' : 'engine_rejected', {
       requested_level: task.requested_level,
       observed_level: tech.level,
+    })
+  }
+  if (queued_but_not_current(force, tech.name)) {
+    start_follow(task, actor, 'queued')
+    return record_result(request_id, actor, task.technology_name, true, false, 'queued_behind', {
+      requested_level: task.requested_level,
+      observed_level: tech.level,
+      progress: 0,
     })
   }
   start_follow(task, actor, 'running')
@@ -351,7 +367,16 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
 
       if (force.current_research?.name === record.technology) {
         const progress = force.research_progress
-        if (progress > record.last_progress + PROGRESS_EPSILON) {
+        if (record.state === 'queued') {
+          // The technology reached the front of the native queue. Its stall
+          // window starts now, not when it was appended.
+          record.state = 'running'
+          record.started_tick = game.tick
+          record.last_progress = progress
+          record.last_progress_tick = game.tick
+          update_follow_result(actor, record, 'started', false, { progress })
+        }
+        else if (progress > record.last_progress + PROGRESS_EPSILON) {
           record.last_progress = progress
           record.last_progress_tick = game.tick
           record.state = 'running'
@@ -369,6 +394,7 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
 
       if (queued_but_not_current(force, record.technology)) {
         record.state = 'queued'
+        record.last_progress_tick = game.tick
         continue
       }
 

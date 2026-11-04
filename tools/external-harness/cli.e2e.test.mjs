@@ -342,7 +342,8 @@ test('CLI abrupt death after admission leaves its write-ahead fence and exclusiv
   assert.equal(persisted.records[0].reason, 'write_ahead_before_send')
   assert.equal(persisted.records[0].state, 'uncertain')
   const locked = f.start()
-  assert.deepEqual(await locked.exit, { code: 1, signal: null })
+  // EX_TEMPFAIL lets the process adapter report state_locked without reading stderr.
+  assert.deepEqual(await locked.exit, { code: 75, signal: null })
   assert.match(locked.stderr(), /state_locked/)
   assert.equal(locked.stdout(), '')
   assert.equal(f.engine.mutations(), 1)

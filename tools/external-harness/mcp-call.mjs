@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { STATE_LOCKED_EXIT_CODE } from './cli.mjs'
 import { MCP_PROTOCOL_VERSION } from './mcp-server.mjs'
 
 const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url))
@@ -26,7 +27,7 @@ export async function withMcpClient(action, { command = process.execPath, args =
   let result
   const exit = new Promise(resolve => {
     child.once('error', () => { exited = true; stop(fail('mcp_start_failed')); resolve(null) })
-    child.once('close', code => { exited = true; stop(fail('mcp_exited')); resolve(code) })
+    child.once('close', code => { exited = true; stop(fail(code === STATE_LOCKED_EXIT_CODE ? 'state_locked' : 'mcp_exited')); resolve(code) })
   })
   function stop(error) {
     failure ??= error
@@ -119,7 +120,10 @@ export async function main(args = process.argv.slice(2)) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {
     const code = /^[a-z_]{1,80}$/.test(error?.code ?? '') ? error.code : 'mcp_adapter_failed'
-    process.stderr.write(`Local MCP adapter stopped: ${code}. No automatic gameplay replay was attempted.\n`)
+    const hint = code === 'state_locked'
+      ? ' Another harness process holds this world\'s state directory: the adapter allows one call at a time. Wait for the running call to finish, then retry this read or receipt; never resend a mutation under a new request_id. If no harness process is running, follow the stale-lock recovery in docs/EXTERNAL_HARNESS.md.'
+      : ''
+    process.stderr.write(`Local MCP adapter stopped: ${code}. No automatic gameplay replay was attempted.${hint}\n`)
     process.exitCode = 1
   })
 }

@@ -20,6 +20,26 @@ export function failure(code, publicMessage = code) {
   return Object.assign(new Error(publicMessage), { code, publicMessage })
 }
 
+const WINDOWS_REPLACE_REFUSALS = { 10: 'different_directories', 11: 'not_fixed_ntfs', 12: 'reparse_component', 13: 'move_file_failed', 14: 'helper_exception' }
+
+// Bounded, path-free description of a durable-write failure: the stage that
+// failed plus a native error code, Windows helper refusal and Win32/HRESULT
+// number when known. Messages are never copied; they can contain private paths.
+export function writeFailureCause(stage, error) {
+  const cause = { stage }
+  if (typeof error?.code === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(error.code)) cause.code = error.code
+  if (stage === 'windows_replace') {
+    if (error?.killed === true || error?.signal) cause.timed_out = true
+    else if (Number.isSafeInteger(error?.code)) {
+      cause.exit_code = error.code
+      cause.helper_refusal = WINDOWS_REPLACE_REFUSALS[error.code] ?? 'unknown_exit'
+      const native = String(error.helperOutput ?? '').trim()
+      if (/^-?\d{1,11}$/.test(native)) cause.native_error = Number(native)
+    }
+  }
+  return cause
+}
+
 // Marks a refusal raised before the write-ahead record: no journal slot was
 // used and the operation was never sent, so its effect is known not to happen.
 function notSent(error) {
@@ -126,6 +146,7 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
     const temp = `${ledgerPath}.${owner}.tmp`
     const data = `${JSON.stringify(ledger)}\n`
     if (Buffer.byteLength(data) > MAX_LEDGER_BYTES) throw failure('ledger_full')
+    let stage = 'temp_write'
     try {
       const file = await fs.open(temp, 'w', 0o600)
       try { await file.writeFile(data); await file.sync() }
@@ -133,31 +154,40 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
       if (process.platform === 'win32') {
         // Node cannot fsync Windows directories. Request a native write-through
         // replacement instead; never reinterpret EPERM as successful persistence.
+        stage = 'windows_replace'
         const systemRoot = process.env.SystemRoot
         if (!systemRoot || !path.isAbsolute(systemRoot)) throw failure('windows_system_root_required')
         await new Promise((resolve, reject) => childProcess.execFile(path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
           ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', windowsReplace, '-Source', temp, '-Destination', ledgerPath],
           { windowsHide: true, timeout: 15000, maxBuffer: 4096,
             env: { SystemRoot: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP } },
-          error => error ? reject(error) : resolve()))
+          (error, stdout) => error ? reject(Object.assign(error, { helperOutput: stdout })) : resolve()))
       }
       else {
+        stage = 'rename'
         await fs.rename(temp, ledgerPath)
+        stage = 'directory_sync'
         const directoryHandle = await fs.open(root, 'r')
         try { await directoryHandle.sync() }
         finally { await directoryHandle.close() }
       }
     }
-    catch {
-      poisoned = true
-      throw failure('journal_write_failed', 'Durable journal write failed; no further mutations are allowed in this process')
+    catch (error) {
+      poisoned = writeFailureCause(stage, error)
+      throw journalWriteFailed()
     }
+  }
+
+  // The first failure stays attached to every later refusal in this process, so
+  // a recurrence names its stage and native code (never paths or messages).
+  function journalWriteFailed() {
+    return Object.assign(failure('journal_write_failed', 'Durable journal write failed; no further mutations are allowed in this process. details.cause names the failed stage and native code.'), { details: { cause: poisoned } })
   }
 
   function serialized(fn) {
     const run = chain.then(() => {
       if (closed) throw failure('runtime_closed')
-      if (poisoned) throw failure('journal_write_failed')
+      if (poisoned) throw journalWriteFailed()
       return fn()
     })
     chain = run.catch(() => {})

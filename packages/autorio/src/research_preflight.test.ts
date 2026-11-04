@@ -149,7 +149,7 @@ describe('deterministic research operation preflight', () => {
     expect(force.add_research).not.toHaveBeenCalled()
   })
 
-  it('reports force_busy with bounded current and queue identity and never replaces the force queue', () => {
+  it('reports ready_queued_behind with bounded current and queue identity and never replaces the force queue', () => {
     const target = technology('automation')
     const queue = Array.from({ length: 12 }, (_, index) => technology(`queued-${index}`))
     const { actor, force } = world(
@@ -162,8 +162,8 @@ describe('deterministic research operation preflight', () => {
 
     const result: any = research_operation_preflight(actor, 'automation')
     expect(result).toMatchObject({
-      ok: false,
-      code: 'force_busy',
+      ok: true,
+      state: 'ready_queued_behind',
       current_research: { name: 'queued-0', progress: 0.25 },
       queue_length: 12,
       queue_truncated: true,

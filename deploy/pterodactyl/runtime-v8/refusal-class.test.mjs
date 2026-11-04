@@ -26,6 +26,10 @@ const OLD_MODEL_CORRECTABLE_PREFLIGHT_CODES = [
 // so these two now get the one bounded correction turn instead of the blocked end. Anything not listed here must match oldPath.
 const INTENTIONAL_CHANGES = { invalid_name: 'argument', unknown_technology: 'argument', placement_candidate_required: 'argument', navigation_position_inside_tile_collision: 'argument', placement_candidate_outside_region: 'argument' }
 
+// Codes the mod's preflight no longer produces. Busy force research no longer refuses a request: it is appended behind the
+// existing research in the native queue (queued_behind). The runtime keeps its recovery for an older mod that still sends it.
+const RETIRED_PREFLIGHT_CODES = ['force_busy']
+
 // Every admission refusal except authorization_stale (ADMISSION_REFUSAL_CODES minus the stale grant).
 const OLD_AUTHORIZATION_RECOVERABLE_CODES = ['protected_entity_refused', 'reserved_supply_refused', 'reserved_supply_ambiguous_target', 'player_inventory_excluded']
 
@@ -52,6 +56,10 @@ test('the mod registry parsed here is not empty and uses only the closed set', (
 test('equivalence: the mod-declared class reproduces the old hand-list path for every mod preflight code', () => {
   const operationOf = code => (OLD_RESEARCH_PREFLIGHT_RECOVERABLE_CODES.includes(code) ? 'research_technology' : 'other')
   for (const code of [...OLD_RESEARCH_PREFLIGHT_RECOVERABLE_CODES, ...OLD_MODEL_CORRECTABLE_PREFLIGHT_CODES]) {
+    if (RETIRED_PREFLIGHT_CODES.includes(code)) {
+      assert.ok(!Object.hasOwn(modRegistry, code), `${code} is retired, so the mod no longer classifies it`)
+      continue
+    }
     assert.ok(Object.hasOwn(modRegistry, code), `${code} from an old list is classified by the mod`)
   }
   for (const [code, declared] of Object.entries(modRegistry)) {
@@ -66,7 +74,7 @@ test('equivalence: the mod-declared class reproduces the old hand-list path for 
   // The classes' sizes are the old lists' sizes plus the recorded changes: nothing else moved onto a recovery path.
   const count = refusalClass => Object.values(modRegistry).filter(declared => declared === refusalClass).length
   assert.equal(count('argument'), OLD_MODEL_CORRECTABLE_PREFLIGHT_CODES.length + Object.keys(INTENTIONAL_CHANGES).length)
-  assert.equal(count('prerequisite'), OLD_RESEARCH_PREFLIGHT_RECOVERABLE_CODES.length)
+  assert.equal(count('prerequisite'), OLD_RESEARCH_PREFLIGHT_RECOVERABLE_CODES.filter(code => !RETIRED_PREFLIGHT_CODES.includes(code)).length)
   assert.equal(count('authority'), 0, 'the mod preflight has no authority refusals; admission produces them')
 })
 
