@@ -1,148 +1,85 @@
-# Factorio NPC
+# Factorio NPC — Built-in pursuit mode
 
-**SGLuna is an AI teammate that lives inside a Factorio world.** It controls a
-standalone character with real inventory, crafting and mining, and can operate
-on a headless server with nobody connected.
+![Mode: built-in pursuit](https://img.shields.io/badge/mode-built--in%20pursuit-0f766e?style=flat-square)
+![Status: experimental](https://img.shields.io/badge/status-experimental-d97706?style=flat-square)
+[![License: MIT](https://img.shields.io/badge/license-MIT-64748b?style=flat-square)](LICENSE)
 
----
+An AI teammate for your Factorio world, controlled by one built-in operator
+model. Give it a goal and it works through game tools, keeping notes as it goes.
 
-## Connect your AI assistant to Factorio
-
-The `main` branch lets a local AI harness control your
-standalone Factorio NPC through MCP. Your assistant
-plans the work and directs native game actions through a local connection.
-
-This mode is experimental and separate from the built-in autonomous planner.
-For an assistant with local command access and automatic setup enabled, use:
-
-```text
-Set up https://github.com/TTLouis/factorio-npc/tree/main
-for this harness. Follow the repository setup instructions and stop when ready
-for my goal.
-```
-
-The [portable setup instructions](docs/EXTERNAL_HARNESS_SETUP.md) let the
-assistant prepare a private game, connect your harness and verify it is ready.
-They cover different local harnesses and explain what remote-only clients need.
-Setup requires local runtime permissions and authorized Factorio access; it does
-not start gameplay. For manual setup and the tool contract, see the
-[runtime guide](docs/EXTERNAL_HARNESS.md). The assistant can also consult the
-[knowledge and gameplay method library](docs/EXTERNAL_HARNESS.md#read-only-method-library)
-on demand before planning your goal.
-
-The runtime gives models structured game observations and bounded actions.
-Deterministic code handles game facts, validation and recovery; Factorio remains
-the source of truth. Computer vision is not required.
-
-**Status: experimental and under active development.** Runtime operations and
-deterministic tests do not establish reliable autonomous factory building.
-Repeatable autonomous science production remains unproven. Read the
-[current status and exact-commit evidence](docs/NPC_AGENT_HARNESS_STATUS.md) before
-choosing a checkpoint; newer development is not automatically a stable release.
+**[Install](#install) · [Availability](#current-availability) · [Choose your harness](#choose-your-harness)**
 
 ---
 
-## Latest demonstrated progress
+## Install
 
-**Semi-automated red science — October 31, 2026:** **12 new packs in two
-minutes** at normal game speed, collected in a chest rather than fed to a lab.
-The agent manually supplied fuel to individual burner machines and the boiler;
-continued fuel servicing was not automated.
+> [!IMPORTANT]
+> **Pursuit mode is not yet available as a ready-to-run installation.** A
+> pursuit-mode startup path has not been integrated. Existing Docker/Pterodactyl
+> startup launches plan mode, not pursuit mode.
 
-See the [latest proofs](docs/proofs/README.md) for in-game screenshots, measured
-results and limitations. This single-run milestone is not a full-automation
-pass; the formal trial failed a furnace observation check.
-
----
-
-## Start here
-
-| Your goal | Next step |
-| --- | --- |
-| Connect an external AI harness | [Portable setup](docs/EXTERNAL_HARNESS_SETUP.md), [runtime/tool guide](docs/EXTERNAL_HARNESS.md) |
-| Run SGLuna on your own server | [Docker setup](deploy/docker/README.md) or [Pterodactyl setup](deploy/pterodactyl/README.md) |
-| Help with a bug, test or explanation | [Contributing](CONTRIBUTING.md) |
-| Understand the design | [Project contract](SPEC.md) and [documentation index](docs/README.md) |
-| Work with a coding agent | [AGENTS.md](AGENTS.md) |
+There is no supported pursuit-mode install command at this checkpoint. The
+startup integration must be completed before this branch can offer a user
+installation guide.
 
 ---
 
-## What is in the project?
+## Choose your harness
 
-- A standalone NPC body, independent of a connected human player.
-- Structured inventory, navigation, crafting, research, combat and construction
-  operations, with actor/operation correlation and validated admission.
-- Deterministic recipe, production-planning and transport-capacity helpers.
-- A planning harness and in-game task/plan UI, provider budgets and behavior traces.
-- Persistent saves, managed release rollback, and Docker/Pterodactyl deployment.
+Choose how you want to control your NPC. Each branch has its own setup and
+experimental status.
 
-Capability is verified in stages: contract tests, deterministic real-engine lanes,
-then an explicitly frozen provider-backed trial. Successful placement is not proof
-of production. See the [production validation ladder](docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md)
-for acceptance criteria and the status page for current limits.
-
-Single-NPC reliability and grounded production are the current focus. Wider
-swarm coordination, vehicles/trains/platforms and optional vision are later work.
-
----
-
-## Optional built-in planner server
-
-The external-harness setup above starts only the game and MCP connection. The
-ordinary Docker/Pterodactyl paths below start the built-in planner instead. For
-the separate Jev experiment, explicitly select `experiment/jev-agent-architecture`.
-
-For the built-in planner, you need Docker or a Pterodactyl host, a compatible Factorio setup, and credentials
-for your chosen model provider. Provider-backed operation may incur API charges.
-Offline contribution/tests do not require production credentials.
-
-For Docker, follow the full [setup guide](deploy/docker/README.md). Its basic
-startup, after configuration, is:
-
-```sh
-cp .env.example .env
-# Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
-# Main is the default source; pin SGLUNA_SOURCE_REF to an exact main SHA for reproduction.
-docker compose up -d --build
-```
-
-The Compose build defaults to `main`. Set `SGLUNA_SOURCE_REF` deliberately for a
-development build, or pin a full commit SHA for reproduction. Keep credentials
-outside Git, and use your own persistent data directory.
-
-For Pterodactyl, choose a channel and follow its
-[configuration and update guide](deploy/pterodactyl/README.md):
-
-| Egg | Default source | Purpose |
+| Line | Branch | How it works |
 | --- | --- | --- |
-| [Main](deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Main built-in planner package |
-| [NPC E2E / Jev Experiment](deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json) | `experiment/jev-agent-architecture` | Experimental development |
+| External harness | [`main`](https://github.com/TTLouis/factorio-npc/tree/main) | Your external AI assistant plans and operates the NPC through MCP. |
+| Built-in harness: plan mode | [`feat/builtin-harness-plan`](https://github.com/TTLouis/factorio-npc/tree/feat/builtin-harness-plan) | An internal planner and executor follow committed plans and step contracts; Jev is optional. |
+| Built-in harness: pursuit mode | [`feat/builtin-harness-pursuit`](https://github.com/TTLouis/factorio-npc/tree/feat/builtin-harness-pursuit) | One internal operator model pursues the goal through tools, with a notebook and native goal evaluation. In development. |
 
-Restart keeps the installed code. Pterodactyl reinstall resolves the selected
-ref again. Docker can reuse its source layer; use an exact SHA or the Docker
-guide's `SGLUNA_SOURCE_NONCE` procedure to pick up a branch update.
-Managed Pterodactyl installs provide `rollback-sgluna.sh` and preserve saves,
-user mods and non-secret configuration across completed releases.
+---
 
-SGLuna uses `SGLUNA_*` settings, `sgluna-config.json` and `!luna` chat input.
-Legacy AIRI settings/input aliases are documented in the deployment guide.
+## What pursuit mode does
+
+One model observes the world, chooses bounded actions and reads their results.
+It uses a persistent notebook to keep its working plan and lessons, and can
+start a fresh conversation when its context fills up. Factory cells are an
+optional tool; a committed step-by-step plan is not required.
+
+The harness handles operation admission, native receipts, safety fences,
+budgets and goal evaluation. The model cannot declare success on its own.
+The NPC keeps native inventory, crafting, mining, research and collision
+rules, and does not need a connected human player or computer vision.
+
+---
+
+## Current availability
+
+The operator tools, loop, notebook/context rotation, provider client and
+supervisor are implemented as modules. Native integration and a live comparison
+remain outstanding at this checkpoint. **No pursuit-mode live production result
+has been established.**
+
+The initial comparison targets red-science production and Automation research.
+Production statistics also count hand-crafted packs, so the default goal check
+alone does not prove machine-only or fully electrified automation.
+
+The external harness has separate
+[recorded results](https://github.com/TTLouis/factorio-npc/blob/main/docs/proofs/README.md).
+Those results do not establish pursuit-mode success.
 
 ---
 
 ## Contribute
 
-External-harness development integrates into **`main`**. The internal
-planner/Jev experiment remains separate on `experiment/jev-agent-architecture`. See [CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
-bug reports and pull requests, and [TESTING.md](docs/TESTING.md) for commands.
-The shared Windows checkout requires Docker tests because its dependency
-folders are WSL symlinks; do not run a Windows host package install there.
+Pursuit-mode work belongs on `feat/builtin-harness-pursuit`. This line starts
+from plan mode and includes external-harness tools through main `560529b4`;
+later main changes are not automatically included.
 
-Useful starting areas are setup feedback, clearer documentation and deterministic
-regressions for reproducible failures. The [development workflow](docs/DEVELOPMENT_WORKFLOW.md)
-defines scope, evidence and review. [Authorized live trials](docs/LIVE_E2E.md)
-are separate from ordinary tests. The opt-in
-[desktop operator adapter](tools/desktop-rcon-operator.mjs) is an operator/test
-surface, not autonomous provider operation.
+Start with [Contributing](CONTRIBUTING.md), [testing](docs/TESTING.md) and
+[agent instructions](AGENTS.md). The implementation is in the
+[operator loop](deploy/pterodactyl/runtime-v8/operator-loop.mjs),
+[shared tools](deploy/pterodactyl/runtime-v8/operator-tool-surface.mjs),
+[provider client](deploy/pterodactyl/runtime-v8/operator-provider.mjs) and
+[supervisor](deploy/pterodactyl/runtime-v8/pursuit-supervisor.mjs).
 
 ---
 
