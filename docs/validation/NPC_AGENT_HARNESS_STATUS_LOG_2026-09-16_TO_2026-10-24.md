@@ -2,8 +2,8 @@
 
 These dated checkpoints formed the body of
 [NPC_AGENT_HARNESS_STATUS.md](../NPC_AGENT_HARNESS_STATUS.md) until November 4, 2026.
-They were moved here unchanged, newest first, except that relative link paths were
-adjusted for the new location. Their SHAs, commands and paths describe the recorded
+They were moved here unchanged, newest first, except that relative link paths and
+repository paths of moved documents were adjusted for the new locations. Their SHAs, commands and paths describe the recorded
 state; they are not instructions to repeat it. The current summary stays on the
 status page.
 

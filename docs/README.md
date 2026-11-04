@@ -32,12 +32,12 @@ These apply to the NPC whichever line controls it.
 | Spatial placement | [Placement architecture](NPC_SPATIAL_PLACEMENT_ARCHITECTURE.md) |
 | Production capability and engine proof | [Production validation ladder](NPC_PRODUCTION_VALIDATION_ROADMAP.md) |
 | Repairing an E2E failure | [Repair requirements](E2E_REPAIR_REQUIREMENTS.md) |
-| Running an authorized provider trial | [Live E2E procedure](LIVE_E2E.md) |
 
 ## Built-in planner and Jev contracts
 
 These describe the `experiment/jev-agent-architecture` line. Their presence on
-`main` does not mean `main` runs the built-in planner.
+`main` does not mean `main` runs the built-in planner. Several are approved
+designs that are only partly built; each page's status line says how far.
 
 | Area | Reference |
 | --- | --- |
@@ -47,7 +47,8 @@ These describe the `experiment/jev-agent-architecture` line. Their presence on
 | Task interruption, authority and campaign allowance | [Macro execution design](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md) |
 | Planner/executor delegation inside one NPC | [Delegation design](NPC_DELEGATION_DESIGN_2026-09-29.md) |
 | Provider failure, continuation and waits | [Provider continuation and recovery](NPC_PROVIDER_CONTINUATION_RECOVERY.md) |
-| Opt-in executor progress audit (off by default) | [Executor progress auditor](EXECUTOR_PROGRESS_AUDITOR.md) |
+| Experimental opt-in executor progress audit (off by default) | [Executor progress auditor](EXECUTOR_PROGRESS_AUDITOR.md) |
+| Running an authorized provider trial | [Live E2E procedure](LIVE_E2E.md) |
 | Accelerated trial profiles | [Tick-sprint contract and adoption gates](E2E_TICK_SPRINT.md) |
 
 ## Proposals and experiments
