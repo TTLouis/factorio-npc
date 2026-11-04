@@ -771,6 +771,37 @@ function renderMapContext(args) {
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_map","crop",${radius}${at})))`
 }
 
+const RESOURCE_AMOUNT_MAX_RADIUS = 48
+
+const resourceAmountsDefinition = {
+  type: 'function',
+  function: {
+    name: 'getResourceAmounts',
+    description: 'Read how much ore lies in a square of tiles: native resource entity amounts on the actor\'s surface. The square is the tile holding center (default: where the actor stands) plus radius tiles on each side (default 16, maximum 48), so radius 2 is a 5x5 square, the mining area of an electric mining drill centred there. Per resource it returns tile_count, total_amount, min_amount, max_amount, infinite and the bounding_box of the tile centres found, largest total first (at most 8 kinds). Name resource_name to count only that resource and also get its per-tile amounts, nearest the centre first (at most 64, tiles_truncated says when more exist). Only chunks the NPC sees now are read: unseen_chunk_count and unseen_chunks name the chunks not read, whose ore is unknown, not absent; coverage_complete is true when every chunk was read. Facts only; which patch to mine is your decision.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        resource_name: { type: 'string', minLength: 1, maxLength: 200 },
+        center: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number', minimum: -1000000, maximum: 1000000 }, y: { type: 'number', minimum: -1000000, maximum: 1000000 } } },
+        radius: { type: 'integer', minimum: 0, maximum: RESOURCE_AMOUNT_MAX_RADIUS, default: 16 },
+      },
+    },
+  },
+}
+
+function renderResourceAmounts(args) {
+  exactKeys(args, ['resource_name', 'center', 'radius'])
+  const fields = []
+  if (args.resource_name !== undefined) fields.push(`resource_name=${base.luaString(base.factorioName(args.resource_name))}`)
+  if (args.center !== undefined) {
+    const center = position(args.center)
+    fields.push(`center={x=${center.x},y=${center.y}}`)
+  }
+  if (args.radius !== undefined) fields.push(`radius=${optionalInteger(args.radius, 'radius', 0, RESOURCE_AMOUNT_MAX_RADIUS)}`)
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_resource_amounts",{${fields.join(',')}})))`
+}
+
 function renderResearchPath(args) {
   const parsed = parseResearchPath(args)
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","research_path",${base.luaString(parsed.name)},${parsed.max_nodes})))`
@@ -1472,6 +1503,7 @@ export const toolDefinitions = [
   constructionIntentDefinition,
   researchPathDefinition,
   mapContextDefinition,
+  resourceAmountsDefinition,
 ]
 
 // Open typed requests may name any ordinary observation. This schema is shared
@@ -1612,6 +1644,7 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getPumpSitePreparation: 'placement_candidates',
   getFluidSourceTiles: 'nearby_world',
   getMapContext: 'nearby_world',
+  getResourceAmounts: 'nearby_world',
   planPlacement: 'placement_candidates',
 
   findConstructionSites: 'construction_state',
@@ -1672,6 +1705,7 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getPumpSitePreparation: 'fact',
   getFluidSourceTiles: 'discovery',
   getMapContext: 'fact',
+  getResourceAmounts: 'fact',
   planPlacement: 'fact',
   findConstructionSites: 'discovery',
   validateConstructionReservation: 'discovery',
@@ -1760,6 +1794,7 @@ export function toolCommand(name, args) {
   if (name === 'getPumpSitePreparation') return renderPumpSitePreparation(args)
   if (name === 'getFluidSourceTiles') return renderFluidSourceTiles(args)
   if (name === 'getMapContext') return renderMapContext(args)
+  if (name === 'getResourceAmounts') return renderResourceAmounts(args)
   if (name === 'getPlacementCandidates') return renderPlacementCandidates(args)
   if (name === 'getProductionScope') return renderProductionScope(args)
   if (name === 'solveProduction') return renderSolveProduction(args)

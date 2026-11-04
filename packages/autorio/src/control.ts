@@ -15,6 +15,7 @@ import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
 import { new_area_clearing_controller } from './area_clearing'
 import { craft_bootstrap_preflight_for_actor } from './bootstrap_planning'
+import { crash_site_setup_status, spawn_freeplay_crash_site } from './crash_site_setup'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
 import { new_combat_controller } from './combat'
@@ -205,6 +206,18 @@ remote.add_interface('autorio_research', {
 
 remote.add_interface('autorio_combat', {
   status: () => combat_controller.status(),
+})
+
+// Operator setup only: the external harness calls it from its explicit
+// --crash-site CLI action; no model observation or operation reaches it.
+remote.add_interface('autorio_setup', {
+  crash_site_status: () => crash_site_setup_status(),
+  spawn_crash_site: () => {
+    if (task_manager.player_state.task_state !== TaskStates.IDLE || task_manager.get_status_snapshot().queue_length !== 0) {
+      return { ok: false, code: 'native_busy' }
+    }
+    return spawn_freeplay_crash_site(get_controlled_actor())
+  },
 })
 
 function log_actor_info() {

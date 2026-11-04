@@ -7,7 +7,7 @@ import test from 'node:test'
 
 import { operationSignature } from '../../deploy/pterodactyl/runtime-v8/operation-reconciliation.mjs'
 import { configuration } from './cli.mjs'
-import { openRuntime } from './runtime.mjs'
+import { openRuntime, writeFailureCause } from './runtime.mjs'
 
 const session = 'external-test-session-00000000000001'
 const operation = { name: 'wait', args: { ticks: 60 } }
@@ -184,6 +184,18 @@ test('durable-write failure prevents send and poisons future mutations', async t
   assert.equal(f.calls.filter(([name]) => name === 'submit').length, 0)
 })
 
+test('durable-write failure cause is bounded and path-free', () => {
+  const pathy = Object.assign(new Error('EPERM: operation not permitted, open C:\\private\\ledger.json'), { code: 'EPERM', path: 'C:\\private\\ledger.json' })
+  assert.deepEqual(writeFailureCause('temp_write', pathy), { stage: 'temp_write', code: 'EPERM' })
+  assert.deepEqual(writeFailureCause('windows_replace', Object.assign(new Error('x'), { code: 13, helperOutput: '32' })),
+    { stage: 'windows_replace', exit_code: 13, helper_refusal: 'move_file_failed', native_error: 32 })
+  assert.deepEqual(writeFailureCause('windows_replace', Object.assign(new Error('x'), { code: 14, helperOutput: 'C:\\private path' })),
+    { stage: 'windows_replace', exit_code: 14, helper_refusal: 'helper_exception' })
+  assert.deepEqual(writeFailureCause('windows_replace', Object.assign(new Error('x'), { killed: true, signal: 'SIGTERM' })),
+    { stage: 'windows_replace', timed_out: true })
+  assert.deepEqual(writeFailureCause('directory_sync', new Error('no code')), { stage: 'directory_sync' })
+})
+
 for (const phase of ['writeFile', 'sync', 'close']) {
   test(`write-ahead ${phase} failure is not ignored as a Windows compatibility error`, async t => {
     const f = await fixture(t); const runtime = await f.open()
@@ -203,8 +215,10 @@ for (const phase of ['writeFile', 'sync', 'close']) {
       return file
     })
     try {
-      await assert.rejects(runtime.submit({ request_id: `fault-${phase}`, operation }), { code: 'journal_write_failed' })
-      await assert.rejects(runtime.submit({ request_id: 'poisoned', operation }), { code: 'journal_write_failed' })
+      // The cause names the stage and native code and stays on every later refusal of this process.
+      const cause = { stage: 'temp_write', code: 'EPERM' }
+      await assert.rejects(runtime.submit({ request_id: `fault-${phase}`, operation }), { code: 'journal_write_failed', details: { cause } })
+      await assert.rejects(runtime.submit({ request_id: 'poisoned', operation }), { code: 'journal_write_failed', details: { cause } })
       assert.equal(f.calls.filter(([name]) => name === 'submit').length, 0)
     }
     finally { fault.mock.restore() }
@@ -219,7 +233,11 @@ test('Windows native replacement refusal preserves the old ledger and poisons ad
   // A read-only Windows destination makes the real MoveFileExW call fail.
   await fs.chmod(ledgerPath, 0o444)
   try {
-    await assert.rejects(runtime.submit({ request_id: 'readonly-destination', operation }), { code: 'journal_write_failed' })
+    await assert.rejects(runtime.submit({ request_id: 'readonly-destination', operation }), {
+      code: 'journal_write_failed',
+      // ERROR_ACCESS_DENIED from MoveFileExW, reported by number only.
+      details: { cause: { stage: 'windows_replace', exit_code: 13, helper_refusal: 'move_file_failed', native_error: 5 } },
+    })
     await assert.rejects(runtime.submit({ request_id: 'poisoned', operation }), { code: 'journal_write_failed' })
     assert.equal(await fs.readFile(ledgerPath, 'utf8'), previous)
     assert.equal(f.calls.filter(([name]) => name === 'submit').length, 0)

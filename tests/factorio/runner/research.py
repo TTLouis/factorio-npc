@@ -215,7 +215,15 @@ def run(client: Rcon, results: Path) -> None:
     duplicate = research_status()
     require(duplicate['last_request_result']['code'] == 'already_queued', duplicate)
     require(duplicate['queue_length'] == 1, duplicate)
-    submit('electric-mining-drill', False, 'force_busy')
+    # A second request while the force is busy is appended behind automation
+    # in the native queue; it neither replaces nor reorders current research.
+    behind_preflight = preflight('electric-mining-drill')
+    require(behind_preflight['ok'] is True and behind_preflight['state'] == 'ready_queued_behind', behind_preflight)
+    behind_request_id = submit('electric-mining-drill', True)[2]
+    wait_until_idle(status, 'queued-behind research request', 5)
+    behind = research_status()
+    require(behind['last_request_result']['code'] == 'queued_behind' and behind['last_request_result']['accepted'] is True, behind)
+    require([item['name'] for item in behind['queue']] == ['automation', 'electric-mining-drill'], behind)
     require(research_status()['current']['name'] == 'automation', "Research assertion failed: research_status()['current']['name'] == 'automation'")
     require(command(lua_text(remote_call('autorio_operations', 'cancel_all_tasks'))) == 'true', "Research assertion failed: command(lua_text(remote_call('autorio_operations', 'cancel_all_tasks'))) == 'true'")
     require(research_status()['current']['name'] == 'automation', 'NPC cancellation cancelled shared research')
@@ -275,6 +283,11 @@ def run(client: Rcon, results: Path) -> None:
     assert_completed(before, after, original_id)
     completed_technology = technology('automation')
     require(completed_technology['found'] is True and completed_technology['researched'] is True, completed_technology)
+    # The labs move straight on to the request queued behind: no idle gap.
+    continued = research_status()
+    require(continued['current'] is not None and continued['current']['name'] == 'electric-mining-drill', continued)
+    behind_follow = [item for item in continued['follow_through'] if item['request_id'] == behind_request_id]
+    require(len(behind_follow) == 1 and behind_follow[0]['state'] == 'running', continued)
     submit('automation', True)
     wait_until_idle(status, 'already completed research request', 5)
     require(research_status()['last_request_result']['code'] == 'already_researched', "Research assertion failed: research_status()['last_request_result']['code'] == 'already_researched'")

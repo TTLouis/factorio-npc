@@ -9,7 +9,7 @@ import { failure, openRuntime } from './runtime.mjs'
 
 const HELP = `Factorio external harness (experimental, local stdio MCP)
 
-Usage: node tools/external-harness/cli.mjs [--bind | --help]
+Usage: node tools/external-harness/cli.mjs [--bind | --crash-site | --help]
 
 Required environment:
   SGLUNA_RCON_PASSWORD          Inject through your local secret environment
@@ -21,9 +21,17 @@ Optional:
 
 --bind is an explicit operator-only action for a fresh idle save. It refuses an
 existing deployment session and never takes over a running controller.
+--crash-site is an explicit operator-only setup action for a bound, idle save,
+run before the goal starts. It runs freeplay's own crashed-ship site and gives
+the NPC freeplay's starting items, as a joining player would get them, then
+disables freeplay's crash site so a later human join cannot spawn another. It
+runs once per save; a repeat reports the first result. Prints a JSON report.
 Normal mode never configures a game, starts a model, or cancels work on exit.
 See docs/EXTERNAL_HARNESS.md for guarded mod setup, receipts and recovery.
 `
+
+// EX_TEMPFAIL: the state directory is held by another harness process.
+export const STATE_LOCKED_EXIT_CODE = 75
 
 export function configuration(env) {
   const host = env.SGLUNA_RCON_HOST ?? '127.0.0.1'
@@ -39,7 +47,7 @@ export function configuration(env) {
 
 export async function main(args = process.argv.slice(2), env = process.env) {
   if (args.length === 1 && args[0] === '--help') { process.stdout.write(HELP); return }
-  if (args.length > 1 || args.length === 1 && args[0] !== '--bind') throw failure('invalid_cli_arguments')
+  if (args.length > 1 || args.length === 1 && !['--bind', '--crash-site'].includes(args[0])) throw failure('invalid_cli_arguments')
   const config = configuration(env)
   const rcon = new Rcon(config.port, config.password, 5000, { host: config.host })
   const bridge = new NativeBridge({ rcon, session: config.session })
@@ -52,6 +60,14 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       await confirmLuaConsoleReady(rcon) // Only the fixed readiness read may repeat.
       await bridge.bind()
       process.stderr.write('Fresh save bound to external session. Preserve its journal and game save together.\n')
+      return
+    }
+    if (args[0] === '--crash-site') {
+      // Refuse a wrong world/session, and unsettled journal work, before any setup write.
+      const context = await runtime.context()
+      if (context.pending.length > 0 || context.reconciliation_required.length > 0) throw failure('setup_not_idle')
+      const report = await bridge.spawnCrashSite()
+      process.stdout.write(`${JSON.stringify(report)}\n`)
       return
     }
     await runtime.context() // Refuse wrong world/session before exposing tools.
@@ -73,6 +89,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   main().catch(error => {
     const code = typeof error?.code === 'string' && /^[a-z_]{1,80}$/.test(error.code) ? error.code : 'startup_or_transport_failed'
     process.stderr.write(`External harness stopped: ${code}. No automatic gameplay replay was attempted.\n`)
-    process.exitCode = 1
+    // A distinct exit status lets the process adapter name a held state lock
+    // without reading this process's stderr.
+    process.exitCode = code === 'state_locked' ? STATE_LOCKED_EXIT_CODE : 1
   })
 }
