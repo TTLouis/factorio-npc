@@ -1,19 +1,26 @@
 # Factorio NPC
 
+![Mode: external harness](https://img.shields.io/badge/mode-external%20harness-2563eb?style=flat-square)
+![Status: experimental](https://img.shields.io/badge/status-experimental-d97706?style=flat-square)
+[![License: MIT](https://img.shields.io/badge/license-MIT-64748b?style=flat-square)](LICENSE)
+
 **SGLuna is an AI teammate that lives inside a Factorio world.** It controls a
 standalone character with real inventory, crafting and mining, and can operate
 on a headless server with nobody connected.
 
+**[Install](#install-and-connect-your-ai-assistant) · [Latest proof](#latest-proof) · [Choose your harness](#choose-your-harness)**
+
 ---
 
-## Connect your AI assistant to Factorio
+## Install and connect your AI assistant
 
 The `main` branch lets a local AI harness control your
 standalone Factorio NPC through MCP. Your assistant
 plans the work and directs native game actions through a local connection.
 
 This mode is experimental and separate from the built-in autonomous planner.
-For an assistant with local command access and automatic setup enabled, use:
+**Quick setup:** paste this into an assistant with local command access
+and automatic setup enabled:
 
 ```text
 Set up https://github.com/TTLouis/factorio-npc/tree/main
@@ -24,34 +31,72 @@ for my goal.
 The [portable setup instructions](docs/EXTERNAL_HARNESS_SETUP.md) let the
 assistant prepare a private game, connect your harness and verify it is ready.
 They cover different local harnesses and explain what remote-only clients need.
-Setup requires local runtime permissions and authorized Factorio access; it does
-not start gameplay. For manual setup and the tool contract, see the
-[runtime guide](docs/EXTERNAL_HARNESS.md). The assistant can also consult the
+
+> [!TIP]
+> Setup prepares the connection and stops ready for your goal. Your assistant
+> needs local command access, runtime permissions and authorized Factorio access.
+
+Once setup is complete, give your connected assistant a goal in its own chat.
+The assistant observes the world through MCP, plans the work, submits bounded
+game actions and reads their results before deciding what to do next. You can
+review its progress and redirect it through your usual harness conversation.
+
+The game bridge validates actions and returns native observations and operation
+receipts. Your assistant handles planning and responding to refusals or changed
+conditions. Computer vision is not required. For manual setup and tool usage,
+see the [runtime guide](docs/EXTERNAL_HARNESS.md). The assistant can consult the
 [knowledge and gameplay method library](docs/EXTERNAL_HARNESS.md#read-only-method-library)
-on demand before planning your goal.
+for methods, and use current game observations for recipes and other game facts.
 
-The runtime gives models structured game observations and bounded actions.
-Deterministic code handles game facts, validation and recovery; Factorio remains
-the source of truth. Computer vision is not required.
-
-**Status: experimental and under active development.** Runtime operations and
-deterministic tests do not establish reliable autonomous factory building.
-Repeatable autonomous science production remains unproven. Read the
-[current status and exact-commit evidence](docs/NPC_AGENT_HARNESS_STATUS.md) before
-choosing a checkpoint; newer development is not automatically a stable release.
+**Status: experimental external-harness integration.** Results depend on your
+assistant, model and goal. The [latest proof](#latest-proof) documents measured
+automatic science production and lab delivery, with the remaining limitations.
+It does not establish reliable completion of arbitrary gameplay goals.
 
 ---
 
-## Latest demonstrated progress
+## Choose your harness
 
-**Semi-automated red science — October 31, 2026:** **12 new packs in two
-minutes** at normal game speed, collected in a chest rather than fed to a lab.
-The agent manually supplied fuel to individual burner machines and the boiler;
-continued fuel servicing was not automated.
+Choose how you want to control your NPC. Each branch has its own setup and
+experimental status.
 
-See the [latest proofs](docs/proofs/README.md) for in-game screenshots, measured
-results and limitations. This single-run milestone is not a full-automation
-pass; the formal trial failed a furnace observation check.
+| Line | Branch | How it works |
+| --- | --- | --- |
+| External harness | [`main`](https://github.com/TTLouis/factorio-npc/tree/main) | Your external AI assistant plans and operates the NPC through MCP. |
+| Built-in harness: plan mode | [`feat/builtin-harness-plan`](https://github.com/TTLouis/factorio-npc/tree/feat/builtin-harness-plan) | An internal planner and executor follow committed plans and step contracts; Jev is optional. |
+| Built-in harness: pursuit mode | [`feat/builtin-harness-pursuit`](https://github.com/TTLouis/factorio-npc/tree/feat/builtin-harness-pursuit) | One internal operator model pursues the goal through tools, with a notebook and native goal evaluation. In development. |
+
+---
+
+## Latest proof
+
+### Automatic red science and lab delivery
+
+**November 4, 2026 · External harness · Factorio 2.0.77**
+
+| New science packs | Hands-off measurement | Delivery |
+| :---: | :---: | :---: |
+| **62** | **10 min 19 sec** | **Automatic fuel, materials and lab feed** |
+
+The external operator built a science line from an empty NPC inventory in a
+fresh world. After construction, the assembler produced 62 new packs during
+the measured hands-off window at normal game speed, with science delivered to
+a researching lab.
+
+![Preserved science line with mining, smelting, assemblers and lab delivery](docs/proofs/images/2026-11-04-trial-3/science-line.jpg)
+
+*Inspection screenshot of the preserved post-stop world. Production counts
+come from the original native measurements, not the screenshot.*
+
+> [!NOTE]
+> **Qualified result:** coal mining remained burner-based, below the fully
+> electrified starter-base goal. The crash site appeared only during later
+> inspection; compatibility with that startup change remains unproven. This
+> external-operator result does not validate built-in plan or pursuit mode.
+
+**[Read the proof and screenshots](docs/proofs/2026-11-04-automatic-red-science.md)
+· [View the metrics](docs/proofs/2026-11-04-automatic-red-science.metrics.json)
+· [Browse all proofs](docs/proofs/README.md)**
 
 ---
 
@@ -86,53 +131,27 @@ swarm coordination, vehicles/trains/platforms and optional vision are later work
 
 ---
 
-## Optional built-in planner server
+## Built-in harness alternatives
 
-The external-harness setup above starts only the game and MCP connection. The
-ordinary Docker/Pterodactyl paths below start the built-in planner instead. For
-the separate Jev experiment, explicitly select `experiment/jev-agent-architecture`.
+For a self-contained harness that calls your model provider directly, choose
+**plan mode** or **pursuit mode** in the branch table above and read that
+branch's README. Plan mode uses a planner/executor workflow with optional Jev.
+Pursuit mode is a separate operator-loop implementation still in development.
 
-For the built-in planner, you need Docker or a Pterodactyl host, a compatible Factorio setup, and credentials
-for your chosen model provider. Provider-backed operation may incur API charges.
-Offline contribution/tests do not require production credentials.
-
-For Docker, follow the full [setup guide](deploy/docker/README.md). Its basic
-startup, after configuration, is:
-
-```sh
-cp .env.example .env
-# Edit .env locally: set FACTORIO_RCON_PASSWORD and the required provider settings.
-# Main is the default source; pin SGLUNA_SOURCE_REF to an exact main SHA for reproduction.
-docker compose up -d --build
-```
-
-The Compose build defaults to `main`. Set `SGLUNA_SOURCE_REF` deliberately for a
-development build, or pin a full commit SHA for reproduction. Keep credentials
-outside Git, and use your own persistent data directory.
-
-For Pterodactyl, choose a channel and follow its
-[configuration and update guide](deploy/pterodactyl/README.md):
-
-| Egg | Default source | Purpose |
-| --- | --- | --- |
-| [Main](deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Main built-in planner package |
-| [NPC E2E / Jev Experiment](deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json) | `experiment/jev-agent-architecture` | Experimental development |
-
-Restart keeps the installed code. Pterodactyl reinstall resolves the selected
-ref again. Docker can reuse its source layer; use an exact SHA or the Docker
-guide's `SGLUNA_SOURCE_NONCE` procedure to pick up a branch update.
-Managed Pterodactyl installs provide `rollback-sgluna.sh` and preserve saves,
-user mods and non-secret configuration across completed releases.
-
-SGLuna uses `SGLUNA_*` settings, `sgluna-config.json` and `!luna` chat input.
-Legacy AIRI settings/input aliases are documented in the deployment guide.
+The external setup on this branch starts the game and MCP connection. The
+ordinary [Docker](deploy/docker/README.md) and
+[Pterodactyl](deploy/pterodactyl/README.md) server installers retain built-in
+planner paths; they are separate from the external MCP setup. Follow the
+plan-mode README and explicitly select `feat/builtin-harness-plan` as the
+source when installing that mode.
 
 ---
 
 ## Contribute
 
-External-harness development integrates into **`main`**. The internal
-planner/Jev experiment remains separate on `experiment/jev-agent-architecture`. See [CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
+External-harness development integrates into **`main`**. Built-in plan and
+pursuit development stay on their respective branches listed above. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
 bug reports and pull requests, and [TESTING.md](docs/TESTING.md) for commands.
 The shared Windows checkout requires Docker tests because its dependency
 folders are WSL symlinks; do not run a Windows host package install there.
