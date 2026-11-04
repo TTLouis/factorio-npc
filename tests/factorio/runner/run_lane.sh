@@ -298,6 +298,10 @@ case "$LANE" in
     printf '[npc-test][requirements] Running scripted first-plan grounding against live recipe/research facts...\n'
     run_node goal_requirements_factorio.mjs
     ;;
+  pursuit-lifecycle)
+    printf '[npc-test][pursuit-lifecycle] Running scripted pursuit operator through the real CLI, runtime journal and native acceptance...\n'
+    run_node pursuit_lifecycle_factorio.mjs
+    ;;
   native-admission)
     printf '[npc-test][native-admission] Running native admission refusals, natural-only harvest and held-item placement against the real engine...\n'
     run_node native_admission_factorio.mjs

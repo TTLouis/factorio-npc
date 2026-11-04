@@ -44,6 +44,12 @@ COPY --from=build /src/packages/autorio/dist /opt/factorio/mods/autorio_0.1.0
 COPY tests/factorio/fixtures/visibility-link-prototypes.lua /opt/factorio/mods/autorio_0.1.0/data-final-fixes.lua
 COPY --from=build /src/deploy/pterodactyl/staging /test/pterodactyl/staging
 COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/pterodactyl/runtime-v8
+# Pursuit lane imports the repository layout (runtime-v8 + tools/external-harness + tools/pursuit).
+COPY --from=build /src/deploy/pterodactyl/staging /test/repo/deploy/pterodactyl/staging
+COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/repo/deploy/pterodactyl/runtime-v8
+COPY --from=build /src/tools/external-harness /test/repo/tools/external-harness
+COPY --from=build /src/tools/pursuit /test/repo/tools/pursuit
+COPY --from=build /src/contracts /test/repo/contracts
 COPY tests/factorio/runner /test/runner
 COPY tests/factorio/fixtures /test/fixtures
 COPY tests/factorio/run.sh /test/run.sh
