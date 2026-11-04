@@ -293,5 +293,6 @@
     "inspection_autosave_edits": "unavailable",
     "native_pristine_load": "recorded historical exact-version 60-update load, not rerun",
     "cleanup": "historical Docker closeout not rechecked; separate capture PIDs verified absent"
-  }
+  },
+  "report_title": "Automatic red science and lab delivery with burner coal"
 }
