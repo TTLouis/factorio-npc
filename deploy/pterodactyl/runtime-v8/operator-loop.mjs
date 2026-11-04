@@ -47,7 +47,7 @@ function notebookSection(label, note) {
   return `[${label} notebook, revision ${note.revision}]\n${note.text || '(empty)'}`
 }
 
-async function seedMessages({ brief, notebook, tools, rotation }) {
+async function seedMessages({ brief, notebook, tools, rotation, note }) {
   const [goalNote, persistentNote, context] = await Promise.all([
     notebook.read('goal'), notebook.read('persistent'), tools.call('factorio_context', {}),
   ])
@@ -59,6 +59,7 @@ async function seedMessages({ brief, notebook, tools, rotation }) {
     notebookSection('Goal', goalNote),
     notebookSection('Persistent', persistentNote),
     `[CURRENT CONTEXT from factorio_context]\n${context.content[0].text}`,
+    ...(typeof note === 'string' && note ? [`[SUPERVISOR] ${note}`] : []),
   ]
   // The brief stays a fixed first message so it remains a cacheable prefix.
   return [{ role: 'system', content: brief }, { role: 'user', content: parts.join('\n\n') }]
@@ -81,13 +82,13 @@ function refusal(code, message) {
  * survive rotation and restart. `complete({ messages, tools, signal })` returns
  * `{ message: { content, tool_calls }, usage }` in OpenAI-compatible shape.
  */
-export async function runOperatorLoop({ complete, tools, notebook, brief, state, options = {}, signal, onEvent = () => {}, saveState = async () => {} }) {
+export async function runOperatorLoop({ complete, tools, notebook, brief, state, options = {}, signal, onEvent = () => {}, saveState = async () => {}, afterResponse, seedNote }) {
   if (typeof complete !== 'function' || typeof tools?.call !== 'function' || typeof notebook?.read !== 'function'
     || typeof brief !== 'string' || brief.length === 0 || !validState(state)) throw new TypeError('invalid operator loop configuration')
   const limits = { ...OPERATOR_LOOP_DEFAULTS, ...options }
   const definitions = [...tools.definitions, ...notebookToolDefinitions]
   const emit = (type, detail = {}) => onEvent({ type, ...detail, requests: state.requests, rotations: state.rotations })
-  let messages = await seedMessages({ brief, notebook, tools, rotation: state.rotations })
+  let messages = await seedMessages({ brief, notebook, tools, rotation: state.rotations, note: seedNote })
   let lastPromptTokens = 0
 
   for (;;) {
@@ -125,6 +126,7 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
     }
 
     let submitted = false
+    const outcomes = []
     for (const [index, call] of calls.entries()) {
       const name = call?.function?.name
       let result
@@ -152,9 +154,14 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
         state.tool_calls++
       }
       emit('tool_result', { tool: name, is_error: result.isError, code: result.isError ? result.structuredContent?.code : undefined })
+      outcomes.push({ tool: name, result })
       messages.push({ role: 'tool', tool_call_id: call?.id, content: result.content[0].text })
     }
     await saveState(state)
+    if (typeof afterResponse === 'function') {
+      const stop = await afterResponse({ state, outcomes })
+      if (typeof stop === 'string') { await saveState(state); emit('supervisor_stop', { reason: stop }); return { stop, state } }
+    }
   }
 }
 
