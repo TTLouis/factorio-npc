@@ -2,7 +2,7 @@
   "schema": 1,
   "run": "external-sonnet-redscience-3-20261103",
   "report_date": "2026-11-04",
-  "derivation": "offline from existing evidence; no new engine or model run",
+  "derivation": "offline original-trial audit; separate post-trial graphics inspection for screenshots, no new inference trial",
   "source_commit": "560529b415082ab4ce5239fc1940b7fbd27c5b00",
   "tools": {
     "factorio_capabilities": {
