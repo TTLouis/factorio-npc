@@ -1,4 +1,4 @@
-# External trial 3: automatic red science, with qualifications
+# Automatic red science and lab delivery with burner coal
 
 Report date: November 4, 2026. Run: `external-sonnet-redscience-3-20261103`.
 
@@ -13,7 +13,52 @@ This report adds the run to the evidence list without promoting it to an
 unqualified success. It records proposed repairs only. No implementation,
 gameplay, deployment or new trial is part of this report.
 
-## Tested configuration and boundaries
+## Screenshots
+
+Four native renders from a separate post-trial inspection copy. They include
+the crash site created on first-player entry; no debris was deleted for these
+images. Production counts come from the original hands-off measurements.
+
+### Science production and automatic lab feeding
+
+![Trial 3 science and gear assemblers, electric iron and copper drills, furnaces and lab](images/2026-11-04-trial-3/science-line.jpg)
+
+The science assembler sits between copper smelting and gear production, with
+the lab above it. Electric drills supply iron and copper; burner inserters feed
+furnace fuel from the coal belt. Wreckage visible below the belt was generated
+on this later inspection load, after the production measurement.
+
+### Coal-fed electricity at the water
+
+![Trial 3 offshore pump, boiler and steam engine supplied by the long coal belt](images/2026-11-04-trial-3/power-plant.jpg)
+
+The long coal belt feeds the boiler through an inserter. The pump and steam
+engine supply the electric network. The fuel source remains the burner drill
+shown below; this image does not establish electric coal extraction.
+
+### Burner coal source and bootstrap smelting
+
+![Trial 3 self-feeding burner coal drill and four bootstrap furnaces beside the coal belt](images/2026-11-04-trial-3/coal-and-bootstrap.jpg)
+
+The burner coal drill feeds the belt and receives fuel back through an inserter.
+Four bootstrap furnaces stand beside the belt. These are distinct from the
+abandoned, singly hand-fuelled furnace 38 and from the final science-site
+furnaces. This image makes the remaining burner dependency visible.
+
+### Whole layout and late-spawning main ship
+
+![Trial 3 overview with coal mine at lower left, science site at upper left, power plant at right, and newly spawned ship crossing the existing belt route](images/2026-11-04-trial-3/base-overview.jpg)
+
+The overview connects the coal source, science site and distant power plant.
+The main crashed ship crosses the already-built belt route near the middle.
+It was spawned by first-player initialization during this inspection, not
+present during the NPC-only production window. The visual overlap is retained
+instead of removing the ship for a cleaner picture. Post-crash belt function
+and damage were not measured.
+
+## Report notes
+
+### Tested configuration and boundaries
 
 | Field | Recorded value |
 | --- | --- |
@@ -33,7 +78,7 @@ the reviewed internal runner's 60-minute construction contract; it must not be
 compared as though it passed that gate. Its three operator stints were parts of
 one world, not three independent trials.
 
-## What was built and measured
+### What was built and measured
 
 A self-feeding burner coal drill supplied a long belt to the smelting site and
 the power plant. An offshore pump, boiler and steam engine supplied electricity
@@ -79,7 +124,7 @@ Useful inspection locations from the native snapshots:
 | Power plant | Pump 213 at (54.5,4.5), boiler 214 at (52.5,4), engine 215 at (52.5,0.5) |
 | Coal source | Burner drill 39 at (-77,34), fed back by inserter 44 |
 
-## Manual inputs and acceptance
+### Manual inputs and acceptance
 
 The historical fuel audit covers all 330 submissions and identifies two manual
 fuel transfers: `r3-011-fuel-wood-BOOTSTRAP` supplied 8 wood to bootstrap furnace
@@ -99,7 +144,7 @@ are part of construction, not the hands-off output claim.
 | First-human-join compatibility without new world interference | **Not met as an initialization invariant:** screenshot capture reproduced crash creation across the existing belt route; functional damage remains untested |
 | Overall owner goal | **Below goal; retain as qualified evidence** |
 
-## Crash-site startup issue and editor note
+### Crash-site startup issue and editor note
 
 The owner observed wreckage during later editor inspection and explained that
 it appeared after the NPC had already placed structures. They removed the
@@ -164,7 +209,7 @@ need an explicit safe disposition rather than blindly spawning wreckage into
 their factories. A prompt asking the operator to avoid spawn does not repair
 the shared startup boundary.
 
-## Tool use, execution and errors
+### Tool use, execution and errors
 
 The offline audit parsed every line of the sealed operator log. All **808 calls**
 reconcile, including **330 submissions = 325 completed admitted operations +
@@ -224,7 +269,7 @@ Recorded `factorio_resume` and `factorio_cancel` calls are zero. The historical
 closeout records no parent gameplay intervention. The owner's later debris
 deletion is separately disclosed above; it is not a trial recovery.
 
-## Plans, usage and time
+### Plans, usage and time
 
 The original operator brief and checkpoint remain sealed. The checkpoint's
 outline is: bootstrap plates and a self-fed coal drill; expand coal-fed
@@ -258,7 +303,7 @@ token-price equivalent and billed amount are unknown. Claude Code subscription
 token usage is not evidence of an incremental API charge. Missing usage and
 unpriced calls prevent a complete monetary estimate.
 
-## Findings and proposed follow-up
+### Findings and proposed follow-up
 
 1. **Initialize the freeplay crash before NPC building.** This is the new startup
    finding; required behavior and proof are described above. No fix is claimed.
@@ -282,7 +327,7 @@ dedicated branch telemetry was not extracted. No path in the internal planner,
 executor, Jev, automatic recovery or accelerated tick-sprint controller is
 claimed exercised.
 
-## Screenshots and reproduced crash initialization
+### Screenshot capture and reproduced crash initialization
 
 Captured November 4, 2026 with the installed Factorio 2.0.77 graphics executable
 from a new isolated copy of the sealed checkpoint. Its 32 native-mod files were
@@ -309,44 +354,7 @@ checkpoint and capture checkpoint retain their matching hashes. No inference
 or autonomous trial was started. The temporary capture processes are no longer
 running. Capture scripts and logs stay outside the sealed evidence.
 
-### Science production and automatic lab feeding
-
-![Trial 3 science and gear assemblers, electric iron and copper drills, furnaces and lab](images/2026-11-04-trial-3/science-line.jpg)
-
-The science assembler sits between copper smelting and gear production, with
-the lab above it. Electric drills supply iron and copper; burner inserters feed
-furnace fuel from the coal belt. Wreckage visible below the belt was generated
-on this later inspection load, after the production measurement.
-
-### Coal-fed electricity at the water
-
-![Trial 3 offshore pump, boiler and steam engine supplied by the long coal belt](images/2026-11-04-trial-3/power-plant.jpg)
-
-The long coal belt feeds the boiler through an inserter. The pump and steam
-engine supply the electric network. The fuel source remains the burner drill
-shown below; this image does not establish electric coal extraction.
-
-### Burner coal source and bootstrap smelting
-
-![Trial 3 self-feeding burner coal drill and four bootstrap furnaces beside the coal belt](images/2026-11-04-trial-3/coal-and-bootstrap.jpg)
-
-The burner coal drill feeds the belt and receives fuel back through an inserter.
-Four bootstrap furnaces stand beside the belt. These are distinct from the
-abandoned, singly hand-fuelled furnace 38 and from the final science-site
-furnaces. This image makes the remaining burner dependency visible.
-
-### Whole layout and late-spawning main ship
-
-![Trial 3 overview with coal mine at lower left, science site at upper left, power plant at right, and newly spawned ship crossing the existing belt route](images/2026-11-04-trial-3/base-overview.jpg)
-
-The overview connects the coal source, science site and distant power plant.
-The main crashed ship crosses the already-built belt route near the middle.
-It was spawned by first-player initialization during this inspection, not
-present during the NPC-only production window. The visual overlap is retained
-instead of removing the ship for a cleaner picture. Post-crash belt function
-and damage were not measured.
-
-## Preservation, closeout and evidence access
+### Preservation, closeout and evidence access
 
 The offline report audit verified all **47 sealed files, 7227821 bytes**, against
 their existing manifest lengths and hashes. The sealed save and inspection
@@ -384,7 +392,7 @@ Owner-local evidence paths below are relative to the shared workspace
 | Inspection checkpoint, profile, log and separate autosave | `test-results/map-editor-external-redscience-3/` |
 | Paired private ledger | Retained owner-local with the original save; excluded from public artifacts |
 
-[Machine-readable report summary](2026-11-04-external-trial-3.metrics.json)
+[Machine-readable report summary](2026-11-04-automatic-red-science.metrics.json)
 contains public counts and qualifications. Full traces, private ledger and saves
 remain local and are not staged or published. Four native screenshots accompany
 this entry; production counts still come from the original native window.

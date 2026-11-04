@@ -10,10 +10,10 @@ New code alone does not upgrade an older result.
 
 | Date | Furthest demonstrated milestone | Outcome |
 | --- | --- | --- |
-| November 4, 2026 | [Trial 3: automatic red science and lab delivery, screenshots and qualified evidence](2026-11-04-external-trial-3.md) | 62 new packs in 619.017 native seconds; automatic fuel delivery after declared bootstrap. Below the fully electrified goal: burner coal mining remained. Later screenshot capture reproduced first-player crash creation across the built belt route. |
+| November 4, 2026 | [Automatic red science and lab delivery with burner coal, screenshots and qualified evidence](2026-11-04-automatic-red-science.md) | 62 new packs in 619.017 native seconds; automatic fuel delivery after declared bootstrap. Below the fully electrified goal: burner coal mining remained. Later screenshot capture reproduced first-player crash creation across the built belt route. |
 | October 31, 2026 | [Semi-automated red science, with screenshots](2026-10-31-red-science.md) | 12 new packs in a two-minute hands-off window; chest output, manual fuel servicing. Formal acceptance failed a furnace observation check. |
 
-Trial 3 adds measured automatic science-to-lab delivery. Fully electrified
+This run adds measured automatic science-to-lab delivery. Fully electrified
 starter-base production and compatibility with later first-player crash-site
 creation remain unproven. The new entry is qualified evidence, not an
 unqualified pass of the owner's goal.
