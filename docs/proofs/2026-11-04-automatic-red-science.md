@@ -4,6 +4,10 @@ On November 4, 2026, an external operator built a red-science line from an empty
 NPC inventory in a fresh freeplay world. The Windows-host-to-Docker trial ran
 at normal game speed with zero connected human players.
 
+> "After seeing what the AI has build, it does remineded me of my first 'try' and
+> I quit after seeing the up comming green science and did not comback untill my
+> friend asked me to play with them."
+
 | Item | Recorded value |
 | --- | --- |
 | Models | Claude Sonnet 5.5 (operator); Opus 5.5 (coordination) |
@@ -48,7 +52,9 @@ a burner drill.
 ### Coal source and bootstrap smelting
 
 ![Self-feeding burner coal drill and bootstrap furnaces beside the belt](images/2026-11-04-trial-3/coal-and-bootstrap.jpg)
-"I mean, this is technically automated"
+
+> "I mean, this is technically automated"
+
 The burner drill feeds the belt and receives fuel back through an inserter.
 The nearby furnaces supported construction. This source supplied the final
 line's fuel and explains the remaining burner dependency.
