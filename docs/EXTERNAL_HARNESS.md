@@ -77,6 +77,36 @@ admission and protected geometry, and refuses clearance. Missing guard capabilit
 unknown geometry, extra joins, changed targets or lost claim history fail closed.
 An unused frozen claim remains durable; deleting claims or the ledger is unsafe.
 
+`place_line` places a straight run of `transport-belt` or a line of
+`small-electric-pole` in one admitted operation:
+`{entity_name, x, y, direction?, line_direction, count, spacing?}`. Tile `i` is
+`(x, y)` plus `i * spacing` steps along `line_direction` (0 north, 4 east, 8 south,
+12 west); `direction` is each entity's own facing (default 0), `count` is 1–32
+(`capabilities.limits.line_count`) and `spacing` 1–8 (default 1). It is
+external-only: not part of the shared ordinary-agent or runtime-v8 catalog, and
+it needs the mod capability `external_line_placement_supported`.
+Preflight is strict and read-only: the actor must hold all `count` items, and every
+tile must pass the same exact-grid, NPC-reservation, native collision and external
+footprint checks as `place_entity`, within 128 tiles of the actor (rechecked at
+admission). Items on the ground and the actor itself block a tile, so stand clear of
+the line before submitting. Any failing tile refuses the whole line before it is sent (`not_happened`), with
+`tile_index` and up to 8 blockers. Execution queues `count` native placements in one
+journal slot; each placement re-checks its tile with the same footprint rule and the
+native `refuse_clearance` flag; if the actor's walk ends inside a later tile it steps
+out first. Nothing is cleared or replaced.
+A `completed` receipt requires the native line record to list every tile as placed;
+its `line_placement` field lists each entity (`index`, `unit_number`, `position`,
+`direction`). A blocker that appears during execution, or a cancel, stops the line.
+The receipt is then `partial` (`exact_line_placement_partial`): the placed prefix,
+which tiles are missing or were never placed, and the first refusal (`index`, `code`,
+`blockers`). It is never reported as success. A refusal on the first tile, before
+anything was placed, is a native proven refusal. After a restart or a batch generation
+change the line is `uncertain`; inspect the tiles instead of resubmitting blindly.
+A finished line also reads `uncertain` (`line_receipt_incomplete`) until a receipt reads
+the native line record of exactly this request and it lists every tile as placed.
+Script-placed poles and belts get the native placement result only; read
+`getEntityStatus` for wire connections and belt state.
+
 `research_technology` submits native research; its completed operation receipt does
 not prove research completion. Read `getTechnology({name})` and
 `getResearchStatus({})` for current requirements, progress and researched state.

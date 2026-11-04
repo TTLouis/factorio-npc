@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import { libraryMetadata } from './library.mjs'
 import { MCP_PROTOCOL_VERSION, MCP_TOOLS } from './mcp-server.mjs'
-import { capabilities, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
+import { capabilities, LINE_PROTOTYPES, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
 
 const manifest = JSON.parse(readFileSync(new URL('../../contracts/factorio-tool-contract.json', import.meta.url), 'utf8'))
 const external = manifest.external_harness
@@ -24,7 +24,11 @@ test('external subset and MCP lifecycle exactly match the canonical manifest', (
   assert.equal(external.observations.includes(binding.name), false, 'immutable metadata selection is not a cacheable observation')
   assert.equal(external.protocol_version, MCP_PROTOCOL_VERSION)
   assert.equal(external.operation_admission_protocol, 2)
-  for (const name of external.operations) assert.ok(manifest.operations[name].surfaces.includes('pterodactyl-runtime-v8'))
+  // External-only operations are not part of the shared ordinary-agent/runtime-v8 operation set.
+  for (const name of external.operations) {
+    if (Object.hasOwn(external.external_only_operations, name)) assert.ok(!Object.hasOwn(manifest.operations, name), name)
+    else assert.ok(manifest.operations[name].surfaces.includes('pterodactyl-runtime-v8'), name)
+  }
   for (const name of external.observations) assert.ok(manifest.tools[name].surfaces.includes('pterodactyl-runtime-v8'))
 })
 
@@ -71,4 +75,26 @@ test('the declared fluid network limit is the native preservation guard bound', 
   assert.equal(Number(source.match(/const MAX_PROTECTED_FLUID_ENTITIES = (\d+)/)?.[1]), external.limits.fluid_network_entities)
   assert.equal(capabilities().limits.fluid_network_entities, external.limits.fluid_network_entities)
   assert.ok(capabilities().operation_notes.place_candidate.includes(`at most ${external.limits.fluid_network_entities} entities`))
+})
+
+test('external-only line placement agrees with the bridge and the native mod', () => {
+  const catalog = capabilities()
+  const line = catalog.operations.find(operation => operation.name === 'place_line')
+  assert.deepEqual(line.args, external.external_only_operations.place_line.args)
+  assert.deepEqual(external.line_placement_prototypes, [...LINE_PROTOTYPES])
+  assert.deepEqual(catalog.limits.line_prototypes, [...LINE_PROTOTYPES])
+  assert.equal(catalog.limits.line_count, external.limits.line_count)
+  assert.equal(catalog.limits.line_spacing, external.limits.line_spacing)
+  for (const name of LINE_PROTOTYPES) assert.ok(external.place_entity_prototypes.includes(name), name)
+  const mod = readFileSync(new URL('../../packages/autorio/src/line_placement.ts', import.meta.url), 'utf8')
+  assert.match(mod, new RegExp(`count: ${external.limits.line_count}, spacing: ${external.limits.line_spacing}, history: \\d+, blockers: ${external.limits.footprint_blockers},`))
+  assert.equal(Number(mod.match(/EXTERNAL_FOOTPRINT_SCAN_LIMIT = (\d+)/)?.[1]), external.limits.footprint_scan)
+  assert.ok(mod.includes(`LINE_PLACEMENT_PROTOTYPES = [${LINE_PROTOTYPES.map(name => `'${name}'`).join(', ')}]`))
+  const bridge = readFileSync(new URL('./native-bridge.mjs', import.meta.url), 'utf8')
+  assert.ok(bridge.includes(`limit=${external.limits.footprint_scan}}); if #found>=${external.limits.footprint_scan} then`))
+  assert.ok(bridge.includes(`#blockers<${external.limits.footprint_blockers} then`))
+  const control = readFileSync(new URL('../../packages/autorio/src/control.ts', import.meta.url), 'utf8')
+  assert.match(control, /external_line_placement_supported: 1/)
+  assert.equal(external.line_placement_native_safety.required_capability, 'external_line_placement_supported')
+  assert.ok(catalog.operation_notes.place_line.includes(String(external.limits.line_count)))
 })

@@ -50,7 +50,7 @@ export const PENDING_OPERATION_LIMITS = Object.freeze({
 // Operation names whose effect on the world is not safe to repeat blindly.
 const DELIVERY_OPERATIONS = new Set(['move_items', 'move_items_exact', 'move_items_with_player', 'supply_entity'])
 const CRAFT_OPERATIONS = new Set(['craft_item'])
-const PLACE_OPERATIONS = new Set(['place_entity', 'place_candidate', 'execute_construction_plan'])
+const PLACE_OPERATIONS = new Set(['place_entity', 'place_candidate', 'execute_construction_plan', 'place_line'])
 const WORLD_OPERATIONS = new Set(['prepare_pump_site', 'mine_entity', 'mine_entity_exact', 'clear_area', 'rotate_entity', 'rotate_entity_exact', 'set_machine_recipe', 'equip_weapon', 'equip_ammo', 'equip_armor'])
 
 export function effectClassOf(name) {
@@ -789,6 +789,80 @@ function terminalConstructionLayoutPartial(admission, status, pending) {
     receipt_source: matches.length === 1 ? 'journal' : 'sealed_row' }
 }
 
+// Factorio encodes an empty Lua array as {}; only that exact shape is an empty list.
+function luaList(value, limit) {
+  if (Array.isArray(value)) return value.length <= limit ? value : undefined
+  return isRecord(value) && Object.keys(value).length === 0 ? [] : undefined
+}
+const LINE_RECEIPT_FIELDS = ['batch_ref', 'batch_id', 'batch_generation', 'state', 'tick', 'task_count', 'tasks_started', 'started_count']
+const LINE_PLACEMENT_MAX = 32
+
+// The mod seals an external line placement as partial (exact_line_placement_partial) from its line record and the cancelled
+// batch receipt (line_placement.ts terminal_line_placement_settlement). This re-proves the link from the retained row instead
+// of trusting that string: one place_line slot with one exact batch reference at the current generation, idle native queues,
+// one cancelled receipt of placing tasks only (as many as the slot queued and the line holds; the journal's, or the sealed
+// copy once the journal evicted it, and both agree when both exist), and tile indexes that partition the line: the placed
+// tiles and the placed-but-gone tiles form a prefix no longer than the tasks started, the rest were not placed. It closes the
+// native admission as partial work only; the line is never replayed.
+export function terminalLinePlacementPartial(admission, status, pending) {
+  const slots = admission?.slots
+  if (admission?.state !== 'partial' || admission.ok !== false || admission.error !== 'exact_line_placement_partial'
+    || status?.status_error || status?.error || !nativeAdmissionJournal(status.admission_journal?.records ?? status.admission_journal).known
+    || status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch
+    || !Number.isSafeInteger(status.batch_generation) || admission.generation !== status.batch_generation
+    || !Array.isArray(slots) || slots.length !== 1 || admission.operation_count !== 1 || pending?.operations?.length !== 1) return null
+  const slot = slots[0]
+  const ref = slot?.batch_refs?.[0]
+  if (!ref || !Number.isSafeInteger(ref.batch_id) || ref.batch_id < 1 || ref.batch_generation !== admission.generation
+    || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`) return null
+  if (slot.index !== 1 || slot.ok !== true || slot.operation !== 'place_line' || pending.operations[0].name !== 'place_line'
+    || !Number.isSafeInteger(slot.queued_tasks) || slot.queued_tasks < 1 || slot.queued_tasks > LINE_PLACEMENT_MAX || slot.batch_refs.length !== 1) return null
+  const line = admission.line_placement
+  if (!isRecord(line) || !isRecord(line.receipt)) return null
+  if (!Array.isArray(status.receipt_journal) || !status.receipt_journal.every(isRecord)) return null
+  const matches = status.receipt_journal.filter(row => row.batch_ref === ref.batch_ref
+    || row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation)
+  if (matches.length > 1) return null
+  const sealed = line.receipt
+  const sealedTypes = luaList(sealed.task_types, 64)
+  if (matches.length === 1) {
+    const journal = matches[0]
+    if (!LINE_RECEIPT_FIELDS.every(field => sealed[field] === journal[field]) || text(sealed.reason ?? '', 128) !== text(journal.reason ?? '', 128)
+      || !sealedTypes || !Array.isArray(journal.task_types) || sealedTypes.length !== journal.task_types.length
+      || !sealedTypes.every((type, i) => type === journal.task_types[i])) return null
+  }
+  const receipt = matches.length === 1 ? matches[0] : { ...sealed, task_types: sealedTypes }
+  if (receipt.state !== 'cancelled' || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation
+    || receipt.batch_ref !== ref.batch_ref || receipt.task_count !== slot.queued_tasks || !Array.isArray(receipt.task_types)
+    || receipt.task_types.length !== receipt.task_count || !receipt.task_types.every(type => type === 'placing')
+    || !Number.isSafeInteger(receipt.tasks_started) || receipt.tasks_started < 1 || receipt.tasks_started > receipt.task_count
+    || !Number.isSafeInteger(receipt.started_count) || receipt.started_count < receipt.tasks_started
+    || !Number.isSafeInteger(admission.tick) || !Number.isSafeInteger(receipt.tick) || receipt.tick < admission.tick
+    || receipt.outcome || receipt.refused_count || receipt.refusals?.length) return null
+  const placed = luaList(line.placed, LINE_PLACEMENT_MAX)
+  const missing = luaList(line.missing_indexes, LINE_PLACEMENT_MAX)
+  const notPlaced = luaList(line.not_placed_indexes, LINE_PLACEMENT_MAX)
+  if (!Number.isSafeInteger(line.line_id) || line.line_id < 1 || line.count !== receipt.task_count || typeof line.entity_name !== 'string'
+    || !placed || !missing || !notPlaced
+    || !placed.every(row => isRecord(row) && Number.isSafeInteger(row.index) && Number.isSafeInteger(row.unit_number) && row.unit_number > 0
+      && Number.isFinite(row.position?.x) && Number.isFinite(row.position?.y))) return null
+  const placedIndexes = placed.map(row => row.index)
+  const prefix = [...placedIndexes, ...missing].sort((a, b) => a - b)
+  if (prefix.length > receipt.tasks_started || !prefix.every((index, position) => index === position)
+    || notPlaced.length !== line.count - prefix.length || !notPlaced.every((index, position) => index === prefix.length + position)) return null
+  const refusal = isRecord(line.refusal) && Number.isSafeInteger(line.refusal.index) && typeof line.refusal.code === 'string'
+    ? { index: line.refusal.index, code: text(line.refusal.code, 80),
+        ...(luaList(line.refusal.blockers, 8)?.length ? { blockers: luaList(line.refusal.blockers, 8) } : {}) }
+    : null
+  return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'line',
+    line_id: line.line_id, entity_name: line.entity_name, count: line.count,
+    placed: placed.map(row => ({ index: row.index, unit_number: row.unit_number, position: { x: row.position.x, y: row.position.y },
+      ...(Number.isSafeInteger(row.direction) ? { direction: row.direction } : {}) })),
+    placed_indexes: placedIndexes, missing_indexes: missing, not_placed_indexes: notPlaced,
+    refusal, stop_reason: text(receipt.reason ?? '', 128) || null,
+    receipt_source: matches.length === 1 ? 'journal' : 'sealed_row' }
+}
+
 // A normal boot binds the NPC again before the pending operation is reconciled (supervisor bindNpc: the guard's configure cancels
 // the queue and bumps the deployment epoch, then startup reconciliation advances the batch generation). The pending operation
 // therefore carries the epoch it ran under, which is older than the current one. This is the one place an epoch change does not
@@ -879,6 +953,9 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     const navigation = terminalNavigationCancellation(admission, status, pending)
     if (navigation) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
       reason: 'exact_terminal_navigation_cancelled', ...navigation }
+    const line = terminalLinePlacementPartial(admission, status, pending)
+    if (line) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
+      reason: 'exact_line_placement_partial', ...line }
     const layout = terminalConstructionLayoutPartial(admission, status, pending)
     if (layout) return { verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, effect: EFFECT.PARTIAL_KNOWN,
       reason: 'exact_construction_layout_partial', ...layout }
@@ -979,9 +1056,10 @@ export function reconciliationFacts(result, pending) {
     batch_id: result?.batch_id ?? null,
     operations: (pending?.operations ?? []).map(operation => operation.name),
     effect_classes: [...new Set((pending?.operations ?? []).map(operation => operation.effect_class))],
-    ...(['gather', 'navigation', 'layout'].includes(result?.recovery_kind) ? { recovery_kind: result.recovery_kind, receipt_tick: result.receipt_tick, batch_ref: result.batch_ref } : {}),
+    ...(['gather', 'navigation', 'layout', 'line'].includes(result?.recovery_kind) ? { recovery_kind: result.recovery_kind, receipt_tick: result.receipt_tick, batch_ref: result.batch_ref } : {}),
     ...(result?.recovery_kind === 'layout' ? { layout_id: result.layout_id, placed_node_ids: result.placed_node_ids, not_placed_node_ids: result.not_placed_node_ids, missing_node_ids: result.missing_node_ids, receipt_source: result.receipt_source } : {}),
-    ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !['gather', 'navigation', 'layout'].includes(result?.recovery_kind)
+    ...(result?.recovery_kind === 'line' ? { line_id: result.line_id, placed_indexes: result.placed_indexes, not_placed_indexes: result.not_placed_indexes, missing_indexes: result.missing_indexes, refusal: result.refusal, receipt_source: result.receipt_source } : {}),
+    ...(result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !['gather', 'navigation', 'layout', 'line'].includes(result?.recovery_kind)
       ? { completed_tasks: result.completed_tasks, refused_tasks: result.refused_tasks } : {}),
     ...(result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
       ? { applied_slots: result.applied_slots ?? [], refused_slots: result.refused_slots ?? [], refusal_codes: result.refusal_codes ?? [], unrun_slots: result.unrun_slots ?? 0,
@@ -994,6 +1072,7 @@ export function reconciliationFacts(result, pending) {
 export function reconciliationGuidance(result, pending) {
   const facts = JSON.stringify(reconciliationFacts(result, pending))
   if (result?.reason === 'exact_terminal_navigation_cancelled') return `Operation reconciliation: the exact navigation-only batch ended unreachable with idle native queues. Movement may have occurred; the destination is not verified. Re-observe current position and the unchanged checkpoint before choosing the next action. Facts: ${facts}`
+  if (result?.reason === 'exact_line_placement_partial') return `Operation reconciliation: the exact line placement batch was cancelled before every tile was placed, with idle native queues. Tiles ${result.placed_indexes.join(', ') || 'none'} were placed and are kept; ${result.not_placed_indexes.length ? `tiles ${result.not_placed_indexes.join(', ')} were not placed` : 'every tile was placed before the batch was cancelled'}${result.missing_indexes?.length ? `; tiles placed and since gone: ${result.missing_indexes.join(', ')}` : ''}${result.refusal ? `; tile ${result.refusal.index} refused: ${result.refusal.code}` : ''}. This is partial work, not success, and the line is not replayed. Facts: ${facts}`
   if (result?.reason === 'exact_construction_layout_partial') return `Operation reconciliation: the exact construction layout batch ended unfinished (cancelled, or retired by a restart) with idle native queues. The layout's placed nodes (${result.placed_node_ids.join(', ') || 'none'}) were built and are kept; its unplaced nodes (${result.not_placed_node_ids.join(', ') || 'none'}) were not built${result.missing_node_ids?.length ? `; nodes placed and since gone: ${result.missing_node_ids.join(', ')}` : ''}. This is partial work, not batch success, and the original batch is not replayed. Facts: ${facts}`
   if (result?.reason === 'exact_terminal_gather_cancelled') return `Operation reconciliation: the exact gather-only batch terminated with partial acquisition. No slot quantity is assumed complete or absent. Keep the effect hold until the harness reads fresh inventory and computes only the unchanged checkpoint deficit; do not replay the batch. Facts: ${facts}`
   if (result?.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL) {

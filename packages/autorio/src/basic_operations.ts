@@ -20,6 +20,7 @@ import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_prepa
 import { layout_node_failed } from './construction_layout'
 import type { EntityRemovalReceipt } from './entity_removal_receipt'
 import { capture_removal_binding } from './operation_admission'
+import { line_node_failed } from './line_placement'
 
 type BasicTask = PlayerParametersMineEntity | PlayerParametersPreparePumpSite | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
 type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
@@ -27,6 +28,7 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'actor_changed' | 'no_target' | 'target_gone' | 'no_inventory' | 'wrong_force'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
   | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable' | 'construction_plan_blocked_no_clear' | 'layout_connection_unproven'
+  | 'placement_footprint_occupied' | 'placement_footprint_dense' | 'line_node_unproven'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
   | 'entity_removal_refused' | 'entity_removal_uncertain' | 'hydraulic_mutation_refused'
@@ -86,6 +88,8 @@ export interface BasicOperationResult {
   /** A placement of a connected construction layout: the node it builds, and why a refusal found its connections unproven. */
   layout_node?: { layout_id: number, index: number }
   layout_refusal?: string
+  /** A tile of an external line placement (line_placement.ts). */
+  line_node?: { line_id: number, index: number }
   // Ground items a placement picked up from its footprint, and one that did not fit.
   ground_items_picked_up?: GroundItem[]
   ground_item_left?: GroundItem
@@ -364,7 +368,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue(task, actor)
   }
 
-  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[], options?: { refuse_clearance?: boolean, layout_node?: { layout_id: number, index: number } }) {
+  function submit_placement(entity_name: string, x?: number, y?: number, direction?: number, placement_candidate?: { candidate_set_id: string, candidate_id: string }, protected_unit_numbers?: number[], allowed_own_clears?: number[], options?: { refuse_clearance?: boolean, layout_node?: { layout_id: number, index: number }, line_node?: { line_id: number, index: number } }) {
     const has_x = x !== undefined
     const has_y = y !== undefined
     if (has_x !== has_y || (has_x && (!valid_coordinate(x!) || !valid_coordinate(y!)))) {
@@ -394,6 +398,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       allowed_own_clears: allowed_own_clears !== undefined && allowed_own_clears.length > 0 ? allowed_own_clears : undefined,
       refuse_clearance: options?.refuse_clearance === true ? true : undefined,
       layout_node: options?.layout_node,
+      line_node: options?.line_node,
       entity_name,
       position: has_x ? { x: x!, y: y! } : undefined,
       direction,
@@ -610,6 +615,8 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     suppress_cancel_receipt = true
     // A failed node leaves its layout unable to continue by itself; the layout record says so (first reason kept).
     if (task.type === TaskStates.PLACING) layout_node_failed(task.layout_node, code)
+    // A refused line tile is the line's first refusal; the cancellation below stops the remaining tiles.
+    if (task.type === TaskStates.PLACING) line_node_failed(task.line_node, code, details.placement_blockers)
     // A placement is only created after every check passes, so a placing
     // failure (including create_failed, which creates nothing) changed nothing
     // in the world unless the task picked up ground items from its footprint

@@ -5,6 +5,8 @@ import type { TaskBatchIdentity, TaskBatchReceipt } from './task_manager'
 import type { EntityRemovalReceipt, RemovalBinding } from './entity_removal_receipt'
 import { node_ids, settle_execution } from './construction_layout_record'
 import { resolve_recorded_entity } from './entity_reference'
+import type { LinePlacementSettlement } from './line_placement'
+import { terminal_line_placement_settlement } from './line_placement'
 
 export const ADMISSION_LIMITS = { unresolved: 64, history: 64, slots: 16, refs: 16 }
 export interface FluidPreservationOwner {
@@ -104,14 +106,21 @@ export interface OperationAdmission extends OperationCorrelation {
     started_count?: number
     task_types: string[]
   }
+  /**
+   * With state partial and error exact_line_placement_partial: the external line placement this admission queued, sealed
+   * from its line record and the cancelled batch receipt (line_placement.ts terminal_line_placement_settlement): the tiles
+   * placed (each re-read), the tiles not placed, the first refused tile and the receipt copy.
+   */
+  line_placement?: LinePlacementSettlement
 }
 // Operations whose submission validates, then either queues a task or returns a
 // refusal without touching the world. A refusal from any other operation
 // (equip, research, follow, composite plans, ...) may follow a partial change.
+// place_line checks every tile, then queues one placing task per tile or returns its refusal before queueing any.
 export const PURE_SUBMIT_OPERATIONS = [
   'place_entity', 'mine_entity', 'mine_entity_exact', 'mine_resource_at', 'rotate_entity', 'move_items', 'move_items_exact',
   'move_items_with_player', 'set_machine_recipe', 'launch_rocket', 'wait', 'craft_item',
-  'harvest_product',
+  'harvest_product', 'place_line',
 ]
 // supply_entity's successful submission only queues submit_move_exact calls.
 // Its failed submission can cancel a prefix, so it is deliberately NOT added
@@ -265,7 +274,8 @@ export function pinned_operation_batch_refs() {
     const record = reconcile_record(stored, status)
     // Unpinning permits receipt eviction. Preserve this terminal decision before
     // releasing its only witness, even when no later admission refresh occurs.
-    if (record.state === 'partial' && (record.error === 'exact_terminal_navigation_cancelled' || record.error === 'exact_construction_layout_partial')) Object.assign(stored, record)
+    if (record.state === 'partial' && (record.error === 'exact_terminal_navigation_cancelled' || record.error === 'exact_construction_layout_partial'
+      || record.error === 'exact_line_placement_partial')) Object.assign(stored, record)
     if (!admission_unresolved(record)) continue
     for (const slot of record.slots) for (const ref of slot.batch_refs) refs.push(ref.batch_ref)
   }
@@ -360,6 +370,11 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.state = 'partial'
     record.ok = false
     record.error = 'exact_construction_layout_partial'
+  }
+  else if (admission_unresolved(record) && apply_line_placement_settlement(record, status)) {
+    record.state = 'partial'
+    record.ok = false
+    record.error = 'exact_line_placement_partial'
   }
   else if (admission_unresolved(record) && (record.generation !== status.batch_generation || refs.some(ref => {
     const receipt = receipt_for(ref)
@@ -501,6 +516,12 @@ function apply_construction_layout_settlement(record: OperationAdmission, status
   record.not_placed_node_ids = settlement.not_placed_node_ids
   record.missing_node_ids = settlement.missing_node_ids.length > 0 ? settlement.missing_node_ids : undefined
   record.layout_receipt = settlement.layout_receipt
+  return true
+}
+function apply_line_placement_settlement(record: OperationAdmission, status: { receipt_journal: TaskBatchReceipt[], batch_generation: number }) {
+  const settlement = terminal_line_placement_settlement(record, status)
+  if (settlement === undefined) return false
+  record.line_placement = settlement
   return true
 }
 function trim_history() {

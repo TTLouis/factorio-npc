@@ -162,6 +162,12 @@ case "$LANE" in
     printf '[npc-test][crash-site] Verifying the setup record and wrecks after a real Factorio restart...\n'
     run_node crash_site_resources_factorio.mjs --phase verify
     ;;
+  line-placement)
+    # External-harness place_line through the shipped NativeBridge: belt run, pole line, mid-line partial and refusals.
+    printf '[npc-test][line-placement] Running belt, pole, partial, shortfall and blocked-tile gates...
+'
+    run_node line_placement_factorio.mjs
+    ;;
   tick-sprint)
     run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"
     stop_factorio

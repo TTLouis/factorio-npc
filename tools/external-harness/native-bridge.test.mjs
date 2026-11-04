@@ -819,3 +819,99 @@ test('machine delivery cannot bind without owned current world scope or a passin
   await assert.rejects(f.bridge.bindMachineDelivery({ unit_number: 42 }), { code: 'machine_delivery_scope_changed' })
   assert.equal(f.calls.filter(command => command.includes('"bind_current_machine_delivery"')).length, 1)
 })
+
+const line = { name: 'place_line', args: { entity_name: 'transport-belt', x: 2.5, y: -3.5, direction: 4, line_direction: 4, count: 3 } }
+function lineFixture() {
+  const f = fixture()
+  Object.assign(f.state.status, { placement_no_clear_supported: true, external_line_placement_supported: 1 })
+  return f
+}
+
+test('place_line parses exact bounded arguments, fills defaults and renders one native remote call', () => {
+  assert.deepEqual(parseExternalOperation(line).args, { ...line.args, spacing: 1 })
+  assert.deepEqual(parseExternalOperation({ name: 'place_line', args: { entity_name: 'small-electric-pole', x: 0.5, y: 0.5, line_direction: 8, count: 4, spacing: 5 } }).args,
+    { entity_name: 'small-electric-pole', x: 0.5, y: 0.5, direction: 0, line_direction: 8, count: 4, spacing: 5 })
+  assert.equal(renderExternalOperation(line), `remote.call("autorio_operations","place_line",'transport-belt',2.5,-3.5,4,4,3,1)`)
+  for (const args of [
+    { ...line.args, entity_name: 'stone-furnace' }, { ...line.args, count: 0 }, { ...line.args, count: 33 }, { ...line.args, spacing: 9 },
+    { ...line.args, line_direction: 2 }, { ...line.args, direction: 6 }, { ...line.args, x: Number.NaN }, { ...line.args, refuse_clearance: false },
+    { ...line.args, lua: 'game.print(1)' }, { ...line.args, count: 2.5 },
+  ]) assert.throws(() => parseExternalOperation({ name: 'place_line', args }), JSON.stringify(args))
+  const catalog = capabilities()
+  assert.deepEqual(catalog.limits.line_prototypes, ['transport-belt', 'small-electric-pole'])
+  assert.equal(catalog.limits.line_count, 32)
+  assert.equal(catalog.limits.line_spacing, 8)
+  assert.ok(catalog.operations.find(item => item.name === 'place_line').external_only)
+})
+
+test('place_line needs both safety capabilities and every tile within walk range before any game call', async () => {
+  const f = fixture()
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.code === 'line_placement_capability_missing' && error.notSent)
+  f.state.status.placement_no_clear_supported = true
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), { code: 'line_placement_capability_missing' })
+  f.state.status.external_line_placement_supported = 1
+  f.state.status.actor.position = { x: -100, y: -3.5 }
+  const far = { name: 'place_line', args: { ...line.args, x: 20.5, count: 10, spacing: 1 } }
+  await assert.rejects(f.bridge.prepare(far, 'run/line'), error => error.code === 'operation_limit' && error.details.tile_index === 8 && error.notSent)
+  assert.ok(!f.calls.some(command => command.includes('autorio_preflight')))
+})
+
+test('place_line preflight checks every tile with the external footprint rule and names the refused tile', async () => {
+  const f = lineFixture()
+  f.preflight = { ok: false, code: 'placement_footprint_occupied', tile_index: 1, blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 3.5, y: -3.5 }, item: 'iron-plate' }] }
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.notSent && error.details.native_code === 'placement_footprint_occupied'
+    && error.details.tile_index === 1 && error.details.blockers[0].item === 'iron-plate' && /Line tile 1 refused/.test(error.publicMessage))
+  const command = f.calls.find(text => text.includes('autorio_preflight'))
+  for (const fragment of ['"place_line"', 'limit=129', 'tile_index=i-1', 'preservation_nonfluid_output']) assert.ok(command.includes(fragment), fragment)
+  f.preflight = { ok: false, code: 'line_placement_items_insufficient', placement_item: { item_name: 'transport-belt', count: 3, held_count: 1, required_count: 3 } }
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.details.native_code === 'line_placement_items_insufficient'
+    && error.details.placement_item.held_count === 1 && /Requires 3 transport-belt, holds 1/.test(error.publicMessage))
+})
+
+test('place_line submit rechecks the line capability atomically and proves a guard refusal not admitted', async () => {
+  const f = lineFixture()
+  const prepared = await f.bridge.prepare(line, 'run/line')
+  f.onSubmit = command => {
+    assert.ok(command.includes('s.external_line_placement_supported~=1 then return "line_placement_capability_missing"'))
+    assert.ok(command.includes('for _,t in ipairs({{2.5,-3.5},{3.5,-3.5},{4.5,-3.5}}) do if (p.x-(t[1]))^2+(p.y-(t[2]))^2>16384 then return "walk_out_of_range"'), 'every tile is rechecked against the live actor position')
+    assert.ok(command.includes(`remote.call("autorio_operations","place_line",'transport-belt',2.5,-3.5,4,4,3,1)`))
+    return `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: 'external_guard_refused:line_placement_capability_missing', prefix: {} })}`
+  }
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted && error.code === 'line_placement_capability_missing')
+})
+
+function lineRecord(pending, placed, extra = {}) {
+  return { ok: true, line: { line_id: 4, actor_id: 7, entity_name: 'transport-belt', count: 3, origin: { x: 2.5, y: -3.5 }, direction: 4, line_direction: 4, spacing: 1,
+    batch_id: 1, batch_generation: 2, batch_ref: 'batch-g2-1',
+    placed: placed.map(index => ({ index, unit_number: 50 + index, name: 'transport-belt', position: { x: 2.5 + index, y: -3.5 }, direction: 4, tick: 120 + index })), ...extra } }
+}
+
+test('a completed line receipt lists each placed entity; a short native line record is never completion', async () => {
+  const f = lineFixture()
+  const prepared = await f.bridge.prepare(line, 'run/line')
+  const admission = row(prepared.pending, 'completed'); admission.slots[0].queued_tasks = 3
+  f.state.status.admission_journal = [admission]
+  f.state.status.receipt_journal = [{ batch_id: 1, batch_generation: 2, batch_ref: 'batch-g2-1', state: 'completed', task_count: 3, task_types: ['placing', 'placing', 'placing'], tick: 180 }]
+  f.state.journal.high_water = 5
+  let record = lineRecord(prepared.pending, [0, 1, 2])
+  f.onCommand = command => command.includes("\"line_placement_status\",'batch-g2-1'") ? JSON.stringify(record) : undefined
+  const done = await f.bridge.receipt(prepared.pending)
+  assert.equal(done.state, 'completed')
+  assert.equal(done.goal_verified, false)
+  assert.deepEqual(done.line_placement.placed.map(entity => [entity.index, entity.unit_number, entity.position.x]), [[0, 50, 2.5], [1, 51, 3.5], [2, 52, 4.5]])
+  assert.equal(done.line_placement.placed_count, 3)
+  assert.equal(done.line_placement.refusal, null)
+  record = lineRecord(prepared.pending, [0, 1])
+  const short = await f.bridge.receipt(prepared.pending)
+  assert.equal(short.state, 'uncertain')
+  assert.equal(short.reason, 'line_receipt_incomplete')
+  assert.equal(short.requires_reconciliation, true)
+  record = { ...lineRecord(prepared.pending, [0, 1, 2]), line: { ...lineRecord(prepared.pending, [0, 1, 2]).line, batch_ref: 'batch-g2-9' } }
+  const foreign = await f.bridge.receipt(prepared.pending)
+  assert.equal(foreign.state, 'uncertain', 'a line record of another batch is not this receipt')
+  assert.equal(foreign.line_placement, null)
+  record = { ...lineRecord(prepared.pending, [0, 1, 2]), line: { ...lineRecord(prepared.pending, [0, 1, 2]).line, spacing: 2 } }
+  const other = await f.bridge.receipt(prepared.pending)
+  assert.equal(other.state, 'uncertain', 'a record whose arguments do not reproduce the request identity is not this line')
+  assert.equal(other.line_placement, null)
+})

@@ -149,6 +149,7 @@ lane_offset() {
     map-context) printf '35' ;;
     resume-water) printf '36' ;;
     crash-site) printf '37' ;;
+    line-placement) printf '38' ;;
     tick-sprint) printf '33' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac

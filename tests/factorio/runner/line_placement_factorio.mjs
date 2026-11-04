@@ -1,0 +1,244 @@
+#!/usr/bin/env node
+// External-harness place_line against the real engine with zero humans, driven through the shipped NativeBridge
+// (prepare -> submit -> receipt), never through a model:
+//
+//   BELT       one admitted operation places an 8-tile east-facing transport-belt run; the completed receipt lists every
+//              entity with its unit number, and the engine holds exactly those belts at those tiles
+//   POLES      a 4-pole small-electric-pole line at spacing 5; the receipt lists every pole (wire connections recorded)
+//   PARTIAL    an item put on the ground on tile 5 after admission (game paused) stops the line there: the receipt is
+//              partial, never success, lists tiles 0-4 as placed and the first refusal at tile 5 with its blocker; the
+//              ground item is not cleared and tiles 6-11 stay empty
+//   SHORTFALL  holding 3 belts, a 6-tile line is refused before it is sent with the exact item accounting; nothing changes
+//   BLOCKED    a ground item already on tile 2 refuses the whole line before it is sent, naming the tile and the item
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { Rcon } from '../pterodactyl/runtime-v8/common.mjs'
+import { NativeBridge } from '../external-harness/tools/external-harness/native-bridge.mjs'
+
+let forbiddenFetchCalls = 0
+globalThis.fetch = async () => { forbiddenFetchCalls++; throw new Error('live inference forbidden in the line-placement lane') }
+
+const arg = name => { const at = process.argv.indexOf(`--${name}`); assert.ok(at >= 0 && process.argv[at + 1], `missing --${name}`); return process.argv[at + 1] }
+const results = path.resolve(arg('results'))
+const transcript = []
+const evidence = {}
+let connection
+let actorId
+let origin
+
+const command = async text => {
+  const response = await connection.command(text)
+  transcript.push({ command: text.slice(0, 800), response: String(response).slice(0, 4000) })
+  return response
+}
+const parse = (raw, label) => {
+  try { return JSON.parse(raw) }
+  catch { throw new Error(`${label} did not return JSON: ${String(raw).slice(0, 800)}`) }
+}
+// Test fixture Lua only (world setup and engine reads); the NPC acts solely through the bridge.
+const lua = async body => parse(await command(`/silent-command local a=game.get_entity_by_unit_number(${actorId}); assert(a and a.valid); local s=a.surface; ${body}`), body.slice(0, 200))
+// helpers.table_to_json writes an empty Lua table as {}.
+const list = value => (Array.isArray(value) ? value : [])
+const bridge = new NativeBridge({ rcon: { command: text => command(text) }, session: 'line-placement-lane-20261104-a1b2c3d4e5f6' })
+
+const held = name => lua(`rcon.print(helpers.table_to_json({count=a.get_item_count(${JSON.stringify(name)})}))`).then(row => row.count)
+const setHeld = (name, count) => lua(`local n=${JSON.stringify(name)}; local have=a.get_item_count(n); if have>${count} then a.remove_item{name=n,count=have-${count}} elseif have<${count} then a.insert{name=n,count=${count}-have} end; rcon.print(helpers.table_to_json({count=a.get_item_count(n)}))`)
+// Every non-resource, non-actor entity in the row of a line, as the engine holds it.
+const entitiesAt = tiles => lua(`local out={}; for i,p in ipairs({${tiles.map(t => `{${t.x},${t.y}}`).join(',')}}) do local row={}; for _,e in pairs(s.find_entities_filtered{area={{p[1]-0.45,p[2]-0.45},{p[1]+0.45,p[2]+0.45}}}) do if e.valid and e.type~="resource" and e~=a then row[#row+1]={name=e.name,type=e.type,unit_number=e.unit_number,x=e.position.x,y=e.position.y,direction=e.direction,item=e.type=="item-entity" and e.stack and e.stack.valid_for_read and e.stack.name or nil} end end; out[i]=row end; rcon.print(helpers.table_to_json({rows=out}))`).then(row => list(row.rows).map(list))
+const groundItem = tile => lua(`local e=s.create_entity{name="item-on-ground",position={${tile.x},${tile.y}},stack={name="iron-plate",count=1}}; rcon.print(helpers.table_to_json({ok=e~=nil and e.valid}))`)
+const toStart = () => lua(`a.teleport({${origin.x},${origin.y}}); rcon.print(helpers.table_to_json({x=a.position.x,y=a.position.y}))`)
+
+function tilesOf({ x, y, line_direction, count, spacing = 1 }) {
+  const step = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] }[line_direction]
+  return Array.from({ length: count }, (_, i) => ({ index: i, x: x + step[0] * spacing * i, y: y + step[1] * spacing * i }))
+}
+
+async function settle(pending, label) {
+  const deadline = Date.now() + 60000
+  for (;;) {
+    const receipt = await bridge.receipt(pending)
+    if (receipt.terminal || receipt.state === 'uncertain' && receipt.reason !== 'line_receipt_incomplete') return receipt
+    assert.ok(Date.now() < deadline, `${label} reached a terminal receipt: ${JSON.stringify(receipt).slice(0, 1500)}`)
+    await delay(100)
+  }
+}
+
+async function run(operation, key, { beforeUnpause } = {}) {
+  const prepared = await bridge.prepare(operation, key)
+  if (beforeUnpause) await lua('game.tick_paused=true; rcon.print(helpers.table_to_json({paused=game.tick_paused}))')
+  const submitted = await bridge.submit(prepared)
+  assert.equal(submitted.admitted, true, `${key} admitted`)
+  if (beforeUnpause) {
+    await beforeUnpause()
+    await lua('game.tick_paused=false; rcon.print(helpers.table_to_json({paused=game.tick_paused}))')
+  }
+  return { prepared, receipt: await settle(prepared.pending, key) }
+}
+
+async function refusal(operation, key) {
+  const before = (await bridge.snapshot()).high_water
+  let error
+  try { await bridge.prepare(operation, key) }
+  catch (caught) { error = caught }
+  assert.ok(error, `${key} was refused`)
+  assert.equal(error.notSent, true, `${key} was not sent`)
+  assert.equal((await bridge.snapshot()).high_water, before, `${key} used no journal ordinal`)
+  return error
+}
+
+function assertPlaced(line, engineRows, tiles, name, direction) {
+  assert.equal(line.entity_name, name)
+  for (const placed of line.placed) {
+    const tile = tiles[placed.index]
+    assert.deepEqual(placed.position, { x: tile.x, y: tile.y }, `placed ${placed.index} is at its tile`)
+    assert.equal(placed.direction, direction)
+    const row = engineRows[placed.index].filter(entity => entity.name === name)
+    assert.equal(row.length, 1, `exactly one ${name} on tile ${placed.index}: ${JSON.stringify(engineRows[placed.index])}`)
+    assert.equal(row[0].unit_number, placed.unit_number, `the receipt names the engine entity on tile ${placed.index}`)
+    assert.equal(row[0].direction, direction)
+  }
+}
+
+async function belt() {
+  const operation = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x + 3, y: origin.y - 4, direction: 4, line_direction: 4, count: 8 } }
+  const tiles = tilesOf(operation.args)
+  const before = await held('transport-belt')
+  const { receipt } = await run(operation, 'line-belt')
+  assert.equal(receipt.state, 'completed', JSON.stringify(receipt).slice(0, 1500))
+  assert.equal(receipt.execution_completed, true)
+  assert.equal(receipt.goal_verified, false)
+  const line = receipt.line_placement
+  assert.equal(line.count, 8)
+  assert.equal(line.placed_count, 8)
+  assert.deepEqual(line.placed.map(entity => entity.index), [0, 1, 2, 3, 4, 5, 6, 7])
+  assert.equal(line.refusal, null)
+  assertPlaced(line, await entitiesAt(tiles), tiles, 'transport-belt', 4)
+  assert.equal(await held('transport-belt'), before - 8, 'native placement consumed exactly 8 belts')
+  evidence.belt = { line, receipt_state: receipt.state }
+  console.log('PASS: BELT - one admitted operation placed 8 belts; the completed receipt names each engine entity')
+}
+
+async function poles() {
+  await toStart()
+  const operation = { name: 'place_line', args: { entity_name: 'small-electric-pole', x: origin.x - 4, y: origin.y - 2, line_direction: 8, count: 4, spacing: 5 } }
+  const tiles = tilesOf(operation.args)
+  const before = await held('small-electric-pole')
+  const { receipt } = await run(operation, 'line-poles')
+  assert.equal(receipt.state, 'completed', JSON.stringify(receipt).slice(0, 1500))
+  const line = receipt.line_placement
+  assert.equal(line.placed_count, 4)
+  assertPlaced(line, await entitiesAt(tiles), tiles, 'small-electric-pole', 0)
+  assert.equal(await held('small-electric-pole'), before - 4)
+  // Recorded, not asserted: whether script-created poles connect their copper wires natively.
+  const wires = await lua(`local out={}; for i,t in ipairs({${line.placed.map(entity => `{${entity.position.x},${entity.position.y}}`).join(',')}}) do local e=game.surfaces[1].find_entity('small-electric-pole',{t[1],t[2]}); local ok,n=pcall(function() local total=0; for _,c in pairs(e.get_wire_connectors(false) or {}) do total=total+c.connection_count end; return total end); out[i]=ok and n or tostring(n) end; rcon.print(helpers.table_to_json({copper=out}))`)
+  evidence.poles = { line, copper_connections: list(wires.copper) }
+  console.log(`PASS: POLES - 4 poles at spacing 5 placed and receipted; copper connections per pole ${JSON.stringify(list(wires.copper))}`)
+}
+
+async function partial() {
+  await toStart()
+  const operation = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x + 3, y: origin.y + 3, direction: 4, line_direction: 4, count: 12 } }
+  const tiles = tilesOf(operation.args)
+  const before = await held('transport-belt')
+  const { receipt } = await run(operation, 'line-partial', { beforeUnpause: async () => {
+    assert.equal((await groundItem(tiles[5])).ok, true, 'the fixture put an item on tile 5 after admission')
+  } })
+  assert.equal(receipt.state, 'partial', JSON.stringify(receipt).slice(0, 2000))
+  assert.equal(receipt.execution_completed, false)
+  assert.equal(receipt.requires_reconciliation, true)
+  assert.equal(receipt.reason, 'exact_line_placement_partial')
+  const line = receipt.line_placement
+  assert.deepEqual(line.placed.map(entity => entity.index), [0, 1, 2, 3, 4])
+  assert.equal(line.placed_count, 5)
+  assert.equal(line.refusal?.index, 5, JSON.stringify(line.refusal))
+  // A ground item passes can_place_entity, so only the execution-time line re-check (line_node_precheck) can refuse it.
+  assert.equal(line.refusal.code, 'placement_footprint_occupied')
+  assert.ok(list(line.refusal.blockers).some(blocker => blocker.item === 'iron-plate'), JSON.stringify(line.refusal))
+  const rows = await entitiesAt(tiles)
+  assertPlaced(line, rows, tiles, 'transport-belt', 4)
+  assert.deepEqual(rows[5].map(entity => [entity.type, entity.item]), [['item-entity', 'iron-plate']], 'the ground item was neither cleared nor built over')
+  for (let i = 6; i < 12; i++) assert.deepEqual(rows[i], [], `tile ${i} stayed empty`)
+  assert.equal(await held('transport-belt'), before - 5, 'only the 5 placed belts were consumed')
+  // The reconciliation names the same prefix and the unplaced remainder.
+  const facts = receipt.reconciliation
+  evidence.partial = { line, reason: receipt.reason, reconciliation: { verdict: facts?.verdict, reason: facts?.reason, partial: facts?.partial ?? facts?.facts } }
+  console.log(`PASS: PARTIAL - tiles 0-4 placed, first refusal at tile 5 (${line.refusal.code}); receipt partial, never success`)
+}
+
+async function shortfall() {
+  await toStart()
+  await setHeld('transport-belt', 3)
+  const operation = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x + 3, y: origin.y + 7, direction: 4, line_direction: 4, count: 6 } }
+  const tiles = tilesOf(operation.args)
+  const error = await refusal(operation, 'line-shortfall')
+  assert.equal(error.code, 'preflight_rejected')
+  assert.equal(error.details.native_code, 'line_placement_items_insufficient')
+  assert.deepEqual(error.details.placement_item, { item_name: 'transport-belt', required_count: 6, held_count: 3 })
+  assert.match(error.publicMessage, /Requires 6 transport-belt, holds 3/)
+  assert.equal(await held('transport-belt'), 3)
+  for (const row of await entitiesAt(tiles)) assert.deepEqual(row, [])
+  evidence.shortfall = { code: error.code, details: error.details }
+  console.log('PASS: SHORTFALL - holding 3 belts, a 6-tile line was refused before sending with the exact accounting')
+}
+
+async function blocked() {
+  await setHeld('transport-belt', 10)
+  const operation = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x + 3, y: origin.y + 10, line_direction: 4, count: 4 } }
+  const tiles = tilesOf(operation.args)
+  assert.equal((await groundItem(tiles[2])).ok, true)
+  const error = await refusal(operation, 'line-blocked')
+  assert.equal(error.details.tile_index, 2, JSON.stringify(error.details))
+  assert.equal(error.details.native_code, 'placement_footprint_occupied', JSON.stringify(error.details))
+  assert.ok(list(error.details.blockers).some(blocker => blocker.item === 'iron-plate'), JSON.stringify(error.details))
+  assert.equal(await held('transport-belt'), 10)
+  const rows = await entitiesAt(tiles)
+  assert.deepEqual([rows[0], rows[1], rows[3]], [[], [], []])
+  // The actor itself blocks a tile it stands on; it is refused before sending, never built under.
+  const actorAt = await toStart()
+  const under = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x, y: origin.y, line_direction: 4, count: 2 } }
+  const refused = await refusal(under, 'line-actor-tile')
+  assert.equal(refused.details.tile_index, 0, JSON.stringify(refused.details))
+  if (refused.details.native_code === 'placement_footprint_occupied') assert.ok(list(refused.details.blockers).some(blocker => blocker.type === 'character'), JSON.stringify(refused.details))
+  else assert.equal(refused.details.native_code, 'placement_not_clear', JSON.stringify(refused.details))
+  // The actor's own vision helper shares its tile; only a placed belt would be a failure here.
+  assert.deepEqual((await entitiesAt(tilesOf(under.args))).map(row => row.filter(entity => entity.name === 'transport-belt')), [[], []])
+  evidence.blocked = { details: error.details, actor_tile: { actor: actorAt, details: refused.details } }
+  console.log('PASS: BLOCKED - a ground item on tile 2 refused the whole line before sending, naming the tile and the item; the actor\x27s own tile is refused the same way')
+}
+
+try {
+  await fs.mkdir(results, { recursive: true })
+  connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') })
+  const ready = Date.now() + 30000
+  for (;;) {
+    try { await connection.connect(); break }
+    catch (error) { connection.close(); if (Date.now() >= ready) throw error; await delay(200) }
+  }
+  assert.match(await command('/version'), /2\.0\.77/)
+  const bound = await bridge.bind()
+  actorId = bound.actor.actor_id
+  assert.equal(bound.status.external_line_placement_supported, 1)
+  assert.equal(parse(await command('/silent-command rcon.print(helpers.table_to_json({humans=#game.connected_players}))'), 'humans').humans, 0)
+  // Fixture: a flat, empty 41x41 grass square around the actor, and the line items in its inventory.
+  const start = await lua('rcon.print(helpers.table_to_json({x=math.floor(a.position.x),y=math.floor(a.position.y)}))')
+  origin = { x: start.x + 0.5, y: start.y + 0.5 }
+  await lua(`local tiles={}; for dx=-20,20 do for dy=-20,20 do tiles[#tiles+1]={name="grass-1",position={${start.x}+dx,${start.y}+dy}} end end; s.set_tiles(tiles); for _,e in pairs(s.find_entities_filtered{area={{${start.x}-20,${start.y}-20},{${start.x}+21,${start.y}+21}}}) do if e.valid and e~=a and e.type~="resource" and e.type~="character" then e.destroy() end end; a.teleport({${origin.x},${origin.y}}); a.insert{name="transport-belt",count=40}; a.insert{name="small-electric-pole",count=10}; rcon.print(helpers.table_to_json({ok=true}))`)
+  await belt()
+  await poles()
+  await partial()
+  await shortfall()
+  await blocked()
+  assert.equal(forbiddenFetchCalls, 0)
+  evidence.status = 'pass'
+}
+catch (error) {
+  evidence.status = 'fail'; evidence.error = String(error?.stack ?? error)
+  await fs.writeFile(path.join(results, 'line-placement-error.txt'), `${error?.stack ?? error}\n${error?.details ? JSON.stringify(error.details) : ''}\n`)
+  process.exitCode = 1
+}
+finally {
+  await fs.writeFile(path.join(results, 'line-placement.json'), JSON.stringify({ evidence, transcript }, null, 2))
+  connection?.close()
+}

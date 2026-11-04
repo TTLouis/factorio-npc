@@ -41,6 +41,7 @@ import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
 import { execute_placement_candidate, placement_candidate_preflight, freeze_fluid_preservation_candidate, initialize_fluid_preservation_history } from './placement_candidates'
+import { line_placement_preflight, line_placement_status, submit_line_placement } from './line_placement'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
 import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
@@ -324,6 +325,8 @@ function operation_preflight(name: string, args: Record<string, any>) {
   if (name === 'research_technology') {
     return research_operation_preflight(actor, args.technology_name)
   }
+  // Every tile of an external line placement, read-only (line_placement.ts).
+  if (name === 'place_line') return line_placement_preflight(actor, args as any)
   if (name === 'harvest_product') {
     if (!actor || !actor.is_valid) return reject('no_actor')
     if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
@@ -673,6 +676,18 @@ remote.add_interface('autorio_operations', {
     }
     return accepted
   },
+  // External harness only (the internal planner catalog does not list it): one bounded straight line of transport belts or
+  // small electric poles, one native placement task per tile, placement-only. See line_placement.ts.
+  place_line: (entity_name: string, x: number, y: number, direction: number, line_direction: number, count: number, spacing: number): [boolean, string | number] => {
+    const result = submit_line_placement(get_controlled_actor(), { entity_name, x, y, direction, line_direction, count, spacing }, {
+      submit_placement: (name, tile_x, tile_y, facing, options) => basic_operation_controller.submit_placement(name, tile_x, tile_y, facing, undefined, undefined, undefined, options),
+      cancel_all_tasks: reason => task_manager.cancel_all_tasks(reason),
+      status: () => task_manager.get_status_snapshot() as any,
+    })
+    if (result[0]) log(`[AUTORIO] New place_line task: line=${result[1]} ${count} x ${entity_name} from (${x}, ${y}) line_direction=${line_direction} spacing=${spacing} direction=${direction}`)
+    return result
+  },
+  line_placement_status: (batch_ref: string) => line_placement_status(batch_ref),
   rotate_entity: (unit_number: number, reverse: boolean = false, external_world_guard?: boolean): [boolean, string] => {
     const result = basic_operation_controller.submit_rotate_exact(unit_number, reverse, external_world_guard)
     if (result[0]) log(`[AUTORIO] New rotate_entity task: unit=${unit_number}, reverse=${reverse}`)
@@ -728,6 +743,7 @@ remote.add_interface('autorio_operations', {
       ...task_manager.get_status_snapshot(),
       placement_no_clear_supported: true,
       external_fluid_candidates_supported: 1,
+      external_line_placement_supported: 1,
       admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       actor_surface_index: actor?.surface.index,

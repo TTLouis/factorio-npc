@@ -197,6 +197,12 @@ export interface PlayerParametersPlaceEntity {
    */
   layout_node?: { layout_id: number, index: number }
   /**
+   * The tile of an external line placement this task places (storage.sgluna_line_placements, line_placement.ts). Set only
+   * by place_line, always with refuse_clearance: the runtime re-checks the external footprint rule just before
+   * create_entity and records the placed entity on the line right after it.
+   */
+  line_node?: { line_id: number, index: number }
+  /**
    * Entities this placement has mined out of its footprint, as measured by the
    * inventory. Any entry means the task changed the world, like a ground-item
    * pickup.
