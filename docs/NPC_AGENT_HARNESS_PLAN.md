@@ -1,8 +1,10 @@
 # SGLuna Factorio — NPC Agent Harness Roadmap
 
-This is the current single-NPC roadmap. Historical pass-by-pass plans are retained under `docs/validation/` and should not be treated as current release gates.
+This is the roadmap for the built-in planner/Jev line on `experiment/jev-agent-architecture`. The external harness on `main` is described in [EXTERNAL_HARNESS.md](EXTERNAL_HARNESS.md); current verified state for both lines is on the [status page](NPC_AGENT_HARNESS_STATUS.md). Historical pass-by-pass plans are retained under `docs/validation/` and should not be treated as current release gates.
 
-## Current checkpoint
+## Checkpoint as of October 7, 2026 (historical)
+
+This section was last updated on October 7. Later checkpoints are in the [status log](validation/NPC_AGENT_HARNESS_STATUS_LOG_2026-09-16_TO_2026-10-24.md) and [validation history](validation/README.md).
 
 October 7 Luna recovery candidate `61f70f54` adds typed missing-fact reads without changing committed intent. The sequentially integrated units, review outcomes and acceptance checklist are in [the targeted observation checkpoint](validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md). Autonomous red-to-green acceptance and multiplayer reliability remain open.
 
