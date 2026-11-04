@@ -76,6 +76,13 @@ function refusal(code, message) {
   return toolResult({ code, message, effect: 'not_happened', journal_slot_used: false }, true)
 }
 
+// Evidence keeps arguments as parsed JSON; unparseable text stays verbatim.
+function loggedArguments(raw) {
+  if (typeof raw !== 'string') return raw
+  try { return JSON.parse(raw) }
+  catch { return raw }
+}
+
 /**
  * Run the operator until it yields (a reply with no tool calls), a budget is
  * exhausted, the signal aborts or the provider fails. `state` is the caller's
@@ -161,7 +168,7 @@ export async function runOperatorLoop({ complete, tools, notebook, brief, state,
         }
         state.tool_calls++
       }
-      emit('tool_result', { tool: name, tool_call_id: call?.id, arguments: call?.function?.arguments,
+      emit('tool_result', { tool: name, tool_call_id: call?.id, arguments: loggedArguments(call?.function?.arguments),
         result, is_error: result.isError, code: result.isError ? result.structuredContent?.code : undefined })
       outcomes.push({ tool: name, result })
       messages.push({ role: 'tool', tool_call_id: call?.id, content: result.content[0].text })

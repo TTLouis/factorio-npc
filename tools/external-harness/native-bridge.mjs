@@ -242,7 +242,7 @@ export class NativeBridge {
   }
 
   async observe(name, args = {}) {
-    check(OBSERVATION_NAMES.includes(name), 'observation_not_supported')
+    check(OBSERVATION_NAMES.includes(name), 'observation_not_supported', `observation_not_supported: supported names are ${OBSERVATION_NAMES.join(', ')}`)
     let command
     try { command = toolCommand(name, args) }
     catch (error) {

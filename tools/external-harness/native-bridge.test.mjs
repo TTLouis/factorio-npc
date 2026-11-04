@@ -210,7 +210,7 @@ test('cancel-completion race reports native completion rather than inventing can
 
 test('read-only observation accepts only curated tools and existing argument validators', async () => {
   const f = fixture()
-  await assert.rejects(f.bridge.observe('submitPlan', {}), { code: 'observation_not_supported' })
+  await assert.rejects(f.bridge.observe('submitPlan', {}), { code: 'observation_not_supported', message: /supported names are .*getInventory/ })
   await assert.rejects(f.bridge.observe('getNearbyEntities', { radius: 100000 }))
   assert.equal(f.calls.length, 0)
   assert.deepEqual(await f.bridge.observe('getRecipeDetails', { item_or_recipe: 'iron-gear-wheel' }), { example: true })

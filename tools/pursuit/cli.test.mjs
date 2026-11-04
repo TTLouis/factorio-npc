@@ -69,6 +69,8 @@ test('a run is accepted natively, persists state and evidence, and reports contr
   const requests = events.filter(event => event.type === 'provider_request')
   assert.deepEqual(requests.map(event => event.new_messages.length), [2, 2, 2])
   assert.deepEqual(requests.map(event => event.message_count), [2, 4, 6])
+  const submit = events.find(event => event.type === 'tool_result' && event.tool === 'factorio_submit')
+  assert.deepEqual(submit.arguments, { request_id: 'r1', operation: { name: 'wait', args: { ticks: 60 } } })
   const text = JSON.stringify(events)
   assert.doesNotMatch(text, /test-gateway-key|test-password|127\.0\.0\.1:8317/)
 })
