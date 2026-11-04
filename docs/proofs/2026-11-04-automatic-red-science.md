@@ -48,7 +48,7 @@ a burner drill.
 ### Coal source and bootstrap smelting
 
 ![Self-feeding burner coal drill and bootstrap furnaces beside the belt](images/2026-11-04-trial-3/coal-and-bootstrap.jpg)
-
+"I mean, this is technically automated"
 The burner drill feeds the belt and receives fuel back through an inserter.
 The nearby furnaces supported construction. This source supplied the final
 line's fuel and explains the remaining burner dependency.
@@ -84,10 +84,6 @@ already-built belt route. It was absent during the NPC-only trial.
   visibly crosses the belt route; functional damage was not tested. The
   proposed follow-up is to initialize the crash site once before NPC building
   and prevent a second crash on later player entry. **No fix was made here.**
-- **Owner's inspection edit:** the owner removed debris in the earlier editor
-  session and may not have saved it. The inspection checkpoint still matches
-  the sealed original. A separate autosave exists, but persistence of the
-  deletion is unknown. The screenshots above use another untouched copy.
 
 ---
 
