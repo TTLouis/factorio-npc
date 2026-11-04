@@ -4,7 +4,7 @@ This file is the current status summary for the single-NPC integration line. His
 
 ## October 24: reviewed Run AU identity and stop-boundary repair
 
-[Run AU repair](RUN_AU_HARNESS_REPAIR_2026-10-24.md) now records executable
+[Run AU repair](validation/RUN_AU_HARNESS_REPAIR_2026-10-24.md) now records executable
 identity from fresh raw native tool answers, before model-facing full/diff/unchanged
 projections can omit scope. Cached output cannot renew invalidated bindings.
 Legacy missing-surface locators use bounded native actor/body/entity reconciliation;
@@ -52,7 +52,7 @@ stop-boundary issues are preserved for a separate harness repair.
 
 ## October 23: Run AT polling prevention and bounded correction
 
-[Polling repair](RUN_AT_POLLING_REPAIR_2026-10-23.md) removes the standalone
+[Polling repair](validation/RUN_AT_POLLING_REPAIR_2026-10-23.md) removes the standalone
 finish RPC before ordinary world commands by confirming native1x in the same
 Lua invocation. Unexecuted residual commands restore/refresh before one retry.
 The additional control-RPC limit stays1200/minute; inline guard checks are
@@ -113,7 +113,7 @@ resources removed/verified and sealed AR/AS evidence preserved.
 
 No further live E2E, push or deployment occurred. Autonomous science production is
 still unproven. Shutdown-alarm classification and accounting helpers remain Units
-B/C in the [next-patch plan](RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md).
+B/C in the [next-patch plan](validation/RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md).
 
 ## October 23: consolidated candidate after the AR repair and Run AS
 
@@ -135,7 +135,7 @@ paths were not triggered. Eight control retries yielded five continuations and
 three failures; there were no automatic resumes. Stop/save/exact load/cleanup
 passed, with one documented sprint alarm during stop confirmation.
 
-The [next patch plan](RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md) targets a bounded
+The [next patch plan](validation/RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md) targets a bounded
 harness-owned identity refresh across observation and mutation boundaries, with
 partial-production reconciliation, then separate shutdown/accounting follow-ups.
 It is a proposal, not implemented behavior or permission for another trial.
@@ -1161,7 +1161,7 @@ is a non-recoverable mod error; the blocked banner had the same latent bug).
 ### 2026-09-25 log fixes, rate facts and think time (unit + engine-lane evidence)
 
 Deployed locally at `6476fdc`. Plan and checklist:
-`docs/PARALLEL_PRODUCTION_WORK_PLAN.md`.
+`docs/validation/PARALLEL_PRODUCTION_WORK_PLAN.md`.
 
 - **Provider HTTP 400 after an output-budget handoff** (`7acc1e3`): the skill
   context was inserted between an assistant `tool_calls` message and its replies. It
@@ -1222,7 +1222,7 @@ User-reported real-Factorio acceptance work has covered the bounded single-NPC f
 - NPC death/replacement with stale-work invalidation;
 - bounded navigation around obstacles, moving-target repath, unreachable-target failure, and distinction between SGLuna-controlled walking and passive belt displacement.
 
-See the archived harness records and `docs/NPC_RELIABILITY_WORK.md` for the detailed scenarios and limitations of those gates.
+See the archived harness records and `docs/validation/NPC_RELIABILITY_WORK.md` for the detailed scenarios and limitations of those gates.
 
 ## Verified packaged Pterodactyl foundation
 
@@ -1268,7 +1268,7 @@ Target for `v0.1.0-pre.2` (owner, 2026-09-26): any model stronger than DeepSeek 
 takes a cold-start NPC to electricity (an electric mining drill working on steam power,
 verified from world state); stretch goal automated red and green science. Not met yet:
 the 2026-09-26 steam run (`docs/validation/E2E_STEAM_POWER_2026-09-26.md`) stopped at
-step 2 of 6 on the per-request output cap. Plan: `docs/PARALLEL_PRODUCTION_WORK_PLAN.md`
+step 2 of 6 on the per-request output cap. Plan: `docs/validation/PARALLEL_PRODUCTION_WORK_PLAN.md`
 "Next week".
 
 ## Known non-blocking limitations / future work
@@ -1291,5 +1291,5 @@ These remain roadmap work and should continue to be validated incrementally rath
 - Production validation: `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md` — canonical production E2E ladder, historical canary, powered-assembler frontier, fluid known-red track, and promotion evidence.
 - Stable actor architecture: `docs/NPC_CHARACTER_ARCHITECTURE.md`
 - Current Pterodactyl operation/deployment: `deploy/pterodactyl/README.md`
-- Detailed single-NPC reliability history: `docs/NPC_RELIABILITY_WORK.md`
+- Detailed single-NPC reliability history: `docs/validation/NPC_RELIABILITY_WORK.md`
 - Historical checkpoints and superseded staging docs: `docs/validation/`

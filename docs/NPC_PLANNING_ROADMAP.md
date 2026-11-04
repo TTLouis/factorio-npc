@@ -1328,7 +1328,7 @@ records (`docs/SWARM_COORDINATION_ARCHITECTURE.md`: mission, work item, result w
 evidence, reservations for the body's lanes) so a second body later reuses the same
 contract, and integrate Jev as far as its authority allows. The swarm branch is
 audited for parts, not merged. Scheduled as wave 3 of
-`docs/PARALLEL_PRODUCTION_WORK_PLAN.md` "Next week", toward the `v0.1.0-pre.2`
+`docs/validation/PARALLEL_PRODUCTION_WORK_PLAN.md` "Next week", toward the `v0.1.0-pre.2`
 electricity target stated there; the design note (item 3.1) answers the questions
 below.
 
@@ -1342,7 +1342,7 @@ right now, so try subagents next time.
 The idea, in the owner's words reduced to a shape:
 
 - **A roadmap agent** owns the whole goal: the shelf (§3), the ordering of milestones,
-  steering (§4) and the parallelization review (W2c in `docs/PARALLEL_PRODUCTION_WORK_PLAN.md`).
+  steering (§4) and the parallelization review (W2c in `docs/validation/PARALLEL_PRODUCTION_WORK_PLAN.md`).
   It thinks slowly and rarely, and sees summaries, not raw tool traffic.
 - **One subagent per active plan** owns one committed plan or slice (§1.1): its
   observations, its operations, its recovery. It has its own context and its own output

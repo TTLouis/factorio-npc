@@ -49,7 +49,7 @@ The macro design's MW1–MW6 table specifies dependency order and acceptance evi
 Prove the integrated lifecycle with scripted provider replies plus relevant real-engine
 assertions; component tests and existing live traces do not establish this new checkpoint.
 Week 2 is October 5–11. Per-request visual feedback is recorded in the
-[weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
+[weekly plan](validation/NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
 Existing production and promotion gates remain in force. No paid run is authorized here.
 
 ## Promotion goal

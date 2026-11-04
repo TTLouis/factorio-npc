@@ -31,7 +31,7 @@ independently compiled active native files matched the frozen candidate. Factori
 generated-Lua check; payload 9, runner helpers 45, recorder 1, ZIP checker 10 and
 entity-accounting 5 tests. Prior polling repair has 28 new regressions, 50 focused
 cases, two exact-baseline failures and two exact-version native proof runs; their
-scope and limits remain in the [repair record](../RUN_AT_POLLING_REPAIR_2026-10-23.md).
+scope and limits remain in the [repair record](RUN_AT_POLLING_REPAIR_2026-10-23.md).
 
 One cold isolated project `red-automation-20261023au`, actor **6**, seed
 **210771490**, new goal **`goal_072qkvb_1`**, zero humans, empty board/inventory and
