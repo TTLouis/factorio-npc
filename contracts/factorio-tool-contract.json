@@ -15,7 +15,7 @@
     "observations": ["getActorStatus", "getInventoryItems", "getEquipmentStatus", "getRecipeDetails", "getPrototypeDetails", "discoverPrototypes", "getNearbyEntities", "getEntityStatus", "getCraftingStatus", "getNavigationStatus", "getTechnology", "getResearchStatus", "getPlacementCandidates", "getFluidSourceTiles", "getEntityGeometry", "getTransportCapacity", "getResourceAmounts"],
     "mcp_tools": ["factorio_capabilities", "factorio_library", "factorio_context", "factorio_observe", "factorio_submit", "factorio_receipt", "factorio_cancel", "factorio_resume"],
     "limits": { "wait_ticks": 3600, "count": 100, "transfer_count": 1000, "walk_distance": 128, "harvest_radius": 64, "receipt_wait_ms": 30000, "journal_records": 512, "fluid_network_entities": 16 },
-    "library": { "tool": "factorio_library", "read_only": true, "advisory_only": true, "donor_commit": "20cdcd072b512c814c8af071f4f9ad1fe087f942", "knowledge": 7, "skills": 54, "result_bytes": 7168 },
+    "library": { "tool": "factorio_library", "read_only": true, "advisory_only": true, "source": "packages/autorio/src/fixtures/leveled-library-v1.json", "knowledge": 7, "skills": 54, "result_bytes": 7168 },
     "resume_semantics": "read-and-reconcile-never-replay",
     "completion_semantics": "native-execution-receipt-not-overall-goal-proof",
     "refusal_semantics": "not-happened-effect-with-bounded-details",

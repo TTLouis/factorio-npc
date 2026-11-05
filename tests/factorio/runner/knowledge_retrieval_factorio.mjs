@@ -62,7 +62,7 @@ try {
     evidence.catalog = await assertViews()
     assert.equal(evidence.catalog.procedural_count, 54)
     const saved = await snapshot()
-    assert.equal(Object.values(saved.definitions).filter(entry => entry.content_type === 'knowledge').length, 6)
+    assert.equal(Object.values(saved.definitions).filter(entry => entry.content_type === 'knowledge').length, 7)
     const imported = { ...pack.knowledge[0], id: 'personal-reference', name: 'Owner reference survives profiles', source: { kind: 'manual', entity_unit_numbers: [], recipe_ids: [], evidence_refs: ['owner:knowledge-native-fixture'] } }
     const importedSkill = { ...pack.skills[0], id: 'personal-procedure', name: 'Owner procedure survives profiles', source: { kind: 'manual', entity_unit_numbers: [], recipe_ids: [], evidence_refs: ['owner:knowledge-native-fixture'] } }
     for (const entry of [imported, importedSkill]) {
