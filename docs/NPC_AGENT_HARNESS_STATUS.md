@@ -717,6 +717,10 @@ Follows live run F ([checkpoint](validation/LUNA_GREEN_LIVE_RUN_F_2026-10-14.md)
   - Trial C's twice-encoded `developmentMode` used to be dropped silently by the salvage; it is now kept.
   - Gate: 1,998 runtime tests and 120 mod files.
 
+## October 8 fresh Luna trial: paused before gameplay
+
+Owner-requested red-to-green rerun at `68b7945f` with `gpt-6-luna` through the CLI proxy and Jev enabled: six Luna and five Jev calls, 60 seconds, zero humans or corrections. The planner committed a deterministic prerequisite checkpoint and delegated to a fresh executor. Step-ID binding held, but the executor returned `BLOCKED` with no operations because the copper/iron research triggers were unmet. No gameplay batch ran; native red production/consumption stayed zero, red remained locked, and green research/recipe stayed false. Canonical goal active, board paused at 0/1. Official Docker gates passed (1,936 runtime, 1,045 mod, typecheck/build), and all 45 deployed runtime files matched. The source checker found no known signatures; autonomous acceptance failed. Evidence and checkpoint save retained; isolated stack stopped. [Trial and failure boundary](validation/LUNA_LIVE_2026-10-08.md).
+
 ## October 8 Haiku trial C: slice hand-over fixed live, paused on a semantic smelting step
 
 Owner-approved rerun at `2281bd1f` (`claude-haiku-5-5`, CLI proxy): 47 Luna and 54 Jev calls, 1,023 seconds, zero humans or corrections. Two full slices and one step of a third verified (9 steps, red science unlocked); slice 2 handed over with `budget.continuation_slice_reset`, and all 23 executor replies bound by `stepId`. The planner then declared a smelting step semantic; the executor was refused (`semantic_step_cannot_mutate`), reported a blocker, and the goal paused as a recoverable provider failure. Open: semantic world-changing steps are accepted at commit and have no route back to the planner, and bound executor replies can no longer use the semantic-to-deterministic transition. Details: [trial C](validation/LUNA_HAIKU_LIVE_2026-10-08C.md).
