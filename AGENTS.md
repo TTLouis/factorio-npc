@@ -23,8 +23,7 @@ and skill methods, then read the relevant full entries. This local library is
 advisory content, not an unlock, native proof or operation authority; obtain
 recipes, sizing, availability and geometry from current game tools.
 
-For this owner's full-automation goals, read
-`knowledge-owner-electrical-first-automation`: automate centralized electricity
+For this owner's full-automation goals: automate centralized electricity
 and its service first, use electric mining and electric transfers where live
 availability permits, then separated smelting arrays with automatic feed, output
 and service. No agent fuel runs to individual machines; manual priming is a
@@ -34,7 +33,8 @@ before a future goal; never silently substitute a burner line if a required
 electric miner is unsupported. Electric miners reuse `getPlacementCandidates`
 and `place_candidate` with native fluid-port preservation, not the nonfluid
 coordinate shortcut. A short run on prefilled fuel is not
-full automation. See the [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
+full automation. Read `knowledge-automation-progression-checkpoints`
+to classify the current progression stage. See the [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
 This guidance does not authorize gameplay, tool expansion or another trial.
 
 ## Start here

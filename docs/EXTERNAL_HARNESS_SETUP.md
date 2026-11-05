@@ -217,7 +217,7 @@ session/ledger. Use it sequentially; do not run it beside another ledger owner.
 node tools/external-harness/mcp-call.mjs --list
 node tools/external-harness/mcp-call.mjs --call factorio_context --arguments '{}'
 node tools/external-harness/mcp-call.mjs --call factorio_capabilities --arguments '{}'
-node tools/external-harness/mcp-call.mjs --call factorio_library --arguments '{"kind":"knowledge","action":"get","id":"knowledge-owner-electrical-first-automation"}'
+node tools/external-harness/mcp-call.mjs --call factorio_library --arguments '{"kind":"knowledge","action":"get","id":"knowledge-automation-progression-checkpoints"}'
 node tools/external-harness/mcp-call.mjs --call factorio_observe --arguments '{"name":"getActorStatus","args":{}}'
 ```
 

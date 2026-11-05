@@ -72,7 +72,7 @@ try {
     await assert.rejects(fs.access(preparedFile), 'Prepare must not overwrite prior evidence')
     await profile('leveled')
     const original = await librarySnapshot()
-    assert.equal(Object.values(original.definitions).filter(row => row.content_type === 'knowledge').length, 6)
+    assert.equal(Object.values(original.definitions).filter(row => row.content_type === 'knowledge').length, 7)
     assert.equal(Object.values(original.definitions).filter(row => row.content_type === 'skill').length, 54)
     evidence.search = []
     for (const [query, expected] of [
