@@ -21,7 +21,7 @@ export const MCP_TOOLS = Object.freeze([
   },
   {
     name: 'factorio_library',
-    description: 'Search or read one authored knowledge reference or gameplay skill. Local read-only advisory content; no RCON, live availability, native proof or execution authority. Search methods on demand, then obtain current game facts with observations. Read the owner electrical-first automation requirement before applying fuel, power, mining or smelting methods.',
+    description: 'Search or read one authored knowledge reference or gameplay skill. Local read-only advisory content; no RCON, live availability, native proof or execution authority. Search methods on demand, then obtain current game facts with observations. Read knowledge-automation-progression-checkpoints to classify the current automation stage before applying fuel, power, mining or smelting methods.',
     inputSchema: object({ kind: { type: 'string', enum: ['knowledge', 'skill'], minLength: 1, maxLength: 9 },
       action: { type: 'string', enum: ['search', 'get'], minLength: 1, maxLength: 6 },
       query: { type: 'string', minLength: 1, maxLength: 160 }, id: { type: 'string', minLength: 1, maxLength: 100 },

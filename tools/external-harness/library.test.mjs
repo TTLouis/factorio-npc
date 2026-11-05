@@ -27,6 +27,19 @@ test('library reads the leveled export: schema 2, asserted counts, unique valid 
   }
 })
 
+// Same authoring rules the built-in harness enforces on the leveled source: methods, not stored numbers.
+test('authored prose holds no numbers and each knowledge reference states exactly one contrast', () => {
+  for (const entry of pack.knowledge) {
+    assert.equal(entry.reference.concepts.filter(text => text.startsWith('Contrast:')).length, 1, entry.id)
+    const prose = JSON.stringify({ summary: entry.summary, applicability: { ...entry.applicability }, reference: entry.reference, failures: entry.known_failure_modes })
+    assert.doesNotMatch(prose, /\d|\bper (?:second|minute|tick)\b/i, entry.id)
+  }
+  for (const entry of pack.skills) {
+    const { related_ids: _related, ...guidance } = entry.guidance
+    assert.doesNotMatch(JSON.stringify({ summary: entry.summary, guidance, failures: entry.known_failure_modes }), /\d|\bper (?:second|minute|tick)\b/i, entry.id)
+  }
+})
+
 test('exported fixture is current with the leveled library source (exporter --check)', () => {
   const script = fileURLToPath(new URL('../../scripts/export-leveled-library.mjs', import.meta.url))
   assert.match(execFileSync(process.execPath, [script, '--check'], { encoding: 'utf8' }), /Checked [0-9]+ entries/)
