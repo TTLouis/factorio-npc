@@ -10,13 +10,13 @@ New code alone does not upgrade an older result.
 
 | Date | Furthest demonstrated milestone | Outcome |
 | --- | --- | --- |
+| November 5, 2026 | [Electrified starter base with automatic red science](2026-11-05-electrified-starter-base.md) | Electric coal, iron and copper mining; automatic fuel service; 21 new packs delivered to a consuming lab in a hands-off window. Modest output and first-player startup compatibility remain limits. |
 | November 4, 2026 | [Automatic red science and lab delivery with burner coal](2026-11-04-automatic-red-science.md) | 62 new packs in a ten-minute hands-off window; automatic fuel and lab delivery. Qualified: burner coal mining remained, and first-player crash creation was deferred. |
 | October 31, 2026 | [Semi-automated red science, with screenshots](2026-10-31-red-science.md) | 12 new packs in a two-minute hands-off window; chest output, manual fuel servicing. Formal acceptance failed a furnace observation check. |
 
-This run adds measured automatic science-to-lab delivery. Fully electrified
-starter-base production and compatibility with later first-player crash-site
-creation remain unproven. The new entry is qualified evidence, not an
-unqualified pass of the owner's goal.
+The latest run adds electric coal mining and automatic fuel service to the
+measured science-to-lab chain. A self-fuelling burner inserter remains at the
+boiler; compatibility with later first-player crash-site creation is unproven.
 
 ---
 
@@ -30,18 +30,19 @@ human player records. The original evidence saves remain unchanged and local.
 
 | Run | Save ZIP | Matching NPC mod ZIP |
 | --- | --- | --- |
+| November 5, 2026 | [Electrified starter base](save/2026-11-05-electrified-starter-base.zip) | [Autorio for this run](save/2026-11-05-electrified-starter-base-autorio-mod.zip) |
 | November 4, 2026 | [Automatic red science](save/2026-11-04-automatic-red-science.zip) | [Autorio for this run](save/2026-11-04-automatic-red-science-autorio-mod.zip) |
 | October 31, 2026 | [Semi-automated red science](save/2026-10-31-red-science.zip) | [Autorio for this run](save/2026-10-31-red-science-autorio-mod.zip) |
 
 1. Use **Factorio 2.0.77**, with Space Age, Quality and Elevated Rails disabled
    to match the runs. Download the save and its matching mod ZIP.
 2. Extract the mod ZIP into Factorio's mods folder. It contains an
-   `autorio_0.1.0` folder. The two historical builds share that version number;
+   `autorio_0.1.0` folder. These historical builds share that version number;
    use the one for the save you are opening, one at a time.
 3. Put the save ZIP in Factorio's saves folder, enable Autorio and load it.
    These downloads contain no external controller or model credentials.
 
-Both public save copies loaded successfully with the matching mod in Factorio
+All public save copies loaded successfully with the matching mod in Factorio
 2.0.77. They are inspection downloads, not new trial results. See each report
 for its limitations, including first-player crash-site behavior.
 
