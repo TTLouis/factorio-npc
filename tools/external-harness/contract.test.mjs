@@ -52,7 +52,7 @@ test('external observation notes match the canonical manifest and name real obse
 test('external library manifest agrees with typed local capability metadata', () => {
   const meta = libraryMetadata()
   assert.equal(external.library.tool, meta.tool)
-  assert.equal(external.library.donor_commit, meta.donor_commit)
+  assert.equal(external.library.source, meta.source)
   assert.equal(external.library.knowledge, meta.counts.knowledge)
   assert.equal(external.library.skills, meta.counts.skills)
   assert.equal(external.library.result_bytes, meta.result_bytes)

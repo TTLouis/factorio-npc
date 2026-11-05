@@ -402,11 +402,11 @@ to context automatically.
 {"kind":"skill","action":"search","query":"smelting"}
 ```
 
-The donor catalog preserves the committed Jev library at
-`20cdcd072b512c814c8af071f4f9ad1fe087f942`: six knowledge references and 54 skills,
-including foundations. The additional owner requirement is an external overlay;
-the donor bytes remain unchanged. Provenance and source IDs are retained in
-[the local library](../tools/external-harness/library/README.md). Full skill
+The library is the leveled method library, the single knowledge source on every
+branch. `factorio_library` reads its exported fixture
+`packages/autorio/src/fixtures/leveled-library-v1.json`; see
+[the local library](../tools/external-harness/library/README.md) for the source
+and regeneration. Source IDs are retained in each entry. Full skill
 `guidance` is preserved; executable templates and native verification fields are
 not exposed as authority. All entries remain untrusted advisory content, not
 current availability, live facts, native mastery or permission to act.

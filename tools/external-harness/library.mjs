@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 
-const DONOR = '20cdcd072b512c814c8af071f4f9ad1fe087f942'
-const CATALOG_SHA256 = 'dd8c6585169b6a8e9a8108db06d390bd9666625822a24a84c7b62156d7b3e861'
-export const OWNER_REQUIREMENT_ID = 'knowledge-owner-electrical-first-automation'
+// The leveled method library export is the single knowledge source.
+// Regenerate it with `node scripts/export-leveled-library.mjs`.
+export const LIBRARY_SOURCE = 'packages/autorio/src/fixtures/leveled-library-v1.json'
+export const LIBRARY_COUNTS = Object.freeze({ knowledge: 6, skills: 54 })
 export const MAX_LIBRARY_RESULT_BYTES = 7 * 1024
+const MAX_LIBRARY_FILE_BYTES = 512 * 1024
 const MAX_QUERY = 160
 const MAX_LIMIT = 8
 const idPattern = /^[a-z0-9][a-z0-9-]{0,99}$/
@@ -13,26 +14,31 @@ const fail = code => { throw Object.assign(new Error(code), { code, publicMessag
 let loaded
 
 export function libraryMetadata() {
-  return { tool: 'factorio_library', read_only: true, advisory_only: true, donor_commit: DONOR,
-    counts: { knowledge: 7, skills: 54 }, owner_requirement_id: OWNER_REQUIREMENT_ID,
-    loading: 'on_demand', result_bytes: MAX_LIBRARY_RESULT_BYTES }
+  return { tool: 'factorio_library', read_only: true, advisory_only: true, source: LIBRARY_SOURCE,
+    counts: { ...LIBRARY_COUNTS }, loading: 'on_demand', result_bytes: MAX_LIBRARY_RESULT_BYTES }
 }
 
 async function catalog() {
   loaded ??= (async () => {
-    const bytes = await readFile(new URL('./library/jev-catalog.json', import.meta.url))
-    if (bytes.length > 512 * 1024 || createHash('sha256').update(bytes).digest('hex') !== CATALOG_SHA256) fail('library_integrity_failed')
-    const donor = JSON.parse(bytes)
-    const provenance = JSON.parse(await readFile(new URL('./library/provenance.json', import.meta.url), 'utf8'))
-    const overlay = JSON.parse(await readFile(new URL('./library/owner-requirements.json', import.meta.url), 'utf8'))
-    if (donor.schema !== 2 || donor.knowledge.length !== 6 || donor.skills.length !== 54
-      || provenance.donor_commit !== DONOR || provenance.artifacts.catalog.sha256 !== CATALOG_SHA256
-      || overlay.schema !== 1 || overlay.knowledge.length !== 1 || overlay.knowledge[0].id !== OWNER_REQUIREMENT_ID) fail('library_integrity_failed')
-    const all = [...donor.knowledge, ...donor.skills, ...overlay.knowledge]
-    if (new Set(all.map(entry => entry.id)).size !== all.length
-      || all.some(entry => !idPattern.test(entry.id) || !['skill', 'knowledge'].includes(entry.content_type))
-      || overlay.related_skill_ids.some(id => !donor.skills.some(entry => entry.id === id))) fail('library_integrity_failed')
-    return { donor, provenance, overlay }
+    const bytes = await readFile(new URL(`../../${LIBRARY_SOURCE}`, import.meta.url))
+    if (bytes.length > MAX_LIBRARY_FILE_BYTES) fail('library_integrity_failed')
+    const pack = JSON.parse(bytes)
+    if (pack.schema !== 2 || !Array.isArray(pack.knowledge) || !Array.isArray(pack.skills)) fail('library_integrity_failed')
+    const all = [...pack.knowledge, ...pack.skills]
+    const ids = new Set(all.map(entry => entry.id))
+    if (ids.size !== all.length
+      || pack.knowledge.some(entry => entry.content_type !== 'knowledge') || pack.skills.some(entry => entry.content_type !== 'skill')
+      || all.some(entry => !idPattern.test(entry.id) || typeof entry.name !== 'string' || typeof entry.summary !== 'string')) fail('library_integrity_failed')
+    // Links are bidirectional: an entry lists its own ids plus any entry that lists it.
+    const links = new Map(all.map(entry => [entry.id, new Set()]))
+    for (const entry of all) {
+      for (const id of entry.related_ids ?? entry.guidance?.related_ids ?? []) {
+        if (!ids.has(id)) fail('library_integrity_failed')
+        links.get(entry.id).add(id)
+        links.get(id).add(entry.id)
+      }
+    }
+    return { pack, links }
   })()
   return loaded
 }
@@ -51,43 +57,39 @@ function validate(input) {
   else if (typeof input.id !== 'string' || !idPattern.test(input.id) || input.query !== undefined || input.limit !== undefined) fail('invalid_library_arguments')
 }
 
-function related(entry, overlay) {
-  return [...new Set([...(entry.related_ids ?? entry.guidance?.related_ids ?? []),
-    ...(overlay.related_skill_ids.includes(entry.id) ? [OWNER_REQUIREMENT_ID] : [])])]
+function related(entry, links) {
+  const own = entry.related_ids ?? entry.guidance?.related_ids ?? []
+  return [...new Set([...own, ...links.get(entry.id)])]
 }
-function card(entry, overlay) {
+function card(entry, links) {
   return { kind: entry.content_type, id: entry.id, name: entry.name, summary: entry.summary.slice(0, 400),
     ...(entry.summary.length > 400 ? { summary_truncated: true } : {}), level: entry.level,
-    related_ids: related(entry, overlay) }
+    related_ids: related(entry, links) }
 }
-function view(entry, overlay) {
+function view(entry, links) {
   const common = { kind: entry.content_type, content_type: entry.content_type, id: entry.id, revision: entry.revision,
     name: entry.name, summary: entry.summary, level: entry.level, source: entry.source,
-    related_ids: related(entry, overlay), known_failure_modes: entry.known_failure_modes }
+    related_ids: related(entry, links), known_failure_modes: entry.known_failure_modes }
   if (entry.content_type === 'knowledge') return { ...common, search_aliases: entry.search_aliases,
     applicability: entry.applicability, reference: entry.reference }
   // Preserve complete authored guidance. Executable templates, topology,
   // verification and confidence fields are deliberately not execution evidence.
-  return { ...common, goal_tags: entry.goal_tags, guidance: entry.guidance,
-    ...(overlay.related_skill_ids.includes(entry.id) ? { owner_requirements: [{ id: OWNER_REQUIREMENT_ID,
-      summary: overlay.knowledge[0].summary, applicability: 'Owner full-automation requirement; read this knowledge before applying this method.',
-      capability_caveat: 'Check the currently admitted electric-miner placement capability. If unsupported, report the gap; do not silently substitute burner mining.' }] } : {}) }
+  return { ...common, goal_tags: entry.goal_tags, guidance: entry.guidance }
 }
 
 export async function readLibrary(input) {
   validate(input)
-  const { donor, provenance, overlay } = await catalog()
-  const entries = input.kind === 'knowledge' ? [...donor.knowledge, ...overlay.knowledge] : donor.skills
+  const { pack, links } = await catalog()
+  const entries = input.kind === 'knowledge' ? pack.knowledge : pack.skills
   const base = { kind: input.kind, action: input.action,
     authority: { content: 'untrusted_advisory', native_verified: false, availability: 'requires_live_checks',
-      operation_authority: false, goal_authority: false, owner_requirement_id: OWNER_REQUIREMENT_ID },
-    provenance: { donor_commit: provenance.donor_commit, catalog_blob: provenance.artifacts.catalog.blob,
-      catalog_sha256: provenance.artifacts.catalog.sha256, owner_overlay: 'owner-requirements.json' } }
+      operation_authority: false, goal_authority: false },
+    provenance: { source: LIBRARY_SOURCE } }
   let result
   if (input.action === 'get') {
     const entry = entries.find(entry => entry.id === input.id)
     if (!entry) fail('library_entry_not_found')
-    result = { ...base, entry: view(entry, overlay) }
+    result = { ...base, entry: view(entry, links) }
   }
   else {
     const query = normalize(input.query)
@@ -106,7 +108,7 @@ export async function readLibrary(input) {
     }).filter(match => match.score > 0).sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id))
     const limit = input.limit ?? 5
     result = { ...base, query: input.query, total_matches: matches.length, truncated: matches.length > limit,
-      results: matches.slice(0, limit).map(({ entry }) => card(entry, overlay)) }
+      results: matches.slice(0, limit).map(({ entry }) => card(entry, links)) }
   }
   // Never silently trim full guidance or return a partial authority disclaimer.
   if (Buffer.byteLength(JSON.stringify(result)) > MAX_LIBRARY_RESULT_BYTES) fail('library_result_too_large')
