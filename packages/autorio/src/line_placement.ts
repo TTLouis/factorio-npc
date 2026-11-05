@@ -110,13 +110,15 @@ function blocker_summary(entity: LuaEntity): LineBlocker {
   }
 }
 
-// The external footprint rule (see EXTERNAL_FOOTPRINT_SCAN_LIMIT): a refusal code and up to eight named blockers.
-export function external_footprint(surface: LuaSurface, box: BoundingBox) {
+// The external footprint rule (see EXTERNAL_FOOTPRINT_SCAN_LIMIT): a refusal code and up to eight named blockers. The line
+// preflight passes the actor's own character, which the placing runtime steps out of before each tile (trial 4r: a line
+// starting where the previous one ended was refused for the actor standing on its own tile 0).
+export function external_footprint(surface: LuaSurface, box: BoundingBox, own_character?: LuaEntity) {
   const found = find_world_entities(surface, { area: box, limit: EXTERNAL_FOOTPRINT_SCAN_LIMIT })
   if (found.length >= EXTERNAL_FOOTPRINT_SCAN_LIMIT) return { code: 'placement_footprint_dense', blockers: [] as LineBlocker[] }
   const blockers: LineBlocker[] = []
   for (const entity of found) {
-    if (entity.valid && entity.type !== 'resource' && blockers.length < LINE_PLACEMENT_LIMITS.blockers) blockers.push(blocker_summary(entity))
+    if (entity.valid && entity.type !== 'resource' && entity !== own_character && blockers.length < LINE_PLACEMENT_LIMITS.blockers) blockers.push(blocker_summary(entity))
   }
   return blockers.length > 0 ? { code: 'placement_footprint_occupied', blockers } : { code: undefined, blockers }
 }
@@ -156,7 +158,7 @@ export function line_placement_preflight(actor: ControlledActor | undefined, arg
       force: actor!.force, build_check_type: defines.build_check_type.manual })) {
       return { ok: false, code: 'placement_not_clear', tile_index: index, planned_footprint }
     }
-    const checked = external_footprint(surface, footprint.world_box)
+    const checked = external_footprint(surface, footprint.world_box, actor!.character)
     if (checked.code !== undefined) return { ok: false, code: checked.code, tile_index: index, blockers: checked.blockers, planned_footprint }
     tiles.push({ index, position: footprint.position, world_box: footprint.world_box })
   }

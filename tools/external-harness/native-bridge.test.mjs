@@ -144,6 +144,28 @@ test('native atomic precondition refusal proves no admission; generic error does
   await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted !== true)
 })
 
+// Trial 4r r4-063: the atomic re-run of the preflight refused, and the receipt had no cause.
+test('an admission-time preflight refusal carries its native code, tile and blockers', async () => {
+  const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
+  let gate
+  const refuse = text => command => { gate = command; return `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: text, prefix: {} })}` }
+  f.onSubmit = refuse('external_guard_refused:preflight_rejected:placement_footprint_occupied@0;character:character::33.50:16.50;item-entity:item-on-ground:coal:-3.25:4.00')
+  await assert.rejects(f.bridge.submit(prepared), error => {
+    assert.equal(error.notAdmitted, true); assert.equal(error.code, 'preflight_rejected')
+    assert.deepEqual(error.details, { native_code: 'placement_footprint_occupied', tile_index: 0, blockers: [
+      { name: 'character', type: 'character', position: { x: 33.5, y: 16.5 } },
+      { name: 'item-on-ground', type: 'item-entity', position: { x: -3.25, y: 4 }, item: 'coal' }] })
+    return true
+  })
+  // The gate renders the refused preflight's cause into its refusal text.
+  assert.match(gate, /if p\.ok~=true then return "preflight_rejected"\.\.\(function\(p\)/)
+  // A detail suffix on another guard code, or a malformed one, proves nothing.
+  f.onSubmit = refuse('external_guard_refused:native_busy:placement_footprint_occupied')
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted !== true)
+  f.onSubmit = refuse('external_guard_refused:preflight_rejected:Bad Code')
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted !== true)
+})
+
 test('tampered prepared operation cannot use the original durable signature', async () => {
   const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
   prepared.operation.args.count = 2
@@ -235,6 +257,11 @@ test('automatic production support keeps canonical recipe admission and bounded 
   await f.bridge.observe('getResourceAmounts', { resource_name: 'iron-ore', center: { x: 4, y: -3 }, radius: 2 })
   assert.match(f.calls.at(-1), /remote\.call\("autorio_tools","get_resource_amounts",\{resource_name='iron-ore',center=\{x=4,y=-3\},radius=2\}\)/)
   await assert.rejects(f.bridge.observe('getResourceAmounts', { radius: 49 }), { code: 'invalid_observation_arguments' })
+  // Trial 4r: an area with no ore came back with tiles {} (an empty Lua table); list fields are lists.
+  f.onCommand = command => command.includes('get_resource_amounts') ? JSON.stringify({ ok: true, resources: {}, tiles: {}, tiles_truncated: false, unseen_chunks: {}, area: {} }) : undefined
+  const empty = await f.bridge.observe('getResourceAmounts', { resource_name: 'iron-ore', radius: 2 })
+  assert.deepEqual([empty.resources, empty.tiles, empty.unseen_chunks], [[], [], []])
+  assert.deepEqual(empty.area, {})
 })
 
 test('native rejection of an empty connected fluid assembler cannot queue a recipe task', async () => {
@@ -273,6 +300,14 @@ test('generic prototype parsing grants no placement authority without a native n
       && error.notAdmitted && error.details.native_code === 'nonfluid_footprint_unproven')
   }
   assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
+})
+
+// Trial 4r (r4-096): the refusal for a candidate-placed prototype names place_candidate.
+test('place_entity of a candidate-placed prototype names place_candidate', () => {
+  for (const entity_name of ['electric-mining-drill', 'offshore-pump', 'boiler', 'steam-engine', 'pipe']) {
+    assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name, x: 2.5, y: 2.5 } }),
+      error => error.code === 'placement_not_supported' && error.message.includes('place_candidate') && error.message.includes('getPlacementCandidates'))
+  }
 })
 
 test('explicit bind is not a tool capability and atomically refuses existing ownership/busy state', async () => {
@@ -524,7 +559,7 @@ test('placement candidates are annotated with the same footprint rule external p
   const annotation = f.calls.at(-1)
   assert.ok(annotation.includes('{{4.25,0.25},{4.75,0.75}}'))
   // The candidate check and placement preflight must send one identical rule.
-  const rule = command => command.match(/local function external_footprint\(surface,box\).*?return nil,blockers end;/)?.[0]
+  const rule = command => command.match(/local function external_footprint\(surface,box,own\).*?return nil,blockers end;/)?.[0]
   f.state.status.placement_no_clear_supported = true; f.onCommand = undefined
   await f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'transport-belt', x: 6.5, y: 0.5 } }, 'run/rule')
   assert.ok(rule(annotation))
@@ -560,7 +595,7 @@ test('candidate annotation survives a transport failure and place_candidate shar
   f.preflight = { ok: false, code: 'placement_footprint_occupied' }
   await assert.rejects(f.bridge.prepare({ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }, 'run/fluid'))
   const preflight = f.calls.find(command => command.includes('external_candidate_unproven'))
-  assert.match(preflight, /local function external_footprint\(surface,box\)/)
+  assert.match(preflight, /local function external_footprint\(surface,box,own\)/)
   assert.match(preflight, /local code,blockers=external_footprint\(surface,f\.world_box\)/)
 })
 
@@ -863,6 +898,9 @@ test('place_line preflight checks every tile with the external footprint rule an
     && error.details.tile_index === 1 && error.details.blockers[0].item === 'iron-plate' && /Line tile 1 refused/.test(error.publicMessage))
   const command = f.calls.find(text => text.includes('autorio_preflight'))
   for (const fragment of ['"place_line"', 'limit=129', 'tile_index=i-1', 'preservation_nonfluid_output']) assert.ok(command.includes(fragment), fragment)
+  // Trial 4r: only the line's re-check exempts the actor's own character (the runtime steps out of each tile before placing).
+  assert.ok(command.includes('local own=remote.call("sgluna_deployment","status").actor_id') && command.includes('external_footprint(surface,t.world_box,own)'))
+  assert.ok(command.includes('not (own and e.type=="character" and e.unit_number==own)'))
   f.preflight = { ok: false, code: 'line_placement_items_insufficient', placement_item: { item_name: 'transport-belt', count: 3, held_count: 1, required_count: 3 } }
   await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.details.native_code === 'line_placement_items_insufficient'
     && error.details.placement_item.held_count === 1 && /Requires 3 transport-belt, holds 1/.test(error.publicMessage))

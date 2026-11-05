@@ -88,11 +88,15 @@ it needs the mod capability `external_line_placement_supported`.
 Preflight is strict and read-only: the actor must hold all `count` items, and every
 tile must pass the same exact-grid, NPC-reservation, native collision and external
 footprint checks as `place_entity`, within 128 tiles of the actor (rechecked at
-admission). Items on the ground and the actor itself block a tile, so stand clear of
-the line before submitting. Any failing tile refuses the whole line before it is sent (`not_happened`), with
-`tile_index` and up to 8 blockers. Execution queues `count` native placements in one
+admission). Items on the ground and any other character block a tile. The actor's own
+character does not: execution steps out of each tile before placing it, so a line may
+start where the previous one ended. Any failing tile refuses the whole line before it is sent (`not_happened`), with
+`tile_index` and up to 8 blockers. A refusal at admission (the world changed after
+preflight) is a terminal `native_refused_before_admission` receipt whose
+`evidence.refusal` names the guard code and, when the atomic preflight re-run refused,
+its `native_code`, `tile_index` and blockers. Execution queues `count` native placements in one
 journal slot; each placement re-checks its tile with the same footprint rule and the
-native `refuse_clearance` flag; if the actor's walk ends inside a later tile it steps
+native `refuse_clearance` flag; if the actor stands inside a tile it steps
 out first. Nothing is cleared or replaced.
 A `completed` receipt requires the native line record to list every tile as placed;
 its `line_placement` field lists each entity (`index`, `unit_number`, `position`,

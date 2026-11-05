@@ -47,6 +47,21 @@ function notSent(error) {
   return error
 }
 
+// Bounded cause of a native refusal before admission: the bridge's guard code (with its native preflight details) or the
+// admission journal's own begin refusal. Free text is never copied.
+export function refusalCause(error) {
+  const id = value => typeof value === 'string' && /^[a-z0-9_]{1,80}$/.test(value) ? value : undefined
+  const text = typeof error?.factorioError === 'string' ? error.factorioError : ''
+  const begin = text === 'stale npc actor epoch' ? 'stale_actor_epoch' : /^admission_begin_refused:([a-z0-9_]{1,80})$/.exec(text)?.[1]
+  const code = id(error?.code) ?? begin
+  if (code === undefined) return undefined
+  const details = error?.details
+  if (!details || typeof details !== 'object') return { code }
+  const blockers = Array.isArray(details.blockers) ? details.blockers.slice(0, 8) : undefined
+  return { code, ...(id(details.native_code) ? { native_code: details.native_code } : {}),
+    ...(Number.isSafeInteger(details.tile_index) ? { tile_index: details.tile_index } : {}), ...(blockers?.length ? { blockers } : {}) }
+}
+
 function object(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) {
     throw failure('invalid_arguments', 'Unexpected arguments')
@@ -89,9 +104,26 @@ function observedEffect(before, after) {
     actor_items: items }
 }
 
+const CALL_LABEL = /^[a-z][a-z0-9_/]{0,63}$/
+
+// Who holds the state lock, from the lock file: its pid, the call it was started for (the process adapter's label) and how
+// long it has held the lock. Bounded and validated; anything else in the file is ignored.
+export async function lockHolder(lockPath, now = Date.now()) {
+  try {
+    const raw = await fs.readFile(lockPath, 'utf8')
+    if (Buffer.byteLength(raw) > 4096) return {}
+    const held = JSON.parse(raw)
+    const started = typeof held?.started_at === 'string' ? Date.parse(held.started_at) : NaN
+    return { ...(Number.isSafeInteger(held?.pid) && held.pid > 0 ? { pid: held.pid } : {}),
+      ...(typeof held?.call === 'string' && CALL_LABEL.test(held.call) ? { call: held.call } : {}),
+      ...(Number.isFinite(started) && now >= started ? { held_seconds: Math.round((now - started) / 1000) } : {}) }
+  }
+  catch { return {} }
+}
+
 // The local journal is a write-ahead duplicate fence, not a second world state.
 // Native receipts remain authoritative. Never evict an idempotency key silently.
-export async function openRuntime({ bridge, directory, session, pollMs = 500 }) {
+export async function openRuntime({ bridge, directory, session, pollMs = 500, callLabel }) {
   if (!bridge || !directory || !ID.test(session ?? '')) throw failure('invalid_configuration')
   const root = path.resolve(directory)
   await fs.mkdir(root, { recursive: true, mode: 0o700 })
@@ -104,9 +136,12 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
     if (error.code !== 'EEXIST') throw error
     // Do not steal a stale lock automatically: PID reuse and another host can
     // make a seemingly dead owner ambiguous. The CLI documents safe recovery.
-    throw failure('state_locked', 'State directory is locked; verify the old process has stopped before removing owner.lock')
+    const holder = await lockHolder(lockPath)
+    const by = holder.pid ? ` by pid ${holder.pid}${holder.call ? ` (${holder.call})` : ''}${holder.held_seconds !== undefined ? ` for ${holder.held_seconds} s` : ''}` : ''
+    throw Object.assign(failure('state_locked', `State directory is locked${by}; verify the old process has stopped before removing owner.lock`), { details: { held_by: holder } })
   }
-  await lock.writeFile(JSON.stringify({ owner, pid: process.pid }))
+  await lock.writeFile(JSON.stringify({ owner, pid: process.pid, started_at: new Date().toISOString(),
+    ...(typeof callLabel === 'string' && CALL_LABEL.test(callLabel) ? { call: callLabel } : {}) }))
   await lock.sync()
   let closed = false
   let poisoned = false
@@ -346,8 +381,11 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
       catch (error) {
         if (error.notAdmitted === true) {
           row.state = 'rejected'; row.reason = 'native_refused_before_admission'; row.effect = 'not_happened'; row.terminal = true
+          // The refusal's own cause (the guard or begin code and, for an admission-time preflight, its native code, tile and
+          // blockers), so a terminal rejection is never causeless.
+          const refusal = refusalCause(error)
           row.result = { state: row.state, reason: row.reason, effect: row.effect, terminal: true, goal_verified: false,
-            evidence: { admission_refused_before_mutation: true } }
+            evidence: { admission_refused_before_mutation: true, ...(refusal ? { refusal } : {}) } }
         }
         else row.reason = 'submission_acknowledgement_unavailable'
         await save()

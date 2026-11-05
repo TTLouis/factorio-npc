@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { STATE_LOCKED_EXIT_CODE } from './cli.mjs'
+import { LOCK_HOLDER_PREFIX, STATE_LOCKED_EXIT_CODE } from './cli.mjs'
 import { MCP_PROTOCOL_VERSION } from './mcp-server.mjs'
 
 const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url))
@@ -13,10 +13,28 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 45000
 const fail = code => Object.assign(new Error(code), { code })
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 
+// The lock holder a refused child names: pid, call label and seconds held, each validated; nothing else is read.
+export function lockHolderFrom(stderr) {
+  const line = String(stderr ?? '').split('\n').find(text => text.startsWith(LOCK_HOLDER_PREFIX))
+  if (!line || line.length > LOCK_HOLDER_PREFIX.length + 200) return undefined
+  let held
+  try { held = JSON.parse(line.slice(LOCK_HOLDER_PREFIX.length)) } catch { return undefined }
+  const holder = { ...(Number.isSafeInteger(held?.pid) && held.pid > 0 ? { pid: held.pid } : {}),
+    ...(typeof held?.call === 'string' && /^[a-z][a-z0-9_/]{0,63}$/.test(held.call) ? { call: held.call } : {}),
+    ...(Number.isSafeInteger(held?.held_seconds) && held.held_seconds >= 0 ? { held_seconds: held.held_seconds } : {}) }
+  return Object.keys(holder).length ? holder : undefined
+}
+
+function holderText(holder) {
+  if (!holder?.pid) return ''
+  return ` (pid ${holder.pid}${holder.call ? `, running ${holder.call}` : ''}${holder.held_seconds !== undefined ? `, for ${holder.held_seconds} s` : ''})`
+}
+
 // One short-lived, exclusive stdio connection. Never logs environment, child
 // stderr or a failed child's arguments; those can contain private host data.
-export async function withMcpClient(action, { command = process.execPath, args = [cli], env = process.env, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
-  const child = spawn(command, args, { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+// label (the tool being called) is written into the state lock, so a call refused by a held lock can name it.
+export async function withMcpClient(action, { command = process.execPath, args = [cli], env = process.env, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, label } = {}) {
+  const child = spawn(command, args, { env: label ? { ...env, SGLUNA_CALL_LABEL: label } : env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
   const pending = new Map()
   let sequence = 0
   let buffer = ''
@@ -27,14 +45,21 @@ export async function withMcpClient(action, { command = process.execPath, args =
   let result
   const exit = new Promise(resolve => {
     child.once('error', () => { exited = true; stop(fail('mcp_start_failed')); resolve(null) })
-    child.once('close', code => { exited = true; stop(fail(code === STATE_LOCKED_EXIT_CODE ? 'state_locked' : 'mcp_exited')); resolve(code) })
+    child.once('close', code => {
+      exited = true
+      const holder = code === STATE_LOCKED_EXIT_CODE ? lockHolderFrom(stderr) : undefined
+      stop(code === STATE_LOCKED_EXIT_CODE ? Object.assign(fail('state_locked'), holder ? { holder } : {}) : fail('mcp_exited'))
+      resolve(code)
+    })
   })
   function stop(error) {
     failure ??= error
     for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error) }
     pending.clear()
   }
-  child.stderr.resume()
+  // Child stderr is never logged or returned; its first 4 KiB is kept only to read the one lock-holder line.
+  let stderr = ''
+  child.stderr.on('data', chunk => { if (stderr.length < 4096) stderr = (stderr + chunk).slice(0, 4096) })
   child.stdin.on('error', () => stop(fail('mcp_input_failed')))
   child.stdout.on('error', () => stop(fail('mcp_output_failed')))
   child.stdout.on('data', chunk => {
@@ -112,7 +137,8 @@ export async function main(args = process.argv.slice(2)) {
     method = 'tools/call'; params = { name: args[1], arguments: arguments_ }
   }
   else throw fail('invalid_adapter_arguments')
-  const result = await withMcpClient(client => client.request(method, params))
+  const label = method === 'tools/call' ? (/^[a-z][a-z0-9_]{0,63}$/.test(params.name) ? params.name : undefined) : 'tools/list'
+  const result = await withMcpClient(client => client.request(method, params), { label })
   process.stdout.write(`${JSON.stringify(result)}\n`)
   if (result.error || result.result?.isError) process.exitCode = 1
 }
@@ -121,7 +147,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   main().catch(error => {
     const code = /^[a-z_]{1,80}$/.test(error?.code ?? '') ? error.code : 'mcp_adapter_failed'
     const hint = code === 'state_locked'
-      ? ' Another harness process holds this world\'s state directory: the adapter allows one call at a time. Wait for the running call to finish, then retry this read or receipt; never resend a mutation under a new request_id. If no harness process is running, follow the stale-lock recovery in docs/EXTERNAL_HARNESS.md.'
+      ? ` Another harness process${holderText(error.holder)} holds this world's state directory: the adapter allows one call at a time. Wait for the running call to finish, then retry this read or receipt; never resend a mutation under a new request_id. If no harness process is running, follow the stale-lock recovery in docs/EXTERNAL_HARNESS.md.`
       : ''
     process.stderr.write(`Local MCP adapter stopped: ${code}. No automatic gameplay replay was attempted.${hint}\n`)
     process.exitCode = 1

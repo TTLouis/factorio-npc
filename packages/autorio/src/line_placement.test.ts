@@ -80,6 +80,22 @@ describe('external line placement', () => {
     }
   })
 
+  // Trial 4r (r4-034, r4-090): a line starting where the previous one ended was refused for the actor standing on tile 0.
+  // The placing runtime steps out of each tile before placing it, so the actor's own character is not a blocker here.
+  it('does not count the actor\'s own character as a blocker, but still counts any other character', () => {
+    const own = { valid: true, type: 'character', name: 'character', position: { x: 2.5, y: -3.5 } }
+    const other = { valid: true, type: 'character', name: 'character', position: { x: 4.5, y: -3.5 }, unit_number: 44 }
+    const characters = [own, other]
+    const with_characters = { ...surface, find_entities_filtered: ({ area }: any) => characters.filter(entity => at([entity.position], area).length > 0) }
+    const standing_actor = { ...actor, surface: with_characters, character: own }
+    characters.pop()
+    expect(line_placement_preflight(standing_actor, args)).toMatchObject({ ok: true })
+    characters.push(other)
+    expect(line_placement_preflight(standing_actor, args)).toMatchObject({ ok: false, code: 'placement_footprint_occupied', tile_index: 1, blockers: [{ type: 'character', unit_number: 44 }] })
+    // Only the actor's own character is exempt: a character that is not the actor's still blocks tile 0.
+    expect(line_placement_preflight({ ...standing_actor, character: undefined }, args)).toMatchObject({ ok: false, code: 'placement_footprint_occupied', tile_index: 0 })
+  })
+
   it('refuses before queueing anything, and otherwise queues one no-clear placing task per tile in one bound batch', () => {
     ground = [{ x: 6.5, y: -3.5 }]
     let d = deps()
