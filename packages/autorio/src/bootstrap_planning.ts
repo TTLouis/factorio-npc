@@ -79,6 +79,8 @@ export interface RecipeBootstrapPlan {
   requested_crafts: number
   craftable_now_count: number
   craftable_now: boolean
+  // Present only when the recipe is research-locked: craftable_now is then false whatever the inventory holds.
+  recipe_locked?: true
   inventory_overlay: {
     outputs: Array<Record<string, unknown>>
     ingredients: Array<Record<string, unknown>>
@@ -589,7 +591,10 @@ export function recipe_bootstrap_for_actor(actor: ControlledActor, recipe: any, 
     : 1
   const categories = categories_for(recipe)
   const hand_craftable = character_can_craft(actor, categories)
-  const craftable_now_count = hand_craftable ? actor.get_craftable_count(recipe.name) : 0
+  // LuaControl.get_craftable_count counts ingredients only; a research-locked recipe is never craftable now
+  // (craft_item refuses it with recipe_locked). External trial 3 saw enabled:false with craftable_now:true.
+  const recipe_locked = recipe.enabled === false
+  const craftable_now_count = hand_craftable && !recipe_locked ? actor.get_craftable_count(recipe.name) : 0
   const dependencies: BootstrapDependency[] = []
   const state: ResolveState = { nodes: 0, trail: [] }
   let first_unresolved: BootstrapDependency | undefined
@@ -626,13 +631,14 @@ export function recipe_bootstrap_for_actor(actor: ControlledActor, recipe: any, 
     if (!first_unresolved) first_unresolved = unresolved
   }
 
-  const craftable_now = craftable_now_count >= count
+  const craftable_now = !recipe_locked && craftable_now_count >= count
   if (craftable_now) first_unresolved = undefined
 
   return {
     requested_crafts: count,
     craftable_now_count,
     craftable_now,
+    ...(recipe_locked ? { recipe_locked: true as const } : {}),
     inventory_overlay: direct_inventory_overlay(actor, recipe, count, dependencies, machine_dependency),
     dependencies,
     first_unresolved,

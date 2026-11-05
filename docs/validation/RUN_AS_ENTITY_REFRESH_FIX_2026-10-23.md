@@ -1,7 +1,7 @@
 # Run AS entity-refresh repair — October 23, 2026
 
 Owner: Codex /root chat01a16ab4. Unit A implementation only; no new live trial,
-push or deployment. [Implementation and proof matrix](../RUN_AS_ENTITY_REFRESH_FIX_2026-10-23.md).
+push or deployment. [Implementation and proof matrix](RUN_AS_ENTITY_REFRESH_IMPLEMENTATION_2026-10-23.md).
 
 ## Immutable identities
 

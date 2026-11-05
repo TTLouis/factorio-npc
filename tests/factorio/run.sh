@@ -148,7 +148,8 @@ lane_offset() {
     entity-refresh) printf '34' ;;
     map-context) printf '35' ;;
     resume-water) printf '36' ;;
-    pursuit-lifecycle) printf '37' ;;
+    crash-site) printf '37' ;;
+    pursuit-lifecycle) printf '38' ;;
     tick-sprint) printf '33' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac

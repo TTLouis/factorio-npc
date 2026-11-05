@@ -81,7 +81,21 @@ An unused frozen claim remains durable; deleting claims or the ledger is unsafe.
 `research_technology` submits native research; its completed operation receipt does
 not prove research completion. Read `getTechnology({name})` and
 `getResearchStatus({})` for current requirements, progress and researched state.
+While other force research is active, a request is appended behind it in the
+native research queue (result `queued_behind`; preflight `ready_queued_behind`)
+and never replaces or reorders it. A prerequisite that is already current or
+queued counts as satisfied, since it finishes first. Queue the next technology
+before the current one completes so labs do not idle. `force_busy` means the
+native queue refused the append: wait or replan.
+A recipe that a technology still locks is reported as `recipe_locked`, not as
+craftable.
 Obtain recipes, availability, ingredients and sizing from live observations.
+`getResourceAmounts({resource_name?, center?, radius?})` totals resource amounts
+in a square of `2*radius+1` tiles around a center tile (radius 0–48, default 16;
+radius 2 is an electric drill's 5x5 area). It reads only chunks the NPC can see
+now: other chunks are listed as unseen, `coverage_complete` is false, and their
+ore is unknown rather than zero. With `resource_name`, up to 64 tiles nearest the
+center are listed with their amounts. Reading never generates or charts chunks.
 `harvest_product` uses native harvesting within 64 tiles, at most 100 requested
 items; its omitted radius defaults to this external bound. No items are injected.
 
@@ -212,7 +226,31 @@ achievements for this disposable save), then selects the standalone NPC. It is a
 not an MCP tool. It refuses an existing session or busy state rather than
 silently taking control. Do not clear another controller's session to make it
 succeed. If the bind reply is lost, reconnect with the same session and inspect
-context rather than attempting takeover. Once bound, the MCP client launches:
+context rather than attempting takeover.
+
+Freeplay creates its crashed-ship site and gives the starting items only when
+the first player joins. A standalone NPC with zero humans never triggers that,
+so a fresh save has no wreckage. To give the NPC the start a joining player
+would get, run this optional operator setup action after `--bind` and before
+the goal starts:
+
+```sh
+node tools/external-harness/cli.mjs --crash-site
+```
+
+It runs freeplay's own crash-site module with freeplay's configured ship,
+debris and part settings, at freeplay's position. It gives the NPC freeplay's
+`created_items` minus the ship and debris items, which stay in the wreckage, as
+freeplay does for a joining player. It then disables freeplay's crash site so a
+later human join cannot spawn a second. It refuses an unowned session, busy
+native work, unsettled journal entries, a save where freeplay's start already
+ran or its crash site is disabled, an incomplete freeplay remote interface, and
+a non-freeplay surface. It runs once per
+save; a repeat creates nothing and reports the first result. It is not an MCP
+tool, so the model cannot call it. It prints a JSON report of the created
+entities and inserted items.
+
+Once bound, the MCP client launches:
 
 ```sh
 node tools/external-harness/cli.mjs
@@ -317,6 +355,9 @@ The bridge re-checks each footprint with that same rule: `eligible: false`
 names the blockers. `eligible: true` covers this footprint rule only; the other
 preflight checks still apply. Native candidate fields are unchanged, and
 `checked: false` means the re-check was unavailable.
+The actor's own position counts as a blocker: walk clear of the footprint
+before placing there. A placed `burner-inserter` starts without fuel; it refuels
+itself only from fuel it moves, so supply fuel before relying on it.
 
 A `factorio_submit` error with `"effect": "not_happened"` and
 `"journal_slot_used": false` means this call was refused before its operation
@@ -444,6 +485,9 @@ The state directory contains `ledger.json` and a single-process `owner.lock`.
 If a process crashes, the lock deliberately remains: an operator must verify
 that the old process is no longer running and no other host owns the directory
 before removing **only `owner.lock`**. Never delete the ledger as lock recovery.
+While another live process holds the lock, a second one stops with code
+`state_locked` (exit status 75). Issue harness calls one at a time; a
+`state_locked` refusal sent nothing to the game.
 The journal retains up to 512 request identities and refuses new work when full
 rather than silently evicting duplicate protection. Do not rotate it over a live
 world to bypass that limit.
@@ -457,6 +501,9 @@ never permission to repeat it. `current_world_verified` and `goal_verified` rema
 false: verify the requested world outcome through fresh observations.
 
 A failed durable journal write prevents further mutation in that process.
+Its `journal_write_failed` error carries `details.cause`: the failed `stage`
+(`temp_write`, `windows_replace`, `rename` or `directory_sync`) and, where known, the
+native error code, helper exit code, helper refusal name or a timeout flag.
 Preserve its files and investigate storage failure before restarting.
 
 Before each mutation, the bridge writes and flushes the complete temporary

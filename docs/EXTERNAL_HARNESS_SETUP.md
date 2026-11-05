@@ -156,6 +156,12 @@ disposable save and selects the standalone NPC. It refuses busy or already bound
 worlds. Never clear a session or delete its ledger to make binding succeed. If
 the reply is lost, reconnect with the same identity and inspect context first.
 
+A fresh zero-player freeplay save has no crashed-ship site. If the user's goal
+expects freeplay's normal start, the operator can run
+`node tools/external-harness/cli.mjs --crash-site` once after binding; see
+[the runtime guide](EXTERNAL_HARNESS.md#bind-once-then-launch-mcp). It changes
+the world, so setup verification does not run it on its own.
+
 Register `node` with the absolute path to `tools/external-harness/cli.mjs` as a
 stdio MCP server using the host's actual supported registration mechanism. The
 [generic descriptor](EXTERNAL_HARNESS.md#bind-once-then-launch-mcp) shows the

@@ -200,7 +200,7 @@ Do not infer orientation from sprites or remembered yellow-arrow graphics. For p
   args: { "technology_name": string }
   This submits a research request in NPC task order; it does not wait for labs to finish.
   A queued/accepted request is not completed research. Verify with getTechnology({ name }) and getResearchStatus().
-  Existing different force research is protected: on force_busy, wait or replan rather than trying to override it.
+  Existing different force research is protected: a request is appended behind it in the native queue (queued_behind), never replacing it; on force_busy the queue refused the append, so wait or replan.
   Gameplay-trigger technologies require their actual trigger; do not treat them as lab research.
 
 11. Wait

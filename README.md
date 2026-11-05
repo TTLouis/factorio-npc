@@ -71,7 +71,7 @@ Those results do not establish pursuit-mode success.
 ## Contribute
 
 Pursuit-mode work belongs on `feat/builtin-harness-pursuit`. This line starts
-from plan mode and includes external-harness tools through main `560529b4`;
+from plan mode and includes external-harness tools and fixes through main `b860bd9e`;
 later main changes are not automatically included.
 
 Start with [Contributing](CONTRIBUTING.md), [testing](docs/TESTING.md) and

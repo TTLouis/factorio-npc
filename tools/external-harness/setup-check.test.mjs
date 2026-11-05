@@ -117,6 +117,15 @@ test('abrupt child failure and stderr never reveal credentials', async () => {
   })
 })
 
+test('a held state lock is reported as state_locked, not an opaque mcp_exited', async () => {
+  // The CLI exits 75 when another process holds the state directory (a second concurrent call).
+  await assert.rejects(withMcpClient(() => {}, { command: process.execPath, args: ['-e', 'process.exit(75)'] }), error => {
+    assert.equal(error.code, 'state_locked')
+    assert.equal(error.cleanupCode, 'mcp_child_failed')
+    return true
+  })
+})
+
 test('default adapter deadline preserves a supported 30-second receipt wait past 15 seconds', async t => {
   const options = await fixture(t)
   t.mock.timers.enable({ apis: ['setTimeout'] })

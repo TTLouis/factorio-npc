@@ -232,6 +232,10 @@ test('automatic production support keeps canonical recipe admission and bounded 
   assert.match(f.calls.at(-1), /entity_geometry/)
   await f.bridge.observe('getTransportCapacity', { kind: 'inserter_instance', unit_number: 42 })
   await assert.rejects(f.bridge.observe('getEntityGeometry', { unit_number: 0 }))
+  assert.ok(capabilities().observations.includes('getResourceAmounts'))
+  await f.bridge.observe('getResourceAmounts', { resource_name: 'iron-ore', center: { x: 4, y: -3 }, radius: 2 })
+  assert.match(f.calls.at(-1), /remote\.call\("autorio_tools","get_resource_amounts",\{resource_name='iron-ore',center=\{x=4,y=-3\},radius=2\}\)/)
+  await assert.rejects(f.bridge.observe('getResourceAmounts', { radius: 49 }), { code: 'invalid_observation_arguments' })
 })
 
 test('native rejection of an empty connected fluid assembler cannot queue a recipe task', async () => {
@@ -273,6 +277,26 @@ test('explicit bind is not a tool capability and atomically refuses existing own
   assert.match(command, /s.task_state~="idle"/)
   assert.match(command, /session_already_bound/)
   assert.ok(!capabilities().observations.includes('bind'))
+})
+
+test('crash-site setup is an owned operator action, never a tool, and reports the native record', async () => {
+  const f = fixture()
+  const native = { ok: true, already_done: false, tick: 9, position: { x: -5, y: -6 }, entity_count: 2,
+    entities: [{ name: 'crash-site-spaceship', unit_number: 1, position: { x: -5, y: -6 } }, { name: 'crash-site-spaceship-wreck-big-1', unit_number: 2, position: { x: -1, y: -4 } }],
+    starter_items: [{ name: 'iron-plate', requested: 8, inserted: 8 }], freeplay_crash_site_disabled: true }
+  f.onCommand = command => command.includes('"autorio_setup","spawn_crash_site"') ? JSON.stringify(native) : undefined
+  const report = await f.bridge.spawnCrashSite()
+  assert.deepEqual(report, { already_done: false, tick: 9, position: { x: -5, y: -6 }, entity_count: 2,
+    entities: ['crash-site-spaceship', 'crash-site-spaceship-wreck-big-1'], starter_items: [{ name: 'iron-plate', requested: 8, inserted: 8 }], freeplay_crash_site_disabled: true })
+  const command = f.calls.at(-1)
+  assert.match(command, /g\.session~='external-/)
+  assert.match(command, /crash_site_setup_unsupported/)
+  assert.match(command, /unresolved_native_operation/)
+  for (const list of [capabilities().observations, capabilities().operations.map(operation => operation.name)]) {
+    assert.ok(!list.some(name => /crash/i.test(name)))
+  }
+  f.onCommand = command => command.includes('spawn_crash_site') ? '{"ok":false,"code":"freeplay_start_already_ran"}' : undefined
+  await assert.rejects(f.bridge.spawnCrashSite(), { code: 'freeplay_start_already_ran' })
 })
 
 
@@ -444,6 +468,7 @@ test('capabilities state craft count, inserter direction and research receipt se
   assert.match(notes.craft_item, /number of recipe crafts, not items/)
   assert.match(notes.place_entity, /inserters it names the pickup side/)
   assert.match(notes.research_technology, /started and queued, not finished/)
+  assert.match(notes.research_technology, /appended behind it in the native queue \(queued_behind\)/)
   assert.match(notes.walk_to_position, /128 tiles/)
 })
 
