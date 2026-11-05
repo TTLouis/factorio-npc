@@ -70,31 +70,32 @@ experimental status.
 
 ## Latest proof
 
-### Automatic red science and lab delivery
+### Electrified starter base with automatic red science
 
-**November 4, 2026 · External harness · Factorio 2.0.77**
+**November 5, 2026 · External harness · Factorio 2.0.77**
 
 | New science packs | Hands-off measurement | Delivery |
 | :---: | :---: | :---: |
-| **62** | **10 min 19 sec** | **Automatic fuel, materials and lab feed** |
+| **21** | **10 min 19 sec** | **Electric mining, automatic fuel and lab feed** |
 
-The external operator built a science line from an empty NPC inventory in a
-fresh world. After construction, the assembler produced 62 new packs during
-the measured hands-off window at normal game speed, with science delivered to
-a researching lab.
+The external operator built a starter base from an empty NPC inventory in a
+fresh world, with electric coal, iron and copper mining. After construction,
+the assembler produced 21 new packs during an independent hands-off window at
+normal game speed, with automatic furnace and boiler fuel service and science
+delivered to a researching lab.
 
-![Preserved science line with mining, smelting, assemblers and lab delivery](docs/proofs/images/2026-11-04-trial-3/science-line.jpg)
+![Preserved electric mining, smelting, assemblers and lab delivery](docs/proofs/images/2026-11-05-electrified/science-and-smelting.jpg)
 
 *Inspection screenshot of the preserved post-stop world. Production counts
 come from the original native measurements, not the screenshot.*
 
 > [!NOTE]
-> **Qualified result:** coal mining remained burner-based, below the fully
-> electrified starter-base goal. The crash site appeared only during later
-> inspection; compatibility with that startup change remains unproven. This
-> external-operator result does not validate built-in plan or pursuit mode.
+> **Limits:** one furnace per ore, one electric coal drill and a self-fuelling
+> burner inserter at the boiler. Output was modest; compatibility with later
+> first-player crash-site creation remains unproven. This external-operator
+> result does not validate built-in plan or pursuit mode.
 
-**[Read the proof and screenshots](docs/proofs/2026-11-04-automatic-red-science.md)
+**[Read the proof and screenshots](docs/proofs/2026-11-05-electrified-starter-base.md)
 · [Browse all proofs](docs/proofs/README.md)**
 
 ---
