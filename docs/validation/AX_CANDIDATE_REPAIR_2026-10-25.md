@@ -11,7 +11,7 @@ Ordinary stock/footprint preflight passed without a join witness. The final
 preservation helper correctly refused before transport, but its late error
 bypassed argument correction and ended in a guard pause. Red output remained0.
 
-The original [baseline fixture](../deploy/pterodactyl/runtime-v8/fixtures/ax-b-candidate-boundary.json)
+The original [baseline fixture](../../deploy/pterodactyl/runtime-v8/fixtures/ax-b-candidate-boundary.json)
 retains the pre-operator-stop p9, exact query/proposal and native candidate
 response. Its source is the sealed AX extraction (SHA256
 `14eb968cb093959de773669f3b16f7ad17df27bd5c411ccaae271051d711b7aa`).
@@ -65,13 +65,13 @@ fuel step. Separate controls cover generic/fluid cross-pool consumption,
 restore/counter reset, normal plan churn, legacy unknown lineage, grants and
 late amendments/cancellation/native activity. Full local logs remain ignored.
 
-The [native fixture](../tests/factorio/runner/fluid_candidate_correction_factorio.mjs)
+The [native fixture](../../tests/factorio/runner/fluid_candidate_correction_factorio.mjs)
 uses a new isolated native-relative layout, the original red-science result,
 scripted local roles and a network-call sentinel. It must prove the actual native
 DTO/transport/receipt/certificate bridge and wrong-outlet zero effects under
 Factorio2.0.77. Until it passes, host substitutions establish no new engine or
-autonomous gameplay claim. Follow the [repair requirements](E2E_REPAIR_REQUIREMENTS.md)
-and [testing gates](TESTING.md) before integration; payload repin remains separate.
+autonomous gameplay claim. Follow the [repair requirements](../E2E_REPAIR_REQUIREMENTS.md)
+and [testing gates](../TESTING.md) before integration; payload repin remains separate.
 
 The first required all gate exposed two adjacent regressions. Exact recorded
 provider-body comparison traced the frozen-request change solely to the internal

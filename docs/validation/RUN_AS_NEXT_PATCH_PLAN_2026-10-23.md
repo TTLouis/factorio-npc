@@ -9,8 +9,8 @@ Do not create the implementation branch until that work begins; use one
 ## Inputs and dependencies
 
 - Executable baseline `cdbc95eda101e6c2f559c0e2848bcaa923df1be6` and the
-  [fix inventory](validation/FIX_CONSOLIDATION_2026-10-23.md).
-- [Exact AS report](validation/RED_AUTOMATION_LIVE_RUN_AS_2026-10-23.md), complete
+  [fix inventory](FIX_CONSOLIDATION_2026-10-23.md).
+- [Exact AS report](RED_AUTOMATION_LIVE_RUN_AS_2026-10-23.md), complete
   responses, canonical plan and failure timeline under
   `test-results/red-automation-live-2026-10-23as/analysis/`.
 - Goal `goal_0cfa0th_1`, plan `goal_0cfa0th_1_p3` version 1, step
@@ -18,7 +18,7 @@ Do not create the implementation branch until that work begins; use one
   (55,63). This identifies an exact regression fixture, never a production special case.
 - Existing immutable-step/actor/request fences, durable observation/recovery limits,
   operation ledger, finite production controller and ordinary completion evaluator.
-  Follow [E2E repair requirements](E2E_REPAIR_REQUIREMENTS.md).
+  Follow [E2E repair requirements](../E2E_REPAIR_REQUIREMENTS.md).
 
 ## Unit A — refresh an executable entity binding in the harness
 

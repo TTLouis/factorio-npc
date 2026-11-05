@@ -74,6 +74,7 @@ describe('canonical Factorio provider contract parity', () => {
       'getResearchPath',
       'getResearchRequest',
       'getReservationDesignInput',
+      'getResourceAmounts',
       'getSkillDetails',
       'inspectFactoryCell',
       'listFactoryCells',

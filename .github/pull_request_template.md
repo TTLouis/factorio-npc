@@ -29,5 +29,6 @@ dependencies, recovery/revert procedure, and any payload repin. No secret values
 - [ ] Documentation matches the behavior; historical validation records are preserved.
 - [ ] For an E2E-derived fix, shared prevention and harness-owned self-correction are evidenced, including a residual miss, safe continuation and bounded exhaustion; otherwise marked not applicable with a reason.
 
-<!-- Target experiment/jev-agent-architecture for development. Live provider trials,
+<!-- Target main for external-harness development; internal planner/Jev work targets
+experiment/jev-agent-architecture separately. Live provider trials,
 deployment and promotion require their existing authorization/evidence gates. -->

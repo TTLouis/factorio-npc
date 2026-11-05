@@ -16,6 +16,7 @@ import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
 import { new_area_clearing_controller } from './area_clearing'
 import { craft_bootstrap_preflight_for_actor } from './bootstrap_planning'
+import { crash_site_setup_status, spawn_freeplay_crash_site } from './crash_site_setup'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
 import { new_combat_controller } from './combat'
@@ -208,6 +209,18 @@ remote.add_interface('autorio_research', {
 
 remote.add_interface('autorio_combat', {
   status: () => combat_controller.status(),
+})
+
+// Operator setup only: the external harness calls it from its explicit
+// --crash-site CLI action; no model observation or operation reaches it.
+remote.add_interface('autorio_setup', {
+  crash_site_status: () => crash_site_setup_status(),
+  spawn_crash_site: () => {
+    if (task_manager.player_state.task_state !== TaskStates.IDLE || task_manager.get_status_snapshot().queue_length !== 0) {
+      return { ok: false, code: 'native_busy' }
+    }
+    return spawn_freeplay_crash_site(get_controlled_actor())
+  },
 })
 
 function log_actor_info() {
@@ -635,8 +648,11 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New place_candidate task: ${candidate_set_id}/${candidate_id}`)
     return result
   },
-  place_entity: (entity_name: string, x?: number, y?: number, direction?: number) => {
-    const accepted = basic_operation_controller.submit_placement(entity_name, x, y, direction)
+  place_entity: (entity_name: string, x?: number, y?: number, direction?: number, refuse_clearance?: boolean) => {
+    // External harness placement is placement-only even if a blocker appears
+    // after admission. Omitted by the existing autonomous adapters.
+    const accepted = basic_operation_controller.submit_placement(entity_name, x, y, direction, undefined, undefined, undefined,
+      refuse_clearance === true ? { refuse_clearance: true } : undefined)
     if (accepted) {
       const position = x !== undefined && y !== undefined ? ` at (${x}, ${y})` : ''
       const facing = direction !== undefined ? ` direction=${direction}` : ''
@@ -697,6 +713,8 @@ remote.add_interface('autorio_operations', {
     const actor = get_controlled_actor()
     return {
       ...task_manager.get_status_snapshot(),
+      placement_no_clear_supported: true,
+      external_fluid_candidates_supported: 1,
       admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       basic_operation: basic_operation_controller.status(),

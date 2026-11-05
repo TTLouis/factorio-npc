@@ -88,6 +88,18 @@ describe('recipe bootstrap dependency closure', () => {
     })
   })
 
+  it('never reports a research-locked recipe as craftable now, even with every ingredient held', () => {
+    const drill = { ...recipe('electric-mining-drill', 'electric-mining-drill', { ingredient: 'iron-plate', ingredientAmount: 10 }), enabled: false }
+    const actor = actorWith({ 'electric-mining-drill': drill }, { 'iron-plate': 50 }, { 'electric-mining-drill': 5 })
+
+    const result = recipe_bootstrap_for_actor(actor, drill, 1)
+
+    expect(result).toMatchObject({ craftable_now: false, craftable_now_count: 0, recipe_locked: true })
+    const enabled = recipe_bootstrap_for_actor(actorWith({ 'electric-mining-drill': { ...drill, enabled: true } }, { 'iron-plate': 50 }, { 'electric-mining-drill': 5 }), { ...drill, enabled: true }, 1)
+    expect(enabled).toMatchObject({ craftable_now: true, craftable_now_count: 5 })
+    expect(enabled).not.toHaveProperty('recipe_locked')
+  })
+
   it('treats an already-held compatible processing machine as satisfied instead of crafting a duplicate', () => {
     const smelting = recipe('smelt-widget', 'plate-x', { category: 'smelting', ingredient: 'ore-x', ingredientAmount: 1 })
     const actor = actorWith({ 'smelt-widget': smelting }, { 'ore-x': 8, 'stone-furnace': 4 })

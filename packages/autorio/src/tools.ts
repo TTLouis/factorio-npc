@@ -12,6 +12,7 @@ import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { count_world_entities, find_world_entities } from './npc_vision'
 import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
+import { resource_amount_observation, type ResourceAmountRequest } from './resource_amounts'
 import { get_pump_site_preparation } from './pump_site_preparation'
 import { nearest_pole_for_unpowered, protected_read, status_shows_no_power } from './electric_facts'
 
@@ -549,6 +550,9 @@ export function create_tools_remote_interface() {
         recipe_selection: entity.type === 'assembling-machine' ? 'configurable' : entity.type === 'furnace' ? 'automatic' : undefined,
         crafting_progress: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_progress : undefined,
         crafting_speed: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.crafting_speed : undefined,
+        // Native cumulative crafts, scoped to this exact machine. Compare samples
+        // with the same identity/recipe; this counter alone is not goal proof.
+        products_finished: entity.type === 'assembling-machine' || entity.type === 'furnace' ? entity.products_finished : undefined,
         status: entity.status,
         status_name: status_name(entity.status),
         working: entity.status === defines.entity_status.working,
@@ -587,6 +591,7 @@ export function create_tools_remote_interface() {
       }
     },
     get_fluid_source_tiles: (request: FluidSourceRequest) => fluid_source_observation(get_controlled_actor(), request),
+    get_resource_amounts: (request: ResourceAmountRequest) => resource_amount_observation(get_controlled_actor(), request ?? {}),
     get_pump_site_preparation: (request: { x: number, y: number, direction?: number }) => get_pump_site_preparation(get_controlled_actor(), request),
     get_placement_candidates: (request: PlacementCandidateRequest) => {
       const actor = get_controlled_actor()

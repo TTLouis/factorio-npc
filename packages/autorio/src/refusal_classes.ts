@@ -59,7 +59,6 @@ export const refusal_class_by_code: Record<string, RefusalClass> = {
   // --- prerequisite: research preconditions ------------------------------------------------------------------------
   missing_prerequisites: 'prerequisite',
   trigger_research: 'prerequisite',
-  force_busy: 'prerequisite',
 
   // --- world: the world, the actor or a dedicated recovery decides ---------------------------------------------------
   no_actor: 'world',

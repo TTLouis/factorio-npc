@@ -93,7 +93,7 @@ describe('with_refusal_class', () => {
   it('attaches the registered class to a refusal and keeps every other field', () => {
     expect(with_refusal_class({ ok: false, code: 'unknown_prototype', operation: 'place_entity', identity: 'x' }))
       .toEqual({ ok: false, code: 'unknown_prototype', operation: 'place_entity', identity: 'x', refusal_class: 'argument' })
-    expect(with_refusal_class({ ok: false, code: 'force_busy' })).toMatchObject({ refusal_class: 'prerequisite' })
+    expect(with_refusal_class({ ok: false, code: 'missing_prerequisites' })).toMatchObject({ refusal_class: 'prerequisite' })
     expect(with_refusal_class({ ok: false, code: 'stale_exact_target' })).toMatchObject({ refusal_class: 'world' })
   })
 

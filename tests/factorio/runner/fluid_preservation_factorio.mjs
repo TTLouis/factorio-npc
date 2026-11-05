@@ -81,7 +81,7 @@ async function operation(name, args, prepared) {
     assert.ok(Date.now() < deadline, `native ${name} timeout`); await delay(100)
   }
 }
-async function freeze(set, candidate, target) {
+async function freeze(set, candidate, target, refusal = false) {
   const actor = await deploymentStatus(rcon, { requireAllowed: true })
   const journal = await lua('rcon.print(helpers.table_to_json(remote.call("autorio_operation_admission","status")))')
   const ordinal = journal.high_water + 1
@@ -92,6 +92,7 @@ async function freeze(set, candidate, target) {
     goalId: owner.goal_id, planId: owner.plan_id, stepId: owner.step_id, actor, baseline: batchWatermark(await tool('getTaskStatus', {})), now: Date.now() })
   const context = { signature: pending.signature, owner }
   const guard = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_preflight","fluid_preservation_candidate",${luaString(set.candidate_set_id)},${luaString(candidate.id)},${luaString(pending.operation_key)},{${target}},helpers.json_to_table(${luaString(JSON.stringify(context))}))))`)
+  if (refusal) return guard
   assert.equal(guard.ok, true, JSON.stringify(guard))
   return { pending, envelope: { version: 2, operation_key: pending.operation_key, attempt_id: pending.attempt_id,
     ordinal, signature: pending.signature, owner: Object.fromEntries(Object.entries(owner).filter(([key]) => key !== 'session')), candidate: guard.preservation_join } }
@@ -100,6 +101,7 @@ async function place(name, request, before) {
   const set = await tool('getPlacementCandidates', { entity_name: name, limit: 8, ...request })
   evidence.candidates ??= []; evidence.candidates.push(set)
   assert.ok(set.candidates?.length, `no native ${name} candidate`)
+  if (request.connects_to) assert.equal(set.connects_to?.preservation_network?.provable, true, JSON.stringify(set.connects_to))
   const candidate = set.candidates[0]
   const args = { candidate_set_id: set.candidate_set_id, candidate_id: candidate.id }
   const preflight = JSON.parse(await rcon.command(renderOperationPreflight({ name: 'place_candidate', args })))
@@ -1006,6 +1008,33 @@ try {
       assert.equal((await tool('getTaskStatus', {})).queue_length, 0)
     }
   }
+  // 2026-11-03 trial finding 1: the candidate listing reports the network bound the
+  // freeze applies. The 17-pipe chain is declared fixture setup; the join is a normal operation.
+  {
+    const row = evidence.setup.center.y + 18
+    const xs = Array.from({ length: 17 }, (_, index) => evidence.setup.center.x + 4 + index)
+    await operation('walk_to_position', { x: evidence.setup.center.x + 14, y: row - 2 })
+    const chain = await lua(`local s=a.surface; for _,e in pairs(s.find_entities_filtered{area={{${xs[0] - 1},${row - 1}},{${xs[16] + 3},${row + 2}}}}) do
+      assert(e.type=="character" or e.name=="sgluna-npc-vision", e.name) end; local ids={};
+      for _,x in pairs({${xs.join(',')}}) do local e=s.create_entity{name="pipe",position={x+0.5,${row}+0.5},force=a.force}; assert(e); ids[#ids+1]=e.unit_number end;
+      assert(a.insert{name="pipe",count=1}==1); rcon.print(helpers.table_to_json(ids))`)
+    // Pipes resolve by unit number only once observed, as an operator would see them.
+    const seen = await tool('getNearbyEntities', { name: 'pipe', radius: 24, limit: 40 })
+    assert.ok(chain.every(id => seen.entities?.some(row => row.unit_number === id)), JSON.stringify(seen))
+    const end = chain[16]
+    const over = await tool('getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: end }, limit: 8 })
+    assert.deepEqual(over.connects_to?.preservation_network, { version: 1, limit: 16, provable: false, reason: 'protected_network_over_limit', entity_count_at_least: 17 }, JSON.stringify(over))
+    assert.ok(over.candidates?.length, 'the listing still reports the native candidates')
+    const refused = await freeze(over, over.candidates[0], end, true)
+    assert.deepEqual(refused, { ok: false, code: 'preservation_guard_network_over_limit', limit: 16, entity_count_at_least: 17 })
+    await lua(`local n=0; for _,v in pairs(a.surface.find_entities_filtered{name="pipe"}) do if v.unit_number==${chain[0]} then v.destroy(); n=n+1 end end; assert(n==1); rcon.print("{}")`)
+    const within = await tool('getPlacementCandidates', { entity_name: 'pipe', connects_to: { unit_number: end }, limit: 8 })
+    assert.deepEqual(within.connects_to?.preservation_network, { version: 1, limit: 16, provable: true, entity_count: 16 })
+    const joined = await place('pipe', { connects_to: { unit_number: end } })
+    evidence.network_limit = { chain, over: over.connects_to.preservation_network, refused, within: within.connects_to.preservation_network, placed: joined.result.placed_unit_number }
+    await lua(`local keep={${[...chain.slice(1), joined.result.placed_unit_number].map(id => `[${id}]=true`).join(',')}}; local n=0;
+      for _,v in pairs(a.surface.find_entities_filtered{name="pipe"}) do if keep[v.unit_number] then v.destroy(); n=n+1 end end; assert(n==17); rcon.print("{}")`)
+  }
   // Fault scheduling occurs after the actual correlated candidate was queued,
   // inside the same native callback, before its first execution tick. No wait
   // or second production operation is smuggled into the single-slot batch.
@@ -1057,7 +1086,7 @@ try {
   evidence.foreign = await geometry(pumpId)
   assert.throws(() => preservationGeometry(evidence.foreign, pumpId))
   evidence.status = 'pass'
-  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam, lost-edge/scope refusal, layout planning/connections, interrupted-layout settle/resume and bounded layout alternatives')
+  console.log('PASS native2.0.77 fluid preservation: empty pump, exact boiler/pipe/engine joins, first-fuel steam, lost-edge/scope refusal, layout planning/connections, interrupted-layout settle/resume, bounded layout alternatives and the 16-entity network bound')
 } finally {
   if (connection) connection.close()
   await fs.mkdir(path.resolve(arg('results')), { recursive: true })

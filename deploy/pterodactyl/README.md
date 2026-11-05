@@ -1,5 +1,7 @@
 # SGLuna — Factorio Pterodactyl deployment
 
+For the external assistant/MCP workflow, use the [portable setup guide](../../docs/EXTERNAL_HARNESS_SETUP.md). These eggs start the built-in planner.
+
 This directory contains the Pterodactyl deployment for **SGLuna**, the user-facing Factorio NPC/agent identity maintained by TTLouis. The repository remains `TTLouis/factorio-npc`, and upstream AIRI/Autorio lineage and MIT attribution remain documented.
 
 ## Deployment channels

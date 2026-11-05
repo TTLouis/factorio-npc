@@ -12,7 +12,7 @@ depends on the numbered foundations below; neither plan supersedes the other.
 ## Week 1 macro amendment (owner Q&A, 2026-09-30)
 
 Current week numbering: **Week 1 September 28–October 4; Week 2 October 5–11**.
-The accepted build contract is [NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md).
+The accepted build contract is [NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md](../NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md).
 Its MW1–MW6 table defines dependencies and evidence for:
 
 - Standing Auto expansion and in-scope recovery of player tasks, with new immutable plan versions and explanations of what happened and why.
@@ -26,7 +26,7 @@ evidence or explicit carryover. UI feedback is recorded for follow-up; layout de
 is outside this macro discussion. No numeric campaign cap, full-game cost estimate,
 live provider run or deployment is authorized by the amendment.
 
-Claude's [delegation design](NPC_DELEGATION_DESIGN_2026-09-29.md) records the newer
+Claude's [delegation design](../NPC_DELEGATION_DESIGN_2026-09-29.md) records the newer
 owner answers and integration-build checkpoint with its source SHA. Those records
 supersede the older discussion proposals below, but importing a design document
 does not merge or validate those runtime commits in this checkout.

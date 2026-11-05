@@ -121,6 +121,7 @@ const toolSamples = {
   inspectConstructionIntent: { x: 0, y: 0, entity_name: 'stone-furnace' },
   getResearchPath: { name: 'automation' },
   getMapContext: { radius: 2, position: { x: 10, y: -5 } },
+  getResourceAmounts: { resource_name: 'iron-ore', center: { x: 4, y: -3 }, radius: 2 },
 }
 
 test('staging owns exactly the operations declared as the shared Pterodactyl base', () => {
@@ -198,6 +199,7 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     'getResearchPath',
     'getResearchRequest',
     'getReservationDesignInput',
+    'getResourceAmounts',
     'getSkillDetails',
     'inspectFactoryCell',
     'listFactoryCells',

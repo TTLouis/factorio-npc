@@ -252,7 +252,6 @@ export function classifyRequestFailure(failure) {
   return { pause_class: PAUSE_CLASS.GUARD, pause_subkind: '', code: 'request_failed', source: 'fallback' }
 }
 
-
 // Whether a pause came from the provider/request layer (the goal.paused trace's provider_failure). Decided from the pause's declared
 // class and the failure CODE that prefixes its reason, never from a text search of the reason: a harness guard's detail text may
 // mention "provider" or "request_failed" without the provider having failed. `request_failed` itself is the unplaced fallback.

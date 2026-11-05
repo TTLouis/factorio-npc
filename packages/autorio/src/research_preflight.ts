@@ -149,18 +149,23 @@ export function research_operation_preflight(actor: ControlledActor | undefined,
 
   if (code === undefined) {
     const queued = requested_is_queued(force, technology_name)
+    const busy = force.current_research !== undefined || array_length(force.research_queue ?? []) > 0
+    // ready_queued_behind: admission appends behind existing force research,
+    // which keeps its order; labs reach this technology when that finishes.
     const state = technology.researched
       ? 'already_researched'
       : queued
         ? 'already_queued'
-        : 'ready'
+        : busy
+          ? 'ready_queued_behind'
+          : 'ready'
     return {
       ok: true,
       operation: 'research_technology',
       technology: technology_name,
       state,
       level: technology.level,
-      ...(queued
+      ...((queued || busy) && !technology.researched
         ? {
             current_research: current_research_summary(force),
             ...queue_summary(force),
@@ -180,13 +185,6 @@ export function research_operation_preflight(actor: ControlledActor | undefined,
       ...(code === 'trigger_research'
         ? { research_trigger: requested?.research_trigger }
         : {}),
-    })
-  }
-
-  if (code === 'force_busy') {
-    return reject(code, technology_name, {
-      current_research: current_research_summary(force),
-      ...queue_summary(force),
     })
   }
 

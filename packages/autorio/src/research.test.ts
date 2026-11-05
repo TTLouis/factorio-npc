@@ -170,24 +170,80 @@ describe('serialized asynchronous research requests', () => {
     expect(controller.status()).toMatchObject({ last_request_result: { code: 'already_researched', completed: true } })
   })
 
-  it('preserves a conflicting force research queue', () => {
-    const { force, tech, controller } = world()
+  function appendingQueue(force: Record<string, any>) {
+    force.add_research = vi.fn((value: any) => {
+      force.research_queue = [...force.research_queue, value]
+      return true
+    })
+  }
+
+  it('appends behind existing force research without replacing or reordering it, then follows it to the front', () => {
+    const { actor, force, tech, controller } = world()
     const other = { ...tech, name: 'logistics' }
     force.current_research = other
     force.research_queue = [other]
-    expectRejected(controller.submit('automation'), 'force_busy')
-    expect(force.research_queue).toEqual([other])
-    expect(force.add_research).not.toHaveBeenCalled()
+    appendingQueue(force)
+    const [accepted, , request_id] = controller.submit('automation')
+    expect(accepted).toBe(true)
+    controller.tick(actor)
+    expect(force.add_research).toHaveBeenCalledTimes(1)
+    expect(force.current_research.name).toBe('logistics')
+    expect(force.research_queue.map((item: any) => item.name)).toEqual(['logistics', 'automation'])
+    expect(controller.request_result(request_id)).toMatchObject({
+      result: { accepted: true, completed: false, code: 'queued_behind' },
+      follow_through: { state: 'queued' },
+    })
+
+    // Waiting in the queue longer than the stall window is not a stall.
+    ;(globalThis as any).game.tick += 60 * 60 * 2
+    controller.status()
+    expect(controller.request_result(request_id)).toMatchObject({ result: { code: 'queued_behind' }, follow_through: { state: 'queued' } })
+
+    // The earlier research finishes and the labs move on to this request.
+    force.current_research = tech
+    force.research_queue = [tech]
+    force.research_progress = 0
+    controller.status()
+    expect(controller.request_result(request_id)).toMatchObject({ result: { code: 'started' }, follow_through: { state: 'running' } })
   })
 
-  it('rechecks conflicting research that starts while the NPC request is waiting', () => {
+  it('accepts a prerequisite that is already queued ahead, and still refuses one that is not', () => {
     const { actor, force, tech, controller } = world()
-    controller.submit('automation')
-    force.current_research = { ...tech, name: 'logistics' }
+    const electronics = { ...tech, name: 'electronics', researched: false }
+    tech.prerequisites = { electronics }
+    force.technologies.electronics = electronics
+    expectRejected(controller.submit('automation'), 'missing_prerequisites')
+    force.current_research = electronics
+    force.research_queue = [electronics]
+    appendingQueue(force)
+    expect(controller.submit('automation')[0]).toBe(true)
     controller.tick(actor)
-    expect(force.add_research).not.toHaveBeenCalled()
+    expect(force.research_queue.map((item: any) => item.name)).toEqual(['electronics', 'automation'])
+    expect(controller.status()).toMatchObject({ last_request_result: { code: 'queued_behind', accepted: true } })
+  })
+
+  it('reports force_busy when the native queue refuses an append, leaving it unchanged', () => {
+    const { actor, force, tech, controller } = world()
+    const other = { ...tech, name: 'logistics' }
+    force.current_research = other
+    force.research_queue = [other]
+    force.add_research = vi.fn(() => false)
+    controller.submit('automation')
+    controller.tick(actor)
+    expect(force.research_queue).toEqual([other])
+    expect(controller.status()).toMatchObject({ last_request_result: { code: 'force_busy', accepted: false } })
+  })
+
+  it('rechecks queue identity after add_research instead of trusting its boolean', () => {
+    const { actor, force, tech, controller } = world()
+    const other = { ...tech, name: 'logistics' }
+    force.current_research = other
+    force.research_queue = [other]
+    force.add_research = vi.fn(() => true)
+    controller.submit('automation')
+    controller.tick(actor)
     expect(force.current_research.name).toBe('logistics')
-    expect(controller.status()).toMatchObject({ last_request_result: { code: 'force_busy' } })
+    expect(controller.status()).toMatchObject({ last_request_result: { code: 'force_busy', accepted: false } })
   })
 
   it('rejects missing prerequisites, gameplay-trigger research, and disabled force research with distinct ids', () => {

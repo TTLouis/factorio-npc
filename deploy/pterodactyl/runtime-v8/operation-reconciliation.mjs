@@ -350,7 +350,6 @@ export const PENDING_STATE = Object.freeze({
   ADMITTED: 'admitted',
 })
 
-
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }

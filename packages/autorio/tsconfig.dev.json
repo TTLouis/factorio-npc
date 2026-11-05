@@ -6,6 +6,7 @@
     "luaLibImport": "inline",
     "luaBundle": "control.lua",
     "luaBundleEntry": "src/control.ts",
+    "noResolvePaths": ["crash-site"],
     "luaPlugins": [
       { "name": "@proj-airi/tstl-plugin-reload-factorio-mod/dist/index.mjs" }
     ]

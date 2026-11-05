@@ -18,7 +18,7 @@ Factorio. The fixture (ore patch, items) is scripted; the behavior under test
 goes through the NPC's remote interfaces.
 
 It also checks the rate facts the planner uses to size production
-(docs/PARALLEL_PRODUCTION_WORK_PLAN.md W1): the harness figures must equal the
+(docs/validation/PARALLEL_PRODUCTION_WORK_PLAN.md W1): the harness figures must equal the
 engine's own prototype values, and the running pair must produce at the rate
 the harness computed.
 

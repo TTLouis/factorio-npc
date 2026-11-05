@@ -7,7 +7,7 @@ This is a separate track from `PARALLEL_PRODUCTION_WORK_PLAN.md`. It records the
 user-facing behavior wanted alongside the production and delegation work. Mark an
 item complete only after its evidence is recorded here with the implementing commit.
 
-The accepted Week 1 build contract is [NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md).
+The accepted Week 1 build contract is [NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md](../NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md).
 It supersedes older blanket revision-approval rules for in-scope Auto/player-task
 recovery. The Q&A below records the decisions; implementation evidence stays separate.
 

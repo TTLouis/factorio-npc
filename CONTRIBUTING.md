@@ -6,8 +6,8 @@ is welcome. You do not need to understand the entire planner to contribute.
 
 ## Find a useful first change
 
-- Try the documented Docker or Pterodactyl setup and report the first confusing
-  step, with your platform and source SHA.
+- Try the [external-harness setup](docs/EXTERNAL_HARNESS_SETUP.md) and report the
+  first confusing step, with your platform and source SHA.
 - Improve a specific explanation or broken link. Check the
   [documentation index](docs/README.md) before creating another guide.
 - Turn a reproducible failure into a recorded/scripted regression. Offline
@@ -21,12 +21,13 @@ See [current status](docs/NPC_AGENT_HARNESS_STATUS.md) for known limits and
 
 ## Choose the right source
 
-Development pull requests target **`experiment/jev-agent-architecture`**.
-`main` is the stable baseline and can be behind current development. Start a
-small task branch from the current Jev candidate, using `<type>/<task-slug>`:
-`docs/setup-guide`, `fix/inventory-refresh` or `test/crafting-restart`, for example.
+External-harness pull requests target **`main`**. Start a small task branch
+from its current head, using `<type>/<task-slug>`: `docs/setup-guide`,
+`fix/inventory-refresh` or `test/crafting-restart`, for example. The internal
+planner/Jev experiment remains on `experiment/jev-agent-architecture`; changes
+to that experiment are separate from the external-harness workflow.
 
-In an independent clone, fetch/check out the development branch before creating
+In an independent clone, fetch/check out `main` before creating
 your task branch. In the owner's shared workspace, first follow the parent
 `AGENTS.md` and `WORKTREES.md` ownership/worktree procedure; never reuse another
 chat's checkout. Those machine-local files are not required for outside contributors.

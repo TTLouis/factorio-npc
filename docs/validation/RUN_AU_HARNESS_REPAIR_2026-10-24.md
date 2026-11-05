@@ -6,7 +6,7 @@ baseline `0776b39b`). No new E2E, real provider/Jev call, push or deployment.
 
 ## Failure and shared ownership
 
-[Run AU](validation/RED_AUTOMATION_LIVE_RUN_AU_2026-10-23.md) stopped on drill15's
+[Run AU](RED_AUTOMATION_LIVE_RUN_AU_2026-10-23.md) stopped on drill15's
 missing exact binding. Its historical locator retained name/type/position but no
 surface index; a matching actor6/epoch1 placement receipt remained. The old refresh
 entry check rejected that locator before any authoritative probe. Earlier AS tests

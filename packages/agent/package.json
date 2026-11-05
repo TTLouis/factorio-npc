@@ -2,9 +2,13 @@
   "name": "@factorio-npc/agent",
   "type": "module",
   "version": "0.1.0",
-  "description": "Structured LLM agent and tool layer for the headless Factorio NPC runtime.",
+  "description": "Headless Factorio NPC agent runtime and LLM planning/tool layer.",
   "author": "TTLouis; originally derived from moeru-ai/airi-factorio by LemonNekoGH",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TTLouis/factorio-npc"
+  },
   "keywords": [
     "factorio",
     "npc",

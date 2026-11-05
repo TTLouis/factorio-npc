@@ -110,5 +110,5 @@ clean integration status, unchanged executable paths, all retained checkout
 identities and the protected primary bytes. Independent final review approved.
 
 The scoped implementation proposal is
-[Run AS next patch](../RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md). It is not implemented
+[Run AS next patch](RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md). It is not implemented
 by this consolidation and does not authorize a new live test.

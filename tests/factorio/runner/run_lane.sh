@@ -154,6 +154,14 @@ case "$LANE" in
     printf '[npc-test][map-context] Verifying knowledge, crop and stale refusals after a real Factorio restart...\n'
     run_node map_context_factorio.mjs --phase verify
     ;;
+  crash-site)
+    # External-trial-3 follow-ups: operator crash-site setup and visible ore amounts with zero humans, then a real restart.
+    printf '[npc-test][crash-site] Running crash-site setup and resource amount gates...\n'
+    run_node crash_site_resources_factorio.mjs --phase prepare --save "$SAVE"
+    restart_factorio
+    printf '[npc-test][crash-site] Verifying the setup record and wrecks after a real Factorio restart...\n'
+    run_node crash_site_resources_factorio.mjs --phase verify
+    ;;
   tick-sprint)
     run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"
     stop_factorio
