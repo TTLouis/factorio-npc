@@ -352,13 +352,15 @@
       },
       "reference": {
         "concepts": [
-          "Checkpoint 0, manual bootstrap: the agent hand-places and primes machines; priming is finite and declared.",
-          "Checkpoint 1, self-sustaining burner loops: burner mining or smelting whose fuel is delivered by the system rather than by agent fuel runs.",
-          "Checkpoint 2, centralized electricity with automatic fuel or service supply.",
-          "Checkpoint 3, electric mining and electric transfers on that network, where live availability and tool support allow.",
-          "Checkpoint 4, separated smelting arrays with automatic feed, output and, if the machines need it, fuel service.",
-          "Checkpoint 5, sustained downstream consumption such as science or labs running from the earlier checkpoints without agent intervention.",
-          "Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it. A burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach."
+          "The checkpoints run in order from manual bootstrap through burner loops, centralized electricity, electric mining and transfers and separated smelting to sustained downstream consumption; each builds on the earlier ones.",
+          "Manual bootstrap: the agent hand-places and primes machines; priming is finite and declared.",
+          "Self-sustaining burner loops: burner mining or smelting whose fuel is delivered by the system rather than by agent fuel runs.",
+          "Centralized electricity: a power network whose fuel or service supply arrives automatically.",
+          "Electric mining and transfers: electric miners and electric transfers on that network, where live availability and tool support allow.",
+          "Separated smelting arrays: automatic feed, output and, if the machines need it, fuel service.",
+          "Sustained downstream consumption: science or labs running from the earlier checkpoints without agent intervention.",
+          "Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it.",
+          "Contrast: a burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach."
         ],
         "interpretation_checks": [
           "The current stage is named with live evidence and the next unmet checkpoint is identified; unknown evidence leaves the checkpoint unmet."
