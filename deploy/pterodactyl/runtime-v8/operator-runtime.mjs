@@ -274,7 +274,7 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500, ca
       ledger.native_tick = result.evidence.tick
       if (row.terminal && row.effect !== 'not_happened' && row.prepared?.observed_before && !row.observed_effect && typeof bridge.effectProbe === 'function') {
         let after = null
-        try { after = await bridge.effectProbe(row.operation) }
+        try { after = await bridge.effectProbe(row.operation, Object.keys(row.prepared.observed_before.items ?? {})) }
         catch { after = null } // Observation only: never affects the receipt state.
         row.observed_effect = observedEffect(row.prepared.observed_before, after)
       }
@@ -299,7 +299,7 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500, ca
     const guidance = result.reason === 'exact_admission_in_flight' ? { guidance: IN_FLIGHT_GUIDANCE } : {}
     if (!row.prepared?.observed_before || typeof bridge.effectProbe !== 'function') return { ...result, ...guidance }
     let now = null
-    try { now = await bridge.effectProbe(row.operation) }
+    try { now = await bridge.effectProbe(row.operation, Object.keys(row.prepared.observed_before.items ?? {})) }
     catch { now = null }
     return { ...result, ...guidance, observed_progress: observedEffect(row.prepared.observed_before, now) }
   }

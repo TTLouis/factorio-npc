@@ -111,9 +111,28 @@ the native line record of exactly this request and it lists every tile as placed
 Script-placed poles and belts get the native placement result only; read
 `getEntityStatus` for wire connections and belt state.
 
+`pick_up_ground_items` picks up items lying on the ground (`item-on-ground`
+entities) in a small box: `{x, y, radius?}` covers the tiles within `radius` (0–2,
+default 0; `capabilities.limits.pickup_radius`) of `(x, y)`. Placement never clears a
+footprint, so this is the separate operation for a tile that a ground item blocks.
+It is external-only and needs the mod capability `external_ground_pickup_supported`.
+Preflight is read-only and within 128 tiles of the actor (rechecked at admission): it
+lists 1–16 ground stacks (`capabilities.limits.pickup_items`) and refuses with
+`no_ground_items`, `ground_items_over_limit` or `inventory_full` when the inventory
+cannot take one of them. Execution walks into reach and picks the stacks up by native
+character mining; it mines no tree, rock, building or resource in the box (as with
+every walk, navigation may clear a tree or rock that blocks the only path).
+It stops with `inventory_full` before mining a stack that no longer fits, and after 32
+pickups if items keep arriving. The receipt's `observed_effect` holds the inventory
+counts of the found items before and after; read the box again to confirm it is empty.
+
 `research_technology` submits native research; its completed operation receipt does
 not prove research completion. Read `getTechnology({name})` and
 `getResearchStatus({})` for current requirements, progress and researched state.
+`getResearchStatus` also lists `available`: up to 24 technologies the force can
+research now, each with the recipes it unlocks (`unlocks`, up to 12), its science
+ingredients and unit count, or `trigger_type` for a technology completed by its
+trigger rather than by labs. `getTechnology` lists `unlocks` for any technology.
 While other force research is active, a request is appended behind it in the
 native research queue (result `queued_behind`; preflight `ready_queued_behind`)
 and never replaces or reorders it. A prerequisite that is already current or
@@ -388,7 +407,11 @@ non-resource entity in the footprint, such as items on the ground or the actor.
 The bridge re-checks each footprint with that same rule: `eligible: false`
 names the blockers. `eligible: true` covers this footprint rule only; the other
 preflight checks still apply. Native candidate fields are unchanged, and
-`checked: false` means the re-check was unavailable.
+`checked: false` means the re-check was unavailable. The NPC's hidden vision
+vehicle (`sgluna-npc-vision`) has no collision and is never a blocker. A checked
+candidate whose footprint covers resource tiles also carries `covers_resources`,
+the tile count per resource name (for example `[{name: "iron-ore", tiles: 4}]`);
+it is a fact for the caller, not a refusal.
 The actor's own position counts as a blocker: walk clear of the footprint
 before placing there. A placed `burner-inserter` starts without fuel; it refuels
 itself only from fuel it moves, so supply fuel before relying on it.

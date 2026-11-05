@@ -117,10 +117,11 @@ export interface OperationAdmission extends OperationCorrelation {
 // refusal without touching the world. A refusal from any other operation
 // (equip, research, follow, composite plans, ...) may follow a partial change.
 // place_line checks every tile, then queues one placing task per tile or returns its refusal before queueing any.
+// pick_up_ground_items re-reads its box, then queues one task or returns its refusal.
 export const PURE_SUBMIT_OPERATIONS = [
   'place_entity', 'mine_entity', 'mine_entity_exact', 'mine_resource_at', 'rotate_entity', 'move_items', 'move_items_exact',
   'move_items_with_player', 'set_machine_recipe', 'launch_rocket', 'wait', 'craft_item',
-  'harvest_product', 'place_line',
+  'harvest_product', 'place_line', 'pick_up_ground_items',
 ]
 // supply_entity's successful submission only queues submit_move_exact calls.
 // Its failed submission can cancel a prefix, so it is deliberately NOT added

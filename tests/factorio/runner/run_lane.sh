@@ -168,6 +168,11 @@ case "$LANE" in
 '
     run_node line_placement_factorio.mjs
     ;;
+  external-ground-pickup)
+    # External-harness pick_up_ground_items through the shipped NativeBridge: pickup, unblocking a belt tile and refusals.
+    printf '[npc-test][external-ground-pickup] Running pickup, unblock, empty-box and full-inventory gates...\n'
+    run_node external_pickup_factorio.mjs
+    ;;
   tick-sprint)
     run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"
     stop_factorio

@@ -195,17 +195,19 @@ async function blocked() {
   assert.equal(await held('transport-belt'), 10)
   const rows = await entitiesAt(tiles)
   assert.deepEqual([rows[0], rows[1], rows[3]], [[], [], []])
-  // The actor itself blocks a tile it stands on; it is refused before sending, never built under.
+  // Trial 4r (r4-034, r4-090): the actor's own character is not a blocker. A line starting under the actor is admitted,
+  // the placing runtime steps the actor aside, and every tile is built.
   const actorAt = await toStart()
-  const under = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x, y: origin.y, line_direction: 4, count: 2 } }
-  const refused = await refusal(under, 'line-actor-tile')
-  assert.equal(refused.details.tile_index, 0, JSON.stringify(refused.details))
-  if (refused.details.native_code === 'placement_footprint_occupied') assert.ok(list(refused.details.blockers).some(blocker => blocker.type === 'character'), JSON.stringify(refused.details))
-  else assert.equal(refused.details.native_code, 'placement_not_clear', JSON.stringify(refused.details))
-  // The actor's own vision helper shares its tile; only a placed belt would be a failure here.
-  assert.deepEqual((await entitiesAt(tilesOf(under.args))).map(row => row.filter(entity => entity.name === 'transport-belt')), [[], []])
-  evidence.blocked = { details: error.details, actor_tile: { actor: actorAt, details: refused.details } }
-  console.log('PASS: BLOCKED - a ground item on tile 2 refused the whole line before sending, naming the tile and the item; the actor\x27s own tile is refused the same way')
+  const under = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x, y: origin.y, direction: 4, line_direction: 4, count: 2 } }
+  const underTiles = tilesOf(under.args)
+  const { receipt } = await run(under, 'line-actor-tile')
+  assert.equal(receipt.state, 'completed', JSON.stringify(receipt).slice(0, 1500))
+  assert.equal(receipt.line_placement.placed_count, 2)
+  assertPlaced(receipt.line_placement, await entitiesAt(underTiles), underTiles, 'transport-belt', 4)
+  const actorAfter = await lua('rcon.print(helpers.table_to_json({x=a.position.x,y=a.position.y}))')
+  assert.ok(underTiles.every(tile => Math.abs(actorAfter.x - tile.x) >= 0.5 || Math.abs(actorAfter.y - tile.y) >= 0.5), `the actor stepped off its line: ${JSON.stringify(actorAfter)}`)
+  evidence.blocked = { details: error.details, actor_tile: { actor: actorAt, after: actorAfter, line: receipt.line_placement } }
+  console.log('PASS: BLOCKED - a ground item on tile 2 refused the whole line before sending, naming the tile and the item; a line under the actor was built after it stepped aside')
 }
 
 try {

@@ -546,13 +546,18 @@ test('placement candidates are annotated with the same footprint rule external p
     { id: 'candidate-1', position: { x: 4.5, y: 0.5 }, footprint: { world_box: box(4.5, 0.5) } },
     { id: 'candidate-2', position: { x: 6.5, y: 0.5 }, footprint: { world_box: box(6.5, 0.5) } }] }
   f.onCommand = command => command.includes('rows=out')
-    ? JSON.stringify({ ok: true, tick: 5361, rows: [{ code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }] }, { code: 'clear', blockers: {} }] })
+    ? JSON.stringify({ ok: true, tick: 5361, rows: [{ code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }], resources: {} }, { code: 'clear', blockers: {}, resources: [{ name: 'iron-ore', tiles: 1 }, { name: 'bad name!', tiles: 2 }, { name: 'stone', tiles: 0 }] }] })
     : command.includes('get_placement_candidates') ? JSON.stringify(native) : undefined
   const result = await f.bridge.observe('getPlacementCandidates', { entity_name: 'transport-belt', covers_position: { x: 4.5, y: 0.5 } })
   assert.equal(result.legal_candidate_count, 2, 'native fields are preserved')
   assert.deepEqual(result.candidates[0].external_footprint, { eligible: false, code: 'placement_footprint_occupied',
     blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }] })
   assert.deepEqual(result.candidates[1].external_footprint, { eligible: true })
+  // Trial 4r: buildings landed on the ore patch. The resource tiles under each footprint are a fact on the candidate.
+  assert.equal(result.candidates[0].covers_resources, undefined, 'no resource tiles, no field')
+  assert.deepEqual(result.candidates[1].covers_resources, [{ name: 'iron-ore', tiles: 1 }, { name: 'unknown', tiles: 2 }])
+  assert.match(result.external_placement.rule, /covers_resources lists the resource tiles/)
+  assert.ok(f.calls.at(-1).includes('find_entities_filtered{area=box,type="resource",limit=256}'))
   assert.equal(result.external_placement.checked, true)
   assert.equal(result.external_placement.blocked_candidate_count, 1)
   assert.equal(result.external_placement.eligible_candidate_count, 1)
@@ -564,6 +569,9 @@ test('placement candidates are annotated with the same footprint rule external p
   await f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'transport-belt', x: 6.5, y: 0.5 } }, 'run/rule')
   assert.ok(rule(annotation))
   assert.equal(rule(f.calls[1]), rule(annotation))
+  // The NPC's hidden vision vehicle follows the actor and has no collision; the mod's own scans skip it, and so does this rule
+  // (native line lane: a line under the actor was refused for "sgluna-npc-vision [car]").
+  assert.ok(rule(annotation).includes('e.name~="sgluna-npc-vision"'))
 })
 
 test('candidate annotation fails visibly, never by dropping or inventing eligibility', async () => {
@@ -952,4 +960,82 @@ test('a completed line receipt lists each placed entity; a short native line rec
   const other = await f.bridge.receipt(prepared.pending)
   assert.equal(other.state, 'uncertain', 'a record whose arguments do not reproduce the request identity is not this line')
   assert.equal(other.line_placement, null)
+})
+
+// Trial 4r: ore a drill dropped on the ground blocked belt tiles, and nothing could pick it up. Placement still never clears;
+// pick_up_ground_items is the separate, bounded operation for items on the ground.
+const pickup = { name: 'pick_up_ground_items', args: { x: 3.4, y: -2.7, radius: 1 } }
+function pickupFixture() {
+  const f = fixture()
+  f.state.status.external_ground_pickup_supported = 1
+  f.preflight = { ok: true, operation: 'pick_up_ground_items', items: [
+    { name: 'iron-ore', count: 3, position: { x: 3.3, y: -2.6 } }, { name: 'stone', count: 1, position: { x: 4.1, y: -2.2 } },
+    { name: 'iron-ore', count: 2, position: { x: 2.9, y: -3.1 } }] }
+  return f
+}
+
+test('pick_up_ground_items parses bounded arguments, fills the radius and renders one native remote call', () => {
+  assert.deepEqual(parseExternalOperation(pickup).args, pickup.args)
+  assert.deepEqual(parseExternalOperation({ name: 'pick_up_ground_items', args: { x: -1, y: 2 } }).args, { x: -1, y: 2, radius: 0 })
+  assert.equal(renderExternalOperation(pickup), 'remote.call("autorio_operations","pick_up_ground_items",3.4,-2.7,1)')
+  for (const args of [
+    { ...pickup.args, radius: 3 }, { ...pickup.args, radius: -1 }, { ...pickup.args, radius: 1.5 }, { ...pickup.args, x: Number.NaN },
+    { y: 0, radius: 0 }, { ...pickup.args, entity_name: 'tree' }, { ...pickup.args, lua: 'game.print(1)' }, { ...pickup.args, x: 2000000 },
+  ]) assert.throws(() => parseExternalOperation({ name: 'pick_up_ground_items', args }), JSON.stringify(args))
+  const catalog = capabilities()
+  assert.ok(OPERATION_NAMES.includes('pick_up_ground_items'))
+  assert.ok(catalog.operations.find(item => item.name === 'pick_up_ground_items').external_only)
+  assert.equal(catalog.limits.pickup_radius, 2)
+  assert.match(catalog.operation_notes.pick_up_ground_items, /Nothing else in the box is mined/)
+  assert.match(catalog.operation_notes.place_entity, /picked up with pick_up_ground_items/)
+})
+
+test('pick_up_ground_items needs the native capability and a box within walk range before any game call', async () => {
+  const f = fixture()
+  await assert.rejects(f.bridge.prepare(pickup, 'run/pickup'), error => error.code === 'ground_pickup_capability_missing' && error.notSent)
+  f.state.status.external_ground_pickup_supported = 1
+  f.state.status.actor.position = { x: 200, y: 0 }
+  await assert.rejects(f.bridge.prepare(pickup, 'run/pickup'), error => error.code === 'operation_limit' && error.details.maximum === 128 && error.notSent)
+  assert.ok(!f.calls.some(command => command.includes('autorio_preflight')))
+})
+
+test('pick_up_ground_items preflight names what it refuses and probes the inventory of every item it found', async () => {
+  const f = pickupFixture()
+  f.probe = { ok: true, tick: 120, actor_id: 7, position: { x: 0, y: 0 }, items: { 'iron-ore': 10, stone: 0 } }
+  const prepared = await f.bridge.prepare(pickup, 'run/pickup')
+  assert.ok(f.calls.some(command => command.includes('remote.call("autorio_preflight","operation","pick_up_ground_items",{x=3.4,y=-2.7,radius=1})')))
+  assert.match(f.calls.at(-1), /\{'iron-ore','stone'\}/, 'each found item once')
+  assert.deepEqual(prepared.observed_before.items, { 'iron-ore': 10, stone: 0 })
+  // The runtime passes the names in observed_before back for the receipt's after-probe.
+  await f.bridge.effectProbe(pickup, Object.keys(prepared.observed_before.items))
+  assert.match(f.calls.at(-1), /\{'iron-ore','stone'\}/)
+  for (const code of ['no_ground_items', 'ground_items_over_limit', 'inventory_full']) {
+    f.preflight = { ok: false, code }
+    await assert.rejects(f.bridge.prepare(pickup, 'run/pickup'), error => error.notSent && error.details.native_code === code
+      && !/Re-observe the target before choosing different arguments/.test(error.publicMessage))
+  }
+})
+
+test('a placement refused by an item on the ground points at pick_up_ground_items', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true
+  f.preflight = { ok: false, code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 1, y: 2 }, item: 'iron-ore' }] }
+  await assert.rejects(f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 0, y: 0 } }, 'run/blocked'),
+    error => /picked up first with pick_up_ground_items/.test(error.publicMessage))
+})
+
+test('pick_up_ground_items submit rechecks capability, range and the box atomically, and a refusal is not admitted', async () => {
+  const f = pickupFixture()
+  const prepared = await f.bridge.prepare(pickup, 'run/pickup')
+  f.onSubmit = command => {
+    assert.ok(command.includes('if s.external_ground_pickup_supported~=1 then return "ground_pickup_capability_missing" end'))
+    assert.ok(command.includes('(p.x-(3.4))^2+(p.y-(-2.7))^2>16384 then return "walk_out_of_range"'))
+    assert.ok(command.includes('local p=remote.call("autorio_preflight","operation","pick_up_ground_items",{x=3.4,y=-2.7,radius=1}); if p.ok~=true then return "preflight_rejected"'))
+    assert.ok(command.includes('remote.call("autorio_operations","pick_up_ground_items",3.4,-2.7,1)'))
+    assert.ok(!command.includes('placement_no_clear_supported'), 'a pickup is not a placement')
+    return `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: 'external_guard_refused:preflight_rejected:no_ground_items', prefix: {} })}`
+  }
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted && error.code === 'preflight_rejected'
+    && error.details.native_code === 'no_ground_items')
+  f.onSubmit = command => `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: 'external_guard_refused:ground_pickup_capability_missing', prefix: {} })}`
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted && error.code === 'ground_pickup_capability_missing')
 })

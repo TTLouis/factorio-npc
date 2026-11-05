@@ -42,6 +42,7 @@ import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery
 import { new_orientation_runtime } from './orientation_runtime'
 import { execute_placement_candidate, placement_candidate_preflight, freeze_fluid_preservation_candidate, initialize_fluid_preservation_history } from './placement_candidates'
 import { line_placement_preflight, line_placement_status, submit_line_placement } from './line_placement'
+import { ground_item_pickup_preflight, MAX_PICKUPS, pickup_args_refusal } from './ground_item_pickup'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
 import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
@@ -327,6 +328,8 @@ function operation_preflight(name: string, args: Record<string, any>) {
   }
   // Every tile of an external line placement, read-only (line_placement.ts).
   if (name === 'place_line') return line_placement_preflight(actor, args as any)
+  // The ground items an external pickup would take, read-only (ground_item_pickup.ts).
+  if (name === 'pick_up_ground_items') return ground_item_pickup_preflight(actor, args)
   if (name === 'harvest_product') {
     if (!actor || !actor.is_valid) return reject('no_actor')
     if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
@@ -628,6 +631,18 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New harvest_product task: ${product_name} +${count}, radius=${search_radius}`)
     return result
   },
+  // External harness only: the items lying on the ground in a box of at most 5x5 tiles, picked up with native mining.
+  // The preflight runs again inside the submit, so a box that emptied or a stack that no longer fits refuses before
+  // anything is queued. See ground_item_pickup.ts.
+  pick_up_ground_items: (x: number, y: number, radius: number = 0): [boolean, string] => {
+    if (pickup_args_refusal(x, y, radius)) return [false, 'invalid_pickup_args']
+    const checked = ground_item_pickup_preflight(get_controlled_actor(), { x, y, radius })
+    if (!checked.ok) return [false, (checked as { code: string }).code]
+    const size = radius * 2 + 1
+    const result = area_clearing_controller.submit(x, y, size, size, { item_entities_only: true, max_clears: MAX_PICKUPS })
+    if (result[0]) log(`[AUTORIO] New pick_up_ground_items task: center=(${x},${y}), radius=${radius}`)
+    return result
+  },
   clear_construction_area: (x: number, y: number, width: number, height: number): [boolean, string] => {
     const result = area_clearing_controller.submit(x, y, width, height)
     if (result[0]) log(`[AUTORIO] New clear_construction_area task: center=(${x},${y}), size=${width}x${height}`)
@@ -744,6 +759,7 @@ remote.add_interface('autorio_operations', {
       placement_no_clear_supported: true,
       external_fluid_candidates_supported: 1,
       external_line_placement_supported: 1,
+      external_ground_pickup_supported: 1,
       admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       actor_surface_index: actor?.surface.index,

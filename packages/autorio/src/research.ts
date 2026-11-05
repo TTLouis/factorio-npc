@@ -1,4 +1,4 @@
-import type { LuaForce, OnResearchFinishedEvent } from 'factorio:runtime'
+import type { LuaForce, LuaTechnology, OnResearchFinishedEvent } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersResearchTechnology } from './types'
@@ -7,6 +7,8 @@ import { TaskStates } from './types'
 const MAX_RESEARCH_QUEUE = 10
 const MAX_TECHNOLOGY_RECORDS = 20
 const MAX_REQUEST_RECORDS = 20
+const MAX_AVAILABLE_TECHNOLOGIES = 24
+const MAX_UNLOCKS = 12
 const STALL_TICKS = 60 * 60
 const PROGRESS_EPSILON = 0.000001
 
@@ -431,6 +433,67 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
     return { found: true, request_id, result, follow_through: follow }
   }
 
+  // The recipes a technology unlocks (its unlock-recipe effects), as a game fact (trial 4r: the NPC split a belt with an inserter and
+  // never saw that Logistics unlocks the splitter).
+  function technology_unlocks(tech: LuaTechnology) {
+    const unlocks: string[] = []
+    let count = 0
+    for (const effect of tech.prototype.effects ?? []) {
+      if (effect.type !== 'unlock-recipe') continue
+      const recipe = (effect as { recipe?: unknown }).recipe
+      if (typeof recipe !== 'string') continue
+      count += 1
+      if (unlocks.length < MAX_UNLOCKS) unlocks.push(recipe)
+    }
+    return { unlocks, unlocks_truncated: count > MAX_UNLOCKS }
+  }
+
+  // Technologies the force can research now: enabled, not researched, every prerequisite researched.
+  // Ordered cheapest first (trigger technologies, then fewer science-pack kinds, fewer units, name) before the cap,
+  // so a long mid-game list keeps the nearest technologies instead of an arbitrary engine order.
+  function available_technologies(force: LuaForce) {
+    const ready_rows: Array<{ name: string, tech: LuaTechnology, kinds: number, units: number }> = []
+    for (const [name, tech] of pairs(force.technologies)) {
+      if (tech.researched || !tech.enabled || tech.prototype.hidden) continue
+      let ready = true
+      for (const [, prerequisite] of pairs(tech.prerequisites)) {
+        if (!prerequisite.researched) {
+          ready = false
+          break
+        }
+      }
+      if (!ready) continue
+      const triggered = tech.prototype.research_trigger !== undefined
+      ready_rows.push({
+        name,
+        tech,
+        kinds: triggered ? 0 : tech.research_unit_ingredients.length,
+        units: triggered ? 0 : tech.research_unit_count,
+      })
+    }
+    ready_rows.sort((a, b) => a.kinds !== b.kinds ? a.kinds - b.kinds : a.units !== b.units ? a.units - b.units : a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    const available: Array<Record<string, unknown>> = []
+    const count = ready_rows.length
+    for (const { name, tech } of ready_rows) {
+      if (available.length >= MAX_AVAILABLE_TECHNOLOGIES) break
+      const trigger = tech.prototype.research_trigger
+      const ingredients: string[] = []
+      if (!trigger) {
+        for (const ingredient of tech.research_unit_ingredients) ingredients.push(ingredient.name)
+      }
+      const { unlocks, unlocks_truncated } = technology_unlocks(tech)
+      available.push({
+        name,
+        unlocks,
+        unlocks_truncated,
+        trigger_type: trigger?.type,
+        research_unit_count: trigger ? undefined : tech.research_unit_count,
+        ingredients: trigger ? undefined : ingredients,
+      })
+    }
+    return { available, available_count: count, available_truncated: count > MAX_AVAILABLE_TECHNOLOGIES }
+  }
+
   function status() {
     const actor = get_actor()
     if (!actor || !actor.is_valid) return { error: 'no_actor' }
@@ -441,6 +504,7 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
     const result = storage.sgluna_last_research_result
     const recent = results()
     const follows = follow_records()
+    const ready = available_technologies(force)
     return {
       force: force.name,
       force_index: force.index,
@@ -454,6 +518,9 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
       last_request_result: result,
       recent_requests: recent.slice(math.max(0, recent.length - MAX_RESEARCH_QUEUE)),
       follow_through: follows.slice(math.max(0, follows.length - MAX_RESEARCH_QUEUE)),
+      available: ready.available,
+      available_count: ready.available_count,
+      available_truncated: ready.available_truncated,
     }
   }
 
@@ -473,6 +540,7 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
     }
     const trigger = tech.prototype.research_trigger
     const ingredients = trigger ? [] : tech.research_unit_ingredients
+    const { unlocks, unlocks_truncated } = technology_unlocks(tech)
     return {
       found: true,
       name: tech.name,
@@ -493,6 +561,8 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
       ingredients_truncated: ingredients.length > MAX_TECHNOLOGY_RECORDS,
       prerequisites,
       prerequisites_truncated: prerequisite_count > MAX_TECHNOLOGY_RECORDS,
+      unlocks,
+      unlocks_truncated,
     }
   }
 

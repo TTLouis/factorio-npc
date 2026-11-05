@@ -388,3 +388,43 @@ describe('technology progress', () => {
     expect(controller.technology('automation')).toMatchObject({ is_current_research: false, progress: 0 })
   })
 })
+describe('research unlock facts', () => {
+  it('lists the technologies researchable now with the recipes each unlocks, and the unlocks of one technology', () => {
+    const { force, tech, controller } = world()
+    tech.prototype.effects = [{ type: 'unlock-recipe', recipe: 'assembling-machine-1' }, { type: 'nothing' }, { type: 'unlock-recipe', recipe: 'long-handed-inserter' }]
+    const logistics = { name: 'logistics', enabled: true, researched: false, level: 1, prerequisites: {}, research_unit_count: 75,
+      research_unit_ingredients: [{ name: 'automation-science-pack', amount: 1 }], saved_progress: 0,
+      prototype: { effects: [{ type: 'unlock-recipe', recipe: 'underground-belt' }, { type: 'unlock-recipe', recipe: 'splitter' }] } }
+    const locked = { ...logistics, name: 'logistics-2', prerequisites: { logistics }, prototype: { effects: [] } }
+    const done = { ...logistics, name: 'steam-power', researched: true }
+    const disabled = { ...logistics, name: 'hidden-tech', enabled: false }
+    const trigger = { ...logistics, name: 'electronics', prototype: { research_trigger: { type: 'craft-item' }, effects: [] } }
+    const hidden = { ...logistics, name: 'debug-tech', prototype: { hidden: true, effects: [] } }
+    force.technologies = { logistics, automation: tech, 'logistics-2': locked, 'steam-power': done, 'hidden-tech': disabled, electronics: trigger, 'debug-tech': hidden }
+    const status: any = controller.status()
+    // Cheapest first: the trigger technology, then 10 units before 75 units.
+    expect(status.available.map((row: any) => row.name)).toEqual(['electronics', 'automation', 'logistics'])
+    expect(status.available[2]).toEqual({ name: 'logistics', unlocks: ['underground-belt', 'splitter'], unlocks_truncated: false,
+      trigger_type: undefined, research_unit_count: 75, ingredients: ['automation-science-pack'] })
+    expect(status.available[0]).toMatchObject({ name: 'electronics', trigger_type: 'craft-item', ingredients: undefined, research_unit_count: undefined })
+    expect(status).toMatchObject({ available_count: 3, available_truncated: false })
+    expect(controller.technology('automation')).toMatchObject({ unlocks: ['assembling-machine-1', 'long-handed-inserter'], unlocks_truncated: false })
+    expect(controller.technology('logistics-2')).toMatchObject({ unlocks: [], unlocks_truncated: false })
+  })
+
+  it('bounds the available list and each unlock list', () => {
+    const { force, tech, controller } = world()
+    tech.prototype.effects = Array.from({ length: 15 }, (_, index) => ({ type: 'unlock-recipe', recipe: `recipe-${index}` }))
+    const many: Record<string, any> = { automation: tech }
+    for (let index = 0; index < 30; index++) many[`tech-${index}`] = { ...tech, name: `tech-${index}`, prototype: { effects: [] } }
+    // A cheap technology listed last by the engine is still kept under the cap.
+    many.logistics = { ...tech, name: 'logistics', research_unit_count: 5, prototype: { effects: [] } }
+    force.technologies = many
+    const status: any = controller.status()
+    expect(status.available).toHaveLength(24)
+    expect(status).toMatchObject({ available_count: 32, available_truncated: true })
+    expect(status.available[0]).toMatchObject({ name: 'logistics' })
+    expect(status.available[1]).toMatchObject({ name: 'automation', unlocks_truncated: true })
+    expect(status.available[1].unlocks).toHaveLength(12)
+  })
+})

@@ -148,6 +148,13 @@ export interface PlayerParametersClearConstructionArea {
   width: number
   height: number
   cleared_count: number
+  /**
+   * External pick_up_ground_items (ground_item_pickup.ts): only item-on-ground entities are targets, the task fails with
+   * inventory_full rather than start mining a stack the inventory cannot take, and with ground_item_pickup_limit after
+   * max_clears pickups. Without it the task clears every clearable construction blocker as before.
+   */
+  item_entities_only?: boolean
+  max_clears?: number
   target?: LuaEntity | null
   target_name?: string
   target_position?: MapPositionStruct
