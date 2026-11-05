@@ -398,7 +398,7 @@ to context automatically.
 
 ```json
 {"kind":"knowledge","action":"search","query":"individual refueling"}
-{"kind":"knowledge","action":"get","id":"knowledge-owner-electrical-first-automation"}
+{"kind":"knowledge","action":"get","id":"knowledge-automation-progression-checkpoints"}
 {"kind":"skill","action":"search","query":"smelting"}
 ```
 

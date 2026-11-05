@@ -61,6 +61,18 @@ test('related links are generic and bidirectional', async () => {
   }
 })
 
+test('progression checkpoints knowledge is discoverable and linked from the related methods', async () => {
+  const id = 'knowledge-automation-progression-checkpoints'
+  const found = await readLibrary({ kind: 'knowledge', action: 'search', query: 'fuel runs' })
+  assert.equal(found.results[0].id, id)
+  const entry = (await readLibrary({ kind: 'knowledge', action: 'get', id })).entry
+  assert.match(JSON.stringify(entry), /next unmet checkpoint/)
+  for (const related of ['burner-coal-loop', 'steam-power-bootstrap', 'skill-prove-sustainment']) {
+    assert.ok(entry.related_ids.includes(related))
+    assert.ok((await readLibrary({ kind: 'skill', action: 'get', id: related })).entry.related_ids.includes(id))
+  }
+})
+
 test('power/electricity search prioritizes power planning, not blanket owner aliases on burner methods', async () => {
   for (const query of ['power', 'electricity']) {
     const r = await readLibrary({ kind: 'skill', action: 'search', query, limit: 3 })
@@ -83,7 +95,7 @@ test('hard action/kind/query/ID/limit validation and separate namespaces fail cl
     { kind: 'skill', action: 'get', id: 'steam-power-bootstrap', lua: 'forbidden' }]) {
     await assert.rejects(readLibrary(input), { code: 'invalid_library_arguments' })
   }
-  await assert.rejects(readLibrary({ kind: 'skill', action: 'get', id: 'knowledge-available-capabilities' }), { code: 'library_entry_not_found' })
+  await assert.rejects(readLibrary({ kind: 'skill', action: 'get', id: 'knowledge-automation-progression-checkpoints' }), { code: 'library_entry_not_found' })
   await assert.rejects(readLibrary({ kind: 'knowledge', action: 'get', id: 'unknown-id' }), { code: 'library_entry_not_found' })
 })
 
@@ -114,11 +126,11 @@ test('MCP paired streams deliver typed library content and validate enum before 
   const send = message => input.write(`${JSON.stringify(message)}\n`)
   send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'library-test', version: '1' } } })
   send({ jsonrpc: '2.0', method: 'notifications/initialized' })
-  send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'knowledge', action: 'get', id: 'knowledge-available-capabilities' } } })
-  send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'plan', action: 'get', id: 'knowledge-available-capabilities' } } })
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'knowledge', action: 'get', id: 'knowledge-automation-progression-checkpoints' } } })
+  send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'plan', action: 'get', id: 'knowledge-automation-progression-checkpoints' } } })
   for (let i = 0; i < 100 && replies.length < 3; i++) await new Promise(resolve => setImmediate(resolve))
   const r = replies.find(row => row.id === 2)
-  assert.equal(r.result.structuredContent.entry.id, 'knowledge-available-capabilities')
+  assert.equal(r.result.structuredContent.entry.id, 'knowledge-automation-progression-checkpoints')
   assert.deepEqual(JSON.parse(r.result.content[0].text), r.result.structuredContent)
   assert.equal(replies.find(row => row.id === 3).error.code, -32602)
   assert.equal(MCP_TOOLS.find(tool => tool.name === 'factorio_library').annotations.readOnlyHint, true)

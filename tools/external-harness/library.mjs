@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 // The leveled method library export is the single knowledge source.
 // Regenerate it with `node scripts/export-leveled-library.mjs`.
 export const LIBRARY_SOURCE = 'packages/autorio/src/fixtures/leveled-library-v1.json'
-export const LIBRARY_COUNTS = Object.freeze({ knowledge: 6, skills: 54 })
+export const LIBRARY_COUNTS = Object.freeze({ knowledge: 7, skills: 54 })
 export const MAX_LIBRARY_RESULT_BYTES = 7 * 1024
 const MAX_LIBRARY_FILE_BYTES = 512 * 1024
 const MAX_QUERY = 160
