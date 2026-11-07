@@ -51,7 +51,7 @@ export function seen_link(seen: SeenArea | undefined, area: Area | undefined, re
 export function pipe_link_area(entity: LuaEntity, connection: { position: Point, target_position?: Point, connection_type?: string }, fluidbox_index: number): Area | undefined {
   if (connection.connection_type === 'linked') return undefined
   if (connection.connection_type === 'underground') {
-    const raw = entity.fluidbox.get_prototype(fluidbox_index)
+    const raw = entity.get_fluid_box_prototype(fluidbox_index)
     if (!raw) return undefined
     const definitions = ('production_type' in raw ? [raw] : raw) as Record<number, LuaFluidBoxPrototype>
     let reach: number | undefined

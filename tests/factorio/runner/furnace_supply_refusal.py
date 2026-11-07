@@ -146,7 +146,7 @@ local function furnace(dy)
   return f
 end
 local c=furnace(-3); local fa=furnace(0); local fb=furnace(3)
-local source=c.get_inventory(defines.inventory.furnace_source)
+local source=c.get_inventory(defines.inventory.crafter_input)
 local foreign=source.insert{name='__FOREIGN__',count=__FOREIGN_COUNT__}
 local chest=s.create_entity{name='wooden-chest',position={x=math.floor(p.x)-3,y=fy},force=a.force}
 local iron=inv.insert{name='iron-ore',count=__SEED_IRON__}

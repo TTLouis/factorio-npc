@@ -18,7 +18,7 @@ function fixture() {
   let serial = 100
   const makeEntity = (surface: any, name = 'tree-01', type = 'tree'): any => {
     const entity: any = { name, type, surface, valid: true, position: { x: 3.5, y: 3.5 }, bounding_box: { left_top: { x: 3, y: 3 }, right_bottom: { x: 4, y: 4 } },
-      quality: { name: 'normal' }, force, direction: 0, health: 50, active: true, unit_number: ++serial,
+      quality: { name: 'normal' }, force, direction: 0, health: 50, active: true, disabled_by_script: false, fluids_count: 0, mirroring: false, unit_number: ++serial,
       get_wire_connectors: () => ({}), get_max_inventory_index: () => 0,
       get_control_behavior: () => undefined,
       destroy: () => { entity.valid = false; return true },
@@ -166,4 +166,15 @@ it('designer pages preserve the whole immutable snapshot without truncating JSON
   const last: any = designer_input(id, 1, first.next_offset)
   expect(last.entries).toHaveLength(1); expect(last.entries[0].kind).toBe('entity'); expect(last.next_offset).toBeUndefined()
   expect(designer_input(id, 1, -1).ok).toBe(false); expect(designer_input(id, 1, 18).ok).toBe(false)
+})
+it('retains a legacy backup when script disable ownership was not journaled', () => {
+  const w = fixture(); const id = w.propose()
+  expect(reserve_area(w.actor, id, 1).ok).toBe(true)
+  const row = (storage as any).sgluna_area_reservations[0]
+  const backup = row.entities[0].backup
+  delete row.entities[0].disabled_by_script
+  expect(restore_area(id, 1, 'legacy restart').ok).toBe(false)
+  expect(reservation_status(id).reservations[0]).toMatchObject({ state: 'conflict', reason: 'legacy_reservation_script_state_unknown_backup_retained' })
+  expect(backup.valid).toBe(true)
+  expect(w.surface.get_tile(2, 2).name).toBe(RESERVED_TILE)
 })

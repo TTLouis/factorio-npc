@@ -232,7 +232,7 @@ function resolve_step(actor: ControlledActor, step: LiveEstimateStep, warnings: 
 
   if (CRAFTING_MACHINE_TYPES[machine.type] !== true) return `step ${step.item}: ${machine_name} is not a crafting machine or mining drill`
   const crafting_speed = machine.get_crafting_speed()
-  if (!(crafting_speed > 0)) return `step ${step.item}: ${machine_name} has no crafting speed`
+  if (crafting_speed === undefined || !(crafting_speed > 0)) return `step ${step.item}: ${machine_name} has no crafting speed`
   const categories = machine.crafting_categories
   // Researched recipes first, as for hand crafting; a locked one only when none fits.
   let choice = choose_recipe(actor, step, recipe => crafting_categories_support_recipe(categories, recipe)

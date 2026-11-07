@@ -51,7 +51,7 @@ try {
   await delay(700)
   const clock = await facts()
   assert.ok(clock.tick - before.tick >= 30, 'native clock must advance quietly with zero humans')
-  assert.equal(before.base, '2.0.77'); assert.equal(before.humans, 0)
+  assert.equal(before.base, '2.1.24'); assert.equal(before.humans, 0)
   assert.equal(before.coal, 0); assert.equal(before.copper, 10); assert.equal(before.tree_alive, true)
   const identity = await deploymentStatus(rcon, { requireAllowed: true })
   const original = await status()
@@ -125,7 +125,7 @@ try {
     cases.push({ name: 'native_atomic_surface_refusal', refusal })
   }
   assert.equal(inference, 0)
-  await fs.writeFile(resultFile, JSON.stringify({ status: 'pass', base: '2.0.77', baseline, external_inference_calls: inference, cases, events, transcript }, null, 2))
+  await fs.writeFile(resultFile, JSON.stringify({ status: 'pass', base: '2.1.24', baseline, external_inference_calls: inference, cases, events, transcript }, null, 2))
   console.log(JSON.stringify({ status: 'pass', baseline, cases: cases.map(row => row.name), inference }))
 } catch (error) {
   await fs.writeFile(resultFile, JSON.stringify({ status: 'fail', error: error.stack, cases, events, transcript }, null, 2))

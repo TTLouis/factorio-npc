@@ -34,7 +34,7 @@ function entity(name: string, type: string, unit_number: number, x: number, y: n
     direction: 0,
     bounding_box: box(x, y),
     force: { name: 'player' },
-    fluidbox: { length: 0, get_pipe_connections: () => [] },
+    fluids_count: 0, get_fluid_box_pipe_connections: () => [],
     ...extra,
   }
   return value
@@ -255,13 +255,11 @@ describe('Factory Area Learning V1', () => {
     const pipe_calls: unknown[][] = []
     const pipe = entity('pipe', 'pipe', 41, 3, 9, {
       get_recipe: () => { throw new Error('Entity is not crafting-machine.') },
-      fluidbox: {
-        length: 1,
-        get_pipe_connections: (...args: unknown[]) => {
+      fluids_count: 1,
+        get_fluid_box_pipe_connections: (...args: unknown[]) => {
           pipe_calls.push(args)
-          return [{ flow_direction: 'input-output', connection_type: 'normal', target: { owner: tank } }]
+          return [{ flow_direction: 'input-output', connection_type: 'normal', target: tank }]
         },
-      },
     })
     const { actor } = fixture([tank, pipe])
     const result = analyze_factory_area(actor, { area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 12, y: 11 } } })
@@ -271,8 +269,8 @@ describe('Factory Area Learning V1', () => {
     expect(pipe_calls.length).toBeGreaterThan(0)
     for (const args of pipe_calls) expect(args).toEqual([1])
     expect(analysis.entities.find(value => value.unit_number === 41)?.fluid_connections).toEqual([
-      { fluidbox_index: 1, target: 'entity-40', flow_direction: 'input-output', connection_type: 'normal' },
+      { connection_basis: 'geometric_adjacency', fluidbox_index: 1, target: 'entity-40', flow_direction: 'input-output', connection_type: 'normal' },
     ])
-    expect(analysis.relations.some(relation => relation.kind === 'fluid_connection' && relation.from === 'entity-41' && relation.to === 'entity-40')).toBe(true)
+    expect(analysis.relations.some(relation => relation.kind === 'fluid_connection' && relation.from === 'entity-41' && relation.to === 'entity-40')).toBe(false)
   })
 })

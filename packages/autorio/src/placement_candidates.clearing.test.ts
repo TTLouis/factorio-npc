@@ -96,7 +96,7 @@ function chest(position: Pos, fields: Record<string, any> = {}) {
     last_user: undefined,
     get_max_inventory_index: () => 1,
     get_inventory: () => ({ is_empty: () => true }),
-    fluidbox: [],
+    fluids_count: 0,
     ...fields,
   })
 }
@@ -339,10 +339,10 @@ describe('placement candidate reads and clearing (Run 19af)', () => {
       ['a cliff, which hand mining cannot remove', () => cliff(SPOT)],
       ['an own entity that is working', () => chest(SPOT, { status: STATUS.working })],
       ['an own entity holding items', () => chest(SPOT, { get_inventory: () => ({ is_empty: () => false }) })],
-      ['an own entity connected to fluid', () => chest(SPOT, { fluidbox: Object.assign([undefined], { get_connections: () => [{ valid: true }] }) })],
+      ['an own entity connected to fluid', () => chest(SPOT, { fluids_count: 1, get_fluid: () => undefined, get_fluid_box_pipe_connections: () => [{ target: { valid: true } }] })],
       ['an own entity that drops onto another', () => chest(SPOT, { drop_target: { valid: true } })],
       ['an own entity that picks up from another', () => chest(SPOT, { pickup_target: { valid: true } })],
-      ['an own entity wired to a pole', () => chest(SPOT, { neighbours: { copper: [{ valid: true }] } })],
+      ['an own entity wired to a pole', () => chest(SPOT, { get_wire_connectors: () => ({ 1: { connection_count: 1 } }) })],
       ['an own belt with a neighbour', () => chest(SPOT, { belt_neighbours: { inputs: [{ valid: true }], outputs: [] } })],
     ])('keeps %s blocked', (_label, make) => {
       const result = candidates_over([make()])

@@ -29,7 +29,7 @@ export function definePair({ version = 'aw', date = '2026-10-25', candidate, pub
   const day = date.replaceAll('-', '')
   const pairId = `red-automation-${day}${version}`
   return { schema: 1, pairId, candidate, published, imageId, imageTag: `factorio-npc:run-${version}-${day}`,
-    profile: 'normal', factorioVersion: '2.0.77', constructionLimitMs: 3600000,
+    profile: 'normal', factorioVersion: '2.1.24', constructionLimitMs: 3600000,
     measurement: { wallMinutes: 5, gameSpeed: 2, minimumGameMinutes: 10, minimumRedPerGameMinute: 1, nativeUpstream: true },
     models: validateFrozenModels(models), overwatchReasoning: 'low',
     sharedQuota: { reserveRemainingPercent: 5, stopRemainingPercent: 7, owner: 'parent', scope: 'shared account across both lanes', staleAfterMs: 180000 },

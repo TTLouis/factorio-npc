@@ -26,7 +26,7 @@ RUN apt-get update \
 # the cached one is not the version it resolves (for example after a new
 # release while an older FACTORIO_VERSION=latest layer is cached).
 FROM base AS factorio-archive
-ARG FACTORIO_VERSION=latest
+ARG FACTORIO_VERSION=2.1.24
 RUN set -eux; \
   mkdir -p /cache; \
   case "$FACTORIO_VERSION" in \
@@ -39,7 +39,7 @@ RUN set -eux; \
       target="$(grep -oE "\"$channel\":[{][^}]*[}]" /tmp/releases.json | grep -oE '"headless":"[0-9]+[.][0-9]+[.][0-9]+"' | grep -oE '[0-9]+[.][0-9]+[.][0-9]+' || true)";; \
     *) target="$FACTORIO_VERSION";; \
   esac; \
-  if printf '%s' "$target" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+$'; then \
+  if [ "$target" = '2.1.24' ]; then \
     archive="factorio-headless_linux_${target}.tar.xz"; \
     curl --fail --location --retry 3 --connect-timeout 20 --max-time 900 \
       --proto '=https' --proto-redir '=https' \
@@ -50,6 +50,8 @@ RUN set -eux; \
     awk -v name="$archive" '$2==name {print $1 "  " $2}' /tmp/factorio-sha256sums.txt > /tmp/factorio-archive.sha256; \
     test "$(wc -l < /tmp/factorio-archive.sha256)" = 1; \
     (cd /cache && sha256sum -c /tmp/factorio-archive.sha256); \
+  else \
+    echo "Unsupported Factorio release: requires 2.1.24" >&2; exit 1; \
   fi; \
   rm -f /tmp/releases.json /tmp/factorio-sha256sums.txt /tmp/factorio-archive.sha256
 
@@ -64,7 +66,7 @@ ARG SGLUNA_REPO=
 ARG SGLUNA_SOURCE_REF=
 ARG AIRI_REPO=
 ARG AIRI_SOURCE_REF=
-ARG FACTORIO_VERSION=latest
+ARG FACTORIO_VERSION=2.1.24
 ARG SGLUNA_LOCAL_RUNTIME_OVERRIDE=0
 ARG SGLUNA_LOCAL_SOURCE=0
 # The source layer is cached by its build arguments. An exact commit SHA fully

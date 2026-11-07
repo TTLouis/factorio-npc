@@ -111,7 +111,7 @@ Prerequisites:
 
 - Node 24 and the package manager pinned by `package.json`.
 - An authorized Factorio installation; the repository's deterministic engine
-  baseline is **2.0.77**. This package does not include the Factorio executable.
+  baseline is **2.1.24**. This package does not include the Factorio executable.
 - A fresh disposable save and its own mod, write-data and runtime-state
   directories. Do not use a production save for the first run.
 - One local controller only. Stop any ordinary agent, supervisor, desktop

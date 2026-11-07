@@ -49,11 +49,11 @@ const boiler = {
   tile_width: 3,
   tile_height: 2,
   fluidbox_prototypes: [
-    { index: 1, volume: 200, production_type: 'input-output', filter: { name: 'water' }, pipe_connections: [
+    { index: 1, get_volume: () => 200, production_type: 'input-output', filter: { name: 'water' }, pipe_connections: [
       connection(12, { x: -1, y: 0.5 }, 'input-output'),
       connection(4, { x: 1, y: 0.5 }, 'input-output'),
     ] },
-    { index: 2, volume: 200, production_type: 'output', filter: { name: 'steam' }, pipe_connections: [
+    { index: 2, get_volume: () => 200, production_type: 'output', filter: { name: 'steam' }, pipe_connections: [
       connection(0, { x: 0, y: -0.5 }, 'output'),
     ] },
   ],
@@ -66,7 +66,7 @@ const steam_engine = {
   tile_width: 3,
   tile_height: 5,
   fluidbox_prototypes: [
-    { index: 1, volume: 200, production_type: 'input-output', filter: { name: 'steam' }, pipe_connections: [
+    { index: 1, get_volume: () => 200, production_type: 'input-output', filter: { name: 'steam' }, pipe_connections: [
       connection(0, { x: 0, y: -2 }, 'input-output'),
       connection(8, { x: 0, y: 2 }, 'input-output'),
     ] },
@@ -80,7 +80,7 @@ const offshore_pump = {
   tile_width: 1,
   tile_height: 1,
   fluidbox_prototypes: [
-    { index: 1, volume: 100, production_type: 'output', filter: { name: 'water' }, pipe_connections: [
+    { index: 1, get_volume: () => 100, production_type: 'output', filter: { name: 'water' }, pipe_connections: [
       connection(8, { x: 0, y: 0 }, 'output'),
     ] },
   ],
@@ -97,17 +97,15 @@ function live_entity(unit_number: number, name: string, storages: Array<{ filter
     bounding_box: { left_top: { x: -1, y: -1 }, right_bottom: { x: 1, y: 1 } },
     surface: { index: 1 },
     force: { index: 1, is_chunk_charted: () => true, is_chunk_visible: () => true },
-    fluidbox: {
-      length: storages.length,
-      get_pipe_connections: (index: number) => storages[index - 1].ports.map(port => ({
+    has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: storages.length,
+      get_fluid_box_pipe_connections: (index: number) => storages[index - 1].ports.map(port => ({
         connection_type: 'normal',
         flow_direction: port.flow_direction,
         position: port.position,
         target_position: port.target_position,
-        target: port.connected ? { owner: {} } : undefined,
+        target: port.connected ? {} : undefined,
       })),
-      get_prototype: (index: number) => ({ index, production_type: 'input-output', filter: { name: storages[index - 1].filter } }),
-    },
+      get_fluid_box_prototype: (index: number) => ({ index, production_type: 'input-output', filter: { name: storages[index - 1].filter } }),
   }
 }
 
@@ -245,8 +243,8 @@ describe('placement candidates that join a live fluid port', () => {
       actor.surface.find_entities_filtered = () => Array.from({ length: 65 }, () => world[100])
       expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_scan_truncated' })
       actor.surface.find_entities_filtered = () => Object.values(world)
-      const original = world[100].fluidbox.get_pipe_connections
-      world[100].fluidbox.get_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
+      const original = world[100].get_fluid_box_pipe_connections
+      world[100].get_fluid_box_pipe_connections = () => Array.from({ length: 9 }, () => original(1)[0])
       expect(read().preservation_join).toMatchObject({ complete: false, reason: 'neighbour_ports_incomplete' })
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
   })
@@ -292,17 +290,17 @@ describe('placement candidates that join a live fluid port', () => {
         version: 1, kind: 'relation_required', actor_id: 18, entity_name: 'boiler', candidate_set_id: set.candidate_set_id,
         candidate_id: set.candidates[0].id, fluid_port_count: 3 } })
       expect(read().preservation_join).toBeUndefined()
-      ;(globalThis as any).prototypes.entity.boiler.fluidbox_prototypes[0].volume = undefined
+      ;(globalThis as any).prototypes.entity.boiler.fluidbox_prototypes[0].get_volume = () => undefined
       expect(read().preservation_eligibility).toBeUndefined()
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
   })
 
   it('carries a nonrenewable native guard through the real queued boiler task and refuses a late second neighbour before mutation', () => {
     build_pump()
-    Object.assign(world[100], { type: 'offshore-pump', direction: 0, fluids_count: 1, get_fluid: () => undefined })
-    world[100].fluidbox.get_capacity = () => 100
-    const heldPrototype = world[100].fluidbox.get_prototype
-    world[100].fluidbox.get_prototype = (index: number) => ({ ...heldPrototype(index), volume: 100 })
+    Object.assign(world[100], { type: 'offshore-pump', direction: 0, has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1, get_fluid: () => undefined })
+    world[100].get_fluid_capacity = () => 100
+    const heldPrototype = world[100].get_fluid_box_prototype
+    world[100].get_fluid_box_prototype = (index: number) => ({ ...heldPrototype(index), get_volume: () => 100 })
     ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
     ;(globalThis as any).prototypes.entity.boiler = { ...boiler, collision_box: { left_top: { x: -1.29, y: -0.79 }, right_bottom: { x: 1.29, y: 0.79 } },
       items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
@@ -413,9 +411,9 @@ describe('placement candidates that join a live fluid port', () => {
       world[102] = live_entity(102, 'offshore-pump', [{ filter: 'water', ports: [
         { position: { x: 48.5, y: 20.5 }, target_position: { x: 49.5, y: 20.5 }, flow_direction: 'output' },
       ] }])
-      Object.assign(world[102], { type: 'offshore-pump', direction: 0, position: { x: 48.5, y: 20.5 }, fluids_count: 1, get_fluid: () => undefined })
-      world[102].fluidbox.get_capacity = () => 100
-      world[102].fluidbox.get_prototype = () => ({ index: 1, volume: 100, production_type: 'output', filter: { name: 'water' } })
+      Object.assign(world[102], { type: 'offshore-pump', direction: 0, position: { x: 48.5, y: 20.5 }, has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1, get_fluid: () => undefined })
+      world[102].get_fluid_capacity = () => 100
+      world[102].get_fluid_box_prototype = () => ({ index: 1, get_volume: () => 100, production_type: 'output', filter: { name: 'water' } })
       const second: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 102 } })
       expect(freeze_fluid_preservation_candidate(actor, second.candidate_set_id, second.candidates[0].id, 'req/second', [102], context)).toMatchObject({ ok: true })
       expect(Object.keys((globalThis as any).storage.sgluna_fluid_preservation_claims)).toHaveLength(2)

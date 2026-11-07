@@ -67,8 +67,12 @@ clone does not need the owner's parent `WORKTREES.md`.
 
 Inspect Git, Node 24, pinned pnpm from `package.json`, Docker availability when
 needed, and authorized Factorio access. This branch's engine baseline is
-**2.0.77**. Check the actual binary version, not its directory name. Prefer an
-already installed matching Windows binary when available. Otherwise choose an
+**2.1.24**. Check the actual binary version, not its directory name. Keep older
+saves and their exact-version inspection installations intact; migrate only a
+separate copy. A save written by 2.1 cannot be downgraded to 2.0. Complete or
+reverse any 2.0 area reservation before migration: a legacy reservation without
+a script-disable snapshot retains its backup and requires recovery in the old
+installation. Prefer an already installed matching Windows binary when available. Otherwise choose an
 isolated Docker Linux server when Docker works; use an exact-version headless
 Factorio distribution and record its identity. A Linux local server is also
 supported. macOS may host a Docker Linux server; native macOS game/ledger support

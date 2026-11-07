@@ -106,10 +106,12 @@ export function contractDefectShape(step) {
 }
 function entityIdentity(raw) {
   if (!raw || !Number.isSafeInteger(raw.unit_number) || raw.unit_number < 1 || typeof raw.name !== 'string' || typeof raw.type !== 'string'
+    || raw.mirrored !== undefined && typeof raw.mirrored !== 'boolean'
     || !Number.isSafeInteger(raw.direction) || raw.direction < 0 || raw.direction > 15
     || !Number.isFinite(raw.position?.x) || !Number.isFinite(raw.position?.y)) unproven('preservation_identity_unreadable')
   return { unit_number: raw.unit_number, name: raw.name, type: raw.type, position: { x: raw.position.x, y: raw.position.y },
-    ...(raw.direction !== undefined ? { direction: raw.direction } : {}) }
+    ...(raw.direction !== undefined ? { direction: raw.direction } : {}),
+    ...(raw.mirrored === true ? { mirrored: true } : {}) }
 }
 function point(raw) {
   if (!Number.isFinite(raw?.x) || !Number.isFinite(raw?.y)) unproven('preservation_geometry_unreadable')
@@ -126,7 +128,8 @@ function fluidPrototype(raw) {
 function fluidPort(raw, scope, { stored = false } = {}) {
   const index = stored ? raw?.index : raw?.connection_index
   if (!positiveIndex(index) || raw.connection_type !== 'normal' || !fluidFlows.has(raw.flow_direction)
-    || typeof raw.connected !== 'boolean' || (!stored && raw.target_valid !== true)) unproven('preservation_fluid_port_unproven')
+    || typeof raw.connected !== 'boolean' || (!stored && (raw.target_valid !== true
+      || raw.hydraulic_state !== (raw.connected ? 'joined' : 'open')))) unproven('preservation_fluid_port_unproven')
   let target = null
   if (raw.connected) {
     const entity = entityIdentity(stored ? raw.target?.entity : raw.target)
@@ -143,7 +146,7 @@ function fluidPort(raw, scope, { stored = false } = {}) {
 export function fluidPreservationGeometry(raw, scope, { stored = false } = {}) {
   const storages = stored ? raw?.storages : raw?.fluid_storages
   const count = stored ? storages?.length : raw?.fluid_box_count
-  if ((stored ? raw?.version : raw?.fluid_geometry_version) !== 3 || !positiveIndex(count)
+  if ((stored ? raw?.version : raw?.fluid_geometry_version) !== 4 || !positiveIndex(count)
     || !Array.isArray(storages) || storages.length !== count
     || !stored && (raw.fluid_storages_truncated !== false || raw.non_fluidbox_storage_count !== 0)) unproven('preservation_fluid_geometry_incomplete')
   const projected = storages.map((storage, index) => {
@@ -165,7 +168,7 @@ export function fluidPreservationGeometry(raw, scope, { stored = false } = {}) {
     if (new Set(storage.prototypes.map(row => row.index)).size !== storage.prototypes.length
       || storage.ports.some((port, index) => port.index !== index + 1)) unproven('preservation_fluid_indices_incomplete')
   }
-  return { version: 3, storages: projected }
+  return { version: 4, storages: projected }
 }
 // Geometry contains no changing fuel/output counters. Preserve engine-known
 // item routes and reject unsupported fluid topology instead of guessing it.

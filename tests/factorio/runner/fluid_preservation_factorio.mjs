@@ -17,7 +17,7 @@ import { nextSliceOwner, nextSliceNativeState } from '../pterodactyl/runtime-v8/
 
 globalThis.fetch = async () => { throw new Error('inference forbidden in fluid preservation fixture') }
 const arg = name => process.argv[process.argv.indexOf(`--${name}`) + 1]
-const evidence = { status: 'fail', factorio: '2.0.77', transcript: [], operations: [] }
+const evidence = { status: 'fail', factorio: '2.1.24', transcript: [], operations: [] }
 let connection
 const rcon = { command: async command => {
   // Any authorized batch (admission-journal or plain): the fault runs in the same callback, after the batch was queued.
@@ -129,7 +129,7 @@ async function place(name, request, before) {
 }
 try {
   connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') }); await connection.connect()
-  assert.equal(JSON.parse(await fs.readFile('/opt/factorio/data/base/info.json', 'utf8')).version, '2.0.77')
+  assert.equal(JSON.parse(await fs.readFile('/opt/factorio/data/base/info.json', 'utf8')).version, '2.1.24')
   await configureNpcSession(rcon, 'fluid-preservation-native-20261025')
   const atomicActor = await deploymentStatus(rcon, { requireAllowed: true })
   const probe = { rcon, epoch: atomicActor, generation: 1, agentContext: { lineageSequence: 1 },

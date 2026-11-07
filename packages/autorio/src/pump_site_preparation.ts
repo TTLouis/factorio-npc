@@ -1,3 +1,4 @@
+import { product_probability } from './production_rates'
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { PlayerParametersPreparePumpSite } from './types'
@@ -73,7 +74,7 @@ function stock_fits(actor: ControlledActor, removals: TileSnapshot[]) {
     for (const name of [tile.name, tile.hidden]) {
       if (!name || prototypes.tile[name]?.fluid?.name === 'water') break
       const products = prototypes.tile[name]?.mineable_properties.products ?? []
-      if (products.length !== 1 || products[0].type !== 'item' || products[0].probability !== undefined && products[0].probability !== 1) return false
+      if (products.length !== 1 || products[0].type !== 'item' || product_probability(products[0]) !== 1) return false
       const product = products[0]
       const amount = product.amount ?? product.amount_max
       if (!amount || amount !== (product.amount_min ?? amount)) return false

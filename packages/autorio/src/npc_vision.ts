@@ -223,7 +223,7 @@ export function new_npc_vision_controller() {
     // Every way of touching it is switched off. The prototype already removes
     // them; this covers a stale prototype and keeps the runtime state explicit.
     entity.destructible = false
-    entity.minable = false
+    entity.minable_flag = false
     entity.operable = false
     entity.rotatable = false
     storage.sgluna_npc_vision_retry_tick = undefined

@@ -647,7 +647,7 @@ const CONTAINER_TYPES = ['container', 'logistic-container', 'infinity-container'
 // inserters and on transport lines outside belts. crafter_output and
 // furnace_result are the same inventory id, so one read per machine.
 function output_inventory_id(entity: LuaEntity) {
-  if (entity.type === 'furnace') return defines.inventory.furnace_result
+  if (entity.type === 'furnace') return defines.inventory.crafter_output
   if (entity.type === 'assembling-machine' || entity.type === 'rocket-silo') return defines.inventory.crafter_output
   if (CONTAINER_TYPES.includes(entity.type)) return defines.inventory.chest
   return undefined

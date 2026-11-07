@@ -1,4 +1,5 @@
-import type { LuaEntity, LuaEntityPrototype, LuaFluidBox, SurfaceCondition } from 'factorio:runtime'
+import { fluid_connection_state } from './fluid_connections'
+import type { LuaEntity, LuaEntityPrototype, LuaFluidBoxPrototype, SurfaceCondition } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { recipe_bootstrap_for_actor } from './bootstrap_planning'
 import { resolve_visible_entity_reference } from './entity_reference'
@@ -208,6 +209,7 @@ function product_summary(product: any) {
     amount_min: product.amount_min,
     amount_max: product.amount_max,
     independent_probability: product.independent_probability,
+    shared_probability: product.shared_probability,
     temperature: product.temperature,
     fluidbox_index: product.fluidbox_index,
   }
@@ -237,6 +239,7 @@ function entity_summary(entity: LuaEntity | undefined) {
     unit_number: entity.unit_number,
     position: entity.position,
     direction: entity.direction,
+    mirrored: entity.mirroring,
     force: entity.force?.name,
   }
 }
@@ -247,18 +250,16 @@ function same_entity(a: LuaEntity | undefined, b: LuaEntity) {
   return a === b
 }
 
-function fluidbox_prototype_summary(value: any) {
+function fluidbox_prototype_summary(value: any, quality?: string) {
   if (!value) return []
-  const values: any[] = value.production_type ? [value] : value
+  const values: LuaFluidBoxPrototype[] = value.production_type ? [value] : value
   const result: Array<Record<string, unknown>> = []
   for (const prototype of values) {
     result.push({
       index: prototype.index,
       production_type: prototype.production_type,
-      volume: prototype.volume,
+      volume: prototype.get_volume(quality),
       filter: prototype.filter?.name,
-      minimum_temperature: prototype.minimum_temperature,
-      maximum_temperature: prototype.maximum_temperature,
     })
   }
   return result
@@ -273,14 +274,14 @@ function linked_summary(seen: SeenArea, position: { x: number, y: number } | und
 }
 
 function fluid_storage_summary(entity: LuaEntity, index: number, seen: SeenArea) {
-  const fluidbox = entity.fluidbox
-  const prototypes_for_storage = fluidbox_prototype_summary(fluidbox.get_prototype(index))
-  const connections = fluidbox.get_pipe_connections(index) ?? []
+  const fluidbox = entity
+  const prototypes_for_storage = fluidbox_prototype_summary(fluidbox.get_fluid_box_prototype(index), entity.quality?.name)
+  const connections = fluidbox.get_fluid_box_pipe_connections(index) ?? []
   const current_fluid = entity.get_fluid(index)
 
   return {
     index,
-    capacity: fluidbox.get_capacity(index),
+    capacity: fluidbox.get_fluid_capacity(index),
     local_volume: prototypes_for_storage.reduce((total, prototype) => total + (prototype.volume as number), 0),
     current_fluid: current_fluid
       ? {
@@ -296,11 +297,11 @@ function fluid_storage_summary(entity: LuaEntity, index: number, seen: SeenArea)
   }
 }
 
-type PipeConnection = ReturnType<LuaFluidBox['get_pipe_connections']>[number]
+type PipeConnection = NonNullable<ReturnType<LuaEntity['get_fluid_box_pipe_connections']>>[number]
 
 function pipe_connection_summary(entity: LuaEntity, connection: PipeConnection, connection_index: number, fluidbox_index: number, seen: SeenArea) {
   // Whether and to what it connects would be read from a chunk the NPC does not see now: unknown, not disconnected.
-  if (!seen_link(seen, pipe_link_area(entity, connection, fluidbox_index), () => connection.target?.owner).seen) {
+  if (!seen_link(seen, pipe_link_area(entity, connection, fluidbox_index), () => connection.target).seen) {
     return {
       connection_index: connection_index + 1,
       target_not_visible: true,
@@ -313,14 +314,15 @@ function pipe_connection_summary(entity: LuaEntity, connection: PipeConnection, 
   return {
     connection_index: connection_index + 1,
     connected: connection.target !== undefined,
-    target_valid: connection.target === undefined || connection.target.owner?.valid === true,
+    hydraulic_state: fluid_connection_state(entity, fluidbox_index, connection),
+    target_valid: connection.target === undefined || connection.target?.valid === true,
     flow_direction: connection.flow_direction,
     connection_type: connection.connection_type,
     position: connection.position,
     target_position: connection.target_position,
-    target: entity_summary(connection.target?.owner),
-    target_surface_index: connection.target?.owner?.valid ? connection.target.owner.surface.index : undefined,
-    target_force_index: connection.target?.owner?.valid ? connection.target.owner.force.index : undefined,
+    target: entity_summary(connection.target),
+    target_surface_index: connection.target?.valid ? connection.target.surface.index : undefined,
+    target_force_index: connection.target?.valid ? connection.target.force.index : undefined,
     target_fluidbox_index: connection.target_fluidbox_index,
     target_pipe_connection_index: connection.target_pipe_connection_index,
   }
@@ -435,7 +437,7 @@ function burner_fuel_summary(categories: string[]) {
   const sourced: Array<{ name: string, category: string, fuel_value: number, mined_from: string[] | undefined, harvested_from: string[] | undefined }> = []
   const unsourced: Array<{ name: string, category: string, fuel_value: number, mined_from: undefined, harvested_from: undefined }> = []
   for (const [name, prototype] of pairs(prototypes.item)) {
-    const category = (prototype as any).fuel_category as string | undefined
+    const category = (prototype.fuel_categories ?? []).find(category => accepted[category] === true)
     const fuel_value = (prototype as any).fuel_value as number | undefined
     if (category === undefined || accepted[category] !== true || typeof fuel_value !== 'number' || !(fuel_value > 0)) continue
     const mined_from = mined_from_names(name)
@@ -631,9 +633,9 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     }
   }
 
-  // Factorio 2.0 exposes connection geometry through LuaFluidBox. LuaFluidBox is
-  // array-like in typed-factorio, so .length maps to the Lua length operator.
-  const fluid_box_count = entity.fluidbox.length
+  // Every fluid storage is addressed through LuaEntity in Factorio 2.1.
+  // Storages without a fluidbox prototype remain observable but cannot certify joins.
+  const fluid_box_count = entity.fluids_count
   const returned_fluid_storages = math.min(fluid_box_count, MAX_FLUID_STORAGES)
   const fluid_storages: Array<Record<string, unknown>> = []
   // Neighbours linked to this entity are read only where the NPC sees now.
@@ -668,9 +670,9 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
           }
         : undefined,
     fluid_storage_count: entity.fluids_count,
-    fluid_geometry_version: 3,
+    fluid_geometry_version: 4,
     fluid_box_count,
-    non_fluidbox_storage_count: math.max(0, entity.fluids_count - fluid_box_count),
+    non_fluidbox_storage_count: fluid_storages.filter(storage => (storage.prototypes as unknown[]).length === 0).length,
     fluid_storages_truncated: fluid_box_count > MAX_FLUID_STORAGES,
     fluid_storages,
   }
@@ -693,7 +695,8 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
       if (!(storage.local_volume > 0 && storage.local_volume < math.huge)) return undefined
       const ports: any[] = storage.pipe_connections ?? []
       for (const port of ports) {
-        if (port.connection_type !== 'normal' || port.target_valid !== true) return undefined
+        if (port.connection_type !== 'normal' || port.target_valid !== true
+          || port.hydraulic_state !== (port.connected ? 'joined' : 'open')) return undefined
       }
     }
   } else if (!['furnace', 'mining-drill', 'inserter'].includes(raw.entity.type)) return undefined
@@ -778,16 +781,19 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     if (!add_inserter_route(relations, inserter, seen, center)) return unreadable()
   }
 
-  const fluid_box_count = math.min(center.fluidbox.length, MAX_FLUID_STORAGES)
+  const fluid_box_count = math.min(center.fluids_count, MAX_FLUID_STORAGES)
   for (let index = 1; index <= fluid_box_count; index++) {
-    const prototypes_for_storage = fluidbox_prototype_summary(center.fluidbox.get_prototype(index))
-    const connections = center.fluidbox.get_pipe_connections(index) ?? []
+    const prototypes_for_storage = fluidbox_prototype_summary(center.get_fluid_box_prototype(index), center.quality?.name)
+    const connections = center.get_fluid_box_pipe_connections(index) ?? []
     for (const connection of connections.slice(0, MAX_PIPE_CONNECTIONS)) {
-      const link = seen_link(seen, pipe_link_area(center, connection, index), () => connection.target?.owner)
+      const link = seen_link(seen, pipe_link_area(center, connection, index), () => connection.target)
       if (!link.seen) return unreadable()
       if (link.entity?.valid) {
+        const hydraulic_state = fluid_connection_state(center, index, connection)
+        if (hydraulic_state === 'unknown') return unreadable()
         push_relation(relations, {
-          kind: 'fluid_connection',
+          kind: hydraulic_state === 'joined' ? 'fluid_connection' : 'fluid_adjacency',
+          hydraulic_state,
           center: entity_summary(center),
           neighbour: entity_summary(link.entity),
           fluidbox_index: index,

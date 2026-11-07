@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "title": "Factorio NPC Runtime",
   "author": "TTLouis; original autorio by LemonNekoGH",
-  "factorio_version": "2.0",
-  "dependencies": ["base >= 2.0"],
+  "factorio_version": "2.1",
+  "dependencies": ["base >= 2.1.24"],
   "description": "Factorio mod runtime for standalone autonomous NPC actors, structured observations, validated operations, and deterministic planning helpers."
 }

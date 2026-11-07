@@ -73,7 +73,7 @@ try {
       remote.call("autorio_task_board","set_snapshot",{goal_id="sprint-goal",objective="Native finite work",status="active",blocker="",pause_reason="",
         plan={plan_id="sprint-plan",plan_version=1},active_index=0,steps={{id="sprint-step",description="Native finite work",status="active"}}});
       rcon.print(helpers.table_to_json({furnace=f.unit_number,base=script.active_mods.base,humans=#game.connected_players}))`)
-    assert.equal(fixture.base, '2.0.77'); assert.equal(fixture.humans, 0)
+    assert.equal(fixture.base, '2.1.24'); assert.equal(fixture.humans, 0)
     assert.equal((await json(sprintCommand('configure', binding))).ok, true)
     // Real Factorio/common.Rcon proof: the inline guard envelope must preserve
     // every payload print and the auxiliary UI lane, including an empty payload.

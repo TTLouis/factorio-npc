@@ -21,10 +21,11 @@ RUN pnpm --filter autorio.ts run build
 RUN cp packages/autorio/info.json packages/autorio/dist/info.json
 RUN cat tests/factorio/fixtures/area-reservation-fixture.lua packages/autorio/dist/control.lua > /tmp/test-control.lua \
   && cp /tmp/test-control.lua packages/autorio/dist/control.lua
+RUN node tests/factorio/fixtures/inject-fluid-proof.mjs packages/autorio/dist/control.lua
 
 FROM debian:bookworm-slim
 
-ARG FACTORIO_VERSION=2.0.77
+ARG FACTORIO_VERSION=2.1.24
 ENV FACTORIO_VERSION=${FACTORIO_VERSION}
 ENV FACTORIO_ROOT=/opt/factorio
 ENV TEST_ROOT=/test

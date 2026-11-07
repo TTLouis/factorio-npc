@@ -68,7 +68,7 @@ function chest(position: Pos) {
   return entity({ name: 'wooden-chest', type: 'container', position, status: undefined, last_user: undefined,
     prototype: { type: 'container', is_building: true, is_entity_with_owner: true, items_to_place_this: [{ name: 'wooden-chest', count: 1 }], collision_mask: MASK,
       mineable_properties: { minable: true, mining_time: 0.2, products: [{ type: 'item', name: 'wooden-chest', amount: 1 }] } },
-    get_max_inventory_index: () => 1, get_inventory: () => ({ is_empty: () => true }), fluidbox: [] })
+    get_max_inventory_index: () => 1, get_inventory: () => ({ is_empty: () => true }), fluids_count: 0 })
 }
 function ground_item(name: string, count: number, position: Pos) {
   return entity({ name: 'item-on-ground', type: 'item-entity', position, prototype: { collision_mask: { layers: { item: true } } },

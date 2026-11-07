@@ -144,11 +144,11 @@ describe('production time estimate from live prototypes', () => {
     type: 'resource',
     resource_category: 'basic-solid',
     infinite_resource: false,
-    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'iron-ore', amount: 1, probability: 1 }] },
+    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'iron-ore', amount: 1, independent_probability: 1 }] },
   }
 
   function recipe(name: string, category: string, energy: number, ingredients: any[], products: any[]) {
-    return { name, category, additional_categories: [], energy, enabled: true, ingredients, products, prototype: { hidden_from_player_crafting: false } }
+    return { name, categories: [category], energy, enabled: true, ingredients, products, prototype: { hidden_from_player_crafting: false } }
   }
 
   function actor() {
@@ -210,7 +210,7 @@ describe('production time estimate from live prototypes', () => {
     }
     ;(globalThis as any).prototypes.item = {
       ...originalItems,
-      coal: { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
+      coal: { name: 'coal', fuel_categories: ['chemical'], fuel_value: 4000000 },
     }
     ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) =>
       filters[0]?.type === 'resource' ? { 'iron-ore': ironOre } : {}
@@ -281,7 +281,7 @@ describe('production time estimate from live prototypes', () => {
       const npc = actor()
       npc.character.prototype.crafting_categories['recycling-or-hand-crafting'] = true
       npc.force.recipes['scrap-recycling'] = {
-        ...recipe('scrap-recycling', 'recycling-or-hand-crafting', 0.2, [{ type: 'item', name: 'scrap', amount: 1 }], [{ type: 'item', name: 'iron-gear-wheel', amount: 1, probability: 0.2 }]),
+        ...recipe('scrap-recycling', 'recycling-or-hand-crafting', 0.2, [{ type: 'item', name: 'scrap', amount: 1 }], [{ type: 'item', name: 'iron-gear-wheel', amount: 1, independent_probability: 0.2 }]),
         enabled: false,
       }
       return npc

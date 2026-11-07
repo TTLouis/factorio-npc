@@ -1,5 +1,6 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { recipe_categories } from './recipe_categories'
 import { recipe_unlock_summary } from './goal_requirements'
 import { find_world_entities } from './npc_vision'
 
@@ -125,8 +126,7 @@ function sort_named<T extends { name: string }>(values: T[]) {
 
 function categories_for(recipe: any): string[] {
   const categories: string[] = []
-  if (typeof recipe?.category === 'string') categories.push(recipe.category)
-  for (const category of recipe?.additional_categories ?? []) {
+  for (const category of recipe_categories(recipe)) {
     if (typeof category !== 'string') continue
     let duplicate = false
     for (const existing of categories) {
@@ -669,7 +669,8 @@ function recipe_product_facts(recipe: any) {
       amount: product.amount,
       amount_min: product.amount_min,
       amount_max: product.amount_max,
-      probability: product.probability,
+      independent_probability: product.independent_probability,
+      shared_probability: product.shared_probability,
     })
   }
   return products

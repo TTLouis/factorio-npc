@@ -18,8 +18,7 @@ function recipe(name: string, options: {
     enabled: options.enabled ?? true,
     hidden: false,
     energy: options.energy,
-    category: options.categories[0],
-    additional_categories: options.categories.slice(1),
+    categories: options.categories,
     ingredients: options.ingredients,
     products: options.products,
     prototype: {
@@ -217,11 +216,11 @@ describe('machine energy and burner fuel knowledge', () => {
   })
   const items = (extra: Record<string, unknown> = {}) => ({
     'copper-plate': {},
-    coal: { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
-    wood: { name: 'wood', fuel_category: 'chemical', fuel_value: 2000000 },
-    'solid-fuel': { name: 'solid-fuel', fuel_category: 'chemical', fuel_value: 12000000 },
-    'uranium-fuel-cell': { name: 'uranium-fuel-cell', fuel_category: 'nuclear', fuel_value: 8000000000 },
-    'inert-lump': { name: 'inert-lump', fuel_category: 'chemical', fuel_value: 0 },
+    coal: { name: 'coal', fuel_categories: ['chemical'], fuel_value: 4000000 },
+    wood: { name: 'wood', fuel_categories: ['chemical'], fuel_value: 2000000 },
+    'solid-fuel': { name: 'solid-fuel', fuel_categories: ['chemical'], fuel_value: 12000000 },
+    'uranium-fuel-cell': { name: 'uranium-fuel-cell', fuel_categories: ['nuclear'], fuel_value: 8000000000 },
+    'inert-lump': { name: 'inert-lump', fuel_categories: ['chemical'], fuel_value: 0 },
     ...extra,
   })
 
@@ -320,7 +319,7 @@ describe('machine energy and burner fuel knowledge', () => {
 
   it('lists every accepted fuel, minable fuels first', () => {
     const many: Record<string, unknown> = {}
-    for (let i = 0; i < 9; i++) many[`fuel-${i}`] = { name: `fuel-${i}`, fuel_category: 'chemical', fuel_value: 1000 + i }
+    for (let i = 0; i < 9; i++) many[`fuel-${i}`] = { name: `fuel-${i}`, fuel_categories: ['chemical'], fuel_value: 1000 + i }
     ;(globalThis as any).prototypes.item = items(many)
     const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
     expect(result.burner_fuels.items).toHaveLength(12)
@@ -348,7 +347,7 @@ describe('mining knowledge', () => {
     type: 'resource',
     resource_category: 'basic-solid',
     infinite_resource: false,
-    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'iron-ore', amount: 1, probability: 1 }] },
+    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'iron-ore', amount: 1, independent_probability: 1 }] },
   }
   const crudeOil = {
     name: 'crude-oil',
@@ -356,7 +355,7 @@ describe('mining knowledge', () => {
     resource_category: 'basic-fluid',
     infinite_resource: true,
     normal_resource_amount: 300000,
-    mineable_properties: { mining_time: 1, products: [{ type: 'fluid', name: 'crude-oil', amount: 10, probability: 1 }] },
+    mineable_properties: { mining_time: 1, products: [{ type: 'fluid', name: 'crude-oil', amount: 10, independent_probability: 1 }] },
   }
   const drills = {
     'electric-mining-drill': {
@@ -408,7 +407,7 @@ describe('mining knowledge', () => {
     }
     ;(globalThis as any).prototypes.item = {
       ...originalItems,
-      coal: { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
+      coal: { name: 'coal', fuel_categories: ['chemical'], fuel_value: 4000000 },
     }
   })
 
@@ -478,7 +477,7 @@ describe('mining knowledge', () => {
       categories: ['recycling'],
       energy: 0.0625,
       ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }],
-      products: [{ type: 'item', name: 'copper-ore', amount: 1, probability: 0.25 }],
+      products: [{ type: 'item', name: 'copper-ore', amount: 1, independent_probability: 0.25 }],
       hidden_from_player_crafting: true,
     })
     const crushing = recipe('advanced-metallic-asteroid-crushing', {
@@ -487,7 +486,7 @@ describe('mining knowledge', () => {
       ingredients: [{ type: 'item', name: 'metallic-asteroid-chunk', amount: 1 }],
       products: [{ type: 'item', name: 'copper-ore', amount: 10 }, { type: 'item', name: 'iron-ore', amount: 5 }],
     })
-    const copperOre = { ...ironOre, name: 'copper-ore', mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'copper-ore', amount: 1, probability: 1 }] } }
+    const copperOre = { ...ironOre, name: 'copper-ore', mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'copper-ore', amount: 1, independent_probability: 1 }] } }
     // A resource whose name matches the query but which does not mine into it is not a source of the item.
     const decoy = { ...ironOre, name: 'copper-ore-decoy', mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'stone', amount: 1 }] } }
     ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
@@ -557,7 +556,6 @@ describe('entity geometry knowledge', () => {
       force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 0,
-      fluidbox: { length: 0 },
       pickup_position: { x: 1, y: 0 },
       drop_position: { x: 3, y: 0 },
       pickup_target: source,
@@ -595,7 +593,6 @@ describe('entity geometry knowledge', () => {
       force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 0,
-      fluidbox: { length: 0 },
       drop_position: { x: 10, y: 7 },
       drop_target: undefined,
     }
@@ -621,12 +618,12 @@ describe('entity geometry knowledge', () => {
       surface: { index: 1 },
     }
     const fluidbox = {
-      length: 2,
-      get_capacity: (index: number) => index === 1 ? 100 : 200,
-      get_prototype: (index: number) => index === 1
-        ? { index: 1, volume: 100, production_type: 'input', filter: undefined }
-        : { index: 2, volume: 200, production_type: 'output', filter: { name: 'sulfuric-acid' } },
-      get_pipe_connections: (index: number) => index === 1
+      fluids_count: 2,
+      get_fluid_capacity: (index: number) => index === 1 ? 100 : 200,
+      get_fluid_box_prototype: (index: number) => index === 1
+        ? { index: 1, get_volume: () => 100, production_type: 'input', filter: undefined }
+        : { index: 2, get_volume: () => 200, production_type: 'output', filter: { name: 'sulfuric-acid' } },
+      get_fluid_box_pipe_connections: (index: number) => index === 1
         ? [{
             flow_direction: 'input',
             connection_type: 'normal',
@@ -638,7 +635,7 @@ describe('entity geometry knowledge', () => {
             connection_type: 'normal',
             position: { x: 21, y: 20 },
             target_position: { x: 22, y: 20 },
-            target: { owner: pipe },
+            target: pipe,
             target_fluidbox_index: 1,
             target_pipe_connection_index: 1,
           }],
@@ -653,14 +650,16 @@ describe('entity geometry knowledge', () => {
       force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 2,
-      fluidbox,
+      ...fluidbox,
       get_fluid: (index: number) => index === 1 ? { name: 'water', amount: 40, temperature: 15 } : undefined,
     }
     ;(globalThis as any).game.get_entity_by_unit_number = () => chemicalPlant
 
+    Object.assign(pipe, { fluids_count: 1, has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined })
+    Object.assign(chemicalPlant, { has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined })
     const result = entity_geometry_for_actor(actor, 77) as any
     expect(result).toMatchObject({
-      fluid_geometry_version: 3,
+      fluid_geometry_version: 4,
       fluid_storage_count: 2,
       fluid_box_count: 2,
       non_fluidbox_storage_count: 0,
@@ -703,7 +702,7 @@ describe('entity geometry knowledge', () => {
     })
   })
 
-  it('reports fluid storage that is not exposed through LuaFluidBox without probing an invalid port', () => {
+  it('reports prototype-less storage through the 2.1 fluid API', () => {
     const entity = {
       valid: true,
       name: 'fluid-wagon',
@@ -714,16 +713,19 @@ describe('entity geometry knowledge', () => {
       force: { name: 'player', index: 1 },
       surface: { index: 1 },
       fluids_count: 1,
-      fluidbox: { length: 0 },
+      get_fluid_box_prototype: () => undefined,
+      get_fluid_box_pipe_connections: () => undefined,
+      get_fluid_capacity: () => 1000,
+      get_fluid: () => undefined,
     }
     ;(globalThis as any).game.get_entity_by_unit_number = () => entity
 
     expect(entity_geometry_for_actor(actor, 81)).toMatchObject({
       found: true,
       fluid_storage_count: 1,
-      fluid_box_count: 0,
+      fluid_box_count: 1,
       non_fluidbox_storage_count: 1,
-      fluid_storages: [],
+      fluid_storages: [expect.objectContaining({ index: 1, prototypes: [], capacity: 1000 })],
     })
   })
 

@@ -48,7 +48,7 @@ try {
   await connection.connect()
   await configureNpcSession(rcon, 'contract-obligation-engine-20261025')
   const version = JSON.parse(await fsp.readFile('/opt/factorio/data/base/info.json', 'utf8')).version
-  assert.equal(version, '2.0.77')
+  assert.equal(version, '2.1.24')
   evidence.factorio_version = version
   const fixture = await lua(`local s=a.surface; local ox=math.floor(a.position.x)+16; local oy=math.floor(a.position.y); game.speed=1;
     for _,e in pairs(s.find_entities_filtered{area={{ox-4,oy-4},{ox+10,oy+6}}}) do if e.type~="character" then e.destroy() end end;

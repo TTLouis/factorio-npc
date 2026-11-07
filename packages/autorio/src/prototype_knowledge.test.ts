@@ -96,7 +96,7 @@ describe('prototype build knowledge', () => {
       type: 'simple-entity',
       mineable_properties: {
         mining_time: 0.6,
-        products: runtimeCollection([{ type: 'item', name: 'stone', amount_min: 8, amount_max: 12, probability: 1 }]),
+        products: runtimeCollection([{ type: 'item', name: 'stone', amount_min: 8, amount_max: 12, independent_probability: 1 }]),
       },
     }
     const treeA = {
@@ -308,7 +308,7 @@ describe('prototype build knowledge', () => {
         amount: undefined,
         amount_min: 8,
         amount_max: 12,
-        probability: 1,
+        independent_probability: 1,
       }],
       products_truncated: false,
     })

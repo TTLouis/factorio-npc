@@ -4,10 +4,9 @@ import { logistics_topology_for_actor } from './knowledge'
 function baseEntity(overrides: Record<string, unknown>) {
   return {
     valid: true,
-    direction: 0,
+    direction: 0, surface: { index: 1 },
     force: { name: 'player', index: 1 },
-    fluids_count: 0,
-    fluidbox: { length: 0 },
+    has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 0,
     ...overrides,
   }
 }
@@ -121,24 +120,21 @@ describe('logistics topology knowledge', () => {
 
   it('returns connected fluidbox owners as semantic fluid relationships', () => {
     const pipe = baseEntity({
-      name: 'pipe', type: 'pipe', unit_number: 40, position: { x: 3, y: 2 },
+      fluids_count: 1, name: 'pipe', type: 'pipe', unit_number: 40, position: { x: 3, y: 2 },
     })
     const center = baseEntity({
       name: 'chemical-plant', type: 'assembling-machine', unit_number: 41, position: { x: 2, y: 2 },
       surface: { index: 1, find_entities_filtered: () => [] },
-      fluids_count: 1,
-      fluidbox: {
-        length: 1,
-        get_prototype: () => ({ index: 1, production_type: 'output', filter: { name: 'sulfuric-acid' } }),
-        get_pipe_connections: () => [{
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1,
+        get_fluid_box_prototype: () => ({ index: 1, get_volume: () => 100, production_type: 'output', filter: { name: 'sulfuric-acid' } }),
+        get_fluid_box_pipe_connections: () => [{
           flow_direction: 'output',
           connection_type: 'normal',
           position: { x: 3, y: 2 },
           target_position: { x: 4, y: 2 },
-          target: { owner: pipe },
+          target: pipe,
           target_fluidbox_index: 1,
         }],
-      },
     })
     ;(globalThis as any).game.get_entity_by_unit_number = () => center
 

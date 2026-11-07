@@ -17,7 +17,7 @@ globalThis.fetch=async()=>{throw new Error('inference/network forbidden in nativ
 const arg=name=>{const at=process.argv.indexOf(`--${name}`);assert.ok(at>=0);return process.argv[at+1]}
 const results=path.resolve(arg('results'))
 const baseline=JSON.parse(await fs.readFile(new URL('../pterodactyl/runtime-v8/fixtures/ax-b-candidate-boundary.json',import.meta.url),'utf8'))
-const evidence={status:'fail',factorio:'2.0.77',scope:'AX B future new-goal ledger, real native eligibility/correction/helper/transport/receipt/certificate/unchanged fuel',
+const evidence={status:'fail',factorio:'2.1.24',scope:'AX B future new-goal ledger, real native eligibility/correction/helper/transport/receipt/certificate/unchanged fuel',
   residual_early_miss:process.env.AX_B_RESIDUAL==='1',historical_guard_resumed:false,
   substitutions:['New isolated actor/world and new goal identity; native-relative spatial fixture, not AX world replay.','All planner/executor choices scripted locally; original red-science goal result retained.'],
   transcript:[],events:[],scripted_calls:[],persisted:[]}
@@ -31,7 +31,7 @@ async function idle(){const deadline=Date.now()+60000;for(;;){const s=await tool
 try{
   await fs.mkdir(results,{recursive:true})
   connection=new Rcon(Number(arg('port')),arg('password'),15000,{host:arg('host')});await connection.connect()
-  assert.equal(JSON.parse(await fs.readFile('/opt/factorio/data/base/info.json','utf8')).version,'2.0.77')
+  assert.equal(JSON.parse(await fs.readFile('/opt/factorio/data/base/info.json','utf8')).version,'2.1.24')
   await configureNpcSession(rcon,'fluid-real-loop-fixture')
   const setup=await lua(`local s=a.surface;local ox=math.floor(a.position.x)+70;local oy=math.floor(a.position.y);game.speed=1;
     for _,e in pairs(s.find_entities_filtered{area={{ox-14,oy-16},{ox+26,oy+20}}})do if e.type~="character" then e.destroy() end end;

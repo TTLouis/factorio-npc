@@ -139,7 +139,7 @@ describe('NPC vision vehicle lifecycle', () => {
 
     const entity = surface.vision_entities[0]
     expect(entity.destructible).toBe(false)
-    expect(entity.minable).toBe(false)
+    expect(entity.minable_flag).toBe(false)
     expect(entity.operable).toBe(false)
     expect(entity.rotatable).toBe(false)
     expect(entity.is_military_target).toBe(false)

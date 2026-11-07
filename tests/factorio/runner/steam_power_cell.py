@@ -374,7 +374,7 @@ def run(client: Rcon, results: Path) -> None:
             '/silent-command local s=game.surfaces[1]; '
             'local function status_name(e) for n,v in pairs(defines.entity_status) do if v==e.status then return n end end end; '
             'local function try(f) local ok,v=pcall(f) if ok then return v end return nil end; '
-            'local function fluid(e,i) local f=e.fluidbox[i]; if f then return {name=f.name,amount=f.amount} end return nil end; '
+            'local function fluid(e,i) local f=e.get_fluid(i); if f then return {name=f.name,amount=f.amount} end return nil end; '
             'local specs={' + rendered + '}; local out={}; '
             'for _,sp in ipairs(specs) do '
             'local e=s.find_entities_filtered{name=sp.n,position={sp.x,sp.y},radius=0.6}[1]; '
@@ -951,8 +951,8 @@ def run(client: Rcon, results: Path) -> None:
             return json_command(
                 "/silent-command local f=nil; for _,e in pairs(game.surfaces[1].find_entities_filtered{name='stone-furnace'}) do "
                 f"if e.unit_number=={furnace_unit} then f=e end end; assert(f); "
-                "rcon.print(helpers.table_to_json({tick=game.tick,ore=f.get_inventory(defines.inventory.furnace_source).get_item_count('iron-ore'),"
-                "plates=f.get_inventory(defines.inventory.furnace_result).get_item_count('iron-plate')}))",
+                "rcon.print(helpers.table_to_json({tick=game.tick,ore=f.get_inventory(defines.inventory.crafter_input).get_item_count('iron-ore'),"
+                "plates=f.get_inventory(defines.inventory.crafter_output).get_item_count('iron-plate')}))",
                 context, record=False)
 
         wait_ticks(FED_WAIT_TICKS, 'furnace smelts the hand-fed ore')

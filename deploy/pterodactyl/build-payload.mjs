@@ -209,7 +209,7 @@ function egg(installScript, channel) {
       variable('Max AI Requests Per Hour', 'Persisted hourly provider request cap. Ordinary requests preserve one slot inside this same cap for exactly-once output-budget recovery.', 'MAX_PROVIDER_REQUESTS_PER_HOUR', '300', 'required|numeric|between:1,1200'),
       variable('Max AI Output Tokens Per Turn', 'Aggregate provider-reported completion-token safety cap across one logical planner turn, including bounded recovery. Missing/incomplete usage remains diagnostic rather than being treated as zero.', 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN', '100000', 'required|numeric|between:1000,200000'),
       variable('Shutdown Timeout (ms)', 'Graceful Factorio save/stop timeout before forced termination.', 'SHUTDOWN_TIMEOUT_MS', '60000', 'required|numeric|between:1000,300000'),
-      variable('Factorio Version', 'Factorio 2.0 headless version: latest, experimental, or exact 2.0.x release.', 'FACTORIO_VERSION', 'latest', 'required|string|max:20'),
+      variable('Factorio Version', 'Supported Factorio headless version: 2.1.24. Release selectors must resolve to this exact version.', 'FACTORIO_VERSION', '2.1.24', 'required|string|max:20'),
     ],
   }
 }

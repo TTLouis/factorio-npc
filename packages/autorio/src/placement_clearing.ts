@@ -184,16 +184,18 @@ export function running_chain_reason(entity: LuaEntity, actor: ControlledActor, 
   const status = protected_read(() => entity.status)
   if (status !== undefined && status === defines.entity_status.working) return 'working'
   if (holds_items(entity)) return 'holds_items'
-  const fluidbox = protected_read(() => entity.fluidbox)
-  if (fluidbox !== undefined) {
-    for (let index = 0; index < fluidbox.length; index++) {
-      if (protected_read(() => fluidbox[index]) !== undefined) return 'holds_fluid'
-      if (has_links(protected_read(() => fluidbox.get_connections(index + 1)))) return 'fluid_connected'
-    }
+  const fluid_count = protected_read(() => entity.fluids_count)
+  if (fluid_count === undefined) return 'fluid_state_unavailable'
+  for (let index = 1; index <= fluid_count; index++) {
+    if (entity.get_fluid(index) !== undefined) return 'holds_fluid'
+    if ((entity.get_fluid_box_pipe_connections(index) ?? []).some(connection => connection.target !== undefined)) return 'fluid_connected'
   }
   if (protected_read(() => entity.drop_target) !== undefined) return 'drops_onto_entity'
   if (protected_read(() => entity.pickup_target) !== undefined) return 'picks_from_entity'
-  if (has_links(protected_read(() => entity.neighbours))) return 'neighbour_linked'
+  const connectors = protected_read(() => entity.get_wire_connectors(false))
+  if (connectors !== undefined) for (const [, connector] of pairs(connectors)) {
+    if (connector.connection_count > 0) return 'neighbour_linked'
+  }
   if (has_links(protected_read(() => entity.belt_neighbours))) return 'belt_linked'
   return electric_link(entity, actor, readable) ?? neighbour_link(entity, actor, readable)
 }

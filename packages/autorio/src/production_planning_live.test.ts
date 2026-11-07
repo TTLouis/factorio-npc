@@ -25,7 +25,7 @@ function recipe({
   ingredients?: Array<Record<string, unknown>>
   products?: Array<Record<string, unknown>>
 }) {
-  return { name, enabled, hidden, energy, category, additional_categories, ingredients, products }
+  return { name, enabled, hidden, energy, categories: [category, ...additional_categories], ingredients, products }
 }
 
 function actorWith(recipes: Record<string, unknown>) {

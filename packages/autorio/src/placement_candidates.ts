@@ -2,7 +2,7 @@ import { reservation_intersection } from './area_reservations'
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_features'
-import { candidate_fluid_ports, complete_live_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
+import { candidate_fluid_ports, complete_live_fluid_ports, fluid_ports_align, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
 import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, placement_tile_size, rotate_cardinal, snap_placement_center, vector_xy, type PlacementFootprint } from './placement_geometry'
 import { resolve_entity_placement_item } from './placement_item'
 import { resolve_visible_entity_reference } from './entity_reference'
@@ -569,6 +569,7 @@ function resolve_join_target(actor: ControlledActor, request: PlacementConnectsT
     if (request.storage_index !== undefined && port.storage_index !== request.storage_index) continue
     if (request.connection_index !== undefined && port.connection_index !== request.connection_index) continue
     matched += 1
+    if (!port.fluid_constraint_known) return join_failure('connects_to_fluid_state_unknown', 'native fluid constraints could not be read; refresh this entity before choosing a join', request.unit_number)
     if (request.connection_index === undefined && port.connected) continue
     ports.push(port)
   }
@@ -1117,6 +1118,7 @@ function join_change(target: LuaEntity, prototype: any, candidate: PlacementCand
     if (port.storage_index === join.target_port.storage_index && port.connection_index === join.target_port.connection_index) live = port
   }
   if (live === undefined) return 'the target fluid port no longer exists'
+  if (!live.fluid_constraint_known) return 'native fluid constraints are unknown'
   if (live.connected) return 'the target fluid port is already connected'
   let own: CandidateFluidPort | undefined
   for (const port of candidate_fluid_ports(prototype, candidate.position, candidate.direction) ?? []) {
@@ -1427,10 +1429,10 @@ export function placement_candidate_preflight(actor: ControlledActor, candidate_
 function preservation_candidate_join(actor: ControlledActor, set: PlacementCandidateSet, candidate: PlacementCandidate, isolated = false) {
   const unavailable = (reason: string) => ({ version: 1, complete: false, reason })
   const prototype = prototypes.entity[set.entity_name]
-  const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
+  const fluidboxes = prototype?.fluidbox_prototypes ?? []
   if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'].includes(set.entity_name)
     || fluidboxes.length < 1 || fluidboxes.length > 16 || fluidboxes.some((storage, index) => storage.index !== index + 1
-      || !(storage.volume > 0 && storage.volume < math.huge)
+      || !(storage.get_volume() > 0 && storage.get_volume() < math.huge)
       || !['input', 'output', 'input-output', 'none'].includes(storage.production_type))) return unavailable('candidate_storage_constraints_unproven')
   let expected = 0
   for (const storage of fluidboxes) {
@@ -1443,8 +1445,7 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   if (!candidate.connects_to && !isolated) return unavailable('relation_required')
   if (isolated && candidate.connects_to) return unavailable('isolated_candidate_has_relation')
   const storages = fluidboxes.map((storage, index) => ({ index: storage.index ?? index + 1,
-    production_type: storage.production_type, volume: storage.volume, filter: storage.filter?.name,
-    minimum_temperature: storage.minimum_temperature, maximum_temperature: storage.maximum_temperature }))
+    production_type: storage.production_type, volume: storage.get_volume(), filter: storage.filter?.name }))
   let left = candidate.position.x
   let right = left
   let top = candidate.position.y
@@ -1461,11 +1462,12 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   if (neighbours.length > 64) return unavailable('neighbour_scan_truncated')
   let matches = 0
   for (const entity of neighbours) {
-    if (!entity.fluidbox || entity.fluidbox.length === 0) continue
+    if (entity.fluids_count === 0) continue
     const live = complete_live_fluid_ports(entity)
     if (!live.complete) return unavailable('neighbour_ports_incomplete')
     for (const from of live.ports) for (const to of ports) {
-      if (!fluid_ports_join(from, to)) continue
+      if (!fluid_ports_align(from, to)) continue
+      if (!fluid_ports_join(from, to)) return unavailable('candidate_fluid_constraint_conflict')
       if (isolated) return unavailable('isolated_candidate_would_connect')
       const join = candidate.connects_to!
       if (entity.unit_number !== join.unit_number || entity.force.index !== actor.force.index

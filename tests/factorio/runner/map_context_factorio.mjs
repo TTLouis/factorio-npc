@@ -146,7 +146,7 @@ async function createReachFixtures() {
     + 'for _,e in pairs(s.find_entities_filtered{area={{13,-53},{50,-36}}}) do if e.type~="character" then e.destroy() end end; '
     + 'local p=s.create_entity{name="npc-test-long-underground-pipe",position={16.5,-40.5},direction=defines.direction.west,force=a.force}; '
     + 'local q=s.create_entity{name="npc-test-long-underground-pipe",position={46.5,-40.5},direction=defines.direction.east,force=a.force}; assert(p and q); '
-    + 'local function linked() for _,c in pairs(p.fluidbox.get_pipe_connections(1)) do if c.connection_type=="underground" and c.target and c.target.owner==q then return true end end return false end; '
+    + 'local function linked() for _,c in pairs(p.get_fluid_box_pipe_connections(1)) do if c.connection_type=="underground" and c.target and c.target==q then return true end end return false end; '
     + 'if not linked() then p.direction=defines.direction.east; q.direction=defines.direction.west end; assert(linked(),"long underground native link must exist"); '
     + 'local i=s.create_entity{name="npc-test-custom-vector-inserter",position={16.5,-50.5},force=a.force}; assert(i); '
     + 'i.pickup_position={15.5,-50.5}; i.drop_position={46.5,-50.5}; '
@@ -440,7 +440,7 @@ try {
     try { await connection.connect(); break }
     catch (error) { connection.close(); if (Date.now() >= ready) throw error; await delay(200) }
   }
-  assert.match(await command('/version'), /2\.0\.77/)
+  assert.match(await command('/version'), /2\.1\.24/)
   if (phase === 'prepare') await prepare()
   else await verify()
   assert.equal(forbiddenFetchCalls, 0)

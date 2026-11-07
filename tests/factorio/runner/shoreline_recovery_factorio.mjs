@@ -30,12 +30,12 @@ const snapshot = () => lua(`local o=remote.call("autorio_operations","status"); 
   for _,e in pairs(s.find_entities_filtered{force=a.force,name={"offshore-pump","boiler","steam-engine","lab","small-electric-pole"}}) do
     local st=nil; for k,v in pairs(defines.entity_status) do if v==e.status then st=k end end;
     local d={name=e.name,unit_number=e.unit_number,position=e.position,status=st,fluid_targets={}};
-    for i=1,#e.fluidbox do for _,c in pairs(e.fluidbox.get_pipe_connections(i)) do
-      local t=c.target and c.target.owner; if t and t.valid then d.fluid_targets[#d.fluid_targets+1]=t.unit_number end
+    for i=1,e.fluids_count do for _,c in pairs(e.get_fluid_box_pipe_connections(i)) do
+      local t=c.target and c.target; if t and t.valid then d.fluid_targets[#d.fluid_targets+1]=t.unit_number end
     end end;
     if e.name=="lab" or e.name=="steam-engine" then d.energy=e.energy; d.network=e.electric_network_id or 0 end;
-    if e.name=="steam-engine" then d.generating=e.energy_generated_last_tick; local f=e.fluidbox[1]; d.steam=f and f.amount or 0 end;
-    if e.name=="boiler" then local f=e.fluidbox[1]; d.water=f and f.amount or 0 end;
+    if e.name=="steam-engine" then d.generating=e.energy_generated_last_tick; local f=e.get_fluid(1); d.steam=f and f.amount or 0 end;
+    if e.name=="boiler" then local f=e.get_fluid(1); d.water=f and f.amount or 0 end;
     if e.name=="lab" then d.science=e.get_item_count("automation-science-pack") end; entities[#entities+1]=d
   end;
   local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end;

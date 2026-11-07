@@ -705,7 +705,7 @@ function pause_by_settlement(record: LayoutRecord, reason: string) {
 
 function entity_facts(entity: LuaEntity): RetainedEntityFacts {
   const direction = protected_read(() => entity.direction as number)
-  return { name: entity.name, position: { x: entity.position.x, y: entity.position.y }, direction: typeof direction === 'number' ? direction : undefined }
+  return { name: entity.name, position: { x: entity.position.x, y: entity.position.y }, direction: typeof direction === 'number' ? direction : undefined, mirrored: entity.mirroring }
 }
 
 // Re-reads a connection that was verified when its last entity was built, against the entities as they stand now (the same
@@ -1103,6 +1103,7 @@ export function record_layout_node_placed(actor: ControlledActor, layout_node: {
   node.placed_tick = game.tick
   node.placed_position = { x: entity.position.x, y: entity.position.y }
   node.placed_direction = protected_read(() => entity.direction as number)
+  node.placed_mirrored = entity.mirroring
 
   for (const connection of record.connections) {
     if (connection.state !== 'pending' || !involves(record, connection, node)) continue

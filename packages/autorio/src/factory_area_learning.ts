@@ -1,3 +1,4 @@
+import { fluid_connection_state } from './fluid_connections'
 import type { LuaEntity, LuaInventory } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { SkillDefinition } from './skills'
@@ -48,6 +49,7 @@ export interface FactoryEntityObservation {
   unit_number?: number
   position: { x: number, y: number }
   direction: number
+  mirrored?: boolean
   footprint: any
   recipe?: {
     name: string
@@ -66,6 +68,7 @@ export interface FactoryEntityObservation {
   mining?: { resources: string[], drop_position?: { x: number, y: number }, drop_target?: string }
   fluid_connections: Array<{
     fluidbox_index: number
+    connection_basis?: string
     target?: string
     flow_direction?: unknown
     connection_type?: unknown
@@ -296,8 +299,8 @@ function inventory_snapshots(entity: LuaEntity) {
     add('output', inventory_defines.crafter_output)
   }
   else if (entity.type === 'furnace') {
-    add('input', inventory_defines.furnace_source)
-    add('output', inventory_defines.furnace_result)
+    add('input', inventory_defines.crafter_input)
+    add('output', inventory_defines.crafter_output)
   }
   else if (entity.type === 'container' || entity.type === 'logistic-container' || entity.type === 'infinity-container') add('storage', inventory_defines.chest)
   const result: FactoryInventorySnapshot[] = []
@@ -328,13 +331,13 @@ function mining_resources(entity: LuaEntity) {
 
 function fluid_connections(entity: LuaEntity) {
   const result: FactoryEntityObservation['fluid_connections'] = []
-  const fluidbox = entity.fluidbox
+  const fluidbox = entity
   if (fluidbox === undefined) return result
-  for (let index = 1; index <= fluidbox.length && result.length < MAX_FLUID_CONNECTIONS; index++) {
-    const connections = fluidbox.get_pipe_connections(index) ?? []
+  for (let index = 1; index <= fluidbox.fluids_count && result.length < MAX_FLUID_CONNECTIONS; index++) {
+    const connections = fluidbox.get_fluid_box_pipe_connections(index) ?? []
     for (const connection of connections) {
       if (result.length >= MAX_FLUID_CONNECTIONS) break
-      result.push({ fluidbox_index: index, target: target_id(connection.target?.owner), flow_direction: connection.flow_direction, connection_type: connection.connection_type })
+      result.push({ fluidbox_index: index, connection_basis: 'geometric_adjacency', target: target_id(connection.target), flow_direction: connection.flow_direction, connection_type: connection.connection_type })
     }
   }
   return result
@@ -358,7 +361,7 @@ function observation(entity: LuaEntity): FactoryEntityObservation {
     : undefined
   return {
     id: entity_id(entity), name: entity.name, type: entity.type, category: entity_category(entity), unit_number: entity.unit_number,
-    position: { x: entity.position.x, y: entity.position.y }, direction: entity.direction as number, footprint: entity.bounding_box,
+    position: { x: entity.position.x, y: entity.position.y }, direction: entity.direction as number, mirrored: entity.mirroring, footprint: entity.bounding_box,
     recipe, inventories: inventory_snapshots(entity), belt, inserter, power, mining, fluid_connections: fluid_connections(entity),
   }
 }
@@ -443,12 +446,12 @@ function build_relations(live_entities: LuaEntity[], entities: FactoryEntityObse
       if (point_in_area(entity.drop_target.position, area) && find_observation(entities, drop_id)) add('direct_item_output', id, drop_id, undefined, 'Mining drill engine drop target is inside the selected area.', mining_resources(entity))
       else add('boundary_output', id, drop_id, undefined, 'Mining drill engine drop target is outside the selected area.', mining_resources(entity))
     }
-    const fluidbox = entity.fluidbox
+    const fluidbox = entity
     if (fluidbox !== undefined) {
-      for (let index = 1; index <= fluidbox.length; index++) {
-        for (const connection of fluidbox.get_pipe_connections(index) ?? []) {
-          const target = connection.target?.owner as LuaEntity | undefined
-          if (target?.valid && point_in_area(target.position, area) && find_observation(entities, entity_id(target))) add('fluid_connection', id, entity_id(target), undefined, 'Engine-confirmed fluidbox connection.')
+      for (let index = 1; index <= fluidbox.fluids_count; index++) {
+        for (const connection of fluidbox.get_fluid_box_pipe_connections(index) ?? []) {
+          const target = connection.target as LuaEntity | undefined
+          if (target?.valid && point_in_area(target.position, area) && find_observation(entities, entity_id(target)) && fluid_connection_state(entity, index, connection) === 'joined') add('fluid_connection', id, entity_id(target), undefined, 'Engine-confirmed shared fluid segment.')
         }
       }
     }

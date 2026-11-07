@@ -104,7 +104,7 @@ try {
   await scenario('residual', 'once', { expectedBoots: 3, success: true })
   await scenario('exhausted', 'always', { expectedBoots: 3, success: false })
   await scenario('exhausted', 'always', { existing: true, expectedBoots: 1, success: false })
-  await fs.writeFile(path.join(results, 'startup-clock-proof.json'), JSON.stringify({ status: 'pass', exact_native_version: '2.0.77',
+  await fs.writeFile(path.join(results, 'startup-clock-proof.json'), JSON.stringify({ status: 'pass', exact_native_version: '2.1.24',
     source: 'actual Session startup, real Factorio; settings fault injected before launch; no provider/Jev calls',
     zero_external_inference: external === 0, scenarios }, null, 2))
   console.log('PASS startup clock: actual Session prevention, residual self-correction, durable exhaustion and zero inference')

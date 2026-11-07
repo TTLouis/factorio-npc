@@ -58,7 +58,7 @@ function fluidSummary(fluid) {
     truncated: storage.connections_truncated === true || (storage.connections?.length ?? 0) > 3,
     ...(storage.contents ? { contents: cleanScalars(storage.contents, ['name', 'amount', 'temperature']) } : {}),
     ports: (Array.isArray(storage.connections) ? storage.connections : []).slice(0, 3).map(port => ({
-      ...cleanScalars(port, ['connection_index', 'direction', 'flow_direction', 'connected', 'reciprocal']),
+      ...cleanScalars(port, ['connection_index', 'direction', 'flow_direction', 'connected', 'reciprocal', 'hydraulic_state']),
       ...(position(port.position ?? port.tile) ? { tile: position(port.position ?? port.tile) } : {}),
       ...(position(port.target_position) ? { opens: position(port.target_position) } : {}),
       ...(port.target ? { target: cleanScalars(port.target, ['name', 'unit_number', 'storage_index']) } : {}),

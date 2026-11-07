@@ -223,7 +223,7 @@ try {
     try { await connection.connect(); break }
     catch (error) { connection.close(); if (Date.now() >= ready) throw error; await delay(200) }
   }
-  assert.match(await command('/version'), /2\.0\.77/)
+  assert.match(await command('/version'), /2\.1\.24/)
   if (phase === 'prepare') await prepare()
   else await verify()
   assert.equal(forbiddenFetchCalls, 0)

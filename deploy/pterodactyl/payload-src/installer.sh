@@ -170,7 +170,7 @@ import { pathToFileURL } from 'node:url'
 await import(pathToFileURL(process.env.SGLUNA_SUPERVISOR_VERIFY).href)
 VERIFY_RUNTIME_IMPORTS
 
-FACTORIO_REQUEST="${FACTORIO_VERSION:-latest}"
+FACTORIO_REQUEST="${FACTORIO_VERSION:-2.1.24}"
 if [[ "$FACTORIO_REQUEST" == latest || "$FACTORIO_REQUEST" == experimental ]]; then
   FACTORIO_TARGET="$(FACTORIO_REQUEST="$FACTORIO_REQUEST" node --input-type=module <<'NODE'
 const request = process.env.FACTORIO_REQUEST
@@ -178,12 +178,12 @@ const response = await fetch('https://factorio.com/api/latest-releases', { redir
 if (!response.ok) throw new Error(`release API HTTP ${response.status}`)
 const data = await response.json()
 const version = data?.[request === 'latest' ? 'stable' : 'experimental']?.headless
-if (typeof version !== 'string' || !/^2\.0\.\d+$/.test(version)) throw new Error('unsupported Factorio release')
+if (typeof version !== 'string' || !/^2\.1\.24$/.test(version)) throw new Error('unsupported Factorio release (requires 2.1.24)')
 process.stdout.write(version)
 NODE
 )" || fail 'Unable to resolve requested Factorio release'
 else
-  [[ "$FACTORIO_REQUEST" =~ ^2\.0\.[0-9]+$ ]] || fail 'FACTORIO_VERSION must be latest, experimental, or an exact 2.0.x release'
+  [[ "$FACTORIO_REQUEST" =~ ^2\.1\.24$ ]] || fail 'FACTORIO_VERSION must be latest, experimental, or the supported exact 2.1.24 release'
   FACTORIO_TARGET="$FACTORIO_REQUEST"
 fi
 
