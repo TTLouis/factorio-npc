@@ -4,7 +4,7 @@ This is the current single-NPC roadmap. Historical pass-by-pass plans are retain
 
 ## Current checkpoint
 
-October 7 Luna recovery candidate `61f70f54` adds typed missing-fact reads without changing committed intent. The sequentially integrated units, review outcomes and acceptance checklist are in [the targeted observation checkpoint](validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md). Autonomous red-to-green acceptance and multiplayer reliability remain open.
+October 7 Luna recovery candidate `61f70f54` adds typed missing-fact reads without changing committed intent. The sequentially integrated units, review outcomes and acceptance checklist are in [the targeted observation checkpoint](https://github.com/TTLouis/factorio-npc/blob/3ae35a8ff1af5996a141250a1b70094811381870/docs/validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md). Autonomous red-to-green acceptance and multiplayer reliability remain open.
 
 The project has moved beyond the original "prove a zero-player character can wait/move/mine/craft" transition phase. The standalone-NPC architecture is now the baseline being prepared for promotion to `main`.
 
@@ -49,7 +49,7 @@ The macro design's MW1–MW6 table specifies dependency order and acceptance evi
 Prove the integrated lifecycle with scripted provider replies plus relevant real-engine
 assertions; component tests and existing live traces do not establish this new checkpoint.
 Week 2 is October 5–11. Per-request visual feedback is recorded in the
-[weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
+[weekly plan](https://github.com/TTLouis/factorio-npc/blob/3ae35a8ff1af5996a141250a1b70094811381870/docs/NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
 Existing production and promotion gates remain in force. No paid run is authorized here.
 
 ## Promotion goal

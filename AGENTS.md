@@ -125,3 +125,11 @@ release gates are additional promotion checks. Preserve main-only deployment
 changes, user saves/configuration and upstream MIT attribution. Keep swarm or
 optional vision work separate from single-NPC promotion unless explicitly scoped.
 Preserve existing newline styles when editing files.
+
+## Internal evidence publication
+
+Keep internal session handoffs, raw run logs, repair checkpoints and
+recovery archives in ignored local directories. Do not stage or push
+them. Public guides and curated proof reports remain publishable after
+their normal review. Preserve evidence locally before removing tracked
+artifacts; use immutable history links for existing historical citations.

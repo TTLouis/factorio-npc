@@ -38,13 +38,8 @@ particular, swarm/vision proposals are separate from the single-NPC baseline.
 
 ## History and documentation maintenance
 
-[Validation history](validation/README.md) contains dated runs, checkpoints and
-superseded handoffs. Their SHAs, commands and paths describe the recorded run;
-they are not instructions to restart it. Use
-[current status](NPC_AGENT_HARNESS_STATUS.md) to find the relevant checkpoint.
-The [migration tracker](PROJECT_MIGRATION_TRACKER.md) records origin/identity work.
-
-Keep the overview in the root README, contribution steps in CONTRIBUTING, coding
-agent rules in AGENTS, and test commands in TESTING. Update an existing owning
-document before adding a competing roadmap. Preserve existing filenames and
-historical evidence so old links and retained run references remain usable.
+Keep internal handoffs, run logs, repair notes and recovery archives in
+ignored local evidence directories. [Historical records](validation/README.md)
+remain available in Git history. Publish only reviewed guides and curated
+proof reports. Update the existing owning document before adding another
+roadmap, and keep historical claims tied to their recorded source and run.

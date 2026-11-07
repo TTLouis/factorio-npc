@@ -6,7 +6,7 @@ Owner Q&A: 2026-09-30. Week 1 is September 28â€“October 4; Week 2 is October 5â€
 This is the authority for the September 30 macro decisions. It refines the lifecycle
 in [NPC_PLANNING_ROADMAP.md](NPC_PLANNING_ROADMAP.md) and the sequential context split
 in [NPC_DELEGATION_DESIGN_2026-09-29.md](NPC_DELEGATION_DESIGN_2026-09-29.md).
-The [weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md) preserves the Q&A and
+The [weekly plan](https://github.com/TTLouis/factorio-npc/blob/3ae35a8ff1af5996a141250a1b70094811381870/docs/NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md) preserves the Q&A and
 Week 2 UX follow-up. These requirements are not evidence that the runtime implements
 them, and do not authorize a provider run or deployment.
 
@@ -27,7 +27,7 @@ checks. Runtime operation ledger, task scheduler/clock repairs, circuit contract
 campaign transport, surplus returns and recovery orchestration still have pending
 integration or implementation work. No three-seed gameplay or package promotion
 pass is established. The
-[current implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md) is the
+[current implementation checklist](https://github.com/TTLouis/factorio-npc/blob/3ae35a8ff1af5996a141250a1b70094811381870/docs/validation/PLAYABLE_BUILD_2026-10-03.md) is the
 authority for build evidence; dated MW1/MW2 sections below remain historical.
 
 ## 1. A continuing campaign, bounded executable slices
@@ -411,4 +411,4 @@ turn has already closed; normal correlated completion still clears the record.
 Three additional scripted test groups and a separate review cover these paths.
 No new engine evidence is claimed. Exact acknowledged-batch attribution,
 joined-batch completion, multiple pending effects and verified-observation
-clearance remain open; see the [October 2 checkpoint](validation/PLAYABLE_CHECKPOINT_2026-10-02.md).
+clearance remain open; see the [October 2 checkpoint](https://github.com/TTLouis/factorio-npc/blob/3ae35a8ff1af5996a141250a1b70094811381870/docs/validation/PLAYABLE_CHECKPOINT_2026-10-02.md).

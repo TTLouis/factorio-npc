@@ -152,3 +152,36 @@ dist
 # Byte-compiled asset-pipeline scripts under packages/*/scripts
 __pycache__/
 *.pyc
+
+# Internal evidence stays local; curated public proofs remain tracked
+/handoffs/
+/branch-archives/
+/recovery-archives/
+/cleanup-archives/
+/scratchpads/
+/validation-evidence/
+/test-results/
+/logs/
+/docs/validation/*
+!/docs/validation/README.md
+/docs/*HANDOFF*
+/docs/*_WORK_NOTE*
+/docs/ASSIGNED_PRODUCER_REVIEW_REPAIR.md
+/docs/AX_CANDIDATE_REPAIR_2026-10-25.md
+/docs/AY_HARNESS_RECOVERY_2026-10-26.md
+/docs/BG_PRODUCER_RECOVERY.md
+/docs/BG_STOCK_RECOVERY.md
+/docs/CONTRACT_OBLIGATION_RECOVERY_2026-10-25.md
+/docs/FLUID_PRESERVATION_PROOF_2026-10-25.md
+/docs/GOAL_ADMISSION_CANCEL_FENCE_2026-10-25.md
+/docs/JEV_DECISION_LAYER_ARCHITECTURE.md
+/docs/NPC_PLANNING_REFACTOR_INTEGRATION.md
+/docs/NPC_RELIABILITY_WORK.md
+/docs/NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md
+/docs/PARALLEL_PRODUCTION_WORK_PLAN.md
+/docs/PRODUCTION_BLOCK_STARTUP_REPAIR.md
+/docs/RUN_AS_ENTITY_REFRESH_FIX_2026-10-23.md
+/docs/RUN_AS_NEXT_PATCH_PLAN_2026-10-23.md
+/docs/RUN_AT_POLLING_REPAIR_2026-10-23.md
+/docs/RUN_AU_HARNESS_REPAIR_2026-10-24.md
+/docs/RUN_BF_PRESERVATION_REPAIR.md
