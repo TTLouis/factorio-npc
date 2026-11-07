@@ -30,3 +30,11 @@
 - https://huggingface.co/docs/hub/main/en/notebooks
 - https://huggingface.co/docs/hub/model-release-checklist
 - https://huggingface.co/docs/hub/main/model-cards
+
+## Internal evidence publication
+
+Keep internal session handoffs, raw run logs, repair checkpoints and
+recovery archives in ignored local directories. Do not stage or push
+them. Public guides and curated proof reports remain publishable after
+their normal review. Preserve evidence locally before removing tracked
+artifacts; use immutable history links for existing historical citations.

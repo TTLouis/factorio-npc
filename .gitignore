@@ -141,3 +141,18 @@ dist
 .pnp.*
 
 .pnpm-store/
+
+# Internal evidence stays local; curated public proofs remain tracked
+/handoffs/
+/branch-archives/
+/recovery-archives/
+/cleanup-archives/
+/scratchpads/
+/validation-evidence/
+/test-results/
+/logs/
+/docs/validation/*
+!/docs/validation/README.md
+/docs/*HANDOFF*
+/docs/*_WORK_NOTE*
+/docs/NPC_RELIABILITY_WORK.md

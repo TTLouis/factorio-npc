@@ -4,7 +4,7 @@ This file tracks implementation progress against `docs/NPC_AGENT_HARNESS_PLAN.md
 
 ## User-verified checkpoint (2026-09-13)
 
-The user supplied a successful combined Docker runtime log after the `d34a4b3` handoff. The console output is retained at [validation/2026-09-13-npc-core.txt](validation/2026-09-13-npc-core.txt). It does not print a source commit or Docker build output, so this record does not independently attest the image revision or claim new build-time test results.
+The user supplied a successful combined Docker runtime log after the `d34a4b3` handoff. The console output is retained at [validation/2026-09-13-npc-core.txt](https://github.com/TTLouis/factorio-npc/blob/8ee348578a87c85af30846772a896e53b8af5d7e/docs/validation/2026-09-13-npc-core.txt). It does not print a source commit or Docker build output, so this record does not independently attest the image revision or claim new build-time test results.
 
 Reported results:
 
