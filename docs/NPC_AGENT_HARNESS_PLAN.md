@@ -4,9 +4,9 @@ This is the roadmap for the built-in planner/Jev line on `experiment/jev-agent-a
 
 ## Checkpoint as of October 7, 2026 (historical)
 
-This section was last updated on October 7. Later checkpoints are in the [status log](validation/NPC_AGENT_HARNESS_STATUS_LOG_2026-09-16_TO_2026-10-24.md) and [validation history](validation/README.md).
+This section was last updated on October 7. Later checkpoints are in the [status log](https://github.com/TTLouis/factorio-npc/blob/f725ce7b7d966ebd82252f71d5f9691a03b0a587/docs/validation/NPC_AGENT_HARNESS_STATUS_LOG_2026-09-16_TO_2026-10-24.md) and [validation history](validation/README.md).
 
-October 7 Luna recovery candidate `61f70f54` adds typed missing-fact reads without changing committed intent. The sequentially integrated units, review outcomes and acceptance checklist are in [the targeted observation checkpoint](validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md). Autonomous red-to-green acceptance and multiplayer reliability remain open.
+October 7 Luna recovery candidate `61f70f54` adds typed missing-fact reads without changing committed intent. The sequentially integrated units, review outcomes and acceptance checklist are in [the targeted observation checkpoint](https://github.com/TTLouis/factorio-npc/blob/f725ce7b7d966ebd82252f71d5f9691a03b0a587/docs/validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md). Autonomous red-to-green acceptance and multiplayer reliability remain open.
 
 The project has moved beyond the original "prove a zero-player character can wait/move/mine/craft" transition phase. The standalone-NPC architecture is now the baseline being prepared for promotion to `main`.
 
@@ -51,7 +51,7 @@ The macro design's MW1–MW6 table specifies dependency order and acceptance evi
 Prove the integrated lifecycle with scripted provider replies plus relevant real-engine
 assertions; component tests and existing live traces do not establish this new checkpoint.
 Week 2 is October 5–11. Per-request visual feedback is recorded in the
-[weekly plan](validation/NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
+[weekly plan](https://github.com/TTLouis/factorio-npc/blob/f725ce7b7d966ebd82252f71d5f9691a03b0a587/docs/validation/NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
 Existing production and promotion gates remain in force. No paid run is authorized here.
 
 ## Promotion goal
