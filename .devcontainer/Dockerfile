@@ -1,5 +1,5 @@
-# Factorio does not have stable support for arm64
-FROM factoriotools/factorio:2.0.30
+# Pin the development environment to the supported Factorio version.
+FROM factoriotools/factorio:2.1.24
 
 ARG PNPM_VERSION=10.13.1
 ENV PNPM_VERSION=${PNPM_VERSION:-10.13.1}
