@@ -5,7 +5,7 @@ dependencies. The native game remains authoritative for physical state; the
 registry is authoritative only for accepted assignments. A declaration does not
 prove that a machine is configured, connected, supplied or producing.
 
-The [October 31 completion addendum](validation/FACTORY_TRACKER_COMPLETION_2026-10-31.md)
+The [October 31 completion addendum](https://github.com/TTLouis/factorio-npc/blob/e30c4fc9ac592e0219e1795ddfabcc5bdf792398/docs/validation/FACTORY_TRACKER_COMPLETION_2026-10-31.md)
 records the combined candidate's native lifecycle evidence, recovery regressions,
 current integration checks and remaining boundaries. Earlier stage notes below
 describe their original prerequisite scope; they are not cumulative acceptance
@@ -62,7 +62,7 @@ per unchanged goal before invoking the existing guarded structural successor
 path. Request callbacks, requirement changes, slices and restart cannot renew it.
 Focused host tests establish these boundaries; full native continuation and
 integration acceptance remain separately required. See the
-[lifecycle validation record](validation/FACTORY_CELL_LIFECYCLE_2026-10-29.md).
+[lifecycle validation record](https://github.com/TTLouis/factorio-npc/blob/e30c4fc9ac592e0219e1795ddfabcc5bdf792398/docs/validation/FACTORY_CELL_LIFECYCLE_2026-10-29.md).
 
 ### Additive metadata revisions (host prerequisite)
 
@@ -470,7 +470,7 @@ proposal, exact member, immutable assignment, native-read scope and allowance.
 `planner.review_round`, `planner.committed_slice_returned` and
 `context.review_notes_delivered` distinguish requested review, actual reply and
 delivered notes; only subsequent ordinary admission and native receipts prove
-progress. See the [repair proof and native recipe](ASSIGNED_PRODUCER_REVIEW_REPAIR.md).
+progress. See the [repair proof and native recipe](https://github.com/TTLouis/factorio-npc/blob/e30c4fc9ac592e0219e1795ddfabcc5bdf792398/docs/ASSIGNED_PRODUCER_REVIEW_REPAIR.md).
 
 ## Physical update invariants
 
@@ -530,4 +530,4 @@ it never replays placement, supplies items, rewrites a plan or grants completion
 `_exhausted` events distinguish durable recovery and unresolved guards. Recovery
 completion means fresh enrollment/use resolution, not gameplay success.
 
-See [the scoped proof matrix](PRODUCTION_BLOCK_STARTUP_REPAIR.md).
+See [the scoped proof matrix](https://github.com/TTLouis/factorio-npc/blob/e30c4fc9ac592e0219e1795ddfabcc5bdf792398/docs/PRODUCTION_BLOCK_STARTUP_REPAIR.md).

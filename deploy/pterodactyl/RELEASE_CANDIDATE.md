@@ -4,7 +4,7 @@ The standalone-NPC v8 release-candidate document that previously lived at this p
 
 The original record is preserved unchanged at:
 
-- [`../../docs/validation/PTERODACTYL_V8_RELEASE_CANDIDATE_2026-09-14.md`](../../docs/validation/PTERODACTYL_V8_RELEASE_CANDIDATE_2026-09-14.md)
+- [`../../docs/validation/PTERODACTYL_V8_RELEASE_CANDIDATE_2026-09-14.md`](https://github.com/TTLouis/factorio-npc/blob/e30c4fc9ac592e0219e1795ddfabcc5bdf792398/docs/validation/PTERODACTYL_V8_RELEASE_CANDIDATE_2026-09-14.md)
 
 For current deployment behavior and test commands, see [`README.md`](./README.md).
 
