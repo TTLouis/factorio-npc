@@ -153,3 +153,17 @@ dist
 # Byte-compiled asset-pipeline scripts under packages/*/scripts
 __pycache__/
 *.pyc
+
+# Internal evidence stays local; curated public proofs remain tracked
+/handoffs/
+/branch-archives/
+/recovery-archives/
+/cleanup-archives/
+/scratchpads/
+/validation-evidence/
+/test-results/
+/logs/
+/docs/validation/*
+!/docs/validation/README.md
+/docs/*HANDOFF*
+/docs/*_WORK_NOTE*

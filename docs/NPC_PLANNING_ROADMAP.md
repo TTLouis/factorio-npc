@@ -28,7 +28,7 @@ player-structure redesign need approval. Campaign allowance is global across eve
 role and restart; paid transport stays disabled for this checkpoint. These are
 acceptance requirements, not a claim that all wiring is complete. Current candidate,
 review and integration evidence is in the
-[October 3 implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md).
+[October 3 implementation checklist](https://github.com/TTLouis/factorio-npc/blob/b860bd9e7b54d02d690d8b6cf74e2c9c1fb8ba98/docs/validation/PLAYABLE_BUILD_2026-10-03.md).
 
 The redesign is intentionally simpler than the earlier experimental hierarchy/checkpoint stack:
 
@@ -1206,7 +1206,7 @@ Constraints any design has to keep:
 
 ### One-step contract prediction (owner decision, 2026-10-08; P1–P4 implemented 2026-10-23)
 
-Trigger: [Haiku trial C](validation/LUNA_HAIKU_LIVE_2026-10-08C.md). The planner writes every step's completion contract when it commits a slice, several steps before those steps run. By then the facts can be stale (trial C committed "mine 100 iron ore" while Luna already held 130), and a contract that turns out wrong is frozen with the plan.
+Trigger: [Haiku trial C](https://github.com/TTLouis/factorio-npc/blob/b860bd9e7b54d02d690d8b6cf74e2c9c1fb8ba98/docs/validation/LUNA_HAIKU_LIVE_2026-10-08C.md). The planner writes every step's completion contract when it commits a slice, several steps before those steps run. By then the facts can be stale (trial C committed "mine 100 iron ore" while Luna already held 130), and a contract that turns out wrong is frozen with the plan.
 
 The owner's decision: keep the residual planning and the Roadmap Shelf, and plan each step close to when it runs. "We do one step prediction to reduce idle time, ie if an actual execution plan has taken place we start to assume that plan got finished and pre plan the next, with just in time as a fall back."
 
@@ -1286,7 +1286,7 @@ can bind the prediction; material-only, changed-owner, failed-step and invalid
 predictions fall back to JIT. Cancellation aborts only the owned side call.
 Scripted full-loop regressions cover binding, fresh rejection, wrong close source,
 actor/goal/version/request replacement, reserve/read/validation/trace races and
-failed native callbacks. See the [Run AN repair checkpoint](validation/PRODUCTION_TASK_CONTROLLER_2026-10-23.md).
+failed native callbacks. See the [Run AN repair checkpoint](https://github.com/TTLouis/factorio-npc/blob/b860bd9e7b54d02d690d8b6cf74e2c9c1fb8ba98/docs/validation/PRODUCTION_TASK_CONTROLLER_2026-10-23.md).
 Prediction does not author a future slice or an entire factory. The mod's task
 board still does not display pending contracts.
 

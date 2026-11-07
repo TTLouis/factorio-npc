@@ -67,16 +67,8 @@ establishes current readiness. Swarm and vision work stays separate from the sin
 
 ## History and documentation maintenance
 
-[Validation history](validation/README.md) contains dated runs, repair notes,
-checkpoints, finished work plans and superseded designs. Their SHAs, commands
-and paths describe the recorded run; they are not instructions to restart it.
-The [status log](validation/NPC_AGENT_HARNESS_STATUS_LOG_2026-09-16_TO_2026-10-24.md)
-holds the dated status checkpoints through October 24, 2026. The
-[migration tracker](PROJECT_MIGRATION_TRACKER.md) records origin/identity work.
-
-Keep the overview in the root README, contribution steps in CONTRIBUTING, coding
-agent rules in AGENTS, and test commands in TESTING. Update an existing owning
-document before adding a competing roadmap. Put dated repair notes, run records
-and closed work plans in `validation/`, not beside the contracts here. Preserve
-existing filenames and historical evidence so old links and retained run
-references remain usable.
+Keep internal handoffs, run logs, repair notes and recovery archives in
+ignored local evidence directories. [Historical records](validation/README.md)
+remain available in Git history. Publish only reviewed guides and curated
+proof reports. Update the existing owning document before adding another
+roadmap, and keep historical claims tied to their recorded source and run.
