@@ -215,7 +215,7 @@ def run(client: Rcon, results: Path) -> None:
             '/silent-command ' + find_actor +
             f"local f=s.create_entity{{name='stone-furnace',position={{{ox + 3},{oy + 0.5}}},force=a.force}}; assert(f); "
             "f.get_fuel_inventory().insert{name='coal',count=2}; "
-            f"f.get_inventory(defines.inventory.furnace_source).insert{{name='iron-ore',count={ORE}}}; "
+            f"f.get_inventory(defines.inventory.crafter_input).insert{{name='iron-ore',count={ORE}}}; "
             "a.get_main_inventory().remove{name='iron-ore',count=" + str(ORE) + "}; rcon.print(helpers.table_to_json({ok=true}))",
             'place furnace',
         )

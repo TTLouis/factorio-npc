@@ -72,7 +72,7 @@ async function main() {
         const native = JSON.parse(await rcon.command('/silent-command '
           + `local r=game.forces.player.recipes[${JSON.stringify(producer.recipe)}]; assert(r); `
           + 'local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; '
-          + 'local cats={r.category}; for _,c in pairs(r.additional_categories) do cats[#cats+1]=c end; '
+          + 'local cats=r.categories; '
           + 'local supported=false; for _,c in pairs(cats) do if a.prototype.crafting_categories[c] then supported=true end end; '
           + 'local fluid=false; for _,i in pairs(r.ingredients) do if i.type=="fluid" then fluid=true end end; '
           + 'for _,p in pairs(r.products) do if p.type=="fluid" then fluid=true end end; '

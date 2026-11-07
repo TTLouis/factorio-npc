@@ -40,6 +40,7 @@ export interface LayoutNode {
   /** What the built entity reported when it was bound: a retained node is only kept while its entity still reports these. */
   placed_position?: PlacementPoint
   placed_direction?: number
+  placed_mirrored?: boolean
 }
 
 export interface LayoutRecordConnection {
@@ -95,6 +96,7 @@ export interface RetainedEntityFacts {
   name: string
   position: PlacementPoint
   direction?: number
+  mirrored?: boolean
 }
 
 export function current_execution(record: LayoutRecord): LayoutExecution | undefined {
@@ -120,7 +122,8 @@ export function retained_node_changed(node: LayoutNode, entity: RetainedEntityFa
   const position = node.placed_position ?? node.position
   if (math.abs(entity.position.x - position.x) > POSITION_EPSILON || math.abs(entity.position.y - position.y) > POSITION_EPSILON) return true
   const direction = node.placed_direction ?? node.direction
-  return entity.direction !== undefined && entity.direction !== direction
+  return (entity.direction !== undefined && entity.direction !== direction)
+    || (entity.mirrored ?? false) !== (node.placed_mirrored ?? false)
 }
 
 // Whether a reason is one a settlement wrote itself (and may therefore rewrite).

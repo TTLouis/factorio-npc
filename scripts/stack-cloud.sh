@@ -21,7 +21,7 @@
 # This script never writes secrets. Optional:
 #   STACK_SOURCE_REF   40-char commit SHA or pushed ref the image installs
 #                      (default: this checkout's HEAD, which must be pushed)
-#   FACTORIO_VERSION   headless version (default: 2.0.77, matching tests/factorio)
+#   FACTORIO_VERSION   headless version (default: 2.1.24, matching tests/factorio)
 #   SGLUNA_DATA_DIR    host data dir (default: ./test-results/stack-data)
 set -Eeuo pipefail
 
@@ -56,7 +56,7 @@ build() {
   log "image installs source $ref (runtime supervisor overridden from this checkout)"
   cloud_docker_build "$ROOT/deploy/docker/Dockerfile" "$ROOT" "$IMAGE" \
     --build-arg "SGLUNA_SOURCE_REF=$ref" \
-    --build-arg "FACTORIO_VERSION=$(setting FACTORIO_VERSION 2.0.77)" \
+    --build-arg "FACTORIO_VERSION=$(setting FACTORIO_VERSION 2.1.24)" \
     --build-arg "SGLUNA_LOCAL_RUNTIME_OVERRIDE=1"
 }
 

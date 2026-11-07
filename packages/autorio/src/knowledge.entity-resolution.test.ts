@@ -23,7 +23,6 @@ describe('knowledge exact entity resolution', () => {
         find_entities_filtered: () => [drill],
       },
       fluids_count: 0,
-      fluidbox: { length: 0 },
       drop_position: { x: 62.5, y: 89.5 },
       drop_target: undefined,
     } as any
@@ -69,7 +68,7 @@ describe('knowledge exact entity resolution', () => {
       surface,
       drop_position: { x: 62.5, y: 89.5 },
       drop_target: chest,
-      fluidbox: { length: 0 },
+      fluids_count: 0,
     } as any
     const replacement = { ...drill, unit_number: 746 }
     surface.find_entities_filtered = (filter: any) => filter?.type === 'inserter' ? [] : [replacement]

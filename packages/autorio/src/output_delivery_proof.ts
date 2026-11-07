@@ -1,3 +1,4 @@
+import { product_probability } from './production_rates'
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_exact_entity } from './entity_reference'
@@ -160,7 +161,7 @@ function collect(proof: ProofState): DeliverySample | string {
     const product = recipe?.products[0]
     if (!recipe || recipe.name !== recipe_name || quality?.name !== 'normal' || recipe.products.length !== 1
       || product?.type !== 'item' || product.name !== spec.item_name || product.amount === undefined
-      || (product.probability ?? 1) !== 1) return 'unsupported_or_changed_recipe'
+      || product_probability(product) !== 1) return 'unsupported_or_changed_recipe'
     const output = producer.get_output_inventory()
     if (!output) return 'producer_output_unavailable'
     sample.producers[line.producer_unit_number] = { finished: producer.products_finished, amount: product.amount, output_count: output.get_item_count(spec.item_name) }

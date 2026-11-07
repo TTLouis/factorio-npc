@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${PTERODACTYL_IMAGE:-ghcr.io/ptero-eggs/yolks:debian_bookworm}"
-FACTORIO_SMOKE_VERSION="${FACTORIO_SMOKE_VERSION:-2.0.77}"
+FACTORIO_SMOKE_VERSION="${FACTORIO_SMOKE_VERSION:-2.1.24}"
 SMOKE_SOURCE_REF="${SGLUNA_SMOKE_SOURCE_REF:-${AIRI_SMOKE_SOURCE_REF:-}}"
 ROOT="$(mktemp -d)"
 NAME="sgluna-ptero-smoke-$RANDOM-$$"

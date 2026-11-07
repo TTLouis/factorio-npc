@@ -38,6 +38,12 @@ export function sorted_keys(value: Record<string, unknown> | undefined) {
   return keys
 }
 
+// Independent and shared rolls both gate the native product.
+export function product_probability(product: { independent_probability?: number, shared_probability?: { min: number, max: number } }) {
+  const shared = product.shared_probability
+  return (product.independent_probability ?? 1) * (shared ? shared.max - shared.min : 1)
+}
+
 // Expected amount of one product per craft or mining cycle.
 export function expected_product_amount(product: any) {
   let amount = product.amount
@@ -45,7 +51,7 @@ export function expected_product_amount(product: any) {
     if (product.amount_min === undefined || product.amount_max === undefined) return 0
     amount = (product.amount_min + product.amount_max) / 2
   }
-  const probability = product.probability ?? 1
+  const probability = product_probability(product)
   return (amount + (product.extra_count_fraction ?? 0)) * probability
 }
 
@@ -67,6 +73,7 @@ export function hand_crafting_speed(actor: ControlledActor) {
   const character = actor.character
   if (character === undefined) return undefined
   const base = character.prototype.get_crafting_speed()
+  if (base === undefined) return undefined
   return base * (1 + (actor.force.manual_crafting_speed_modifier ?? 0) + (character.character_crafting_speed_modifier ?? 0))
 }
 
@@ -86,9 +93,9 @@ export function drill_productivity_bonus(force: LuaForce, drill: LuaEntityProtot
 export function fuel_burn(energy_watts: number, burner: LuaBurnerPrototype, fuel_name: string) {
   const item = prototypes.item[fuel_name]
   if (item === undefined) return { name: fuel_name, accepted: false, error: 'unknown item' }
-  const category = item.fuel_category
+  const categories = item.fuel_categories ?? []
   const fuel_value = item.fuel_value
-  if (category === undefined || burner.fuel_categories[category] !== true || !(fuel_value > 0)) {
+  if (!categories.some(category => burner.fuel_categories[category] === true) || !(fuel_value > 0)) {
     return { name: fuel_name, accepted: false, error: 'this burner does not accept this fuel' }
   }
   return {
@@ -146,7 +153,7 @@ export function crafting_speed_of(prototype: LuaEntityPrototype) {
 export function machine_craft_rate(prototype: LuaEntityPrototype, recipe: any, fuel_name: string | undefined) {
   const crafting_speed = prototype.get_crafting_speed()
   const energy = recipe.energy
-  if (!(crafting_speed > 0) || !(energy > 0)) {
+  if (crafting_speed === undefined || !(crafting_speed > 0) || !(energy > 0)) {
     return { crafting_speed, ...energy_facts(prototype, fuel_name) }
   }
   const crafts_per_second = crafting_speed / energy

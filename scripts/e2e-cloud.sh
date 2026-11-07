@@ -30,7 +30,7 @@ log() { cloud_log "$@"; }
 
 build_image() {
   cloud_docker_build "$ROOT/tests/factorio/Dockerfile" "$ROOT" "$IMAGE" \
-    --build-arg "FACTORIO_VERSION=${FACTORIO_VERSION:-2.0.77}"
+    --build-arg "FACTORIO_VERSION=${FACTORIO_VERSION:-2.1.24}"
 }
 
 run_suite() {

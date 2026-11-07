@@ -23,10 +23,10 @@ const lua = async body => JSON.parse(await rcon.command(`/silent-command local a
 const observe = async (method, args = '') => lua(`rcon.print(helpers.table_to_json(remote.call("autorio_tools","${method}"${args ? `,${args}` : ''})))`)
 const snapshot = () => lua(`local entities={}; for _,e in pairs(a.surface.find_entities_filtered{force=a.force,name={"offshore-pump","boiler","pipe","steam-engine","small-electric-pole","inserter"}}) do
  local d={name=e.name,id=e.unit_number,position=e.position,direction=e.direction,energy=e.energy,status=e.status,fluid_targets={}};
- for i=1,#e.fluidbox do for _,c in pairs(e.fluidbox.get_pipe_connections(i)) do local t=c.target and c.target.owner; if t and t.valid then d.fluid_targets[#d.fluid_targets+1]=t.unit_number end end end;
- if e.name=="steam-engine" then d.generation=e.energy_generated_last_tick; d.network=e.electric_network_id; local f=e.fluidbox[1]; d.steam=f and f.amount or 0 end;
+ for i=1,e.fluids_count do for _,c in pairs(e.get_fluid_box_pipe_connections(i)) do local t=c.target and c.target; if t and t.valid then d.fluid_targets[#d.fluid_targets+1]=t.unit_number end end end;
+ if e.name=="steam-engine" then d.generation=e.energy_generated_last_tick; d.network=e.electric_network_id; local f=e.get_fluid(1); d.steam=f and f.amount or 0 end;
  if e.name=="inserter" then d.network=e.electric_network_id end;
- if e.name=="boiler" then d.fuel=e.get_fuel_inventory().get_contents(); d.remaining_fuel=e.burner.remaining_burning_fuel; d.water=e.fluidbox[1]; d.steam=e.fluidbox[2] end;
+ if e.name=="boiler" then d.fuel=e.get_fuel_inventory().get_contents(); d.remaining_fuel=e.burner.remaining_burning_fuel; d.water=e.get_fluid(1); d.steam=e.get_fluid(2) end;
  entities[#entities+1]=d end;
  local o=remote.call("autorio_operations","status"); rcon.print(helpers.table_to_json({actor_id=a.unit_number,position=a.position,inventory=a.get_main_inventory().get_contents(),entities=entities,tick=game.tick,humans=#game.connected_players,speed=game.speed,queue_length=o.queue_length,task_state=o.task_state,last_cancelled=o.last_cancelled_batch,artificial=a.surface.count_entities_filtered{type={"electric-energy-interface","solar-panel","accumulator"}}}))`)
 async function idle() {

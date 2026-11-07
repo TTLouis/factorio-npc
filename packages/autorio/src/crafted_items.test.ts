@@ -7,7 +7,8 @@ beforeEach(() => {
     recipe: {
       'stone-furnace': { products: [{ type: 'item', name: 'stone-furnace', amount: 1 }] },
       'copper-cable': { products: [{ type: 'item', name: 'copper-cable', amount: 2 }] },
-      'gamble': { products: [{ type: 'item', name: 'iron-plate', amount: 1, probability: 0.5 }] },
+      'shared-roll': { products: [{ type: 'item', name: 'iron-plate', amount: 1, independent_probability: 1, shared_probability: { min: 0.25, max: 0.75 } }] },
+      'gamble': { products: [{ type: 'item', name: 'iron-plate', amount: 1, independent_probability: 0.5 }] },
       'oil-thing': { products: [{ type: 'fluid', name: 'petroleum-gas', amount: 10 }, { type: 'item', name: 'sulfur', amount: 2 }] },
       'ranged': { products: [{ type: 'item', name: 'iron-plate', amount_min: 1, amount_max: 3 }] },
     },
@@ -56,7 +57,7 @@ describe('crafted item counter', () => {
   })
 
   it('counts only the certain item products of a recipe', () => {
-    credit_finished_crafts(1, { 'gamble': 2, 'oil-thing': 1, 'ranged': 1, 'unknown-recipe': 4 }, {})
+    credit_finished_crafts(1, { 'gamble': 2, 'shared-roll': 2, 'oil-thing': 1, 'ranged': 1, 'unknown-recipe': 4 }, {})
     expect(crafted_item_count(1, 'iron-plate')).toBe(0)
     expect(crafted_item_count(1, 'petroleum-gas')).toBe(0)
     expect(crafted_item_count(1, 'sulfur')).toBe(2)

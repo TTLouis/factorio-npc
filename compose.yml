@@ -7,7 +7,7 @@ services:
         SGLUNA_SOURCE_REF: ${SGLUNA_SOURCE_REF:-main}
         SGLUNA_LOCAL_SOURCE: ${SGLUNA_LOCAL_SOURCE:-0}
         SGLUNA_SOURCE_NONCE: ${SGLUNA_SOURCE_NONCE:-}
-        FACTORIO_VERSION: ${FACTORIO_VERSION:-latest}
+        FACTORIO_VERSION: ${FACTORIO_VERSION:-2.1.24}
     image: factorio-npc:local
     platform: linux/amd64
     restart: unless-stopped

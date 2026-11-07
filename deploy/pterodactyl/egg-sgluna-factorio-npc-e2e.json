@@ -200,9 +200,9 @@
         },
         {
             "name": "Factorio Version",
-            "description": "Factorio 2.0 headless version: latest, experimental, or exact 2.0.x release.",
+            "description": "Supported Factorio headless version: 2.1.24. Release selectors must resolve to this exact version.",
             "env_variable": "FACTORIO_VERSION",
-            "default_value": "latest",
+            "default_value": "2.1.24",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|string|max:20",

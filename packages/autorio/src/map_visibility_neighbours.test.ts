@@ -90,8 +90,7 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
       direction: 0,
       surface,
       force,
-      fluids_count: 0,
-      fluidbox: { length: 0 },
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 0,
       bounding_box: { left_top: { x: at.x - half, y: at.y - half }, right_bottom: { x: at.x + half, y: at.y + half } },
     }
   }
@@ -187,16 +186,16 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
     function pipe_at(x: number, connection_type: 'normal' | 'underground' | 'linked', target_x: number, reach = 10) {
       const entity: any = {
         ...base('pipe', 'pipe', UNIT, { x, y: 10.5 }),
-        fluids_count: 1,
+        has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1,
         get_fluid: () => undefined,
       }
       const other: any = { ...base('pipe', 'pipe', NEIGHBOUR, { x: target_x, y: 10.5 }) }
-      other.fluidbox = { length: 1, get_pipe_connections: () => [{ target: { owner: entity }, target_fluidbox_index: 1 }] }
-      entity.fluidbox = {
-        length: 1,
-        get_capacity: () => 100,
-        get_prototype: () => ({ production_type: 'input-output', pipe_connections: [{ connection_type, max_underground_distance: reach }] }),
-        get_pipe_connections: () => {
+      Object.assign(other, { has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1, get_fluid_box_pipe_connections: () => [{ target: entity, target_fluidbox_index: 1 }] })
+      Object.assign(entity, {
+        has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1,
+        get_fluid_capacity: () => 100,
+        get_fluid_box_prototype: () => ({ get_volume: () => 100, production_type: 'input-output', pipe_connections: [{ connection_type, max_underground_distance: reach }] }),
+        get_fluid_box_pipe_connections: () => {
           const standing = neighbour.standing
           return [{
             position: { x: x + 0.5, y: 10.5 },
@@ -205,12 +204,12 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
             connection_type,
             get target() {
               neighbour.reads += 1
-              return standing ? { owner: other } : undefined
+              return standing ? other : undefined
             },
             target_fluidbox_index: standing ? 1 : undefined,
           }]
         },
-      }
+      })
       lookup[UNIT] = entity
       return entity
     }
@@ -274,9 +273,9 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
 
     it('includes all merged fluidbox definitions, including runtime-shaped connection collections', () => {
       const pipe = pipe_at(80.5, 'underground', 110.5)
-      pipe.fluidbox.get_prototype = () => [
-        { production_type: 'input-output', pipe_connections: { 1: { connection_type: 'underground', max_underground_distance: 10 } } },
-        { production_type: 'input-output', pipe_connections: { 1: { connection_type: 'underground', max_underground_distance: 30 } } },
+      pipe.get_fluid_box_prototype = () => [
+        { get_volume: () => 100, production_type: 'input-output', pipe_connections: { 1: { connection_type: 'underground', max_underground_distance: 10 } } },
+        { get_volume: () => 100, production_type: 'input-output', pipe_connections: { 1: { connection_type: 'underground', max_underground_distance: 30 } } },
       ]
       expect((entity_geometry_for_actor(actor, UNIT) as any).fluid_storages[0].pipe_connections[0].target_not_visible).toBe(true)
       expect(neighbour.reads).toBe(0)
@@ -284,7 +283,7 @@ describe('reads behind an entity the NPC sees now (M3)', () => {
 
     it.each([undefined, -1, Number.NaN, Number.POSITIVE_INFINITY, 4097])('refuses unknown or invalid native underground reach %s before a target read', reach => {
       const pipe = pipe_at(40.5, 'underground', 45.5)
-      pipe.fluidbox.get_prototype = () => ({ production_type: 'input-output', pipe_connections: [{ connection_type: 'underground', max_underground_distance: reach }] })
+      pipe.get_fluid_box_prototype = () => ({ get_volume: () => 100, production_type: 'input-output', pipe_connections: [{ connection_type: 'underground', max_underground_distance: reach }] })
       expect((compact_spatial_summary(pipe, seen()) as any).fluid.storages[0].connections[0].target_not_visible).toBe(true)
       expect(logistics_topology_for_actor(actor, UNIT)).toMatchObject({ found: false, code: 'area_not_visible' })
       expect(neighbour.reads).toBe(0)

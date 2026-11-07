@@ -169,7 +169,7 @@ async function main() {
     const before = await snapshot()
     const probe = await lua(`${furnaceNear('f', 3)} remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); `
       + 'local recipe=remote.call("autorio_preflight","operation","set_machine_recipe",{unit_number=f.unit_number,recipe_name="iron-plate"}); '
-      + 'local input=f.get_inventory(defines.inventory.furnace_source); assert(input.insert{name="iron-ore",count=12}==12); '
+      + 'local input=f.get_inventory(defines.inventory.crafter_input); assert(input.insert{name="iron-ore",count=12}==12); '
       + 'local mixed={iron=input.get_item_count("iron-ore"),copper_can_insert=input.can_insert{name="copper-ore"},copper_room=input.get_insertable_count{name="copper-ore"}}; assert(f.destroy()); '
       + 'local p2=a.surface.find_non_colliding_position("assembling-machine-1",{a.position.x+6,a.position.y},16,0.5); assert(p2); '
       + 'local m=a.surface.create_entity{name="assembling-machine-1",position=p2,force=a.force}; assert(m); remote.call("autorio_tools","get_nearby_entities",32,"assembling-machine-1","assembling-machine",16); '
@@ -217,7 +217,7 @@ async function main() {
     assert.ok(recoverable[0].request_id, 'the recoverable trace row carries request_id')
     assert.deepEqual(result.operations.map(operation => operation.name), ['wait'])
     await untilIdle('corrected recipe-guard batch')
-    const after = await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; rcon.print(helpers.table_to_json({wood=f.get_fuel_inventory().get_item_count("wood"),iron=f.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),inventory=${MAIN}.get_contents()}))`)
+    const after = await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; rcon.print(helpers.table_to_json({wood=f.get_fuel_inventory().get_item_count("wood"),iron=f.get_inventory(defines.inventory.crafter_input).get_item_count("iron-ore"),inventory=${MAIN}.get_contents()}))`)
     assert.equal(after.wood, 0, 'the refused batch never supplied the furnace')
     assert.equal(after.iron, 0)
     assert.deepEqual(after.inventory, before.inventory)
@@ -239,7 +239,7 @@ async function main() {
     noEffect(before, await snapshot(), 'supply_missing mixed')
     // Occupied iron input plus copper and usable wood: zero-transfer item refuses the whole supply.
     await insertStock({ 'copper-ore': 75, wood: 18 })
-    await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; assert(f.get_inventory(defines.inventory.furnace_source).insert{name="iron-ore",count=42}==42); rcon.print(helpers.table_to_json({ok=true}))`)
+    await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; assert(f.get_inventory(defines.inventory.crafter_input).insert{name="iron-ore",count=42}==42); rcon.print(helpers.table_to_json({ok=true}))`)
     const before2 = await snapshot()
     const full = await preflight('supply_entity', `{unit_number=${setup.unit_number},items={{item_name="copper-ore",count=75},{item_name="wood",count=18}}}`)
     assert.equal(full.ok, false)
@@ -248,7 +248,7 @@ async function main() {
     assert.equal(full.transfer.items[0].refusal_cause, 'input_slot_holds_other_item')
     assert.equal(full.transfer.items[1].expected_moved, 18)
     noEffect(before2, await snapshot(), 'destination_full mixed')
-    const furnace = await lua('local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; local r={iron=f.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),wood=f.get_fuel_inventory().get_item_count("wood"),coal=f.get_fuel_inventory().get_item_count("coal")}; assert(f.destroy()); rcon.print(helpers.table_to_json(r))')
+    const furnace = await lua('local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; local r={iron=f.get_inventory(defines.inventory.crafter_input).get_item_count("iron-ore"),wood=f.get_fuel_inventory().get_item_count("wood"),coal=f.get_fuel_inventory().get_item_count("coal")}; assert(f.destroy()); rcon.print(helpers.table_to_json(r))')
     assert.equal(furnace.iron, 42)
     assert.equal(furnace.wood, 0)
     assert.equal(furnace.coal, 0)
@@ -270,7 +270,7 @@ async function main() {
     assert.deepEqual(conflict.transfer.destination_conflict.item_names, ['copper-ore', 'iron-ore'])
     assert(conflict.transfer.items.every(item => item.expected_moved > 0))
     noEffect(before, await snapshot(), 'supply_destination_conflict')
-    const furnace = await lua('local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; local i=f.get_inventory(defines.inventory.furnace_source); local r={coal=f.get_fuel_inventory().get_item_count("coal"),iron=i.get_item_count("iron-ore"),copper=i.get_item_count("copper-ore")}; assert(f.destroy()); rcon.print(helpers.table_to_json(r))')
+    const furnace = await lua('local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; local i=f.get_inventory(defines.inventory.crafter_input); local r={coal=f.get_fuel_inventory().get_item_count("coal"),iron=i.get_item_count("iron-ore"),copper=i.get_item_count("copper-ore")}; assert(f.destroy()); rcon.print(helpers.table_to_json(r))')
     assert.deepEqual(furnace, { coal: 0, iron: 0, copper: 0 })
     evidence.supply_shared_slot = { positive, conflict }
   }

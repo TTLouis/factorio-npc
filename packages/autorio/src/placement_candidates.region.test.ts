@@ -185,9 +185,9 @@ describe('placement candidate regions', () => {
         ] } }
       const live = {
         valid: true, unit_number: 100, name: 'offshore-pump', position: { x: 0, y: 0 }, surface: { index: 1 }, force: { index: 1 },
-        fluidbox: { length: 1,
-          get_pipe_connections: () => [{ connection_type: 'normal', flow_direction: 'output', position: { x: 8.5, y: 20.5 }, target_position: { x: 9.5, y: 20.5 }, target: undefined }],
-          get_prototype: (index: number) => ({ index, production_type: 'input-output', filter: { name: 'water' } }) },
+        has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1,
+          get_fluid_box_pipe_connections: () => [{ connection_type: 'normal', flow_direction: 'output', position: { x: 8.5, y: 20.5 }, target_position: { x: 9.5, y: 20.5 }, target: undefined }],
+          get_fluid_box_prototype: (index: number) => ({ index, production_type: 'input-output', filter: { name: 'water' } }),
       }
       const previous = G.game.get_entity_by_unit_number
       G.game.get_entity_by_unit_number = (unit: number) => unit === 100 ? live : undefined

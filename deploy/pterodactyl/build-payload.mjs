@@ -16,7 +16,7 @@ const LEGACY_SOURCE_PIN = '78ef2acf788189981d82aa9e15e9c33b3dedb29c'
 // payload bytes; otherwise the bootstrap checksum and immutable source can diverge.
 // Channel eggs keep this bootstrap immutable, then resolve SGLUNA_SOURCE_REF to an exact
 // commit at reinstall time and patch only the payload's SGLUNA_REF/revision assignments.
-const PAYLOAD_REF = '12c828d6d425e3334719b0b648a4bab9d48eb687'
+const PAYLOAD_REF = '152eb64e561fa99dd4e5b71e23ce70f62fecb200'
 const CHANNELS = Object.freeze({
   main: {
     name: 'SGLuna Factorio Server (Main)',
@@ -209,7 +209,7 @@ function egg(installScript, channel) {
       variable('Max AI Requests Per Hour', 'Persisted hourly provider request cap. Ordinary requests preserve one slot inside this same cap for exactly-once output-budget recovery.', 'MAX_PROVIDER_REQUESTS_PER_HOUR', '300', 'required|numeric|between:1,1200'),
       variable('Max AI Output Tokens Per Turn', 'Aggregate provider-reported completion-token safety cap across one logical planner turn, including bounded recovery. Missing/incomplete usage remains diagnostic rather than being treated as zero.', 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN', '100000', 'required|numeric|between:1000,200000'),
       variable('Shutdown Timeout (ms)', 'Graceful Factorio save/stop timeout before forced termination.', 'SHUTDOWN_TIMEOUT_MS', '60000', 'required|numeric|between:1000,300000'),
-      variable('Factorio Version', 'Factorio 2.0 headless version: latest, experimental, or exact 2.0.x release.', 'FACTORIO_VERSION', 'latest', 'required|string|max:20'),
+      variable('Factorio Version', 'Supported Factorio headless version: 2.1.24. Release selectors must resolve to this exact version.', 'FACTORIO_VERSION', '2.1.24', 'required|string|max:20'),
     ],
   }
 }

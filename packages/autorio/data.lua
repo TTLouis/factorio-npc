@@ -157,10 +157,10 @@ data:extend({
     energy_source = { type = "void" },
     -- Nothing here can move it: no driver, no fuel, no engine output.
     weight = 1,
-    braking_power = "1W",
+    braking_force = 1,
     consumption = "1W",
     effectivity = 0.01,
-    friction = 1,
+    friction_force = 1,
     rotation_speed = 0.0001,
     rotation_snap_angle = 0,
     energy_per_hit_point = 1,

@@ -2,7 +2,7 @@ param(
     [ValidateSet('Start', 'Status')]
     [string]$Action = 'Start',
     [string]$Image = 'ghcr.io/ptero-eggs/yolks:debian_bookworm',
-    [string]$FactorioSmokeVersion = '2.0.77'
+    [string]$FactorioSmokeVersion = '2.1.24'
 )
 
 $ErrorActionPreference = 'Stop'

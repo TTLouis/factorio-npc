@@ -104,7 +104,7 @@ Leave both Factorio account fields blank for a private/unlisted server. Set both
 
 ## Factorio version
 
-`FACTORIO_VERSION` is a build-time setting because the image includes the selected official Factorio headless build. Supported values follow the deployment installer: `latest`, `experimental`, or an exact `2.0.x` release.
+`FACTORIO_VERSION` is a build-time setting because the image includes the selected official Factorio headless build. The default and supported exact version is `2.1.24`. The `latest` and `experimental` selectors are accepted only when they resolve to that version; a later engine release requires another compatibility review.
 
 Changing `FACTORIO_VERSION` requires rebuilding the image. A published release image retains the Factorio build selected when that release image was created.
 

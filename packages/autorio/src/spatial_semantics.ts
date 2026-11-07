@@ -1,3 +1,4 @@
+import { fluid_connection_state } from './fluid_connections'
 import type { LuaEntity } from 'factorio:runtime'
 import { find_world_entities } from './npc_vision'
 import { electric_prototype_facts, protected_read } from './electric_facts'
@@ -41,21 +42,19 @@ function compact_fluidbox_prototype(value: any) {
       production_type: prototype.production_type,
     }
     if (prototype.filter?.name !== undefined) summary.filter = prototype.filter.name
-    if (prototype.minimum_temperature !== undefined) summary.minimum_temperature = prototype.minimum_temperature
-    if (prototype.maximum_temperature !== undefined) summary.maximum_temperature = prototype.maximum_temperature
     result.push(summary)
   }
   return result
 }
 
 function compact_fluid_ports(entity: LuaEntity, seen?: SeenArea) {
-  const fluidbox = entity.fluidbox
-  const count = math.min(fluidbox.length, MAX_FLUID_STORAGES)
+  const fluidbox = entity
+  const count = math.min(fluidbox.fluids_count, MAX_FLUID_STORAGES)
   if (count <= 0) return undefined
 
   const storages: Array<Record<string, unknown>> = []
   for (let index = 1; index <= count; index++) {
-    const raw_connections = fluidbox.get_pipe_connections(index) ?? []
+    const raw_connections = fluidbox.get_fluid_box_pipe_connections(index) ?? []
     const connection_count = math.min(raw_connections.length, MAX_PIPE_CONNECTIONS_PER_STORAGE)
     const connections: Array<Record<string, unknown>> = []
 
@@ -69,17 +68,19 @@ function compact_fluid_ports(entity: LuaEntity, seen?: SeenArea) {
       if (connection.flow_direction !== undefined) summary.flow_direction = connection.flow_direction
       if (connection.connection_type !== undefined) summary.connection_type = connection.connection_type
       if (connection.target_position !== undefined) summary.target_position = connection.target_position
-      const link = seen_link(seen, seen ? pipe_link_area(entity, connection, index) : undefined, () => connection.target?.owner)
+      const link = seen_link(seen, seen ? pipe_link_area(entity, connection, index) : undefined, () => connection.target)
       if (!link.seen) {
         summary.target_not_visible = true
         connections.push(summary)
         continue
       }
+      summary.connected = connection.target !== undefined
+      summary.hydraulic_state = fluid_connection_state(entity, index, connection)
       const target = entity_identity(link.entity)
       if (target !== undefined) summary.target = target
       if (target !== undefined && connection.target_fluidbox_index !== undefined) {
-        const reverse = protected_read(() => connection.target!.owner.fluidbox.get_pipe_connections(connection.target_fluidbox_index!))
-        if (reverse !== undefined) summary.reciprocal = reverse.some(other => other.target?.owner === entity && other.target_fluidbox_index === index)
+        const reverse = protected_read(() => connection.target!.get_fluid_box_pipe_connections(connection.target_fluidbox_index!))
+        if (reverse !== undefined) summary.reciprocal = reverse.some(other => other.target === entity && other.target_fluidbox_index === index)
       }
       if (connection.target_fluidbox_index !== undefined) summary.target_fluidbox_index = connection.target_fluidbox_index
       connections.push(summary)
@@ -88,9 +89,9 @@ function compact_fluid_ports(entity: LuaEntity, seen?: SeenArea) {
     const current = protected_read(() => entity.get_fluid(index))
     storages.push({
       index,
-      capacity: protected_read(() => fluidbox.get_capacity(index)),
+      capacity: protected_read(() => fluidbox.get_fluid_capacity(index)),
       contents: current ? { name: current.name, amount: current.amount, temperature: current.temperature } : undefined,
-      prototypes: compact_fluidbox_prototype(fluidbox.get_prototype(index)),
+      prototypes: compact_fluidbox_prototype(fluidbox.get_fluid_box_prototype(index)),
       connections,
       connections_truncated: raw_connections.length > connection_count,
     })
@@ -98,8 +99,8 @@ function compact_fluid_ports(entity: LuaEntity, seen?: SeenArea) {
 
   return {
     storage_count: entity.fluids_count,
-    fluidbox_count: fluidbox.length,
-    storages_truncated: fluidbox.length > count,
+    fluidbox_count: fluidbox.fluids_count,
+    storages_truncated: fluidbox.fluids_count > count,
     storages,
   }
 }
@@ -107,6 +108,7 @@ function compact_fluid_ports(entity: LuaEntity, seen?: SeenArea) {
 function compact_item_io(entity: LuaEntity, seen?: SeenArea) {
   if (entity.type === 'inserter') {
     return {
+      mirrored: entity.mirroring,
       pickup_position: entity.pickup_position,
       drop_position: entity.drop_position,
       pickup_target: linked_identity(seen, entity.pickup_position, () => entity.pickup_target),
@@ -132,12 +134,6 @@ function mining_radius(prototype: any) {
   return typeof radius === 'number' && radius > 0 && finite(radius) ? radius : undefined
 }
 
-function mining_offset(prototype: any, direction: number) {
-  const offset = vector_xy(prototype?.radius_visualisation_specification?.offset)
-  if (!offset) return { x: 0, y: 0 }
-  return rotate_cardinal(offset, direction)
-}
-
 function mining_categories(prototype: any) {
   const result: Record<string, boolean> = {}
   const categories: Record<string, boolean> = prototype?.resource_categories ?? {}
@@ -150,7 +146,8 @@ function compact_mining_coverage(entity: LuaEntity, seen?: SeenArea) {
   const prototype: any = entity.prototype
   const radius = mining_radius(prototype)
   if (radius === undefined) return undefined
-  const offset = mining_offset(prototype, entity.direction)
+  const local_offset = vector_xy(prototype?.radius_visualisation_specification?.offset) ?? { x: 0, y: 0 }
+  const offset = rotate_cardinal({ x: entity.mirroring ? -local_offset.x : local_offset.x, y: local_offset.y }, entity.direction)
   const center = { x: entity.position.x + offset.x, y: entity.position.y + offset.y }
   const area = area_around(center, radius)
   // The mining area must be seen now before it is scanned; otherwise its resources are unknown.
@@ -196,7 +193,7 @@ function compact_mining_coverage(entity: LuaEntity, seen?: SeenArea) {
  * include useful geometry without forcing a second LLM observation round.
  *
  * This intentionally does not encode vanilla prototype names or remembered
- * orientation rules. Geometry is read from the current LuaEntity/LuaFluidBox
+ * orientation rules. Geometry is read from the current LuaEntity
  * and mining coverage is calculated from the live surface/prototype.
  *
  * With `seen` (a model-facing read, M3), linked neighbours and the mining area are read only where the NPC sees now;

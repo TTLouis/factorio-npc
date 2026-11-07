@@ -48,7 +48,7 @@ const snapshot = () => lua(`local f=a.surface.find_entity("stone-furnace",{6,4})
   local function counts(i) local t={} for _,v in pairs(i.get_contents()) do t[v.name]=v.count end return t end;
   local o=remote.call("autorio_operations","status");
   rcon.print(helpers.table_to_json({actor_id=a.unit_number,humans=#game.connected_players,speed=game.speed,tick=game.tick,
-    held=counts(a.get_main_inventory()),source=counts(f.get_inventory(defines.inventory.furnace_source)),output=counts(f.get_output_inventory()),fuel=counts(f.get_fuel_inventory()),
+    held=counts(a.get_main_inventory()),source=counts(f.get_inventory(defines.inventory.crafter_input)),output=counts(f.get_output_inventory()),fuel=counts(f.get_fuel_inventory()),
     remaining_fuel=f.burner.remaining_burning_fuel,energy=f.energy,crafting_progress=f.crafting_progress,recipe=f.get_recipe() and f.get_recipe().name,
     position=a.position,target={unit_number=f.unit_number,position=f.position,surface_index=f.surface.index},
     copper_produced=a.force.get_item_production_statistics(a.surface).get_input_count("copper-plate"),
@@ -159,7 +159,7 @@ try {
     + 'local s=game.create_surface("partial-transfer",{seed=424242,width=0,height=0,water=0,cliff_settings={cliff_elevation_interval=0},autoplace_settings={entity={treat_missing_as_default=false,settings={}}}}); s.request_to_generate_chunks({4,4},1); s.force_generate_chunk_requests(); for _,e in pairs(s.find_entities()) do e.destroy() end; '
     + 'local tiles={}; for x=-16,31 do for y=-16,31 do tiles[#tiles+1]={name="landfill",position={x,y}} end end; s.set_tiles(tiles,true,false,true); assert(a.teleport({3,4},s)); s.always_day=true; '
     + 'a.get_main_inventory().clear(); for _,v in pairs({{"copper-plate",10},{"copper-ore",10},{"coal",5}}) do assert(a.insert{name=v[1],count=v[2]}==v[2]) end; '
-    + 'local f=s.create_entity{name="stone-furnace",position={6,4},force=a.force}; assert(f); assert(f.get_inventory(defines.inventory.furnace_source).insert{name="iron-ore",count=21}==21); assert(f.get_output_inventory().insert{name="iron-plate",count=4}==4); assert(f.get_fuel_inventory().insert{name="coal",count=1}==1); '
+    + 'local f=s.create_entity{name="stone-furnace",position={6,4},force=a.force}; assert(f); assert(f.get_inventory(defines.inventory.crafter_input).insert{name="iron-ore",count=21}==21); assert(f.get_output_inventory().insert{name="iron-plate",count=4}==4); assert(f.get_fuel_inventory().insert{name="coal",count=1}==1); '
     + 'game.speed=16; rcon.print(helpers.table_to_json({actor_id=a.unit_number,unit=f.unit_number,surface_index=s.index}))'))
   unit = setup.unit
   seen.nativeSetup = await until('real coal exhaustion with a reserved unfinished iron craft', async () => {

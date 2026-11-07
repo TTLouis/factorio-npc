@@ -191,8 +191,6 @@ function fluidbox_details(prototype: any) {
       index: fluidbox.index,
       production_type: fluidbox.production_type,
       filter: fluidbox.filter?.name,
-      minimum_temperature: fluidbox.minimum_temperature,
-      maximum_temperature: fluidbox.maximum_temperature,
       pipe_connection_count: runtime_connections.count,
       pipe_connections_truncated: runtime_connections.truncated,
       pipe_connections,
@@ -232,7 +230,8 @@ function mineable_product_summaries(prototype: any, limit: number = MAX_MINEABLE
       amount: product.amount,
       amount_min: product.amount_min,
       amount_max: product.amount_max,
-      probability: product.probability,
+      independent_probability: product.independent_probability,
+      shared_probability: product.shared_probability,
     })
   }
 
@@ -346,7 +345,7 @@ function item_details(prototype: any) {
     name: prototype.name,
     stack_size: prototype.stack_size,
     place_result: prototype.place_result?.name,
-    fuel_category: prototype.fuel_category,
+    fuel_categories: prototype.fuel_categories,
     fuel_value: prototype.fuel_value,
     burnt_result: prototype.burnt_result?.name,
   }

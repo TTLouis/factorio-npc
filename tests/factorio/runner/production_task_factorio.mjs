@@ -111,7 +111,7 @@ try {
     for name in pairs(required) do assert(a.force.recipes[name].enabled,"fixture recipe must be unlocked: "..name) end;
     local f=s.create_entity{name="stone-furnace",position={0,0},force=a.force};assert(f);
     rcon.print(helpers.table_to_json({furnace=f.unit_number,base=script.active_mods.base,seed=s.map_gen_settings.seed,declared_recipe_unlocks=unlocks}))`)
-  assert.equal(fixture.base, process.env.FACTORIO_VERSION ?? '2.0.77')
+  assert.equal(fixture.base, process.env.FACTORIO_VERSION ?? '2.1.24')
   // Declared fixture ends. No stock insertion, terrain/entity edits, teleport,
   // research manipulation, human connection or clock acceleration follows.
   const before = await idle()

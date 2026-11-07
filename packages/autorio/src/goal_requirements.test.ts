@@ -21,8 +21,7 @@ function recipe(name: string, options: RecipeOptions = {}, product = name) {
     enabled: options.enabled ?? true,
     hidden: options.hidden ?? false,
     prototype: { hidden_from_player_crafting: false },
-    category: options.category ?? 'crafting',
-    additional_categories: [] as string[],
+    categories: [options.category ?? 'crafting'],
     ingredients: (options.ingredients ?? []).map(ingredient => ({ type: 'item', name: ingredient, amount: 1 })),
     products: [{ type: 'item', name: product, amount: 1 }],
   }
@@ -148,7 +147,7 @@ describe('goal requirements query', () => {
   it('reports alternate producer names, additional categories and native current craftable counts without guessing inventory', () => {
     installPrototypes({ triggers: { 'trigger-tech': { type: 'craft-item', item: { name: 'widget' }, count: 3 } }, items: ['widget'] })
     const alternate = recipe('widget-alternate', { category: 'custom' }, 'widget')
-    alternate.additional_categories = ['crafting']
+    alternate.categories.push('crafting')
     const actor = actorWith([alternate], [technology('trigger-tech')])
     ;(actor as any).character = { prototype: { crafting_categories: { crafting: true } } }
     const queried: string[] = []

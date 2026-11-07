@@ -11,8 +11,7 @@ function recipe(name: string, product: string, {
     name,
     enabled: true,
     hidden: false,
-    category,
-    additional_categories: [],
+    categories: [category],
     ingredients: [{ type: 'item', name: ingredient, amount: ingredientAmount }],
     products: [{ type: 'item', name: product, amount: 1 }],
   }

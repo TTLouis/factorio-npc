@@ -29,7 +29,7 @@ describe('autorio_planning remote contract', () => {
       hidden: false,
       energy: 0.5,
       ingredients: [{ type: 'item', name: 'iron-plate', amount: 2 }],
-      products: [{ type: 'item', name: 'iron-gear-wheel', amount: 1, probability: 1 }],
+      products: [{ type: 'item', name: 'iron-gear-wheel', amount: 1, independent_probability: 1 }],
     }
     const actor = {
       is_valid: true,
@@ -121,7 +121,7 @@ describe('autorio_planning remote contract', () => {
       is_valid: true,
       force: {
         valid: true,
-        recipes: { 'plain-recipe': { name: 'plain-recipe', enabled: true, hidden: false, category: 'crafting', additional_categories: [], ingredients: [], products: [{ type: 'item', name: 'plain-recipe', amount: 1 }] } },
+        recipes: { 'plain-recipe': { name: 'plain-recipe', enabled: true, hidden: false, categories: ['crafting'], ingredients: [], products: [{ type: 'item', name: 'plain-recipe', amount: 1 }] } },
         technologies: {},
       },
     } as unknown as ControlledActor

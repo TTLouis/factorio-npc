@@ -133,6 +133,10 @@ export function electric_prototype_facts(prototype: any): Record<string, unknown
   }
   const maximum_temperature = prototype_number(prototype, ['maximum_temperature'], [])
   if (maximum_temperature !== undefined && maximum_temperature > 0) power.maximum_temperature = maximum_temperature
+  const minimum_input_temperature = prototype_number(prototype, ['minimum_input_temperature'], [])
+  const maximum_input_temperature = prototype_number(prototype, ['maximum_input_temperature'], [])
+  if (minimum_input_temperature !== undefined) power.minimum_input_temperature = minimum_input_temperature
+  if (maximum_input_temperature !== undefined) power.maximum_input_temperature = maximum_input_temperature
   if (has_power) {
     power.prototype_quality = 'normal'
     facts.power = power

@@ -15,6 +15,7 @@ import type { LuaForce, LuaSurface } from 'factorio:runtime'
 // the queue because the engine finished them, never from the order. Work the
 // harness cancels is not credited.
 
+import { product_probability } from './production_rates'
 import { record_hand_crafted_tick } from './hand_work'
 
 export interface CraftedItemsStorage {
@@ -36,7 +37,9 @@ interface RecipeProduct {
   type: string
   name: string
   amount?: number
-  probability?: number
+  independent_probability?: number
+  shared_probability?: { min: number, max: number }
+  extra_count_fraction?: number
 }
 
 export function crafted_item_count(force_index: number, item_name: string): number {
@@ -101,7 +104,7 @@ function certain_item_products(recipe_name: string): Array<{ name: string, amoun
   const found: Array<{ name: string, amount: number }> = []
   for (const product of recipe?.products ?? []) {
     if (product.type !== 'item' || typeof product.amount !== 'number' || product.amount <= 0) continue
-    if (product.probability !== undefined && product.probability < 1) continue
+    if (product_probability(product) !== 1 || (product.extra_count_fraction ?? 0) !== 0) continue
     found.push({ name: product.name, amount: product.amount })
   }
   return found

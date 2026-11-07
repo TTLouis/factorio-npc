@@ -42,7 +42,7 @@
     "lint-staged": "^16.2.7",
     "simple-git-hooks": "^2.13.1",
     "taze": "^19.9.2",
-    "typed-factorio": "^3.35.0",
+    "typed-factorio": "4.8.0",
     "typescript": "~5.9.3"
   },
   "simple-git-hooks": {

@@ -33,8 +33,8 @@ importers:
         specifier: ^19.9.2
         version: 19.9.2
       typed-factorio:
-        specifier: ^3.35.0
-        version: 3.35.0(lua-types@2.13.1)(typescript-to-lua@1.32.0(typescript@5.9.3))
+        specifier: 4.8.0
+        version: 4.8.0(lua-types@2.13.1)(typescript-to-lua@1.32.0(typescript@5.9.3))
       typescript:
         specifier: ~5.9.3
         version: 5.9.3
@@ -109,8 +109,8 @@ importers:
         specifier: ^2.13.1
         version: 2.13.1
       typed-factorio:
-        specifier: ^3.33.0
-        version: 3.33.0(lua-types@2.13.1)(typescript-to-lua@1.32.0(typescript@5.9.3))
+        specifier: 4.8.0
+        version: 4.8.0(lua-types@2.13.1)(typescript-to-lua@1.32.0(typescript@5.9.3))
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -207,8 +207,8 @@ importers:
         specifier: ^2.13.1
         version: 2.13.1
       typed-factorio:
-        specifier: ^3.27.0
-        version: 3.27.0(lua-types@2.13.1)(typescript-to-lua@1.31.4(typescript@5.9.2))
+        specifier: 4.8.0
+        version: 4.8.0(lua-types@2.13.1)(typescript-to-lua@1.31.4(typescript@5.9.2))
       typescript:
         specifier: ^5.9.2
         version: 5.9.2
@@ -4721,6 +4721,12 @@ packages:
 
   typed-emitter@0.1.0:
     resolution: {integrity: sha512-Tfay0l6gJMP5rkil8CzGbLthukn+9BN/VXWcABVFPjOoelJ+koW8BuPZYk+h/L+lEeIp1fSzVRiWRPIjKVjPdg==}
+
+  typed-factorio@4.8.0:
+    resolution: {integrity: sha512-pCS0vJPHQGfiotRuma42GJgk6wLt5QeFsTYmBN1gTlfHT3FQXv7+n4pt85oKnUVipzaeQesS3GdP6Me7BUTtzA==}
+    peerDependencies:
+      lua-types: ^2.13.1
+      typescript-to-lua: ^1.10.0
 
   typed-factorio@3.27.0:
     resolution: {integrity: sha512-kNLbghjA6y1a9j0Z27jtvNZFO4W4ZvuvuEMAKhemNniDSGVYqIVlrEGdOqJNlyDf9MaQS959sxdwPKeihbCwRA==}
@@ -10671,6 +10677,16 @@ snapshots:
   type-fest@4.41.0: {}
 
   typed-emitter@0.1.0: {}
+
+  typed-factorio@4.8.0(lua-types@2.13.1)(typescript-to-lua@1.31.4(typescript@5.9.2)):
+    dependencies:
+      lua-types: 2.13.1
+      typescript-to-lua: 1.31.4(typescript@5.9.2)
+
+  typed-factorio@4.8.0(lua-types@2.13.1)(typescript-to-lua@1.32.0(typescript@5.9.3)):
+    dependencies:
+      lua-types: 2.13.1
+      typescript-to-lua: 1.32.0(typescript@5.9.3)
 
   typed-factorio@3.27.0(lua-types@2.13.1)(typescript-to-lua@1.31.4(typescript@5.9.2)):
     dependencies:

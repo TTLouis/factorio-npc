@@ -23,7 +23,7 @@
     "@proj-airi/tstl-plugin-reload-factorio-mod": "workspace:*",
     "eslint": "^9.38.0",
     "lua-types": "^2.13.1",
-    "typed-factorio": "^3.33.0",
+    "typed-factorio": "4.8.0",
     "typescript": "^5.9.3",
     "typescript-to-lua": "^1.32.0",
     "vitest": "^4.0.4"

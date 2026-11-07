@@ -12,7 +12,7 @@ type Mode = 'auto' | 'review'
 type State = 'validated' | 'awaiting_review' | 'backing_up' | 'reserved' | 'restoring' | 'restored' | 'rejected' | 'conflict'
 export interface AreaProposal { goal_id: string, plan_id: string, x: number, y: number, width: number, height: number }
 interface TileSnapshot { name: string, position: Point, hidden?: string, double_hidden?: string }
-interface HeldEntity { source: LuaEntity, snapshot: string, active: boolean, backup?: LuaEntity, restored?: LuaEntity, original_id?: number }
+interface HeldEntity { source: LuaEntity, snapshot: string, disabled_by_script: boolean, backup?: LuaEntity, restored?: LuaEntity, original_id?: number }
 interface Reservation {
   id: number, revision: number, mode: Mode, state: State, proposal: AreaProposal, box: Box,
   actor_id: number, force_index: number, force: LuaForce, surface: LuaSurface, tick: number,
@@ -48,8 +48,8 @@ function supported(entity: LuaEntity) {
   const wires = entity.get_wire_connectors(false)
   if (wires !== undefined) for (const [, connector] of pairs(wires)) if (connector.connection_count > 0) return false
   if (machine(entity) && entity.is_connected_to_electric_network()) return false
-  if (entity.fluidbox !== undefined) for (let i = 1; i <= entity.fluidbox.length; i++) {
-    if (entity.fluidbox[i - 1] !== undefined || entity.fluidbox.get_pipe_connections(i).some(connection => connection.target !== undefined)) return false
+  for (let i = 1; i <= entity.fluids_count; i++) {
+    if (entity.get_fluid(i) !== undefined || (entity.get_fluid_box_pipe_connections(i) ?? []).some(connection => connection.target !== undefined)) return false
   }
   return true
 }
@@ -68,7 +68,7 @@ function stack_snapshot(stack: LuaItemStack) {
     allow_manual_label_change: protected_read(() => stack.allow_manual_label_change) })
 }
 
-function entity_snapshot(entity: LuaEntity, active = entity.active) {
+function entity_snapshot(entity: LuaEntity, disabled_by_script = entity.disabled_by_script) {
   const inventories: string[][] = []
   let slots = 0
   for (let index = 1; index <= entity.get_max_inventory_index(); index++) {
@@ -86,14 +86,14 @@ function entity_snapshot(entity: LuaEntity, active = entity.active) {
     inventories.push(contents)
   }
   const fluids: unknown[] = []
-  if (entity.fluidbox !== undefined) for (let i = 0; i < entity.fluidbox.length; i++) fluids.push(entity.fluidbox[i] ?? false)
+  for (let i = 1; i <= entity.fluids_count; i++) fluids.push(entity.get_fluid(i) ?? false)
   let recipe_name: string | undefined
   let recipe_quality: string | undefined
   if (machine(entity)) { const [recipe, quality] = entity.get_recipe(); recipe_name = recipe?.name; recipe_quality = quality?.name }
-  return helpers.table_to_json({ name: entity.name, position: entity.position, direction: entity.direction,
-    force: entity.force.index, quality: entity.quality.name, health: entity.health, active, inventories, fluids,
+  return helpers.table_to_json({ name: entity.name, position: entity.position, direction: entity.direction, mirrored: entity.mirroring,
+    force: entity.force.index, quality: entity.quality.name, health: entity.health, disabled_by_script, inventories, fluids,
     energy: protected_read(() => entity.energy), temperature: protected_read(() => entity.temperature),
-    flags: { minable: entity.minable, destructible: entity.destructible, operable: entity.operable, rotatable: entity.rotatable },
+    flags: { minable: entity.minable, minable_flag: entity.minable_flag, destructible: entity.destructible, operable: entity.operable, rotatable: entity.rotatable },
     last_user: entity.last_user?.index, orientation: protected_read(() => entity.orientation),
     graphics_variation: protected_read(() => entity.graphics_variation), color: protected_read(() => entity.color),
     amount: entity.type === 'resource' ? entity.amount : undefined,
@@ -120,7 +120,7 @@ function capture(surface: LuaSurface, box: Box) {
       if (!supported(entity)) return { ...fail('entity_not_roundtrippable'), tiles, entities }
       const snapshot = entity_snapshot(entity)
       if (helpers.table_to_json({ kind: 'entity', original_unit_number: entity.unit_number, native_snapshot: snapshot }).length > 8000) return { ...fail('entity_snapshot_too_large'), tiles, entities }
-      entities.push({ source: entity, snapshot, active: entity.active, original_id: entity.unit_number })
+      entities.push({ source: entity, snapshot, disabled_by_script: entity.disabled_by_script, original_id: entity.unit_number })
     }
     catch { return { ...fail('entity_state_not_roundtrippable'), tiles, entities } }
   }
@@ -221,11 +221,11 @@ function cut(row: Reservation) {
       log(`[AUTORIO] reservation_clone_mismatch ${helpers.table_to_json({ reservation_id: row.id, name: entity.source.name, before: entity.snapshot.slice(0, 12000), after: copied?.slice(0, 12000) })}`)
       row.state = 'conflict'; row.reason = 'backup_verification_failed'; trace(row, row.reason); return fail(row.reason)
     }
-    if (machine(entity.backup)) entity.backup.active = false
+    if (machine(entity.backup)) entity.backup.disabled_by_script = true
   }
   // A native clone hook must not silently change the world being cut.
-  if (row.entities.some(entity => !entity.backup?.valid || entity_snapshot(entity.backup, entity.active) !== entity.snapshot
-    || (machine(entity.backup) && entity.backup.active))) {
+  if (row.entities.some(entity => !entity.backup?.valid || entity_snapshot(entity.backup, entity.disabled_by_script) !== entity.snapshot
+    || (machine(entity.backup) && !entity.backup.disabled_by_script))) {
     row.state = 'conflict'; row.reason = 'backup_changed_during_copy'; return fail(row.reason)
   }
   if (!same_source(row)) { row.state = 'conflict'; row.reason = 'source_changed_during_backup'; return fail(row.reason) }
@@ -289,6 +289,12 @@ export function restore_area(id: number, revision: number, reason: string) {
   if (find_world_entities(row.surface, { area: row.box }).some(entity => !owned.includes(entity))) {
     row.state = 'conflict'; row.reason = 'restore_area_occupied_backup_retained'; trace(row, row.reason); return fail(row.reason)
   }
+  // A pre-2.1 journal stored aggregate active, which cannot recover script ownership.
+  // Keep its native backup intact rather than guessing a script-disable flag.
+  if (row.entities.some(entity => typeof entity.disabled_by_script !== 'boolean')) {
+    row.state = 'conflict'; row.reason = 'legacy_reservation_script_state_unknown_backup_retained'
+    trace(row, row.reason); return fail(row.reason)
+  }
   row.state = 'restoring'
   row.surface.set_tiles(row.tiles.map(tile => ({ name: tile.name, position: tile.position })), false, false, false)
   for (const tile of row.tiles) { row.surface.set_hidden_tile(tile.position, tile.hidden); row.surface.set_double_hidden_tile(tile.position, tile.double_hidden) }
@@ -299,7 +305,7 @@ export function restore_area(id: number, revision: number, reason: string) {
       if (!entity.backup?.valid) { row.state = 'conflict'; row.reason = 'backup_missing'; return fail(row.reason) }
       entity.restored = entity.backup.clone({ position: entity.backup.position, surface: row.surface, create_build_effect_smoke: false })
     }
-    if (entity.restored && machine(entity.restored)) entity.restored.active = entity.active
+    if (entity.restored && machine(entity.restored)) entity.restored.disabled_by_script = entity.disabled_by_script
     if (!entity.restored || entity_snapshot(entity.restored) !== entity.snapshot) {
       row.state = 'conflict'; row.reason = 'restore_verification_failed_backup_retained'; trace(row, row.reason); return fail(row.reason)
     }

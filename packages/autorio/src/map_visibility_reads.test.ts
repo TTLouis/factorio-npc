@@ -105,7 +105,6 @@ function make_entity(world: { surface: any, force: any }, kind: Kind, unit_numbe
     type: 'furnace',
     status: 1,
     fluids_count: 0,
-    fluidbox: { length: 0 },
     get_max_inventory_index: () => 1,
     get_inventory: () => ({ get_contents: () => [{ name: 'iron-plate', count: 5, quality: 'normal' }] }),
     get_recipe: () => [{ name: 'iron-plate' }, undefined],

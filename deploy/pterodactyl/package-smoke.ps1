@@ -1,6 +1,6 @@
 param(
     [string]$Image = 'ghcr.io/ptero-eggs/yolks:debian_bookworm',
-    [string]$FactorioSmokeVersion = '2.0.77',
+    [string]$FactorioSmokeVersion = '2.1.24',
     # Exact 40-character commit SHA to install, matching package-smoke.sh's
     # SGLUNA_SMOKE_SOURCE_REF/AIRI_SMOKE_SOURCE_REF. Defaults to either env
     # var, then to the egg's own default channel (normally main) when unset.

@@ -1,4 +1,5 @@
-import type { LuaEntity, LuaFluidBox } from 'factorio:runtime'
+import { fluid_storage_constraint } from './fluid_connections'
+import type { LuaEntity } from 'factorio:runtime'
 
 const MAX_CANDIDATE_FLUID_PORTS = 16
 const MAX_LIVE_FLUID_STORAGES = 8
@@ -99,6 +100,7 @@ export interface LiveFluidPort {
   flow_direction?: string
   connection_type?: string
   connected: boolean
+  fluid_constraint_known: boolean
 }
 
 function position_xy(raw: any): { x: number, y: number } | undefined {
@@ -106,8 +108,8 @@ function position_xy(raw: any): { x: number, y: number } | undefined {
   return { x: raw.x, y: raw.y }
 }
 
-function storage_filter_name(fluidbox: LuaFluidBox, index: number): string | undefined {
-  const value: any = fluidbox.get_prototype(index)
+function storage_filter_name(fluidbox: LuaEntity, index: number): string | undefined {
+  const value: any = fluidbox.get_fluid_box_prototype(index)
   if (!value) return undefined
   const values: any[] = value.production_type ? [value] : value
   for (const prototype of values) {
@@ -123,11 +125,12 @@ function storage_filter_name(fluidbox: LuaFluidBox, index: number): string | und
  * tile and are left out.
  */
 export function live_fluid_ports(entity: LuaEntity): LiveFluidPort[] {
-  const fluidbox = entity.fluidbox
-  const storages = math.min(fluidbox.length, MAX_LIVE_FLUID_STORAGES)
+  const fluidbox = entity
+  const storages = math.min(fluidbox.fluids_count, MAX_LIVE_FLUID_STORAGES)
   const ports: LiveFluidPort[] = []
   for (let index = 1; index <= storages; index++) {
-    const connections: any[] = fluidbox.get_pipe_connections(index) ?? []
+    const constraint = fluid_storage_constraint(entity, index)
+    const connections: any[] = fluidbox.get_fluid_box_pipe_connections(index) ?? []
     const count = math.min(connections.length, MAX_LIVE_PIPE_CONNECTIONS)
     for (let connection_index = 0; connection_index < count; connection_index++) {
       const connection = connections[connection_index]
@@ -140,7 +143,8 @@ export function live_fluid_ports(entity: LuaEntity): LiveFluidPort[] {
         connection_index: connection_index + 1,
         position,
         target_position,
-        filter: storage_filter_name(fluidbox, index),
+        filter: constraint?.fluid ?? storage_filter_name(fluidbox, index),
+        fluid_constraint_known: constraint !== undefined,
         flow_direction: connection.flow_direction,
         connection_type: connection.connection_type,
         connected: connection.target !== undefined,
@@ -154,10 +158,10 @@ export function live_fluid_ports(entity: LuaEntity): LiveFluidPort[] {
 // proof that a port is absent. Keep the existing placement helper permissive;
 // expose completeness separately for the strict pre-admission certificate.
 export function complete_live_fluid_ports(entity: LuaEntity) {
-  if (entity.fluidbox.length > MAX_LIVE_FLUID_STORAGES) return { complete: false, ports: [] as LiveFluidPort[] }
+  if (entity.fluids_count > MAX_LIVE_FLUID_STORAGES) return { complete: false, ports: [] as LiveFluidPort[] }
   let expected = 0
-  for (let index = 1; index <= entity.fluidbox.length; index++) {
-    const connections: any[] = entity.fluidbox.get_pipe_connections(index) ?? []
+  for (let index = 1; index <= entity.fluids_count; index++) {
+    const connections: any[] = entity.get_fluid_box_pipe_connections(index) ?? []
     if (connections.length > MAX_LIVE_PIPE_CONNECTIONS) return { complete: false, ports: [] as LiveFluidPort[] }
     for (const connection of connections) {
       if (connection.connection_type !== 'normal' || !finite_position(connection.position) || !finite_position(connection.target_position)) {
@@ -167,7 +171,7 @@ export function complete_live_fluid_ports(entity: LuaEntity) {
     }
   }
   const ports = live_fluid_ports(entity)
-  return { complete: ports.length === expected, ports }
+  return { complete: ports.length === expected && ports.every(port => port.fluid_constraint_known), ports }
 }
 
 const PORT_TILE_TOLERANCE = 0.001
@@ -191,11 +195,16 @@ function direction_vector(direction: number | undefined): { x: number, y: number
  * are both input or both output, never connect). Derived only from the live
  * fluidbox and the prototype fluidbox connections.
  */
-export function fluid_ports_join(live: LiveFluidPort, candidate: CandidateFluidPort): boolean {
+export function fluid_ports_align(live: LiveFluidPort, candidate: CandidateFluidPort): boolean {
   const facing = direction_vector(candidate.direction)
   if (facing === undefined) return false
   if (!same_tile(candidate.position, live.target_position)) return false
   if (!same_tile({ x: candidate.position.x + facing.x, y: candidate.position.y + facing.y }, live.position)) return false
+  return true
+}
+
+export function fluid_ports_join(live: LiveFluidPort, candidate: CandidateFluidPort): boolean {
+  if (!live.fluid_constraint_known || !fluid_ports_align(live, candidate)) return false
   if (live.filter !== undefined && candidate.filter !== undefined && live.filter !== candidate.filter) return false
   if (live.flow_direction === 'input' && candidate.flow_direction === 'input') return false
   if (live.flow_direction === 'output' && candidate.flow_direction === 'output') return false

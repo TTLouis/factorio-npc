@@ -11,8 +11,7 @@ function recipe(name: string, product: string, category = 'crafting') {
     ingredients: [{ type: 'item', name: 'iron-plate', amount: 1 }],
     products: [{ type: 'item', name: product, amount: 1 }],
     prototype: { hidden_from_player_crafting: false },
-    category,
-    additional_categories: [],
+    categories: [category],
   }
 }
 
@@ -42,7 +41,7 @@ beforeEach(() => {
   ;(globalThis as any).prototypes.get_entity_filtered = () => ({})
 })
 
-describe('recipe details use Factorio 2.0 recipe category fields', () => {
+describe('recipe details use Factorio 2.1 recipe categories', () => {
   it('reports native intermediate permissions without treating missing flags as permission', () => {
     const item = recipe('item', 'item') as any
     const actor = actorWithRecipes({ item })
@@ -89,7 +88,7 @@ describe('recipe details use Factorio 2.0 recipe category fields', () => {
     expect(recipe_details_for_actor(actor, 'shared-product').recipes[0].name).toBe('z-local')
   })
 
-  it('returns burner-mining-drill details from the Factorio 2.0 category field', () => {
+  it('returns burner-mining-drill details from the Factorio 2.1 categories field', () => {
     const actor = actorWithRecipes({
       'burner-mining-drill': recipe('burner-mining-drill', 'burner-mining-drill'),
     })
@@ -106,7 +105,7 @@ describe('recipe details use Factorio 2.0 recipe category fields', () => {
 
   it('includes deterministic additional categories without duplicates', () => {
     const multi = recipe('multi', 'multi') as any
-    multi.additional_categories = ['smelting', 'crafting']
+    multi.categories.push('smelting', 'crafting')
     const actor = actorWithRecipes({ multi })
 
     const result = recipe_details_for_actor(actor, 'multi')
@@ -158,7 +157,7 @@ describe('recipe details use Factorio 2.0 recipe category fields', () => {
     const originalItems = (globalThis as any).prototypes.item
     ;(globalThis as any).prototypes.item = {
       ...originalItems,
-      'coal': { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
+      'coal': { name: 'coal', fuel_categories: ['chemical'], fuel_value: 4000000 },
       'iron-plate': { name: 'iron-plate' },
     }
     try {

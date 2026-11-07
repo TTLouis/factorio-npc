@@ -82,7 +82,7 @@ try {
     const smeltDeadline = Date.now() + 60000
     let before
     do { before = await facts(); if (before.output['copper-plate'] === 10) break; assert.ok(Date.now() < smeltDeadline, 'Native ten-plate smelting timeout'); await delay(200) } while (true)
-    assert.equal(before.base, '2.0.77'); assert.equal(before.humans, 0); assert.equal(before.speed, 1)
+    assert.equal(before.base, '2.1.24'); assert.equal(before.humans, 0); assert.equal(before.speed, 1)
     assert.equal(before.held['copper-plate'] ?? 0, 0); assert.equal(before.held['copper-ore'], 10)
     assert.equal(before.products_finished, 10)
     const restored = structuredClone(fixture.memory)

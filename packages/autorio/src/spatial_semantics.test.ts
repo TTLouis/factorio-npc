@@ -23,8 +23,7 @@ describe('compact spatial semantics', () => {
       type: 'container',
       unit_number: 10,
       position: { x: 1, y: 2 },
-      fluids_count: 0,
-      fluidbox: { length: 0 },
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 0,
     } as any
 
     expect(compact_spatial_summary(chest)).toBeUndefined()
@@ -44,8 +43,7 @@ describe('compact spatial semantics', () => {
       type: 'mining-drill',
       unit_number: 12,
       position: { x: 4, y: 4 },
-      fluids_count: 0,
-      fluidbox: { length: 0 },
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 0,
       drop_position: { x: 4, y: 5 },
       drop_target: chest,
     } as any
@@ -79,8 +77,7 @@ describe('compact spatial semantics', () => {
       unit_number: 13,
       position: { x: 10, y: 20 },
       direction: 4,
-      fluids_count: 0,
-      fluidbox: { length: 0 },
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 0,
       drop_position: { x: 12, y: 20 },
       drop_target: undefined,
       prototype: {
@@ -131,8 +128,7 @@ describe('compact spatial semantics', () => {
       type: 'inserter',
       unit_number: 22,
       position: { x: 1, y: 0 },
-      fluids_count: 0,
-      fluidbox: { length: 0 },
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 0,
       pickup_position: { x: 0, y: 0 },
       drop_position: { x: 2, y: 0 },
       pickup_target: source,
@@ -152,17 +148,17 @@ describe('compact spatial semantics', () => {
   it('reports fluid ports for any entity exposing LuaFluidBox connections', () => {
     const pipe = {
       valid: true,
-      name: 'modded-pipe',
+      surface: { index: 1 }, name: 'modded-pipe',
       type: 'pipe',
       unit_number: 30,
       position: { x: 8, y: 9 },
     }
     const fluidbox = {
-      length: 2,
-      get_prototype: (index: number) => index === 1
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 2,
+      get_fluid_box_prototype: (index: number) => index === 1
         ? { index: 1, production_type: 'input', filter: { name: 'water' } }
         : { index: 2, production_type: 'output' },
-      get_pipe_connections: (index: number) => index === 1
+      get_fluid_box_pipe_connections: (index: number) => index === 1
         ? [{
             flow_direction: 'input',
             connection_type: 'normal',
@@ -174,18 +170,18 @@ describe('compact spatial semantics', () => {
             connection_type: 'normal',
             position: { x: 7, y: 6 },
             target_position: { x: 8, y: 6 },
-            target: { owner: pipe },
+            target: pipe,
             target_fluidbox_index: 1,
           }],
     }
     const entity = {
       valid: true,
-      name: 'modded-fluid-machine',
+      surface: { index: 1 }, name: 'modded-fluid-machine',
       type: 'assembling-machine',
       unit_number: 31,
       position: { x: 6, y: 6 },
-      fluids_count: 2,
-      fluidbox,
+      has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 2,
+      ...fluidbox,
     } as any
 
     const result = compact_spatial_summary(entity) as any
@@ -211,22 +207,23 @@ describe('compact spatial semantics', () => {
   it('reads fresh stored fluid and reciprocal links without inferring power from connectivity', () => {
     let amount = 5
     const source: any = { valid: true, name: 'heater', type: 'boiler', unit_number: 90,
-      position: { x: 0, y: 0 }, fluids_count: 1,
+      position: { x: 0, y: 0 }, has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1,
       prototype: { type: 'boiler', get_max_energy_usage: () => 30000 }, energy: 0,
       get_fluid: () => ({ name: 'steam', amount, temperature: 165 }),
     }
     const target: any = { valid: true, name: 'pipe', type: 'pipe', unit_number: 91, position: { x: 1, y: 0 },
-      fluidbox: { get_pipe_connections: () => [{ target: { owner: source }, target_fluidbox_index: 1 }] },
+      get_fluid_box_pipe_connections: () => [{ target: source, target_fluidbox_index: 1 }],
     }
-    source.fluidbox = { length: 1, get_capacity: () => 200, get_prototype: () => ({ index: 1, production_type: 'output' }),
-      get_pipe_connections: () => [{ position: { x: 0, y: 0 }, target: { owner: target }, target_fluidbox_index: 1 }],
-    }
+    Object.assign(source, { has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1, get_fluid_capacity: () => 200, get_fluid_box_prototype: () => ({ index: 1, production_type: 'output' }),
+      get_fluid_box_pipe_connections: () => [{ position: { x: 0, y: 0 }, target: target, target_fluidbox_index: 1 }],
+    })
+    source.surface = target.surface = { index: 1 }
     const first = compact_spatial_summary(source) as any
     expect(first.fluid.storages[0]).toMatchObject({ capacity: 200, contents: { name: 'steam', amount: 5, temperature: 165 } })
     expect(first.fluid.storages[0].connections[0].reciprocal).toBe(true)
     expect(first.power).toMatchObject({ prototype: { power: { consumption_watts: 1800000 } }, stored_energy_joules: 0 })
     amount = 0
-    target.fluidbox.get_pipe_connections = () => []
+    target.get_fluid_box_pipe_connections = () => []
     const second = compact_spatial_summary(source) as any
     expect(second.fluid.storages[0].contents.amount).toBe(0)
     expect(second.fluid.storages[0].connections[0].reciprocal).toBe(false)

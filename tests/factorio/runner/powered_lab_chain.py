@@ -68,7 +68,7 @@ def run_powered_lab_chain(json_command, run_operation, wait_ticks, evaluate,
         f"if entity.unit_number=={lab_id} then l=entity elseif entity.unit_number=={engine_unit} then e=entity end end; assert(l and e); "
         "local f=a.force; local st=remote.call('autorio_operations','status'); "
         "local status=nil; for k,v in pairs(defines.entity_status) do if v==l.status then status=k end end; "
-        "local steam=e.fluidbox[1]; "
+        "local steam=e.get_fluid(1); "
         "rcon.print(helpers.table_to_json({tick=game.tick,speed=game.speed,humans=#game.connected_players,"
         "actor_id=st.actor.actor_id,actor_valid=st.actor.valid,actor_kind=st.actor.kind,lab_id=l.unit_number,"
         "current=f.current_research and f.current_research.name,progress=f.current_research and f.research_progress or 0,"

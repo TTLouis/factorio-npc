@@ -124,8 +124,7 @@ function fixed_amount_or_placeholder(product: any) {
 function product_is_probabilistic(product: any) {
   if (product?.amount === undefined) return true
   if (product.amount_min !== undefined || product.amount_max !== undefined) return true
-  if (product.probability !== undefined && product.probability !== 1) return true
-  if (product.independent_probability === true) return true
+  if (rates.product_probability(product) !== 1 || (product.extra_count_fraction ?? 0) !== 0) return true
   return false
 }
 
@@ -228,7 +227,7 @@ export function solve_live_production(actor: ControlledActor, request: LiveProdu
     if (selection) {
       const prototype = (prototypes.entity as any)[selection.machine_name]
       const crafting_speed = prototype ? rates.crafting_speed_of(prototype) : 0
-      if (!prototype || !valid_positive_number(crafting_speed)) {
+      if (!prototype || crafting_speed === undefined || !valid_positive_number(crafting_speed)) {
         adapter_failure = fail(request.calculation_id, `machine prototype is missing or has no crafting speed: ${selection.machine_name}`)
         return
       }

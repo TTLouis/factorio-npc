@@ -203,7 +203,7 @@ def run(client: Rcon, results: Path) -> None:
                 f"for _,p in ipairs(r.products) do if p.name=='{item}' and p.type=='item' then makes=true end end "
                 "if makes then local ing={}; for _,i in ipairs(r.ingredients) do ing[#ing+1]={type=i.type,name=i.name,amount=i.amount} end "
                 "local prod={}; for _,p in ipairs(r.products) do prod[#prod+1]={type=p.type,name=p.name,amount=p.amount,amount_min=p.amount_min,amount_max=p.amount_max,probability=p.probability} end "
-                "out[#out+1]={name=name,category=r.category,enabled=r.enabled,hidden=r.hidden,energy=r.energy,ingredients=ing,products=prod} end end "
+                "out[#out+1]={name=name,categories=r.categories,enabled=r.enabled,hidden=r.hidden,energy=r.energy,ingredients=ing,products=prod} end end "
                 "table.sort(out,function(x,y) return x.name<y.name end) rcon.print(helpers.table_to_json({recipes=out}))",
                 f'recipes producing {item}',
             )['recipes']
@@ -301,7 +301,7 @@ def run(client: Rcon, results: Path) -> None:
             f"local fur=nil; for _,e in pairs(s.find_entities_filtered{{name='{FURNACE}'}}) do if e.unit_number=={unit_number} then fur=e end end "
             "assert(fur, 'furnace missing'); local out={}; local src={}; local fuel={}; "
             "for _,e in ipairs(fur.get_output_inventory().get_contents()) do out[e.name]=e.count end "
-            "for _,e in ipairs(fur.get_inventory(defines.inventory.furnace_source).get_contents()) do src[e.name]=e.count end "
+            "for _,e in ipairs(fur.get_inventory(defines.inventory.crafter_input).get_contents()) do src[e.name]=e.count end "
             "for _,e in ipairs(fur.get_fuel_inventory().get_contents()) do fuel[e.name]=e.count end "
             "rcon.print(helpers.table_to_json({tick=game.tick,status=fur.status,products_finished=fur.products_finished,output=out,source=src,fuel=fuel}))",
             f'furnace {unit_number}',
