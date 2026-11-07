@@ -77,3 +77,11 @@ The older Hugging Face/model guidance applies only when working specifically und
 - clear notebook outputs before publishing.
 
 Do not apply those model-publishing notes to the core NPC runtime, deployment, or agent harness unless the task actually concerns the model subproject.
+
+## Internal evidence publication
+
+Keep internal session handoffs, raw run logs, repair checkpoints and
+recovery archives in ignored local directories. Do not stage or push
+them. Public guides and curated proof reports remain publishable after
+their normal review. Preserve evidence locally before removing tracked
+artifacts; use immutable history links for existing historical citations.

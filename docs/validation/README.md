@@ -1,15 +1,9 @@
-# Validation history
+# Historical validation records
 
-This directory contains historical evidence and superseded checkpoint documents. Files here are intentionally immutable descriptions of the commit/state they were written for; they are not the current roadmap or deployment manual.
+Internal session handoffs, run transcripts, repair checkpoints and recovery
+archives are retained locally rather than published in branch contents.
+Keep new raw evidence in ignored `test-results/` or `handoffs/` directories;
+do not commit it here. Public guides remain in `docs/`.
 
-Current documentation lives in:
-
-- `../../README.md` — project overview and branch/deployment model;
-- `../NPC_AGENT_HARNESS_PLAN.md` — current single-NPC roadmap and promotion gates;
-- `../NPC_AGENT_HARNESS_STATUS.md` — current verified status and known limits;
-- `../NPC_CHARACTER_ARCHITECTURE.md` — stable actor/body architecture;
-- `../../deploy/pterodactyl/README.md` — current Pterodactyl operation/deployment contract.
-
-Historical records currently include the original NPC harness plan/status snapshots, the v7→v8 Pterodactyl staging design, the 2026-09-14 v8 release-candidate record, and user-supplied runtime transcripts.
-
-When a new promotion checkpoint is validated, add a new dated file here. Do not rewrite an older record to make it describe a newer commit.
+[Earlier records in Git history](https://github.com/TTLouis/factorio-npc/tree/8661b6a9e8cfb8a52b973866a09b176989ff2ded/docs/validation) describe their original
+commits and runs, not current readiness or instructions to resume them.

@@ -4,7 +4,7 @@ The original v7→v8 staging design formerly stored at this path is no longer th
 
 The full historical document is preserved at:
 
-- [`validation/PTERODACTYL_NPC_V8_STAGING_2026-09-14.md`](./validation/PTERODACTYL_NPC_V8_STAGING_2026-09-14.md)
+- [`validation/PTERODACTYL_NPC_V8_STAGING_2026-09-14.md`](https://github.com/TTLouis/factorio-npc/blob/8661b6a9e8cfb8a52b973866a09b176989ff2ded/docs/validation/PTERODACTYL_NPC_V8_STAGING_2026-09-14.md)
 
 For current operational behavior, configuration, package layout, update semantics, and rollback use:
 
