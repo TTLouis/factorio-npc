@@ -12,7 +12,7 @@ consecutive game-minute windows into one exact named chest. This bounded red-sci
 proof supersedes the older deferral of all sustained-rate testing below; wider SPM
 maturity remains later work. First revalidate the burner canary, natural-water
 steam power and powered assembler/inserter cell. No current gameplay pass is
-claimed. [Implementation and evidence](validation/PLAYABLE_BUILD_2026-10-03.md).
+claimed. [Implementation and evidence](https://github.com/TTLouis/factorio-npc/blob/a5be3161524dddb30d59dc94f298d804c22991a0/docs/validation/PLAYABLE_BUILD_2026-10-03.md).
 
 Buffered building/supply stock may use chest-count circuit caps: generally two
 live item stacks for buildings and roughly 400–600 belts per tier, with explicit
@@ -767,7 +767,7 @@ restore, and a passive blueprint/pin review mode through `/npc-spaces`.
 Designer input is immutable and paged; no designer inference role, layout-wide
 functional validation or sandbox-to-live design lifecycle is implemented.
 Batch tokens remain bound to live actor/world identity and current admission
-checks. See [the reservation checkpoint](validation/NPC_AREA_RESERVATIONS_2026-10-22.md)
+checks. See [the reservation checkpoint](https://github.com/TTLouis/factorio-npc/blob/a5be3161524dddb30d59dc94f298d804c22991a0/docs/validation/NPC_AREA_RESERVATIONS_2026-10-22.md)
 for native evidence and eligibility limits.
 
 Construction robots are explicitly deferred for later discussion. Revisit ghost

@@ -143,7 +143,7 @@ bounded adoption. Native proof loads an explicitly saved active lease while
 paused, invalidates it before unpause and preserves expenditure.
 
 Implementation evidence and remaining promotion gates are recorded in
-[the controller checkpoint](validation/E2E_TICK_SPRINT_CONTROLLER_2026-10-23.md).
+[the controller checkpoint](https://github.com/TTLouis/factorio-npc/blob/a5be3161524dddb30d59dc94f298d804c22991a0/docs/validation/E2E_TICK_SPRINT_CONTROLLER_2026-10-23.md).
 These gates do not authorize another live trial or publication.
 
 ## Startup clock gate after Run AP
