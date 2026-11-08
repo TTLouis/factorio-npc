@@ -76,6 +76,33 @@ Do not add provider adapters solely because a helper exists on the other surface
 
 ## Change rules
 
+### Gather search and partial cancellation
+
+`gather_resource` fixes its search disk at native submission, including the
+surface. Earlier queued movement cannot move that disk; execution still resolves
+currently eligible resources and uses ordinary native navigation and mining.
+This does not change ordinary nearest-entity navigation. Resource preflight
+records the original disk and one eligible source point; the native admission
+journal independently records the actual submission origin. Recovery requires
+their agreement, not an assumption that a preflight point was the executed target.
+
+An exact gather-only `navigation_no_target` receipt can distinguish completed
+earlier slots, navigation failure before acquisition and untouched later slots.
+The shared reconciler requires the exact ordered task receipt, actor/epoch,
+generation, original scope, current force/surface and idle queues. Missing,
+changed or opaque evidence retains the unresolved-effect hold. Partial
+reconciliation is never a claim that requested quantities were acquired.
+
+Plan mode's existing gather recovery reads fresh inventory against the unchanged
+committed checkpoint. It can issue only missing quantities at originally
+witnessed in-scope points using `mine_resource_at`, whose native preflight,
+approach, reach and collision checks remain authoritative. Already acquired
+resources are not replayed. Existing durable limits (two attempts per step,
+six per goal), owner fences and explicit guard pauses remain in force across
+restage/restart; the planner-review unsettled-operation fence is unchanged.
+Explicit guard/system/operator/authority pauses are not labelled provider
+failures merely because their outer reason is `request_failed`.
+
 When changing a structured operation or provider-visible Factorio tool:
 
 1. update the owning implementation;

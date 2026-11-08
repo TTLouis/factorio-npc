@@ -47,6 +47,8 @@ interface NavigationResult {
   player_name?: string
   target_unit_number?: number
   target_position?: { x: number, y: number }
+  resource_search_origin?: { x: number, y: number }
+  resource_search_surface?: number
   path_request_id?: number
   path_attempts?: number
   blocked_reason?: string
@@ -127,6 +129,7 @@ function identity_matches(actor: ControlledActor, task: PlayerParametersWalkToEn
     && identity.actor_id === task.owner_actor_id
     && identity.kind === task.owner_actor_kind
     && actor.force.index === task.owner_force_index
+    && (task.resource_search_surface === undefined || actor.surface.index === task.resource_search_surface)
 }
 
 function draw_path(actor: ControlledActor, path: PathfinderWaypoint[]) {
@@ -166,6 +169,8 @@ function record(actor: ControlledActor | undefined, raw_task: PlayerParametersWa
     player_name: task?.target_player_name,
     target_unit_number: task?.target_unit_number,
     target_position: destination ? copy_position(destination) : undefined,
+    resource_search_origin: task?.resource_search_origin ? copy_position(task.resource_search_origin) : undefined,
+    resource_search_surface: task?.resource_search_surface,
     path_request_id: task?.path_request_id,
     path_attempts: task?.path_attempts,
     blocked_reason: !completed && ['unreachable', 'path_timeout', 'stuck', 'path_busy'].indexOf(code) >= 0 ? code : undefined,
@@ -265,6 +270,20 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     const resolved = actor_for_submission()
     if (!resolved || resolved.identity.actor_id === undefined) return false
     manager.add_task(make_task(resolved.actor, resolved.identity, entity_name, search_radius, undefined, undefined, 'nearest_entity'))
+    return true
+  }
+
+  // Gather keeps its admitted search disk while earlier queued work moves the
+  // actor. Current availability is still checked when this task executes.
+  function submit_resource(entity_name: string, search_radius: number): boolean {
+    if (typeof entity_name !== 'string' || prototypes.entity[entity_name]?.type !== 'resource'
+      || !valid_radius(search_radius)) return false
+    const resolved = actor_for_submission()
+    if (!resolved || resolved.identity.actor_id === undefined) return false
+    const task = make_task(resolved.actor, resolved.identity, entity_name, search_radius, undefined, undefined, 'nearest_entity')
+    task.resource_search_origin = copy_position(resolved.actor.position)
+    task.resource_search_surface = resolved.actor.surface.index
+    manager.add_task(task)
     return true
   }
 
@@ -458,7 +477,15 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       }
     }
     else {
-      target = nearest(actor, find_world_entities(actor.surface, { position: actor.position, radius: task.search_radius, name: task.entity_name }))
+      const origin = task.resource_search_origin
+      if (origin && (!valid_coordinate(origin.x) || !valid_coordinate(origin.y)
+        || !valid_radius(task.search_radius) || task.resource_search_surface !== actor.surface.index)) {
+        fail(actor, task, 'different_surface')
+        return false
+      }
+      const sources = find_world_entities(actor.surface, { position: origin ?? actor.position, radius: task.search_radius, name: task.entity_name,
+        ...(origin ? { type: 'resource' as const } : {}) })
+      target = nearest(actor, origin ? sources.filter(entity => entity.valid && entity.type === 'resource' && entity.amount > 0) : sources)
     }
     if (!target) {
       fail(actor, task, 'no_target')
@@ -715,6 +742,8 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       state: active ? (task?.recovery_position ? 'recovering' : task?.calculating_path ? 'pathfinding' : 'navigating') : blocked ? 'blocked' : last?.code === 'reached' ? 'reached' : 'idle',
       actor: actor?.status_snapshot(),
       target_kind: task?.target_kind,
+      resource_search_origin: task?.resource_search_origin ? copy_position(task.resource_search_origin) : undefined,
+      resource_search_surface: task?.resource_search_surface,
       player_name: task?.target_player_name,
       persistent_follow: task?.persistent_follow === true,
       reach_distance: task?.reach_distance,
@@ -756,5 +785,5 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     }
   }
 
-  return { submit, submit_exact, submit_position, submit_player, tick, on_path_finished, status }
+  return { submit, submit_resource, submit_exact, submit_position, submit_player, tick, on_path_finished, status }
 }

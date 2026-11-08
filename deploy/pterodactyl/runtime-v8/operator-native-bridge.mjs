@@ -417,7 +417,7 @@ export class NativeBridge {
     }
     const pending = buildPendingOperation({ requestId: key, operationKey: key, attemptId: key,
       ordinal: snapshot.high_water + 1, protocolVersion: 2, operations: [operation], actor: snapshot.actor,
-      baseline: batchWatermark(snapshot.status), now: Date.now(), surfaceIndex: snapshot.actor.surface_index,
+      baseline: batchWatermark(snapshot.status), now: Date.now(), surfaceIndex: snapshot.actor.surface_index, preflight: [preflight],
       ...(operation.name === 'place_candidate' ? { goalId: this.session, planId: 'external-fluid', stepId: key } : {}) })
     let preservation
     if (operation.name === 'place_candidate') {

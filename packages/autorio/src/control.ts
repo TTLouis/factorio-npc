@@ -468,7 +468,9 @@ function operation_preflight(name: string, args: Record<string, any>) {
       const source = sources.find(entity => entity.valid && entity.amount > 0)
       if (!source) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, search_radius: radius })
       return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type,
-        resource_search: { radius, position: source.position, amount: source.amount } })
+        resource_search: { radius, origin: { x: actor.position.x, y: actor.position.y },
+          position: { x: source.position.x, y: source.position.y }, amount: source.amount,
+          actor_id: actor.status_snapshot().actor_id, surface_index: actor.surface.index, force_index: actor.force.index, tick: game.tick } })
     }
     if (!actor || !actor.is_valid) return reject('no_actor')
     const x = args.x; const y = args.y; const count = args.count ?? 1
@@ -728,6 +730,8 @@ remote.add_interface('autorio_operations', {
       external_fluid_candidates_supported: 1,
       admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
+      actor_surface_index: actor?.surface.index,
+      actor_force_index: actor?.force.index,
       basic_operation: basic_operation_controller.status(),
       follow: follow_controller.status(),
       defense: defense_controller.status(),

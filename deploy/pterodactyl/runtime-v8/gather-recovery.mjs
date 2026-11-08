@@ -1,7 +1,7 @@
 import { PROGRESS_AUDIT_TRANSITION } from './executor-progress-audit.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { parseInventoryCounts } from './inventory-facts.mjs'
-import { operationSignature, reconcilePendingOperation, RECONCILE_VERDICT } from './operation-reconciliation.mjs'
+import { gatherSearchWitness, operationSignature, reconcilePendingOperation, RECONCILE_VERDICT } from './operation-reconciliation.mjs'
 import { deploymentStatus } from './supervisor-adapter.mjs'
 
 export const GATHER_RECOVERY_LIMITS = Object.freeze({ perStep: 2, perGoal: 6, records: 128 })
@@ -88,6 +88,12 @@ export async function recoverGatherFailure(agent, { failureBoundary = false } = 
       agent.assertCheckpointOwnerIdentity(owner)
       if (runtime.surface_index !== owner.surfaceIndex) throw new Error('gather_recovery_surface_changed')
     }
+    if (owner.gatherForceIndex !== undefined) {
+      const native = JSON.parse(await agent.readTaskStatusRaw())
+      agent.assertCheckpointOwnerIdentity(owner)
+      if (agent.currentPendingAmendment() || agent.memory.pauseRecord?.(owner.key)?.paused) throw new Error('gather_recovery_authority_changed')
+      if (native.actor_surface_index !== owner.surfaceIndex || native.actor_force_index !== owner.gatherForceIndex) throw new Error('gather_recovery_force_changed')
+    }
   }
   const checked = async promise => { const value = await promise; await current(); return value }
   const emit = (event, reason, data = {}) => checked(agent.traceEvent(`gather.${event}`, {
@@ -110,11 +116,13 @@ export async function recoverGatherFailure(agent, { failureBoundary = false } = 
     if (!runtime.idle) return undefined
     if (!Number.isSafeInteger(held.surface_index) || held.surface_index !== runtime.surface_index) return pause('gather_recovery_surface_unproven')
     owner.surfaceIndex = runtime.surface_index
+    if (verdict.cancellation_reason === 'navigation_no_target') owner.gatherForceIndex = status.actor_force_index
     const follow = JSON.parse(await checked(agent.rcon.command(agent.observationToolCommand('getFollowStatus', {}))))
     const crafting = JSON.parse(await checked(agent.rcon.command(agent.observationToolCommand('getCraftingStatus', {}))))
     if (follow.active !== false || crafting.task_active !== false || !crafting.native_queue || Object.keys(crafting.native_queue).length
       || crafting.persisted_owner || status.actor?.mining_state?.mining === true) return { gather: 'deferred', reason: 'native_controller_work', operations: [] }
-    await emit('residual_detected', verdict.reason, { disposition: 'fresh_inventory_reconciliation' })
+    await emit('residual_detected', verdict.reason, { disposition: 'fresh_inventory_reconciliation',
+      cancellation_reason: verdict.cancellation_reason, slot_outcomes: verdict.slot_outcomes })
     agent.memory.gatherRecoveries ??= new Map()
     const ledger = agent.memory.gatherRecoveries.get(goalKey) ?? []
     if (agent.memory.gatherRecoveryFault) return pause('gather_recovery_ledger_unreadable')
@@ -123,8 +131,24 @@ export async function recoverGatherFailure(agent, { failureBoundary = false } = 
       || (!agent.memory.gatherRecoveries.has(goalKey) && agent.memory.gatherRecoveries.size >= GATHER_RECOVERY_LIMITS.records)) return pause('gather_recovery_exhausted')
     const raw = String(await checked(agent.rcon.command(agent.observationToolCommand('getInventoryItems', {}))))
     const inventory = raw.length <= 200000 ? parseInventoryCounts(raw) : undefined
-    const operations = gatherDeficit(held, step.completion_contract, inventory)
+    let operations = gatherDeficit(held, step.completion_contract, inventory)
     if (!operations) return pause('gather_recovery_facts_unproven')
+    if (verdict.cancellation_reason === 'navigation_no_target') {
+      // The exact native cancellation and admission-origin equality were proved
+      // above. Reuse only an originally witnessed point inside that admitted
+      // disk. mine_resource_at performs fresh native preflight and ordinary
+      // mining approach/reach/collision; no radius expansion or teleport occurs.
+      const corrected = []
+      for (const operation of operations) {
+        if (operation.name !== 'gather_resource') { corrected.push(operation); continue }
+        const original = held.operations.find(op => op.name === operation.name && op.args.resource_name === operation.args.resource_name)
+        const witness = gatherSearchWitness(original, original?.resource_search, held.actor, held.surface_index)
+        if (!witness || witness.tick > verdict.receipt_tick || witness.force_index !== owner.gatherForceIndex) return pause('gather_recovery_origin_unproven')
+        corrected.push({ name: 'mine_resource_at', args: { resource_name: operation.args.resource_name,
+          count: operation.args.count, x: witness.position.x, y: witness.position.y } })
+      }
+      operations = corrected
+    }
     for (const op of operations) {
       const details = JSON.parse(await checked(agent.rcon.command(agent.observationToolCommand('getMiningDetails', { resource_or_item: op.args.resource_name }))))
       const resource = details.resources?.find(row => row.name === op.args.resource_name)
@@ -201,7 +225,10 @@ export async function recoverGatherFailure(agent, { failureBoundary = false } = 
 export async function correctMiningLocation(agent, proposed, preflight) {
   const op = proposed.operations?.[0]
   const candidate = preflight.resource_correction
-  if (agent.miningLocationFlight || op?.name !== 'mine_resource_at' || proposed.operations.length !== 1
+  // A missing-effect gather correction is bound to its original witnessed
+  // source. The ordinary nearby-position repair must not move it outside that
+  // authority (or consume a second nested recovery allowance).
+  if (agent.gatherAdmission || agent.miningLocationFlight || op?.name !== 'mine_resource_at' || proposed.operations.length !== 1
     || !['resource_source_not_found', 'resource_source_insufficient'].includes(preflight.code) || !candidate
     || agent.currentPendingAmendment() || agent.memory.pendingOperation?.(agent.activePlanKey())) return undefined
   const owner = agent.captureCheckpointOwner()
