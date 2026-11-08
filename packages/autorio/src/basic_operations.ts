@@ -1,3 +1,4 @@
+import { hydraulic_mutation_preflight, type HydraulicMutationWitness } from './hydraulic_mutation'
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import { batch_task_index } from './task_state_runtime'
@@ -17,6 +18,8 @@ import type { ClearableEntity, ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import { cleanup_pump_preparation, pump_site_preflight } from './pump_site_preparation'
 import { layout_node_failed } from './construction_layout'
+import type { EntityRemovalReceipt } from './entity_removal_receipt'
+import { capture_removal_binding } from './operation_admission'
 
 type BasicTask = PlayerParametersMineEntity | PlayerParametersPreparePumpSite | PlayerParametersPlaceEntity | PlayerParametersRotateEntity | PlayerParametersMoveItems | PlayerParametersSetRecipe | PlayerParametersLaunchRocket | PlayerParametersWaiting
 type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
@@ -26,12 +29,16 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'item_missing' | 'no_position' | 'not_placeable' | 'npc_area_reserved' | 'ground_items_inventory_full' | 'ground_item_pickup_failed' | 'clearing_inventory_full' | 'clearing_unreachable' | 'clearing_failed' | 'create_failed' | 'placement_candidate_required' | 'placement_candidate_unavailable' | 'construction_plan_blocked_no_clear' | 'layout_connection_unproven'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
   | 'mining_rejected'
+  | 'entity_removal_refused' | 'entity_removal_uncertain' | 'hydraulic_mutation_refused'
   | 'not_rotatable' | 'rotation_failed'
   | 'not_recipe_machine' | 'recipe_disabled' | 'incompatible_recipe' | 'set_recipe_failed'
   | 'not_rocket_silo' | 'rocket_not_ready' | 'launch_failed' | 'launch_not_confirmed'
   | 'pump_preparation_refused'
 
 export interface BasicOperationResult {
+  hydraulic_guard?: HydraulicMutationWitness
+  hydraulic_reason?: string
+  entity_removal?: EntityRemovalReceipt
   operation_id?: number
   type?: TaskStates
   accepted: boolean
@@ -59,6 +66,12 @@ export interface BasicOperationResult {
   placed_entity_type?: string
   placed_position?: { x: number, y: number }
   placed_surface_index?: number
+  placed_force_index?: number
+  /** Present only when the native save already has a valid persistent world UUID. */
+  placed_world_id?: string
+  placed_batch_id?: number
+  placed_batch_generation?: number
+  placed_batch_ref?: string
   placed_direction?: number
   placed_last_user?: string
   preservation_binding?: PlayerParametersPlaceEntity['preservation_binding']
@@ -225,6 +238,7 @@ function result_for(actor: ControlledActor | undefined, task: BasicTask | undefi
     ...(task?.type === TaskStates.PREPARING_PUMP_SITE ? { preparation_id: task.preparation_id, execution_strategy: 'actor' as const,
       removed_layers: task.removed_layers ?? 0, reclaimed_items: task.reclaimed_items } : {}),
     target_unit_number: task?.type === TaskStates.MINING || task?.type === TaskStates.MOVING_ITEMS || task?.type === TaskStates.SETTING_RECIPE || task?.type === TaskStates.ROTATING || task?.type === TaskStates.LAUNCHING_ROCKET ? task.target_unit_number : undefined,
+    ...(task?.type === TaskStates.MINING && task.entity_removal ? { entity_removal: task.entity_removal } : {}),
     recipe_name: task?.type === TaskStates.SETTING_RECIPE ? task.recipe_name : undefined,
     player_name: task?.type === TaskStates.MOVING_ITEMS ? task.player_name : undefined,
     item_name: task && 'item_name' in task ? task.item_name : undefined,
@@ -298,20 +312,26 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return queue({ type: TaskStates.PREPARING_PUMP_SITE, preparation_id, owner_surface_index: actor.surface.index }, actor)
   }
 
-  function submit_mining_exact(target_unit_number: number) {
+  function submit_mining_exact(target_unit_number: number, external_world_guard?: boolean) {
     if (!valid_integer(target_unit_number, 1, 9007199254740991)) {
       result_for(get_actor(), undefined, false, false, 'invalid_unit_number')
       return false
     }
     const actor = actor_for_submission()
     if (!actor) return false
+    const hydraulic = hydraulic_mutation_preflight(actor, 'mine_entity_exact', target_unit_number)
+    if (!hydraulic.ok) { result_for(actor, undefined, false, false, 'hydraulic_mutation_refused', { hydraulic_reason: hydraulic.code }); return false }
     const task: PlayerParametersMineEntity = {
+      hydraulic_guard: hydraulic.witness,
       type: TaskStates.MINING,
+      external_world_guard: external_world_guard === true,
       target_unit_number,
       count: 1,
       requested_count: 1,
     }
-    return queue(task, actor)
+    const accepted = queue(task, actor)
+    if (accepted) task.removal_binding = capture_removal_binding(actor, manager.get_status_snapshot())
+    return accepted
   }
 
   function submit_mining_at(resource_name: string, x: number, y: number, count: number = 1) {
@@ -392,7 +412,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return accepted
   }
 
-  function submit_rotate_exact(target_unit_number: number, reverse: boolean = false): [boolean, string] {
+  function submit_rotate_exact(target_unit_number: number, reverse: boolean = false, external_world_guard?: boolean): [boolean, string] {
     if (!valid_integer(target_unit_number, 1, 9007199254740991)) {
       result_for(get_actor(), undefined, false, false, 'invalid_unit_number')
       return [false, 'unit_number must be a positive safe integer']
@@ -403,8 +423,12 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     }
     const actor = actor_for_submission()
     if (!actor) return [false, 'No controlled actor']
+    const hydraulic = hydraulic_mutation_preflight(actor, 'rotate_entity', target_unit_number)
+    if (!hydraulic.ok) { result_for(actor, undefined, false, false, 'hydraulic_mutation_refused', { hydraulic_reason: hydraulic.code }); return [false, 'Hydraulic mutation refused'] }
     const task: PlayerParametersRotateEntity = {
+      hydraulic_guard: hydraulic.witness,
       type: TaskStates.ROTATING,
+      external_world_guard: external_world_guard === true,
       target_unit_number,
       reverse,
     }
@@ -452,7 +476,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     return [true, 'Task started']
   }
 
-  function submit_set_recipe_exact(target_unit_number: number, recipe_name: string): [boolean, string] {
+  function submit_set_recipe_exact(target_unit_number: number, recipe_name: string, external_world_guard?: boolean): [boolean, string] {
     if (!valid_integer(target_unit_number, 1, 9007199254740991)) {
       result_for(get_actor(), undefined, false, false, 'invalid_unit_number')
       return [false, 'unit_number must be a positive safe integer']
@@ -465,6 +489,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     if (!actor) return [false, 'No controlled actor']
     const task: PlayerParametersSetRecipe = {
       type: TaskStates.SETTING_RECIPE,
+      external_world_guard: external_world_guard === true,
       target_unit_number,
       recipe_name,
     }
@@ -579,6 +604,9 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
 
   function fail(actor: ControlledActor | undefined, task: BasicTask, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
     refusal_results = {}
+    if (task.type === TaskStates.MINING && task.entity_removal?.state === 'prepared') {
+      task.entity_removal.state = 'refused'; task.entity_removal.code = code; task.entity_removal.after_tick = game.tick
+    }
     suppress_cancel_receipt = true
     // A failed node leaves its layout unable to continue by itself; the layout record says so (first reason kept).
     if (task.type === TaskStates.PLACING) layout_node_failed(task.layout_node, code)
@@ -616,6 +644,9 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
       const task = get_task()
       if (!task) return
       const actor = get_actor()
+      if (task.type === TaskStates.MINING && task.entity_removal?.state === 'prepared') {
+        task.entity_removal.state = 'refused'; task.entity_removal.code = 'cancelled'; task.entity_removal.after_tick = game.tick
+      }
       result_for(actor, task, false, false, 'cancelled')
     })
   }

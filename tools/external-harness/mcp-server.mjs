@@ -1,5 +1,6 @@
 // A deliberately small stdio-only MCP 2025-06-18 transport. Gameplay authority
 // belongs to the injected deterministic runtime, never to this protocol layer.
+import { machineDeliveryToolDefinition } from '../../deploy/pterodactyl/runtime-v8/machine-delivery.mjs'
 export const MCP_PROTOCOL_VERSION = '2025-06-18'
 export const MAX_MESSAGE_BYTES = 64 * 1024
 export const MAX_RESULT_BYTES = 256 * 1024
@@ -14,6 +15,12 @@ const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: t
 const mutation = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
 
 export const MCP_TOOLS = Object.freeze([
+  {
+    name: machineDeliveryToolDefinition.function.name,
+    description: machineDeliveryToolDefinition.function.description,
+    inputSchema: machineDeliveryToolDefinition.function.parameters,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: 'factorio_capabilities',
     description: 'Read the bounded operation and observation catalog supported by this experimental runtime. This server has no internal model planner and never accepts Lua, console commands, or arbitrary remote calls.',
@@ -62,6 +69,7 @@ export const MCP_TOOLS = Object.freeze([
 ])
 
 const methods = Object.freeze({
+  bindMachineDelivery: 'bindMachineDelivery',
   factorio_capabilities: 'capabilities', factorio_library: 'library', factorio_context: 'context', factorio_observe: 'observe',
   factorio_submit: 'submit', factorio_receipt: 'get', factorio_cancel: 'cancel', factorio_resume: 'resume',
 })

@@ -34,15 +34,15 @@ allowance and recovery contracts remain unchanged.
 ## Current capability boundary
 
 Use `factorio_capabilities` to discover the exact supported operation names,
-arguments and bounded observation tools for the running revision. This initial
-slice supports walking, waiting, hand crafting, bounded native harvesting,
-mining known resource positions, exact item transfers, research submission and
-restricted construction. Unsupported operations fail closed; the complete existing
-runtime-v8 catalog is **not** implicitly exposed.
+arguments and bounded observation tools for the running revision. The bridge
+exposes native walking, crafting, harvesting, exact transfers and supply,
+research, construction, custody-backed exact removal, equipment and combat.
+Human-player workflows and composite plan/layout/registry lifecycles belong to
+separate adapters. Unsupported operations fail closed.
 
-`place_entity` accepts only `stone-furnace`, `burner-mining-drill` and
-`wooden-chest`, `lab`, `small-electric-pole`, `assembling-machine-1`,
-`transport-belt`, `inserter` and `burner-inserter`, with explicit exact-grid coordinates.
+`place_entity` accepts native nonfluid prototypes with explicit exact-grid
+coordinates. There is no prototype-name authorization list; the empty legacy
+prototype-list fields mean eligibility is determined by native witnesses.
 Read native placement candidates to obtain valid snapped centers, including
 half-grid centers; do not assume integer coordinates. Native prototype/footprint
 and collision checks must prove a clear, nonfluid site. The bridge always passes
@@ -51,11 +51,10 @@ not clearing or replacement. It refuses older mods without the explicit safety
 capability marker. The flag is not model-selectable. Discover and inspect the
 actual placed entity before supplying it; placement alone proves no production.
 
-`place_candidate` supports only the native preservation path's bounded fluid
-prototype set: `offshore-pump`, `boiler`, `steam-engine`, `pipe` and
-`electric-mining-drill`. Electric miners reuse this same candidate/constructor
-path because their native prototypes can have fluid ports; they are not admitted
-through the zero-fluidbox `place_entity` shortcut. First discover
+`place_candidate` uses the native preservation path for fluid prototypes whose
+complete bounded port/storage geometry can be proved. Generic and modded names
+must satisfy the same native constraints; listing a name grants no permission.
+Fluid machines do not use the zero-fluidbox coordinate shortcut. First discover
 current prototype, source-tile and placement facts with `getPrototypeDetails`,
 `getFluidSourceTiles` and `getPlacementCandidates`. A candidate without a declared
 relation is accepted only when a complete native scan proves zero possible fluid
@@ -301,6 +300,7 @@ only game connection is to the explicitly configured local RCON service.
 | --- | --- |
 | `factorio_capabilities` | Read the supported operation/observation schemas and limits |
 | `factorio_library` | Search/get typed knowledge or skill guidance on demand; local advisory content, no game calls |
+| `bindMachineDelivery` | Select one exact newly actor-placed chest for the already armed finite-output goal; immutable goal metadata only, with session/actor/epoch fences |
 | `factorio_context` | Get a compact actor and execution summary; not a full-world dump |
 | `factorio_observe` | Fetch one approved, argument-bounded native detail |
 | `factorio_submit` | Validate and admit one operation, using a stable caller `request_id` |
@@ -430,23 +430,72 @@ or launch a model trial.
 
 ## Automatic production tools
 
-The bounded nonfluid placement list additionally supports `assembling-machine-1`,
-`transport-belt`, `inserter` and `burner-inserter`. These names grant placement
-capability, not availability: inspect current prototype, recipe and inventory
-facts first. Use fresh `getPlacementCandidates` positions and directions with
-explicit `place_entity`; its native zero-fluidbox, exact-grid and no-clear
-checks still apply. Nonfluid candidate IDs are not accepted by `place_candidate`.
+Generic placement eligibility comes from current prototype, recipe, inventory,
+geometry and hydraulic facts. Use fresh `getPlacementCandidates` positions and
+directions with explicit `place_entity` for nonfluid prototypes; exact-grid and
+no-clear execution checks remain. Nonfluid candidate IDs map to their exact
+coordinates, while fluid candidate IDs use the frozen native preservation path.
 
-`set_machine_recipe {unit_number, recipe_name}` uses canonical native admission
-and execution. External recipe assignment additionally requires the exact
-`assembling-machine-1` target, actor force/surface and a native zero-fluidbox
-witness for both prototype and runtime. Empty or disabled fluid ports do not
-qualify. The same check runs again inside atomic admission; missing native proof
-fails closed. Canonical recipe operations on other interfaces retain their
-existing scope. A matching recipe is idempotent; replacing an existing recipe is
-refused. A first assignment also refuses active crafting, fluid contents or any
-occupied inventory at execution, preserving stock even after approach recovery.
-Read a refused machine again instead of emptying or replacing it implicitly.
+`set_machine_recipe {unit_number, recipe_name}` requires the exact native
+compatible assembling machine. A matching recipe is idempotent; replacing an
+existing recipe is refused. First assignment requires no active crafting, fluid
+contents or occupied inventory. The external native witness also proves complete
+empty disconnected fluid ports. Disabled recipe ports require complete prototype
+geometry and a bounded visible neighbor scan proving no possible join. The same
+checks run during atomic admission and immediately before execution. Unknown
+geometry fails closed.
+
+`mine_entity_exact` requires a bound persistent world identity, visible exact
+actor-force/surface target, admitted session/epoch/batch identity, native mining
+duration, unchanged contents and full combined inventory capacity. A verified
+receipt proves recovered-item custody; partial/uncertain effects are never
+replayed. Active processes and unsupported contents are refused.
+
+Hydraulic removal and rotation share a mandatory native proof on every exact
+submission, including internal plan adapters. A bounded complete current network
+must be empty, idle, visible and outside every durable preservation claim's
+network entities, edge endpoints and candidate footprint. Rotation additionally
+proves all networks in a complete prototype-derived port/footprint envelope,
+including a current-prototype search margin for off-center neighbour ports.
+The queue captures world, actor/session/epoch, geometry and claim count; execution
+repeats the proof and refuses any changed witness. Models cannot disable it.
+Internal plans retain their additional preservation obligations and authority.
+
+Complete claim history starts only in native `on_init` at tick zero with no prior
+claim storage. An independent monotonic count is compared with the retained
+claim registry and its integrity inventory. Loading/upgrading an older save,
+observation or world binding never creates that history. Missing/legacy history,
+truncation, nonempty/active networks, unsupported connection geometry, unseen
+areas and bounded-scan exhaustion are explicit refusals. Legacy saves can still
+use nonfluid paths; this is a provenance limitation, not proof that no claims
+existed. New-game comparisons use the same shared proof on all three adapters.
+
+Natural trees and rocks can be removed with `clear_construction_area`, whose
+native predicate preserves resources, characters and placed/force-owned
+buildings. `prepare_pump_site` executes only a current native bounded landfill
+proposal. Neither action relaxes placement's no-clear flag.
+
+Name-targeted item transfers map to bounded entity discovery and
+`move_items_exact` with the selected unit number and the same item/count/direction.
+Name-targeted mining maps to exact removal for supported buildings, exact
+resource-position mining or bounded gathering for resources, and native
+`harvest_product` for natural products. Lost exact targets never fall back to a
+nearest name. These are adapter mappings, not claims of identical search policy.
+
+`getWorldEntityFacts {request_id,members}` reads up to 32 exact locators containing
+`unit_number`, `name`, `position`, `surface_index` and `force_index`. The native
+world/actor/scope are derived in the same callback; callers cannot override them.
+It returns input, inventory, endpoint, topology, progress, power, fluid and
+removal facts without creating a factory registry or task. Unknown/truncated
+facts stay unknown. Only explicit fresh-save operator setup binds a world UUID;
+observation of an old unbound save refuses rather than inventing provenance.
+
+Production, mining, research-path, spatial, map and logistics helpers share the
+typed native renderers. `getTaskStatus` and `getResearchRequest` expose bounded
+native receipt state. `measureTransportThroughput` owns one exact measurement
+ID, checks actor/session/epoch and native idle state on start and polls, and
+cancels a stalled/failed/expired sample within a bounded wall-clock budget.
+It never changes game speed or treats an interrupted sample as a measurement.
 
 Use `getEntityGeometry {unit_number}` for exact native pickup/drop relationships
 and `getTransportCapacity` for live belt/inserter facts. Prototype rates are not

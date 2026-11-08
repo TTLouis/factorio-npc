@@ -24,6 +24,7 @@ const directory = process.env.EXTERNAL_HARNESS_STATE_DIR;
 const context = ${JSON.stringify(context)};
 const calls = [];
 const runtime = {
+ bindMachineDelivery: async () => { calls.push('FORBIDDEN-bind'); throw new Error('forbidden') },
  library: async () => { calls.push('library'); return {kind:'knowledge',entry:{id:'knowledge-automation-progression-checkpoints',content_type:'knowledge'},authority:{native_verified:false,operation_authority:false}} },
  context: async () => { calls.push('context'); return context },
  capabilities: async () => { calls.push('capabilities'); return { operations: [{name:'wait'}], observation_schemas:[{name:'getActorStatus',inputSchema:{type:'object'}}] } },

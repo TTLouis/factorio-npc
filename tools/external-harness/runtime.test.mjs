@@ -62,6 +62,38 @@ test('write-ahead admission stays running; exact completion remains distinct fro
   assert.equal(f.calls.filter(([name]) => name === 'submit').length, 1)
 })
 
+test('machine delivery metadata binding serializes with world reads without creating an operation record', async t => {
+  const f = await fixture(t)
+  const snapshot = f.bridge.snapshot
+  f.bridge.snapshot = async () => ({ ...await snapshot(), tick: 0 })
+  const runtime = await f.open()
+  await runtime.context()
+  const ledgerPath = path.join(f.directory, 'ledger.json')
+  await assert.rejects(fs.stat(ledgerPath), { code: 'ENOENT' })
+  const events = []
+  let release
+  f.bridge.bindMachineDelivery = async input => {
+    events.push(['bind_start', input])
+    await new Promise(resolve => { release = resolve })
+    events.push(['bind_end'])
+    return { ok: true, unit_number: input.unit_number, acceptance_key: 'native-armed-key', metadata_only: true, world_mutated: false, goal_verified: false }
+  }
+  f.bridge.observe = async () => { events.push(['observe']); return { observed: true } }
+  const binding = runtime.bindMachineDelivery({ unit_number: 42 })
+  const reading = runtime.observe({ name: 'getActorStatus', args: {} })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(events, [['bind_start', { unit_number: 42 }]])
+  release()
+  assert.equal((await binding).goal_verified, false)
+  assert.deepEqual(await reading, { observed: true })
+  assert.deepEqual(events, [['bind_start', { unit_number: 42 }], ['bind_end'], ['observe']])
+  await assert.rejects(fs.stat(ledgerPath), { code: 'ENOENT' }, 'metadata selection cannot create a world operation ledger')
+  assert.equal(f.calls.length, 0, 'no world submit, receipt, cancellation or operation admission')
+  await assert.rejects(runtime.bindMachineDelivery({ unit_number: 42, acceptance_key: 'caller-key' }), { code: 'invalid_arguments' })
+  await assert.rejects(runtime.bindMachineDelivery({ unit_number: 42, reset: true }), { code: 'invalid_arguments' })
+  assert.equal(events.length, 3, 'invalid metadata input cannot enter the bridge')
+})
+
 test('identical request is idempotent concurrently and conflicting payload cannot mutate', async t => {
   const f = await fixture(t); const runtime = await f.open()
   const [a, b] = await Promise.all([runtime.submit({ request_id: 'same', operation }), runtime.submit({ request_id: 'same', operation })])
@@ -439,7 +471,8 @@ test('running receipt explains in-flight and reports progress once per reply, ne
   assert.equal(admitted.observed_progress.actor_position.moved_tiles, 5)
   probes = 0
   const polled = f.calls.filter(([name]) => name === 'receipt').length
-  const waited = await runtime.get({ operation_id: admitted.operation_id, wait_ms: 60 })
+  // Windows durable replacement launches a native helper during each poll.
+  const waited = await runtime.get({ operation_id: admitted.operation_id, wait_ms: process.platform === 'win32' ? 3000 : 60 })
   assert.ok(f.calls.filter(([name]) => name === 'receipt').length - polled > 1, 'the wait polled more than once')
   assert.equal(probes, 1, 'one progress probe per reply')
   assert.equal(waited.observed_progress.available, true)

@@ -9,6 +9,41 @@ beforeEach(() => {
 })
 
 describe('task manager status snapshot', () => {
+  it('reads exact active batch provenance without actor lookup, storage mutation or exposing the receipt', () => {
+    const actor = vi.fn(() => undefined)
+    const manager = new_task_manager(actor)
+    expect(manager.get_active_batch_identity()).toBeUndefined()
+    expect((globalThis as any).storage).toEqual({})
+    manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+    actor.mockClear()
+    const before = JSON.stringify((globalThis as any).storage)
+    const identity = manager.get_active_batch_identity()!
+    expect(identity).toEqual({ batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1' })
+    identity.batch_id = 99
+    expect(manager.get_active_batch_identity()?.batch_id).toBe(1)
+    expect(JSON.stringify((globalThis as any).storage)).toBe(before)
+    expect(actor).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['missing', undefined],
+    ['invalid id', { batch_id: -1, batch_generation: 1, batch_ref: 'batch-g1-1' }],
+    ['invalid generation', { batch_id: 1, batch_generation: 0, batch_ref: 'batch-g0-1' }],
+    ['foreign id', { batch_id: 2, batch_generation: 1, batch_ref: 'batch-g1-2' }],
+    ['foreign generation', { batch_id: 1, batch_generation: 2, batch_ref: 'batch-g2-1' }],
+    ['foreign ref', { batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-2' }],
+  ])('leaves %s active batch provenance unavailable without repair', (_name, receipt) => {
+    const actor = vi.fn(() => undefined)
+    const manager = new_task_manager(actor)
+    manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+    ;(storage as any).sgluna_task_active_batch = receipt
+    actor.mockClear()
+    const before = JSON.stringify(storage)
+    expect(manager.get_active_batch_identity()).toBeUndefined()
+    expect(JSON.stringify(storage)).toBe(before)
+    expect(actor).not.toHaveBeenCalled()
+  })
+
   it('reads an empty legacy save repeatedly without creating storage or advancing generation', () => {
     const manager = new_task_manager(() => undefined)
     manager.get_status_snapshot()

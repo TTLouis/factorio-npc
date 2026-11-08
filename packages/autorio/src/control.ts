@@ -1,3 +1,6 @@
+import { hydraulic_mutation_preflight } from './hydraulic_mutation'
+import { external_world_preflight } from './external_world_safety'
+import { create_factory_cell_remote_interface } from './factory_cell_observation'
 import type { MapPositionStruct } from 'factorio:prototype'
 import type {
   LuaEntity,
@@ -10,6 +13,7 @@ import type {
 
 import type { ControlledActor } from './actors/types'
 import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
+import { tick_machine_delivery } from './machine_delivery_acceptance'
 import { new_output_delivery_proof_controller, tick_output_delivery_proofs } from './output_delivery_proof'
 import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
@@ -35,7 +39,7 @@ import { create_knowledge_remote_interface } from './knowledge'
 import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
-import { execute_placement_candidate, placement_candidate_preflight, freeze_fluid_preservation_candidate } from './placement_candidates'
+import { execute_placement_candidate, placement_candidate_preflight, freeze_fluid_preservation_candidate, initialize_fluid_preservation_history } from './placement_candidates'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
 import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
@@ -96,6 +100,10 @@ remote.add_interface('autorio_operation_admission', {
   status: (key?: string) => operation_admission.status(key),
 })
 set_task_board_world_task_provider(() => task_manager.get_status_snapshot())
+create_factory_cell_remote_interface(peek_controlled_actor, () => task_manager.is_idle_for_observation())
+remote.add_interface('sgluna_world_safety', {
+  preflight: (operation: string, unit_number: number) => external_world_preflight(peek_controlled_actor(), operation, unit_number),
+})
 const awareness_controller = new_awareness_controller()
 const area_clearing_controller = new_area_clearing_controller(get_controlled_actor, task_manager)
 const basic_operation_controller = new_basic_operation_controller(get_controlled_actor, task_manager)
@@ -405,6 +413,11 @@ function operation_preflight(name: string, args: Record<string, any>) {
         return facts.ok ? accept(details) : reject(facts.code as string, details)
       }
     }
+    if (name === 'rotate_entity' || name === 'mine_entity_exact') {
+      const hydraulic = hydraulic_mutation_preflight(actor, name, unit_number)
+      if (!hydraulic.ok) return reject(hydraulic.code, { field: 'unit_number', identity: unit_number, target: exact_target })
+      return accept({ field: 'unit_number', identity: unit_number, target: exact_target, hydraulic_guard: hydraulic.witness })
+    }
     if (name !== 'set_machine_recipe') {
       return accept({ field: 'unit_number', identity: unit_number, target: exact_target })
     }
@@ -589,8 +602,8 @@ remote.add_interface('autorio_operations', {
     if (accepted) log(`[AUTORIO] New mine_entity task: ${entity_name} x${count}`)
     return accepted
   },
-  mine_entity_exact: (unit_number: number) => {
-    const accepted = basic_operation_controller.submit_mining_exact(unit_number)
+  mine_entity_exact: (unit_number: number, external_world_guard?: boolean) => {
+    const accepted = basic_operation_controller.submit_mining_exact(unit_number, external_world_guard)
     if (accepted) log(`[AUTORIO] New mine_entity_exact task: unit=${unit_number}`)
     return accepted
   },
@@ -657,8 +670,8 @@ remote.add_interface('autorio_operations', {
     }
     return accepted
   },
-  rotate_entity: (unit_number: number, reverse: boolean = false): [boolean, string] => {
-    const result = basic_operation_controller.submit_rotate_exact(unit_number, reverse)
+  rotate_entity: (unit_number: number, reverse: boolean = false, external_world_guard?: boolean): [boolean, string] => {
+    const result = basic_operation_controller.submit_rotate_exact(unit_number, reverse, external_world_guard)
     if (result[0]) log(`[AUTORIO] New rotate_entity task: unit=${unit_number}, reverse=${reverse}`)
     return result
   },
@@ -676,8 +689,8 @@ remote.add_interface('autorio_operations', {
     }
     return result
   },
-  set_machine_recipe: (unit_number: number, recipe_name: string): [boolean, string] => {
-    const result = basic_operation_controller.submit_set_recipe_exact(unit_number, recipe_name)
+  set_machine_recipe: (unit_number: number, recipe_name: string, external_world_guard?: boolean): [boolean, string] => {
+    const result = basic_operation_controller.submit_set_recipe_exact(unit_number, recipe_name, external_world_guard)
     if (result[0]) log(`[AUTORIO] New set_machine_recipe task for entity unit ${unit_number}: ${recipe_name}`)
     return result
   },
@@ -800,7 +813,7 @@ function sweep_npc_vision(reason: string) {
   awareness_controller.vision.sweep(actor_id, reason)
 }
 
-script.on_init(() => sweep_npc_vision('on_init'))
+script.on_init(() => { initialize_fluid_preservation_history(); sweep_npc_vision('on_init') })
 script.on_event(defines.events.on_player_created, () => tick_sprint.safety('player_created'))
 script.on_event(defines.events.on_entity_damaged, event => {
   if (event.entity.unit_number === peek_controlled_actor()?.character?.unit_number) tick_sprint.safety('actor_damaged')
@@ -827,6 +840,7 @@ script.on_event(defines.events.on_tick, (_event) => {
   tick_output_delivery_proofs()
 
   const actor = get_controlled_actor()
+  tick_machine_delivery(actor)
   if (actor === undefined || actor.character === undefined || !actor.is_valid) {
     if (!no_actor_found) {
       log('[AUTORIO] No valid controlled actor found')

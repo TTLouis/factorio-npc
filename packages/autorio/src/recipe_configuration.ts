@@ -1,3 +1,4 @@
+import { external_world_preflight } from './external_world_safety'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { resolve_exact_entity } from './entity_reference'
@@ -91,6 +92,8 @@ export function new_recipe_configuration_runtime(manager: Manager, controller: B
       log(`[AUTORIO] Refused first recipe assignment with native contents or active crafting on machine unit ${task.target_unit_number}`)
       return
     }
+
+    if (task.external_world_guard && !external_world_preflight(actor, 'set_machine_recipe', task.target_unit_number).ok) { controller.fail(actor, task, 'set_recipe_failed'); return }
 
     target.set_recipe(task.recipe_name)
     const [verified_recipe] = target.get_recipe()

@@ -1,3 +1,5 @@
+import { hydraulic_mutation_matches } from './hydraulic_mutation'
+import { external_world_preflight } from './external_world_safety'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { resolve_exact_entity } from './entity_reference'
@@ -46,6 +48,11 @@ export function new_orientation_runtime(manager: Manager, controller: BasicContr
       return [false, 'Target entity cannot be rotated'] as const
     }
 
+    if (task.external_world_guard && !external_world_preflight(actor, 'rotate_entity', task.target_unit_number).ok) { controller.fail(actor, task, 'rotation_failed'); return [false, 'External hydraulic target unproven'] as const }
+
+    const hydraulic = hydraulic_mutation_matches(actor, 'rotate_entity', task.target_unit_number, task.hydraulic_guard)
+    if (!hydraulic.ok) { controller.fail(actor, task, 'hydraulic_mutation_refused', { hydraulic_reason: hydraulic.code }); return [false, hydraulic.code] as const }
+
     const previous_direction = entity.direction
     if (!entity.rotate({ reverse: task.reverse })) {
       controller.fail(actor, task, 'rotation_failed', { previous_direction })
@@ -54,7 +61,7 @@ export function new_orientation_runtime(manager: Manager, controller: BasicContr
 
     const direction = entity.direction
     log(`[AUTORIO] Rotated entity unit=${task.target_unit_number} ${task.reverse ? 'counter-clockwise' : 'clockwise'}: ${previous_direction} -> ${direction}`)
-    controller.complete(actor, task, { previous_direction, direction })
+    controller.complete(actor, task, { previous_direction, direction, hydraulic_guard: task.hydraulic_guard })
     return [true, 'Entity rotated successfully', entity] as const
   }
 

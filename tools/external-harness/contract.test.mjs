@@ -15,6 +15,13 @@ test('external subset and MCP lifecycle exactly match the canonical manifest', (
   assert.deepEqual(external.place_entity_prototypes, capabilities().limits.placement_prototypes)
   assert.deepEqual(external.fluid_candidate_prototypes, capabilities().limits.fluid_candidate_prototypes)
   assert.deepEqual(external.mcp_tools, MCP_TOOLS.map(tool => tool.name))
+  assert.equal(MCP_TOOLS.length, 9)
+  const binding = MCP_TOOLS.find(tool => tool.name === manifest.finite_machine_delivery.model_binding_tool)
+  assert.deepEqual(Object.keys(binding.inputSchema.properties), manifest.finite_machine_delivery.model_binding_args)
+  assert.deepEqual(binding.inputSchema.required, ['unit_number'])
+  assert.equal(binding.inputSchema.additionalProperties, false)
+  assert.equal(external.operations.includes(binding.name), false, 'destination selection is goal metadata, not an admitted world operation')
+  assert.equal(external.observations.includes(binding.name), false, 'immutable metadata selection is not a cacheable observation')
   assert.equal(external.protocol_version, MCP_PROTOCOL_VERSION)
   assert.equal(external.operation_admission_protocol, 2)
   for (const name of external.operations) assert.ok(manifest.operations[name].surfaces.includes('pterodactyl-runtime-v8'))
@@ -38,7 +45,7 @@ test('declared external bounds agree with executable capability limits', () => {
 test('external operation notes match the canonical manifest and name real operations', () => {
   const notes = capabilities().operation_notes
   assert.deepEqual(Object.keys(notes), external.operation_notes)
-  for (const name of Object.keys(notes)) assert.ok(['submit_refusals', 'running_receipts'].includes(name) || external.operations.includes(name), name)
+  for (const name of Object.keys(notes)) assert.ok(['submit_refusals', 'running_receipts', 'exact_adapters'].includes(name) || external.operations.includes(name), name)
   assert.ok(notes.walk_to_position.includes(String(external.limits.walk_distance)))
 })
 

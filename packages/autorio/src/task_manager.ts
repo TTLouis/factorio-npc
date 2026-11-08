@@ -669,6 +669,25 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     }
   }
 
+  // Internal read-only queries must not take the full status path: it ensures
+  // batch-generation storage and crafting status may reconcile/create an actor.
+  function is_idle_for_observation() {
+    const state = execution()
+    return state.player_state.task_state === TaskStates.IDLE && state.task_queue.length === 0 && state.active_batch_id === undefined
+  }
+
+  // Receipt provenance must read the admitted identity without creating an
+  // actor, initializing storage or deriving replacement counters for old saves.
+  function get_active_batch_identity(): TaskBatchIdentity | undefined {
+    const batch = storage.sgluna_task_active_batch
+    if (!batch || !valid_persisted_counter(batch.batch_id) || batch.batch_id < 1
+      || !valid_persisted_counter(batch.batch_generation) || batch.batch_generation < 1
+      || batch.batch_id !== execution().active_batch_id
+      || batch.batch_generation !== storage.sgluna_task_batch_generation
+      || batch.batch_ref !== `batch-g${batch.batch_generation}-${batch.batch_id}`) return undefined
+    return { batch_id: batch.batch_id, batch_generation: batch.batch_generation, batch_ref: batch.batch_ref }
+  }
+
   function get_status_snapshot() {
     return {
       task_state: execution().player_state.task_state,
@@ -752,6 +771,8 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     next_task,
     interrupt_current_with,
     is_task_queue_empty,
+    is_idle_for_observation,
+    get_active_batch_identity,
     get_status_snapshot,
     reset_task_state,
     cancel_task,

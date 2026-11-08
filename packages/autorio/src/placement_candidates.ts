@@ -147,6 +147,7 @@ declare const storage: {
   sgluna_fluid_preservation_claims_initialized?: boolean
   sgluna_fluid_preservation_claim_inventory?: Record<string, any>
   sgluna_fluid_preservation_claim_count?: number
+  sgluna_fluid_preservation_history?: { version: 1, origin: 'native_on_init', tick: 0, claim_count: number }
 }
 
 function candidate_sets() {
@@ -1223,6 +1224,58 @@ function claim_header(guard: NativeFluidGuard) {
     entity_name: guard.join.entity_name, position, direction: guard.join.direction,
     footprint: placement_footprint(prototypes.entity[guard.join.entity_name], position, guard.join.direction).world_box }
 }
+// Only a fresh native game can establish an empty history. Loading/upgrading a
+// legacy save must never manufacture evidence that no protected claims existed.
+export function initialize_fluid_preservation_history() {
+  if (game.tick !== 0 || storage.sgluna_fluid_preservation_history !== undefined
+    || storage.sgluna_fluid_preservation_claims !== undefined || storage.sgluna_fluid_preservation_claim_inventory !== undefined
+    || storage.sgluna_fluid_preservation_claim_count !== undefined || storage.sgluna_fluid_preservation_claims_initialized !== undefined) return
+  storage.sgluna_fluid_preservation_history = { version: 1, origin: 'native_on_init', tick: 0, claim_count: 0 }
+}
+
+// Pure history proof. The independent inception/high-water record is never
+// backfilled on reads or after configuration changes. Registry/inventory copies
+// still validate every retained claim; deleting a suffix cannot reset the count.
+export function hydraulic_claim_protection(actor: ControlledActor, network: any[], envelope?: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) {
+  const fail = (code: string) => ({ ok: false as const, code })
+  const history = storage.sgluna_fluid_preservation_history
+  const count = storage.sgluna_fluid_preservation_claim_count ?? 0
+  if (!history || history.version !== 1 || history.origin !== 'native_on_init' || history.tick !== 0
+    || typeof history.claim_count !== 'number' || history.claim_count < 0 || history.claim_count > 64
+    || history.claim_count !== math.floor(history.claim_count) || history.claim_count !== count || !claim_registry_valid()) return fail('hydraulic_history_unproven')
+  const claims = Object.values(storage.sgluna_fluid_preservation_claims ?? {}) as NativeFluidGuard[]
+  if (claims.length !== history.claim_count || network.length < 1 || network.length > MAX_PROTECTED_FLUID_ENTITIES) return fail('hydraulic_history_unproven')
+  const ids = network.map(row => row.entity.unit_number)
+  const overlaps = (a: any, b: any) => a.left_top.x <= b.right_bottom.x && a.right_bottom.x >= b.left_top.x
+    && a.left_top.y <= b.right_bottom.y && a.right_bottom.y >= b.left_top.y
+  for (const claim of claims) {
+    const header = claim_header(claim)
+    if (!header || !Array.isArray(claim.geometry) || claim.geometry.length > MAX_PROTECTED_FLUID_ENTITIES) return fail('hydraulic_history_unproven')
+    // Unit IDs are globally exact; protect every saved network member and edge,
+    // including a target not separately named in protected_ids.
+    if (claim.protected_ids.some(id => ids.includes(id))) return fail('hydraulic_target_protected')
+    for (const row of claim.geometry) {
+      if (!row.entity || !Array.isArray(row.fluid_storages)) return fail('hydraulic_history_unproven')
+      if (ids.includes(row.entity.unit_number)) return fail('hydraulic_target_protected')
+      for (const box of row.fluid_storages) {
+        if (!Array.isArray(box.pipe_connections)) return fail('hydraulic_history_unproven')
+        for (const port of box.pipe_connections) if (port.connected && (!port.target || ids.includes(port.target.unit_number))) return fail('hydraulic_target_protected')
+      }
+    }
+    if (header.surface_index !== actor.surface.index) continue
+    // Protect the placed candidate even after registry eviction or a save/load;
+    // its durable native footprint cannot be replaced by a guessed new identity.
+    if (envelope && overlaps(envelope, header.footprint)) return fail('hydraulic_candidate_footprint_protected')
+    for (const row of network) {
+      const p = row.entity.position
+      if (!p) return fail('hydraulic_history_unproven')
+      if (p.x >= header.footprint.left_top.x && p.x <= header.footprint.right_bottom.x
+        && p.y >= header.footprint.left_top.y && p.y <= header.footprint.right_bottom.y) return fail('hydraulic_candidate_footprint_protected')
+    }
+  }
+  return { ok: true as const, claim_count: history.claim_count }
+}
+
 function claim_registry_valid() {
   const claims = storage.sgluna_fluid_preservation_claims ?? {}
   const inventory = storage.sgluna_fluid_preservation_claim_inventory ?? {}
@@ -1346,6 +1399,7 @@ export function freeze_fluid_preservation_candidate(actor: ControlledActor | und
     storage.sgluna_fluid_preservation_claim_inventory[operation_key] = { header: claim_header(candidate.preservation_guard),
       guard_facts: copy_native_fact(candidate.preservation_guard) }
     storage.sgluna_fluid_preservation_claim_count = (storage.sgluna_fluid_preservation_claim_count ?? 0) + 1
+    if (storage.sgluna_fluid_preservation_history) storage.sgluna_fluid_preservation_history.claim_count += 1
   }
   storage.sgluna_fluid_preservation_claims_initialized = true
   return { ok: true, preservation_join: { ...candidate.preservation_guard.join, version: 4,
@@ -1430,8 +1484,7 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   const unavailable = (reason: string) => ({ version: 1, complete: false, reason })
   const prototype = prototypes.entity[set.entity_name]
   const fluidboxes = prototype?.fluidbox_prototypes ?? []
-  if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'].includes(set.entity_name)
-    || fluidboxes.length < 1 || fluidboxes.length > 16 || fluidboxes.some((storage, index) => storage.index !== index + 1
+  if (!prototype || fluidboxes.length < 1 || fluidboxes.length > 16 || fluidboxes.some((storage, index) => storage.index !== index + 1
       || !(storage.get_volume() > 0 && storage.get_volume() < math.huge)
       || !['input', 'output', 'input-output', 'none'].includes(storage.production_type))) return unavailable('candidate_storage_constraints_unproven')
   let expected = 0
@@ -1441,7 +1494,7 @@ function preservation_candidate_join(actor: ControlledActor, set: PlacementCandi
   }
   const ports = candidate_fluid_ports(prototype, candidate.position, candidate.direction)
   if (!ports || expected !== ports.length || expected > 16 || expected < 1
-    || ports.some(port => port.connection_type !== 'normal') || (candidate.clears?.length ?? 0) > 0) return unavailable('candidate_ports_incomplete_or_clearing')
+    || ports.some(port => port.connection_type !== 'normal' || port.direction === undefined || ![0, 4, 8, 12].includes(port.direction)) || (candidate.clears?.length ?? 0) > 0) return unavailable('candidate_ports_incomplete_or_clearing')
   if (!candidate.connects_to && !isolated) return unavailable('relation_required')
   if (isolated && candidate.connects_to) return unavailable('isolated_candidate_has_relation')
   const storages = fluidboxes.map((storage, index) => ({ index: storage.index ?? index + 1,

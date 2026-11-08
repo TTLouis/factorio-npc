@@ -1,3 +1,4 @@
+import { worldEntityFactsDefinition, renderWorldEntityFacts } from './world-entity-tool.mjs'
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
@@ -1272,8 +1273,8 @@ export const plannerControlToolDefinitions = [{
                   id: { type: 'string', maxLength: 60 },
                   kind: {
                     type: 'string',
-                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate'],
-                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); inventory_count {item_name, minimum} (SGLuna\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded: any non-fuel hand insert, even into a chest, delays it by a window, and a hand-fed machine keeps it void until its hand-fed input is used up). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
+                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'machine_output_delivered', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate'],
+                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); machine_output_delivered {item_name, minimum} (new native furnace output in one exact newly placed chest; requires host arming before work and immutable explicit destination selection or completed exact deposit); inventory_count {item_name, minimum} (SGLuna\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded: any non-fuel hand insert, even into a chest, delays it by a window, and a hand-fed machine keeps it void until its hand-fed input is used up). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
                   },
                   technology: { type: 'string', maxLength: 100 },
                   item_name: { type: 'string', maxLength: 100 },
@@ -1484,6 +1485,7 @@ const researchPathDefinition = {
 }
 
 export const toolDefinitions = [
+  worldEntityFactsDefinition,
   ...base.toolDefinitions,
   ...reservationDefinitions,
   placementCandidatesDefinition,
@@ -1627,6 +1629,7 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   findLongRangeEntities: 'nearby_world',
   findNearestEnemy: 'nearby_world',
 
+  getWorldEntityFacts: 'entity_status',
   getEntityStatus: 'entity_status',
   getEntityGeometry: 'entity_status',
   getLocalSpatialObservation: 'entity_status',
@@ -1685,6 +1688,7 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getMiningDetails: 'fact',
   estimateProductionTime: 'fact',
   getPrototypeDetails: 'fact',
+  getWorldEntityFacts: 'fact',
   getEntityStatus: 'fact',
   getEntityGeometry: 'fact',
   getResearchStatus: 'fact',
@@ -1772,6 +1776,7 @@ export function isObservationToolName(name) {
 }
 
 export function toolCommand(name, args) {
+  if (name === 'getWorldEntityFacts') return renderWorldEntityFacts(args)
   if (name === 'validateConstructionReservation') {
     exactKeys(args, ['goal_id', 'plan_id', 'x', 'y', 'width', 'height'])
     check(['x', 'y', 'width', 'height'].every(key => Number.isInteger(args[key])), 'Area coordinates and dimensions are required integers')

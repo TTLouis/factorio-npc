@@ -1,3 +1,4 @@
+export const TERMINAL_TRANSFER_REFUSAL_CAUSES = Object.freeze(['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item'])
 // MW2b operation reconciliation (docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md section 3: "No blind replay of a command whose
 // acknowledgement was lost, and no uncertain operation counted as successful").
 //
@@ -578,7 +579,7 @@ function terminalTransferRefusal(admission, status, pending) {
       || !Array.isArray(receipt.refusals) || receipt.refusals.length !== receipt.refused_count
       || new Set(receipt.refusals.map(row => row.operation_id)).size !== receipt.refused_count
       || !receipt.refusals.every(row => row?.type === 'moving_items' && row.code === 'nothing_moved'
-        && row.cause === 'target_rejects_item' && Number.isSafeInteger(row.operation_id) && row.operation_id > 0
+        && TERMINAL_TRANSFER_REFUSAL_CAUSES.includes(row.cause) && Number.isSafeInteger(row.operation_id) && row.operation_id > 0
         && Number.isSafeInteger(row.target_unit_number) && row.target_unit_number > 0 && Number.isSafeInteger(row.held_count) && row.held_count > 0
         && Number.isSafeInteger(row.tick) && row.tick >= 0 && row.tick <= receipt.tick)) return null
     completed += receipt.completed_count; refused += receipt.refused_count
