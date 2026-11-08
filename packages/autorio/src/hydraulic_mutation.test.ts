@@ -116,6 +116,36 @@ describe('native hydraulic mutation evidence', () => {
       recovered_items: [{ name: 'fixture-building', count: 1, quality: 'normal' }] })
   })
 
+  it('accepts passive pipe working status only with empty fresh hydraulic and custody evidence', () => {
+    const f = fixture()
+    f.target.status = G.defines.entity_status.working
+    expect(hydraulic_mutation_preflight(f.actor, 'mine_entity_exact', 91).ok).toBe(true)
+    expect(f.submitRemoval(false)).toBe(true)
+    f.runtime.state_mining(f.actor)
+    G.game.tick = 112
+    f.runtime.state_mining(f.actor)
+    expect(f.target.mine).toHaveBeenCalledTimes(1)
+    expect(f.controller.status().last_result?.entity_removal).toMatchObject({ state: 'verified', target_gone: true })
+  })
+
+  it('still refuses fluid in a passive pipe whose native status is working', () => {
+    const f = fixture()
+    f.target.status = G.defines.entity_status.working
+    f.target.get_fluid = () => ({ name: 'fixture-fluid', amount: 1 })
+    expect(hydraulic_mutation_preflight(f.actor, 'mine_entity_exact', 91)).toMatchObject({ ok: false, code: 'hydraulic_network_not_empty' })
+    expect(f.submitRemoval(false)).toBe(false)
+    expect(f.target.mine).not.toHaveBeenCalled()
+  })
+
+  it('continues refusing working processors instead of treating working status as passive', () => {
+    const f = fixture()
+    f.target.type = 'assembling-machine'
+    f.target.status = G.defines.entity_status.working
+    expect(hydraulic_mutation_preflight(f.actor, 'mine_entity_exact', 91)).toMatchObject({ ok: false, code: 'hydraulic_network_active' })
+    expect(f.submitRemoval(false)).toBe(false)
+    expect(f.target.mine).not.toHaveBeenCalled()
+  })
+
   it.each(['missing', 'legacy', 'wrong-count'])('refuses %s claim history even when the target is empty', fault => {
     const f = fixture()
     if (fault === 'missing') delete G.storage.sgluna_fluid_preservation_history

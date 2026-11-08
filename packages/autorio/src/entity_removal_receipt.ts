@@ -72,7 +72,9 @@ export function removal_snapshot(entity: LuaEntity): RemovalSnapshot {
   if (!entity.minable || !entity.prototype.mineable_properties.minable) fail('removal_not_minable')
   // A synchronous mine can destroy fluid and in-flight materials. Never count
   // their loss as successful item custody or silently stop an operating machine.
-  if (entity.status === defines.entity_status.working) fail('removal_target_working')
+  // Passive native pipes/tanks report working without processing materials.
+  // Their complete geometry and empty-fluid custody checks still apply below.
+  if (entity.status === defines.entity_status.working && !['pipe', 'storage-tank'].includes(entity.type)) fail('removal_target_working')
   if (['assembling-machine', 'furnace', 'rocket-silo'].includes(entity.type) && entity.crafting_progress > 0) fail('removal_process_in_flight')
   if (['transport-belt', 'underground-belt', 'splitter', 'loader', 'loader-1x1', 'linked-belt', 'inserter', 'car', 'spider-vehicle', 'locomotive', 'cargo-wagon', 'fluid-wagon', 'artillery-wagon'].includes(entity.type)) fail('removal_contents_domain_unsupported')
   const fluidboxes = entity.fluids_count

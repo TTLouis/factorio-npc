@@ -130,7 +130,9 @@ function prove(actor: ControlledActor, operation: string, entity: LuaEntity) {
     if (pending.length > MAX_NETWORK) return fail('hydraulic_network_over_limit')
     const resolved = resolve_visible_entity_reference(actor, pending[index], 'actor_body').entity
     if (!resolved?.valid || resolved.force.index !== actor.force.index || resolved.surface.index !== actor.surface.index) return fail('hydraulic_network_scope_unproven')
-    if (resolved.status === defines.entity_status.working) return fail('hydraulic_network_active')
+    // Passive native pipes/tanks report working without processing materials.
+    // Their complete geometry and empty-fluid custody checks still apply below.
+    if (resolved.status === defines.entity_status.working && !['pipe', 'storage-tank'].includes(resolved.type)) return fail('hydraulic_network_active')
     if (['assembling-machine', 'furnace', 'rocket-silo'].includes(resolved.type) && resolved.crafting_progress > 0) return fail('hydraulic_process_in_flight')
     if (!finite(resolved.fluids_count) || resolved.fluids_count < 0 || resolved.fluids_count > 16) return fail('hydraulic_network_unreadable')
     for (let storage = 1; storage <= resolved.fluids_count; storage++) if (resolved.get_fluid(storage) !== undefined) return fail('hydraulic_network_not_empty')
