@@ -1,34 +1,52 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-import { libraryMetadata, MAX_LIBRARY_RESULT_BYTES, OWNER_REQUIREMENT_ID, readLibrary } from './library.mjs'
+import { LIBRARY_COUNTS, LIBRARY_SOURCE, libraryMetadata, MAX_LIBRARY_RESULT_BYTES, readLibrary } from './library.mjs'
 import { MCP_TOOLS, startMcpServer } from './mcp-server.mjs'
 import { withMcpClient } from './mcp-call.mjs'
 import { openRuntime } from './runtime.mjs'
 
-const bytes = await fs.readFile(new URL('./library/jev-catalog.json', import.meta.url))
-const donor = JSON.parse(bytes)
-const provenance = JSON.parse(await fs.readFile(new URL('./library/provenance.json', import.meta.url), 'utf8'))
+const sourceUrl = new URL(`../../${LIBRARY_SOURCE}`, import.meta.url)
+const pack = JSON.parse(await fs.readFile(sourceUrl))
+const everyEntry = [...pack.knowledge, ...pack.skills]
 
-test('catalog preserves exact pinned donor bytes, Git blob, schema, six knowledge and 54 skills', () => {
-  assert.equal(provenance.donor_commit, '20cdcd072b512c814c8af071f4f9ad1fe087f942')
-  assert.equal(provenance.artifacts.catalog.sha256, 'dd8c6585169b6a8e9a8108db06d390bd9666625822a24a84c7b62156d7b3e861')
-  assert.equal(createHash('sha256').update(bytes).digest('hex'), provenance.artifacts.catalog.sha256)
-  assert.equal(createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes])).digest('hex'), provenance.artifacts.catalog.blob)
-  assert.equal(provenance.artifacts.catalog.blob, '305385246458f7fab6fa5c3796c30d92d05803a2')
-  assert.equal(bytes.length, provenance.artifacts.catalog.bytes)
-  assert.equal(donor.schema, 2)
-  assert.equal(donor.knowledge.length, 6)
-  assert.equal(donor.skills.length, 54)
+test('library reads the leveled export: schema 2, asserted counts, unique valid ids, resolvable related ids', () => {
+  assert.equal(pack.schema, 2)
+  assert.deepEqual({ knowledge: pack.knowledge.length, skills: pack.skills.length }, LIBRARY_COUNTS)
+  const ids = new Set(everyEntry.map(entry => entry.id))
+  assert.equal(ids.size, everyEntry.length)
+  for (const entry of everyEntry) {
+    assert.match(entry.id, /^[a-z0-9][a-z0-9-]{0,99}$/)
+    for (const id of entry.related_ids ?? entry.guidance?.related_ids ?? []) assert.ok(ids.has(id), `${entry.id} -> ${id}`)
+  }
 })
 
-test('every donor full guidance/source ID survives typed advisory views without executable/native verification fields', async () => {
-  for (const [kind, entries] of [['knowledge', donor.knowledge], ['skill', donor.skills]]) {
+// Same authoring rules the built-in harness enforces on the leveled source: methods, not stored numbers.
+test('authored prose holds no numbers and each knowledge reference states exactly one contrast', () => {
+  for (const entry of pack.knowledge) {
+    assert.equal(entry.reference.concepts.filter(text => text.startsWith('Contrast:')).length, 1, entry.id)
+    const prose = JSON.stringify({ summary: entry.summary, applicability: { ...entry.applicability }, reference: entry.reference, failures: entry.known_failure_modes })
+    assert.doesNotMatch(prose, /\d|\bper (?:second|minute|tick)\b/i, entry.id)
+  }
+  for (const entry of pack.skills) {
+    const { related_ids: _related, ...guidance } = entry.guidance
+    assert.doesNotMatch(JSON.stringify({ summary: entry.summary, guidance, failures: entry.known_failure_modes }), /\d|\bper (?:second|minute|tick)\b/i, entry.id)
+  }
+})
+
+test('exported fixture is current with the leveled library source (exporter --check)', () => {
+  const script = fileURLToPath(new URL('../../scripts/export-leveled-library.mjs', import.meta.url))
+  assert.match(execFileSync(process.execPath, [script, '--check'], { encoding: 'utf8' }), /Checked [0-9]+ entries/)
+})
+
+test('every full guidance/source ID survives typed advisory views without executable/native verification fields', async () => {
+  for (const [kind, entries] of [['knowledge', pack.knowledge], ['skill', pack.skills]]) {
     for (const entry of entries) {
       const result = await readLibrary({ kind, action: 'get', id: entry.id })
       assert.equal(result.entry.id, entry.id)
@@ -43,23 +61,29 @@ test('every donor full guidance/source ID survives typed advisory views without 
   }
 })
 
-test('owner policy is separately discoverable and relevant method views cross-reference electrical-first sustainment', async () => {
-  const found = await readLibrary({ kind: 'knowledge', action: 'search', query: 'fuel individual machines' })
-  assert.equal(found.results[0].id, OWNER_REQUIREMENT_ID)
-  const policy = await readLibrary({ kind: 'knowledge', action: 'get', id: OWNER_REQUIREMENT_ID })
-  const text = JSON.stringify(policy.entry)
-  assert.match(text, /centralized/)
-  assert.match(text, /separated smelting/)
-  assert.match(text, /finite bootstrap/)
-  assert.match(text, /automatically supplied/)
-  assert.doesNotMatch(text, /currently unsupported|currently lacks|does not support electric/)
-  for (const id of ['burner-coal-loop', 'burner-inserter-refueling', 'direct-miner-smelting', 'steam-power-bootstrap', 'starter-smelting-row', 'skill-prove-sustainment']) {
-    const view = await readLibrary({ kind: 'skill', action: 'get', id })
-    assert.ok(view.entry.related_ids.includes(OWNER_REQUIREMENT_ID))
-    assert.equal(view.entry.owner_requirements[0].id, OWNER_REQUIREMENT_ID)
-    assert.match(view.entry.owner_requirements[0].capability_caveat, /currently admitted/)
+test('related links are generic and bidirectional', async () => {
+  const sources = new Map(everyEntry.map(entry => [entry.id, new Set(entry.related_ids ?? entry.guidance?.related_ids ?? [])]))
+  const kinds = new Map(pack.knowledge.map(entry => [entry.id, 'knowledge']).concat(pack.skills.map(entry => [entry.id, 'skill'])))
+  for (const [id, own] of sources) {
+    const expected = new Set([...own, ...[...sources].filter(([, ids]) => ids.has(id)).map(([other]) => other)])
+    const result = await readLibrary({ kind: kinds.get(id), action: 'get', id })
+    assert.deepEqual(new Set(result.entry.related_ids), expected, id)
+    assert.equal(Object.hasOwn(result.entry, 'owner_requirements'), false)
+    assert.equal(Object.hasOwn(result.authority, 'owner_requirement_id'), false)
+    assert.equal(result.provenance.source, LIBRARY_SOURCE)
   }
-  assert.ok(Buffer.byteLength(JSON.stringify(policy)) <= MAX_LIBRARY_RESULT_BYTES)
+})
+
+test('progression checkpoints knowledge is discoverable and linked from the related methods', async () => {
+  const id = 'knowledge-automation-progression-checkpoints'
+  const found = await readLibrary({ kind: 'knowledge', action: 'search', query: 'fuel runs' })
+  assert.equal(found.results[0].id, id)
+  const entry = (await readLibrary({ kind: 'knowledge', action: 'get', id })).entry
+  assert.match(JSON.stringify(entry), /next unmet checkpoint/)
+  for (const related of ['burner-coal-loop', 'steam-power-bootstrap', 'skill-prove-sustainment']) {
+    assert.ok(entry.related_ids.includes(related))
+    assert.ok((await readLibrary({ kind: 'skill', action: 'get', id: related })).entry.related_ids.includes(id))
+  }
 })
 
 test('power/electricity search prioritizes power planning, not blanket owner aliases on burner methods', async () => {
@@ -84,7 +108,7 @@ test('hard action/kind/query/ID/limit validation and separate namespaces fail cl
     { kind: 'skill', action: 'get', id: 'steam-power-bootstrap', lua: 'forbidden' }]) {
     await assert.rejects(readLibrary(input), { code: 'invalid_library_arguments' })
   }
-  await assert.rejects(readLibrary({ kind: 'skill', action: 'get', id: OWNER_REQUIREMENT_ID }), { code: 'library_entry_not_found' })
+  await assert.rejects(readLibrary({ kind: 'skill', action: 'get', id: 'knowledge-automation-progression-checkpoints' }), { code: 'library_entry_not_found' })
   await assert.rejects(readLibrary({ kind: 'knowledge', action: 'get', id: 'unknown-id' }), { code: 'library_entry_not_found' })
 })
 
@@ -115,11 +139,11 @@ test('MCP paired streams deliver typed library content and validate enum before 
   const send = message => input.write(`${JSON.stringify(message)}\n`)
   send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'library-test', version: '1' } } })
   send({ jsonrpc: '2.0', method: 'notifications/initialized' })
-  send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'knowledge', action: 'get', id: OWNER_REQUIREMENT_ID } } })
-  send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'plan', action: 'get', id: OWNER_REQUIREMENT_ID } } })
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'knowledge', action: 'get', id: 'knowledge-automation-progression-checkpoints' } } })
+  send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'factorio_library', arguments: { kind: 'plan', action: 'get', id: 'knowledge-automation-progression-checkpoints' } } })
   for (let i = 0; i < 100 && replies.length < 3; i++) await new Promise(resolve => setImmediate(resolve))
   const r = replies.find(row => row.id === 2)
-  assert.equal(r.result.structuredContent.entry.id, OWNER_REQUIREMENT_ID)
+  assert.equal(r.result.structuredContent.entry.id, 'knowledge-automation-progression-checkpoints')
   assert.deepEqual(JSON.parse(r.result.content[0].text), r.result.structuredContent)
   assert.equal(replies.find(row => row.id === 3).error.code, -32602)
   assert.equal(MCP_TOOLS.find(tool => tool.name === 'factorio_library').annotations.readOnlyHint, true)
@@ -140,7 +164,9 @@ const runtime=Object.fromEntries(['capabilities','context','observe','submit','g
 
 test('library capability metadata stays small and advertises the local typed advisory boundary', () => {
   const m = libraryMetadata()
-  assert.deepEqual(m.counts, { knowledge: 7, skills: 54 })
+  assert.deepEqual(m.counts, LIBRARY_COUNTS)
+  assert.equal(m.source, LIBRARY_SOURCE)
+  assert.equal(Object.hasOwn(m, 'donor_commit'), false)
   assert.equal(m.loading, 'on_demand')
   assert.equal(m.advisory_only, true)
   assert.ok(JSON.stringify(m).length < 500)

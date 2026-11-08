@@ -315,6 +315,94 @@
           "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
         ]
       }
+    },
+    {
+      "schema_version": 1,
+      "content_type": "knowledge",
+      "id": "knowledge-automation-progression-checkpoints",
+      "revision": 1,
+      "name": "Automation Progression Checkpoints",
+      "summary": "A checkpoint scale for classifying how automated a base is from observed facts and naming the next unmet checkpoint.",
+      "level": 0,
+      "search_aliases": [
+        "electricity first",
+        "centralized power",
+        "electric mining drill",
+        "electrical miners",
+        "fuel runs",
+        "individual refueling",
+        "prefilled fuel",
+        "separated smelting arrays",
+        "sustainment",
+        "unattended production",
+        "automation stage",
+        "progression checkpoint"
+      ],
+      "applicability": {
+        "when_to_use": "Judging how automated the current base is, choosing what to automate next, or deciding whether a short run shows sustained automation.",
+        "when_to_skip": "The current stage and next checkpoint are already established by fresh observations of the same base.",
+        "live_checks": [
+          "Power source, its fuel or supply route, and which machines draw electricity versus burner fuel.",
+          "Whether machine and fuel inventories were replenished with no agent actions over a fresh observation window.",
+          "Current capabilities and the admitted placement and tool support for the machines a checkpoint needs, such as electric miners."
+        ],
+        "required_capabilities": [
+          "Current capability evidence and admitted placement catalog for any machine type a checkpoint needs."
+        ]
+      },
+      "reference": {
+        "concepts": [
+          "The checkpoints run in order from manual bootstrap through burner loops, centralized electricity, electric mining and transfers and separated smelting to sustained downstream consumption; each builds on the earlier ones.",
+          "Manual bootstrap: the agent hand-places and primes machines; priming is finite and declared.",
+          "Self-sustaining burner loops: burner mining or smelting whose fuel is delivered by the system rather than by agent fuel runs.",
+          "Centralized electricity: a power network whose fuel or service supply arrives automatically.",
+          "Electric mining and transfers: electric miners and electric transfers on that network, where live availability and tool support allow.",
+          "Separated smelting arrays: automatic feed, output and, if the machines need it, fuel service.",
+          "Sustained downstream consumption: science or labs running from the earlier checkpoints without agent intervention.",
+          "Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it.",
+          "Contrast: a burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach."
+        ],
+        "interpretation_checks": [
+          "The current stage is named with live evidence and the next unmet checkpoint is identified; unknown evidence leaves the checkpoint unmet."
+        ]
+      },
+      "related_ids": [
+        "knowledge-available-capabilities",
+        "knowledge-production-dependencies",
+        "knowledge-rates-stocks-freshness",
+        "burner-coal-loop",
+        "direct-miner-smelting",
+        "starter-mining-belt-output",
+        "burner-inserter-refueling",
+        "starter-smelting-row",
+        "steam-power-bootstrap",
+        "scale-out-production-line",
+        "skill-complete-operating-cell",
+        "skill-commission-before-copying",
+        "skill-minimum-useful-bootstrap",
+        "skill-parallel-production-scheduling",
+        "skill-manual-to-automatic-transition",
+        "skill-find-actual-bottleneck",
+        "skill-protect-critical-supply",
+        "skill-prove-sustainment",
+        "skill-define-production-interfaces",
+        "skill-local-or-shared-production",
+        "skill-maintain-remote-operations",
+        "skill-independent-operating-base"
+      ],
+      "known_failure_modes": [
+        "Prefilled stocks or a short positive run are classified as sustained.",
+        "Repeated individual refueling is counted as automation.",
+        "Unlocks or tool support are assumed from catalog presence."
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
+        ]
+      }
     }
   ],
   "skills": [
