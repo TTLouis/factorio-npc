@@ -235,6 +235,7 @@ export function configuration(raw = {}, env = process.env) {
     budget: safeInteger(env.MAX_PROVIDER_REQUESTS_PER_HOUR ?? raw.maxProviderRequestsPerHour ?? 30, 'MAX_PROVIDER_REQUESTS_PER_HOUR', 1, 1200),
     maxProviderOutputUnits: safeInteger(env.MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN ?? raw.maxProviderOutputTokensPerTurn ?? 100000, 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN', 1000, 200000),
     stopMs: safeInteger(env.SHUTDOWN_TIMEOUT_MS ?? raw.shutdownTimeoutMs ?? 60000, 'SHUTDOWN_TIMEOUT_MS', 1000, 300000),
+    factorioVersion: cleanString(env.FACTORIO_VERSION ?? raw.factorioVersion ?? '2.1.24', 'FACTORIO_VERSION', 20),
     factorio: {
       username: factorioUsername,
       token: factorioToken,
@@ -3711,7 +3712,10 @@ export class Session {
     }
     check(this.rcon, 'Timed out waiting for authenticated Factorio RCON')
     const version = await this.rcon.command('/version')
-    check(/2\.0\.\d+/.test(version), 'Authenticated Factorio RCON version probe failed')
+    const expectedVersion = this.config.factorioVersion ?? '2.1.24'
+    check(['2.0.77', '2.1.24'].includes(expectedVersion)
+      && String(version).match(/\b(\d+\.\d+\.\d+)\b/)?.[1] === expectedVersion,
+    `Authenticated Factorio RCON version probe did not match configured engine ${expectedVersion}`)
     const handshake = await confirmLuaConsoleReady(this.rcon)
     this.log(`startup.lua_console_ready ${JSON.stringify({ request_id: 'startup', reason: handshake.attempts === 2 ? 'native_confirmation_repeated' : 'already_enabled', ...handshake })}`)
   }

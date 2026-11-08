@@ -10,7 +10,7 @@ import { MAX_IN_FLIGHT, MAX_MESSAGE_BYTES, MAX_RESULT_BYTES, MCP_PROTOCOL_VERSIO
 // mechanics or establish native gameplay success.
 function fixture(overrides = {}) {
   const calls = []
-  const runtime = Object.fromEntries(['capabilities', 'library', 'context', 'observe', 'submit', 'get', 'cancel', 'resume']
+  const runtime = Object.fromEntries(['bindMachineDelivery', 'capabilities', 'library', 'context', 'observe', 'submit', 'get', 'cancel', 'resume']
     .map(name => [name, async args => { calls.push({ name, args }); return { method: name, args } }]))
   Object.assign(runtime, overrides)
   const input = new PassThrough()
@@ -49,9 +49,15 @@ test('negotiates a supported MCP version and exposes exactly the bounded tool sc
   assert.deepEqual(initialized.result.capabilities, { tools: { listChanged: false } })
   const listed = await f.request(1, 'tools/list')
   assert.deepEqual(listed.result.tools, MCP_TOOLS)
-  assert.equal(listed.result.tools.length, MCP_TOOLS.length)
+  assert.equal(listed.result.tools.length, 9)
   assert.equal(listed.result.tools.find(tool => tool.name === 'factorio_submit').annotations.readOnlyHint, false)
   assert.equal(listed.result.tools.find(tool => tool.name === 'factorio_resume').annotations.readOnlyHint, true)
+  const binding = listed.result.tools.find(tool => tool.name === 'bindMachineDelivery')
+  assert.deepEqual(binding.inputSchema.required, ['unit_number'])
+  assert.deepEqual(Object.keys(binding.inputSchema.properties), ['unit_number'])
+  assert.equal(binding.inputSchema.additionalProperties, false)
+  assert.equal(binding.annotations.readOnlyHint, false)
+  assert.equal(binding.annotations.destructiveHint, false)
   assert.equal(f.calls.length, 0)
 })
 
@@ -68,6 +74,7 @@ test('requires initialization before tools and rejects malformed initialization'
 test('all declared MCP tools dispatch once with exact arguments and structured/text results', async t => {
   const f = fixture(); t.after(f.server.stop); await f.initialize()
   const invocations = [
+    ['bindMachineDelivery', 'bindMachineDelivery', { unit_number: 42 }],
     ['factorio_capabilities', 'capabilities', {}],
     ['factorio_library', 'library', { kind: 'knowledge', action: 'search', query: 'power' }],
     ['factorio_context', 'context', {}],
@@ -90,6 +97,10 @@ test('rejects invalid and unknown calls before entering the runtime', async t =>
   const f = fixture(); t.after(f.server.stop); await f.initialize()
   const badCalls = [
     { name: 'shell', arguments: { command: 'anything' } },
+    { name: 'bindMachineDelivery', arguments: { unit_number: 42, acceptance_key: 'caller-key' } },
+    { name: 'bindMachineDelivery', arguments: { unit_number: 42, reset: true } },
+    { name: 'bindMachineDelivery', arguments: { unit_number: 0 } },
+    { name: 'bindMachineDelivery', arguments: { unit_number: 42, lua: 'game.print(1)' } },
     { name: 'factorio_context', arguments: { extra: true } },
     { name: 'factorio_context', arguments: null },
     { name: 'factorio_submit', arguments: { request_id: 'x', operation: { name: 'wait', args: {}, lua: 'anything' } } },
@@ -231,7 +242,7 @@ test('stop detaches immediately without cancelling an in-flight gameplay call', 
 test('real child-process stdio emits only newline-delimited MCP messages (fake runtime)', async () => {
   const moduleUrl = new URL('./mcp-server.mjs', import.meta.url).href
   const script = `import { startMcpServer } from ${JSON.stringify(moduleUrl)};
-const runtime = Object.fromEntries(['capabilities','library','context','observe','submit','get','cancel','resume'].map(name => [name, async args => ({name,args})]));
+const runtime = Object.fromEntries(['bindMachineDelivery','capabilities','library','context','observe','submit','get','cancel','resume'].map(name => [name, async args => ({name,args})]));
 startMcpServer({runtime});`
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['pipe', 'pipe', 'pipe'] })
   let stdout = ''; let stderr = ''

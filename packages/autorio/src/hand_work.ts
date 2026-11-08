@@ -25,6 +25,7 @@
 // numbers and strings only).
 
 import type { LuaEntity, LuaSurface, SurfaceIndex } from 'factorio:runtime'
+import { note_machine_delivery_nonmachine_gain } from './machine_delivery_acceptance'
 import { note_output_proof_hand_craft, note_output_proof_manual_mutation } from './output_delivery_proof'
 import { entity_role_inventories, has_separate_output } from './inventory_roles'
 import { find_world_entities } from './npc_vision'
@@ -193,6 +194,7 @@ function prune_fed(work: ForceHandWork) {
 }
 
 export function record_hand_crafted_tick(force_index: number, item_name: string) {
+  note_machine_delivery_nonmachine_gain(item_name)
   note_output_proof_hand_craft(force_index, item_name)
   const work = force_work(force_index)
   const crafted = work.crafted_tick ?? {}
@@ -202,6 +204,7 @@ export function record_hand_crafted_tick(force_index: number, item_name: string)
 
 /** A player on the force mined an item by hand (on_player_mined_item). */
 export function record_hand_mined_item(force_index: number, item_name: string) {
+  note_machine_delivery_nonmachine_gain(item_name)
   const work = force_work(force_index)
   const mined = work.mined_tick ?? {}
   work.mined_tick = mined
@@ -269,6 +272,7 @@ export function note_hand_mining(force_index: number, mining: boolean, target: L
   const mined = work.mined_tick ?? {}
   work.mined_tick = mined
   for (const name of Object.keys(active)) {
+    note_machine_delivery_nonmachine_gain(name)
     mined[name] = game.tick
     delete active[name]
   }

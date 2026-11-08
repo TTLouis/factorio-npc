@@ -48,7 +48,7 @@ export const GOAL_READING_MIN_CONFIDENCE = 0.6
 const FAMILY_CONDITION_KINDS = Object.freeze({
   rocket_launch: ['rockets_launched'],
   research: ['research_completed'],
-  produce_items: ['items_produced', 'inventory_count', 'production_rate'],
+  produce_items: ['items_produced', 'inventory_count', 'production_rate', 'machine_output_delivered'],
   space_travel: ['space_location_unlocked'],
 })
 

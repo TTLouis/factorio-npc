@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fluid_source_observation } from './fluid_source_observation'
-import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor, freeze_fluid_preservation_candidate, placement_candidate_matches, placement_preservation_execution_allowed, placement_preservation_queue_binding } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight, placement_candidates_for_actor, freeze_fluid_preservation_candidate, placement_candidate_matches, placement_preservation_execution_allowed, placement_preservation_queue_binding, hydraulic_claim_protection, initialize_fluid_preservation_history } from './placement_candidates'
 import { new_basic_operation_controller } from './basic_operations'
 import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_task_manager } from './task_manager'
@@ -249,18 +249,28 @@ describe('placement candidates that join a live fluid port', () => {
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
   })
 
-  it('refuses an unlisted fluid miner even when its synthetic port shape matches an allowed candidate', () => {
+  it('proves a custom fluid miner from native facts and refuses unknown storage or incomplete ports', () => {
     build_pump()
     const entityName = 'unlisted-fluid-miner'
     ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
-    ;(globalThis as any).prototypes.entity[entityName] = { ...boiler, name: entityName, type: 'mining-drill', items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    const prototype = { ...boiler, name: entityName, type: 'mining-drill',
+      fluidbox_prototypes: boiler.fluidbox_prototypes.map(box => ({ ...box, pipe_connections: box.pipe_connections.map(port => ({ ...port })) })),
+      items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
+    ;(globalThis as any).prototypes.entity[entityName] = prototype
     const actor = actor_at(0, 0)
     actor.get_main_inventory = () => ({ get_item_count: () => 1 })
     actor.surface.find_entities_filtered = () => Object.values(world)
     try {
       const set: any = create_placement_candidate_set(actor, { entity_name: entityName, connects_to: { unit_number: 100 } })
-      const result: any = placement_candidate_preflight(actor, set.candidate_set_id, set.candidates[0].id)
-      expect(result.preservation_join).toMatchObject({ complete: false, reason: 'candidate_storage_constraints_unproven' })
+      const read = () => placement_candidate_preflight(actor, set.candidate_set_id, set.candidates[0].id) as any
+      expect(read().preservation_join).toMatchObject({ complete: true, entity_name: entityName })
+      const volume = prototype.fluidbox_prototypes[0].get_volume
+      prototype.fluidbox_prototypes[0].get_volume = () => Number.NaN
+      expect(read().preservation_join).toMatchObject({ complete: false, reason: 'candidate_storage_constraints_unproven' })
+      prototype.fluidbox_prototypes[0].get_volume = volume
+      prototype.fluidbox_prototypes[0].pipe_connections[0].positions = []
+      expect(read()).toMatchObject({ ok: false, code: 'placement_candidate_unavailable' })
+      expect(read().error).toMatch(/^connects_to_port_changed:/)
     } finally { delete (globalThis as any).prototypes.item['fluid-proof-test-kit'] }
   })
 
@@ -296,11 +306,25 @@ describe('placement candidates that join a live fluid port', () => {
   })
 
   it('carries a nonrenewable native guard through the real queued boiler task and refuses a late second neighbour before mutation', () => {
+    ;(globalThis as any).game.tick = 0
+    initialize_fluid_preservation_history()
+    ;(globalThis as any).game.tick = 500
     build_pump()
     Object.assign(world[100], { type: 'offshore-pump', direction: 0, has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1, get_fluid: () => undefined })
     world[100].get_fluid_capacity = () => 100
     const heldPrototype = world[100].get_fluid_box_prototype
     world[100].get_fluid_box_prototype = (index: number) => ({ ...heldPrototype(index), get_volume: () => 100 })
+    // A second native edge is deliberately outside protected_ids=[100]. The
+    // frozen network walk, rather than the caller's short list, protects it.
+    world[103] = live_entity(103, 'pipe', [{ filter: 'water', ports: [] }])
+    Object.assign(world[103], { type: 'pipe', direction: 0, position: { x: 7.5, y: 20.5 },
+      get_fluid: () => undefined, get_fluid_capacity: () => 100,
+      get_fluid_box_prototype: () => ({ index: 1, production_type: 'input-output', get_volume: () => 100 }),
+      get_fluid_box_pipe_connections: () => [{ connection_type: 'normal', flow_direction: 'input-output',
+        position: { x: 7.5, y: 20.5 }, target_position: { x: 8.5, y: 20.5 }, target: world[100], target_fluidbox_index: 1 }] })
+    const pumpPorts = world[100].get_fluid_box_pipe_connections
+    world[100].get_fluid_box_pipe_connections = (index: number) => [...pumpPorts(index), { connection_type: 'normal', flow_direction: 'input-output',
+      position: { x: 8.5, y: 20.5 }, target_position: { x: 7.5, y: 20.5 }, target: world[103], target_fluidbox_index: 1 }]
     ;(globalThis as any).prototypes.item['fluid-proof-test-kit'] = {}
     ;(globalThis as any).prototypes.entity.boiler = { ...boiler, collision_box: { left_top: { x: -1.29, y: -0.79 }, right_bottom: { x: 1.29, y: 0.79 } },
       items_to_place_this: [{ name: 'fluid-proof-test-kit', count: 1 }] }
@@ -326,15 +350,43 @@ describe('placement candidates that join a live fluid port', () => {
         : scope === 'autorio_crafting' ? { task_active: false, native_queue: [] }
           : method === 'authorize' ? epoch === nativeEpoch : ({ allowed: true, actor_id: 18, epoch: nativeEpoch, session: nativeSession }) }
     const set: any = create_placement_candidate_set(actor, { entity_name: 'boiler', connects_to: { unit_number: 100 } })
-    expect(set.connects_to.preservation_network).toEqual({ version: 1, limit: 16, provable: true, entity_count: 1 })
+    expect(set.connects_to.preservation_network).toEqual({ version: 1, limit: 16, provable: true, entity_count: 2 })
     const candidate = set.candidates[0]
     try {
       const frozen: any = freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100], context)
       expect(frozen.ok).toBe(true)
       expect(frozen.preservation_join).toMatchObject({ version: 4, operation_key: 'req/first', owner })
+      // Read actual freeze-produced native records. A different target ID is
+      // still protected when it occupies the durable candidate's footprint.
+      const unprotected = [{ entity: { unit_number: 999, position: { x: 1000, y: 1000 } }, fluid_storages: [] }]
+      expect(hydraulic_claim_protection(actor, frozen.preservation_join.protected_geometry)).toMatchObject({ ok: false, code: 'hydraulic_target_protected' })
+      const edge = frozen.preservation_join.protected_geometry.find((row: any) => row.entity.unit_number === 103)
+      expect(edge).toBeDefined()
+      expect(hydraulic_claim_protection(actor, [edge])).toMatchObject({ ok: false, code: 'hydraulic_target_protected' })
+      expect(hydraulic_claim_protection(actor, unprotected)).toEqual({ ok: true, claim_count: 1 })
+      const footprint = (globalThis as any).storage.sgluna_fluid_preservation_claim_inventory['req/first'].header.footprint
+      expect(hydraulic_claim_protection(actor, unprotected, footprint)).toMatchObject({ ok: false, code: 'hydraulic_candidate_footprint_protected' })
+      expect(hydraulic_claim_protection(actor, [{ entity: { unit_number: 999, position: candidate.position }, fluid_storages: [] }])).toMatchObject({ ok: false, code: 'hydraulic_candidate_footprint_protected' })
+      // Preserve synthetic JS undefined fields and shared references here.
+      // Lua nil keys never exist, so a JSON roundtrip would manufacture a
+      // fixture-only geometry change before the idempotent freeze check.
+      const retained = structuredClone((globalThis as any).storage)
+      for (const fault of ['missing-marker', 'legacy-marker', 'inventory-loss', 'claim-loss', 'count-mismatch']) {
+        ;(globalThis as any).storage = structuredClone(retained)
+        const held = (globalThis as any).storage
+        if (fault === 'missing-marker') delete held.sgluna_fluid_preservation_history
+        if (fault === 'legacy-marker') held.sgluna_fluid_preservation_history.origin = 'legacy'
+        if (fault === 'inventory-loss') delete held.sgluna_fluid_preservation_claim_inventory
+        if (fault === 'claim-loss') held.sgluna_fluid_preservation_claims = {}
+        if (fault === 'count-mismatch') held.sgluna_fluid_preservation_history.claim_count++
+        expect(hydraulic_claim_protection(actor, unprotected), fault).toMatchObject({ ok: false, code: 'hydraulic_history_unproven' })
+      }
+      ;(globalThis as any).storage = structuredClone(retained)
       const firstTick = frozen.preservation_join.tick
       ;(globalThis as any).game.tick++
-      expect((freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100], context) as any).preservation_join.tick).toBe(firstTick)
+      const repeated: any = freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/first', [100], context)
+      expect(repeated).toMatchObject({ ok: true })
+      expect(repeated.preservation_join.tick).toBe(firstTick)
       expect(freeze_fluid_preservation_candidate(actor, set.candidate_set_id, candidate.id, 'req/other', [100], context)).toMatchObject({ ok: false, code: 'preservation_guard_already_claimed' })
       expect(basic.submit_placement('boiler', candidate.position.x, candidate.position.y, candidate.direction)).toBe(false)
       expect(execute_placement_candidate(actor, set.candidate_set_id, candidate.id, basic.submit_placement)[0]).toBe(false, 'a frozen witness is not an active admission caller')

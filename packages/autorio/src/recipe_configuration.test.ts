@@ -77,6 +77,34 @@ beforeEach(() => {
 })
 
 describe('exact machine recipe configuration', () => {
+  it.each(['isolated', 'aligned-neighbour', 'unreadable-prototype'])('checks dormant recipe fluid ports before execution with %s geometry', mode => {
+    const c = context()
+    const m = machine()
+    ;(c.force as any).is_chunk_visible = () => true
+    const target = m.target as any
+    target.name = 'fixture-modded-assembler'
+    target.direction = 0
+    target.fluids_count = 0
+    target.prototype.fluidbox_prototypes = [{ pipe_connections: [{ connection_type: 'normal', direction: 4,
+      positions: mode === 'unreadable-prototype' ? undefined : [{ x: 1, y: 0 }] }] }]
+    const neighbour: any = { valid: true, name: 'fixture-pipe', fluids_count: 1,
+      has_fluid_segment: () => false, get_fluid_filter: () => undefined, get_fluid: () => undefined,
+      get_fluid_box_prototype: () => ({ production_type: 'input-output' }),
+      get_fluid_box_pipe_connections: () => [{ connection_type: 'normal', position: { x: 4, y: 0 }, target_position: { x: 3, y: 0 } }] }
+    ;(c.actor.surface as any).find_entities_filtered = () => mode === 'aligned-neighbour' ? [neighbour] : []
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn((unit: number) => unit === 101 ? target : undefined)
+    expect(c.controller.submit_set_recipe_exact(101, 'iron-gear-wheel', true)).toEqual([true, 'Task started'])
+    c.runtime.state_setting_recipe(c.actor)
+    if (mode === 'isolated') {
+      expect(target.set_recipe).toHaveBeenCalledTimes(1)
+      expect(c.controller.status().last_result?.completed).toBe(true)
+    }
+    else {
+      expect(target.set_recipe).not.toHaveBeenCalled()
+      expect(c.controller.status().last_result).toMatchObject({ completed: false, code: 'set_recipe_failed' })
+    }
+  })
+
   it('sets and verifies the requested enabled compatible recipe on the exact machine', () => {
     const c = context()
     const m = machine()

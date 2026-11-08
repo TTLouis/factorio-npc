@@ -21,6 +21,7 @@ export const GOAL_CONDITION_KINDS = Object.freeze([
   'research_completed',
   'rockets_launched',
   'items_produced',
+  'machine_output_delivered',
   'inventory_count',
   'space_location_unlocked',
   'entity_working',
@@ -132,6 +133,7 @@ function sanitizeCondition(raw, index, options = {}) {
     fail('invalid_goal_condition', `goal.doneWhen kind must be one of ${GOAL_CONDITION_KINDS.join(', ')}`)
   }
   const id = typeof raw.id === 'string' && /^[A-Za-z0-9_.-]{1,60}$/.test(raw.id) ? raw.id : `done_${index + 1}`
+  if (kind === 'machine_output_delivered') return { id, kind, item_name: prototypeName(raw.item_name, 'item_name', kind, raw), minimum: minimum(raw.minimum, kind) }
   if (kind === 'research_completed') return { id, kind, technology: prototypeName(raw.technology, 'technology', kind, raw) }
   if (kind === 'rockets_launched') return withCounter({ id, kind, minimum: minimum(raw.minimum, kind) }, raw, options)
   if (kind === 'space_location_unlocked') return { id, kind, name: prototypeName(raw.name, 'name', kind, raw) }
@@ -214,6 +216,7 @@ export function goalConditionCommand(condition) {
 
 export function describeGoalCondition(condition) {
   switch (condition?.kind) {
+    case 'machine_output_delivered': return `at least ${condition.minimum} newly furnace-produced ${condition.item_name} in one exact newly placed chest selected for this goal (native provenance required)`
     case 'research_completed': return `research "${condition.technology}" is completed`
     case 'rockets_launched': return condition.count_from === GOAL_COUNT_FROM.SAVE_START
       ? `at least ${condition.minimum} rocket${condition.minimum === 1 ? '' : 's'} launched in this save`
@@ -281,7 +284,8 @@ export async function evaluateGoalDefinition(definition, command, { samples = GO
   const results = []
   const baselines = {}
   for (const condition of definition?.done_when ?? []) {
-    let observation = await readGoalCondition(condition, command)
+    const request = condition.kind === 'machine_output_delivered' ? { ...condition, acceptance_key: String(definition.acceptance_key ?? `${definition.defined_at ?? 0}:${condition.id}`) } : condition
+    let observation = await readGoalCondition(request, command)
     let votes
     let stalled = false
     if (GOAL_RUNNING_KINDS.includes(condition.kind) && samples > 1) {
@@ -294,6 +298,7 @@ export async function evaluateGoalDefinition(definition, command, { samples = GO
       kind: condition.kind,
       satisfied: ok && observation.satisfied === true,
       current,
+      ...(condition.kind === 'machine_output_delivered' ? { native_evidence: observation, observation_reason: observation?.reason } : {}),
       error: ok ? undefined : String(observation?.error ?? 'unreadable_condition').slice(0, 120),
     }
     if (votes) {

@@ -1,8 +1,9 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 
 import { nativeAdmissionJournal } from '../../deploy/pterodactyl/staging/native-admission-journal.mjs'
 import { executeAuthorizedBatch } from '../../deploy/pterodactyl/staging/supervisor-adapter.mjs'
 import { luaString, PolicyError } from '../../deploy/pterodactyl/staging/structured-policy.mjs'
+import { machineDeliveryToolDefinition, validateMachineDeliveryBindingArgs } from '../../deploy/pterodactyl/runtime-v8/machine-delivery.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
@@ -18,25 +19,28 @@ import {
   toolDefinitions,
 } from '../../deploy/pterodactyl/runtime-v8/structured-policy.mjs'
 
-// This is an intentionally smaller capability surface, not an alternate policy.
-// Nonfluid sites require native zero-fluidbox witnesses. Fluid candidates use
-// the shared frozen native preservation claim and exact v2 admission owner.
-export const PLACEMENT_PROTOTYPES = Object.freeze(['stone-furnace', 'burner-mining-drill', 'wooden-chest', 'lab', 'small-electric-pole', 'assembling-machine-1', 'transport-belt', 'inserter', 'burner-inserter'])
-export const FLUID_PLACEMENT_PROTOTYPES = Object.freeze(['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'])
-export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate', 'set_machine_recipe'])
+// Capability membership is separate from native legality. Generic placements
+// require live geometry/fluid witnesses, never membership in a prototype list.
+export const PLACEMENT_PROTOTYPES = Object.freeze([])
+export const FLUID_PLACEMENT_PROTOTYPES = Object.freeze([])
+export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate', 'set_machine_recipe', 'walk_to_entity', 'walk_to_entity_exact', 'gather_resource', 'supply_entity', 'mine_entity_exact', 'rotate_entity', 'prepare_pump_site', 'clear_construction_area', 'set_auto_defense', 'equip_weapon', 'equip_ammo', 'equip_armor', 'select_weapon_slot', 'attack_nearest_enemy', 'clear_enemy_area', 'launch_rocket'])
 export const OBSERVATION_NAMES = Object.freeze([
   'getActorStatus', 'getInventoryItems', 'getEquipmentStatus', 'getRecipeDetails',
   'getPrototypeDetails', 'discoverPrototypes', 'getNearbyEntities', 'getEntityStatus',
   'getCraftingStatus', 'getNavigationStatus', 'getTechnology', 'getResearchStatus',
   'getPlacementCandidates', 'getFluidSourceTiles', 'getEntityGeometry', 'getTransportCapacity',
-  'getResourceAmounts',
+  'getResourceAmounts', 'getProductionScope', 'solveProduction', 'getMiningDetails', 'estimateProductionTime', 'getResearchPath',
+  'findLongRangeEntities', 'getLogisticsTopology', 'measureTransportThroughput', 'getLocalSpatialObservation', 'planPlacement', 'findConstructionSites', 'getMapContext',
+  'getTaskStatus', 'getResearchRequest', 'findNearestEnemy', 'getDefenseStatus', 'getCombatStatus', 'getPumpSitePreparation', 'getWorldEntityFacts',
 ])
 export const observationDefinitions = toolDefinitions.filter(tool => OBSERVATION_NAMES.includes(tool.function.name))
 export function capabilities() {
   return { operations: operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)),
+    goal_metadata_tools: [{ name: machineDeliveryToolDefinition.function.name, description: machineDeliveryToolDefinition.function.description,
+      inputSchema: machineDeliveryToolDefinition.function.parameters, world_mutation: false, operation_authority: false }],
     observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
       name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
-    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false },
+    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false, placement_domain: 'native-nonfluid-or-proven-fluid-candidate', recipe_domain: 'native-compatible-empty-isolated-assembling-machine' },
     operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES } }
 }
 
@@ -44,12 +48,17 @@ export function capabilities() {
 // 2026-11-01 trial. Facts about this bridge, not strategy advice.
 export const OPERATION_NOTES = Object.freeze({
   craft_item: 'count is the number of recipe crafts, not items. A recipe with N products per craft yields count x N items (read getRecipeDetails products).',
-  place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. getPlacementCandidates rows with external_footprint.eligible=false will be refused. No pickup or deconstruct operation exists, so placements are permanent.',
+  place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. getPlacementCandidates rows with external_footprint.eligible=false will be refused. Use mine_entity_exact for custody-backed removal when native removal_readiness permits it; protected, active, nonempty or unproved hydraulic networks and unsupported contents are refused.',
   place_candidate: 'A fluid candidate that joins an entity (connects_to) needs the native preservation guard to prove that entity\'s whole connected fluid network, at most 16 entities. getPlacementCandidates reports this as connects_to.preservation_network (provable, entity_count, limit; unit_number names an entity the guard cannot read, for example one not visible now) and marks such candidates external_preservation.eligible=false. They are refused before they are sent. A join to a network of 16 brings it to 17; a network of 17 or more cannot be joined.',
   research_technology: 'A completed receipt means research was started and queued, not finished. While other force research is active the request is appended behind it in the native queue (queued_behind) and the labs reach it when the earlier work finishes; queue the next technology before the current one completes so labs never idle. Read getResearchStatus or getTechnology for progress and researched.',
   walk_to_position: 'Target must be within 128 tiles of the current actor position.',
-  move_items_exact: 'May walk the actor into reach first. A terminal receipt includes observed_effect with the actor inventory delta for item_name and the actor position before and after.',
+  move_items_exact: 'Name-targeted transfers use getNearbyEntities/findLongRangeEntities to select an exact unit, with no fallback after target loss. May walk the actor into reach first. A terminal receipt includes observed_effect with the actor inventory delta for item_name and the actor position before and after.',
   harvest_product: 'Searches up to 64 tiles and may walk the actor there. A terminal receipt includes observed_effect with the actor inventory delta for product_name and the actor position before and after.',
+  mine_entity_exact: 'Exact visible target only; native world binding, full recovered-item capacity and immutable admission custody are required. Hydraulic targets require a fresh bounded empty-network proof, complete native claim history and no protected entity/edge/candidate footprint; the captured witness is repeated at execution. Working/in-flight processes and unsupported contents are refused. Completion requires a verified removal receipt.',
+  rotate_entity: 'Exact visible target only. Hydraulic rotation proves the complete empty network and all networks in its native rotation/port envelope are unprotected, captures the witness at queueing and rechecks it at execution. Missing legacy claim history, unseen/truncated geometry or changed networks refuse; no model override.',
+  set_machine_recipe: 'Native compatible assembler only; first assignment with empty inventory and no active process. Fluid machines additionally need complete, empty, disconnected native ports, rechecked at execution.',
+  clear_construction_area: 'Bounded native hand-mining of natural construction blockers only. Force-owned or item-placeable buildings, resources and characters are preserved; no implicit placement clearing.',
+  prepare_pump_site: 'Executes only the current native proposal for bounded removable landfill over observed water; no arbitrary clearing.',
   submit_refusals: 'A factorio_submit error with effect "not_happened" means this call was refused before its operation was sent to the game and used no journal slot. An error without that field may have had an effect; read the receipt or native state. Placement refusals name blockers in details. A refusal during atomic admission instead returns a rejected receipt.',
   running_receipts: 'A running receipt includes observed_progress: the actor position and inventory delta for the operation\'s item so far, read when the reply is sent. It is an observation of the actor, not a native progress count.',
 })
@@ -100,15 +109,12 @@ function preflightExpression(operation) {
   if (!command) return '{ok=true,validation="not_required"}'
   check(command.startsWith(JSON_PREFIX) && command.endsWith('))'), 'preflight_renderer_changed')
   const expression = command.slice(JSON_PREFIX.length, -2)
-  if (operation.name === 'set_machine_recipe') {
-    // This external capability is only for the bounded nonfluid assembler.
-    // Read both static and actual native fluidboxes, even when empty/disabled;
-    // rerun the same witness inside atomic admission, not just during prepare.
-    const unit = operation.args.unit_number
-    return `(function() local p=${expression}; if p.ok~=true then return p end; local t=p.target; local a=remote.call("sgluna_deployment","status"); local e=game.get_entity_by_unit_number(${unit}); if not e and t and t.position and t.surface_index==a.surface_index and t.force_index==a.force_index then local s=game.surfaces[t.surface_index]; if s then for _,candidate in pairs(s.find_entities_filtered({position=t.position,radius=0.25,name=t.name,force=a.force_index,limit=2})) do if candidate.valid and candidate.unit_number==${unit} then e=candidate end end end end; if not t or t.unit_number~=${unit} or not e or not e.valid or e.unit_number~=t.unit_number or e.name~="assembling-machine-1" or e.name~=t.name or e.type~="assembling-machine" or e.surface.index~=a.surface_index or e.force.index~=a.force_index or e.surface.index~=t.surface_index or e.force.index~=t.force_index then return {ok=false,code="external_recipe_target_unproven"} end; local ok,w=pcall(function() local boxes=e.prototype.fluidbox_prototypes; if type(boxes)~="table" then return nil end; for _,box in pairs(boxes) do return nil end; if #e.fluidbox~=0 then return nil end; return {version=1,unit_number=e.unit_number,entity_name=e.name,surface_index=e.surface.index,force_index=e.force.index,prototype_fluidbox_count=0,fluidbox_count=0} end); if not ok or not w then return {ok=false,code="external_recipe_target_unproven"} end; p.external_recipe_nonfluid=w; return p end)()`
+  if (['set_machine_recipe', 'mine_entity_exact', 'rotate_entity'].includes(operation.name)) {
+    return `(function() local p=${expression}; if p.ok~=true then return p end; if not remote.interfaces.sgluna_world_safety then return {ok=false,code="world_safety_capability_missing"} end; local w=remote.call("sgluna_world_safety","preflight",${luaString(operation.name)},${operation.args.unit_number}); if w.ok~=true then return w end; p.external_world_safety=w.external_world_safety; return p end)()`
   }
+  if (operation.name === 'walk_to_entity_exact') return `(function() local p=${expression}; if p.ok~=true then return p end; local s=remote.call("autorio_operations","status"); local a=s.actor and s.actor.position; local t=p.target and p.target.position; if not a or not t or (a.x-t.x)^2+(a.y-t.y)^2>16384 then return {ok=false,code="walk_out_of_range"} end; return p end)()`
   if (!['place_entity', 'place_candidate'].includes(operation.name)) return expression
-  if (operation.name === 'place_candidate') return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or not (${FLUID_PLACEMENT_PROTOTYPES.map(name => `n==${luaString(name)}`).join(' or ')}) or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; ${FOOTPRINT_CHECK_LUA} return p end)()`
+  if (operation.name === 'place_candidate') return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; ${FOOTPRINT_CHECK_LUA} return p end)()`
   const { entity_name: name, x, y, direction = 0 } = operation.args
   // Consume the same native footprint and nonfluid witness as the full runtime;
   // never infer dimensions, snapping or fluid ports from a vanilla name.
@@ -166,7 +172,7 @@ export function renderExternalOperation(raw) {
   const command = renderOperation(operation)
   // This safety argument is NOT model-selectable. The native endpoint forwards
   // it to the existing execution-time refuse_clearance task invariant.
-  return operation.name === 'place_entity' ? `${command.slice(0, -1)},true)` : command
+  return ['place_entity', 'mine_entity_exact', 'rotate_entity', 'set_machine_recipe'].includes(operation.name) ? `${command.slice(0, -1)},true)` : command
 }
 function normalizedStatus(status) {
   check(object(status) && typeof status.task_state === 'string' && Number.isSafeInteger(status.queue_length)
@@ -181,18 +187,19 @@ function normalizedStatus(status) {
 }
 
 export function parseExternalOperation(raw) {
-  const operation = parseOperation(raw?.name === 'harvest_product' && raw.args?.search_radius === undefined
-    ? { ...raw, args: { ...raw.args, search_radius: 64 } } : raw)
+  const operation = parseOperation(['harvest_product', 'gather_resource'].includes(raw?.name) && raw.args?.search_radius === undefined
+    ? { ...raw, args: { ...raw.args, search_radius: raw.name === 'harvest_product' ? 64 : 128 } } : raw)
   check(OPERATION_NAMES.includes(operation.name), 'operation_not_supported', 'This external mode does not enable that operation')
   // The inherited parser is authoritative; these are additional experiment limits.
   if (operation.name === 'wait') check(operation.args.ticks <= 3600, 'operation_limit', 'wait is bounded to 3600 ticks')
-  if (operation.name === 'craft_item' || operation.name === 'mine_resource_at') check(operation.args.count <= 100, 'operation_limit', 'count is bounded to 100')
-  if (operation.name === 'place_entity') check(PLACEMENT_PROTOTYPES.includes(operation.args.entity_name)
-    && Number.isFinite(operation.args.x) && Number.isFinite(operation.args.y), 'placement_not_supported', 'Use explicit coordinates for an allowed nonfluid prototype')
+  if (['craft_item', 'mine_resource_at', 'gather_resource'].includes(operation.name)) check(operation.args.count <= 100, 'operation_limit', 'count is bounded to 100')
+  if (operation.name === 'place_entity') check(Number.isFinite(operation.args.x) && Number.isFinite(operation.args.y), 'placement_not_supported', 'Use explicit coordinates; native preflight must prove the nonfluid prototype and exact footprint')
   if (operation.name === 'harvest_product') {
     check(operation.args.count <= 100 && operation.args.search_radius <= 64, 'operation_limit', 'Harvest is bounded to 100 items within 64 tiles')
   }
   if (operation.name === 'move_items_exact') check(operation.args.max_count <= 1000, 'operation_limit', 'max_count is bounded to 1000')
+  if (['walk_to_entity', 'gather_resource'].includes(operation.name)) check(operation.args.search_radius <= 128, 'operation_limit', 'search_radius is bounded to 128')
+  if (operation.name === 'supply_entity') check(operation.args.items.length <= 16 && operation.args.items.every(item => item.count <= 1000), 'operation_limit', 'Supply is bounded to 16 item types and 1000 per type')
   return operation
 }
 
@@ -219,7 +226,8 @@ export class NativeBridge {
 
   // Operator setup only: never exposed as an agent tool. No takeover, no retry.
   async bind() {
-    const command = `${PREFIX}local g=remote.call("sgluna_deployment","status"); local s=remote.call("autorio_operations","status"); if g.session~="" then rcon.print(helpers.table_to_json({ok=false,code="session_already_bound"})) elseif s.task_state~="idle" or s.queue_length~=0 or s.active_batch then rcon.print(helpers.table_to_json({ok=false,code="native_busy"})) else local j=remote.call("autorio_operation_admission","status"); local unresolved=false; for _,r in pairs(j.records) do if r.state=="admitting" or r.state=="admitted" or r.state=="uncertain" then unresolved=true end end; if unresolved then rcon.print(helpers.table_to_json({ok=false,code="unresolved_native_operation"})) else local result=remote.call("sgluna_deployment","configure","npc",${luaString(this.session)}); rcon.print(helpers.table_to_json({ok=result==${luaString(this.session)}})) end end`
+    const worldId = randomUUID()
+    const command = `${PREFIX}local g=remote.call("sgluna_deployment","status"); local s=remote.call("autorio_operations","status"); if g.session~="" then rcon.print(helpers.table_to_json({ok=false,code="session_already_bound"})) elseif s.task_state~="idle" or s.queue_length~=0 or s.active_batch then rcon.print(helpers.table_to_json({ok=false,code="native_busy"})) else local j=remote.call("autorio_operation_admission","status"); local unresolved=false; for _,r in pairs(j.records) do if r.state=="admitting" or r.state=="admitted" or r.state=="uncertain" then unresolved=true end end; if unresolved then rcon.print(helpers.table_to_json({ok=false,code="unresolved_native_operation"})) elseif not remote.interfaces.sgluna_factory then rcon.print(helpers.table_to_json({ok=false,code="world_identity_capability_missing"})) else local w=remote.call("sgluna_factory","world_identity"); if w.code=="world_unbound" then w=remote.call("sgluna_factory","bind_world_id",${luaString(worldId)}) end; if w.ok~=true then rcon.print(helpers.table_to_json(w)); return end; local result=remote.call("sgluna_deployment","configure","npc",${luaString(this.session)}); rcon.print(helpers.table_to_json({ok=result==${luaString(this.session)}})) end end`
     const result = json(await this.rcon.command(command))
     check(result.ok === true, typeof result.code === 'string' && /^[a-z0-9_]{1,80}$/.test(result.code) ? result.code : 'bind_failed')
     return this.snapshot()
@@ -263,6 +271,26 @@ export class NativeBridge {
     }
   }
 
+  async bindMachineDelivery(input) {
+    try { validateMachineDeliveryBindingArgs(input) }
+    catch { throw new BridgeError('invalid_machine_delivery_binding') }
+    const before = await this.snapshot()
+    const actor = before.actor
+    const surface = before.guard.surface_index
+    const force = before.guard.force_index
+    check(positive(surface) && positive(force), 'machine_delivery_world_scope_unavailable')
+    // Recheck ownership in the same native command as the metadata update.
+    // No dynamic remote name, goal key, Lua or baseline can come from the model.
+    const command = `${PREFIX}local g=remote.call("sgluna_deployment","status"); if g.allowed~=true or g.session~=${luaString(this.session)} or g.actor_id~=${actor.actor_id} or g.epoch~=${actor.epoch} or g.surface_index~=${surface} or g.force_index~=${force} then rcon.print(helpers.table_to_json({ok=false,error="machine_delivery_scope_changed"})) elseif not remote.interfaces.autorio_tools or not remote.interfaces.autorio_tools.bind_current_machine_delivery then rcon.print(helpers.table_to_json({ok=false,error="machine_delivery_binding_unsupported"})) else rcon.print(helpers.table_to_json(remote.call("autorio_tools","bind_current_machine_delivery",{unit_number=${input.unit_number}}))) end`
+    const result = json(await this.rcon.command(command))
+    const after = await this.snapshot()
+    check(after.actor.actor_id === actor.actor_id && after.actor.epoch === actor.epoch
+      && after.guard.surface_index === surface && after.guard.force_index === force, 'machine_delivery_scope_changed')
+    check(result?.ok === true, typeof result?.error === 'string' && /^[a-z0-9_]{1,80}$/.test(result.error) ? result.error : 'machine_delivery_binding_refused')
+    check(result.unit_number === input.unit_number && typeof result.acceptance_key === 'string', 'machine_delivery_binding_invalid_result')
+    return { ...result, metadata_only: true, world_mutated: false, goal_verified: false }
+  }
+
   async observe(name, args = {}) {
     check(OBSERVATION_NAMES.includes(name), 'observation_not_supported')
     let command
@@ -276,6 +304,7 @@ export class NativeBridge {
       throw new BridgeError('invalid_observation_arguments', `${error.message.slice(0, 200)} for ${name}. Expected args {${expected}}. Nothing was sent to the game.`,
         { details: { observation: name, expected: schema } })
     }
+    if (name === 'measureTransportThroughput') return this.measureThroughput(command, args)
     // Observations remain allowed after a control loss, to support diagnosis.
     const raw = await this.rcon.command(command)
     check(typeof raw === 'string' && Buffer.byteLength(raw) <= 48 * 1024, 'observation_too_large', 'Narrow the observation; replies are limited to 48 KiB')
@@ -283,6 +312,39 @@ export class NativeBridge {
     try { result = JSON.parse(raw.trim()) }
     catch { return { text: raw } }
     return name === 'getPlacementCandidates' ? this.annotateCandidates(result) : result
+  }
+
+  // Measurements own one exact native ID and a bounded lifetime. The runtime
+  // serializes this tool with submissions; authority is rechecked atomically on
+  // start and every poll. A failed/expired sample is cancelled, never resumed.
+  async measureThroughput(command, args) {
+    check(command.startsWith(JSON_PREFIX) && command.endsWith('))'), 'measurement_renderer_changed')
+    const snapshot = await this.snapshot()
+    const actor = snapshot.actor
+    const gate = `local g=remote.call("sgluna_deployment","status"); local s=remote.call("autorio_operations","status"); if g.allowed~=true or g.session~=${luaString(this.session)} or g.actor_id~=${actor.actor_id} or g.epoch~=${actor.epoch} or game.speed~=1 then return {ok=false,code="measurement_authority_changed"} end; if s.task_state~="idle" or s.queue_length~=0 or s.active_batch then return {ok=false,code="native_busy"} end; local j=remote.call("autorio_operation_admission","status"); for _,r in pairs(j.records) do if r.state=="admitting" or r.state=="admitted" or r.state=="uncertain" then return {ok=false,code="unresolved_native_operation"} end end; `
+    const start = json(await this.rcon.command(`${JSON_PREFIX}(function() ${gate} return ${command.slice(JSON_PREFIX.length, -2)} end)()))`))
+    if (start.ok !== true) return start
+    check(positive(start.measurement_id), 'measurement_identity_missing')
+    const id = start.measurement_id
+    let complete = false
+    const budget = Math.min(180000, Math.max(15000, ((args.warmup_ticks ?? 60) + (args.window_ticks ?? 300)) * 50 + 10000))
+    const deadline = Date.now() + budget
+    let lastTick = start.started_tick, advancedAt = Date.now()
+    try {
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 250))
+        const result = json(await this.rcon.command(`${JSON_PREFIX}(function() ${gate} return {tick=game.tick,result=remote.call("autorio_planning","throughput_measurement_status",${id})} end)()))`))
+        check(result.result?.measurement_id === id, result.code ?? 'measurement_identity_changed')
+        if (result.result.state !== 'running') { complete = true; return result.result }
+        check(Number.isSafeInteger(result.tick) && result.tick >= lastTick, 'measurement_clock_rollback')
+        if (result.tick > lastTick) { lastTick = result.tick; advancedAt = Date.now() }
+        check(Date.now() - advancedAt <= 10000, 'measurement_clock_stalled')
+      }
+      throw new BridgeError('measurement_wall_timeout')
+    }
+    finally {
+      if (!complete) await this.rcon.command(`${JSON_PREFIX}remote.call("autorio_planning","throughput_measurement_cancel",${id})))`)
+    }
   }
 
   // The native candidate search applies can_place_entity only. Re-check each

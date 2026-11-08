@@ -2,6 +2,7 @@ import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import type { ControlledActor } from './actors/types'
 import { crafted_item_count, craft_trigger_statistics_count } from './crafted_items'
+import { arm_machine_delivery, bind_machine_delivery, bind_current_machine_delivery, evaluate_machine_delivery } from './machine_delivery_acceptance'
 import { remember_entity_reference, resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
 import { entity_has_power, evaluate_world_condition, status_name, WORLD_CONDITION_KINDS } from './goal_world_conditions'
 import { machine_eta } from './production_eta'
@@ -161,6 +162,7 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
   const actor = get_controlled_actor()
   if (!request || typeof request !== 'object') return { ok: false, error: 'invalid_condition' }
   const kind = request.kind
+  if (kind === 'machine_output_delivered') return evaluate_machine_delivery(actor, request)
   const force_result = evaluate_force_condition(goal_force(actor), kind, request)
   if (force_result !== undefined) return force_result
   // World-state goal conditions (plan 3.7): is the factory running, powered,
@@ -275,6 +277,9 @@ export function create_tools_remote_interface() {
   create_actor_remote_interface()
 
   remote.add_interface('autorio_tools', {
+    arm_machine_delivery: (request: Record<string, unknown>) => arm_machine_delivery(get_controlled_actor(), request),
+    bind_machine_delivery: (request: Record<string, unknown>) => bind_machine_delivery(get_controlled_actor(), request),
+    bind_current_machine_delivery: (request: Record<string, unknown>) => bind_current_machine_delivery(get_controlled_actor(), request),
     evaluate_condition: (request: Record<string, unknown>) => evaluate_runtime_condition(request),
     goal_progress_facts: (request: Record<string, unknown>) => goal_progress_facts(request),
     get_inventory_items: () => {

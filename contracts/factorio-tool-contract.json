@@ -1,30 +1,193 @@
 {
   "version": 3,
+  "finite_machine_delivery": {
+    "condition": "machine_output_delivered",
+    "arm_remote": ["autorio_tools", "arm_machine_delivery"],
+    "bind_remote": ["autorio_tools", "bind_machine_delivery"],
+    "public_bind_remote": ["autorio_tools", "bind_current_machine_delivery"],
+    "evaluate_remote": ["autorio_tools", "evaluate_condition"],
+    "model_binding_tool": "bindMachineDelivery",
+    "model_binding_args": ["unit_number"],
+    "binding_authority": "immutable-goal-metadata-only-no-world-mutation",
+    "arming": "host-before-inference-exact-goal-item-minimum-furnace",
+    "destination": "exact-new-admitted-actor-placed-container",
+    "proof": "new-native-furnace-output-and-exact-chest-contents-minus-global-old-stock",
+    "manual_feed": "allowed",
+    "uncertain_provenance": "unsatisfied"
+  },
   "external_harness": {
     "status": "experimental-bounded-operator",
     "transport": "local-stdio-mcp",
     "protocol_version": "2025-06-18",
     "native_adapter": "pterodactyl-runtime-v8-subset",
     "operation_admission_protocol": 2,
-    "operations": ["wait", "walk_to_position", "craft_item", "mine_resource_at", "move_items_exact", "place_entity", "harvest_product", "research_technology", "place_candidate", "set_machine_recipe"],
-    "place_entity_prototypes": ["stone-furnace", "burner-mining-drill", "wooden-chest", "lab", "small-electric-pole", "assembling-machine-1", "transport-belt", "inserter", "burner-inserter"],
-    "fluid_candidate_prototypes": ["offshore-pump", "boiler", "steam-engine", "pipe", "electric-mining-drill"],
-    "fluid_candidate_safety": { "required_capability": "external_fluid_candidates_supported", "version": 1, "admission": "frozen-native-claim-v2-owner", "isolated": "complete-zero-join-native-scan", "joined": "exact-single-additive-native-join", "execution_clearance": "refused" },
-    "place_entity_native_safety": { "argument_index": 5, "forced_value": true, "execution_flag": "refuse_clearance", "required_capability": "placement_no_clear_supported", "model_selectable": false },
-    "recipe_assignment_native_safety": { "prototype": "assembling-machine-1", "required_witness": "external_recipe_nonfluid", "version": 1, "prototype_fluidbox_count": 0, "runtime_fluidbox_count": 0, "admission": "fresh-exact-target-actor-force-surface", "rechecked_atomically": true },
-    "observations": ["getActorStatus", "getInventoryItems", "getEquipmentStatus", "getRecipeDetails", "getPrototypeDetails", "discoverPrototypes", "getNearbyEntities", "getEntityStatus", "getCraftingStatus", "getNavigationStatus", "getTechnology", "getResearchStatus", "getPlacementCandidates", "getFluidSourceTiles", "getEntityGeometry", "getTransportCapacity", "getResourceAmounts"],
-    "mcp_tools": ["factorio_capabilities", "factorio_library", "factorio_context", "factorio_observe", "factorio_submit", "factorio_receipt", "factorio_cancel", "factorio_resume"],
-    "limits": { "wait_ticks": 3600, "count": 100, "transfer_count": 1000, "walk_distance": 128, "harvest_radius": 64, "receipt_wait_ms": 30000, "journal_records": 512, "fluid_network_entities": 16 },
-    "library": { "tool": "factorio_library", "read_only": true, "advisory_only": true, "source": "packages/autorio/src/fixtures/leveled-library-v1.json", "knowledge": 7, "skills": 54, "result_bytes": 7168 },
+    "operations": [
+      "wait",
+      "walk_to_position",
+      "craft_item",
+      "mine_resource_at",
+      "move_items_exact",
+      "place_entity",
+      "harvest_product",
+      "research_technology",
+      "place_candidate",
+      "set_machine_recipe",
+      "walk_to_entity",
+      "walk_to_entity_exact",
+      "gather_resource",
+      "supply_entity",
+      "mine_entity_exact",
+      "rotate_entity",
+      "prepare_pump_site",
+      "clear_construction_area",
+      "set_auto_defense",
+      "equip_weapon",
+      "equip_ammo",
+      "equip_armor",
+      "select_weapon_slot",
+      "attack_nearest_enemy",
+      "clear_enemy_area",
+      "launch_rocket"
+    ],
+    "place_entity_prototypes": [],
+    "fluid_candidate_prototypes": [],
+    "fluid_candidate_safety": {
+      "required_capability": "external_fluid_candidates_supported",
+      "version": 1,
+      "admission": "frozen-native-claim-v2-owner",
+      "isolated": "complete-zero-join-native-scan",
+      "joined": "exact-single-additive-native-join",
+      "execution_clearance": "refused"
+    },
+    "place_entity_native_safety": {
+      "argument_index": 5,
+      "forced_value": true,
+      "execution_flag": "refuse_clearance",
+      "required_capability": "placement_no_clear_supported",
+      "model_selectable": false
+    },
+    "recipe_assignment_native_safety": {
+      "required_witness": "external_world_safety",
+      "version": 1,
+      "domain": "native-compatible-assembling-machine",
+      "hydraulics": "empty-disconnected-complete-live-and-prototype-port-neighbour-proof",
+      "admission": "fresh-exact-target-actor-force-surface",
+      "rechecked_atomically": true,
+      "rechecked_at_execution": true,
+      "model_selectable": false
+    },
+    "observations": [
+      "getActorStatus",
+      "getInventoryItems",
+      "getEquipmentStatus",
+      "getRecipeDetails",
+      "getPrototypeDetails",
+      "discoverPrototypes",
+      "getNearbyEntities",
+      "getEntityStatus",
+      "getCraftingStatus",
+      "getNavigationStatus",
+      "getTechnology",
+      "getResearchStatus",
+      "getPlacementCandidates",
+      "getFluidSourceTiles",
+      "getEntityGeometry",
+      "getTransportCapacity",
+      "getResourceAmounts",
+      "getProductionScope",
+      "solveProduction",
+      "getMiningDetails",
+      "estimateProductionTime",
+      "getResearchPath",
+      "findLongRangeEntities",
+      "getLogisticsTopology",
+      "measureTransportThroughput",
+      "getLocalSpatialObservation",
+      "planPlacement",
+      "findConstructionSites",
+      "getMapContext",
+      "getTaskStatus",
+      "getResearchRequest",
+      "findNearestEnemy",
+      "getDefenseStatus",
+      "getCombatStatus",
+      "getPumpSitePreparation",
+      "getWorldEntityFacts"
+    ],
+    "mcp_tools": [
+      "bindMachineDelivery",
+      "factorio_capabilities",
+      "factorio_library",
+      "factorio_context",
+      "factorio_observe",
+      "factorio_submit",
+      "factorio_receipt",
+      "factorio_cancel",
+      "factorio_resume"
+    ],
+    "limits": {
+      "wait_ticks": 3600,
+      "count": 100,
+      "transfer_count": 1000,
+      "walk_distance": 128,
+      "harvest_radius": 64,
+      "receipt_wait_ms": 30000,
+      "journal_records": 512,
+      "fluid_network_entities": 16
+    },
+    "library": {
+      "tool": "factorio_library",
+      "read_only": true,
+      "advisory_only": true,
+      "source": "packages/autorio/src/fixtures/leveled-library-v1.json",
+      "knowledge": 7,
+      "skills": 54,
+      "result_bytes": 7168
+    },
     "resume_semantics": "read-and-reconcile-never-replay",
     "completion_semantics": "native-execution-receipt-not-overall-goal-proof",
     "refusal_semantics": "not-happened-effect-with-bounded-details",
     "receipt_observed_effect": "actor-observation-not-attribution",
     "placement_candidate_annotation": "external-footprint-same-rule-as-placement",
     "placement_candidate_preservation": "native-guard-network-walk",
-    "operation_notes": ["craft_item", "place_entity", "place_candidate", "research_technology", "walk_to_position", "move_items_exact", "harvest_product", "submit_refusals", "running_receipts"],
-    "observation_notes": ["getNearbyEntities", "getEntityStatus"],
-    "running_receipt_progress": "actor-observation-not-attribution"
+    "operation_notes": [
+      "craft_item",
+      "place_entity",
+      "place_candidate",
+      "research_technology",
+      "walk_to_position",
+      "move_items_exact",
+      "harvest_product",
+      "mine_entity_exact",
+      "rotate_entity",
+      "set_machine_recipe",
+      "clear_construction_area",
+      "prepare_pump_site",
+      "submit_refusals",
+      "running_receipts"
+    ],
+    "observation_notes": [
+      "getNearbyEntities",
+      "getEntityStatus"
+    ],
+    "running_receipt_progress": "actor-observation-not-attribution",
+    "placement_domain": "native-nonfluid-or-proven-fluid-candidate",
+    "exact_mutation_native_safety": {
+      "required_interface": "sgluna_world_safety",
+      "execution_flag": "external_world_guard",
+      "model_selectable": false,
+      "removal": "persisted-world-and-admission-bound-custody-receipt",
+      "rotation": "native-rotation-envelope-and-empty-unprotected-network",
+      "connected_fluid_mutation": "bounded-empty-unprotected-network-only",
+      "history": "native-on-init-tick-zero-inception-with-independent-monotonic-claim-count",
+      "queued_witness": "fresh-geometry-owner-world-and-claim-count-must-match-at-execution",
+      "shared_native_enforcement": "all-exact-rotation-and-removal-submissions-regardless-external-flag"
+    },
+    "world_identity": {
+      "binding": "explicit-operator-setup-only",
+      "observation": "read-existing-never-create",
+      "native_storage": "sgluna_factory_world_id"
+    }
   },
   "surfaces": [
     "ordinary-agent",
@@ -585,6 +748,27 @@
     }
   },
   "tools": {
+    "getWorldEntityFacts": {
+      "remote": [
+        "sgluna_factory",
+        "observe"
+      ],
+      "category": "observation",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only",
+      "args": [
+        "request_id",
+        "members"
+      ],
+      "bounds": {
+        "members": 32,
+        "request_id": 160
+      },
+      "identity": "native-world-actor-force-surface-derived",
+      "authority": "read-only-no-registry-lifecycle"
+    },
     "getActorStatus": {
       "remote": [
         "autorio_actor",

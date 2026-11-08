@@ -1,8 +1,10 @@
+import type { HydraulicMutationWitness } from './hydraulic_mutation'
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, PathfinderWaypoint } from 'factorio:runtime'
 import type { ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
 import type { FluidQueuedBinding } from './operation_admission'
+import type { EntityRemovalReceipt, RemovalBinding } from './entity_removal_receipt'
 
 export enum TaskStates {
   IDLE = 'idle',
@@ -68,6 +70,12 @@ export interface PlayerParametersWalkingDirect {
 }
 
 export interface PlayerParametersMineEntity {
+  hydraulic_guard?: HydraulicMutationWitness
+  external_world_guard?: boolean
+  removal_binding?: RemovalBinding
+  entity_removal?: EntityRemovalReceipt
+  removal_started_tick?: number
+  removal_required_ticks?: number
   type: TaskStates.MINING
   owner_surface_index?: number
   operation_id?: number
@@ -198,6 +206,8 @@ export interface PlayerParametersPlaceEntity {
 }
 
 export interface PlayerParametersRotateEntity {
+  hydraulic_guard?: HydraulicMutationWitness
+  external_world_guard?: boolean
   type: TaskStates.ROTATING
   operation_id?: number
   owner_actor_id?: number
@@ -228,6 +238,7 @@ export interface PlayerParametersMoveItems {
 }
 
 export interface PlayerParametersSetRecipe {
+  external_world_guard?: boolean
   type: TaskStates.SETTING_RECIPE
   operation_id?: number
   owner_actor_id?: number

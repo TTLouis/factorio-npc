@@ -413,12 +413,12 @@ describe('durable operation admission', () => {
     expect(admission.status().records).toHaveLength(64)
   })
   describe('exact drained transfer refusal', () => {
-    function setup() {
+    function setup(cause = 'target_rejects_item') {
       const receipt = {
         ...ref, state: 'cancelled', outcome: 'refused', tick: 110,
         task_count: 4, started_count: 4, task_types: ['moving_items', 'moving_items', 'moving_items', 'moving_items'],
         completed_count: 3, refused_count: 1,
-        refusals: [{ operation_id: 21, type: 'moving_items', code: 'nothing_moved', cause: 'target_rejects_item', target_unit_number: 49, held_count: 10, tick: 109 }],
+        refusals: [{ operation_id: 21, type: 'moving_items', code: 'nothing_moved', cause, target_unit_number: 49, held_count: 10, tick: 109 }],
       }
       const status: any = { batch_generation: 1, receipt_journal: [] }
       const admission = new_operation_admission(actor, () => status)
@@ -435,6 +435,16 @@ describe('durable operation admission', () => {
       const stored = (globalThis as any).storage.sgluna_operation_admissions[0]
       return { admission, status, receipt, stored }
     }
+    it.each(['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item'])('settles the native zero-transfer cause %s only with complete terminal proof', cause => {
+      const { admission, status, receipt, stored } = setup(cause)
+      expect(admission.status().records[0]).toMatchObject({ state: 'partial', error: 'exact_terminal_transfer_refusal', ok: false })
+      expect(stored.state).toBe('admitted')
+      status.batch_generation = 2
+      expect(admission.status().records[0].state).not.toBe('partial')
+      status.batch_generation = 1
+      receipt.started_count--
+      expect(admission.status().records[0].state).not.toBe('partial')
+    })
     it('closes fully accounted partial effects without claiming success, absence or a pre-mutation refusal', () => {
       const { admission, stored } = setup()
       expect(admission.status().records[0]).toMatchObject({ state: 'partial', ok: false, error: 'exact_terminal_transfer_refusal' })

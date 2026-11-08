@@ -50,7 +50,7 @@ function sort_named<T extends { name: string }>(values: T[]) {
 
 // Prototype presence comes from the loaded game, not a base-game/expansion name list.
 // Enabled is deliberately separate: locked recipes remain useful research dependencies.
-function recipe_applicability(actor: ControlledActor, recipe: any) {
+export function recipe_applicability(actor: ControlledActor, recipe: any) {
   const surface = actor.surface
   const scope = { surface_index: surface?.index }
   if (!recipe.prototype) return { ...scope, state: 'unknown', reason: 'recipe_prototype_unavailable', surface_bound: true }
@@ -686,8 +686,7 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
   if (!raw.found || raw.fluid_storages_truncated !== false || raw.fluid_box_count > 16
     || raw.surface_index !== raw.actor_surface_index || raw.force_index !== raw.actor_force_index) return undefined
   if (raw.fluid_box_count > 0) {
-    if (!['offshore-pump', 'boiler', 'steam-engine', 'pipe', 'electric-mining-drill'].includes(raw.entity.name)
-      || raw.non_fluidbox_storage_count !== 0) return undefined
+    if (raw.non_fluidbox_storage_count !== 0) return undefined
     const storages: any[] = raw.fluid_storages ?? []
     if (storages.length !== raw.fluid_box_count) return undefined
     for (const storage of storages) {
@@ -699,7 +698,7 @@ export function preservation_geometry_for_actor(actor: ControlledActor, unit_num
           || port.hydraulic_state !== (port.connected ? 'joined' : 'open')) return undefined
       }
     }
-  } else if (!['furnace', 'mining-drill', 'inserter'].includes(raw.entity.type)) return undefined
+  }
   // A route end in a chunk the NPC does not see now cannot prove preservation.
   if (raw.item_io?.pickup_target?.not_visible === true || raw.item_io?.drop_target?.not_visible === true) return undefined
   const storages: any[] = raw.fluid_storages ?? []

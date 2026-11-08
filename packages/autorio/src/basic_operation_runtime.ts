@@ -1,15 +1,21 @@
+import { hydraulic_mutation_matches } from './hydraulic_mutation'
+import { external_world_preflight } from './external_world_safety'
 import { reservation_intersection } from './area_reservations'
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
 import { layout_node_precheck, record_layout_node_placed } from './construction_layout'
 import { entity_last_user } from './entity_provenance'
-import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { remember_entity_reference, resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
+import { factory_world_identity } from './factory_cell_observation'
+import { execute_removal, inspect_removal } from './entity_removal_receipt'
+import { queued_removal_admission } from './operation_admission'
 import { record_hand_insert } from './hand_work'
+import { note_machine_delivery_placement, note_machine_delivery_exact_deposit } from './machine_delivery_acceptance'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { entity_role_inventories } from './inventory_roles'
 import type { InventoryRole } from './inventory_roles'
-import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
+import { MAX_MINING_START_REJECTIONS, is_placed_building_entity, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
 import { placement_candidate_matches, placement_preservation_execution_allowed } from './placement_candidates'
 import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
@@ -255,6 +261,67 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     controller.complete(actor, task)
   }
 
+  function state_exact_building_removal(actor: ControlledActor, task: PlayerParametersMineEntity, target: LuaEntity | undefined) {
+    actor.set_mining_state({ mining: false })
+    if (task.entity_removal && task.entity_removal.state !== 'prepared') { controller.fail(actor, task, 'entity_removal_uncertain'); return }
+    const record = queued_removal_admission(actor, task.removal_binding, manager.get_status_snapshot())
+    const world = factory_world_identity()
+    const refuse = (code: string, uncertain = false) => {
+      if (task.entity_removal) {
+        task.entity_removal.state = uncertain ? 'uncertain' : 'refused'
+        task.entity_removal.code = code; task.entity_removal.after_tick = game.tick
+      }
+      controller.fail(actor, task, uncertain ? 'entity_removal_uncertain' : 'entity_removal_refused')
+    }
+    if (!record || !world.ok || !world.world_id || !task.operation_id) { refuse('removal_owner_unproven', true); return }
+    // A retained terminal result is evidence, never a new permission to mine.
+    if (record.entity_removal && record.entity_removal !== task.entity_removal) {
+      controller.fail(actor, task, 'entity_removal_uncertain'); return
+    }
+    if (!task.entity_removal) {
+      task.entity_removal = { schema_version: 1, state: 'prepared', code: 'removal_prepared', world_id: world.world_id,
+        operation_id: task.operation_id, binding: { ...task.removal_binding! }, hydraulic_guard: task.hydraulic_guard, before_tick: game.tick, native_call: 'not_attempted' }
+      record.entity_removal = task.entity_removal
+    }
+    if (!target || !target.valid) { refuse('removal_target_disappeared', true); return }
+    if (target.unit_number !== task.target_unit_number || target.surface.index !== actor.surface.index || target.force.index !== actor.force.index) {
+      refuse('removal_target_scope_changed', true); return
+    }
+    if (task.entity_removal && task.entity_removal.world_id !== world.world_id) { refuse('removal_world_changed', true); return }
+    if (!within_mining_reach(actor, target)) {
+      task.removal_started_tick = undefined
+      reposition_for_mining(actor, target, task); return
+    }
+    if (task.external_world_guard && !external_world_preflight(actor, 'mine_entity_exact', task.target_unit_number!).ok) { refuse('external_hydraulic_target_unproven'); return }
+    const hydraulic = hydraulic_mutation_matches(actor, 'mine_entity_exact', task.target_unit_number!, task.hydraulic_guard)
+    if (!hydraulic.ok) { refuse(hydraulic.code); return }
+    const inventory = actor.get_main_inventory()
+    if (!inventory) { refuse('removal_inventory_unavailable'); return }
+    const checked = inspect_removal(target, inventory)
+    if (!checked.ok) { refuse(checked.code); return }
+    const ticks = clearing_mining_ticks(actor, target)
+    if (ticks === undefined || ticks !== ticks || ticks < 0 || ticks === math.huge) { refuse('removal_mining_duration_unknown'); return }
+    if (!task.entity_removal.before) {
+      task.entity_removal.before = checked.snapshot
+      task.entity_removal.actor_before = checked.actor
+      task.removal_required_ticks = ticks
+    }
+    else if (helpers.table_to_json(task.entity_removal.before) !== helpers.table_to_json(checked.snapshot)) {
+      refuse('removal_target_contents_changed'); return
+    }
+    task.removal_started_tick ??= game.tick
+    task.removal_required_ticks = math.max(task.removal_required_ticks ?? ticks, ticks)
+    if (game.tick - task.removal_started_tick < task.removal_required_ticks) return
+    // Fresh complete custody/capacity checks above run in the same synchronous
+    // callback as the only mine call; no queued native action can race between.
+    task.entity_removal.before_tick = game.tick
+    task.entity_removal.actor_before = checked.actor
+    execute_removal(actor, target, inventory, task.entity_removal)
+    log(`[AUTORIO] entity.removal operation_key=${record.operation_key} operation_id=${task.operation_id} state=${task.entity_removal.state} reason=${task.entity_removal.code}`)
+    if (task.entity_removal.state === 'verified') controller.complete(actor, task)
+    else controller.fail(actor, task, 'entity_removal_uncertain')
+  }
+
   function poll_standalone_mining(actor: ControlledActor) {
     const task = manager.player_state.parameters_mine_entity
     if (!task || !task.position || actor.status_snapshot().kind !== 'standalone_character') return false
@@ -308,6 +375,14 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (task.entity_name === undefined && task.target_unit_number === undefined) {
       controller.fail(actor, task, 'invalid_entity')
       return
+    }
+
+    if (task.target_unit_number !== undefined && actor.status_snapshot().kind === 'standalone_character') {
+      const exact = resolve_exact_entity(actor, task.target_unit_number)
+      if (task.entity_removal || exact?.valid && exact.type !== 'resource' && is_placed_building_entity(exact)) {
+        const visible = resolve_visible_entity_reference(actor, task.target_unit_number, 'actor_body')
+        state_exact_building_removal(actor, task, visible.entity); return
+      }
     }
 
     if (poll_standalone_mining(actor)) return
@@ -672,11 +747,20 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       log(`[AUTORIO] ERROR placement item accounting mismatch after creating ${task.entity_name}: required=${requirement.count} ${requirement.item_name}, removed=${removed}`)
     }
     log(`[AUTORIO] Entity placed successfully: ${task.entity_name} using ${requirement.count} ${requirement.item_name} at ${serpent.line(position)} direction=${task.direction ?? 'default'}`)
+    const placed_world = factory_world_identity()
+    const placed_batch = manager.get_active_batch_identity()
+    note_machine_delivery_placement(actor, entity, placed_batch)
     controller.complete(actor, task, {
+      entity_name: entity.name,
       placed_unit_number: entity.unit_number,
       placed_entity_type: entity.type,
       placed_position: { x: entity.position.x, y: entity.position.y },
       placed_surface_index: entity.surface.index,
+      placed_force_index: entity.force.index,
+      placed_world_id: placed_world.ok ? placed_world.world_id : undefined,
+      placed_batch_id: placed_batch?.batch_id,
+      placed_batch_generation: placed_batch?.batch_generation,
+      placed_batch_ref: placed_batch?.batch_ref,
       placed_direction: entity.direction,
       preservation_binding: task.preservation_binding,
       // MW1: the engine's last_user right after placement (nil for the standalone
@@ -881,6 +965,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
     const target_label = task.target_unit_number !== undefined ? ` entity unit ${task.target_unit_number}` : ''
     log(`[AUTORIO] Moved a total of ${moved_total} ${task.item_name}${target_label}`)
+    if (task.to_entity) note_machine_delivery_exact_deposit(actor, task.item_name, task.target_unit_number, moved_total)
     controller.complete(actor, task, task.to_entity ? { moved_count: moved_total, held_count } : { moved_count: moved_total })
     return moved_total
   }

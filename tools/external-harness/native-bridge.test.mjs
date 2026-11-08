@@ -9,7 +9,7 @@ const session = 'external-75ccaf8f-9ab3-4878-a37d-387b809339c1'
 const operation = { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }
 function world() {
   return {
-    guard: { revision: 'sgluna-deploy-v8-npc-staging', session, mode: 'npc', actor_kind: 'standalone_character', actor_id: 7, epoch: 3, allowed: true, surface_index: 1 },
+    guard: { revision: 'sgluna-deploy-v8-npc-staging', session, mode: 'npc', actor_kind: 'standalone_character', actor_id: 7, epoch: 3, allowed: true, surface_index: 1, force_index: 1 },
     status: { task_state: 'idle', queue_length: 0, queue_empty: true, batch_generation: 2, tasks_added: 0, admission_journal: [], receipt_journal: [], actor: { position: { x: 0, y: 0 } } },
     journal: { records: [], high_water: 4 }, tick: 100, speed: 1,
   }
@@ -56,7 +56,6 @@ function fixture() {
 }
 
 for (const raw of [
-  { name: 'place_entity', args: { entity_name: 'offshore-pump', x: 1, y: 1 } },
   { name: 'place_entity', args: { entity_name: 'stone-furnace' } },
   { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 101 } },
   { name: 'wait', args: { ticks: 3601 } },
@@ -222,7 +221,7 @@ test('automatic production support keeps canonical recipe admission and bounded 
   f.admission = row(prepared.pending)
   await f.bridge.submit(prepared)
   assert.match(f.calls.at(-1), /autorio_preflight.*set_machine_recipe/)
-  for (const fragment of ['external_recipe_target_unproven', 'e.name~="assembling-machine-1"', 'e.type~="assembling-machine"', 'e.unit_number~=t.unit_number', 'e.surface.index~=a.surface_index', 'e.force.index~=a.force_index', 'e.prototype.fluidbox_prototypes', 'for _,box in pairs(boxes)', '#e.fluidbox~=0', 'external_recipe_nonfluid=w', 'candidate.unit_number==42', 'radius=0.25']) {
+  for (const fragment of ['world_safety_capability_missing', '"sgluna_world_safety","preflight",\'set_machine_recipe\',42', 'external_world_safety=w.external_world_safety']) {
     assert.ok(f.calls[1].includes(fragment), `prepare: ${fragment}`)
     assert.ok(f.calls.at(-1).includes(fragment), `atomic admission: ${fragment}`)
   }
@@ -242,9 +241,9 @@ test('native rejection of an empty connected fluid assembler cannot queue a reci
   const f = fixture()
   // Real Lua branch/connection proof belongs to the native lane. This test
   // checks how its authoritative rejection crosses the external boundary.
-  f.preflight = { ok: false, code: 'external_recipe_target_unproven' }
+  f.preflight = { ok: false, code: 'external_hydraulic_target_unproven' }
   await assert.rejects(f.bridge.prepare({ name: 'set_machine_recipe', args: { unit_number: 42, recipe_name: 'automation-science-pack' } }, 'run/fluid-recipe'), error => error.code === 'preflight_rejected' && error.notAdmitted)
-  assert.ok(f.calls[1].includes('external_recipe_target_unproven'))
+  assert.match(f.calls[1], /"sgluna_world_safety","preflight",'set_machine_recipe',42/)
   assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
 })
 
@@ -264,9 +263,16 @@ for (const name of ['assembling-machine-1', 'transport-belt', 'inserter', 'burne
   })
 }
 
-test('external placement still excludes advanced or arbitrary prototypes', () => {
-  for (const entity_name of ['assembling-machine-2', 'fast-transport-belt', 'chemical-plant', 'arbitrary-prototype'])
-    assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name, x: 2, y: 2 } }), { code: 'placement_not_supported' })
+test('generic prototype parsing grants no placement authority without a native nonfluid footprint witness', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true
+  for (const entity_name of ['fixture-modded-machine', 'chemical-plant', 'arbitrary-prototype']) {
+    const operation = { name: 'place_entity', args: { entity_name, x: 2, y: 2 } }
+    assert.deepEqual(parseExternalOperation(operation), operation)
+    f.preflight = { ok: false, code: 'nonfluid_footprint_unproven' }
+    await assert.rejects(f.bridge.prepare(operation, `run/${entity_name}`), error => error.code === 'preflight_rejected'
+      && error.notAdmitted && error.details.native_code === 'nonfluid_footprint_unproven')
+  }
+  assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
 })
 
 test('explicit bind is not a tool capability and atomically refuses existing ownership/busy state', async () => {
@@ -367,7 +373,7 @@ test('harvest canonicalizes its bounded default and refuses extended work', () =
   }
 })
 
-test('lab and pole use native fractional-grid footprints while fluid coordinate placement stays refused', async () => {
+test('fractional-grid footprints and fluid coordinate refusals come from native current-world evidence', async () => {
   const f = fixture(); f.state.status.placement_no_clear_supported = true
   for (const entity_name of ['lab', 'small-electric-pole']) {
     const operation = { name: 'place_entity', args: { entity_name, x: 0.5, y: -1.5 } }
@@ -377,7 +383,8 @@ test('lab and pole use native fractional-grid footprints while fluid coordinate 
     assert.match(renderExternalOperation(operation), /,true\)$/)
   }
   for (const entity_name of ['boiler', 'steam-engine', 'pipe', 'offshore-pump', 'electric-mining-drill']) {
-    assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name, x: 0, y: 0 } }))
+    f.preflight = { ok: false, code: 'nonfluid_footprint_unproven' }
+    await assert.rejects(f.bridge.prepare({ name: 'place_entity', args: { entity_name, x: 0, y: 0 } }, 'run/fluid-coordinate'), { code: 'preflight_rejected' })
   }
 })
 
@@ -395,8 +402,8 @@ for (const isolated of [false, true]) {
     assert.equal(prepared.pending.goal_id, session)
     assert.equal(prepared.pending.step_id, 'run/fluid')
     assert.match(f.calls[1], /external_candidate_unproven/)
-    assert.ok(f.calls[1].includes('electric-mining-drill'))
-    assert.ok(capabilities().limits.fluid_candidate_prototypes.includes('electric-mining-drill'))
+    assert.equal(capabilities().limits.placement_domain, 'native-nonfluid-or-proven-fluid-candidate')
+    assert.match(f.calls[1], /preservation_clears_count~=0/)
     assert.match(f.calls[1], /placement_footprint_occupied/)
     assert.ok(f.calls[2].includes(isolated ? ',{},helpers.json_to_table' : ',{42},helpers.json_to_table'))
     f.admission = row(prepared.pending)
@@ -600,4 +607,215 @@ test('a network over the guard limit is refused with the limit and count, before
   await assert.rejects(f.bridge.prepare(candidate, 'run/fluid'), error => !/at most/.test(error.publicMessage)
     && error.details.native_code === 'preservation_guard_geometry_unproven' && error.details.limit === undefined)
   assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
+})
+
+const sharedWorldReads = [
+  ['getProductionScope', { calculation_id: 'fixture', target: { type: 'item', name: 'fixture-item' } }, /"autorio_planning","scope_context"/],
+  ['solveProduction', { calculation_id: 'fixture', target: { type: 'item', name: 'fixture-item', rate_per_second: 1 } }, /"autorio_planning","solve"/],
+  ['getMiningDetails', { resource_or_item: 'fixture-item' }, /"autorio_knowledge","mining_details"/],
+  ['estimateProductionTime', { target: 'fixture-item', count: 2, steps: [{ item: 'fixture-item' }] }, /"autorio_knowledge","production_estimate"/],
+  ['getResearchPath', { name: 'fixture-technology' }, /"autorio_planning","research_path"/],
+  ['findLongRangeEntities', { name: 'fixture-entity' }, /"autorio_discovery","find_entities"/],
+  ['getLogisticsTopology', { unit_number: 42 }, /"autorio_knowledge","logistics_topology",42/],
+  ['getLocalSpatialObservation', { position: { x: 1, y: 1 } }, /"autorio_planning","spatial_observation"/],
+  ['planPlacement', { entity_name: 'fixture-entity', position: { x: 1, y: 1 } }, /"autorio_planning","plan_placement"/],
+  ['findConstructionSites', { width: 2, height: 2, position: { x: 1, y: 1 } }, /"autorio_planning","find_construction_sites"/],
+  ['getMapContext', {}, /"autorio_map","crop"/],
+  ['getTaskStatus', {}, /"autorio_operations","status"/],
+  ['getResearchRequest', { request_id: 42 }, /"autorio_research","request_result",42/],
+]
+for (const [name, args, route] of sharedWorldReads) {
+  test(`shared world observation ${name} reaches its native facts route`, async () => {
+    const f = fixture()
+    const native = { ok: true, observed_tick: 100, state: 'unknown', code: 'fixture-native-unavailable', truncated: true }
+    f.onCommand = command => route.test(command) ? JSON.stringify(native) : undefined
+    assert.deepEqual(await f.bridge.observe(name, args), native, 'native unknown/truncation must not become invented successful facts')
+    assert.equal(f.calls.length, 1)
+    assert.match(f.calls[0], route)
+  })
+}
+
+test('expanded world reads retain typed bounds and reject executable or caller-owned context before transport', async () => {
+  const f = fixture()
+  for (const [name, args] of [
+    ['getMiningDetails', { resource_or_item: 'fixture-item', lua: 'game.print(1)' }],
+    ['getResearchPath', { name: 'fixture-technology', max_nodes: 65 }],
+    ['getLogisticsTopology', { unit_number: 42, radius: 17 }],
+    ['getMapContext', { radius: 5 }],
+    ['getLocalSpatialObservation', { half_size: 17 }],
+    ['findLongRangeEntities', { name: 'fixture-entity', max_radius: 4097 }],
+    ['measureTransportThroughput', { kind: 'belt_lane', unit_number: 42, lane_index: 3 }],
+    ['getResearchRequest', { request_id: 42, actor_id: 999 }],
+  ]) {
+    await assert.rejects(f.bridge.observe(name, args), { code: 'invalid_observation_arguments' }, name)
+  }
+  assert.equal(f.calls.length, 0, 'invalid world queries cannot reach RCON')
+})
+
+for (const operation of [
+  { name: 'walk_to_entity_exact', args: { unit_number: 42 } },
+  { name: 'gather_resource', args: { resource_name: 'fixture-resource', count: 2, search_radius: 32 } },
+  { name: 'supply_entity', args: { unit_number: 42, items: [{ item_name: 'fixture-item', count: 2 }] } },
+]) {
+  test(`core world action ${operation.name} retains atomic authority and canonical admission`, async () => {
+    const f = fixture(); const prepared = await f.bridge.prepare(operation, `run/${operation.name}`)
+    f.admission = row(prepared.pending)
+    await f.bridge.submit(prepared)
+    const command = f.calls.at(-1)
+    assert.match(command, new RegExp(`autorio_operations','${operation.name}'`))
+    for (const fragment of ['g.session~=', 'g.actor_id~=7', 'g.epoch~=3', 's.task_state~="idle"',
+      's.batch_generation~=2', 'j.high_water~=4', 'unresolved_native_operation', 'autorio_operation_admission","begin']) {
+      assert.ok(command.includes(fragment), `${operation.name}: ${fragment}`)
+    }
+    assert.ok(command.indexOf('autorio_preflight') < command.indexOf('autorio_operation_admission","begin'))
+    const tampered = structuredClone(prepared)
+    tampered.operation.args.lua = 'game.print(1)'
+    const before = f.calls.length
+    await assert.rejects(f.bridge.submit(tampered))
+    assert.equal(f.calls.length, before, 'untyped action cannot enter the transport')
+  })
+}
+
+test('exact world facts derive native ownership and preserve unavailable evidence without binding a world', async () => {
+  const f = fixture()
+  const args = { request_id: 'facts/one', members: [{ unit_number: 42, name: 'fixture-entity', position: { x: 2, y: -1 }, surface_index: 1, force_index: 1 }] }
+  const native = { ok: false, code: 'world_unbound' }
+  f.onCommand = command => command.includes('"sgluna_factory","observe"') ? JSON.stringify(native) : undefined
+  assert.deepEqual(await f.bridge.observe('getWorldEntityFacts', args), native)
+  const command = f.calls.at(-1)
+  for (const fragment of ['"sgluna_factory","world_identity"', 'q.world_id=w.world_id', 'q.actor_id=g.actor_id',
+    'q.surface_index=g.surface_index', 'q.force_index=g.force_index', '"sgluna_factory","observe",q']) assert.ok(command.includes(fragment), fragment)
+  assert.equal(command.includes('bind_world_id'), false, 'a model observation cannot create or replace world identity')
+  const calls = f.calls.length
+  for (const bad of [
+    { ...args, world_id: 'caller-world' }, { ...args, actor_id: 999 }, { ...args, schema_version: 999 },
+    { ...args, members: [args.members[0], args.members[0]] }, { ...args, members: [] },
+    { ...args, members: Array.from({ length: 33 }, (_, i) => ({ ...args.members[0], unit_number: i + 1 })) },
+    { ...args, members: [{ ...args.members[0], position: { x: Number.NaN, y: 0 } }] },
+    { ...args, members: [{ ...args.members[0], lua: 'game.print(1)' }] },
+  ]) await assert.rejects(f.bridge.observe('getWorldEntityFacts', bad), { code: 'invalid_observation_arguments' })
+  assert.equal(f.calls.length, calls, 'invalid ownership or member claims never reach transport')
+})
+
+for (const name of ['mine_entity_exact', 'rotate_entity']) {
+  test(`exact ${name} requires a fresh native safety witness at prepare and atomic admission`, async () => {
+    const f = fixture()
+    const operation = { name, args: { unit_number: 42 } }
+    const prepared = await f.bridge.prepare(operation, `run/${name}`)
+    f.admission = row(prepared.pending)
+    await f.bridge.submit(prepared)
+    for (const command of [f.calls[1], f.calls.at(-1)]) assert.ok(command.includes(`"sgluna_world_safety","preflight",'${name}',42`))
+    assert.match(renderExternalOperation(operation), /,true\)$/, 'execution-time safety is forced by trusted adapter')
+    assert.throws(() => parseExternalOperation({ name, args: { unit_number: 42, external_world_guard: false } }))
+    const sent = f.calls.filter(command => command.includes('local refusal=')).length
+    f.preflight = { ok: false, code: name === 'mine_entity_exact' ? 'removal_inventory_full' : 'external_hydraulic_target_unproven' }
+    await assert.rejects(f.bridge.prepare(operation, `run/${name}/refused`), error => error.code === 'preflight_rejected' && error.notAdmitted)
+    assert.equal(f.calls.filter(command => command.includes('local refusal=')).length, sent)
+    f.onSubmit = command => `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: 'external_guard_refused:preflight_rejected', prefix: {} })}`
+    await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted && error.code === 'preflight_rejected')
+  })
+}
+
+test('expanded resource and supply work remains bounded before transport', async () => {
+  const f = fixture()
+  for (const raw of [
+    { name: 'gather_resource', args: { resource_name: 'fixture-resource', count: 101 } },
+    { name: 'gather_resource', args: { resource_name: 'fixture-resource', count: 1, search_radius: 129 } },
+    { name: 'walk_to_entity', args: { entity_name: 'fixture-entity', search_radius: 129 } },
+    { name: 'supply_entity', args: { unit_number: 42, items: [{ item_name: 'fixture-item', count: 1001 }] } },
+  ]) await assert.rejects(f.bridge.prepare(raw, 'run/oversized'))
+  assert.equal(f.calls.length, 0)
+})
+
+test('throughput observation waits for its exact owned native measurement instead of returning only start admission', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fixture()
+  const complete = { measurement_id: 71, state: 'completed', transferred: 2, observed_ticks: 60 }
+  f.onCommand = command => command.includes('"throughput_measurement_start"') ? '{"ok":true,"measurement_id":71,"started_tick":100}'
+    : command.includes('"throughput_measurement_status"') ? JSON.stringify({ tick: 160, result: complete }) : undefined
+  const result = f.bridge.observe('measureTransportThroughput', { kind: 'inserter_instance', unit_number: 42, warmup_ticks: 0, window_ticks: 60 })
+  await new Promise(resolve => setImmediate(resolve))
+  t.mock.timers.tick(250)
+  assert.deepEqual(await result, complete)
+  const commands = f.calls.filter(command => command.includes('throughput_measurement_'))
+  assert.equal(commands.length, 2)
+  assert.match(commands[1], /"throughput_measurement_status",71/)
+  for (const command of commands) {
+    for (const fragment of ['g.session~=', 'g.actor_id~=7', 'g.epoch~=3', 's.task_state~="idle"', 'unresolved_native_operation']) assert.ok(command.includes(fragment), fragment)
+  }
+})
+
+test('throughput authority loss cancels only the exact measurement and does not retry', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fixture()
+  f.onCommand = command => command.includes('"throughput_measurement_start"') ? '{"ok":true,"measurement_id":71,"started_tick":100}'
+    : command.includes('"throughput_measurement_status"') ? '{"ok":false,"code":"measurement_authority_changed"}' : undefined
+  const rejected = assert.rejects(f.bridge.observe('measureTransportThroughput', { kind: 'inserter_instance', unit_number: 42 }), { code: 'measurement_authority_changed' })
+  await new Promise(resolve => setImmediate(resolve))
+  t.mock.timers.tick(250)
+  await rejected
+  assert.equal(f.calls.filter(command => command.includes('"throughput_measurement_start"')).length, 1)
+  assert.match(f.calls.at(-1), /"throughput_measurement_cancel",71/)
+})
+
+test('machine delivery binding uses the armed native key as metadata without operation admission', async () => {
+  const f = fixture()
+  f.onCommand = command => command.includes('"bind_current_machine_delivery"')
+    ? JSON.stringify({ ok: true, acceptance_key: 'native-armed-key', unit_number: 42 }) : undefined
+  const result = await f.bridge.bindMachineDelivery({ unit_number: 42 })
+  assert.deepEqual(result, { ok: true, acceptance_key: 'native-armed-key', unit_number: 42,
+    metadata_only: true, world_mutated: false, goal_verified: false })
+  assert.equal(f.calls.length, 3, 'native scope is observed before and after the atomic metadata update')
+  const command = f.calls[1]
+  assert.match(command, /remote.call\("autorio_tools","bind_current_machine_delivery",\{unit_number=42\}\)/)
+  for (const field of ['g.session~=', 'g.actor_id~=7', 'g.epoch~=3', 'g.surface_index~=1', 'g.force_index~=1']) assert.ok(command.includes(field), field)
+  assert.doesNotMatch(command, /acceptance_key|arm_machine_delivery|reset|baseline/)
+  assert.equal(f.state.journal.high_water, 4)
+  assert.deepEqual(f.state.status.admission_journal, [])
+  for (const sent of f.calls) assert.doesNotMatch(sent, /autorio_operation_admission","(?:begin|slot|finish)|local refusal=/)
+})
+
+test('machine delivery rejects caller keys, resets and executable arguments before any transport', async () => {
+  const f = fixture()
+  for (const input of [
+    {}, { unit_number: 0 }, { unit_number: 1.5 }, { unit_number: 1000000000 },
+    { unit_number: 42, acceptance_key: 'caller-key' }, { unit_number: 42, reset: true },
+    { unit_number: 42, baseline: 0 }, { unit_number: 42, actor_id: 99 },
+    { unit_number: 42, lua: 'game.print(1)' }, { unit_number: 42, method: 'arm_machine_delivery' },
+  ]) await assert.rejects(f.bridge.bindMachineDelivery(input), { code: 'invalid_machine_delivery_binding' })
+  assert.equal(f.calls.length, 0)
+})
+
+for (const [label, mutate, code] of [
+  ['actor', state => { state.guard.actor_id++ }, 'machine_delivery_scope_changed'],
+  ['epoch', state => { state.guard.epoch++ }, 'machine_delivery_scope_changed'],
+  ['session', state => { state.guard.session = 'replacement-session' }, 'session_not_owned'],
+  ['surface', state => { state.guard.surface_index++ }, 'machine_delivery_scope_changed'],
+  ['force', state => { state.guard.force_index++ }, 'machine_delivery_scope_changed'],
+]) {
+  test(`machine delivery refuses a changed ${label} after the native metadata reply`, async () => {
+    const f = fixture()
+    f.onCommand = command => {
+      if (!command.includes('"bind_current_machine_delivery"')) return undefined
+      mutate(f.state)
+      return '{"ok":true,"acceptance_key":"native-armed-key","unit_number":42}'
+    }
+    await assert.rejects(f.bridge.bindMachineDelivery({ unit_number: 42 }), { code })
+    assert.equal(f.calls.filter(command => command.includes('"bind_current_machine_delivery"')).length, 1, 'no retry after a possibly applied metadata selection')
+  })
+}
+
+test('machine delivery cannot bind without owned current world scope or a passing atomic native fence', async () => {
+  for (const scope of ['surface_index', 'force_index']) {
+    const f = fixture(); delete f.state.guard[scope]
+    await assert.rejects(f.bridge.bindMachineDelivery({ unit_number: 42 }), { code: 'machine_delivery_world_scope_unavailable' })
+    assert.equal(f.calls.length, 1)
+  }
+  const f = fixture(); f.state.guard.session = 'other-owner'
+  await assert.rejects(f.bridge.bindMachineDelivery({ unit_number: 42 }), { code: 'session_not_owned' })
+  assert.equal(f.calls.length, 1)
+  f.state.guard.session = session
+  f.onCommand = command => command.includes('"bind_current_machine_delivery"') ? '{"ok":false,"error":"machine_delivery_scope_changed"}' : undefined
+  await assert.rejects(f.bridge.bindMachineDelivery({ unit_number: 42 }), { code: 'machine_delivery_scope_changed' })
+  assert.equal(f.calls.filter(command => command.includes('"bind_current_machine_delivery"')).length, 1)
 })

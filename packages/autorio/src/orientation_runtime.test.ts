@@ -11,7 +11,7 @@ function fixture() {
     character: { valid: true },
     position: { x: 0, y: 0 },
     surface: { index: 1, find_entities_filtered: vi.fn(() => []) },
-    force: { index: 1 },
+    force: { index: 1, is_chunk_visible: () => true },
     set_walking_state: vi.fn(),
     set_mining_state: vi.fn(),
     set_shooting_state: vi.fn(),
@@ -52,6 +52,7 @@ describe('placed entity orientation runtime', () => {
       direction: 0,
       supports_direction: true,
       rotatable: true,
+      prototype: { fluidbox_prototypes: [] }, fluids_count: 0,
       surface: { index: 1 },
       force: { index: 1 },
     }
@@ -91,6 +92,7 @@ describe('placed entity orientation runtime', () => {
       direction: 0,
       supports_direction: true,
       rotatable: false,
+      prototype: { fluidbox_prototypes: [] }, fluids_count: 0,
       surface: { index: 1 },
       force: { index: 1 },
       rotate: vi.fn(),
@@ -109,5 +111,32 @@ describe('placed entity orientation runtime', () => {
       code: 'not_rotatable',
       completed: false,
     })
+  })
+
+  it.each(['unchanged', 'new-fluid-port', 'actor-replaced'])('rechecks guarded exact rotation at execution after %s', mode => {
+    const f = fixture()
+    ;(f.actor.force as any).is_chunk_visible = () => true
+    const entity: any = { valid: true, name: 'fixture-rotatable', type: 'assembling-machine', unit_number: 543,
+      position: { x: 2, y: 0 }, direction: 0, supports_direction: true, rotatable: true,
+      surface: f.actor.surface, force: f.actor.force, fluids_count: 0, prototype: { fluidbox_prototypes: [] } }
+    entity.rotate = vi.fn(() => { entity.direction = 4; return true })
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => entity)
+    expect(f.controller.submit_rotate_exact(543, false, true)).toEqual([true, 'Task started'])
+    // A first zero-port observation is not permission to ignore a later native
+    // change, even when that new fluid storage happens to be empty now.
+    if (mode === 'new-fluid-port') entity.prototype.fluidbox_prototypes = [{}]
+    if (mode === 'actor-replaced') (f.actor as any).status_snapshot = () => ({ actor_id: 99, kind: 'standalone_character' })
+    const result = f.runtime.state_rotating(f.actor)
+    if (mode === 'unchanged') {
+      expect(result[0]).toBe(true)
+      expect(entity.rotate).toHaveBeenCalledTimes(1)
+      expect(f.controller.status().last_result?.completed).toBe(true)
+    }
+    else {
+      expect(result[0]).toBe(false)
+      expect(entity.rotate).not.toHaveBeenCalled()
+      expect(f.controller.status().last_result?.completed).toBe(false)
+      expect(f.manager.get_status_snapshot()).toMatchObject({ task_state: TaskStates.IDLE, queue_length: 0 })
+    }
   })
 })

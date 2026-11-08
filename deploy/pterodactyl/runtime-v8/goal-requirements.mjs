@@ -89,6 +89,7 @@ export function requirementTargets(definition) {
         break
       // A machine rate with hand work excluded: the item needs machines.
       case 'production_rate':
+      case 'machine_output_delivered':
         addItem(condition.item_name, true)
         break
       case 'research_completed': {

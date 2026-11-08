@@ -281,6 +281,12 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500 }) 
 
   const runtime = {
     capabilities: () => ({ ...bridge.capabilities(), library: libraryMetadata() }),
+    // Serialized goal metadata, never an observation/cache entry or an
+    // operation admission. Native state owns the immutable acceptance key.
+    bindMachineDelivery: input => serialized(async () => {
+      object(input, ['unit_number'])
+      return bridge.bindMachineDelivery(input)
+    }),
     library: readLibrary,
     context: () => serialized(async () => {
       for (const row of ledger.records.filter(row => !row.terminal)) await refresh(row)
