@@ -471,7 +471,8 @@ test('running receipt explains in-flight and reports progress once per reply, ne
   assert.equal(admitted.observed_progress.actor_position.moved_tiles, 5)
   probes = 0
   const polled = f.calls.filter(([name]) => name === 'receipt').length
-  const waited = await runtime.get({ operation_id: admitted.operation_id, wait_ms: 60 })
+  // Windows durable replacement launches a native helper during each poll.
+  const waited = await runtime.get({ operation_id: admitted.operation_id, wait_ms: process.platform === 'win32' ? 3000 : 60 })
   assert.ok(f.calls.filter(([name]) => name === 'receipt').length - polled > 1, 'the wait polled more than once')
   assert.equal(probes, 1, 'one progress probe per reply')
   assert.equal(waited.observed_progress.available, true)
