@@ -39,6 +39,96 @@
             "field_type": "text"
         },
         {
+            "name": "Harness Mode",
+            "description": "Lifecycle from the shared codebase. plan manages the server; external and pursuit connect to an already prepared running Factorio host. Stop and reconcile before changing modes.",
+            "env_variable": "SGLUNA_HARNESS_MODE",
+            "default_value": "plan",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:external,plan,pursuit",
+            "field_type": "text"
+        },
+        {
+            "name": "Pursuit Profile",
+            "description": "Absolute path to a private non-secret pursuit profile JSON; required only for pursuit mode. Provider/session secrets remain environment-only.",
+            "env_variable": "SGLUNA_PURSUIT_PROFILE",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:1024",
+            "field_type": "text"
+        },
+        {
+            "name": "Operator RCON Host",
+            "description": "External/pursuit only: loopback address of the already running prepared Factorio host. This does not start a server or enable remote RCON.",
+            "env_variable": "SGLUNA_RCON_HOST",
+            "default_value": "127.0.0.1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|in:127.0.0.1,::1",
+            "field_type": "text"
+        },
+        {
+            "name": "RCON Port",
+            "description": "External/pursuit: explicitly set the existing host RCON port (normally 27015). Blank preserves plan-mode automatic port selection; this field does not start a host.",
+            "env_variable": "SGLUNA_RCON_PORT",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|numeric|between:1,65535",
+            "field_type": "text"
+        },
+        {
+            "name": "RCON Password",
+            "description": "External/pursuit: credential for the existing host. Optional in plan mode, which retains its generated-password default. Environment-only; never put it in the pursuit profile.",
+            "env_variable": "SGLUNA_RCON_PASSWORD",
+            "default_value": "",
+            "user_viewable": false,
+            "user_editable": true,
+            "rules": "nullable|string|max:256",
+            "field_type": "text"
+        },
+        {
+            "name": "Operator World Session",
+            "description": "External/pursuit only: the existing bound world-unique session ID (32-120 letters, digits, underscore or hyphen). Preserve it with the save and journal; startup never binds a different world.",
+            "env_variable": "EXTERNAL_HARNESS_SESSION",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|min:32|max:120",
+            "field_type": "text"
+        },
+        {
+            "name": "Operator State Directory",
+            "description": "External/pursuit only: private durable absolute path for the paired world operation journal. Preserve it with the save; external and pursuit share its process lock.",
+            "env_variable": "EXTERNAL_HARNESS_STATE_DIR",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:1024",
+            "field_type": "text"
+        },
+        {
+            "name": "Pursuit Provider Base",
+            "description": "Pursuit only: existing operator provider base URL. Required by pursuit startup; no provider is called by external mode. Keep credentials in the separate gateway-key field.",
+            "env_variable": "OPERATOR_PROVIDER_BASE",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|url|max:1024",
+            "field_type": "text"
+        },
+        {
+            "name": "Pursuit Gateway Key",
+            "description": "Pursuit only: injected operator provider credential. Required by pursuit startup, kept environment-only and never written to profile or evidence.",
+            "env_variable": "CLI_PROXY_GATEWAY_KEY",
+            "default_value": "",
+            "user_viewable": false,
+            "user_editable": true,
+            "rules": "nullable|string|max:1024",
+            "field_type": "text"
+        },
+        {
             "name": "SGLuna Actor Mode",
             "description": "Controlled actor mode. The v8 egg intentionally supports standalone NPC ownership only.",
             "env_variable": "SGLUNA_ACTOR_MODE",
@@ -60,32 +150,32 @@
         },
         {
             "name": "OpenAI API Key",
-            "description": "Provider credential. Kept environment-only and never written to sgluna-config.json.",
+            "description": "Plan-mode provider credential; plan startup validates it. External mode needs none. Pursuit uses its separately injected operator provider settings. Kept environment-only.",
             "env_variable": "OPENAI_API_KEY",
             "default_value": "",
             "user_viewable": false,
             "user_editable": true,
-            "rules": "required|string|max:512",
+            "rules": "nullable|string|max:512",
             "field_type": "text"
         },
         {
             "name": "AI Model",
-            "description": "Comma-separated OpenAI-compatible model identifiers. The first entry is the main agent model, used exactly as a single model always was. A second entry names the subagent/plan-agent model for later use; extra entries are validated but otherwise unused today.",
+            "description": "Plan mode only; pursuit selects its model from the explicit profile. Comma-separated OpenAI-compatible model identifiers. The first entry is the main agent model, used exactly as a single model always was. A second entry names the subagent/plan-agent model for later use; extra entries are validated but otherwise unused today.",
             "env_variable": "OPENAI_MODEL",
             "default_value": "replace-me",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string|max:200",
+            "rules": "nullable|string|max:200",
             "field_type": "text"
         },
         {
             "name": "Provider Base URL",
-            "description": "OpenAI-compatible API base URL. Replace the non-routable placeholder. The direct and router AI API methods require HTTPS; the local method also allows plain http to localhost/127.0.0.1/[::1]/host.docker.internal.",
+            "description": "Plan-mode OpenAI-compatible API base URL; plan startup validates it. External needs none; pursuit uses separately injected OPERATOR_PROVIDER_BASE and CLI_PROXY_GATEWAY_KEY. Replace the non-routable placeholder. The direct and router AI API methods require HTTPS; the local method also allows plain http to localhost/127.0.0.1/[::1]/host.docker.internal.",
             "env_variable": "OPENAI_API_BASEURL",
             "default_value": "https://provider.invalid/v1",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string|url|max:255",
+            "rules": "nullable|string|url|max:255",
             "field_type": "text"
         },
         {

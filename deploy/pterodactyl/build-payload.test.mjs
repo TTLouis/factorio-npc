@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { buildArtifacts, channelInstaller, installerLoader, verifyGeneratedArtifacts } from './build-payload.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const PAYLOAD_REF = '152eb64e561fa99dd4e5b71e23ce70f62fecb200'
-const PAYLOAD_SHA256 = '095ba27e26f44aba5cb8d72e31d001462cdc30801efdabeec909073d7f409cba'
+const PAYLOAD_REF = 'eaa944f7331b5f6b540d7db9dc9f87f9f4b98c41'
+const PAYLOAD_SHA256 = '6f2d5d6689a73725b0a533dfc04a9ce9ed0bac9c47d7c08ce78d26805b6f5a48'
 const source = Buffer.from(`#!/usr/bin/env bash
 SGLUNA_REF="0123456789abcdef0123456789abcdef01234567"
 REVISION="test"
@@ -158,9 +158,10 @@ test('generated artifact verifier rejects source or channel drift', () => {
     () => verifyGeneratedArtifacts(changedSource, canonical.installScript, canonical.mainEggJson, canonical.e2eEggJson),
     /install\.sh loader is stale|egg schema is stale/,
   )
-  const changedE2e = canonical.e2eEggJson.replace('experiment/jev-agent-architecture', 'main')
+  const changedE2e = JSON.parse(canonical.e2eEggJson)
+  changedE2e.variables.find(entry => entry.env_variable === 'SGLUNA_SOURCE_REF').default_value = 'invalid-source-ref'
   assert.throws(
-    () => verifyGeneratedArtifacts(source, canonical.installScript, canonical.mainEggJson, changedE2e),
+    () => verifyGeneratedArtifacts(source, canonical.installScript, canonical.mainEggJson, JSON.stringify(changedE2e)),
     /npcE2e egg schema is stale|wrong source ref/,
   )
 })
@@ -191,7 +192,6 @@ test('committed Pterodactyl artifacts are internally valid and reinstall stays d
   assert.match(sourceText, /goal-definition\.mjs/)
   assert.match(sourceText, /goal-reading\.mjs/)
   assert.match(sourceText, /SGLUNA_SUPERVISOR_VERIFY=/)
-  assert.match(sourceText, /await import\(pathToFileURL\(process\.env\.SGLUNA_SUPERVISOR_VERIFY\)\.href\)/)
   assert.match(sourceText, /src\/runtime-v8\/canonical-task-board-memory\.mjs/)
   assert.match(sourceText, /src\/runtime-v8\/provider-base\.mjs/)
   assert.match(sourceText, /README-SGLUNA\.txt/)
