@@ -36,6 +36,8 @@ export interface OperationCorrelation {
   fluid_preservation?: FluidPreservationOwner
 }
 export interface AdmissionSlot {
+  /** Native-only origin at actual gather submission, not an earlier host preflight. */
+  gather_search_origin?: { x: number, y: number, surface_index: number, force_index: number, tick: number }
   index: number
   ok: boolean
   result?: string | number | boolean
@@ -51,7 +53,7 @@ export interface AdmissionSlot {
   queued_tasks?: number
 }
 /** Fields the harness supplies for a slot; the mod, not the harness, decides what a refusal proves. */
-export type AdmissionSlotInput = Omit<AdmissionSlot, 'index' | 'refused_before_mutation' | 'refusal_code'> & {
+export type AdmissionSlotInput = Omit<AdmissionSlot, 'index' | 'refused_before_mutation' | 'refusal_code' | 'gather_search_origin'> & {
   /** The operation returned a refusal (false or a false-first tuple) instead of throwing. */
   refused?: boolean
 }
@@ -412,10 +414,18 @@ export function terminal_gather_cancellation(record: OperationAdmission, status:
     types.push('mining')
     if (slot.queued_tasks !== (slot.operation === 'gather_resource' ? 2 : 1)) return false
   }
-  const receipt = status.receipt_journal.find(row => row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation && row.batch_ref === ref.batch_ref)
+  const matches = status.receipt_journal.filter(row => row.batch_ref === ref.batch_ref
+    || row.batch_id === ref.batch_id && row.batch_generation === ref.batch_generation)
+  if (matches.length !== 1) return false
+  const receipt = matches[0]
+  const navigation_miss = receipt.reason === 'navigation_no_target'
+    && integer(receipt.tasks_started) && receipt.tasks_started <= types.length
+    && integer(receipt.started_count) && receipt.started_count >= receipt.tasks_started
+    && types[receipt.tasks_started - 1] === 'walking_to_entity'
   return receipt?.state === 'cancelled' && receipt.task_count === types.length && receipt.task_types.length === types.length
+    && receipt.batch_id === ref.batch_id && receipt.batch_generation === ref.batch_generation && receipt.batch_ref === ref.batch_ref
     && receipt.task_types.every((type, index) => type === types[index]) && receipt.tick >= record.tick
-    && (receipt.reason === 'mining:mining_rejected' || receipt.reason === 'mining:no_target')
+    && (receipt.reason === 'mining:mining_rejected' || receipt.reason === 'mining:no_target' || navigation_miss)
     && receipt.outcome === undefined && !receipt.refused_count && !(receipt.refusals?.length)
 }
 // A single execute_construction_plan admission whose placement batch ended unfinished, matched to the construction layout that
@@ -596,9 +606,12 @@ export function new_operation_admission(
       ? tasks_added - record.work_mark : undefined
     record.work_mark = tasks_added
     const error = typeof raw.error === 'string' ? raw.error.slice(0, 512) : undefined
+    const gather_actor = raw.ok && raw.operation === 'gather_resource' ? actor_provider() : undefined
     if (!['wait_ticks', 'wait_condition'].includes(raw.operation ?? 'unknown')) note_starter_servicing(actor_provider()!.force.index)
     record.slots.push({
       index, ok: raw.ok, result, operation: typeof raw.operation === 'string' ? raw.operation.slice(0, 64) : undefined,
+      ...(gather_actor ? { gather_search_origin: { x: gather_actor.position.x, y: gather_actor.position.y,
+        surface_index: gather_actor.surface.index, force_index: gather_actor.force.index, tick: game.tick } } : {}),
       mutation_unknown: raw.ok ? undefined : !refused,
       // The queue did not grow, so any open batch the harness saw belongs to earlier work.
       refused_before_mutation: refused ? true : undefined, refusal_code: refused ? (error ?? 'rejected').slice(0, 128) : undefined,

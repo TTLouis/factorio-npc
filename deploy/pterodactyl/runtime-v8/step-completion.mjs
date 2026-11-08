@@ -4,6 +4,7 @@ const STRICT_TASKS_BY_OPERATION = new Map([
   ['walk_to_player', ['walking_to_entity']],
   ['mine_entity', ['mining']],
   ['mine_entity_exact', ['mining']],
+  ['mine_resource_at', ['mining']],
   ['gather_resource', ['walking_to_entity', 'mining']],
   ['harvest_product', ['harvesting']],
   ['clear_construction_area', ['clearing_area']],

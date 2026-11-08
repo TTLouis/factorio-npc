@@ -30,6 +30,9 @@ export interface PlayerParametersWalkToEntity {
   /** Prototype name for nearest-name and entity-bound navigation. Position targets leave this empty. */
   entity_name: string
   search_radius: number
+  /** Internal gather scope: the admitted search disk must not move with earlier queued work. */
+  resource_search_origin?: MapPositionStruct
+  resource_search_surface?: number
   /** Explicit target semantics so observability can distinguish nearest-name, exact identity, coordinate, and player movement. */
   target_kind?: 'nearest_entity' | 'exact_entity' | 'position' | 'player'
   /** Fixed world coordinate selected by the caller. Unlike target_position, this remains authoritative across repaths. */

@@ -4,7 +4,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
-import { operationSignature, reconcilePendingOperation, duplicateEffectGuard } from './operation-reconciliation.mjs'
+import { buildPendingOperation, operationSignature, reconcilePendingOperation, duplicateEffectGuard } from './operation-reconciliation.mjs'
 import { progressObligationKey, progressVector } from './executor-progress-audit.mjs'
 import { gatherDeficit } from './gather-recovery.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
@@ -40,6 +40,15 @@ function world({ readHook, traceHook, inventory, memory: snapshot, preflight } =
   const native = game.command.bind(game)
   game.command = async text => {
     await readHook?.({ text, agent, memory, game })
+    // Current FakeFactorio publishes its durable receipt journal separately
+    // from last_cancelled_batch. Mirror this fixture's explicitly declared
+    // original terminal receipt, including the restart variant's new identity.
+    if (text.includes('remote.call("autorio_operations","status")') && game.cancelledBatch) {
+      const receipt = game.cancelledBatch
+      const generation = receipt.batch_generation ?? game.generation ?? 1
+      const ref = receipt.batch_ref ?? `batch-g${generation}-${receipt.batch_id}`
+      game.factoryTerminalBatchReceipts.set(ref, { ...receipt, batch_generation: generation, batch_ref: ref, state: 'cancelled' })
+    }
     if (text.includes('"autorio_crafting","status"')) return JSON.stringify(game.craftingStatus ?? { task_active: false, native_queue: [] })
     if (text.includes('"mining_details"')) {
       const name = /"mining_details",'([^']+)'/.exec(text)[1]
@@ -67,10 +76,122 @@ function world({ readHook, traceHook, inventory, memory: snapshot, preflight } =
   const finish = () => {
     const text = game.mutations.at(-1)
     for (const match of text.matchAll(/'gather_resource','([^']+)',(\d+),/g)) game.inventory[match[1]] = (game.inventory[match[1]] ?? 0) + Number(match[2])
+    for (const match of text.matchAll(/'mine_resource_at','([^']+)',[-\d.]+,[-\d.]+,(\d+)/g)) game.inventory[match[1]] = (game.inventory[match[1]] ?? 0) + Number(match[2])
     game.taskState = 'idle'; game.status.idle = true
   }
   return { game, memory, agent, events, providers, held, finish }
 }
+
+// A separate navigation-origin residual fixture, using the same real Session
+// failure/completion scheduling as AR. Native-origin metadata below is a fake
+// game's deterministic output; the real-engine runner independently proves it.
+function navigationWorld({ coalPosition = { x: 10.5, y: 0.5 }, ...options } = {}) {
+  const w = world(options)
+  const original = w.memory.pendingOperations(ar.key)[0]
+  // Preserve the frozen AR operation identity; changing its radius would be
+  // correctly refused by the canonical pending-operation reducer.
+  const ops = structuredClone(ar.operations)
+  const origin = { x: 0, y: 0 }
+  const witnesses = ops.map((op, index) => ({ origin, position: index ? coalPosition : { x: -72.5, y: 0.5 },
+    radius: op.args.search_radius, amount: 100, actor_id: 25, surface_index: 1, force_index: 1, tick: 100 }))
+  const built = buildPendingOperation({ requestId: original.request_id, operationKey: original.operation_key,
+    attemptId: original.attempt_id, ordinal: original.ordinal, protocolVersion: 2, operations: ops,
+    actor: original.actor, surfaceIndex: 1, goalId: original.goal_id, planId: original.plan_id, stepId: original.step_id,
+    baseline: original.baseline, now: original.sent_at, preflight: witnesses.map((resource_search, i) => ({
+      ok: true, operation: 'gather_resource', identity: ops[i].args.resource_name, resource_search })) })
+  w.memory.updatePendingOperation(ar.key, { operations: built.operations, signature: built.signature }, original.operation_key)
+  const record = w.game.admissions[0]
+  record.signature = built.signature
+  record.tick = Math.max(record.tick, 100)
+  for (const slot of record.slots) slot.gather_search_origin = { ...origin, surface_index: 1, force_index: 1, tick: record.tick }
+  w.game.cancelledBatch.reason = 'navigation_no_target'
+  w.game.cancelledBatch.tasks_started = 3
+  w.game.cancelledBatch.started_count = Math.max(3, w.game.cancelledBatch.started_count)
+  const command = w.game.command.bind(w.game)
+  w.game.command = async text => {
+    const raw = await command(text)
+    if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify({ ...JSON.parse(raw),
+      actor_surface_index: w.game.status.surface_index, actor_force_index: w.game.status.force_index ?? 1 })
+    return raw
+  }
+  return w
+}
+
+test('queued gather-origin residual runs real Session failure -> exact missing-only native admission -> ordinary completion callback', async () => {
+  const w = navigationWorld()
+  const native = JSON.parse(await w.game.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","status")))'))
+  const held = w.memory.pendingOperations(ar.key)[0]
+  const verdict = reconcilePendingOperation(held, { status: native, actor: w.game.status })
+  assert.equal(verdict.reason, 'exact_terminal_gather_cancelled', JSON.stringify({ held, native, verdict }))
+  const semanticGoal = () => { const g = w.memory.planningState(ar.key).goal; return { goal_id: g.goal_id, objective: g.objective, definition: g.definition } }
+  const immutable = structuredClone({ goal: semanticGoal(), steps: w.held().steps })
+  const ctx = recoverySession(w, { actorId: 25, epoch: 1 })
+  ctx.session.onGameLine('[AUTORIO] [ERROR] navigation failed: no_target; dependent operations cancelled')
+  await settle(ctx.session)
+  assert.equal(w.game.mutations.length, 1)
+  assert.match(w.game.mutations[0], /'mine_resource_at','coal',10.5,0.5,10/)
+  assert.doesNotMatch(w.game.mutations[0], /'gather_resource'|'mine_resource_at','copper-ore'/)
+  assert.equal(w.game.inventory['copper-ore'], 10)
+  assert.equal(w.game.inventory.coal ?? 0, 0, 'correction admission is not acquired stock')
+  assert.equal(w.providers.length, 0)
+  assert.deepEqual(w.held().steps, immutable.steps)
+  assert.deepEqual(semanticGoal(), immutable.goal)
+  const residual = w.events.find(row => row.event === 'gather.residual_detected')
+  assert.equal(residual.data.cancellation_reason, 'navigation_no_target')
+  assert.deepEqual(residual.data.slot_outcomes.map(row => row.state), ['completed', 'navigation_failed_before_acquisition'])
+  // Bound this fixture at the next ordinary checkpoint transition, as AR does;
+  // next-step authoring is unrelated to the native correction being tested.
+  const close = w.agent.settleCompletedStepState.bind(w.agent)
+  w.agent.settleCompletedStepState = (state, options) => close(state, { ...options, allowContinuation: false })
+  w.finish()
+  ctx.session.onGameLine('[AUTORIO] All operations completed')
+  await settle(ctx.session)
+  const afterNative = JSON.parse(await w.game.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","status")))'))
+  assert.equal(w.held().active_step_index, 1, JSON.stringify({ inventory: w.game.inventory,
+    pending: w.memory.pendingOperations(ar.key), verdicts: w.memory.pendingOperations(ar.key).map(p => reconcilePendingOperation(p, { status: afterNative, actor: w.game.status })),
+    native: afterNative, events: w.events.slice(-24), sessionLogs: ctx.logs }))
+  assert.equal(w.memory.pendingOperations(ar.key).length, 0)
+  assert.equal(w.game.inventory['copper-ore'], 10)
+  assert.equal(w.game.inventory.coal, 10)
+  assert.ok(w.events.some(row => row.event === 'gather.recovery_continued'))
+})
+
+test('nested exact-location correction cannot escape the originally admitted gather disk', async () => {
+  const w = navigationWorld({ coalPosition: { x: 1023.5, y: 0.5 }, preflight: text => text.includes("'mine_resource_at'")
+    ? { ok: false, code: 'resource_source_not_found', resource_correction: { resource_name: 'coal',
+      position: { x: 1025.5, y: 0.5 }, origin: { x: 1023.5, y: 0.5 }, radius: 5, surface_index: 1, amount: 100 } }
+    : { ok: true } })
+  const ctx = recoverySession(w, { actorId: 25, epoch: 1 })
+  ctx.session.onGameLine('[AUTORIO] [ERROR] navigation failed: no_target; dependent operations cancelled')
+  await settle(ctx.session)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.providers.length, 0)
+  assert.equal(w.memory.pauseRecord(ar.key).pause_reason, 'gather_recovery_preflight_resource_source_not_found')
+  assert.equal(w.held().active_step_index, 0)
+  assert.equal(w.events.filter(row => row.event === 'mining.location_corrected').length, 0)
+})
+
+for (const boundary of ['gather.residual_detected', 'gather.reconciled']) test(`navigation-origin recovery ownership cannot cross cancellation during ${boundary}`, async () => {
+  const w = navigationWorld({ traceHook: ({ row, agent }) => { if (row.event === boundary) agent.cancel('user_stop') } })
+  await assert.rejects(w.agent.failed('navigation:no_target'), /cancelled|superseded|stale/i)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.providers.length, 0)
+})
+
+test('duplicate same-resource gather authority cannot select an arbitrary source witness', () => {
+  const w = navigationWorld()
+  const pending = w.memory.pendingOperations(ar.key)[0]
+  pending.operations.push(structuredClone(pending.operations[1]))
+  assert.equal(gatherDeficit(pending, w.held().steps[0].completion_contract, new Map(Object.entries(ar.inventory))), undefined)
+})
+
+test('force replacement during navigation-origin reconciliation cannot mine under the replacement force', async () => {
+  const w = navigationWorld({ traceHook: ({ row, game }) => { if (row.event === 'gather.residual_detected') game.status.force_index = 2 } })
+  await assert.rejects(w.agent.failed('navigation:no_target'), /gather_recovery_force_changed|cancelled|superseded|stale/i)
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.providers.length, 0)
+  assert.equal(w.memory.pendingOperations(ar.key).length, 1)
+})
 
 test('exact AR cancelled copper/coal batch is terminal partial, never success or blind replay', () => {
   const w = world()

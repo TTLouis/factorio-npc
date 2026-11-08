@@ -417,6 +417,23 @@ export function batchWatermark(rawStatus) {
   }
 }
 
+// Native preflight target within the original gather disk. Retained only for
+// deterministic missing-effect correction; it never proves current availability.
+export function gatherSearchWitness(operation, raw, actor, surfaceIndex) {
+  const point = value => isRecord(value) && Number.isFinite(value.x) && Number.isFinite(value.y)
+    && Math.abs(value.x) <= 1000000 && Math.abs(value.y) <= 1000000
+  if (operation?.name !== 'gather_resource' || !isRecord(raw) || !point(raw.origin) || !point(raw.position)
+    || !Number.isSafeInteger(raw.radius) || raw.radius < 1 || raw.radius > 4096
+    || raw.radius !== (operation.args?.search_radius ?? 256)
+    || !Number.isSafeInteger(actor?.actor_id) || raw.actor_id !== actor.actor_id
+    || !Number.isSafeInteger(surfaceIndex) || raw.surface_index !== surfaceIndex
+    || !Number.isSafeInteger(raw.force_index) || raw.force_index < 1
+    || !Number.isSafeInteger(raw.tick) || raw.tick < 0 || !Number.isFinite(raw.amount) || raw.amount <= 0
+    || (raw.position.x - raw.origin.x) ** 2 + (raw.position.y - raw.origin.y) ** 2 > raw.radius ** 2 + 1e-8) return undefined
+  return { origin: { x: raw.origin.x, y: raw.origin.y }, position: { x: raw.position.x, y: raw.position.y },
+    radius: raw.radius, amount: raw.amount, actor_id: raw.actor_id, surface_index: raw.surface_index, force_index: raw.force_index, tick: raw.tick }
+}
+
 /** The durable record written before a batch is sent. `baseline` is `batchWatermark` of the status read just before. */
 export function buildPendingOperation({ requestId, operationKey, attemptId, ordinal, protocolVersion, operations, goalId, planId, stepId, actor, baseline, now, surfaceIndex, preflight } = {}) {
   const list = (Array.isArray(operations) ? operations : []).slice(0, PENDING_OPERATION_LIMITS.operations)
@@ -441,6 +458,10 @@ export function buildPendingOperation({ requestId, operationKey, attemptId, ordi
       trace_operation_id: text(operation?.trace_operation_id ?? `${requestId ?? 'request'}/op_${index + 1}`, PENDING_OPERATION_LIMITS.ref),
       name: text(operation?.name, 80),
       ...(['gather_resource', 'mine_resource_at'].includes(operation?.name) && isRecord(operation.args) ? { args: { ...operation.args } } : {}),
+      ...(preflight?.[index]?.ok === true && preflight[index].operation === operation?.name
+        && preflight[index].identity === operation?.args?.resource_name
+        && gatherSearchWitness(operation, preflight[index].resource_search, actor, surfaceIndex)
+        ? { resource_search: gatherSearchWitness(operation, preflight[index].resource_search, actor, surfaceIndex) } : {}),
       // The operation's canonical identity (name + canonical args digest), its item-delivery keys and item-level delivery facts,
       // and the prototype a placement places: all that survives of the arguments, kept so a settled completed prefix can fence
       // a replay of these slots and a completed placement of the refused prototype can close that fence (operation-ledger.mjs).
@@ -614,14 +635,46 @@ export function terminalGatherCancellation(admission, status, pending) {
     && pending.operations[i].name === slot.operation && slot.queued_tasks === (slot.operation === 'gather_resource' ? 2 : 1) && slot.batch_refs?.length === 1
     && slot.batch_refs[0].batch_id === ref.batch_id && slot.batch_refs[0].batch_generation === ref.batch_generation
     && slot.batch_refs[0].batch_ref === ref.batch_ref)) return null
-  const receipt = status.receipt_journal?.find(r => r.batch_id === ref.batch_id && r.batch_generation === ref.batch_generation && r.batch_ref === ref.batch_ref)
+  const matches = Array.isArray(status.receipt_journal) ? status.receipt_journal.filter(r => r?.batch_ref === ref.batch_ref
+    || r?.batch_id === ref.batch_id && r?.batch_generation === ref.batch_generation) : []
+  if (matches.length !== 1) return null
+  const receipt = matches[0]
+  const navigationMiss = receipt.reason === 'navigation_no_target' && status.queue_empty === true
+    && nativeAdmissionJournal(status.admission_journal?.records ?? status.admission_journal).known
+    && operationSignature(pending.operations) === pending.signature
+    && (admission.ok === true && (!admission.error || admission.error === 'batch_reconciliation_required')
+      || admission.state === 'partial' && admission.ok === false && admission.error === 'exact_terminal_gather_cancelled')
+    && Number.isSafeInteger(receipt.tasks_started) && receipt.tasks_started >= 1 && receipt.tasks_started <= types.length
+    && Number.isSafeInteger(receipt.started_count) && receipt.started_count >= receipt.tasks_started
+    && types[receipt.tasks_started - 1] === 'walking_to_entity'
+    && slots.every((slot, index) => {
+      if (slot.operation !== 'gather_resource') return true
+      const witness = gatherSearchWitness(pending.operations[index], pending.operations[index].resource_search, pending.actor, pending.surface_index)
+      const origin = slot.gather_search_origin
+      return witness && origin && origin.x === witness.origin.x && origin.y === witness.origin.y
+        && origin.surface_index === witness.surface_index && origin.force_index === witness.force_index
+        && Number.isSafeInteger(origin.tick) && origin.tick >= witness.tick && origin.tick >= admission.tick && origin.tick <= receipt.tick
+        && status.actor_surface_index === witness.surface_index && status.actor_force_index === witness.force_index
+    })
   if (!receipt || receipt.state !== 'cancelled' || receipt.task_count !== types.length
+    || receipt.batch_id !== ref.batch_id || receipt.batch_generation !== ref.batch_generation || receipt.batch_ref !== ref.batch_ref
     || !Array.isArray(receipt.task_types) || receipt.task_types.length !== receipt.task_count
     || !receipt.task_types.every((type, i) => type === types[i])
     || !Number.isSafeInteger(receipt.tick) || receipt.tick < admission.tick
-    || !/^mining:(?:mining_rejected|no_target)$/.test(receipt.reason ?? '')
+    || (!/^mining:(?:mining_rejected|no_target)$/.test(receipt.reason ?? '') && !navigationMiss)
     || receipt.outcome || receipt.refused_count || receipt.refusals?.length) return null
-  return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'gather' }
+  let offset = 0
+  const slotOutcomes = navigationMiss ? slots.map(slot => {
+    const start = offset + 1
+    offset += slot.queued_tasks
+    // Queue order and the exact failing navigation task prove this prefix and
+    // untouched suffix. No quantity is inferred for any partly executed slot.
+    return { slot: slot.index, operation: slot.operation,
+      state: offset < receipt.tasks_started ? 'completed' : start === receipt.tasks_started ? 'navigation_failed_before_acquisition'
+        : start > receipt.tasks_started ? 'not_started' : 'partial' }
+  }) : undefined
+  return { batch_id: ref.batch_id, batch_ref: ref.batch_ref, receipt_tick: receipt.tick, recovery_kind: 'gather',
+    cancellation_reason: receipt.reason, ...(slotOutcomes ? { slot_outcomes: slotOutcomes } : {}) }
 }
 
 // A failed walk can change position (and clear obstacles). Only a complete exact
@@ -1020,6 +1073,8 @@ export function sanitizePendingOperation(raw) {
         resource_name: text(operation.args.resource_name, 200), count: operation.args.count,
         ...(operation.name === 'gather_resource' ? { search_radius: operation.args.search_radius } : { x: operation.args.x, y: operation.args.y }),
       } } : {}),
+      ...(gatherSearchWitness(operation, operation.resource_search, raw.actor, raw.surface_index)
+        ? { resource_search: gatherSearchWitness(operation, operation.resource_search, raw.actor, raw.surface_index) } : {}),
       ...(typeof operation.identity === 'string' && /^[0-9a-f]{64}$/.test(operation.identity) ? { identity: operation.identity } : {}),
       ...(Array.isArray(operation.delivery_keys) && operation.delivery_keys.length > 0 ? { delivery_keys: sanitizeDeliveryKeys(operation.delivery_keys) } : {}),
       ...(Array.isArray(operation.delivery_items) && sanitizeDeliveryItems(operation.delivery_items).length > 0 ? { delivery_items: sanitizeDeliveryItems(operation.delivery_items) } : {}),

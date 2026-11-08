@@ -435,6 +435,10 @@
       "pterodactyl_layer": "staging-base"
     },
     "gather_resource": {
+      "search_scope": "submission-origin disk on the same actor surface; current resource availability is rechecked when queued navigation executes",
+      "native_preflight_witness": ["origin", "position", "radius", "amount", "actor_id", "surface_index", "force_index", "tick"],
+      "native_admission_witness": "slots[].gather_search_origin (native origin/force/surface/tick at actual submission)",
+      "terminal_navigation_recovery": "exact gather-only navigation_no_target receipt with ordered task proof, matching admission/preflight scope, current identity and idle queues; fresh immutable-checkpoint deficit only, original source point revalidated by native mine_resource_at",
       "args": [
         "resource_name",
         "count",

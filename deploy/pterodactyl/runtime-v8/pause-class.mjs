@@ -256,9 +256,11 @@ export function classifyRequestFailure(failure) {
 // class and the failure CODE that prefixes its reason, never from a text search of the reason: a harness guard's detail text may
 // mention "provider" or "request_failed" without the provider having failed. `request_failed` itself is the unplaced fallback.
 export function isProviderFailurePause(record, reason) {
-  if (pauseClassOf(record).pause_class === PAUSE_CLASS.TRANSPORT) return true
+  const classification = pauseClassOf(record)
+  if (classification.classified && [PAUSE_CLASS.GUARD, PAUSE_CLASS.SYSTEM, PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AUTHORITY].includes(classification.pause_class)) return false
+  if (classification.pause_class === PAUSE_CLASS.TRANSPORT) return true
   const code = String(reason ?? record?.pause_reason ?? '').split(':')[0].trim()
-  return code === 'request_failed' || code === 'recoverable_provider_failure' || code.startsWith('provider_')
+  return code === 'request_failed' && !classification.classified || code === 'recoverable_provider_failure' || code.startsWith('provider_')
 }
 
 // Stamp a class on an error where it is raised.

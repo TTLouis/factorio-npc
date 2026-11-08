@@ -59,7 +59,7 @@ export function new_composite_operation_controller(
       return [false, `invalid_target_kind: expected resource prototype; observed type=${prototype.type}; target=${resource_name}`]
     }
 
-    if (!navigation.submit(resource_name, search_radius)) {
+    if (!navigation.submit_resource(resource_name, search_radius)) {
       return [false, `Unable to queue navigation to ${resource_name}`]
     }
     if (!basic.submit_mining(resource_name, count)) {

@@ -48,6 +48,8 @@ describe('composite resource gathering', () => {
       entity_name: 'iron-ore',
       search_radius: 512,
       owner_actor_id: 42,
+      resource_search_origin: { x: 0, y: 0 },
+      resource_search_surface: 1,
     })
     expect(f.manager.get_status_snapshot()).toMatchObject({
       queue_length: 1,

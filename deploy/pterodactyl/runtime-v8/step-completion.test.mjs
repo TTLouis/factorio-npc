@@ -20,7 +20,7 @@ test('receipt declarations share the verifier support policy, research still req
     assert.equal(sanitizeStepCompletionContract(contract).requirements[0].operation_name, operation_name,
       'legacy contracts remain structurally preserved without acquiring invented completion proof')
   }
-  for (const name of ['craft_item', 'place_entity', 'gather_resource']) {
+  for (const name of ['craft_item', 'place_entity', 'gather_resource', 'mine_resource_at']) {
     assert.ok(strictTaskTypesForOperation({ name, args: {} }))
     assert.equal(authoredCompletionContractSupported({ mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: name }] }), true)
   }
