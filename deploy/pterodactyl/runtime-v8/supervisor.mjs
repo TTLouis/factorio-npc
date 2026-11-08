@@ -1,6 +1,5 @@
 import { requireHarnessMode } from './harness-modes.mjs'
 import { verifyManifest } from './release-integrity.mjs'
-export { verifyManifest } from './release-integrity.mjs'
 import { inspectNextSliceLiveness, nextSliceControlView, nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice } from './next-slice-liveness.mjs'
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import { inspectControllerLiveness } from './controller-liveness.mjs'
@@ -68,6 +67,7 @@ import {
   REVIEW_BLOCKER_UNCHANGED_REASON,
   transportFailureOf,
 } from './pause-class.mjs'
+export { verifyManifest } from './release-integrity.mjs'
 
 // Pause-reason prefix for temporary provider failures that resume on their own
 // (see transientProviderFailure).

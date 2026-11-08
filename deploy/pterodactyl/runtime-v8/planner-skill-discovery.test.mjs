@@ -1,12 +1,35 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import test from 'node:test'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { ensureSkillOffers, parseSkillOffers, skillDiscoveryPolicy } from './skill-offers.mjs'
-import { FakeFactorio, answersStepContract, planReply } from './task-loop-fixtures.mjs'
-import { getActivePlan } from './planning-state.mjs'
-import { executionOnlyProviderToolDefinitions, planningOnlyProviderToolDefinitions, executorProviderToolDefinitions } from './structured-policy.mjs'
+import test, { after } from 'node:test'
+import { registerHooks } from 'node:module'
+
+// These synthetic legacy-shaped libraries test context capacity and role
+// handoff independently of catalog ranking. The hook changes transport only;
+// real loading, sanitization, provenance checks and role guards still run.
+let libraryGame
+const libraryHook = registerHooks({ load(url, context, next) {
+  const result = next(url, context)
+  if (!url.endsWith('/canonical-library-tools.mjs')) return result
+  const source = String(result.source)
+  const needle = 'export async function readCanonicalLibraryTool(name, args) {'
+  assert.ok(source.includes(needle), 'canonical library transport seam exists')
+  return { ...result, source: source.replace(needle, `${needle}\n  if (globalThis.__plannerSkillFixtureRead) return globalThis.__plannerSkillFixtureRead(name, args)`) }
+} })
+globalThis.__plannerSkillFixtureRead = async (name, args) => {
+  if (name === 'findSkills') {
+    const found = JSON.parse(await libraryGame.command(skillOfferCommand(args.query, args.limit)))
+    return JSON.stringify({ ok: true, results: found.cards })
+  }
+  return libraryGame.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",'${args.id}')))`)
+}
+const { NpcAgentLoop } = await import('./npc-agent-loop.mjs')
+const { CanonicalTaskBoardMemory } = await import('./canonical-task-board-memory.mjs')
+const { ensureSkillOffers, parseSkillOffers, skillDiscoveryPolicy, skillOfferCommand } = await import('./skill-offers.mjs')
+const { FakeFactorio, answersStepContract, planReply } = await import('./task-loop-fixtures.mjs')
+const { getActivePlan } = await import('./planning-state.mjs')
+const { executionOnlyProviderToolDefinitions, planningOnlyProviderToolDefinitions, executorProviderToolDefinitions } = await import('./structured-policy.mjs')
+libraryHook.deregister()
+after(() => { delete globalThis.__plannerSkillFixtureRead })
 
 const pack = JSON.parse(await readFile(new URL('../../../packages/autorio/src/fixtures/factory-playbooks-v1.json', import.meta.url), 'utf8'))
 const cards = Array.from({ length: 12 }, (_, index) => ({ id: `pattern-${index}`, name: `Pattern ${index}`, summary: `Build pattern ${index}.`, produces: [], needs: [], matched: ['factory'], score: 20-index }))
@@ -17,7 +40,7 @@ const contextIds = messages => {
 }
 
 class LibraryGame extends FakeFactorio {
-  constructor(library = details, offered = cards) { super(); this.offers = []; this.reads = []; this.offered = offered; for (const skill of library) this.skills[skill.id] = skill }
+  constructor(library = details, offered = cards) { super(); libraryGame = this; this.offers = []; this.reads = []; this.offered = offered; for (const skill of library) this.skills[skill.id] = skill }
   async command(command) {
     if (command.includes('remote.call("autorio_skills","offer"')) {
       const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(command)[1]
@@ -30,13 +53,13 @@ class LibraryGame extends FakeFactorio {
   }
 }
 
-test('separated planner loads six of ten ranked matches, executor and legacy policies stay focused', async () => {
+test('separated planner loads six of eight canonical-boundary matches, executor and legacy policies stay focused', async () => {
   const game = new LibraryGame()
   const agent = new NpcAgentLoop({ allowEphemeralSkillHandoff: true, rcon: game, provider: async () => { throw new Error('No inference') }, completionProtocolVersion: 3, stateFile: null, traceFile: null, decisionTraceFile: null })
   assert.equal(agent.agentContext.role, 'planner')
   agent.epoch = { actor_id: 18, epoch: 3 }
   await ensureSkillOffers(agent, { memoryKey: agent.activePlanKey(), intent: 'new_goal', text: 'Build a factory' })
-  assert.equal(game.offers[0].limit, 10)
+  assert.equal(game.offers[0].limit, 8)
   assert.equal(game.reads.length, 6)
   assert.equal(agent.loadedSkillContext.size, 6)
   assert.equal(contextIds([{ content: agent.skillContext() }]).length, 6)

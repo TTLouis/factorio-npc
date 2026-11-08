@@ -510,7 +510,7 @@ test('D2 B1: after the batch receipt lands the executor first continuation carri
   const currentStep = textOf(stepBlock(request.messages))
   assert.doesNotMatch(currentStep, /counts_deferred/, 'the volatile step block no longer claims that the completed batch is in flight')
   assert.match(currentStep, /^held_counts .*copper-plate=10/m)
-  assert.match(currentStep, /^receipt #[0-9]+ operation_receipt batch_1: outcome=completed; task_state=idle/m)
+  assert.match(currentStep, /^receipt #[0-9]+ operation_receipt batch-g1-1: outcome=completed; task_state=idle/m)
   assert.match(currentStep, /^authority: .*latest_receipt=#[0-9]+ deterministic_verification batch_1 \(this step\)/m, 'the current step block names the receipt that just landed')
   assert.equal(request.messages.map(textOf).find(text => text.startsWith('[HANDOFF]')), stablePlan, 'the stable plan prefix remains byte-identical')
   assert.equal(world.agent.agentContext.handoffId, handoffId)
@@ -1422,8 +1422,15 @@ const STEAM_RECIPES = {
   'copper-plate': detail('copper-plate', [['copper-ore', 1]], [['copper-plate', 1]], ['stone-furnace'], { categories: ['smelting'], energy: 3.2 }),
 }
 const STEAM_PROTOS = { 'offshore-pump': [['offshore-pump', 1]], boiler: [['boiler', 1]], 'steam-engine': [['steam-engine', 1]], 'small-electric-pole': [['small-electric-pole', 1]] }
+// A powered or working entity_count is a factory operating obligation: the runtime refuses it unless the world is bound and the planner declares
+// the block it will establish (the engine that stands is not an enrolled cell). The declaration is synthetic; the bill reads are unchanged.
+const operating = contract => contract.requirements.some(row => ['powered', 'working'].includes(row.state))
+const STEAM_BLOCK_GUIDANCE = { approach: 'Establish the declared steam power block', rationale: 'A powered engine checkpoint is a factory operating obligation', constraints: [], skillIds: [],
+  cellIntent: { kind: 'production_block', purpose: 'Synthetic steam power block', members: [{ role: 'water', entity: 'offshore-pump' }, { role: 'generator', entity: 'steam-engine' }],
+    outputs: [{ role: 'generator', kind: 'power', resource: null }] } }
 const steamCommit = (contract = STEAM_CONTRACT) => planReply({
   plan: STEAM_STEPS, currentStep: 0, operations: [gather('iron-ore', 25)], stepCompletions: [{ kind: 'deterministic', checkpoint: contract }], goal: STEAM_GOAL, roadmap: SHELF,
+  ...(operating(contract) ? { executionGuidance: [structuredClone(STEAM_BLOCK_GUIDANCE)] } : {}),
 })
 const steamGather = () => planReply({ plan: STEAM_STEPS, currentStep: 0, operations: [gather('iron-ore', 25)] })
 
@@ -1437,6 +1444,7 @@ async function runSteamWorld({ inventory = { 'iron-plate': 15 }, placed = { 'ste
   game.minedFrom = { stone: ['stone'] }
   mutate?.(game)
   const world = harness({ game, script: [steamCommit(contract), steamGather(), steamGather()], agentOptions: { completionProtocolVersion: 2 } })
+  if (contract && operating(contract)) world.memory.initializeFactoryRegistry(game.factoryWorldId) // bind only the synthetic world; no cell or member is adopted
   await world.say()
   await world.agent.taskStatusReceipt()
   const restaged = await restageToFreshExecutor(world)

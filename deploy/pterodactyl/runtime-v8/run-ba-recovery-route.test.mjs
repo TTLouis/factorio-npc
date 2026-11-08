@@ -4,6 +4,9 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { atFactoryCellBoundary } from './factory-cell-enrollment.mjs'
+import { FactoryRegistryError } from './factory-registry.mjs'
+import { classifyRequestFailure } from './pause-class.mjs'
 
 // Run BA (Terra planner): a next-slice draft preserved a wooden chest, the Jev wake_planner route redrafted without it,
 // and that one route draft hit an ordinary plan_category refusal (A: later steps without obligations; B: an active
@@ -32,7 +35,10 @@ function baWorld(row, replies) {
   game.command = async text => {
     const geometry = /"entity_geometry",(\d+)/.exec(text)
     if (geometry) {
-      const unit = units.get(Number(geometry[1]))
+      const originalUnit = units.get(Number(geometry[1]))
+      // This route-correction fixture still needs an unsupported capability.
+      // BF adds ordinary containers; substitute a logistic container here only.
+      const unit = originalUnit?.type === 'container' ? { ...originalUnit, type: 'logistic-container' } : originalUnit
       if (!unit) return JSON.stringify({ found: false })
       const position = { x: unit.unit_number * 3 + 0.5, y: 0.5 }
       const routed = ['mining-drill', 'inserter'].includes(unit.type)
@@ -54,6 +60,14 @@ function baWorld(row, replies) {
     },
     interactionDecisionProvider: async () => ({ answers: { recovery_semantics: { choice: 'semantic_replan', confidence: 0.99 }, one_observation_can_resolve: { noul: 0 } } }),
     systemPrompt: 'BA offline exact-state replay', npcId: 'npc-1', stateFile: null, traceFile: null, decisionTraceFile: null, goalDefinitionPolicy: 'required' })
+  // Keep the historical route-correction scenario isolated: production now
+  // pauses unsupported capabilities directly. This fixture explicitly injects
+  // its old recoverable classification; BF tests cover the production refusal.
+  const recover = agent.recoverPlan.bind(agent)
+  agent.recoverPlan = (generation, reason, round) => {
+    if (reason?.code === 'preservation_type_unsupported') reason.category = 'unproven'
+    return recover(generation, reason, round)
+  }
   const rows = []
   agent.behaviorTrace = { emit: async entry => { rows.push(entry) } }
   agent.lastMemoryKey = key
@@ -346,4 +360,28 @@ test('an authority change while a valid route draft validates commits nothing', 
   assert.equal(events(w, 'plan.accepted').length, 0)
   assert.equal(events(w, 'context.stale_reply_redriven').length, 1)
   assert.deepEqual(seen.planning.plans, before)
+})
+
+test('BI factory refusal at recovery commit keeps its guard code through the actual recovery route and request failure', async () => {
+  const row = lane('a')
+  const w = baWorld(row, [row.wire.submit.message, row.wire.route.message])
+  startAuthoring(w)
+  // Inject only the factory result at the route commit boundary; the existing
+  // route selection, correction request and request failure handling are real.
+  w.agent.commitRecoveryRouteDraft = () => atFactoryCellBoundary(w.agent, 'commit', async () => {
+    throw new FactoryRegistryError('factory_cell_resolution_required', 'factory_cell_resolution_required')
+  })
+  await assert.rejects(w.agent.runGuarded(), error => {
+    assert.equal(error.code, 'factory_cell_resolution_required')
+    assert.equal(error.pause_class, 'guard')
+    assert.equal(error.detail.current_batch_sent, false)
+    assert.doesNotMatch(error.message, /provider_jev/)
+    assert.deepEqual(classifyRequestFailure(error), { pause_class: 'guard', pause_subkind: '', code: 'factory_cell_resolution_required', source: 'guard_code' })
+    return true
+  })
+  const failed = events(w, 'request.failed').at(-1)
+  assert.equal(failed.data.failure_code, 'factory_cell_resolution_required')
+  assert.equal(failed.data.pause_class, 'guard')
+  assert.equal(w.game.mutations.length, 0)
+  assert.equal(w.calls.length, 2)
 })

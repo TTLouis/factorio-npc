@@ -2,12 +2,36 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { getActivePlan } from './planning-state.mjs'
-import { FakeFactorio, answersStepContract, planReply } from './task-loop-fixtures.mjs'
-import { classifyRequestFailure } from './pause-class.mjs'
+import test, { after } from 'node:test'
+import { registerHooks } from 'node:module'
+
+// Isolated legacy-shaped library records make revision drift and restart
+// corruption controllable. Only transport is replaced; real compaction,
+// immutable-plan binding, snapshot hashing and restoration remain unchanged.
+let libraryGame
+const libraryHook = registerHooks({ load(url, context, next) {
+  const result = next(url, context)
+  if (!url.endsWith('/canonical-library-tools.mjs')) return result
+  const source = String(result.source)
+  const needle = 'export async function readCanonicalLibraryTool(name, args) {'
+  assert.ok(source.includes(needle), 'canonical library transport seam exists')
+  return { ...result, source: source.replace(needle, `${needle}\n  if (globalThis.__skillRestartFixtureRead) return globalThis.__skillRestartFixtureRead(name, args)`) }
+} })
+globalThis.__skillRestartFixtureRead = async (name, args) => {
+  if (name === 'findSkills') {
+    const found = JSON.parse(await libraryGame.command(skillOfferCommand(args.query, args.limit)))
+    return JSON.stringify({ ok: true, results: found.cards })
+  }
+  return libraryGame.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",'${args.id}')))`)
+}
+const { NpcAgentLoop } = await import('./npc-agent-loop.mjs')
+const { CanonicalTaskBoardMemory } = await import('./canonical-task-board-memory.mjs')
+const { getActivePlan } = await import('./planning-state.mjs')
+const { FakeFactorio, answersStepContract, planReply } = await import('./task-loop-fixtures.mjs')
+const { classifyRequestFailure } = await import('./pause-class.mjs')
+const { skillOfferCommand } = await import('./skill-offers.mjs')
+libraryHook.deregister()
+after(() => { delete globalThis.__skillRestartFixtureRead })
 
 const KEY = 'npc:sgluna'
 const IDS = ['restart-guide-a', 'restart-guide-b']
@@ -21,7 +45,7 @@ const selectedDetails = messages => {
 }
 
 class LibraryGame extends FakeFactorio {
-  constructor() { super(); this.libraryReads = 0; for (const skill of skills) this.skills[skill.id] = structuredClone(skill) }
+  constructor() { super(); libraryGame = this; this.libraryReads = 0; for (const skill of skills) this.skills[skill.id] = structuredClone(skill) }
   async command(command) {
     if (command.includes('remote.call("autorio_skills","offer"')) {
       this.libraryReads++

@@ -10,6 +10,8 @@ import {
   transferSupplyRecoveryCount,
 } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
+import { FakeFactorio } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 
 // Transfer preflight facts (mod: supply_entity / move_items_exact) in the real agent loop: a proved missing supply is a
 // recoverable acquisition dependency of the SAME committed step, bounded per step, while protected targets, stale actors
@@ -31,6 +33,8 @@ function deployment(epoch = 3) {
     actor_interface: true,
     operations: true,
     tools: true,
+    surface_index: 1,
+    force_index: 1,
   }
 }
 
@@ -81,8 +85,9 @@ const RECIPE_DETAILS = {
 }
 const serpent = inventory => ['{', Object.entries(inventory).filter(([, count]) => count > 0).map(([name, count]) => `  {\n    count = ${count},\n    name = "${name}"\n  }`).join(',\n'), '}'].join('\n')
 
-class Rcon {
+class Rcon extends FakeFactorio {
   constructor() {
+    super()
     this.inventory = undefined // the actor inventory the game prints; unset answers like an empty table
     this.recipes = undefined // getRecipeDetails answers by name; unset answers like an unreadable read
     this.commands = []
@@ -158,6 +163,8 @@ class Rcon {
 
   async command(text) {
     this.commands.push(text)
+    this.status = deployment(this.epoch)
+    if (/remote\.call\(["'](?:sgluna_factory|autorio_actor)["']/.test(text)) return super.command(text)
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment(this.epoch))
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify({ active: false })
@@ -193,7 +200,7 @@ class Rcon {
       const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
       if (encoded) {
         const identity = JSON.parse(JSON.parse(encoded))
-        this.admissions.push({ ...identity, generation: 1, batch_id: batchId, state: 'admitted', slots: Array.from({ length: count }, (_, index) => ({
+        this.admissions.push({ ...identity, tick: 100, generation: 1, batch_id: batchId, state: 'admitted', slots: Array.from({ length: count }, (_, index) => ({
           index: index + 1, ok: true, batch_refs: [{ batch_id: batchId, batch_generation: 1, batch_ref: `batch-g1-${batchId}` }] })) })
       }
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: count }, () => [true, 'Task started']) })}`
@@ -203,6 +210,11 @@ class Rcon {
 }
 
 function harness(rcon, script, { memory = new CanonicalTaskBoardMemory() } = {}) {
+  // Explicit synthetic iron job, independently supplied again by a cold fake
+  // engine. Never derive a cell assignment from an executor's requested input.
+  const seed = memory.factoryRegistryStatus().status === 'uninitialized' ? memory : new CanonicalTaskBoardMemory()
+  installHistoricalFactorySupplement(seed, rcon, { unit_number: 15, name: 'stone-furnace', type: 'furnace', position: { x: 3, y: 0 } },
+    { products: ['iron-plate'], ingredients: ['iron-ore'] })
   const calls = []
   const rows = []
   const agent = new NpcAgentLoop({
@@ -582,21 +594,20 @@ test('actor epoch replacement during preflight still cancels the stale turn: no 
 test('a frozen (blocked) plan is never pulled into supply recovery', async () => {
   const rcon = new Rcon()
   rcon.preflight.supply_entity = missingCoal()
-  const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY]), planMessage([GATHER_COAL, COAL_SUPPLY])])
+  let outcome
+  const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY]), async () => {
+    // The structural block arrives during the actual current request, before
+    // any corrected batch; an ended request cannot provide owner/trace authority.
+    const state = world.plan()
+    state.status = 'blocked'; state.blocker = 'structural_blocker'
+    outcome = await world.agent.handleTransferSupplyPreflight(
+      { preflight: { ...missingCoal(), operation_index: 0 } }, { operations: [COAL_SUPPLY] }, { actor_id: 18, epoch: 3 }, undefined)
+    return planMessage([])
+  }])
   await world.agent.request('load the furnace with coal', { sender: 'tester' })
-  world.agent.requestInfo = { memoryKey: KEY }
-  // Simulate the plan having been frozen by a structural blocker since the draft.
-  const state = world.plan()
-  state.status = 'blocked'
-  state.blocker = 'structural_blocker'
-  const outcome = await world.agent.handleTransferSupplyPreflight(
-    { preflight: { ...missingCoal(), operation_index: 0 } },
-    { operations: [COAL_SUPPLY] },
-    { actor_id: 18, epoch: 3 },
-    undefined,
-  )
   assert.equal(outcome.action, 'unhandled')
   assert.equal(world.plan().blocker, 'structural_blocker')
+  assert.equal(rcon.mutations.length, 0)
 })
 
 test('the budget is a monotonic board counter: more than 32 evidence items in a step cannot evict it, and a restore keeps it', async () => {

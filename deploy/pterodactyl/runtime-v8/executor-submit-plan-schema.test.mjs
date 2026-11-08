@@ -56,11 +56,11 @@ test('the executor submitPlan requires stepId and operations, carries no plan or
   assert.deepEqual(executor.function.parameters.properties.operations, planner.function.parameters.properties.operations)
 })
 
-test('the planner submitPlan definition is unchanged and still the one in the shared tool list', () => {
+test('the planner submitPlan definition includes canonical revision controls and is the shared tool definition', () => {
   const planner = submitPlanOf(providerToolDefinitions)
   assert.equal(planner, plannerControlToolDefinitions[0])
   assert.deepEqual(planner.function.parameters.required, ['plan', 'currentStep', 'operations'])
-  assert.deepEqual(Object.keys(planner.function.parameters.properties).sort(), ['assessmentOnly', 'chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'goal', 'observationRequest', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'stepCompletions', 'stepId', 'timeReview'])
+  assert.deepEqual(Object.keys(planner.function.parameters.properties).sort(), ['assessmentOnly', 'chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'factoryReassignment', 'goal', 'observationRequest', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'starterBaseBindings', 'stepCompletions', 'stepId', 'timeReview', 'workingPlanRevision'])
   // The executor list is the same observation tools plus its own control tool; nothing else differs.
   const plannerNames = providerToolDefinitions.map(tool => tool.function.name)
   const executorNames = executorProviderToolDefinitions.map(tool => tool.function.name)

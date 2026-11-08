@@ -1,9 +1,5 @@
 // A deliberately small stdio-only MCP 2025-06-18 transport. Gameplay authority
 // belongs to the injected deterministic runtime, never to this protocol layer.
-export const MCP_PROTOCOL_VERSION = '2025-06-18'
-export const MAX_MESSAGE_BYTES = 64 * 1024
-export const MAX_IN_FLIGHT = 16
-
 import {
   assertOperatorRuntime,
   executionError,
@@ -14,6 +10,10 @@ import {
   toolResult,
   validateToolArguments as validate,
 } from './operator-tool-surface.mjs'
+
+export const MCP_PROTOCOL_VERSION = '2025-06-18'
+export const MAX_MESSAGE_BYTES = 64 * 1024
+export const MAX_IN_FLIGHT = 16
 
 // The catalog lives in runtime-v8 so the in-process pursuit operator shares it.
 export { MAX_RESULT_BYTES }

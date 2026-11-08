@@ -472,7 +472,7 @@ test('a semantic claim in a resume turn of a paused goal is sent back to the pla
   failNext = true
   const failure = await world.finish('coal')
   assert.equal(failure.goalStatus, 'paused')
-  assert.match(world.memory.currentPlan(KEY).pause_reason, /^request_failed: Provider HTTP 400/)
+  assert.match(world.memory.currentPlan(KEY).pause_reason, /^provider_request_failed: Provider HTTP 400/)
   const openStep = world.memory.currentPlan(KEY).task_board.active_step_id
 
   const resumed = await world.say('continue', 'continue_current')
@@ -884,7 +884,7 @@ function assertOneResumeLine(chatMessage) {
 test('a scripted provider failure after a step pauses the goal with one chat line, a Resume and a traced goal.paused', async () => {
   let failures = 0
   const cases = [
-    ['Provider HTTP 400; request will not be retried automatically', 'request_failed', /the model request failed/],
+    ['Provider HTTP 400; request will not be retried automatically', 'provider_request_failed', /the model request failed/],
     ['Provider response recovery exhausted after 2 attempts: Invalid provider content JSON', 'provider_recovery_exhausted', /could not get a usable model response/],
     ['provider_semantic_alignment_failed: proposed operations still do not align with the active step', 'provider_semantic_alignment_failed', /did not match the current step/],
   ]
@@ -996,7 +996,7 @@ test('a provider failure while Autorio still runs work does not pause the goal a
   assert.equal(world.events('goal.paused').length, 0)
   const skipped = world.events('goal.pause_skipped')
   assert.equal(skipped.length, 1)
-  assert.equal(skipped[0].data.cause, 'request_failed')
+  assert.equal(skipped[0].data.cause, 'provider_request_failed')
   assert.equal(skipped[0].data.reason, 'autorio_runtime_not_idle')
   assert.equal(typeof skipped[0].request_id, 'string')
 })

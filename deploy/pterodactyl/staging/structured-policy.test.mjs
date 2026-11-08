@@ -178,7 +178,7 @@ test('read-only tool renderer targets native actor-aware interfaces without play
   assert.match(toolCommand('discoverPrototypes', { capability: 'mining', resource_name: 'iron-ore' }), /autorio_prototypes.*discover/)
   assert.match(toolCommand('discoverPrototypes', { capability: 'harvest', product_name: 'stone' }), /"capability":"harvest".*"product_name":"stone"/)
   assert.equal(toolCommand('getPrototypeDetails', { name: "mod's-machine" }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_prototypes","details",\'mod\\\'s-machine\')))')
-  assert.equal(toolCommand('findSkills', { query: 'early iron plate smelting' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","find",\'early iron plate smelting\',3)))')
+  assert.equal(toolCommand('findSkills', { query: 'early iron plate smelting' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","find",\'early iron plate smelting\',5)))')
   assert.equal(toolCommand('findSkills', { query: '煤蛇', limit: 2 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","find",\'煤蛇\',2)))')
   assert.equal(toolCommand('getSkillDetails', { id: 'burner-coal-loop' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",\'burner-coal-loop\')))')
   assert.equal(toolCommand('getPlayerStatus', { player_name: 'TTLouis' }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_player_status",\'TTLouis\')))')

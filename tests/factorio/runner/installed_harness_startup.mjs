@@ -2,14 +2,13 @@
 // Runs inside the real installer-built image. All runtime entrypoints are
 // subprocesses; pursuit speaks to a bounded loopback HTTP fixture, never DI.
 import assert from 'node:assert/strict'
-import { spawn, execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
 
 const mode = process.argv[2]
@@ -19,7 +18,6 @@ const root = path.join(output, 'data')
 const installedStart = '/opt/sgluna/start-sgluna.sh'
 const app = path.dirname(await fs.realpath(installedStart))
 const { Rcon, confirmLuaConsoleReady } = await import(pathToFileURL(path.join(app, 'src/runtime-v8/common.mjs')))
-const run = promisify(execFile)
 const password = randomBytes(32).toString('hex')
 const session = `external-${randomUUID()}`
 const record = { mode, source: process.env.STARTUP_EXPECT_SOURCE, app, node: process.version,
@@ -27,7 +25,7 @@ const record = { mode, source: process.env.STARTUP_EXPECT_SOURCE, app, node: pro
   http: [], rcon: [], childProcesses: [], status: 'RUNNING', started: new Date().toISOString() }
 await fs.mkdir(root, { recursive: true })
 const scrub = value => String(value).split(password).join('[fixture-rcon-password]')
-const write = async (name, value) => fs.writeFile(path.join(output, name), typeof value === 'string' ? scrub(value) : JSON.stringify(value, null, 2) + '\n')
+const write = async (name, value) => fs.writeFile(path.join(output, name), typeof value === 'string' ? scrub(value) : `${JSON.stringify(value, null, 2)  }\n`)
 const persist = () => write('RESULTS.json', record)
 let connection, engine, runtime, stub
 const children = new Set()
@@ -51,7 +49,7 @@ async function finish(child, signal = 'SIGTERM') {
   if (!child || child.exitCode !== null) return
   child.kill(signal)
   const result = await bounded(child.closed, 20000)
-  if (!result) { child.kill('SIGKILL'); await child.closed; throw Error(`${child.capture.label} required SIGKILL`) }
+  if (!result) { child.kill('SIGKILL'); await child.closed; throw new Error(`${child.capture.label} required SIGKILL`) }
 }
 async function freePort() {
   const server = net.createServer()
@@ -76,7 +74,7 @@ async function connect(port) {
     try { await candidate.connect(); connection = candidate; await confirmLuaConsoleReady(connection); return }
     catch { candidate.close(); await sleep(250) }
   }
-  throw Error('prepared host RCON not ready')
+  throw new Error('prepared host RCON not ready')
 }
 async function requestBody(request) {
   const chunks = []
@@ -122,21 +120,21 @@ async function openStub() {
   return stub.address().port
 }
 async function mcp(child) {
-  let sequence = 0, buffer = ''
+  let sequence = 0; let buffer = ''
   const pending = new Map()
   child.stdout.on('data', chunk => {
     buffer += chunk
     while (buffer.includes('\n')) {
-      const end = buffer.indexOf('\n'), line = buffer.slice(0, end); buffer = buffer.slice(end + 1)
+      const end = buffer.indexOf('\n'); const line = buffer.slice(0, end); buffer = buffer.slice(end + 1)
       try { const reply = JSON.parse(line); pending.get(reply.id)?.(reply); pending.delete(reply.id) }
       catch { record.mcpUnexpectedOutput = line }
     }
   })
   const rpc = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++sequence
-    const timer = setTimeout(() => { pending.delete(id); reject(Error(`MCP timeout ${method}`)) }, 45000)
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`MCP timeout ${method}`)) }, 45000)
     pending.set(id, reply => { clearTimeout(timer); record.mcp ??= []; record.mcp.push({ method, params, reply }); resolve(reply) })
-    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })  }\n`)
   })
   assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'installed-startup-fixture', version: '1' } })).error, undefined)
   child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
@@ -172,7 +170,7 @@ try {
   record.manifest = JSON.parse(await fs.readFile(path.join(app, 'manifest.json'), 'utf8'))
   assert.equal(record.manifest.source, record.source)
   for (const [name, expected] of Object.entries(record.manifest.files)) assert.equal(createHash('sha256').update(await fs.readFile(path.join(app, name))).digest('hex'), expected, name)
-  const port = await freePort(), stubPort = await openStub()
+  const port = await freePort(); const stubPort = await openStub()
   const env = { CONTAINER_ROOT: root, SGLUNA_HARNESS_MODE: mode, SGLUNA_ACTOR_MODE: 'npc', SGLUNA_CHAT_PLAYERS: 'none',
     SGLUNA_RCON_HOST: '127.0.0.1', SGLUNA_RCON_PORT: String(port), SGLUNA_RCON_PASSWORD: password,
     EXTERNAL_HARNESS_SESSION: session, EXTERNAL_HARNESS_STATE_DIR: path.join(output, 'ledger'),

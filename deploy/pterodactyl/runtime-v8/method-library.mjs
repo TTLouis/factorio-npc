@@ -50,7 +50,7 @@ function validate(input) {
   if (input.action === 'search') {
     if (input.id !== undefined || typeof input.query !== 'string' || input.query.length > MAX_QUERY
       // Reject control characters at the external input boundary.
-      // eslint-disable-next-line no-control-regex
+
       || /[\u0000-\u001F\u007F]/u.test(input.query) || !normalize(input.query)
       || input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_LIMIT)) fail('invalid_library_arguments')
   }

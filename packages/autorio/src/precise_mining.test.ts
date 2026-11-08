@@ -11,7 +11,7 @@ function fixture() {
     index: 1,
     find_entities_filtered: vi.fn(),
   }
-  const force = { index: 1 }
+  const force = { index: 1, is_chunk_visible: () => true }
   const exactResource = {
     valid: true,
     name: 'coal',
@@ -32,14 +32,16 @@ function fixture() {
   }
   const exactEntity = {
     valid: true,
-    name: 'steel-chest',
-    type: 'container',
+    name: 'fixture-tree',
+    type: 'tree',
     unit_number: 91,
     position: { x: 2, y: 0 },
     surface,
     force,
+    fluids_count: 0,
     prototype: {
-      is_building: true,
+      fluidbox_prototypes: [],
+      is_building: false,
       mineable_properties: { minable: true, mining_time: 0.5, products: [] },
     },
   }
@@ -110,14 +112,14 @@ describe('precise mining targeting', () => {
     })
   })
 
-  it('mines one exact entity by unit number without a same-name nearest lookup', () => {
+  it('mines one exact natural entity by unit number without a same-name nearest lookup', () => {
     const f = fixture()
     ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => unit === 91 ? f.exactEntity : undefined
     expect(f.controller.submit_mining_exact(91)).toBe(true)
 
     f.runtime.state_mining(f.actor)
 
-    expect(f.surface.find_entities_filtered).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'steel-chest' }))
+    expect(f.surface.find_entities_filtered).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'fixture-tree' }))
     expect(f.actor.set_mining_state).toHaveBeenCalledWith({ mining: true, position: f.exactEntity.position })
     expect(f.manager.player_state.parameters_mine_entity).toMatchObject({
       target_unit_number: 91,
@@ -128,12 +130,15 @@ describe('precise mining targeting', () => {
 
   it('fails closed when an exact entity disappears instead of substituting another target', () => {
     const f = fixture()
-    expect(f.controller.submit_mining_exact(999)).toBe(true)
+    ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => unit === 91 ? f.exactEntity : undefined
+    expect(f.controller.submit_mining_exact(91)).toBe(true)
+    f.exactEntity.valid = false
+    ;(globalThis as any).game.get_entity_by_unit_number = () => undefined
 
     f.runtime.state_mining(f.actor)
 
     expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
-    expect(f.controller.status().last_result).toMatchObject({ code: 'target_gone', target_unit_number: 999 })
+    expect(f.controller.status().last_result).toMatchObject({ code: 'target_gone', target_unit_number: 91 })
     expect(f.actor.set_mining_state).not.toHaveBeenCalledWith(expect.objectContaining({ mining: true }))
   })
 

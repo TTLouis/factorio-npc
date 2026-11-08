@@ -1,27 +1,81 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
-import { PAUSE_CLASS } from './pause-class.mjs'
-import { getActivePlan } from './planning-state.mjs'
+import test, { after, afterEach } from 'node:test'
+import { registerHooks } from 'node:module'
+
+// Only this test worker substitutes its legacy-shaped library transport. The
+// real offer lifecycle, shadow judgment ledger and request-owner fences remain
+// in use; the synthetic records never claim canonical provenance.
+let libraryGame
+const libraryHook = registerHooks({ load(url, context, next) {
+  const result = next(url, context)
+  if (!url.endsWith('/canonical-library-tools.mjs')) return result
+  const source = String(result.source)
+  const needle = 'export async function readCanonicalLibraryTool(name, args) {'
+  assert.ok(source.includes(needle), 'canonical library transport seam exists')
+  return { ...result, source: source.replace(needle, `${needle}\n  if (globalThis.__goalReviewFixtureRead) return globalThis.__goalReviewFixtureRead(name, args)`) }
+} })
+globalThis.__goalReviewFixtureRead = async (name, args) => {
+  if (name === 'findSkills') {
+    const found = JSON.parse(await libraryGame.command(skillOfferCommand(args.query, args.limit)))
+    return JSON.stringify({ ok: true, results: found.cards })
+  }
+  return libraryGame.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",'${args.id}')))`)
+}
+const { NpcAgentLoop } = await import('./npc-agent-loop.mjs')
+const { CanonicalTaskBoardMemory } = await import('./canonical-task-board-memory.mjs')
+const { FakeFactorio, gather, inventoryCheckpoint, planReply } = await import('./task-loop-fixtures.mjs')
+const { PAUSE_CLASS } = await import('./pause-class.mjs')
+const { getActivePlan } = await import('./planning-state.mjs')
+const { skillOfferCommand } = await import('./skill-offers.mjs')
+libraryHook.deregister()
+after(() => { delete globalThis.__goalReviewFixtureRead })
+
+const gates = new Set()
+const agents = new Set()
+const requests = new Set()
+afterEach(async () => {
+  for (const gate of gates) gate.resolve()
+  for (const agent of agents) agent.cancel('fixture_cleanup')
+  await Promise.allSettled([...requests, ...[...agents].map(agent => agent.skillChoicePending)])
+  gates.clear(); agents.clear(); requests.clear()
+})
+async function waitFor(gate, label) {
+  let timer
+  try {
+    await Promise.race([gate.promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Missing deferred boundary: ${label}`)), 3000)
+    })])
+  }
+  finally { clearTimeout(timer) }
+}
 
 const KEY = 'npc:sgluna'
 function deferred() {
   let resolve, reject
   const promise = new Promise((r, j) => { resolve = r; reject = j })
-  return { promise, resolve, reject }
+  const gate = { promise, resolve, reject }
+  gates.add(gate)
+  return gate
 }
 const goal = { scope: 'long_horizon', summary: 'Launch one rocket.', doneWhen: [{ id: 'rocket', kind: 'rockets_launched', minimum: 1 }] }
 const slice = () => planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal, roadmap: [{ id: 'node_iron', intent: 'Gather iron ore' }] })
 async function physicalWorld(options = {}) {
   const game = options.game ?? new FakeFactorio()
+  libraryGame = game
   const memory = new CanonicalTaskBoardMemory()
   const rows = []; const decisions = []
   let calls = 0
   const agent = new NpcAgentLoop({ rcon: game, memory, provider: async () => { calls++; return slice() },
     systemPrompt: 'offline review regression', npcId: 'sgluna', goalDefinitionPolicy: 'required',
     stateFile: null, traceFile: null, decisionTraceFile: null, ...options })
+  agents.add(agent)
+  const request = agent.request.bind(agent)
+  agent.request = (...args) => {
+    const pending = request(...args)
+    requests.add(pending)
+    void pending.catch(() => {}) // Cleanup observes failed requests even if an earlier assertion fails.
+    return pending
+  }
   agent.behaviorTrace = { emit: async row => { rows.push(row) } }
   agent.decisionTrace = { emit: async row => { decisions.push(row) } }
   await agent.request('Gather iron toward launching a rocket', { sender: 'Louis' })
@@ -59,7 +113,7 @@ for (const boundary of ['planner_resumed', 'assertCurrent']) {
         }
       }
       const pending = assert.rejects(w.agent.request('Withdrawn amendment', { sender: 'Louis' }), /cancelled|superseded/)
-      await entered.promise
+      await waitFor(entered, boundary)
       w.agent.cancel('user_stop_immediate')
       if (disposition === 'replacement') {
         w.agent.interactionProvider = async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) })
@@ -88,7 +142,7 @@ for (const owned of [false, true]) {
         return read()
       }
       const pending = w.agent.request(route === 'status_query' ? 'How is the current task?' : 'Replacement goal', { sender: 'Louis' })
-      await entered.promise
+      await waitFor(entered, route)
       const intake = w.agent.requestAdmissionOwner
       const trace = w.agent.traceRequest
       assert.equal(intake.requestId, undefined, 'new intake has not minted its trace or base generation')
@@ -127,7 +181,7 @@ test('R2 explicit global operator stop still revokes newer pre-trace intake', as
   const read = w.agent.readInteractionTaskStatus.bind(w.agent)
   w.agent.readInteractionTaskStatus = async () => { entered.resolve(); await held.promise; return read() }
   const pending = assert.rejects(w.agent.request('How is the task?', { sender: 'Louis' }), /cancelled|superseded/)
-  await entered.promise
+  await waitFor(entered, 'operator stop intake')
   w.agent.cancel('user_stop_immediate')
   assert.equal(w.agent.requestAdmissionOwner, null)
   held.resolve()
@@ -155,7 +209,7 @@ for (const disposition of ['reject', 'aborted-result', 'fallback-trace']) {
       if (first) { first = false; entered.resolve(); return held.promise }
       return undefined
     } })
-    await entered.promise
+    await waitFor(entered, 'shadow provider')
     const oldRequestId = w.rows.find(row => row.event === 'request.received').request_id
     const oldShadow = w.agent.skillChoicePending
     assert.ok(oldShadow)
@@ -170,7 +224,7 @@ for (const disposition of ['reject', 'aborted-result', 'fallback-trace']) {
         }
       }
       held.reject(new Error('owned shadow fixture failure'))
-      await fallbackEntered.promise
+      await waitFor(fallbackEntered, 'shadow fallback trace')
     }
     // Hold B's real minted trace while A's deliberately uncooperative provider
     // settles. This exercises the actual replacement identity, not a fake row.
@@ -185,7 +239,7 @@ for (const disposition of ['reject', 'aborted-result', 'fallback-trace']) {
       if (row.event === 'request.received') { replacementEntered.resolve(); await replacementHeld.promise }
     }
     const replacement = w.agent.request('Replacement goal', { sender: 'Louis' })
-    await replacementEntered.promise
+    await waitFor(replacementEntered, 'replacement request trace')
     const trace = w.agent.traceRequest
     const traceSeq = trace.seq
     const decisionSeq = w.agent.decisionTraceSequence
@@ -250,7 +304,7 @@ for (const boundary of ['pretrace-status', 'pretrace-new-goal', 'minted-trace'])
       if (boundary === 'minted-trace' && row.event === 'request.received') { replacementEntered.resolve(); await replacementHeld.promise }
     }
     const pause = w.agent.pausePersistentPlan('stranded_physical_guard', { pause_class: PAUSE_CLASS.GUARD }).then(result => ({ result }), error => ({ error }))
-    await pauseEntered.promise
+    await waitFor(pauseEntered, 'goal pause trace')
     const route = boundary === 'pretrace-status' ? 'status_query' : 'new_goal'
     w.agent.interactionProvider = async () => ({ content: JSON.stringify({ intent: route, queue_conflict: false, reply: '' }) })
     if (boundary !== 'minted-trace') {
@@ -262,7 +316,7 @@ for (const boundary of ['pretrace-status', 'pretrace-new-goal', 'minted-trace'])
       }
     }
     const replacement = w.agent.request('B continues under its own intake', { sender: 'Louis' })
-    await replacementEntered.promise
+    await waitFor(replacementEntered, boundary)
     const intake = w.agent.requestAdmissionOwner
     const trace = w.agent.traceRequest
     const generation = w.agent.generation
@@ -320,7 +374,7 @@ for (const boundary of ['abandon', 'judgment']) {
           if (target) { entered.resolve(); await held.promise }
         }
         response.resolve(successfulSkill)
-        await entered.promise
+        await waitFor(entered, boundary)
         w.agent.cancel('user_stop_immediate')
         let replacement
         const replacementHeld = deferred()
@@ -333,7 +387,7 @@ for (const boundary of ['abandon', 'judgment']) {
             if (row.event === 'request.received') { replacementEntered.resolve(); await replacementHeld.promise }
           }
           replacement = w.agent.request('B owns the current request', { sender: 'Louis' })
-          await replacementEntered.promise
+          await waitFor(replacementEntered, 'replacement request trace')
         }
         await w.agent.jev.flushPersist()
         const snapshot = w.memory.snapshot()

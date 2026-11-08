@@ -7,7 +7,7 @@ import {sanitizeOwnerGoal,sameOwnerGoalConditions} from './owner-goal-intake.mjs
 const input={goalId:'copper-goal',acceptanceKey:'copper-goal',sender:'Owner',text:'Deliver10newlymachine-smeltedcopperplatesintooneexactnewchest',definition:{scope:'finite',summary:'Finite exact new copper delivery',doneWhen:[{kind:'machine_output_delivered',item_name:'copper-plate',minimum:10}]}}
 function fixture(){
  const game=new FakeFactorio();let generations=0
- const forbidden=async()=>{generations++;throw Error('no preflight inference')}
+ const forbidden=async()=>{generations++;throw new Error('no preflight inference')}
  const agent=new NpcAgentLoop({memory:new CanonicalTaskBoardMemory(),rcon:game,provider:forbidden,interactionDecisionProvider:forbidden,steeringDecisionProvider:forbidden,skillDecisionProvider:forbidden,stateFile:null,traceFile:null,decisionTraceFile:null})
  return {game,agent,generations:()=>generations}
 }

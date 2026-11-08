@@ -6,6 +6,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { FurnaceFactorio, recoverySession, settle } from './recovery-loop-fixtures.mjs'
 import { pinLegacyFixtureSkillContext } from './task-loop-fixtures.mjs'
+import { registerFactoryCell } from './factory-registry.mjs'
 
 const captured = JSON.parse(fs.readFileSync(new URL('./fixtures/run-au-recovery.json', import.meta.url)))
 const KEY = 'npc:npc-1'
@@ -19,6 +20,35 @@ function world({ readHook, traceHook, snapshot, collectionCount = 6 } = {}) {
   const game = new FurnaceFactorio({ inventory: { coal: 18, 'iron-plate': 8 },
     furnace: { unit_number: 16, position: { x: -95, y: 37 }, output: { 'copper-plate': 6 } } })
   Object.assign(game.status, { actor_id: 6, epoch: 1, surface_index: 1, connected_players: 0 })
+  // Explicit synthetic retained assignment and native capability supplement;
+  // these facts are not recovered from the frozen AU memory or issued reply.
+  const members = [
+    { unit_number: 15, name: 'burner-mining-drill', position: { x: -95, y: 39 }, surface_index: 1, force_index: 1 },
+    { unit_number: 16, name: 'stone-furnace', position: game.furnace.position, surface_index: 1, force_index: 1 },
+  ]
+  const receipts = members.map(locator => {
+    const n = 10000 + locator.unit_number
+    return { receipt_id: `${game.factoryWorldId}/batch-g1-${n}/${n}`, world_id: game.factoryWorldId, ...locator,
+      actor_id: 6, actor_epoch: 1, request_id: 'synthetic-au-placement', goal_id: 'synthetic-au-goal', plan_id: 'synthetic-au-plan',
+      plan_version: 1, step_id: 'synthetic-au-step', semantic_step_id: 'synthetic-au-step', operation_key: `synthetic-au-${n}`,
+      operation_id: n, batch_id: n, batch_generation: 1, batch_ref: `batch-g1-${n}`, tick: 1 }
+  })
+  const registry = memory.factoryRegistryStatus().status === 'initialized' ? memory.getFactoryRegistry()
+    : registerFactoryCell(memory.initializeFactoryRegistry(game.factoryWorldId), {
+    surface_index: 1, force_index: 1,
+    assignment: { products: ['copper-plate'], purpose: 'Synthetic AU direct-feed fixture', method: 'synthetic_fixture' },
+    members: members.map((member, index) => ({ ...member, provenance: { source: 'synthetic_fixture', receipt_id: receipts[index].receipt_id } })),
+    ports: [{ port_id: 'plates', direction: 'output', kind: 'item', resource: 'copper-plate' }], origin: { source: 'synthetic_fixture' },
+  })
+  memory.restore({ ...memory.snapshot(), factory_registry: registry })
+  for (const receipt of receipts) memory.recordFactoryPlacementReceipt(receipt, memory.factoryWorldBinding().generation)
+  game.installFactoryFixture(memory)
+  const furnaceFacts = game.factoryMembers.get(16)
+  game.factoryMembers.set(15, { locator: members[0], type: 'mining-drill', state: 'observed', recipe: { state: 'unsupported' },
+    source_resources: { state: 'known', truncated: false, resources: [{ name: 'copper-ore', amount: 100, products_truncated: false,
+      products: [{ name: 'copper-ore', type: 'item' }] }] },
+    item_routes: { state: 'known', truncated: false, routes: [{ kind: 'drop', state: 'connected', target: members[1] }] },
+    burner_fuel_requirement: structuredClone(furnaceFacts.burner_fuel_requirement), fuel_item_facts: structuredClone(furnaceFacts.fuel_item_facts) })
   game.batchId = 5
   const events = []; const providers = []; const reads = []
   const native = game.command.bind(game)
@@ -31,7 +61,9 @@ function world({ readHook, traceHook, snapshot, collectionCount = 6 } = {}) {
   game.command = async text => {
     reads.push(text)
     await readHook?.({ text, game, agent, memory })
-    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ actor: { actor_id: game.status.actor_id }, surface_index: game.status.surface_index, force_index: 1 })
+    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: game.status.mode,
+      actor: { actor_id: game.status.actor_id, kind: game.status.actor_kind, valid: game.status.allowed === true },
+      surface_index: game.status.surface_index, force_index: game.status.force_index })
     if (text.includes('"autorio_crafting","status"')) return JSON.stringify(game.craftingStatus ?? { task_active: false, native_queue: [] })
     if (game.drillWorking && text.includes('entity_state') && text.includes('15')) return JSON.stringify({ ok: true, kind: 'entity_state', satisfied: true, progressing: true, unit_number: 15 })
     if (text.includes('"get_entity_status"')) return JSON.stringify(game.detailOverride ?? detail(text.includes('unit_number') ? 15 : /,15\)/.test(text) ? 15 : 16))

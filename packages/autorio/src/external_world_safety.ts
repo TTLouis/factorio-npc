@@ -34,7 +34,7 @@ export function external_world_preflight(actor: ControlledActor | undefined, ope
       const potential = candidate_fluid_ports(entity.prototype, entity.position, entity.direction)
       if (!potential || expected !== potential.length || expected < 1 || expected > 16
         || potential.some(port => port.connection_type !== 'normal' || port.direction === undefined || ![0, 4, 8, 12].includes(port.direction))) return undefined
-      let left = entity.position.x, right = left, top = entity.position.y, bottom = top
+      let left = entity.position.x; let right = left; let top = entity.position.y; let bottom = top
       for (const port of potential) {
         left = math.min(left, port.position.x); right = math.max(right, port.position.x)
         top = math.min(top, port.position.y); bottom = math.max(bottom, port.position.y)

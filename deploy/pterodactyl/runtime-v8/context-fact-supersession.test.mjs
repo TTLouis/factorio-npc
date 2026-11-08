@@ -20,7 +20,6 @@ async function world() {
     if (text.includes('sgluna_deployment')) return JSON.stringify(deployment)
     if (text.includes('get_inventory_items')) return this.inventory
     if (text.includes('get_entity_status')) return this.entity
-    if (text.includes('autorio_skills')) return JSON.stringify({ id: 'old-skill', revision: 1, name: 'Old Skill' })
     return '{}'
   } }
   const payloads = []
@@ -178,12 +177,12 @@ for (const invalidation of ['generation', 'lineage', 'cancel-reset']) {
   for (const [label, pausedEvent, tools] of [
     ['inventory supersession', 'observation.post_batch_fact_superseded', [call('old-inventory', 'getInventoryItems')]],
     ['entity supersession', 'observation.post_batch_fact_superseded', [call('old-entity', 'getEntityStatus', { unit_number: 35 })]],
-    ['skill context', 'skill.context_loaded', [call('old-skill', 'getSkillDetails', { id: 'old-skill' })]],
-    ['skill loaded', 'skill.loaded', [call('old-skill', 'getSkillDetails', { id: 'old-skill' })]],
+    ['skill context', 'skill.context_loaded', [call('old-skill', 'getSkillDetails', { id: 'steam-power-bootstrap' })]],
+    ['skill loaded', 'skill.loaded', [call('old-skill', 'getSkillDetails', { id: 'steam-power-bootstrap' })]],
     ['native result trace', 'observation.power_gap_observed', [call('old-entity', 'getEntityStatus', { unit_number: 35 })]],
     ['repair completion', 'recovery.action_omission_observation_complete', [call('old-inventory', 'getInventoryItems')]],
     ['between results', 'tool.result', [call('old-inventory', 'getInventoryItems'), call('old-entity', 'getEntityStatus', { unit_number: 35 })]],
-  ]) test(`${invalidation} replacement during deferred ${label} stops old bookkeeping`, async () => {
+  ]) test(`${invalidation} replacement during deferred ${label} stops old bookkeeping`, async t => {
     const w = await world()
     w.rcon.inventory = inventory(9)
     w.rcon.entity = entity(200)
@@ -209,7 +208,11 @@ for (const invalidation of ['generation', 'lineage', 'cancel-reset']) {
     const oldWork = w.agent.handleToolBatch({ tool_calls: tools })
     // Observe rejection immediately so the negative control never leaves an unhandled promise.
     const outcome = oldWork.then(() => undefined, error => error)
-    const paused = await started
+    t.after(async () => { release(); await outcome })
+    let timer
+    t.after(() => clearTimeout(timer))
+    const paused = await Promise.race([started, outcome.then(error => { throw error ?? new Error(`Missing trace: ${pausedEvent}`) }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out waiting for ${pausedEvent}`)), 3000) })])
     if (invalidation === 'generation') w.agent.generation++
     else if (invalidation === 'lineage') w.agent.agentContext.beginLineage(EXECUTOR_ROLE)
     else w.agent.cancel()
@@ -259,7 +262,7 @@ for (const invalidation of ['generation', 'lineage', 'cancel-reset']) {
 }
 
 
-test('the same owner resumes a deferred supersession trace and completes normal result bookkeeping', async () => {
+test('the same owner resumes a deferred supersession trace and completes normal result bookkeeping', async t => {
   const w = await world()
   w.rcon.inventory = inventory(9)
   w.agent.traceRequest.usage = { tool_calls: 0, duplicate_tool_calls: 0, tool_result_chars: 0 }
@@ -276,7 +279,12 @@ test('the same owner resumes a deferred supersession trace and completes normal 
     }
   }
   const work = w.agent.handleToolBatch({ tool_calls: [call('same-owner', 'getInventoryItems')] })
-  await started
+  const outcome = work.then(() => undefined, error => error)
+  t.after(async () => { release(); await outcome })
+  let timer
+  t.after(() => clearTimeout(timer))
+  await Promise.race([started, outcome.then(error => { throw error ?? new Error('Missing supersession trace') }),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Timed out waiting for supersession trace')), 3000) })])
   release()
   await work
   assert.equal(w.agent.handoffInventoryObservations.get('iron-plate').count, 9)

@@ -164,20 +164,39 @@ test('256 KiB guard still rejects oversized synthetic text even with a correct C
   assert.equal(called, 1, 'no implicit retry or cap increase')
 })
 
-class IronBootstrapGame extends FurnaceFactorio {
-  smelt(count) {
-    if ((this.furnace.output['copper-plate'] ?? 0) > 0 && (this.furnace.source['iron-ore'] ?? 0) > 0) return 0
-    return super.smelt(count)
-  }
-}
+// Retain the original mixed-output fixture unchanged as a negative case. The
+// compatible CLI loop below is a separate synthetic dedicated-iron scenario,
+// not evidence that the original cross-job/native blockage was repaired.
+const ORIGINAL_IRON_BOOTSTRAP = { inventory: { 'iron-plate': 8 },
+  furnace: { output: { 'copper-plate': 10 }, source: { 'iron-ore': 50 }, fuel: { wood: 8 } } }
 
-test('configured CLI-proxy full loop clears copper output, smelts and collects fifty iron on one immutable step with unchanged limits', async t => {
+test('original mixed-output fixture cannot withdraw copper from a dedicated iron assignment', async () => {
+  const before = structuredClone(ORIGINAL_IRON_BOOTSTRAP)
+  const game = new FurnaceFactorio({ ...structuredClone(ORIGINAL_IRON_BOOTSTRAP), factoryJob: 'iron-plate' })
+  const model = new ScriptedModel()
+  const world = recoveryWorld({ game, model })
+  const checkpoint = inventoryCheckpoint('iron-plate', 58)
+  const step = 'Clear the copper output, smelt the iron ore and collect fifty iron plates'
+  model.push('planner', 'original:commit', planReply({ plan: [step], currentStep: 0, operations: [], checkpoint,
+    stepCompletions: [{ kind: 'deterministic', checkpoint }], goal: { scope: 'finite', summary: step, doneWhen: checkpoint.requirements } }))
+    .push('executor', 'original:observe', tool('getEntityStatus', { name: 'stone-furnace', radius: 20 }))
+    .push('executor', 'original:clear-copper', () => planReply({ stepId: world.agent.targetedObservationIdentity().data.stepId,
+      operations: [{ name: 'move_items_exact', args: { unit_number: game.furnace.unit_number, item_name: 'copper-plate', max_count: 10, to_entity: false } }] }))
+  await assert.rejects(world.agent.request(step, { sender: 'fixture' }), { failure_code: 'factory_cell_withdrawal_not_output' })
+  assert.equal(game.sent.length, 0)
+  assert.deepEqual(game.inventory, before.inventory)
+  assert.deepEqual(ORIGINAL_IRON_BOOTSTRAP, before)
+  assert.deepEqual(model.violations, []); assert.deepEqual(model.remaining, [])
+})
+
+test('synthetic dedicated-iron CLI-proxy loop collects existing output then fifty new plates with unchanged goal and limits', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const config = configuration({}, env({ AI_API_METHOD: 'cli-proxy' }))
   const budgets = { hourly: config.budget, output: config.maxProviderOutputUnits }
   const proof = await provider.verifyCliProxyProviderContracts(config, { requestId: 'fixture_full_loop_preflight' })
   assert.equal(proof.event, 'provider.cli_proxy_contract_verified')
-  const game = new IronBootstrapGame({ inventory: { 'iron-plate': 8 }, furnace: { output: { 'copper-plate': 10 }, source: { 'iron-ore': 50 }, fuel: { wood: 8 } } })
+  const game = new FurnaceFactorio({ ...structuredClone(ORIGINAL_IRON_BOOTSTRAP), factoryJob: 'iron-plate',
+    furnace: { ...structuredClone(ORIGINAL_IRON_BOOTSTRAP.furnace), output: { 'iron-plate': 10 } } })
   const model = new ScriptedModel(); const wires = []
   const connection = bridge(config, async (_url, options) => {
     const body = JSON.parse(options.body)
@@ -188,7 +207,7 @@ test('configured CLI-proxy full loop clears copper output, smelts and collects f
   const world = recoveryWorld({ game, model, agentRoleConfig: config, roleProvider: (messages, context) => { connection.currentContext = context; return connection.roleProvider(messages, context) } })
   const { session, logs } = recoverySession(world)
   const ctx = { game, model, world, session }
-  const checkpoint = inventoryCheckpoint('iron-plate', 58); const step = 'Clear the copper output, smelt the iron ore and collect fifty iron plates'
+  const checkpoint = inventoryCheckpoint('iron-plate', 58); const step = 'Collect the existing iron output, smelt the iron ore and collect fifty new iron plates'
   const decision = operations => ({ chatMessage: '', stepId: world.agent.targetedObservationIdentity().data.stepId, operations })
   let identity, allowance, budget
   model.push('planner', 'sol:iron-bootstrap', planReply({ plan: [step], currentStep: 0, operations: [], checkpoint,
@@ -202,20 +221,19 @@ test('configured CLI-proxy full loop clears copper output, smelts and collects f
       budget = world.agent.observationBudgetRemaining
       return tool('getEntityStatus', { name: 'stone-furnace', radius: 20 })
     })
-    .push('executor', 'luna:clear-copper', (messages, context) => {
+    .push('executor', 'luna:collect-existing-iron', (messages, context) => {
       assert.equal(context.allowTools, false)
       assert.equal(world.agent.observationBudgetRemaining, 0)
       const entity = JSON.parse(messages.findLast(row => row.role === 'tool').content).entity
-      const plate = entity.inventories.find(row => row.index === 3).items.find(row => row.name === 'copper-plate')
+      const plate = entity.inventories.find(row => row.index === 3).items.find(row => row.name === 'iron-plate')
       assert.equal(plate.count, 10)
       // Model chooses this actual fresh target; the harness does not insert a correction.
       return { content: JSON.stringify(decision([{ name: 'move_items_exact', args: { unit_number: entity.unit_number, item_name: plate.name, max_count: plate.count, to_entity: false } }])) }
     })
-  assert.equal(game.smelt(50), 0)
   assert.equal(session.queuePlayerRequest('TTLouis', step), true)
   await settle(session)
   assert.ok(game.pendingBatch, JSON.stringify({ logs, labels: model.labels, violations: model.violations, trace: world.trace.slice(-12) }))
-  assert.equal(game.inventory['copper-plate'], undefined)
+  assert.equal(game.inventory['iron-plate'], 8, 'first collection still needs its native receipt')
   model.push('executor', 'luna:read-new-iron', tool('getEntityStatus', { unit_number: game.furnace.unit_number }))
     .push('executor', 'luna:collect-iron', messages => {
       const entity = JSON.parse(messages.findLast(row => row.role === 'tool').content).entity
@@ -224,16 +242,16 @@ test('configured CLI-proxy full loop clears copper output, smelts and collects f
       return submit(decision([{ name: 'move_items_exact', args: { unit_number: entity.unit_number, item_name: plate.name, max_count: plate.count, to_entity: false } }]))
     })
   await completeAndReport(ctx, { smelt: 50 })
-  assert.equal(game.inventory['copper-plate'], 10)
-  assert.equal(game.inventory['iron-plate'], 8, 'iron collection requires the admitted native-style operation receipt')
+  assert.equal(game.inventory['iron-plate'], 18, 'newly smelted output still requires its second native collection receipt')
   const active = getActivePlan(world.memory.planningState(KEY))
   assert.deepEqual([active.plan_id, active.plan_version, active.steps[0].step_id, active.steps[0].completion_contract], [identity.plan_id, identity.plan_version, identity.steps[0].step_id, identity.steps[0].completion_contract])
   const afterAllowance = world.memory.autoResumeAllowance(KEY)
   // The progress mark includes receipt history; it legitimately changes when
-  // the copper transfer settles. Limits, counters and ownership cannot change.
+  // the first iron transfer settles. Limits, counters and ownership cannot change.
   for (const field of ['per_step', 'per_goal', 'step_attempts', 'goal_attempts', 'goal_id', 'plan_id', 'plan_version', 'step_id', 'step_key']) assert.equal(afterAllowance[field], allowance[field], field)
   await completeAndReport(ctx)
-  assert.equal(game.inventory['iron-plate'], 58)
+  assert.equal(game.inventory['iron-plate'], 68, 'surplus does not change the original 58-plate goal threshold')
+  assert.equal(game.sent.length, 2, 'two distinct collection batches, each settled through its real receipt')
   assert.equal(world.named('goal.evaluated').at(-1).satisfied, true)
   assert.equal(game.pendingBatch, null); assert.equal(game.queueLength, 0)
   assert.equal(game.status.connected_players, 0)

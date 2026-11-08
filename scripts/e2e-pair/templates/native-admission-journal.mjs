@@ -6,6 +6,9 @@ const MAX_NATIVE_INTEGER = 9007199254740990
 const text = (value, limit) => typeof value === 'string' && value.length > 0 && value.length <= limit
 const nonnegative = value => Number.isSafeInteger(value) && value >= 0 && value <= MAX_NATIVE_INTEGER
 const positive = value => nonnegative(value) && value > 0
+const gatherOrigin = value => value && typeof value === 'object' && Number.isFinite(value.x) && Number.isFinite(value.y)
+  && Math.abs(value.x) <= 1000000 && Math.abs(value.y) <= 1000000
+  && positive(value.surface_index) && positive(value.force_index) && nonnegative(value.tick)
 const optional = (value, accepts) => value === undefined || accepts(value)
 const boolean = value => typeof value === 'boolean'
 const boundedString = limit => value => typeof value === 'string' && value.length <= limit
@@ -35,10 +38,13 @@ export function nativeAdmissionJournal(raw) {
         || !optional(slot.operation, boundedString(64)) || !optional(slot.queued_tasks, nonnegative)
         || !optional(slot.mutation_unknown, boolean) || !optional(slot.refused_before_mutation, boolean)
         || !optional(slot.refusal_code, boundedString(128))
+        || !optional(slot.gather_search_origin, gatherOrigin)
         || refs.some(ref => !positive(ref?.batch_id) || !positive(ref.batch_generation) || !text(ref.batch_ref, 96)
           || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`)) return unknown()
       slotIdentity.push([slot.index, slot.ok, slot.operation, slot.queued_tasks, slot.mutation_unknown,
-        slot.refused_before_mutation, slot.refusal_code, refs.map(ref => [ref.batch_id, ref.batch_generation, ref.batch_ref])])
+        slot.refused_before_mutation, slot.refusal_code, refs.map(ref => [ref.batch_id, ref.batch_generation, ref.batch_ref]),
+        slot.gather_search_origin ? [slot.gather_search_origin.x, slot.gather_search_origin.y, slot.gather_search_origin.surface_index,
+          slot.gather_search_origin.force_index, slot.gather_search_origin.tick] : null])
     }
     records.push({ operation_key: row.operation_key, attempt_id: row.attempt_id, signature: row.signature,
       ordinal: row.ordinal, actor_id: row.actor_id, epoch: row.epoch, generation: row.generation,

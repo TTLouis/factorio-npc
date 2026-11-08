@@ -28,7 +28,7 @@ test('pending persistence retains only a validated native gather source inside i
  assert.deepEqual(pending.operations.map(op=>op.resource_search),witnesses)
  assert.deepEqual(sanitizePendingOperation(JSON.parse(JSON.stringify(pending))).operations.map(op=>op.resource_search),witnesses)
  for(const patch of [{actor_id:99},{surface_index:2},{radius:4097},{radius:63},{position:{x:1000,y:1000}},
-  {origin:{x:NaN,y:0}},{force_index:0},{tick:-1},{amount:0}]){
+  {origin:{x:Number.NaN,y:0}},{force_index:0},{tick:-1},{amount:0}]){
   const raw=structuredClone(pending);Object.assign(raw.operations[1].resource_search,patch)
   assert.equal(sanitizePendingOperation(raw).operations[1].resource_search,undefined,JSON.stringify(patch))
  }

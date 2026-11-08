@@ -11,12 +11,12 @@ import path from 'node:path'
 
 const mode = process.argv[2]
 assert.ok(['external', 'plan', 'pursuit'].includes(mode))
-const output = process.env.STARTUP_PROOF_DIR ?? '/proof', root = path.join(output, 'data')
+const output = process.env.STARTUP_PROOF_DIR ?? '/proof'; const root = path.join(output, 'data')
 const app = path.dirname(await fs.realpath('/opt/sgluna/start-sgluna.sh'))
 const record = { mode, source: process.env.STARTUP_EXPECT_SOURCE, scenario: 'tampered-prompt-before-startup',
   runtimeEntry: '/usr/local/bin/sgluna-docker-entrypoint -> actual installed start-sgluna.sh',
   inferenceRequests: 0, nativeConnections: 0, http: [], status: 'RUNNING' }
-const persist = () => fs.writeFile(path.join(output, 'RESULTS.json'), JSON.stringify(record, null, 2) + '\n')
+const persist = () => fs.writeFile(path.join(output, 'RESULTS.json'), `${JSON.stringify(record, null, 2)  }\n`)
 let child
 const native = net.createServer(socket => { record.nativeConnections++; socket.destroy() })
 const provider = http.createServer((request, response) => { record.http.push({ method: request.method, url: request.url }); response.writeHead(500); response.end('tripwire') })
@@ -26,7 +26,7 @@ try {
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve))
   const manifest = JSON.parse(await fs.readFile(path.join(app, 'manifest.json'), 'utf8'))
   assert.equal(manifest.source, record.source)
-  const file = 'src/prompt.md', filename = path.join(app, file)
+  const file = 'src/prompt.md'; const filename = path.join(app, file)
   const hash = bytes => createHash('sha256').update(bytes).digest('hex')
   record.originalHash = hash(await fs.readFile(filename)); assert.equal(record.originalHash, manifest.files[file])
   await fs.appendFile(filename, '\n<!-- disposable startup integrity fixture -->\n')

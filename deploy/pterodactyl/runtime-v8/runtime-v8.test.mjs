@@ -220,10 +220,10 @@ function stop(){if(stopping)return;stopping=true;for(const s of sockets)s.destro
 
 test('startup real process adapter accepts exact configured2.1 and refuses mismatched or unsupported engine',async t=>{
  for(const version of ['2.1.24','2.1.23','9.9.9'])await t.test(version,async child=>{
-  const root=await temp(child),game=path.join(root,'engine'),bin=path.join(game,'bin','x64')
-  await fsp.mkdir(bin,{recursive:true});await fsp.writeFile(path.join(bin,'factorio'),fakeFactorio.replace(/Version: [0-9.]+ \(fixture\)/,'Version: '+version+' (fixture)'),{mode:0o755})
+  const root=await temp(child); const game=path.join(root,'engine'); const bin=path.join(game,'bin','x64')
+  await fsp.mkdir(bin,{recursive:true});await fsp.writeFile(path.join(bin,'factorio'),fakeFactorio.replace(/Version: [0-9.]+ \(fixture\)/,`Version: ${version} (fixture)`),{mode:0o755})
   const save=path.join(root,'world.zip');await fsp.writeFile(save,'PKfixture')
-  const session=new Session({root,app:root,game,config:{...configuration({},baseEnv),factorioVersion:'2.1.24'},save,settingsFile:path.join(root,'settings.json'),modDir:root,ini:path.join(root,'config.ini'),startupMs:5000,log:()=>{},provider:async()=>{throw Error('provider forbidden')}})
+  const session=new Session({root,app:root,game,config:{...configuration({},baseEnv),factorioVersion:'2.1.24'},save,settingsFile:path.join(root,'settings.json'),modDir:root,ini:path.join(root,'config.ini'),startupMs:5000,log:()=>{},provider:async()=>{throw new Error('provider forbidden')}})
   child.after(async()=>{session.rcon?.close();await session.gameChild?.stop(3000)});const rconPort=await freeTcpPort([])
   if(version==='2.1.24'){await session.startGameProcess(rconPort,()=>{});assert.ok(session.rcon)}
   else await assert.rejects(session.startGameProcess(rconPort,()=>{}),/did not match configured engine/)

@@ -13,7 +13,7 @@ const submit = (id, error = false) => ({ message: { tool_calls: [call(id, 'facto
 
 function fakeRuntime(refuse = () => false) {
   const runtime = {}
-  for (const method of Object.values(OPERATOR_TOOL_METHODS)) runtime[method] = async input => ({ ok: true, method })
+  for (const method of Object.values(OPERATOR_TOOL_METHODS)) runtime[method] = async _input => ({ ok: true, method })
   runtime.submit = async input => {
     if (refuse(input)) throw Object.assign(new Error('x'), { code: 'preflight_rejected', effect: 'not_happened', publicMessage: 'refused' })
     return { operation_id: `op-${input.request_id}`, status: 'admitted' }

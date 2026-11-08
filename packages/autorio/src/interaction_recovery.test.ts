@@ -13,7 +13,9 @@ function target(name: string, unit_number: number, x: number) {
     unit_number,
     position: { x, y: 0 },
     surface: { index: 1 },
-    force: { index: 1 },
+    force: { index: 1, is_chunk_visible: () => true },
+    fluids_count: 0,
+    prototype: { fluidbox_prototypes: [] },
   } as any
 }
 
@@ -35,7 +37,7 @@ function fixture() {
     },
     position: { x: 0, y: 0 },
     surface,
-    force: { index: 1 },
+    force: { index: 1, is_chunk_visible: () => true },
     status_snapshot: () => ({
       actor_id: 42,
       kind: 'standalone_character',

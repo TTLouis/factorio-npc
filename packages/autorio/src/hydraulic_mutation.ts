@@ -67,7 +67,7 @@ function rotation_envelope(entity: LuaEntity) {
 // Derive the search margin from the complete current prototype set, rather than
 // assuming all neighbouring ports belong to entities within two tiles.
 function neighbour_search_margin() {
-  let count = 0, margin = 0
+  let count = 0; let margin = 0
   for (const [, prototype] of pairs(prototypes.entity)) {
     count++
     if (count > 4096) return undefined

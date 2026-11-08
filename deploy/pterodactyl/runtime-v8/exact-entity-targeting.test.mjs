@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { FakeFactorio, assignScriptedFactoryPlacement, planReply } from './task-loop-fixtures.mjs'
 
 function deployment() {
   return {
@@ -121,32 +123,56 @@ test('same-goal live observed exact id is executable', async () => {
 })
 
 test('placement completion receipt binds the created entity for an immediate exact follow-up without re-observation', async () => {
-  const rcon = new ExactTargetRcon()
-  rcon.preflightByUnit.set(77, {
+  const rcon = new FakeFactorio({ inventory: { 'iron-ore': 5, coal: 1, 'stone-furnace': 1 } })
+  const native = rcon.command.bind(rcon)
+  rcon.commands = []
+  rcon.command = async text => { rcon.commands.push(text); return native(text) }
+  rcon.status.connected_players = 0
+  rcon.preflight = () => ({
     ok: true,
     operation: 'supply_entity',
     field: 'unit_number',
     identity: 77,
   })
+  // Explicit synthetic singleton placement evidence, qualified by FakeFactorio
+  // against the actual admitted operation before the shared host retains it.
+  rcon.onMutation = text => {
+    if (!text.includes("'place_entity'")) return
+    rcon.lastBasicResult = { operation_id: rcon.batchId, type: 'placing', accepted: true, completed: true, code: 'completed',
+      tick: 600 + rcon.batchId, actor_id: 18, entity_name: 'stone-furnace', requested_position: { x: 3, y: 0 },
+      placed_unit_number: 77, placed_entity_type: 'furnace', placed_position: { x: 3, y: 0 }, placed_surface_index: 1,
+      placed_direction: 0, placed_last_user: null }
+  }
 
   const canonicalPlan = ['Place a furnace', 'Load the placed furnace']
+  const checkpoint = { mode: 'all', requirements: [{ id: 'placed', kind: 'authoritative_operation_receipt', operation_name: 'place_entity' }] }
   let calls = 0
   const agent = new NpcAgentLoop({
     rcon,
-    memory: new NpcDialogueMemory(),
+    memory: new CanonicalTaskBoardMemory(),
+    completionProtocolVersion: 2,
+    executorHandoff: false,
     systemPrompt: 'placement receipt exact identity handoff test',
     provider: async (messages, context) => {
       calls++
+      if (context.triggerSource === 'step_contract') return { content: JSON.stringify({
+        stepId: agent.targetedObservationIdentity().data.stepId,
+        checkpoint: { mode: 'all', requirements: [{ id: 'loaded', kind: 'authoritative_operation_receipt', operation_name: 'supply_entity' }] },
+      }) }
       assert.equal(context.allowTools, true)
       if (calls === 1) {
-        return planMessage([{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 3, y: 0 } }], {
-          plan: canonicalPlan,
-          currentStep: 0,
-        })
+        return planReply({ plan: canonicalPlan, currentStep: 0, checkpoint, stepCompletions: [{ kind: 'deterministic', checkpoint }, { kind: 'deterministic' }],
+          operations: [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 3, y: 0 } }] })
       }
 
       const text = messages.map(message => String(message.content ?? '')).join('\n')
-      assert.match(text, /placed_unit_number["']?\s*:\s*77/i)
+      assert.ok(/placed_unit_number["']?\s*:\s*77/i.test(text), text.slice(-3500))
+      assignScriptedFactoryPlacement(agent, rcon, 'npc:sgluna', 77, { products: ['iron-plate'], native: {
+        type: 'furnace', recipe: { state: 'known', name: 'synthetic-iron-job', truncated: false,
+          ingredients: [{ type: 'item', name: 'iron-ore' }], products: [{ type: 'item', name: 'iron-plate' }] },
+        burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['synthetic-fuel'] },
+        fuel_item_facts: { state: 'known', items: [{ name: 'coal', category: 'synthetic-fuel', fuel_value: 1 }] },
+      } })
       return planMessage([{
         name: 'supply_entity',
         args: {
@@ -167,27 +193,10 @@ test('placement completion receipt binds the created entity for an immediate exa
   assert.equal(placed.operations[0].name, 'place_entity')
   assert.equal(rcon.mutations.length, 1)
 
-  rcon.completedStatus(1, ['placing'], {
-    operation_id: 1,
-    type: 'placing',
-    accepted: true,
-    completed: true,
-    code: 'completed',
-    tick: 201,
-    actor_id: 18,
-    force_index: 1,
-    entity_name: 'stone-furnace',
-    requested_position: { x: 3, y: 0 },
-    placed_unit_number: 77,
-    placed_entity_type: 'furnace',
-    placed_position: { x: 3, y: 0 },
-    placed_surface_index: 1,
-    placed_direction: 0,
-  })
   const follow = await agent.completed()
 
-  assert.equal(calls, 2)
-  assert.equal(follow.operations[0].name, 'supply_entity')
+  assert.equal(calls, 3, 'placement, next-step contract, and exact supply continuation')
+  assert.equal(follow.operations?.[0]?.name, 'supply_entity', JSON.stringify(follow))
   assert.equal(follow.operations[0].args.unit_number, 77)
   assert.equal(rcon.mutations.length, 2)
   assert.match(rcon.mutations[1], /supply_entity',77/)

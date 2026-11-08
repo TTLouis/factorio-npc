@@ -14,11 +14,6 @@ function boundedText(value, label, max) {
   return value.trim()
 }
 
-function skillId(value) {
-  check(typeof value === 'string' && value.length >= 1 && value.length <= 80 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value), 'Invalid skill id')
-  return value
-}
-
 function integer(value, label, min, max) {
   check(Number.isSafeInteger(value) && value >= min && value <= max, `${label} must be an integer from ${min} to ${max}`)
   return value

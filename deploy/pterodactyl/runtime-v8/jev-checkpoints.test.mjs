@@ -2,11 +2,22 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
+import test, { after } from 'node:test'
+import { registerHooks } from 'node:module'
 
-import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { buildHandoffPacket, HANDOFF_PACKET_LIMITS } from './handoff-packet.mjs'
-import {
+// The historical shadow-order fixture controls only library I/O in this test
+// worker. It retains legacy records without claiming canonical provenance.
+const libraryHook = registerHooks({ load(url, context, next) {
+  const result = next(url, context)
+  if (!url.endsWith('/canonical-library-tools.mjs')) return result
+  const source = String(result.source)
+  const needle = 'export async function readCanonicalLibraryTool(name, args) {'
+  assert.ok(source.includes(needle), 'canonical library transport seam exists')
+  return { ...result, source: source.replace(needle, `${needle}\n  if (globalThis.__jevSkillFixtureRead && ['findSkills', 'getSkillDetails'].includes(name)) return globalThis.__jevSkillFixtureRead(name, args)`) }
+} })
+const { CanonicalTaskBoardMemory } = await import('./canonical-task-board-memory.mjs')
+const { buildHandoffPacket, HANDOFF_PACKET_LIMITS } = await import('./handoff-packet.mjs')
+const {
   applyShelfRanking,
   ADVISORY_WAIT_MS,
   c4Questions,
@@ -17,15 +28,18 @@ import {
   parseC4Choice,
   parseShelfRanking,
   shelfRankingQuestions,
-} from './jev-checkpoints.mjs'
-import { effectiveStage, emptyLedger, recordJudgment, restoreLedger, scoreC4Judgment, scoreJudgment, serializeLedger, summarizeLedger } from './jev-judgments.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { recoverInterruptedAgentPlan } from './supervisor.mjs'
-import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
-import { applyPlanningEvent, createEmptyPlanningState, getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
-import { analyzeBehaviorTrace, formatCheckReport, JEV_TRACE_ROWS } from './run-check.mjs'
-import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
-import { buildRunRecord, formatRunRecord } from './think-time-report.mjs'
+} = await import('./jev-checkpoints.mjs')
+const { effectiveStage, emptyLedger, recordJudgment, restoreLedger, scoreC4Judgment, scoreJudgment, serializeLedger, summarizeLedger } = await import('./jev-judgments.mjs')
+const { NpcAgentLoop } = await import('./npc-agent-loop.mjs')
+const { recoverInterruptedAgentPlan } = await import('./supervisor.mjs')
+const { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } = await import('./provider.mjs')
+const { applyPlanningEvent, createEmptyPlanningState, getActivePlan, PLAN_STATUS, PLANNING_EVENT } = await import('./planning-state.mjs')
+const { analyzeBehaviorTrace, formatCheckReport, JEV_TRACE_ROWS } = await import('./run-check.mjs')
+const { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } = await import('./task-loop-fixtures.mjs')
+const { buildRunRecord, formatRunRecord } = await import('./think-time-report.mjs')
+
+libraryHook.deregister()
+after(() => { delete globalThis.__jevSkillFixtureRead })
 
 // U11: Jev at the delegation checkpoints. Static scenarios: scripted model replies, a scripted Jev decision
 // provider in the live response shape, a fake Factorio. Nothing here calls a provider.
@@ -1059,8 +1073,9 @@ async function skillScenario({ pick, loads, missing = [] }) {
   const trace = []
   const skillJev = recordingJev(async (_state, questions) => (questions.skill_choice ? { overrides: { skill_choice: { choice: pick, confidence: 0.9 } } } : undefined))
   let call = 0
+  const game = new SkillFactorio(missing)
   const agent = new NpcAgentLoop({
-    rcon: new SkillFactorio(missing),
+    rcon: game,
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill order scenario',
     npcId: 'sgluna',
@@ -1075,8 +1090,14 @@ async function skillScenario({ pick, loads, missing = [] }) {
     },
   })
   agent.behaviorTrace = { emit: async (record) => { trace.push(record) } }
-  await agent.request('Get steam power running so we have electricity', { sender: 'Louis' })
-  await agent.skillChoicePending
+  globalThis.__jevSkillFixtureRead = (name, args) => JSON.stringify(name === 'findSkills'
+    ? { ok: true, results: STEAM_CARDS }
+    : game.skills[args.id] ?? { ok: false, error: 'unknown_skill' })
+  try {
+    await agent.request('Get steam power running so we have electricity', { sender: 'Louis' })
+    await agent.skillChoicePending
+  }
+  finally { delete globalThis.__jevSkillFixtureRead }
   return { agent, trace, rows: event => trace.filter(record => record.event === event) }
 }
 

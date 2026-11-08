@@ -2,6 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
+import { FakeFactorio } from './task-loop-fixtures.mjs'
 
 function deployment() {
   return {
@@ -94,6 +97,25 @@ class RuntimeRcon {
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: count }, () => [true, 'Task started']) })}`
     }
     return '{}'
+  }
+}
+
+// A producer operation (move_items_exact into a furnace) must pass the factory
+// use boundary, which needs canonical memory and native factory reads. This
+// fixture answers only those reads from FakeFactorio's scripted engine state;
+// every other command keeps RuntimeRcon's behavior.
+class FactoryRuntimeRcon extends RuntimeRcon {
+  constructor(options) {
+    super(options)
+    this.engine = new FakeFactorio({ inventory: { 'iron-ore': 5, coal: 5 } })
+    this.engine.status.connected_players = 0
+    this.furnace = { unit_number: 582, name: 'stone-furnace', type: 'furnace', position: { x: 2, y: 0 } }
+    this.engine.nearby = { actor_position: { x: 0, y: 0 }, entities: [this.furnace] }
+  }
+
+  async command(text) {
+    if (/remote\.call\(["'](?:autorio_actor|sgluna_factory)["']/.test(text) || text.includes('remote.call("autorio_operations","status")')) return this.engine.command(text)
+    return super.command(text)
   }
 }
 
@@ -277,8 +299,10 @@ test('normal successful operation admission remains waiting with an active durab
 
 
 test('repeated cached and irrelevant observations recover into an executable plan from existing evidence', async () => {
-  const rcon = new RuntimeRcon()
-  const memory = new NpcDialogueMemory()
+  const rcon = new FactoryRuntimeRcon()
+  const memory = new CanonicalTaskBoardMemory()
+  // Explicit synthetic assignment for the furnace the test loads; not recovered native evidence.
+  installHistoricalFactorySupplement(memory, rcon.engine, rcon.furnace, { products: ['iron-plate'], ingredients: ['iron-ore'] })
   const calls = []
 
   const toolCall = (id, name, args = {}) => ({

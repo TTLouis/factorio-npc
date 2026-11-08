@@ -16,7 +16,9 @@ function fixture(target_x: number) {
     amount: 100,
     unit_number: 91,
     surface: undefined as any,
-    force: { index: 1 },
+    force: { index: 1, is_chunk_visible: () => true },
+    fluids_count: 0,
+    prototype: { fluidbox_prototypes: [] },
   }
   const surface = {
     index: 1,
@@ -38,7 +40,7 @@ function fixture(target_x: number) {
     character,
     position: { x: 0, y: 0 },
     surface,
-    force: { index: 1 },
+    force: { index: 1, is_chunk_visible: () => true },
     update_selected_entity,
     get_mining_state: vi.fn(() => ({ mining })),
     set_mining_state,
@@ -249,8 +251,10 @@ describe('mining reach recovery', () => {
       unit_number: 191,
       position: { x: 8, y: 0 },
       surface: f.surface,
-      force: { index: 1 },
+      force: { index: 1, is_chunk_visible: () => true },
+      fluids_count: 0,
       prototype: {
+        fluidbox_prototypes: [],
         is_building: false,
         mineable_properties: { minable: true, mining_time: 0.5, products: [] },
       },
@@ -295,8 +299,10 @@ describe('mining reach recovery', () => {
       unit_number: 192,
       position: { x: 8, y: 0 },
       surface: f.surface,
-      force: { index: 1 },
+      force: { index: 1, is_chunk_visible: () => true },
+      fluids_count: 0,
       prototype: {
+        fluidbox_prototypes: [],
         type: 'simple-entity',
         is_building: true,
         is_entity_with_owner: false,
@@ -347,8 +353,8 @@ describe('mining reach recovery', () => {
 
   it('moves farther toward the exact mining target when Factorio clears a started mining selection', () => {
     const f = fixture(2)
-    expect(f.controller.submit_mining_exact(91)).toBe(true)
     ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => unit === 91 ? f.resource : undefined
+    expect(f.controller.submit_mining_exact(91)).toBe(true)
 
     f.runtime.state_mining(f.actor)
     expect(f.manager.player_state.parameters_mine_entity).toMatchObject({

@@ -1,4 +1,4 @@
-/* eslint-disable antfu/no-top-level-await, no-console */
+
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'

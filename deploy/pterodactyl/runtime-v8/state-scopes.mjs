@@ -92,6 +92,8 @@ export const LOOP_STATE_FIELDS = Object.freeze({
   executorObservationRate: f('construction', true, V8, 'supervisor enables protocol-3 executor token bucket; legacy programmatic replays retain decision caps'),
   observationRateClock: f('construction', false, V8, 'wall clock and abortable sleep dependency; deterministic test clock never supplied by model'),
   observationRateAbort: f('conversation', false, V8, 'owned token wait, aborted on cancel/reset; generation/lineage/conversation/request/actor fences checked before every claim and native read'),
+  ownerGoalAdmissionPending: f('process', false, V8, 'admission mutex across awaited pre-request owner intake; released in finally, survives request reset'),
+  ownerGoalIntake: f('process', true, V8, 'owner-authored admission retained until explicit start; its consumed flag prevents starting the same intake twice across requests'),
   persistQueue: f('process', false, V8, 'promise chain serialising durable writes'),
   turnSequence: f('process', false, ST, 'monotonic turn id; restored from memory in loadPersistentState'),
   planningReasoningEpochSeen: f('process', true, V8, 'reasoning epoch per plan key, never cleared; a bump triggers the planner rebuild in refreshPlanningReasoningEpoch (restageContext marks it seen)'),

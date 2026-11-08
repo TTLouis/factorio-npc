@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { ACTION_SCOPE, authorizationOf, MANDATE_KIND } from './authorization.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
 import {
@@ -80,6 +81,9 @@ function gameWithMissingFurnace(onBlocked, { code = 'stale_exact_target', unit =
 
 function world(script, { game = gameWithMissingFurnace(), intents = [], agentOptions = {} } = {}) {
   const memory = new CanonicalTaskBoardMemory()
+  // Supplemental synthetic job facts; the historical stale-target preflight remains authoritative.
+  const furnace = game.nearby?.entities?.find(entity => entity.unit_number === FURNACE)
+  if (furnace) installHistoricalFactorySupplement(memory, game, furnace, { products: ['iron-plate'], ingredients: ['iron-ore'] })
   const rows = []
   const calls = []
   let routed = 0
@@ -650,6 +654,78 @@ test('MW5: an admission refusal the game proved happened before any mutation wak
     }
   }
 })
+
+test('exact no-effect admission recovery continues once under the unchanged goal and cannot replay its deferred wake', async () => {
+  const w = world(call => {
+    if (call === 1) return plannerDraft()
+    if (call === 2) {
+      w.game.syncRefusal = { slot: 1, operation: 'place_entity', error: 'no free tile', proven: true }
+      return executorPlace()
+    }
+    return replacementDraft()
+  }, { game: new FakeFactorio() })
+  let witness
+  const continueWake = w.agent.continueReconciledAdmissionWake.bind(w.agent)
+  w.agent.continueReconciledAdmissionWake = async value => { witness = value; return continueWake(value) }
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const goal = structuredClone(w.planning().goal)
+  const original = getActivePlan(w.planning())
+  const descriptions = original.steps.map(step => step.description)
+  w.game.inventory['iron-ore'] = 10
+  const result = await w.agent.completed()
+  assert.equal(result.operations[0].name, 'place_entity', 'successor reaches actual shared native admission')
+  assert.equal(w.game.mutations.length, 3, 'initial gather, refused attempt, one successor placement')
+  assert.equal(w.named('operation.refusal_wake_pending').length, 1)
+  assert.equal(w.named('plan.replacement_committed').length, 1)
+  assert.equal(w.planning().goal.goal_id, goal.goal_id)
+  assert.equal(w.planning().goal.objective, goal.objective)
+  assert.deepEqual(w.planning().plans.find(plan => plan.plan_id === original.plan_id).steps.map(step => step.description), descriptions)
+  const used = replacementsUsed(w.planning())
+  assert.equal(used, 1)
+  await assert.rejects(continueWake(witness), /discarded|superseded|stale/i)
+  assert.equal(w.game.mutations.length, 3)
+  assert.equal(replacementsUsed(w.planning()), used)
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(w.memory.snapshot())
+  assert.equal(replacementsUsed(restored.planningState(KEY)), used, 'restart cannot renew consumed replacement allowance')
+})
+
+for (const fault of ['stale_owner', 'busy', 'unknown_journal', 'partial']) {
+  test(`deferred admission wake refuses ${fault} across its awaited boundary without a successor or allowance consumption`, async () => {
+    const w = world(call => {
+      if (call === 1) return plannerDraft()
+      if (call === 2) {
+        w.game.syncRefusal = { slot: 1, operation: 'place_entity', error: 'no free tile', proven: true }
+        return executorPlace()
+      }
+      assert.fail('an unsafe deferred wake must not call the planner')
+    }, { game: new FakeFactorio() })
+    let heldBeforeFailureCleanup
+    const continueWake = w.agent.continueReconciledAdmissionWake.bind(w.agent)
+    w.agent.continueReconciledAdmissionWake = async value => {
+      try { return await continueWake(value) }
+      catch (error) { heldBeforeFailureCleanup = w.agent.batchInFlight; throw error }
+    }
+    const emit = w.agent.behaviorTrace.emit
+    w.agent.behaviorTrace.emit = async record => {
+      await emit(record)
+      if (record.event !== 'operation.refusal_wake_pending') return
+      if (fault === 'stale_owner') w.agent.generation++
+      if (fault === 'busy') { w.game.taskState = 'walking'; w.game.queueLength = 1 }
+      if (fault === 'unknown_journal') delete w.game.admissions.at(-1).signature
+      if (fault === 'partial') w.game.admissions.at(-1).state = 'partial'
+    }
+    await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+    w.game.inventory['iron-ore'] = 10
+    await assert.rejects(w.agent.completed(), fault === 'stale_owner' ? /discarded|superseded|stale/i : /admission_refusal_wake_native_unproven/)
+    assert.equal(w.game.mutations.length, 2)
+    assert.equal(heldBeforeFailureCleanup, true, 'the refusal boundary cannot release the in-flight hold')
+    assert.equal(w.named('plan.replacement_wake').length, 0)
+    assert.equal(w.named('plan.replacement_committed').length, 0)
+    assert.equal(replacementsUsed(w.planning()), 0)
+    assert.equal(getActivePlan(w.planning()).plan_version, 1)
+  })
+}
 
 // --- verdict paths ----------------------------------------------------------------------------------------------------------
 
