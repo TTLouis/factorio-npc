@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 import { EXECUTOR_REFUSAL_UNCORRECTED_REASON, NpcAgentLoop, worldRefusalCorrectionMessage, worldRefusalFacts, WORLD_REFUSAL_UNCORRECTED_REASON } from './npc-agent-loop.mjs'
 import { MODEL_RECOVERABLE_OUTCOME_REASONS, validateOutcomeCandidate } from './outcome-authority.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
@@ -55,11 +56,14 @@ const plannerDraft = () => planReply({
 const observation = () => ({ content: null, tool_calls: [{ id: 'call_obs', index: 0, type: 'function', function: { name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 17 }) } }] })
 const supply = items => ({ name: 'supply_entity', args: { unit_number: FURNACE, items } })
 const RUN_G_BATCH = () => [gather('coal', 10), supply([{ item_name: 'coal', count: 10 }, { item_name: 'iron-ore', count: 50 }, { item_name: 'copper-ore', count: 10 }])]
-const CORRECTED_BATCH = () => [gather('coal', 10), supply([{ item_name: 'coal', count: 10 }, { item_name: 'iron-ore', count: 50 }])]
+// Compatible synthetic submissions isolate the correction controller from Run G's wrong-job input.
+const SYNTHETIC_IRON_BATCH = () => [gather('coal', 10), supply([{ item_name: 'coal', count: 10 }, { item_name: 'iron-ore', count: 50 }])]
+const CORRECTED_BATCH = () => [gather('coal', 10), supply([{ item_name: 'coal', count: 10 }, { item_name: 'iron-ore', count: 10 }])]
+const SYNTHETIC_FULL_DESTINATION = { ok: false, code: 'synthetic_destination_capacity_changed', operation: 'supply_entity', field: 'unit_number', identity: FURNACE, refusal_class: 'world' }
 const executor = operations => planReply({ plan: IRON_PLAN, currentStep: 1, operations })
 
-// Refuses a supply that names more than one ore (the shared slot); anything else passes.
-function gameRefusing(refusal = RUN_G_TRANSFER, when = text => text.includes("'supply_entity'") && text.includes('copper-ore')) {
+// Synthetic bounded destination capacity fault; the corrected smaller supply passes.
+function gameRefusing(refusal = SYNTHETIC_FULL_DESTINATION, when = text => text.includes("'supply_entity'") && /count[^0-9]*50/.test(text)) {
   const game = new FakeFactorio({
     preflight: text => (when(text) ? refusal : { ok: true }),
   })
@@ -69,6 +73,9 @@ function gameRefusing(refusal = RUN_G_TRANSFER, when = text => text.includes("'s
 
 function world(script, { game = gameRefusing(), provider: roleProvider } = {}) {
   const memory = new CanonicalTaskBoardMemory()
+  // Supplemental synthetic iron job; this does not authorize the historical mixed copper supply.
+  const furnace = game.nearby?.entities?.find(entity => entity.unit_number === FURNACE)
+  if (furnace) installHistoricalFactorySupplement(memory, game, furnace, { products: ['iron-plate'], ingredients: ['iron-ore'] })
   const rows = []
   const calls = []
   const agent = new NpcAgentLoop({
@@ -162,23 +169,34 @@ test('the correction message states the refusal facts per item and the shared on
 
 // --- one correction turn, then a corrected resubmission is admitted ---------------------------------------------------------
 
-test('run G: the first refusal returns the facts to the executor, nothing blocks, and the corrected batch is admitted', async () => {
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(CORRECTED_BATCH())])
+test('original Run G mixed supply is refused by the assigned iron job before any batch mutation', async () => {
+  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH())])
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const before = structuredClone(w.memory.snapshot().factory_registry)
+  const mutations = w.game.mutations.length
+  w.game.inventory['iron-ore'] = 10
+  await assert.rejects(w.agent.completed(), { code: 'factory_cell_input_unproven' })
+  assert.equal(w.game.mutations.length, mutations)
+  assert.deepEqual(w.memory.snapshot().factory_registry, before)
+  assert.equal(w.named('operations.preflight_recoverable').length, 0)
+  assert.equal(w.agent.worldCorrectionRetries ?? 0, 0)
+})
+
+test('synthetic dedicated iron supplier: the first refusal returns the facts to the executor, nothing blocks, and the corrected batch is admitted', async () => {
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(CORRECTED_BATCH())])
   const result = await runToExecutor(w)
   assert.equal(w.calls.length, 4, 'planner, observation, refused batch, corrected batch')
   assert.equal(result.blocker, undefined)
   assert.notEqual(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
   assert.notEqual(w.memory.currentPlan(KEY).status, 'blocked')
 
-  const message = harnessMessages([w.calls[3]]).find(text => text.includes('supply_destination_conflict'))
+  const message = harnessMessages([w.calls[3]]).find(text => text.includes('synthetic_destination_capacity_changed'))
   assert.ok(message, 'the retry carries the harness message')
-  assert.match(message, /destination_conflict":\{"inventory_index":2,"slot_count":1,"item_names":\["iron-ore","copper-ore"\]\}/)
-  assert.match(message, /"item_name":"coal","requested":10,"source_count":0,"destination_accepts":50,"missing":10,"status":"supply_missing"/)
   assert.match(message, /Nothing from this batch ran/)
 
   const [recoverable, ...extra] = w.named('operations.preflight_recoverable')
   assert.equal(extra.length, 0)
-  assert.equal(recoverable.data.failure_class, 'world_correction_supply_destination_conflict')
+  assert.equal(recoverable.data.failure_class, 'world_correction_synthetic_destination_capacity_changed')
   assert.equal(recoverable.data.retry, 1)
   assert.equal(recoverable.data.retry_budget, 1)
   assert.equal(recoverable.data.refusal_class, 'world')
@@ -191,17 +209,17 @@ test('run G: the first refusal returns the facts to the executor, nothing blocks
   assert.equal(w.agent.worldCorrectionRetries, 0, 'a passed preflight resets the budget')
   const evidence = (w.memory.currentPlan(KEY).task_board.evidence ?? []).find(item => item.kind === 'operation_preflight_recoverable')
   assert.ok(evidence)
-  assert.match(evidence.summary, /supply_destination_conflict/)
+  assert.match(evidence.summary, /synthetic_destination_capacity_changed/)
 })
 
 // --- a second refusal pauses visibly and the supervisor resumes it ---------------------------------------------------------
 
-test('run G: a second refusal in the same request pauses as model_recoverable with the reason and the supervisor schedules an auto-resume', async () => {
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())])
+test('synthetic dedicated iron supplier: a second refusal in the same request pauses as model_recoverable with the reason and the supervisor schedules an auto-resume', async () => {
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())])
   const result = await runToExecutor(w)
   assert.equal(w.calls.length, 4)
   assert.equal(result.recoverableFailure.reason, WORLD_REFUSAL_UNCORRECTED_REASON)
-  assert.match(result.chatMessage, /^\[Plan paused\] The game refused operation 2 \(supply_entity: supply_destination_conflict\)/)
+  assert.match(result.chatMessage, /^\[Plan paused\] The game refused operation 2 \(supply_entity: synthetic_destination_capacity_changed\)/)
   assert.equal(w.named('operations.preflight_recoverable').length, 1, 'one correction turn only')
 
   const plan = w.memory.currentPlan(KEY)
@@ -249,7 +267,7 @@ for (const [refusalClass, failureClass, worldCorrection, endStatus] of [
 ]) {
   test(`a ${refusalClass}-class refusal takes the ${refusalClass} path${worldCorrection ? ' (one correction turn) and then pauses' : ' and never the world-correction path'}`, async () => {
     const game = gameRefusing({ ok: false, code: 'brand_new_mod_code', refusal_class: refusalClass, operation: 'supply_entity', field: 'unit_number', identity: FURNACE }, text => text.includes("'supply_entity'"))
-    const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game })
+    const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())], { game })
     await runToExecutor(w).catch(() => {})
     const classes = w.named('operations.preflight_recoverable').map(row => row.data.failure_class)
     assert.deepEqual(classes, [failureClass])
@@ -281,7 +299,7 @@ const noCorrection = w => w.named('operations.preflight_recoverable').filter(row
 
 test('a refusal that is harness-evidenced world change keeps the MW5 wake and takes neither the world-correction turn nor the terminal pause', async () => {
   // stale_exact_target has its own one-round rebinding, so the executor sends the batch twice before the plan blocks and the wake fires.
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH()), replacementDraft()], { game: staleFurnace() })
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH()), replacementDraft()], { game: staleFurnace() })
   await runToExecutor(w)
   assert.equal(w.calls.length, 5, 'planner, observation, refused batch, refused again, replacement draft')
   assert.equal(w.named('plan.replacement_wake').length, 1)
@@ -293,7 +311,7 @@ test('a refusal that is harness-evidenced world change keeps the MW5 wake and ta
 })
 
 test('a world-evidence refusal whose wake was skipped (no current grant) ends in exactly one guard pause, not a silent blocked end', async () => {
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game: staleFurnace() })
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())], { game: staleFurnace() })
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.memory.revokeAuthorization(KEY, w.memory.currentGoalGrant(KEY).grant_id, { reason: 'test' })
   w.game.inventory['iron-ore'] = 10
@@ -322,7 +340,7 @@ test('a world-evidence refusal whose wake was skipped (no current grant) ends in
 
 test('a recipe_locked refusal gets no correction turn and ends in exactly one guard pause that no timer resumes', async () => {
   const locked = { ok: false, code: 'recipe_locked', refusal_class: 'world', operation: 'supply_entity', field: 'item_name', identity: 'automation-science-pack', recipe_name: 'automation-science-pack' }
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH())], { game: gameRefusing(locked, text => text.includes("'supply_entity'")) })
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH())], { game: gameRefusing(locked, text => text.includes("'supply_entity'")) })
   const result = await runToExecutor(w)
   assert.equal(w.calls.length, 3, 'planner, observation, the refused batch: no correction turn')
   assert.equal(noCorrection(w).length, 0)
@@ -349,7 +367,7 @@ test('a recipe_locked refusal gets no correction turn and ends in exactly one gu
 test('preflight_transport_error is a transport fault: no correction turn, the request fails with a declared transport class and the pause is transport', async () => {
   const game = gameRefusing()
   game.preflight = text => (text.includes("'supply_entity'") ? undefined : { ok: true }) // the game answers nothing readable
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game })
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())], { game })
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.game.inventory['iron-ore'] = 10
   const failure = await w.agent.completed().then(() => undefined, error => error)
@@ -373,7 +391,7 @@ test('preflight_transport_error is a transport fault: no correction turn, the re
 })
 
 test('the world-correction budget starts over only once a batch was actually sent', async () => {
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(CORRECTED_BATCH())])
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(CORRECTED_BATCH())])
   await runToExecutor(w)
   const at = event => w.named(event).map(row => row.retries)
   assert.deepEqual(at('operations.preflight_recoverable'), [1], 'the refusal spent the budget')
@@ -431,7 +449,7 @@ async function superviseOnce(w) {
 }
 
 test('unit 13: an argument refusal after its retry budget ends in exactly one model_recoverable pause, with the step untouched, and the supervisor schedules an auto-resume', async () => {
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity) })
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())], { game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity) })
   const result = await runToExecutor(w)
   assert.equal(w.calls.length, 4, 'planner, observation, refused batch, refused again after its one argument correction')
   assert.equal(result.blocker, undefined, 'nothing is blocked')
@@ -503,7 +521,7 @@ test('unit 13: supply_missing that survives its supply recovery gets one world-c
 
 test('unit 13: an authority refusal after its retry stays exactly one guard pause, with no auto-resume', async () => {
   const refusal = { ok: false, code: 'protected_entity_refused', refusal_class: 'authority', operation: 'supply_entity', field: 'unit_number', identity: FURNACE, detail: 'the furnace was built by a player' }
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game: gameRefusing(refusal, supplyEntity) })
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())], { game: gameRefusing(refusal, supplyEntity) })
   const result = await runToExecutor(w)
   assert.equal(w.calls.length, 4, 'planner, observation, refused batch, refused again after its one authorization retry')
   assert.equal(result.blocker.code, 'protected_entity_refused')
@@ -526,7 +544,7 @@ test('unit 13: an authority refusal after its retry stays exactly one guard paus
 
 test('unit 13: no_actor is a lifecycle refusal: no correction turn and exactly one guard pause', async () => {
   const refusal = { ok: false, code: 'no_actor', refusal_class: 'world', operation: 'supply_entity', detail: 'no standalone actor is bound' }
-  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH())], { game: gameRefusing(refusal, supplyEntity) })
+  const w = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH())], { game: gameRefusing(refusal, supplyEntity) })
   const result = await runToExecutor(w)
   assert.equal(w.calls.length, 3, 'planner, observation, the refused batch: no correction turn')
   assert.equal(noCorrection(w).length, 0)
@@ -541,13 +559,13 @@ test('unit 13: no_actor is a lifecycle refusal: no correction turn and exactly o
 
 test('unit 13: every guard end names its reason: recipe_locked, a world-evidence refusal whose wake was skipped, and a refusal with no declared class', async () => {
   const locked = { ok: false, code: 'recipe_locked', refusal_class: 'world', operation: 'supply_entity', field: 'item_name', identity: 'automation-science-pack', recipe_name: 'automation-science-pack' }
-  const a = world([plannerDraft(), observation(), executor(RUN_G_BATCH())], { game: gameRefusing(locked, supplyEntity) })
+  const a = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH())], { game: gameRefusing(locked, supplyEntity) })
   await runToExecutor(a)
   const [lockedEnd] = blockedEnds(a)
   assert.equal(lockedEnd.data.request_id, lockedEnd.request_id)
   assert.deepEqual([lockedEnd.data.code, lockedEnd.data.pause_class, lockedEnd.data.reason], ['recipe_locked', 'guard', 'executor_cannot_fix:plan_level'])
 
-  const b = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game: staleFurnace() })
+  const b = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())], { game: staleFurnace() })
   await b.agent.request(OBJECTIVE, { sender: 'Louis' })
   b.memory.revokeAuthorization(KEY, b.memory.currentGoalGrant(KEY).grant_id, { reason: 'test' })
   b.game.inventory['iron-ore'] = 10
@@ -557,7 +575,7 @@ test('unit 13: every guard end names its reason: recipe_locked, a world-evidence
   assert.deepEqual([evidenceEnd.data.code, evidenceEnd.data.pause_class, evidenceEnd.data.reason], ['stale_exact_target', 'guard', 'world_evidence_wake_skipped'])
 
   const unclassified = { ok: false, code: 'brand_new_mod_code', operation: 'supply_entity', field: 'unit_number', identity: FURNACE }
-  const c = world([plannerDraft(), observation(), executor(RUN_G_BATCH())], { game: gameRefusing(unclassified, supplyEntity) })
+  const c = world([plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH())], { game: gameRefusing(unclassified, supplyEntity) })
   await runToExecutor(c)
   assert.equal(c.named('operations.preflight_unclassified').length, 1)
   const [unclassifiedEnd] = blockedEnds(c)
@@ -572,7 +590,7 @@ test('unit 13: a repeating executor refusal is bounded end to end: two restages,
     // sends the same refused batch.
     provider: async (messages, context) => {
       if (context?.role !== 'executor') return plannerDraft()
-      return messages.some(message => message.role === 'tool') ? executor(RUN_G_BATCH()) : observation()
+      return messages.some(message => message.role === 'tool') ? executor(SYNTHETIC_IRON_BATCH()) : observation()
     },
   })
   const result = await runToExecutor(w)
@@ -636,7 +654,7 @@ test('unit 13: a restaged executor gets its own correction turn with the refusal
     game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity),
     provider: async (messages, context) => {
       if (context?.role !== 'executor') return plannerDraft()
-      return messages.some(message => message.role === 'tool') ? executor(RUN_G_BATCH()) : observation()
+      return messages.some(message => message.role === 'tool') ? executor(SYNTHETIC_IRON_BATCH()) : observation()
     },
   })
   const result = await runToExecutor(w)
@@ -674,7 +692,7 @@ test('unit 13: a restaged executor gets its own correction turn with the refusal
 // read, it keeps the plan active; but finishPreflightRecoveryFailure ends the request (agent.active = false), and the supervisor
 // drops an 'All operations completed' line when the agent is not active, so nothing would wake the NPC. The end is a pause instead.
 
-const ARGUMENT_BATCHES = () => [plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())]
+const ARGUMENT_BATCHES = () => [plannerDraft(), observation(), executor(SYNTHETIC_IRON_BATCH()), executor(SYNTHETIC_IRON_BATCH())]
 // The task status is the fixture's own until the executor's batch is refused; from then on the game answers with `status`, which is
 // what the request's end reads (the earlier step verification must not see it).
 function gameWithStatusAfterRefusal(refusal, status) {
@@ -695,50 +713,30 @@ function gameWithStatusAfterRefusal(refusal, status) {
   return game
 }
 
-test('unit 13: with a task still running the request ends as a visible pause, the line says what happened, and a completion signal would wake nothing', async () => {
-  const game = gameWithStatusAfterRefusal(ARGUMENT_REFUSAL, { task_state: 'walking', queue_empty: false, queue_length: 2 })
-  const w = world(ARGUMENT_BATCHES(), { game })
-  const result = await runToExecutor(w)
-  assert.equal(result.recoverableFailure.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON)
-  assert.match(result.chatMessage, /^\[Plan paused\] The game refused operation 2/)
-  const record = w.memory.pauseRecord(KEY)
-  assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, `recoverable_provider_failure:${EXECUTOR_REFUSAL_UNCORRECTED_REASON}`, 'model_recoverable'])
-  assert.equal(w.memory.currentPlan(KEY).status, 'paused')
-  const [gate, ...extra] = w.named('operations.recovery_failure_runtime_gate')
-  assert.equal(extra.length, 0)
-  assert.equal(gate.data.request_id, gate.request_id)
-  assert.ok(gate.data.request_id)
-  assert.deepEqual([gate.data.decision, gate.data.pause_class, gate.data.paused], ['paused_runtime_active', 'model_recoverable', true])
-  assert.deepEqual([gate.data.runtime.active, gate.data.runtime.task_state, gate.data.runtime.queue_length], [true, 'walking', 2])
-  assert.equal(w.named('goal.paused').length, 1)
-  // Why it pauses: the request is over, so a later completion of the queued work is ignored (npc-agent-loop completed() returns null
-  // when the agent is not active, and the supervisor does not call it then).
-  assert.equal(w.agent.active, false)
-  assert.equal(await w.agent.completed(), null)
-  // The supervisor's auto-resume owns the wake instead.
-  const { decision } = await superviseOnce(w)
-  assert.equal(decision, true)
-})
-
-test('unit 13: a task status that cannot be read ends as a visible system pause, never an active plan with no pending work', async () => {
-  for (const [label, status] of [['unreadable json', 'not json'], ['rcon error', new Error('rcon connection reset')]]) {
-    const game = gameWithStatusAfterRefusal(ARGUMENT_REFUSAL, status)
-    const w = world(ARGUMENT_BATCHES(), { game })
-    const result = await runToExecutor(w)
-    assert.equal(result.recoverableFailure.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON, label)
-    const record = w.memory.pauseRecord(KEY)
-    assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, `runtime_status_unknown:${EXECUTOR_REFUSAL_UNCORRECTED_REASON}`, 'system'], label)
-    assert.equal(w.memory.currentPlan(KEY).status, 'paused', label)
-    const [gate] = w.named('operations.recovery_failure_runtime_gate')
-    assert.equal(gate.data.request_id, gate.request_id, label)
-    assert.deepEqual([gate.data.decision, gate.data.pause_class], ['paused_runtime_status_unknown', 'system'], label)
-    assert.ok(gate.data.runtime.status_error, label)
-    assert.equal(w.named('goal.paused').length, 1, label)
-    // A system pause is for its own lifecycle recovery: the auto-resume timer never fires for it.
-    const { decision } = await superviseOnce(w)
-    assert.equal(decision, null, label)
-  }
-})
+// Busy/unknown native status now stops the next attempt at the shared factory boundary,
+// before the older end-of-correction pause path. Retain the real fault, never fabricate idle.
+for (const [label, status, code] of [
+  ['busy', { task_state: 'walking', queue_empty: false, queue_length: 2 }, 'factory_runtime_not_idle'],
+  ['unreadable json', 'not json', 'factory_tool_native_unreadable'],
+  ['rcon error', new Error('rcon connection reset'), 'factory_tool_native_unreadable'],
+]) {
+  test(`unit 13: ${label} status refuses correction at the shared boundary without relabeling native work or renewing authority`, async () => {
+    const w = world(ARGUMENT_BATCHES(), { game: gameWithStatusAfterRefusal(ARGUMENT_REFUSAL, status) })
+    let failure
+    await assert.rejects(runToExecutor(w), error => { failure = error; return error.code === code })
+    assert.equal(w.game.mutations.length, 1, 'only the initial gather was sent')
+    assert.equal(w.named('operations.preflight_recoverable').length, 1, 'the original correction was spent exactly once')
+    assert.equal(w.agent.modelCorrectablePreflightRetries, 1)
+    assert.equal(w.agent.worldCorrectionRetries ?? 0, 0)
+    assert.equal(w.named('plan.replacement_committed').length, 0)
+    const paused = await pauseStrandedPlanAfterRequestError({ agent: w.agent, currentPlanState: () => w.memory.currentPlan(KEY) }, failure)
+    assert.equal(paused, undefined, 'supervisor cannot relabel busy or unknown native work as safely paused')
+    assert.equal(w.memory.currentPlan(KEY).status, 'active')
+    assert.equal(getActivePlan(w.planning()).plan_version, 1)
+    assert.equal(w.memory.snapshot().factory_registry.cells.length, 1)
+    assert.equal(w.named('operations.admit').length, 1)
+  })
+}
 
 test('unit 13: an idle runtime keeps the declared pause and never traces the runtime gate', async () => {
   const w = world(ARGUMENT_BATCHES(), { game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity) })

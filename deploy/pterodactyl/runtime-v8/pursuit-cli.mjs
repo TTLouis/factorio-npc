@@ -55,7 +55,7 @@ export function configuration(env) {
 // The notebook store keys worlds by UUID; derive one stably from the session.
 export function worldIdForSession(session) {
   const hex = createHash('sha256').update(`sgluna-pursuit-world:${session}`).digest('hex')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${'89ab'[parseInt(hex[16], 16) % 4]}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${'89ab'[Number.parseInt(hex[16], 16) % 4]}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
 
 async function readJson(file) {

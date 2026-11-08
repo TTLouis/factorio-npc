@@ -2863,16 +2863,19 @@ function terminalProviderBudgetCode(value) {
 // The pause-reason code for a provider failure that ends a request. The codes
 // match the supervisor's stranded-plan pause, so the in-game board shows the
 // same summary for them.
+// Invocation provenance stays local; error text or caller-supplied fields cannot grant it.
+const providerRequestFailures = new WeakSet()
+
 function providerFailurePauseCause(message, failure) {
   const text = String(message ?? '')
-  if (!/provider/i.test(text) || /cancelled|superseded|epoch changed/i.test(text)) return undefined
+  if ((!providerRequestFailures.has(failure) && !/provider/i.test(text)) || /cancelled|superseded|epoch changed/i.test(text)) return undefined
   const budget = /provider_context_window_exceeded|provider_output_budget|finish=length/i.test(text)
   if (!budget && transportFailureOf(failure ?? text)) return undefined
   if (/provider_output_budget_exhausted|finish=length|output budget/i.test(text)) return 'provider_output_budget_exhausted'
   if (/^Provider response recovery exhausted after \d+ attempts/i.test(text)) return 'provider_recovery_exhausted'
   if (/provider_action_omission_repair_failed/i.test(text)) return 'provider_action_omission_repair_failed'
   if (/provider_semantic_alignment_failed/i.test(text)) return 'provider_semantic_alignment_failed'
-  return 'request_failed'
+  return providerRequestFailures.has(failure) ? 'provider_request_failed' : 'request_failed'
 }
 
 const PROVIDER_PAUSE_TEXT = {
@@ -14701,39 +14704,47 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let message
     try {
       this.assertModelRecoveryAllowed(recoveryOwner)
-      message = await this.provider(providerMessages, {
-        ...this.providerRoleFields(attribution),
-        ...(this.completionProtocolVersion >= 3 ? { completionProtocolVersion: this.completionProtocolVersion } : {}),
-        epoch: current.epoch,
-        actorId: current.actor_id,
-        round,
-        allowTools: effectiveAllowTools,
-        recoveryAttempt: effectiveRecoveryAttempt,
-        recoveryKind,
-        triggerSource,
-        reasoningBudget: this.reasoningBudgetOverride ?? undefined,
-        lifecycle: this.requestLifecycle,
-        actionOmissionRepair: omissionRepair,
-        requestBodyPatch: omissionRepair ? { max_tokens: ACTION_OMISSION_MAX_TOKENS } : undefined,
-        roundPhase: roundPhase.phase,
-        // The prompt trace keys every provider row by this id (1.3); without
-        // it requests had to be rebuilt from round-0 boundaries.
-        requestId: this.traceRequest?.id,
-        onReasoningPolicy: decision => this.traceEvent('provider.round_policy', {
+      try {
+        message = await this.provider(providerMessages, {
+          ...this.providerRoleFields(attribution),
+          ...(this.completionProtocolVersion >= 3 ? { completionProtocolVersion: this.completionProtocolVersion } : {}),
+          epoch: current.epoch,
+          actorId: current.actor_id,
           round,
-          trigger_source: triggerSource,
-          round_phase: roundPhase.phase,
-          round_phase_reason: roundPhase.reason,
-          effort: decision?.effort,
-          reason: decision?.reason,
-          output_cap: decision?.output_cap,
-          output_cap_source: decision?.output_cap_source,
-          capability_profile: decision?.capability_profile,
-          recovery_attempt: effectiveRecoveryAttempt,
-          recovery_kind: traceRecoveryKind,
-        }),
-        signal: controller.signal,
-      })
+          allowTools: effectiveAllowTools,
+          recoveryAttempt: effectiveRecoveryAttempt,
+          recoveryKind,
+          triggerSource,
+          reasoningBudget: this.reasoningBudgetOverride ?? undefined,
+          lifecycle: this.requestLifecycle,
+          actionOmissionRepair: omissionRepair,
+          requestBodyPatch: omissionRepair ? { max_tokens: ACTION_OMISSION_MAX_TOKENS } : undefined,
+          roundPhase: roundPhase.phase,
+          // The prompt trace keys every provider row by this id (1.3); without
+          // it requests had to be rebuilt from round-0 boundaries.
+          requestId: this.traceRequest?.id,
+          onReasoningPolicy: decision => this.traceEvent('provider.round_policy', {
+            round,
+            trigger_source: triggerSource,
+            round_phase: roundPhase.phase,
+            round_phase_reason: roundPhase.reason,
+            effort: decision?.effort,
+            reason: decision?.reason,
+            output_cap: decision?.output_cap,
+            output_cap_source: decision?.output_cap_source,
+            capability_profile: decision?.capability_profile,
+            recovery_attempt: effectiveRecoveryAttempt,
+            recovery_kind: traceRecoveryKind,
+          }),
+          signal: controller.signal,
+        })
+      }
+      catch (error) {
+        // Preserve provider origin without granting retries or changing guards.
+        const failure = error && (typeof error === 'object' || typeof error === 'function') ? error : new Error(String(error))
+        providerRequestFailures.add(failure)
+        throw failure
+      }
       const usage = estimatedOutputUsage(normalizedProviderUsage(message?._sglunaProvider?.usage), message?._sglunaProvider)
       if (usage?.output_units_estimated === true) {
         if (this.traceRequest && this.traceRequest.usage_estimated_traced !== true) {

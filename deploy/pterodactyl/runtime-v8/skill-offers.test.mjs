@@ -7,15 +7,37 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
+import test, { after, afterEach } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { registerHooks } from 'node:module'
 
-import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { isTailBlock } from './prompt-prefix.mjs'
-import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
-import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
-import {
+// Only this isolated test process redirects the library transport. The legacy
+// native-shaped records below deliberately exercise compatibility, budgets and
+// cancellation; they never claim canonical provenance. Production imports and
+// the real canonical-reader regression below keep the normal library boundary.
+let libraryGame
+const libraryHook = registerHooks({ load(url, context, next) {
+  const result = next(url, context)
+  if (!url.endsWith('/canonical-library-tools.mjs')) return result
+  const source = String(result.source)
+  const needle = 'export async function readCanonicalLibraryTool(name, args) {'
+  assert.ok(source.includes(needle), 'canonical library transport seam exists')
+  return { ...result, source: source.replace(needle, `${needle}\n  if (globalThis.__skillOfferFixtureRead) return globalThis.__skillOfferFixtureRead(name, args)`) }
+} })
+globalThis.__skillOfferFixtureRead = async (name, args) => {
+  if (name === 'findSkills') {
+    const found = JSON.parse(await libraryGame.command(skillOfferCommand(args.query, args.limit)))
+    if (found.ok !== true) throw new Error(found.error ?? 'fixture_library_lookup_failed')
+    return JSON.stringify({ ok: true, results: found.cards })
+  }
+  return libraryGame.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",'${args.id}')))`)
+}
+const { CanonicalTaskBoardMemory } = await import('./canonical-task-board-memory.mjs')
+const { NpcAgentLoop } = await import('./npc-agent-loop.mjs')
+const { isTailBlock } = await import('./prompt-prefix.mjs')
+const { emptyJevHealth, recordJevHealth, summarizeJevHealth } = await import('./jev-health.mjs')
+const { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } = await import('./provider.mjs')
+const {
   ensureSkillOffers,
   loadOfferedSkillDetails,
   parseSkillChoice,
@@ -32,8 +54,36 @@ import {
   skillOfferCommand,
   skillOffersContext,
   utf8Prefix,
-} from './skill-offers.mjs'
-import { FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
+} = await import('./skill-offers.mjs')
+const { FakeFactorio, planReply, recordingJev } = await import('./task-loop-fixtures.mjs')
+libraryHook.deregister()
+after(() => { delete globalThis.__skillOfferFixtureRead })
+const { readCanonicalLibraryTool, canonicalLibraryResult } = await import('./canonical-library-tools.mjs')
+const pendingGates = new Set()
+const fixtureLoops = new Set()
+afterEach(async () => {
+  for (const gate of pendingGates) gate.resolve()
+  pendingGates.clear()
+  for (const loop of fixtureLoops) loop.skillChoiceAbort?.abort(new Error('fixture_cleanup'))
+  await Promise.all([...fixtureLoops].map(loop => loop.skillChoicePending))
+  fixtureLoops.clear()
+})
+function fixtureAgent(options) {
+  const agent = new NpcAgentLoop(options)
+  fixtureLoops.add(agent)
+  return agent
+}
+
+test('the default library transport retains canonical provenance and performs no native read', async () => {
+  const injected = globalThis.__skillOfferFixtureRead
+  delete globalThis.__skillOfferFixtureRead
+  try {
+    const raw = await readCanonicalLibraryTool('getSkillDetails', { id: 'steam-power-bootstrap' })
+    assert.equal(canonicalLibraryResult(raw)?.entry.id, 'steam-power-bootstrap')
+    assert.equal(JSON.parse(raw).authority.operation_authority, false)
+  }
+  finally { globalThis.__skillOfferFixtureRead = injected }
+})
 
 // What the mod's autorio_skills.offer returns for the steam goal on a fresh
 // base-game save (same shape as the card snapshot in packages/autorio
@@ -79,6 +129,7 @@ class SkillFactorio extends FakeFactorio {
     this.offer = offer
     this.offerRequests = []
     this.detailRequests = []
+    libraryGame = this
     this.skills['steam-power-bootstrap'] = { id: 'steam-power-bootstrap', name: 'Steam Power Bootstrap', revision: 2, status: 'candidate', stage: 'pattern', summary: 'Starter steam power.' }
   }
 
@@ -101,7 +152,7 @@ async function scenario({ game = new SkillFactorio(), jev, planner, intents, req
   const traceFile = path.join(dir, 'sgluna-behavior.jsonl')
   const calls = []
   const world = { intent: intents?.[0] ?? 'new_goal' }
-  const agent = new NpcAgentLoop({
+  const agent = fixtureAgent({
     rcon: game,
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill offers scenario',
@@ -393,6 +444,7 @@ test('Run AA: red automation planning sees dedicated direct-feed time-saving gui
 })
 
 function loadingLoop(game) {
+  libraryGame = game
   const loop = fakeLoop(game)
   loop.loadedSkillContext = new Map()
   loop.recordLoadedSkillToolResult = NpcAgentLoop.prototype.recordLoadedSkillToolResult
@@ -589,7 +641,9 @@ test('the working-character ceiling reserves room for the loaded skill and the l
 function deferred() {
   let resolve
   const promise = new Promise(done => { resolve = done })
-  return { promise, resolve }
+  const gate = { promise, resolve }
+  pendingGates.add(gate)
+  return gate
 }
 
 const PICK_STEAM = {
@@ -618,7 +672,7 @@ test('shadow Jev adds no planning latency: the planner runs and the request ends
   const game = new SkillFactorio()
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-skill-latency-'))
   const traceFile = path.join(dir, 'sgluna-behavior.jsonl')
-  const agent = new NpcAgentLoop({
+  const agent = fixtureAgent({
     rcon: game,
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill latency scenario',
@@ -657,7 +711,7 @@ test('shadow Jev adds no planning latency: the planner runs and the request ends
 
 function fakeLoop(game, jev) {
   const traced = []
-  return {
+  const loop = {
     traced,
     rcon: game,
     skillOffers: null,
@@ -670,6 +724,8 @@ function fakeLoop(game, jev) {
     async decisionTraceEvent(event, data) { this.decisions.push({ event, data }) },
     log: () => {},
   }
+  fixtureLoops.add(loop)
+  return loop
 }
 
 test('a late Jev answer for a replaced offer is traced as aborted and never written into any offer', async () => {
@@ -747,7 +803,7 @@ test('loop cancel and stop abort an in-flight Jev skill call', async () => {
   })
   const run = async (stop) => {
     const game = new SkillFactorio()
-    const agent = new NpcAgentLoop({
+    const agent = fixtureAgent({
       rcon: game,
       memory: new CanonicalTaskBoardMemory(),
       systemPrompt: 'skill cancel scenario',
@@ -822,7 +878,7 @@ test('shadow skill_choice stays out of the Jev health window, so a cancelled sha
     await new Promise((_resolve, reject) => context.signal.addEventListener('abort', () => reject(context.signal.reason)))
     return undefined
   })
-  const agent = new NpcAgentLoop({
+  const agent = fixtureAgent({
     rcon: new SkillFactorio(),
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill health scenario',
@@ -865,7 +921,7 @@ test('two overlapping decisions pair each decision.exchange with its own decisio
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-decision-pairing-'))
   const decisionTraceFile = path.join(dir, 'sgluna-decision.jsonl')
   const answer = { answers: {}, provider: 'fixture-jev', model: 'fixture' }
-  const agent = new NpcAgentLoop({
+  const agent = fixtureAgent({
     rcon: new SkillFactorio(),
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'decision pairing',

@@ -168,6 +168,7 @@ export const REQUEST_FAILURE_CODE_CLASS = Object.freeze({
   provider_context_window_exceeded: PAUSE_CLASS.MODEL_RECOVERABLE,
   provider_turn_output_cap_exceeded: PAUSE_CLASS.GUARD,
   request_output_ceiling: PAUSE_CLASS.GUARD,
+  provider_request_failed: PAUSE_CLASS.GUARD,
   request_failed: PAUSE_CLASS.GUARD,
 })
 
@@ -257,9 +258,10 @@ export function classifyRequestFailure(failure) {
 // mention "provider" or "request_failed" without the provider having failed. `request_failed` itself is the unplaced fallback.
 export function isProviderFailurePause(record, reason) {
   const classification = pauseClassOf(record)
+  const code = String(reason ?? record?.pause_reason ?? '').split(':')[0].trim()
+  if (classification.pause_class === PAUSE_CLASS.GUARD && code === 'provider_request_failed') return true
   if (classification.classified && [PAUSE_CLASS.GUARD, PAUSE_CLASS.SYSTEM, PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AUTHORITY].includes(classification.pause_class)) return false
   if (classification.pause_class === PAUSE_CLASS.TRANSPORT) return true
-  const code = String(reason ?? record?.pause_reason ?? '').split(':')[0].trim()
   return code === 'request_failed' && !classification.classified || code === 'recoverable_provider_failure' || code.startsWith('provider_')
 }
 

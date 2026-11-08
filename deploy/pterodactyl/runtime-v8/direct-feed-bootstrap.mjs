@@ -26,15 +26,16 @@ function craftable(recipe) {
 }
 
 /**
- * @param resource  the direct-feed resource (iron-ore)
- * @param drills    names of every drill the native mining facts list for it (complete list only)
- * @param recipes   raw native recipe rows: the drills' recipes and every ingredient's, one row per item
- * @param raw       items the native facts confirm are raw (mined or harvested, no recipe)
- * @param inventory held counts by item name
- * @param placed    NPC-placed machines the step does not preserve, counted by entity name
- * @param unresolved entity names with a recorded unpreserved placement the facts neither confirm nor refute (a failed lookup, or
+ * @param {object} options
+ * @param options.resource  the direct-feed resource (iron-ore)
+ * @param options.drills    names of every drill the native mining facts list for it (complete list only)
+ * @param options.recipes   raw native recipe rows: the drills' recipes and every ingredient's, one row per item
+ * @param options.raw       items the native facts confirm are raw (mined or harvested, no recipe)
+ * @param options.inventory held counts by item name
+ * @param options.placed    NPC-placed machines the step does not preserve, counted by entity name
+ * @param options.unresolved entity names with a recorded unpreserved placement the facts neither confirm nor refute (a failed lookup, or
  *                  a placement past the examination cap); a pair that needs such a machine is unknown, never infeasible
- * @param protect   the step checkpoint's inventory_count requirements ({ item_name, minimum })
+ * @param options.protect   the step checkpoint's inventory_count requirements ({ item_name, minimum })
  */
 export function directFeedBootstrapVerdict({ resource, drills, recipes, raw = [], inventory: heldInventory = {}, placed = {}, unresolved = [], protect = [] }) {
   const unknown = reason => ({ verdict: VERDICT.UNKNOWN, resource, reason, pairs: [] })

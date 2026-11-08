@@ -132,6 +132,7 @@ run_runtime() {
     -e UPDATE_RESTAGE_GOLDEN \
     -v "$host_root/deploy/pterodactyl:/src/deploy/pterodactyl" \
     -v "$host_root/contracts:/src/contracts:ro" \
+    -v "$host_root/tools/external-harness:/src/tools/external-harness:ro" \
     -v "$host_root/packages/autorio/src:/src/packages/autorio/src:ro" \
     -v "$host_root/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
     -v "$host_root/packages/agent/src:/src/packages/agent/src:ro" \

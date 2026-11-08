@@ -1921,6 +1921,7 @@ export function estimateTokens(chars) {
  * @param {object} [args.executorFacts] D2: harness-read facts for a fresh executor ({recipes, counts, machine, residual, historical_entities, fluid_source_hints}); each record is labelled fresh, stale or historical
  * @param {object} [args.topology] bounded native topology observations for either role; never execution authority
  * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
+ * @param {object} [args.factoryAssignments] canonical factory assignments for the current step
  * @param {object} [args.harnessDefaults] the executor's own standing defaults ({burner_fuel}), shown in its step block
  */
 export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, topology, harnessDefaults, factoryAssignments, previousContextChars, now, sequence, limits: limitOverrides } = {}) {

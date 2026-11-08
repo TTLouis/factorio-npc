@@ -12,7 +12,8 @@ import { getActivePlan, PLANNING_EVENT } from './planning-state.mjs'
 import { configuration, Session, recoverInterruptedAgentPlan } from './supervisor.mjs'
 import { recoverySession, settle, fireResumeTimer } from './recovery-loop-fixtures.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
-import { answersStepContract, FakeFactorio, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { answersStepContract, assignScriptedFactoryPlacement, FakeFactorio, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { registerFactoryCell } from './factory-registry.mjs'
 
 const recorded = JSON.parse(readFileSync(new URL('./fixtures/run-av-contract-drift.json', import.meta.url)))
 const correctedReply = JSON.parse(recorded.exact_assistant_replies.tap_63.content)
@@ -34,15 +35,43 @@ function world({ required = false, progressAudit = false, onRead, onTrace, first
   const initialDescription = bootstrapFuel ? 'Fuel the existing iron drill with one coal while preserving its cell.' : description
   if (bootstrapFuel) firstIntent = normalizeObligations({ outcome: { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: 'supply_entity' }] }, preserve: [21, 22] })
   const memory = new CanonicalTaskBoardMemory()
+  if (legacy) {
+    // Inject the retired one-review policy solely to exercise the existing C7
+    // supervisor recovery path. The default harness uses durable goal effort.
+    const claimReview = memory.claimReviewContinuation.bind(memory)
+    const legacyReviewedSteps = new Set()
+    memory.claimReviewContinuation = (key, stepId, options) => {
+      if (legacyReviewedSteps.has(stepId)) return false
+      legacyReviewedSteps.add(stepId)
+      return claimReview(key, stepId, options)
+    }
+  }
   // Scripted native preflight: a coordinate place_entity reports its planned footprint centre, as the mod does (the fixture's
   // coordinates are already on the grid, so the snapped centre is the requested one).
   const preflight = text => {
     const x = Number(/\['x'\]=(-?[\d.]+)/.exec(text)?.[1]); const y = Number(/\['y'\]=(-?[\d.]+)/.exec(text)?.[1])
     const name = /\['entity_name'\]='([^']+)'/.exec(text)?.[1]
-    return /["']place_entity["']/.test(text) && name && Number.isFinite(x) && Number.isFinite(y) ? { ok: true, planned_footprint: { entity_name: name, position: { x, y }, direction: 0 } } : { ok: true }
+    return /["']place_entity["']/.test(text) && name && Number.isFinite(x) && Number.isFinite(y) ? { ok: true, planned_footprint: { entity_name: name, position: { x, y }, direction: 0, tile_box: { left_top: { x: x - 1, y: y - 1 }, right_bottom: { x: x + 1, y: y + 1 } }, world_box: { left_top: { x: x - 0.7, y: y - 0.7 }, right_bottom: { x: x + 0.7, y: y + 0.7 } } } } : { ok: true }
   }
   const game = new FakeFactorio({ inventory: { 'stone-furnace': 1, 'copper-plate': 10, 'iron-plate': 58, ...(bootstrapFuel ? { coal: 1 } : {}) }, preflight })
   game.status.connected_players = 0
+  // New synthetic assignment/native facts supplement the recorded AV payload;
+  // they are not claimed as recovered historical evidence.
+  const fuel = { burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['synthetic-fuel'], truncated: false },
+    fuel_item_facts: { state: 'known', coverage: 'complete', truncated: false, items: [{ name: 'coal', category: 'synthetic-fuel', fuel_value: 1 }] } }
+  if (bootstrapFuel) {
+    memory.initializeFactoryRegistry(game.factoryWorldId)
+    const locator = { ...geometry(21).entity, surface_index: 1, force_index: 1 }; delete locator.type; delete locator.direction
+    const origin = { source: 'placement_receipt', goal_id: 'synthetic-prior-goal', plan_id: 'synthetic-prior-plan', plan_version: 1,
+      semantic_step_id: 'synthetic-prior-step', request_id: 'synthetic-prior-request', actor_id: 18, actor_epoch: 3, tick: 1 }
+    const registry = registerFactoryCell(memory.getFactoryRegistry(), { surface_index: 1, force_index: 1, origin,
+      assignment: { products: ['iron-ore'], purpose: 'Synthetic existing iron drill', method: 'Native mining' },
+      members: [{ ...locator, provenance: { ...origin, receipt_id: 'synthetic-prior-drill-placement' } }],
+      ports: [{ port_id: 'out', direction: 'output', kind: 'item', resource: 'iron-ore' }] })
+    memory.restore({ ...memory.snapshot(), factory_registry: registry })
+    game.factoryMembers.set(21, { locator, state: 'observed', type: 'mining-drill', ...fuel,
+      source_resources: { state: 'known', truncated: false, resources: [{ name: 'iron-ore', products_truncated: false, products: [{ type: 'item', name: 'iron-ore' }] }] } })
+  }
   const native = game.command.bind(game)
   const rows = []
   const calls = []
@@ -115,6 +144,8 @@ function world({ required = false, progressAudit = false, onRead, onTrace, first
         operations: bootstrapFuel ? [{ name: 'supply_entity', args: { unit_number: 21, items: [{ item_name: 'coal', count: 1 }] } }]
           : [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 46, y: 12 } }] })
       agent.recordLiveEntityObservation(geometry(23).entity, undefined, 'fixture_fresh_native_read')
+      assignScriptedFactoryPlacement(agent, game, KEY, 23, { products: ['copper-plate'], native: { type: 'furnace', ...fuel,
+        recipe: { state: 'known', truncated: false, name: 'synthetic-copper', ingredients: [{ type: 'item', name: 'copper-ore' }], products: [{ type: 'item', name: 'copper-plate' }] } } })
       return planReply({ stepId: held.steps[held.active_step_index].step_id,
         operations: [{ name: 'supply_entity', args: { unit_number: 23, items: [{ item_name: 'copper-ore', count: 5 }, { item_name: 'coal', count: 1 }] } }] })
     }) })
@@ -313,7 +344,7 @@ for (const unsupported of ['transport-belt', 'underground-belt', 'splitter', 'el
   })
 }
 
-test('exact legacy AV checkpoint reproduces native-success/count-failure and both bounded supervisor resumes', async t => {
+test('exact legacy AV checkpoint with injected legacy review cap reproduces native-success/count-failure and bounded resumes', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   // Fixture starts at the already-bound checkpoint, omitting the earlier
   // bootstrap/native history. Exact taps 62/63 and the final original plan are
@@ -671,7 +702,7 @@ function losePreservationVisibility(w, { persistently = false } = {}) {
     }
   }
   w.game.command = async text => {
-    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 18, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
+    if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ mode: 'npc', actor: { actor_id: 18, kind: 'standalone_character', valid: true, position: { x: 100, y: 20 } }, surface_index: 1, force_index: 1 })
     if (invisible && text.includes('entity_geometry')) return JSON.stringify({ found: false, code: 'entity_not_visible', unit_number: 21 })
     return native(text)
   }

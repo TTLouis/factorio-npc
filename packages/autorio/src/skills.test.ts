@@ -779,7 +779,7 @@ describe('player edits from the skills window', () => {
 
   it('shows every part of a skill the model can read, in order', () => {
     const rows = skill_detail_rows(create_skill_candidate(candidate()))
-    expect(rows.map(([key]) => key)).toEqual(['ID', 'KIND', 'SOURCE', 'SUMMARY', 'INPUTS', 'OUTPUTS', 'NEEDS', 'MACHINES', 'LINKS', 'RULES', 'PARAMS', 'CHECKED', 'FAILS', 'CONFIDENCE', 'EXAMPLES'])
+    expect(rows.map(([key]) => key)).toEqual(['ID', 'TYPE', 'LEVEL', 'KIND', 'SOURCE', 'SUMMARY', 'INPUTS', 'OUTPUTS', 'NEEDS', 'MACHINES', 'LINKS', 'RULES', 'PARAMS', 'CHECKED', 'FAILS', 'CONFIDENCE', 'EXAMPLES'])
     expect(rows.find(([key]) => key === 'LINKS')?.[1]).toContain('direct_item_output gear-assembler → belt-assembler')
   })
 })

@@ -158,9 +158,20 @@ test('bounded retained assignments reach both roles without authorizing an opera
 for (const variant of ['unknown_fuel', 'unknown_recipe', 'mixed_batch', 'unselected_material', 'controller_owned']) test(`unproven or internal ${variant} cannot receive model-conflict review authority`, async () => {
   let checked = false
   await withFixture(async w => {
-    await assert.rejects(w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' }), /fixture_checked_guard/)
+    // The callback checks the native guard, then deliberately terminates this
+    // fixture's provider invocation. Its sentinel is a provider failure, not
+    // the native refusal already asserted below, and must not grant a review.
+    const result = await w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' })
+    assert.equal(result.goalStatus, 'paused')
+    const pause = w.memory.pauseRecord(ASSIGNED_KEY)
+    assert.equal(pause.pause_class, 'guard')
+    assert.equal(pause.pause_reason, 'provider_request_failed: fixture_checked_guard')
     assert.equal(checked, true); assert.equal(w.game.mutations.length, 0)
     assert.equal(w.memory.snapshot().factory_use_recovery.records.length, 0)
+    assert.equal(w.plannerCalls(), 1)
+    assert.equal(w.events.filter(row => row.event === 'factory_cell.assigned_review_started').length, 0)
+    assert.equal(w.events.filter(row => row.event === 'planner.review_round').length, 0)
+    assert.equal(w.events.filter(row => row.event === 'plan.replacement_committed').length, 0)
   }, { onProvider: async (context, w) => {
     if (context.role !== 'executor' || checked) return
     const operations = [{ name: 'supply_entity', args: { unit_number: 36, items: [{ item_name: 'iron-ore', count: 1 }] } }]
@@ -206,22 +217,35 @@ test('a previously consumed same-step review survives restore without imposing a
   } })
 })
 
-test('an advisory provider failure stays a provider failure with no retry, mutation or replacement', async () => {
+for (const synchronous of [false, true]) test(`an advisory provider failure stays a provider failure without retry or replacement (synchronous frozen error=${synchronous})`, async () => {
+  const failureMessage = synchronous ? 'fixture_request_rejected' : 'fixture_planner_provider_failure'
   let reviewCalls = 0
   await withFixture(async w => {
+    if (synchronous) {
+      const provider = w.agent.provider
+      w.agent.provider = (messages, context) => {
+        if (context.role === 'planner' && w.agent.reviewContinuation) {
+          reviewCalls++
+          throw Object.freeze(new Error(failureMessage))
+        }
+        return provider(messages, context)
+      }
+    }
     try { await w.agent.request(ASSIGNED_OBJECTIVE, { sender: 'owner' }) } catch (error) {
-      assert.match(error.message, /fixture_planner_provider_failure/)
+      assert.equal(error.message, failureMessage)
       assert.notEqual(error.pause_class, 'guard'); assert.notEqual(error.code, 'factory_cell_input_unproven')
     }
     assert.equal(reviewCalls, 1); assert.equal(w.game.mutations.length, 0)
-    const failure = w.events.find(row => row.event === 'provider.error' && row.data.message === 'fixture_planner_provider_failure')
+    const failure = w.events.find(row => row.event === 'provider.error' && row.data.message === failureMessage)
     assert.equal(failure?.data.role, 'planner')
     assert.equal(w.events.findLast(row => row.event === 'request.completed')?.data.outcome, 'paused_provider_failure')
     assert.equal(w.events.findLast(row => row.event === 'goal.paused')?.data.provider_failure, true)
+    assert.equal(w.events.findLast(row => row.event === 'goal.paused')?.data.cause, 'provider_request_failed')
+    assert.equal(w.events.findLast(row => row.event === 'goal.paused')?.data.pause_class, 'guard')
     assert.equal(Object.entries(w.memory.planningState(ASSIGNED_KEY).goal.effort.blockers).filter(([key]) => key.startsWith('assignment:')).reduce((n, [, count]) => n + count, 0), 1)
     assert.equal(w.events.filter(row => row.event === 'plan.replacement_committed').length, 0)
   }, { onProvider: (context, w) => {
-    if (context.role === 'planner' && w.agent.reviewContinuation) { reviewCalls++; throw new Error('fixture_planner_provider_failure') }
+    if (!synchronous && context.role === 'planner' && w.agent.reviewContinuation) { reviewCalls++; throw new Error(failureMessage) }
   } })
 })
 

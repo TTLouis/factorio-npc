@@ -12,15 +12,19 @@ import { fluidPreservationMutationUnsafe } from './contract-obligation-runtime.m
 
 const aw = JSON.parse(fs.readFileSync(new URL('./fixtures/aw-fluid-preservation-baseline.json', import.meta.url)))
 const nativeEmpty = JSON.parse(fs.readFileSync(new URL('./fixtures/native-fluid-empty-clears.json', import.meta.url)))
-test('exact real2.0.77 freeze reply canonicalizes empty clears without changing original native evidence', () => {
+test('exact real2.0.77 empty clears shape canonicalizes in a current proof without changing original native evidence', () => {
   assert.equal(createHash('sha256').update(nativeEmpty.original_reply).digest('hex'), nativeEmpty.original_reply_sha256)
   assert.deepEqual(JSON.parse(nativeEmpty.original_reply).preservation_join, nativeEmpty.envelope.candidate)
   assert.deepEqual(nativeEmpty.envelope.candidate.clears, {})
   const before = JSON.stringify(nativeEmpty)
-  const normalized = normalizeFluidAdmission(nativeEmpty.envelope, nativeEmpty.plan, nativeEmpty.step)
+  // Historical geometry is v3 and must remain refused by today's v4 guard.
+  assert.equal(normalizeFluidAdmission(nativeEmpty.envelope, nativeEmpty.plan, nativeEmpty.step), undefined)
+  const current = fluidFixture()
+  current.admission.candidate.clears = structuredClone(nativeEmpty.envelope.candidate.clears)
+  const normalized = normalizeFluidAdmission(current.admission, current.plan, current.step)
   assert.ok(normalized)
   assert.deepEqual(normalized.candidate.clears, [])
-  assert.deepEqual(normalizeFluidAdmission(normalized, nativeEmpty.plan, nativeEmpty.step), normalized, 'canonical add/restore/cert input is stable')
+  assert.deepEqual(normalizeFluidAdmission(normalized, current.plan, current.step), normalized, 'canonical add/restore/cert input is stable')
   assert.equal(JSON.stringify(nativeEmpty), before, 'the original native reply and old committed proof stay immutable')
 })
 for (const [label, value] of [['missing', undefined], ['null', null], ['number', 0], ['boolean', false], ['string', ''],
@@ -30,8 +34,9 @@ for (const [label, value] of [['missing', undefined], ['null', null], ['number',
   ['array-prototype', Object.setPrototypeOf([], null)]]) {
   test(`allowed-empty native preservation sequences refuse ${label} rather than grant no-clearing/idle authority`, () => {
     assert.equal(isNativeEmptyPreservationSequence(value), false)
-    const raw = structuredClone(nativeEmpty.envelope); raw.candidate.clears = value
-    assert.equal(normalizeFluidAdmission(raw, nativeEmpty.plan, nativeEmpty.step), undefined)
+    const current = fluidFixture()
+    const raw = current.admission; raw.candidate.clears = value
+    assert.equal(normalizeFluidAdmission(raw, current.plan, current.step), undefined)
   })
 }
 for (const value of [[], {}]) test(`allowed-empty native preservation shape ${JSON.stringify(value)} is known empty`, () => {
@@ -39,8 +44,9 @@ for (const value of [[], {}]) test(`allowed-empty native preservation shape ${JS
 })
 for (const field of ['candidate_ports', 'candidate_storages', 'protected_geometry']) for (const value of [[], {}, undefined]) {
   test(`required nonempty native ${field} refuses ${JSON.stringify(value)}`, () => {
-    const raw = structuredClone(nativeEmpty.envelope); raw.candidate[field] = value
-    assert.equal(normalizeFluidAdmission(raw, nativeEmpty.plan, nativeEmpty.step), undefined)
+    const current = fluidFixture()
+    const raw = current.admission; raw.candidate[field] = value
+    assert.equal(normalizeFluidAdmission(raw, current.plan, current.step), undefined)
   })
 }
 for (const lane of aw.lanes) test(`AW ${lane.tap}: exact old nonfluid guard reproduces original refusal, future v2 captures pump without waiving it`, async () => {

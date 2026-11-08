@@ -41,7 +41,7 @@ export function createOperatorCompletion({ base, key, model, fetchImpl = fetch, 
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       })
     }
-    catch (cause) {
+    catch {
       throw new OperatorProviderError(timeout.aborted ? 'provider_timeout' : signal?.aborted ? 'aborted' : 'provider_unreachable')
     }
     if (!response.ok) throw new OperatorProviderError(response.status === 429 ? 'provider_rate_limited' : 'provider_http_error', response.status)

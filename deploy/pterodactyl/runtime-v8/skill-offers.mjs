@@ -24,7 +24,7 @@
 // belongs on the mod side next to the keyword score (see skills.ts), always
 // falling back to keywords. Nothing here depends on LM Studio.
 
-import { luaString, toolCommand } from '../staging/structured-policy.mjs'
+import { luaString } from '../staging/structured-policy.mjs'
 import { getActivePlan, nearestShelfRefinementTarget, PLAN_STATUS } from './planning-state.mjs'
 import { PLANNER_ROLE } from './agent-roles.mjs'
 import { createHash } from 'node:crypto'

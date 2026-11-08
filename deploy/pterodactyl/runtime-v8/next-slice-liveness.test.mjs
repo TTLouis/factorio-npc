@@ -78,7 +78,7 @@ for (const lane of fixture.lanes) {
     const w = awWorld(lane, () => ({ content: lane.wire.content }))
     const before = structuredClone(w.memory.planningState(w.key).plans)
     startAuthoring(w)
-    await assert.rejects(w.agent.runGuarded(), /provider_jev_recovery_route_failed: preservation_fluid_geometry_incomplete/)
+    await assert.rejects(w.agent.runGuarded(), /preservation_fluid_geometry_incomplete/)
     assert.ok(w.geometryReads() > 0)
     assert.equal(w.memory.pauseRecord(w.key).paused, true)
     assert.equal(w.memory.pauseRecord(w.key).pause_class, 'guard')

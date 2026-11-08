@@ -36,7 +36,7 @@ function fixture() {
     e.get_fluid_box_pipe_connections = () => {
       const delta = e.direction === 0 ? { x: 1, y: 0 } : e.direction === 4 ? { x: 0, y: 1 }
         : e.direction === 8 ? { x: -1, y: 0 } : { x: 0, y: -1 }
-      const position = { ...e.position }, target_position = { x: position.x + delta.x, y: position.y + delta.y }
+      const position = { ...e.position }; const target_position = { x: position.x + delta.x, y: position.y + delta.y }
       const target = entities.find(other => other !== e && other.valid && other.position.x === target_position.x && other.position.y === target_position.y)
       return [{ connection_type: 'normal', flow_direction: 'input-output', position, target_position,
         ...(target ? { target, target_fluidbox_index: 1 } : {}) }]

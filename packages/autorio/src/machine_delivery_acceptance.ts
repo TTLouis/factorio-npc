@@ -3,6 +3,7 @@ import type { ControlledActor } from './actors/types'
 import type { OperationAdmission } from './operation_admission'
 import type { TaskBatchIdentity } from './task_manager'
 import { product_probability } from './production_rates'
+import { find_world_entities } from './npc_vision'
 
 // A finite batch, not sustained automation. No recipe, yield or layout is stored.
 // Old stock is a global contamination budget: even if every old item is moved
@@ -63,7 +64,7 @@ function inventory_count(entity: LuaEntity, item: string) {
 function stock_census(item: string) {
   let count = 0; let scanned = 0
   for (const [, surface] of game.surfaces) {
-    const entities = surface.find_entities_filtered({ limit: MAX_ENTITIES - scanned + 1 })
+    const entities = find_world_entities(surface, { limit: MAX_ENTITIES - scanned + 1 })
     scanned += entities.length
     if (scanned > MAX_ENTITIES) return undefined
     for (const entity of entities) if (entity.valid) count += inventory_count(entity, item)

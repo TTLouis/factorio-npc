@@ -42,9 +42,9 @@ test('Run T capture proves an open research control consumed the closed allowanc
 // proven. World effects arise only from admitted operations and smelting time.
 // The real-engine companion verifies native recursive crafting and research.
 class LabGame extends FurnaceFactorio {
-  constructor() {
+  constructor({ dedicatedCopper = false } = {}) {
     super({ connectedPlayers: 0, inventory: { 'iron-plate': 62, 'copper-plate': 10, 'iron-gear-wheel': 10 },
-      furnace: { unit_number: 3, output: { 'iron-plate': 52 }, source: { 'copper-ore': 5 }, fuel: { coal: 7 } } })
+      furnace: { unit_number: 3, output: dedicatedCopper ? { 'copper-plate': 5 } : { 'iron-plate': 52 }, source: { 'copper-ore': 5 }, fuel: { coal: 7 } } })
     this.knownTechnologies.add('automation-science-pack')
     this.researched.add('electronics'); this.researched.add('steam-power')
     this.researchReads = 0
@@ -89,9 +89,9 @@ class LabGame extends FurnaceFactorio {
   }
 }
 
-function fullFixture(t) {
+function fullFixture(t, options) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const game = new LabGame(); const model = new ScriptedModel(); const wire = []
+  const game = new LabGame(options); const model = new ScriptedModel(); const wire = []
   const bridge = Object.create(Session.prototype)
   bridge.config = configuration({}, { SGLUNA_ACTOR_MODE: 'npc', OPENAI_API_KEY: 'fixture-only', OPENAI_API_BASEURL: 'https://proxy.example.test/v1', AI_API_METHOD: 'local', OPENAI_MODEL: 'gpt-6.1-sol,gpt-6-luna' })
   bridge.provider = (config, messages, context) => providerRequest(config, messages, { ...context, promptTraceFile: null,
@@ -107,9 +107,27 @@ function fullFixture(t) {
   return { game, model, wire, world, session, logs, intent, read }
 }
 
-test('Run T full loop: open redundant research read stays cached; model clears iron, collects five smelted copper and crafts a lab on the same step', async t => {
+test('original Run T mixed-output iron withdrawal cannot use the assigned copper furnace', async t => {
   const ctx = fullFixture(t); const { game, model, world, session } = ctx
-  assert.equal(game.smelt(5), 0, 'mixed iron output really blocks the copper input')
+  assert.equal(game.smelt(5), 0, 'retain the original blocked mixed-output simulator state')
+  const before = structuredClone({ inventory: game.inventory, furnace: game.furnace })
+  model.push('planner', 'original:lab-prerequisite', planReply({ plan: [STEP], currentStep: 0, operations: [], checkpoint: CHECKPOINT,
+    stepCompletions: [{ kind: 'deterministic', checkpoint: CHECKPOINT }], goal: { scope: 'finite', summary: STEP, doneWhen: CHECKPOINT.requirements } }))
+    .push('executor', 'original:furnace-read', tool('getEntityStatus', { name: 'stone-furnace', radius: 20 }))
+    .push('executor', 'original:clear-iron-output', () => submit(ctx.intent([{ name: 'move_items_exact', args: {
+      item_name: 'iron-plate', unit_number: 3, max_count: 52, to_entity: false,
+    } }])))
+  session.queuePlayerRequest('TTLouis', STEP)
+  await settle(session)
+  assert.equal(world.named('request.failed').at(-1).failure_code, 'factory_cell_withdrawal_not_output')
+  assert.equal(game.sent.length, 0)
+  assert.deepEqual({ inventory: game.inventory, furnace: game.furnace }, before)
+})
+
+test('synthetic dedicated-copper Run T counterpart: cached research, two real copper collections and lab craft on the same step', async t => {
+  // This compatible single-job fixture tests normal observation and receipts;
+  // the historical mixed-output withdrawal is separately refused below.
+  const ctx = fullFixture(t, { dedicatedCopper: true }); const { game, model, world, session } = ctx
   let before, resumeLedger, closedLedger
   model.push('planner', 'sol:lab-prerequisite', planReply({ plan: [STEP], currentStep: 0, operations: [], checkpoint: CHECKPOINT,
     stepCompletions: [{ kind: 'deterministic', checkpoint: CHECKPOINT }],
@@ -134,12 +152,12 @@ test('Run T full loop: open redundant research read stays cached; model clears i
       assert.deepEqual([...(world.memory.targetedObservationLedger ?? new Map())], closedLedger)
       return tool('getEntityStatus', { name: 'stone-furnace', radius: 20 })
     })
-    .push('executor', 'luna:clear-iron-output', messages => {
+    .push('executor', 'synthetic:collect-existing-copper-output', messages => {
       const fact = JSON.parse(messages.findLast(row => row.role === 'tool').content).entity
       assert.equal(fact.unit_number, 3)
-      const output = fact.inventories.find(row => row.index === 3).items.find(row => row.name === 'iron-plate')
-      assert.equal(output.count, 52)
-      assert.equal(game.furnace.output['iron-plate'], 52)
+      const output = fact.inventories.find(row => row.index === 3).items.find(row => row.name === 'copper-plate')
+      assert.equal(output.count, 5)
+      assert.equal(game.furnace.output['copper-plate'], 5)
       return submit(ctx.intent([{ name: 'move_items_exact', args: { item_name: output.name, unit_number: fact.unit_number, max_count: output.count, to_entity: false } }]))
     })
   assert.equal(session.queuePlayerRequest('TTLouis', STEP), true)
@@ -155,18 +173,18 @@ test('Run T full loop: open redundant research read stays cached; model clears i
     })
   await completeAndReport(ctx, { smelt: 5 })
   assert.equal(game.produced['copper-plate'], 5)
-  assert.equal(game.inventory['copper-plate'], 10, 'collection is still queued')
+  assert.equal(game.inventory['copper-plate'], 15, 'second collection is still queued')
   assert.ok(game.pendingBatch, JSON.stringify({ calls: model.labels, violations: model.violations, logs: ctx.logs, agentLogs: world.agentLogs, trace: world.trace.slice(-18) }))
   model.push('executor', 'luna:craft-lab', () => submit(ctx.intent([{ name: 'craft_item', args: { item_name: 'lab', count: 1 } }])))
   await completeAndReport(ctx)
-  assert.equal(game.inventory['copper-plate'], 15)
+  assert.equal(game.inventory['copper-plate'], 20)
   const after = getActivePlan(world.memory.planningState(KEY))
   assert.equal(after.plan_id, before.plan_id); assert.equal(after.plan_version, before.plan_version)
   assert.equal(after.steps[0].step_id, before.steps[0].step_id)
   assert.deepEqual(after.steps[0].completion_contract, before.steps[0].completion_contract)
   assert.deepEqual(world.memory.planningState(KEY).run.auto_resume, resumeLedger, 'no seventh resume or allowance reset')
   await completeAndReport(ctx)
-  assert.equal(game.inventory.lab, 1); assert.equal(game.inventory['copper-plate'], undefined)
+  assert.equal(game.inventory.lab, 1); assert.equal(game.inventory['copper-plate'], 5)
   assert.equal(game.researched.has('automation-science-pack'), true)
   assert.equal(world.named('goal.evaluated').at(-1).satisfied, true)
   assert.deepEqual(world.named('observation.targeted_granted'), [])
@@ -244,13 +262,15 @@ for (const [toolName, args] of [
 
 test('open typed schema advertises ordinary observations but never gameplay actions', () => {
   const schema = executorProviderToolDefinitions.find(row => row.function.name === 'submitPlan').function.parameters.properties.observationRequest
-  assert.deepEqual(schema.properties.tool.enum, toolDefinitions.map(row => row.function.name))
+  assert.deepEqual(schema.properties.tool.enum, toolDefinitions.map(row => row.function.name).filter(name => !['readNotebook', 'updateNotebook', 'bindMachineDelivery'].includes(name)))
   assert.equal(schema.properties.tool.enum.includes('place_candidate'), false)
 })
 
 for (const [toolName, args] of [
   ['place_candidate', { candidate_set_id: 's', candidate_id: 'c' }],
   ['submitPlan', {}], ['unknownRead', {}],
+  ['bindMachineDelivery', { producer_unit_number: 1, receiver_unit_number: 2 }],
+  ['readNotebook', { scope: 'goal' }], ['updateNotebook', { scope: 'goal', expectedRevision: 0, text: 'External memory' }],
   ['getPlacementCandidates', { entity_name: 'burner-mining-drill', radius: 25 }],
   ['getNearbyEntities', { radius: 20, execute: 'unbounded' }],
 ]) test(`open typed request rejects non-observations or invalid arguments: ${toolName} ${JSON.stringify(args)}`, async () => {

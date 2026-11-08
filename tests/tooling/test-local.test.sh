@@ -48,10 +48,12 @@ case "$1" in
     fi
     if [[ "$lane" == runtime ]]; then
       found_contracts=false
+      found_external_harness=false
       for arg in "$@"; do
         [[ "$arg" != *'/repo with spaces/contracts:/src/contracts:ro' ]] || found_contracts=true
+        [[ "$arg" != *'/repo with spaces/tools/external-harness:/src/tools/external-harness:ro' ]] || found_external_harness=true
       done
-      [[ "$found_contracts" == true ]]
+      [[ "$found_contracts" == true && "$found_external_harness" == true ]]
     fi
     prev=
     for arg in "$@"; do

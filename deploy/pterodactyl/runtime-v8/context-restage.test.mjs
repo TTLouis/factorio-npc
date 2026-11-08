@@ -11,13 +11,41 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { sanitizeDurableModelText } from './durable-text.mjs'
 import { buildHandoffPacket, sanitizeHandoffNote } from './handoff-packet.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { COMPACT_CONTINUATION_PROMPT, compactCompletionTools, providerStylePrompt } from './provider-base.mjs'
 import { getActivePlan, getContextRestages, PLAN_STATUS } from './planning-state.mjs'
 import { analyzeBehaviorTrace, DELEGATION_TRACE_ROWS } from './run-check.mjs'
 import { STEAM_SCRIPTED_BLOCKED_ANSWER, steamReplayHarness } from './steam-run-fixtures.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const GOLDEN_FILE = path.join(here, 'fixtures', 'context-restage', 'no-restage-steam-replay.golden.json')
+const GOLDEN_FILE = path.join(here, 'fixtures', 'context-restage', 'no-restage-steam-synthetic-factory-current.golden.json')
+
+// Shared-harness derivative, 2026-11-08. Keep both historical JSON oracles
+// untouched. Relative to the synthetic factory oracle at 50d78ab6 (imported
+// with the shared harness at 87f2b94b), current tool schemas and prompt guidance
+// add world/resource observations, machine-delivery and working-plan controls;
+// canonical local discovery replaces the old native lookup failure. These are
+// the only changed fingerprints: all 190 other trace rows, provider contexts,
+// message counts and event ordering must still match the existing oracle.
+const SHARED_HARNESS_20261108 = {
+  bodies: ['dcb19ede750c85d4', '37999673d0a27ef9', '73510c51a1f07401', '01c5a63841d13c56',
+    '6b110f0b895f5a6a', '3a615ff76f6e719e', '30d58acf9dffe261', '972672cacc8154ab',
+    '0fdb2334ead8f6ea', 'e49d8cd2ad974ad5', '9442d8e787b3c795'],
+  trace: new Map([
+    [4, { event: 'skill.offer_skipped', sha: '17cea4b2804126e8' }],
+    [11, { event: 'provider.request', sha: '1a8ba1afef2da3d3' }],
+    [23, { event: 'provider.request', sha: 'a3f3b39389146e1d' }],
+    [40, { event: 'provider.request', sha: '0ccf8fc84c2ac0b3' }],
+    [54, { event: 'provider.request', sha: 'e9f186d154c2488e' }],
+    [82, { event: 'provider.request', sha: '15de56d764f75f78' }],
+    [92, { event: 'provider.request', sha: '035a8197c9c03ddb' }],
+    [105, { event: 'provider.request', sha: 'd40e0f395de406cd' }],
+    [118, { event: 'provider.request', sha: '8b10c1dfa3bed6b8' }],
+    [175, { event: 'provider.request', sha: 'b83c89b54598fa67' }],
+    [185, { event: 'provider.request', sha: '65518ddd5c7a2ae5' }],
+    [194, { event: 'provider.request', sha: '0bd4911ff14d5dbd' }],
+  ]),
+}
 
 const sha = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex').slice(0, 16)
 
@@ -42,6 +70,8 @@ function normalizeRow(record, ids) {
     .replace(/(?<=_s\d+_)[a-z0-9]{4,10}(?![a-z0-9])/g, id => placeholder(id, 'sid'))
 }
 
+// The historical no-restage-steam-replay.golden.json is retained unchanged.
+// This separately labeled current synthetic factory replay includes native identity and cell events.
 // The whole steam replay (recorded usage, 300-rule system prompt, tool results
 // at their recorded sizes) through the real loop and the real provider stack.
 // Captured: the exact HTTP body of every provider call, the context object the
@@ -50,9 +80,32 @@ async function steamReplayFingerprint() {
   // The golden is the run with no executor (delegation U6 hands every committed slice to one; that
   // run has its own tests in executor-wiring.test.mjs): the seam itself must stay byte-identical.
   const world = steamReplayHarness({ transport: 'http', extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER], agentOptions: { executorHandoff: false } })
+  const nativeOwner = JSON.parse(await world.game.command('remote.call("autorio_actor","status")'))
+  assert.deepEqual([nativeOwner.actor.actor_id, nativeOwner.surface_index, nativeOwner.force_index], [18, 1, 1])
   await world.request()
   await world.closeStep1()
   await world.failSupplyBatch()
+  const firstBody = world.calls[0].body
+  assert.match(firstBody.messages[0].content, /Rule 300:/, 'the complete recorded-size system prefix survives')
+  for (const [index, { body }] of world.calls.entries()) {
+    // The provider compacts the first two completion reads, then returns to
+    // the full prefix as the existing output-budget ladder escalates. This is
+    // transport compaction, not a conversation restage.
+    const prefix = index === 4 || index === 5
+      ? { role: 'system', content: `${COMPACT_CONTINUATION_PROMPT}\n\n${providerStylePrompt('deepseek')}` } : firstBody.messages[0]
+    assert.deepEqual(body.messages[0], prefix, 'each replay round keeps its declared full or compact continuation prefix')
+    const tools = index === 4 || index === 5 ? compactCompletionTools(firstBody.tools) : firstBody.tools
+    assert.deepEqual(body.tools, tools, 'each replay round keeps its declared full or compact tool descriptions and exact argument schemas')
+    assert.equal(body.model, 'deepseek-flash')
+    assert.equal(body.tool_choice, 'auto')
+  }
+  const toolNames = firstBody.tools.map(tool => tool.function.name)
+  for (const name of ['getWorldEntityFacts', 'getResourceAmounts', 'bindMachineDelivery']) assert.ok(toolNames.includes(name))
+  assert.ok(firstBody.tools.find(tool => tool.function.name === 'submitPlan').function.parameters.properties.workingPlanRevision)
+  assert.deepEqual(world.calls.map(call => call.body.max_tokens), [40000, 40000, 40000, 40000, 3000, 3000, 6000, 12000, 16000, 16000, 16000])
+  assert.deepEqual(world.trace.filter(row => row.event === 'skill.offer_skipped').map(row => row.data), [
+    { trigger: 'new_goal', reason: 'no_matching_skill', intent: 'new_goal' },
+  ])
   // Each wake restores its decision scope, including the final wake after the
   // request closes. Cleanup keeps the originating request and explicit reason.
   const requestId = world.trace.find(row => row.event === 'request.received').request_id
@@ -61,18 +114,18 @@ async function steamReplayFingerprint() {
   assert.deepEqual(cleanupRows.map(row => ({ event: row.event, request_id: row.request_id,
     data: row.data, turn: row.turn, seq: row.seq })), [
     { turn: 1, seq: 70 },
-    { turn: 2, seq: 131 },
+    { turn: 2, seq: 168 },
     { turn: undefined, seq: 0 },
   ].map(boundary => ({ event: 'decision.budgets_restored', request_id: requestId,
     data: { request_id: requestId, reason: 'decision_scope_finished' }, ...boundary })))
-  // Fresh topology is a separately labelled volatile contract. This historical fixture has
-  // no actor surface/force scope, so it reports unavailable (or deferred behind its batch), without extra world reads.
+  // Current synthetic actor scope is explicit. The legacy topology response still lacks
+  // scoped native geometry; one bounded read remains unavailable, and pending work defers it.
   const topologyRows = world.trace.filter(row => row.event === 'context.topology_refreshed')
   assert.ok(topologyRows.length > 0)
   for (const row of topologyRows) {
     assert.ok(['unavailable', 'deferred'].includes(row.data.state))
-    assert.equal(row.data.reason, row.data.state === 'deferred' ? 'mutation_pending' : 'actor_scope_unknown')
-    assert.equal(row.data.reads_attempted, 0)
+    assert.equal(row.data.reason, row.data.state === 'deferred' ? 'mutation_pending' : 'malformed_or_unscoped_native_read')
+    assert.equal(row.data.reads_attempted, row.data.state === 'deferred' ? 0 : 1)
     assert.equal(row.data.candidate_solves, 0)
   }
   const requestIds = new Map()
@@ -88,17 +141,20 @@ async function steamReplayFingerprint() {
   }
 }
 
-test('a run that never restages preserves its frozen requests and trace with the explicit volatile topology contract', async () => {
+test('shared-harness synthetic factory replay preserves exact requests and trace without modifying historical goldens', async () => {
   const actual = await steamReplayFingerprint()
-  if (process.env.UPDATE_RESTAGE_GOLDEN === '1') {
-    await fsp.mkdir(path.dirname(GOLDEN_FILE), { recursive: true })
-    await fsp.writeFile(GOLDEN_FILE, `${JSON.stringify(actual, null, 2)}\n`)
-  }
   const golden = JSON.parse(await fsp.readFile(GOLDEN_FILE, 'utf8'))
   assert.equal(actual.calls.length, golden.calls.length)
+  assert.equal(actual.calls.length, SHARED_HARNESS_20261108.bodies.length)
   assert.equal(actual.trace.length, golden.trace.length)
-  golden.calls.forEach((expected, index) => assert.deepEqual(actual.calls[index], expected, `provider call ${index}`))
-  golden.trace.forEach((expected, index) => assert.deepEqual(actual.trace[index], expected, `trace row ${index} (${expected.event})`))
+  golden.calls.forEach((expected, index) => assert.deepEqual(actual.calls[index], {
+    ...expected, body: SHARED_HARNESS_20261108.bodies[index],
+  }, `provider call ${index}`))
+  golden.trace.forEach((expected, index) => {
+    const revised = SHARED_HARNESS_20261108.trace.get(index)
+    if (revised) assert.equal(revised.event, expected.event, 'the derivative cannot replace a different trace event')
+    assert.deepEqual(actual.trace[index], revised ?? expected, `trace row ${index} (${expected.event})`)
+  })
 })
 
 // ---------------------------------------------------------------------------------------

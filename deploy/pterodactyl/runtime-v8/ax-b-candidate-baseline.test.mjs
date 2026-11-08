@@ -7,8 +7,7 @@ import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { batchWatermark, operationSignature } from './operation-reconciliation.mjs'
 import { luaString, renderOperationPreflight } from './structured-policy.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
-import { PreservationProofError, obligationProofOrigin, effectivePreservationProof, preservedProofMatches,
-  normalizeFluidAdmission } from './contract-obligations.mjs'
+import { authoredCompletionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
 
 const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/ax-b-candidate-boundary.json', import.meta.url)))
 test('sealed AX B PRESTOP exact anchor-only query, selected output/output candidate and immutable p9 are preserved', () => {
@@ -54,9 +53,15 @@ test('unchanged2959 actual helper reproduces join-unproven for exact operation, 
       if (text.includes('fluid_preservation_candidate')) { freezeReads++; return JSON.stringify({ ok: false, code: 'preservation_guard_candidate_unavailable' }) }
       return JSON.stringify({ ok: true, operation: 'place_candidate', preservation_clears_count: 0 })
     } } }
+  // The original helper must use its own proof schema: current v4 validators
+  // deliberately reject its frozen v3 proof. Preserve both historical sources.
+  const proofSource = fs.readFileSync(new URL('./fixtures/ax-b-contract-obligations-2959.mjs.txt', import.meta.url), 'utf8')
+  assert.equal(createHash('sha256').update(proofSource).digest('hex'), '2440ab8ea42fa04c07a6ba60691308bea3c58f3e66ab56fa6fc04c89535ee119')
+  const historicalProof = vm.runInNewContext(`${proofSource.replace(/^import .*$/gm, '').replaceAll('export ', '')}; ({ PreservationProofError, obligationProofOrigin, effectivePreservationProof, preservedProofMatches, normalizeFluidAdmission })`, {
+    createHash, structuredClone, authoredCompletionContractSupported, sanitizeStepCompletionContract, operationSignature,
+  })
   const original = vm.runInNewContext(`${fixture.baseline_functions.replaceAll('export ', '')}; prepareFluidPreservationAdmission`, {
-    getActivePlan, PLAN_STATUS, PreservationProofError, obligationProofOrigin, effectivePreservationProof, preservedProofMatches,
-    normalizeFluidAdmission, operationSignature, nativeAdmissionJournal, batchWatermark, luaString, renderOperationPreflight,
+    getActivePlan, PLAN_STATUS, ...historicalProof, operationSignature, nativeAdmissionJournal, batchWatermark, luaString, renderOperationPreflight,
     nativeIdle: async () => true, captureObligationProof: async () => structuredClone(proof),
   })
   await assert.rejects(original(agent, { operations, pending }), error => error.code === 'preservation_candidate_join_unproven')

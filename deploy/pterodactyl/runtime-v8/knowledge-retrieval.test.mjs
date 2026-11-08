@@ -192,7 +192,7 @@ test('complete canonical reference text survives projection; oversized details r
 })
 
 test('request supersession during canonical reference lookup publishes no stale answer or durable context', async () => {
-  const { agent, game } = fixture()
+  const { agent } = fixture()
   const original = agent.traceEvent.bind(agent)
   agent.traceEvent = async (name, data) => { await original(name,data); if(name==='tool.call')agent.generation++ }
   await assert.rejects(agent.handleToolBatch(reply(call('getKnowledgeDetails', { id: reference.id }))), /superseded|cancel/i)

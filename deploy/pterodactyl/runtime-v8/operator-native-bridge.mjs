@@ -34,16 +34,6 @@ export const OBSERVATION_NAMES = Object.freeze([
   'getTaskStatus', 'getResearchRequest', 'findNearestEnemy', 'getDefenseStatus', 'getCombatStatus', 'getPumpSitePreparation', 'getWorldEntityFacts',
 ])
 export const observationDefinitions = toolDefinitions.filter(tool => OBSERVATION_NAMES.includes(tool.function.name))
-export function capabilities() {
-  return { operations: operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)),
-    goal_metadata_tools: [{ name: machineDeliveryToolDefinition.function.name, description: machineDeliveryToolDefinition.function.description,
-      inputSchema: machineDeliveryToolDefinition.function.parameters, world_mutation: false, operation_authority: false }],
-    observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
-      name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
-    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false, placement_domain: 'native-nonfluid-or-proven-fluid-candidate', recipe_domain: 'native-compatible-empty-isolated-assembling-machine' },
-    operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES } }
-}
-
 // Semantics the shared catalog leaves implicit and operators misread in the
 // 2026-11-01 trial. Facts about this bridge, not strategy advice.
 export const OPERATION_NOTES = Object.freeze({
@@ -68,6 +58,16 @@ export const OBSERVATION_NOTES = Object.freeze({
   getNearbyEntities: 'radius is centred on the actor\'s current position (actor_position in the result), not where an earlier call ran. Operations that walk the actor move that centre.',
   getEntityStatus: 'Reads only chunks the force sees live now (Factorio force chunk visibility: near the actor, or radar coverage). entity_not_visible means there is no live vision there, not that the entity is gone. status and status_name are the native defines.entity_status values.',
 })
+export function capabilities() {
+  return { operations: operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)),
+    goal_metadata_tools: [{ name: machineDeliveryToolDefinition.function.name, description: machineDeliveryToolDefinition.function.description,
+      inputSchema: machineDeliveryToolDefinition.function.parameters, world_mutation: false, operation_authority: false }],
+    observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
+      name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
+    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false, placement_domain: 'native-nonfluid-or-proven-fluid-candidate', recipe_domain: 'native-compatible-empty-isolated-assembling-machine' },
+    operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES } }
+}
+
 const MAX_REPLY_BYTES = 512 * 1024
 const PREFIX = '/silent-command '
 const JSON_PREFIX = `${PREFIX}rcon.print(helpers.table_to_json(`
@@ -104,6 +104,15 @@ function identity(pending) {
     && typeof pending.attempt_id === 'string' && /^[a-z0-9_/-]{1,120}$/i.test(pending.attempt_id)
     && /^[a-f0-9]{64}$/.test(pending.signature), 'invalid_pending_identity')
 }
+// Any non-resource entity in the footprint blocks external placement, including
+// items on the ground and characters that can_place_entity (and therefore the
+// native candidate search) accepts. One Lua definition serves placement preflight
+// and candidate annotation so they cannot disagree. It names up to eight blockers
+// so the operator can tell an item on the ground from a real structure; clearing
+// is still never attempted.
+const FOOTPRINT_RULE_LUA = 'local function external_footprint(surface,box) local found=surface.find_entities_filtered({area=box,limit=129}); if #found>=129 then return "placement_footprint_dense",{} end; local blockers={}; for _,e in pairs(found) do if e.valid and e.type~="resource" and #blockers<8 then blockers[#blockers+1]={name=e.name,type=e.type,position=e.position,unit_number=e.unit_number,item=e.type=="item-entity" and e.stack and e.stack.valid_for_read and e.stack.name or nil} end end; if #blockers>0 then return "placement_footprint_occupied",blockers end; return nil,blockers end;'
+const FOOTPRINT_CHECK_LUA = 'local code,blockers=external_footprint(surface,f.world_box); if code=="placement_footprint_dense" then return {ok=false,code=code} end; if code then return {ok=false,code=code,blockers=blockers,planned_footprint=f} end;'
+
 function preflightExpression(operation) {
   const command = renderOperationPreflight(operation)
   if (!command) return '{ok=true,validation="not_required"}'
@@ -121,14 +130,6 @@ function preflightExpression(operation) {
   return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local w=p.preservation_nonfluid_output; local f=p.planned_footprint; if not w or w.fluid_port_count~=0 or w.entity_name~=${luaString(name)} or not f or not f.world_box then return {ok=false,code="nonfluid_footprint_unproven"} end; if f.position.x~=${x} or f.position.y~=${y} then return {ok=false,code="exact_grid_required",planned_footprint=f} end; local surface=game.surfaces[w.surface_index]; local force=game.forces[w.force_index]; if not surface or not force or not surface.can_place_entity({name=${luaString(name)},position=f.position,direction=${direction},force=force,build_check_type=defines.build_check_type.manual}) then return {ok=false,code="placement_not_clear"} end; ${FOOTPRINT_CHECK_LUA} return p end)()`
 }
 
-// Any non-resource entity in the footprint blocks external placement, including
-// items on the ground and characters that can_place_entity (and therefore the
-// native candidate search) accepts. One Lua definition serves placement preflight
-// and candidate annotation so they cannot disagree. It names up to eight blockers
-// so the operator can tell an item on the ground from a real structure; clearing
-// is still never attempted.
-const FOOTPRINT_RULE_LUA = 'local function external_footprint(surface,box) local found=surface.find_entities_filtered({area=box,limit=129}); if #found>=129 then return "placement_footprint_dense",{} end; local blockers={}; for _,e in pairs(found) do if e.valid and e.type~="resource" and #blockers<8 then blockers[#blockers+1]={name=e.name,type=e.type,position=e.position,unit_number=e.unit_number,item=e.type=="item-entity" and e.stack and e.stack.valid_for_read and e.stack.name or nil} end end; if #blockers>0 then return "placement_footprint_occupied",blockers end; return nil,blockers end;'
-const FOOTPRINT_CHECK_LUA = 'local code,blockers=external_footprint(surface,f.world_box); if code=="placement_footprint_dense" then return {ok=false,code=code} end; if code then return {ok=false,code=code,blockers=blockers,planned_footprint=f} end;'
 const ANNOTATED_CANDIDATES = 8 // getPlacementCandidates limit maximum
 
 const PREFLIGHT_HINTS = Object.freeze({
@@ -329,7 +330,7 @@ export class NativeBridge {
     let complete = false
     const budget = Math.min(180000, Math.max(15000, ((args.warmup_ticks ?? 60) + (args.window_ticks ?? 300)) * 50 + 10000))
     const deadline = Date.now() + budget
-    let lastTick = start.started_tick, advancedAt = Date.now()
+    let lastTick = start.started_tick; let advancedAt = Date.now()
     try {
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 250))

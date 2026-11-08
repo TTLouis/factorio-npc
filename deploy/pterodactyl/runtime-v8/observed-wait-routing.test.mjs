@@ -5,6 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop, PASSIVE_ROUTE_MIN_WAIT_TICKS } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { makeConditionWait } from './step-completion.mjs'
+import { FakeFactorio } from './task-loop-fixtures.mjs'
 
 // Repair unit B (docs/validation/LUNA_AUTONOMY_FAILURE_ANALYSIS_2026-10-05.md section 3). A batch of only `wait`
 // operations on a machine-output checkpoint is routed to the bounded condition wait (no timer); a blind wait's
@@ -198,11 +199,13 @@ class WaitRcon {
   }
 }
 
-function makeWorld({ committed = false, draft = false, script = [], rcon = new WaitRcon(), memory = new CanonicalTaskBoardMemory(), checkpoint = CHECKPOINT } = {}) {
+function makeWorld({ committed = false, draft = false, script = [], rcon = new WaitRcon(), memory = new CanonicalTaskBoardMemory(), checkpoint = CHECKPOINT, executionGuidance } = {}) {
   const state = planState()
   state.task_board.steps[0].completion_contract = checkpoint ? structuredClone(checkpoint) : undefined
   memory.planByNpc.set(KEY, state)
-  if (draft || committed) memory.ensurePlanningDraft(KEY, memory.planByNpc.get(KEY), { now: 1 })
+  if (draft || committed) memory.ensurePlanningDraft(KEY, memory.planByNpc.get(KEY), { now: 1, executionGuidance,
+    ...(executionGuidance ? { stepCompletions: [{ kind: 'deterministic', checkpoint }] } : {}) })
+  if (executionGuidance) assert.deepEqual(getActivePlan(memory.planningState(KEY)).steps[0].execution_guidance, executionGuidance[0])
   if (committed) memory.commitPlanningPlan(KEY, { now: 2, runtime_validation: { passed: true } })
   const calls = []
   const agent = new NpcAgentLoop({
@@ -674,12 +677,31 @@ test('pendingBlindWait starts empty and a reset clears it', () => {
 // Run AH: a pump can report working forever while boiler/engine remain held.
 // That status is neither recipe production nor progress toward this checkpoint.
 function runAhPumpWorld() {
-  const world = makeWorld({ committed: true, checkpoint: {
+  const memory = new CanonicalTaskBoardMemory()
+  const rcon = new WaitRcon()
+  const native = new FakeFactorio()
+  memory.initializeFactoryRegistry(native.factoryWorldId)
+  const command = rcon.command.bind(rcon)
+  rcon.command = async text => {
+    if (text.includes('sgluna_factory') || text.includes('"autorio_actor","status"')) {
+      native.status = { ...deployment(rcon.actorEpoch), surface_index: 1, force_index: 1 }
+      return native.command(text)
+    }
+    return command(text)
+  }
+  const world = makeWorld({ memory, rcon, committed: true, checkpoint: {
     mode: 'all', requirements: [
       { id: 'boiler', kind: 'entity_count', prototype: 'boiler', minimum: 1, state: 'working' },
       { id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 1, state: 'working' },
     ],
-  }, script: [sleepingModel()] })
+  }, executionGuidance: [{
+    // Synthetic declaration only: the boiler and engine remain unbuilt. A
+    // working pump cannot enroll this block or establish the original outcome.
+    approach: 'Build the declared power block', rationale: 'Track the unchanged operating checkpoint', constraints: [], skillIds: [],
+    cellIntent: { kind: 'production_block', purpose: 'Synthetic Run AH wait boundary',
+      members: [{ role: 'steam', entity: 'boiler' }, { role: 'generator', entity: 'steam-engine' }],
+      outputs: [{ role: 'generator', kind: 'power', resource: null }] },
+  }], script: [sleepingModel()] })
   world.rcon.conditionAnswer = () => ({
     ok: true, kind: 'entity_state', unit_number: 15, satisfied: true,
     progressing: true, progress_known: true, entity_status: 1,

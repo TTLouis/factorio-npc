@@ -215,7 +215,7 @@ describe('compact spatial semantics', () => {
       get_fluid_box_pipe_connections: () => [{ target: source, target_fluidbox_index: 1 }],
     }
     Object.assign(source, { has_fluid_segment: () => true, get_fluid_segment_id: () => 1, get_fluid_segment_filter: () => undefined, get_fluid_segment_fluid: () => undefined, fluids_count: 1, get_fluid_capacity: () => 200, get_fluid_box_prototype: () => ({ index: 1, production_type: 'output' }),
-      get_fluid_box_pipe_connections: () => [{ position: { x: 0, y: 0 }, target: target, target_fluidbox_index: 1 }],
+      get_fluid_box_pipe_connections: () => [{ position: { x: 0, y: 0 }, target, target_fluidbox_index: 1 }],
     })
     source.surface = target.surface = { index: 1 }
     const first = compact_spatial_summary(source) as any

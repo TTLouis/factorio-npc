@@ -1081,8 +1081,51 @@ const INFORMATIONAL_SIGNATURES = [
   },
 ]
 
+// Native/controller terminal rows can be emitted between model requests. Keep
+// their plan/step ownership and coalesce paired pause/paused notifications.
+function terminalGuardFindings(rows, family) {
+  const findings = new Map()
+  for (const row of rows) {
+    const data = row?.data ?? {}
+    const code = String(data.code ?? data.reason ?? data.preflight_code ?? '').split(':')[0]
+    const stock = row?.event === 'stock_dependency.exhausted'
+      || row?.event === 'contract.preservation_refused' && data.preflight_code === 'batch_stock_unverified_dependency'
+        && data.code === 'argument_correction_limit_exhausted'
+    const production = ['production.pause', 'production.paused', 'production.admission_exhausted'].includes(row?.event)
+      || row?.event === 'request.blocked_plan_paused' && code.startsWith('production_')
+    const binding = production && ['production_producer_unbound', 'production_producer_binding_unrepairable'].includes(code)
+    if (family === 'stock' ? !stock : family === 'binding' ? !binding : !production || binding) continue
+    const request = row.request_id ?? data.request_id ?? '(controller)'
+    const key = JSON.stringify([request, row.actor_id, row.epoch, data.goal_id, data.plan_id, data.step_id ?? data.semantic_step_id, code])
+    if (!findings.has(key)) findings.set(key, { request_id: request, count: 1, first_ts: row.ts,
+      detail: `${row.event}: ${code || 'unknown'}; plan_id=${data.plan_id ?? 'unknown'} step_id=${data.step_id ?? data.semantic_step_id ?? 'unknown'}` })
+  }
+  return [...findings.values()]
+}
+
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
+  { id: 'preservation_guard', label: 'preservation proof stopped the request',
+    detect: (_all, _withRequest, rows) => rows.filter(row => {
+      const data = row.data ?? {}
+      const code = String(data.cause ?? data.code ?? data.reason ?? '').split(':')[0]
+      return row.event === 'goal.paused' && data.pause_class === 'guard' && code.startsWith('preservation_')
+        || row.event === 'contract.defect_refused' && data.disposition === 'classified_guard_pause' && code.startsWith('preservation_')
+        || row.event === 'contract.preservation_refused' && data.disposition === 'classified_guard_pause'
+          && (code.startsWith('preservation_') || String(data.preflight_code ?? '').startsWith('preservation_'))
+    }).map(row => ({ request_id: row.request_id ?? row.data?.request_id ?? '(controller)', count: 1, first_ts: row.ts,
+      detail: `${row.event}: ${row.data?.cause ?? row.data?.code ?? row.data?.reason ?? 'unknown'}` })) },
+  { id: 'contract_defect_exhausted', label: 'contract correction allowance exhausted',
+    detect: (_all, _withRequest, rows) => rows.filter(row => row.event === 'contract.defect_exhausted').map(row => ({
+      request_id: row.request_id ?? row.data?.request_id ?? '(controller)', count: 1, first_ts: row.ts,
+      detail: `${row.data?.reason ?? 'unknown'}; plan_id=${row.data?.plan_id ?? 'unknown'} step_id=${row.data?.semantic_step_id ?? row.data?.step_id ?? 'unknown'}`,
+    })) },
+  { id: 'stock_dependency_guard', label: 'stock dependency correction exhausted',
+    detect: (_all, _withRequest, rows) => terminalGuardFindings(rows, 'stock') },
+  { id: 'production_binding_guard', label: 'production stopped on an unproved producer binding',
+    detect: (_all, _withRequest, rows) => terminalGuardFindings(rows, 'binding') },
+  { id: 'production_controller_guard', label: 'production controller paused or exhausted',
+    detect: (_all, _withRequest, rows) => terminalGuardFindings(rows, 'controller') },
   {
     id: 'sprint_superseded_owner_fault', label: 'superseded sprint boundary became a global fault',
     detect: (_all, _withRequest, rows) => rows.filter(row => row.event === 'sprint.fault'

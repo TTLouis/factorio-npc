@@ -22,6 +22,7 @@ function world({ snapshot, readHook, traceHook, output = 10, provider } = {}) {
     furnace: { unit_number: machine.id, position: machine.position, fuel: stock(machine.inventories.fuel),
       source: {}, output: { 'copper-plate': output } } })
   Object.assign(game.status, { actor_id: 12, epoch: 1, surface_index: 1, connected_players: 0 })
+  game.installFactoryFixture(memory)
   game.batchId = 7 // AS's last native batch; new operations must not impersonate old receipts.
   game.researched.add('electronics')
   game.knownTechnologies.add('electronics')
@@ -30,7 +31,8 @@ function world({ snapshot, readHook, traceHook, output = 10, provider } = {}) {
   const native = game.command.bind(game)
   game.command = async text => {
     await readHook?.({ text, game, agent, memory })
-    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ actor: { actor_id: game.status.actor_id }, surface_index: game.status.surface_index, force_index: game.forceIndex ?? 1 })
+    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: game.status.mode,
+      actor: { actor_id: game.status.actor_id, valid: game.status.allowed === true, kind: game.status.actor_kind }, surface_index: game.status.surface_index, force_index: game.forceIndex ?? 1 })
     if (text.includes('"autorio_crafting","status"')) return JSON.stringify(game.craftingStatus ?? { task_active: false, native_queue: [] })
     if (text.includes('"get_entity_status"')) {
       const detail = game.entityRead()
@@ -70,6 +72,22 @@ test('original AS mutation reply renews furnace 19 and collects existing ten pla
   assert.equal(w.game.inventory['copper-plate'] ?? 0, 0, 'admission is not completion')
   assert.equal(w.game.inventory['copper-ore'], 10)
   assert.deepEqual(w.held().steps, steps)
+  assert.equal(w.events.some(row => row.event.startsWith('production.manual_bootstrap_')), false,
+    'the existing assigned producer retains its exact-refresh collection path, not new-producer normalization')
+})
+
+test('new-producer normalization leaves an existing assignment and original AS checkpoint to guarded admission', async () => {
+  const w = world()
+  const original = JSON.parse(message('tap_24').content)
+  const snapshot = w.memory.snapshot()
+  assert.ok(original.checkpoint)
+  assert.ok(w.memory.getFactoryOperationalRegistry().cells.some(cell => cell.members.some(member => member.unit_number === 19)))
+  assert.equal(await w.agent.normalizeManualBootstrapProduction(original), original)
+  assert.equal(await w.agent.normalizeManualBootstrapProduction(original, { residual: true }), original)
+  assert.deepEqual(w.memory.snapshot(), snapshot)
+  assert.deepEqual(w.game.sent, [])
+  assert.deepEqual(w.events, [])
+  assert.equal(w.providers.length, 0)
 })
 
 test('original AS targeted observation reply can refresh a durable furnace locator without an entity checkpoint', async () => {
@@ -113,6 +131,7 @@ test('residual binding loss after parsing drives the real Session admission and 
   assert.equal(w.memory.pendingOperations(KEY).length, 0)
   assert.equal(w.held().execution.step_progress[w.held().steps[3].step_id].status, 'completed', JSON.stringify(ctx.logs))
   assert.ok(w.events.some(row => row.event === 'entity.refresh_settled'))
+  assert.equal(w.events.some(row => row.event.startsWith('production.manual_bootstrap_')), false)
   assert.ok(analyzeBehaviorTrace(captured.failure_events).findings.some(row => row.signature === 'exact_entity_binding_unrecovered'))
   assert.equal(analyzeBehaviorTrace(w.events).findings.filter(row => row.signature === 'exact_entity_binding_unrecovered').length, 0)
   assert.equal(analyzeBehaviorTrace([...captured.failure_events, ...w.events]).findings.filter(row => row.signature === 'exact_entity_binding_unrecovered').length, 1,
