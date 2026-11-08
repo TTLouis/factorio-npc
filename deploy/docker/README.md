@@ -1,6 +1,13 @@
 # Docker deployment
 
-For the external assistant/MCP workflow, follow the [portable setup guide](../../docs/EXTERNAL_HARNESS_SETUP.md). This ordinary server wrapper starts the built-in planner.
+The installed wrapper defaults to built-in `plan` mode. Select `external`, `plan`
+or `pursuit` with `SGLUNA_HARNESS_MODE`; all use the same source codebase. See
+[harness modes](../../docs/HARNESS_MODES.md) for per-mode configuration. External
+and pursuit connect to an already running, bound Factorio host on loopback;
+they do not start a server. For external assistant/MCP setup, follow the
+[portable setup guide](../../docs/EXTERNAL_HARNESS_SETUP.md). Attach stdin for
+external stdio MCP and keep stdout as protocol data; wrapper diagnostics go to
+stderr.
 
 The Docker wrapper packages the same standalone-NPC runtime used by the Pterodactyl deployment. Local builds resolve `SGLUNA_SOURCE_REF` to an exact Git commit during the image build, so restarting a container never silently updates SGLuna code.
 
@@ -87,13 +94,15 @@ SGLUNA_SOURCE_REF=main
 
 When the source install layer runs, the Docker build resolves that ref to an exact SHA and bakes that exact SGLuna runtime into the image. Restarting the container does not update code. A rebuild can reuse a cached source layer; use an exact SHA or change `SGLUNA_SOURCE_NONCE` as described below to pick up branch updates.
 
-For the separate internal planner/Jev experiment, set `SGLUNA_SOURCE_REF=experiment/jev-agent-architecture` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
+Keep `SGLUNA_SOURCE_REF=main` for all three modes, or select an exact 40-character
+commit SHA for fully reproducible builds. Mode selection does not require a
+different source branch.
 
 The build is layered so a source change doesn't download Factorio again. The system packages and the official Factorio archive (verified against Factorio's published checksums) are cached. Docker also caches the Node archive and package manager stores across source revisions. The source install layer reruns whenever its build arguments change. With an exact commit SHA, a rebuild installs exactly that commit, and a new SHA reinstalls only the source. A branch ref such as `main` is resolved only when that layer reruns, so to pick up a branch's newer commits, set a new `SGLUNA_SOURCE_NONCE` (for example `SGLUNA_SOURCE_NONCE=$(date +%s) docker compose up -d --build`) or use a SHA. The installer re-verifies the cached archive and downloads Factorio itself if the cached version differs from the one it resolves. Published prerelease images are already pinned and do not need this rebuild behavior.
 
 ## Configuration boundary
 
-Jev is optional on the current `experiment/jev-agent-architecture` branch. Leave
+Jev is optional in plan mode. Leave
 `JEV_TYPESAFE_API_KEY` blank in your local `.env` to run without it; Compose passes
 that optional value as `TYPESAFE_API_KEY`. The main LLM provider settings are still
 required. This uses the runtime's non-Jev decision paths, not a different branch.
@@ -110,14 +119,16 @@ Changing `FACTORIO_VERSION` requires rebuilding the image. A published release i
 
 ## Shutdown
 
-`docker stop` sends `SIGTERM` to the SGLuna supervisor. The supervisor shutdown path cancels SGLuna work, saves Factorio, and stops the child process. Compose gives it a 90-second grace period by default.
+In plan mode, `docker stop` sends `SIGTERM` to the SGLuna supervisor. The supervisor shutdown path cancels SGLuna work, saves Factorio, and stops the child process. Compose gives it a 90-second grace period by default.
+External and pursuit stop their controller/transport only; the owning host must
+still cancel native work, prove idle, save and stop its separately running game.
 
 ## Notes
 
 - The current tested/published container platform is `linux/amd64`.
 - RCON remains internal to the container and is not exposed on the host.
 - The legacy top-level `docker/` directory is not used by this deployment.
-- `main` includes the external harness. The internal planner/Jev experiment remains separate on `experiment/jev-agent-architecture`.
+- `main` contains the shared external, plan and pursuit implementations.
 
 
 ### Legacy deployment aliases

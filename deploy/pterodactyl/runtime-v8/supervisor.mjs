@@ -1,4 +1,6 @@
 import { requireHarnessMode } from './harness-modes.mjs'
+import { verifyManifest } from './release-integrity.mjs'
+export { verifyManifest } from './release-integrity.mjs'
 import { inspectNextSliceLiveness, nextSliceControlView, nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice } from './next-slice-liveness.mjs'
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import { inspectControllerLiveness } from './controller-liveness.mjs'
@@ -22,7 +24,6 @@ import {
   DeploymentError,
   directory,
   freeTcpPort,
-  hashFile,
   nonce,
   parseChatPlayers,
   readJson,
@@ -4349,18 +4350,6 @@ export class Session {
     })()
     return this.stopPromise
   }
-}
-
-export async function verifyManifest(app) {
-  const manifest = await readJson(path.join(app, 'manifest.json'))
-  check(manifest?.revision === 'sgluna-pterodactyl-v8' && manifest.files && typeof manifest.files === 'object', 'Missing v8 release manifest')
-  for (const [name, expected] of Object.entries(manifest.files)) {
-    check(typeof expected === 'string' && /^[a-f0-9]{64}$/.test(expected), `Invalid manifest digest: ${name}`)
-    const filename = path.join(app, name)
-    await regularFile(filename)
-    check(await hashFile(filename) === expected, `Release file integrity failed: ${name}`)
-  }
-  return manifest
 }
 
 export async function main(_args = [], env = process.env) {

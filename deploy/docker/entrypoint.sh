@@ -11,7 +11,7 @@ SOURCE_SHA="unknown"
 if [[ -f /opt/sgluna/SOURCE_REF ]]; then SOURCE_REF="$(cat /opt/sgluna/SOURCE_REF)"; fi
 if [[ -f /opt/sgluna/SOURCE_SHA ]]; then SOURCE_SHA="$(cat /opt/sgluna/SOURCE_SHA)"; fi
 
-echo "[SGLuna docker] source=$SOURCE_REF resolved=$SOURCE_SHA data=$ROOT"
+echo "[SGLuna docker] source=$SOURCE_REF resolved=$SOURCE_SHA data=$ROOT" >&2
 
 export CONTAINER_ROOT="$ROOT"
 
