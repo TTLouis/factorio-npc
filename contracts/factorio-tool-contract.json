@@ -152,8 +152,8 @@
       "read_only": true,
       "advisory_only": true,
       "source": "packages/autorio/src/fixtures/leveled-library-v1.json",
-      "knowledge": 7,
-      "skills": 54,
+      "knowledge": 9,
+      "skills": 58,
       "result_bytes": 7168
     },
     "resume_semantics": "read-and-reconcile-never-replay",

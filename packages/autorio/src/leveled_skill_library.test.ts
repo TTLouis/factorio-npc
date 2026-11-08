@@ -102,11 +102,11 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
     ensure_basic_skill_definitions()
     const baseline = list_skill_definitions().map(entry => JSON.stringify(entry))
     expect(baseline).toHaveLength(11)
-    expect(select_curated_library('leveled')).toMatchObject({ profile: 'leveled', added: 50, upgraded: 11, removed: 0, total: 61 })
+    expect(select_curated_library('leveled')).toMatchObject({ profile: 'leveled', added: 56, upgraded: 11, removed: 0, total: 67 })
     const entries = list_skill_definitions()
-    expect(entries).toHaveLength(61)
-    expect(entries.filter(entry => entry.content_type === 'knowledge')).toHaveLength(7)
-    expect(entries.filter(entry => entry.content_type === 'skill')).toHaveLength(54)
+    expect(entries).toHaveLength(67)
+    expect(entries.filter(entry => entry.content_type === 'knowledge')).toHaveLength(9)
+    expect(entries.filter(entry => entry.content_type === 'skill')).toHaveLength(58)
     for (const raw of BASIC_SKILL_DEFINITIONS) {
       const foundation = get_skill_definition(raw.id)!
       expect(foundation.content_type).toBe('skill')
@@ -114,7 +114,7 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
       expect(foundation.guidance!.steps.length).toBeGreaterThanOrEqual(3)
       expect(foundation.revision).toBeGreaterThan(raw.revision)
     }
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 0, total: 61 })
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 0, total: 67 })
     select_curated_library('basic')
     expect(list_skill_definitions().map(entry => JSON.stringify(entry))).toEqual(baseline)
     for (const entry of BASIC_SKILL_DEFINITIONS) expect(get_skill_definition(entry.id)).toBeDefined()
@@ -125,9 +125,9 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
     const registry = (globalThis as any).storage.sgluna_skill_definitions
     for (const raw of BASIC_SKILL_DEFINITIONS) delete registry[raw.id]
     delete registry['burner-inserter-refueling']
-    expect(list_skill_definitions()).toHaveLength(49)
-    expect(ensure_basic_skill_definitions()).toMatchObject({ added: 12, removed: 0, total: 61 })
-    expect(list_skill_definitions()).toHaveLength(61)
+    expect(list_skill_definitions()).toHaveLength(55)
+    expect(ensure_basic_skill_definitions()).toMatchObject({ added: 12, removed: 0, total: 67 })
+    expect(list_skill_definitions()).toHaveLength(67)
     expect(find_skill_definitions('煤蛇', 10).some(entry => entry.id === 'burner-coal-loop')).toBe(true)
   })
 
@@ -159,7 +159,7 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
       expect(knowledge_reference(imported)).toEqual(reference)
     }
     const ids = LEVELED_LIBRARY_DEFINITIONS.map(entry => entry.id)
-    expect(new Set(ids).size).toBe(61)
+    expect(new Set(ids).size).toBe(67)
     for (const raw of LEVELED_LIBRARY_DEFINITIONS) {
       const entry = canonicalize_skill_definition(raw)
       expect(entry.inputs).toEqual([])
@@ -232,7 +232,7 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
     select_curated_library('leveled')
     const entries = list_skill_definitions()
     const before = JSON.stringify((globalThis as any).storage)
-    expect(filtered_library_entries(entries, { type: 'knowledge', level: -1 })).toHaveLength(7)
+    expect(filtered_library_entries(entries, { type: 'knowledge', level: -1 })).toHaveLength(9)
     expect(filtered_library_entries(entries, { type: 'skill', level: 3 })).toHaveLength(6)
     expect(filtered_library_entries(entries, { type: 'knowledge', level: 3 })).toEqual([])
     expect(filtered_library_entries(entries, { type: 'all', level: -2 })).toEqual([])
