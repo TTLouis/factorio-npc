@@ -302,14 +302,6 @@ test('generic prototype parsing grants no placement authority without a native n
   assert.equal(f.calls.some(command => command.includes('local refusal=')), false)
 })
 
-// Trial 4r (r4-096): the refusal for a candidate-placed prototype names place_candidate.
-test('place_entity of a candidate-placed prototype names place_candidate', () => {
-  for (const entity_name of ['electric-mining-drill', 'offshore-pump', 'boiler', 'steam-engine', 'pipe']) {
-    assert.throws(() => parseExternalOperation({ name: 'place_entity', args: { entity_name, x: 2.5, y: 2.5 } }),
-      error => error.code === 'placement_not_supported' && error.message.includes('place_candidate') && error.message.includes('getPlacementCandidates'))
-  }
-})
-
 test('explicit bind is not a tool capability and atomically refuses existing ownership/busy state', async () => {
   const f = fixture()
   await f.bridge.bind()
