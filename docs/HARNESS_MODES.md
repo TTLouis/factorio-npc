@@ -10,6 +10,18 @@ mod, world-tool implementation or recipe library. All modes remain experimental.
 | `plan` | Built-in planner/executor; immutable committed plan, step contracts, bounded recovery and optional Jev | Existing installed server supervisor starts and owns Factorio |
 | `pursuit` | One built-in operator; durable notebook, context rotation, budgets, native goal evaluation and bounded unaccepted yields | Connects to an already running, bound Factorio host with an explicit goal profile |
 
+## Source and development branches
+
+Install and develop all three modes from `main`, or freeze an exact main commit
+for a deployment or trial. `feat/builtin-harness-plan` and
+`feat/builtin-harness-pursuit` are historical source lines, not current mode
+selectors. Optional Jev support is part of current plan mode; a Jev experiment
+ref is needed only when the owner explicitly requests that experiment.
+
+Shared-core and mode-specific changes both target main through a bounded task
+branch, independent review and validated integration. See the
+[branch rules](DEVELOPMENT_WORKFLOW.md#branches-and-integration-target).
+
 ## Select before startup
 
 From the source checkout, using Node 24:
@@ -84,6 +96,22 @@ operation parsing, observation schemas, legality, admission, exact receipts,
 cancellation and stale/uncertain-work fences. `method-library.mjs` and the one
 leveled library export supply advisory knowledge to all lifecycles. Native goal
 conditions and `machine-delivery.mjs` remain the acceptance authority.
+All three modes use the same knowledge and skill-method content from the chosen
+source revision. Search the two kinds separately and read the relevant full
+entries; plan and pursuit use their exposed library tools, and external uses
+[`factorio_library`](EXTERNAL_HARNESS.md#read-only-method-library). These entries
+teach methods, not stored recipes, ingredient quantities, machine ratios or
+unlock assumptions. Query current native game facts before choosing and sizing
+work. A library read cannot authorize an operation or establish completion.
+
+The shared native gather boundary retains each submitted search area across
+queued movement. Plan recovery can reconcile an exact terminal partial receipt
+and admit only a freshly proven missing quantity at an originally witnessed
+source. Missing ownership, origin or effect proof keeps the safety hold; a model
+request cannot clear uncertain effects. See
+[runtime ownership](ARCHITECTURE_OWNERSHIP.md) and the
+[repair contract](E2E_REPAIR_REQUIREMENTS.md).
+
 The canonical advisory search projection is bounded to eight results with a
 default of five. The older native `autorio_skills.find` compatibility endpoint
 retains its ten-result maximum; the host projection does not advertise that

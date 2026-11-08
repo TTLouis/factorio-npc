@@ -9,16 +9,21 @@ Newer dated evidence is in [proofs](proofs/README.md) and
 
 ## Current state
 
+All three lifecycles develop and integrate on `main`; use
+[runtime mode selection](HARNESS_MODES.md) rather than a legacy built-in branch.
+Optional Jev support is available in plan mode without switching source lines.
+Branch availability does not establish that every feature or proposed design
+has passed the same native or provider-backed gates.
+
 ### External harness (`main`)
 
 - Latest prerelease: [v0.1.0-pre.1](releases/external-harness-v0.1.0-pre.1.md),
   source `c4108ab1`.
-- Furthest demonstrated result: [semi-automated red science on October 31](proofs/2026-10-31-red-science.md).
-  It produced 12 packs in a two-minute hands-off window at normal speed, collected
-  in a chest. The agent fuelled burner machines and the boiler by hand, and formal
-  acceptance failed a furnace observation check.
-- Not yet demonstrated: sustained electricity-first production and an automatic
-  science-to-lab loop.
+- Furthest published production proof: [electrified starter base on November 5](proofs/2026-11-05-electrified-starter-base.md),
+  with 21 new science packs during a 10-minute 19-second hands-off window,
+  electric mining, automatic fuel service and lab delivery. Its Factorio 2.0.77
+  source and limited production layout remain historical evidence, not validation
+  of every later 2.1.24 candidate or either built-in lifecycle.
 - After the prerelease, November 2–3 fixes on `main` explain refusals, report
   observed operation effects and running-receipt progress, mark placement
   candidates that external placement refuses, and report the fluid preservation
@@ -64,9 +69,9 @@ The historical v8 release-candidate checkpoint recorded passing package/deployme
 
 The exact historical candidate data is preserved at `docs/validation/PTERODACTYL_V8_RELEASE_CANDIDATE_2026-09-14.md`. It must not be mistaken for proof that every later integration-branch commit has run those same heavyweight gates.
 
-## Built-in planner branch capabilities beyond the original baseline
+## Built-in planner capabilities beyond the original baseline
 
-The integration branch now contains substantially more than the original NPC transition. It includes work in areas such as:
+The shared codebase preserves substantially more than the original NPC transition. It includes work in areas such as:
 
 - richer task/plan UI and console interaction;
 - behavior tracing and provider recovery/steering;
@@ -76,9 +81,13 @@ The integration branch now contains substantially more than the original NPC tra
 - additional reliability and operation-receipt contracts;
 - early swarm-facing identifiers/foundations.
 
-These features do **not** all share the same level of real-engine/provider E2E evidence. Their presence on the branch should not be read as an assertion that they are all release-complete.
+These features do **not** all share the same level of real-engine/provider E2E evidence. Their presence on main should not be read as an assertion that they are all release-complete.
 
-## Built-in planner promotion blockers (last updated September 26, 2026)
+## Historical built-in planner promotion checkpoint (September 26, 2026)
+
+The following checkpoint predates the shared-main integration. It preserves
+that candidate's promotion work and target, not a current instruction to move
+plan mode from a separate branch.
 
 There is no longer a known architectural blocker that requires keeping the standalone-NPC baseline permanently off `main`.
 
@@ -100,7 +109,7 @@ step 2 of 6 on the per-request output cap. Plan: `docs/validation/PARALLEL_PRODU
 
 ## Known non-blocking limitations / future work
 
-The next main promotion does not claim complete coverage of:
+The shared main codebase does not claim complete coverage of:
 
 - autonomous end-to-end production-line design;
 - validated inserter/belt-lane/stacking throughput reasoning across all relevant research states;

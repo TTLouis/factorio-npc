@@ -6,6 +6,34 @@ Start with [CONTRIBUTING.md](../CONTRIBUTING.md) for first contributions,
 [TESTING.md](TESTING.md) for test commands. Actor, planning, secret and promotion
 rules in [AGENTS.md](../AGENTS.md) remain authoritative.
 
+## Branches and integration target
+
+`main` is the shared development and integration target for external, plan and
+pursuit. Select a lifecycle with the [mode settings](HARNESS_MODES.md), not by
+checking out `feat/builtin-harness-plan` or `feat/builtin-harness-pursuit`.
+Those legacy refs and the Jev/swarm experiment refs retain their own histories;
+they are not prerequisites for current plan mode or optional Jev support.
+
+Use one bounded task branch named `<type>/<task-slug>` from an explicit current
+main SHA, and reuse it for continuation or handoff. Supported types are `feat`,
+`fix`, `docs`, `test`, `chore`, `refactor` and explicitly approved `experiment`.
+In the shared workspace, register the exact branch, `.worktrees/<type>-<task-slug>`
+path, owner and completion criteria before creation. Never switch another
+session's checkout or rewrite its work to make a path fit. Independent clones
+use their own checkout layout.
+
+After focused validation and independent review, merge through the owned main
+checkout with `--no-ff`. Record both parents and verify the resulting tree against
+the reviewed candidate; recheck any resolved conflicts. Publication is a separate
+authorized action: verify the destination and current remote boundary, then push
+the reviewed commit with an explicit refspec. Do not publish archive refs, raw
+logs or private configuration. Documentation does not configure GitHub branch
+protection or make a failing CI run green.
+
+Keep explicitly requested experiments isolated. A branch name, passing local
+test or registry entry is not permission for inference, deployment, publication
+or another live trial.
+
 ## Start from a bounded failure or outcome
 
 Read `AGENTS.md` and `SPEC.md`. In the owner's shared workspace, also read its

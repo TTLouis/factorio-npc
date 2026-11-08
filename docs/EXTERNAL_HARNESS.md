@@ -402,8 +402,8 @@ to context automatically.
 {"kind":"skill","action":"search","query":"smelting"}
 ```
 
-The library is the leveled method library, the single knowledge source on every
-branch. `factorio_library` reads its exported fixture
+All three modes on `main` share the leveled method library from the selected
+source revision. `factorio_library` reads its exported fixture
 `packages/autorio/src/fixtures/leveled-library-v1.json`; see
 [the local library](../tools/external-harness/library/README.md) for the source
 and regeneration. Source IDs are retained in each entry. Full skill

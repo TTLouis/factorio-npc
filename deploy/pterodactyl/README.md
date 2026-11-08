@@ -1,6 +1,10 @@
 # SGLuna — Factorio Pterodactyl deployment
 
-For the external assistant/MCP workflow, use the [portable setup guide](../../docs/EXTERNAL_HARNESS_SETUP.md). These eggs start the built-in planner.
+Both eggs ship external, plan and pursuit from `main`. Their installed startup
+defaults to `plan`; select `SGLUNA_HARNESS_MODE` explicitly for another lifecycle.
+External and pursuit connect to an existing bound host instead of starting a
+second server. See [mode setup](../../docs/HARNESS_MODES.md) and the
+[external assistant/MCP setup guide](../../docs/EXTERNAL_HARNESS_SETUP.md).
 
 This directory contains the Pterodactyl deployment for **SGLuna**, the user-facing Factorio NPC/agent identity maintained by TTLouis. The repository remains `TTLouis/factorio-npc`, and upstream AIRI/Autorio lineage and MIT attribution remain documented.
 
@@ -11,7 +15,11 @@ There are two PTDL_v2 eggs:
 | File | Pterodactyl name | Default `SGLUNA_SOURCE_REF` | Use |
 | --- | --- | --- | --- |
 | `egg-sgluna-factorio-server.json` | `SGLuna Factorio Server (Main)` | `main` | stable/main servers |
-| `egg-sgluna-factorio-npc-e2e.json` | `SGLuna Factorio Server (NPC E2E)` | `experiment/jev-agent-architecture` | active NPC/E2E testing |
+| `egg-sgluna-factorio-npc-e2e.json` | `SGLuna Factorio Server (NPC E2E)` | `main` | explicitly authorized NPC/E2E testing |
+
+Channel names are compatibility labels, not separate implementations or runtime
+mode selectors. Freeze an exact source SHA for a trial; choosing the E2E channel
+does not authorize inference or another run.
 
 Import the desired file through **Admin → Nests → Import Egg**.
 

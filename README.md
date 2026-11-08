@@ -14,11 +14,11 @@ on a headless server with nobody connected.
 
 ## Install and connect your AI assistant
 
-The `main` branch lets a local AI harness control your
+In `external` mode, a local AI harness controls your
 standalone Factorio NPC through MCP. Your assistant
 plans the work and directs native game actions through a local connection.
 
-This mode is experimental and separate from the built-in autonomous planner.
+This workflow is one of three experimental modes shipped together on `main`.
 **Quick setup:** paste this into an assistant with local command access
 and automatic setup enabled:
 
@@ -69,6 +69,17 @@ Select a lifecycle at startup; no branch switch is needed.
 See [mode selection and setup](docs/HARNESS_MODES.md) for commands, requirements,
 compatibility entrypoints and the preserved safety boundaries. All modes remain
 experimental; historical evidence applies only to its recorded candidate.
+
+The source CLI defaults to `external`; installed `start-sgluna.sh` defaults to
+`plan`. Select the mode explicitly with `--mode` or `SGLUNA_HARNESS_MODE` before
+startup. External and pursuit connect to an existing bound host; plan's installed
+supervisor owns its Factorio process. Never run competing controllers on one host.
+
+All modes use the same advisory knowledge and skill-method library. Search and
+read the relevant entries, then obtain current recipes, resource availability,
+geometry and sizing from live game tools. Library text and model judgments do
+not grant execution or completion authority; native validation and correlated
+receipts do.
 
 ---
 
@@ -135,26 +146,25 @@ swarm coordination, vehicles/trains/platforms and optional vision are later work
 
 ---
 
-## Built-in harness alternatives
+## Branches and development
 
-For a self-contained harness that calls your model provider directly, choose
-**plan mode** or **pursuit mode** in the branch table above and read that
-branch's README. Plan mode uses a planner/executor workflow with optional Jev.
-Pursuit mode is a separate operator-loop implementation still in development.
+Use **`main` for external, plan and pursuit**, including optional Jev support
+in plan mode. The old `feat/builtin-harness-plan`,
+`feat/builtin-harness-pursuit` and integration/experiment refs preserve earlier
+work and evidence; they are not required to install or select a mode.
 
-The external setup on this branch starts the game and MCP connection. The
-ordinary [Docker](deploy/docker/README.md) and
-[Pterodactyl](deploy/pterodactyl/README.md) server installers retain built-in
-planner paths; they are separate from the external MCP setup. Follow the
-plan-mode README and explicitly select `feat/builtin-harness-plan` as the
-source when installing that mode.
+Start a bounded `<type>/<task-slug>` branch from current main and target main
+for shared-runtime or mode changes. Reuse the same branch when resuming a task.
+In the owner's shared workspace, register and respect checkout ownership before
+editing. Explicitly scoped experiments remain separate. See the
+[development workflow](docs/DEVELOPMENT_WORKFLOW.md#branches-and-integration-target)
+for review, integration and publication rules.
 
 ---
 
 ## Contribute
 
-External-harness development integrates into **`main`**. Built-in plan and
-pursuit development stay on their respective branches listed above. See
+Development for all three modes integrates into **`main`**. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for small first changes,
 bug reports and pull requests, and [TESTING.md](docs/TESTING.md) for commands.
 The shared Windows checkout requires Docker tests because its dependency
