@@ -769,6 +769,132 @@
       "identity": "native-world-actor-force-surface-derived",
       "authority": "read-only-no-registry-lifecycle"
     },
+    "bindMachineDelivery": {
+      "args": ["unit_number"],
+      "category": "context",
+      "execution": "host-context",
+      "host_handler": "machine-delivery",
+      "effect": "immutable-native-goal-destination-binding",
+      "harness_only_remotes": [["autorio_tools", "bind_current_machine_delivery"]],
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only",
+      "authority": "binds-only-an-already-armed-window; no world-operation-or-completion-authority"
+    },
+    "readNotebook": {
+      "args": [
+        "scope"
+      ],
+      "category": "context",
+      "execution": "host-context",
+      "host_handler": "agent-notebook",
+      "effect": "context-read",
+      "harness_only_remotes": [
+        [
+          "sgluna_factory",
+          "world_identity"
+        ],
+        [
+          "sgluna_factory",
+          "bind_world_id"
+        ]
+      ],
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only",
+      "protocol3_role": "planner-and-executor",
+      "authority": "none",
+      "autoload": false,
+      "argument_bounds": {
+        "scope": [
+          "goal",
+          "persistent"
+        ],
+        "text": {
+          "maxLength": 4096
+        },
+        "expectedRevision": {
+          "minimum": 0,
+          "maximum": 1000000000
+        }
+      },
+      "request_bounds": {
+        "shared_context_calls": 8,
+        "notebook_write_attempts": 4
+      },
+      "store_bounds": {
+        "npc_world_pairs": 32,
+        "text_per_scope": 4096
+      }
+    },
+    "updateNotebook": {
+      "args": [
+        "scope",
+        "expectedRevision",
+        "text"
+      ],
+      "category": "context",
+      "execution": "host-context",
+      "host_handler": "agent-notebook",
+      "effect": "local-working-memory-write",
+      "harness_only_remotes": [
+        [
+          "sgluna_factory",
+          "world_identity"
+        ],
+        [
+          "sgluna_factory",
+          "bind_world_id"
+        ]
+      ],
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only",
+      "protocol3_role": "planner-and-executor",
+      "authority": "none",
+      "autoload": false,
+      "argument_bounds": {
+        "scope": [
+          "goal",
+          "persistent"
+        ],
+        "text": {
+          "maxLength": 4096
+        },
+        "expectedRevision": {
+          "minimum": 0,
+          "maximum": 1000000000
+        }
+      },
+      "request_bounds": {
+        "shared_context_calls": 8,
+        "notebook_write_attempts": 4
+      },
+      "store_bounds": {
+        "npc_world_pairs": 32,
+        "text_per_scope": 4096
+      }
+    },
+    "listFactoryCells": {
+      "args": ["offset", "limit"],
+      "category": "status",
+      "execution": "host-observation",
+      "host_handler": "factory-cell-tools",
+      "harness_only_remotes": [["sgluna_factory", "world_identity"], ["sgluna_factory", "bind_world_id"]],
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only",
+      "argument_bounds": { "offset": { "minimum": 0, "maximum": 256, "default": 0 }, "limit": { "minimum": 1, "maximum": 32, "default": 16 } }
+    },
+    "inspectFactoryCell": {
+      "args": ["cell_id", "binding"],
+      "category": "status",
+      "execution": "host-observation",
+      "host_handler": "factory-cell-tools",
+      "harness_only_remotes": [["sgluna_factory", "world_identity"], ["sgluna_factory", "bind_world_id"], ["sgluna_factory", "observe"]],
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only"
+    },
     "getActorStatus": {
       "remote": [
         "autorio_actor",
@@ -1014,7 +1140,7 @@
       "surface_policy": "shared",
       "native_scope_fields": ["actor_id", "actor_surface_index", "actor_force_index", "surface_index", "force_index"],
       "fluid_preservation_projection": {
-        "version": 3,
+        "version": 4,
         "storage_limit": 16,
         "connection_limit": 16,
         "storage_fields": ["index", "capacity", "local_volume", "prototypes", "prototypes_truncated", "pipe_connections_truncated"],
@@ -1304,11 +1430,28 @@
       ],
       "surface_policy": "runtime-v8-only"
     },
+    "findKnowledge": {
+      "protocol3_role": "planner-and-executor",
+      "delivery": "explicit-request-only reference tool result; no skill selection or autoload",
+      "argument_bounds": { "limit": { "minimum": 1, "maximum": 8, "default": 5 } },
+      "remote": ["autorio_references", "find"],
+      "category": "knowledge",
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only"
+    },
+    "getKnowledgeDetails": {
+      "protocol3_role": "planner-and-executor",
+      "delivery": "explicit-request-only reference tool result; no skill selection or autoload",
+      "remote": ["autorio_references", "get"],
+      "category": "knowledge",
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only"
+    },
     "findSkills": {
       "protocol3_role": "planner-only",
       "executor_delivery": "planner-selected references with harness-supplied skill context",
       "argument_bounds": {
-        "limit": { "minimum": 1, "maximum": 10, "default": 3 }
+        "limit": { "minimum": 1, "maximum": 8, "default": 5 }
       },
       "remote": [
         "autorio_skills",

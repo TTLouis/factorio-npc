@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { createFactoryRegistry, registerFactoryCell } from './factory-registry.mjs'
 
 function deployment() {
   return {
@@ -107,6 +108,18 @@ class RejectingTransferRcon extends FakeRcon {
   }
 
   async command(text) {
+    if (text.includes('autorio_actor') && text.includes('status')) return JSON.stringify({ mode: 'npc', actor: { actor_id: 18, kind: 'standalone_character', valid: true }, surface_index: 1, force_index: 1 })
+    if (text.includes("'sgluna_factory','world_identity'")) return JSON.stringify({ schema_version: 1, ok: true, world_id: '226a063b-b2ac-4ec1-a6c4-a4d9ac7a747a' })
+    if (text.includes("'sgluna_factory','observe'")) {
+      const request = JSON.parse(text.match(/helpers\.json_to_table\('(.+)'\)/)[1])
+      return JSON.stringify({ ...request, ok: true, tick: 500, members: request.members.map(locator => ({ locator, state: 'observed', type: 'furnace',
+        recipe: { state: 'known', name: 'iron-plate', truncated: false, ingredients: [{ type: 'item', name: 'iron-ore' }], products: [{ type: 'item', name: 'iron-plate' }] },
+        endpoint_facts: { schema_version: 1, inventories: { state: 'known', endpoints: [{ state: 'known', inventory_index: 3, roles: { state: 'known', values: ['output'] } }] } } })) })
+    }
+    if (text.includes('remote.call("autorio_operations","status")')) {
+      const status = JSON.parse(await super.command(text)); status.admission_journal = []; status.receipt_journal = []
+      return JSON.stringify(status)
+    }
     if (text.includes('local ok,result=pcall') && text.includes("remote.call('autorio_operations','move_items_exact'")) {
       this.transferAdmissionAttempts++
       if (this.transferAdmissionAttempts === 1) {
@@ -120,6 +133,18 @@ class RejectingTransferRcon extends FakeRcon {
 }
 
 test('rejected transfer cannot advance or complete the canonical plan step', async () => {
+  // Explicit persisted synthetic assignment, independent of current model text.
+  const memory = new CanonicalTaskBoardMemory()
+  const world = '226a063b-b2ac-4ec1-a6c4-a4d9ac7a747a'
+  const origin = { source: 'placement_receipt', goal_id: 'prior-goal', plan_id: 'prior-plan', plan_version: 1,
+    semantic_step_id: 'prior-step', request_id: 'prior-request', actor_id: 18, actor_epoch: 3, tick: 100 }
+  memory.initializeFactoryRegistry(world)
+  const registry = registerFactoryCell(createFactoryRegistry(world), { surface_index: 1, force_index: 1, origin,
+    assignment: { products: ['iron-plate'], purpose: 'Synthetic assigned iron production', method: 'native furnace processing' },
+    members: [{ unit_number: 582, name: 'stone-furnace', position: { x: 4, y: 0 }, surface_index: 1, force_index: 1,
+      provenance: { ...origin, receipt_id: 'synthetic-furnace-placement' } }],
+    ports: [{ port_id: 'output', direction: 'output', kind: 'item', resource: 'iron-plate' }] })
+  memory.restore({ ...memory.snapshot(), factory_registry: registry })
   const plan = ['Load furnace with ore and fuel', 'Retrieve 20 iron plates']
   let reply = 0
   const agent = new NpcAgentLoop({
@@ -158,7 +183,7 @@ test('rejected transfer cannot advance or complete the canonical plan step', asy
       })
     },
     systemPrompt: 'NPC transfer truth test prompt',
-    memory: new CanonicalTaskBoardMemory(),
+    memory,
     stateFile: null,
     traceFile: null,
   })
@@ -564,6 +589,7 @@ test('completed observation followed by prose-only intent gets exactly one cheap
       })
     },
     systemPrompt: 'Observed-action omission test',
+    memory: new CanonicalTaskBoardMemory(),
     stateFile: null,
     traceFile: null,
   })
@@ -680,6 +706,7 @@ test('one genuinely missing mutable fact gets one targeted observation, then act
       })
     },
     systemPrompt: 'One-observation omission test',
+    memory: new CanonicalTaskBoardMemory(),
     stateFile: null,
     traceFile: null,
   })

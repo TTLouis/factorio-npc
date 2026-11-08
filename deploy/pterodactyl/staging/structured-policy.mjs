@@ -777,8 +777,8 @@ export const toolDefinitions = [
   functionTool('findSkills', 'Search SGLuna\'s bounded local skill/pattern library for reusable gameplay experience relevant to a task. Skill matches are guidance, not live world truth or mutation authority; validate recipes, prototypes, inventory, geometry, and placement before acting.', {
     type: 'object',
     properties: {
-      query: { type: 'string', minLength: 1, maxLength: 240 },
-      limit: { type: 'integer', minimum: 1, maximum: 10, default: 3 },
+      query: { type: 'string', minLength: 1, maxLength: 160 },
+      limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 },
     },
     required: ['query'],
     additionalProperties: false,
@@ -786,7 +786,7 @@ export const toolDefinitions = [
   functionTool('getSkillDetails', 'Open one exact SGLuna skill/pattern by id after discovery. Treat candidate/manual skills as experienced-player heuristics: reuse the decision pattern, but revalidate all mutable and game-version-specific facts before execution.', {
     type: 'object',
     properties: {
-      id: { type: 'string', minLength: 1, maxLength: 80, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' },
+      id: { type: 'string', minLength: 1, maxLength: 100, pattern: '^[a-z0-9][a-z0-9-]{0,99}$' },
     },
     required: ['id'],
     additionalProperties: false,
@@ -975,13 +975,14 @@ export function toolCommand(name, rawArgs = {}) {
       return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_prototypes","details",${luaString(factorioName(args.name))})))`
     case 'findSkills': {
       noExtra(args, ['query', 'limit'])
-      const query = boundedText(args.query, 'skill search query', 240)
-      const limit = integer(args.limit ?? 3, 'limit', 1, 10)
+      const query = boundedText(args.query, 'skill search query', 160)
+      const limit = integer(args.limit ?? 5, 'limit', 1, 8)
       return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","find",${luaString(query)},${limit})))`
     }
     case 'getSkillDetails':
       noExtra(args, ['id'])
-      return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",${luaString(skillId(args.id))})))`
+      check(typeof args.id === 'string' && /^[a-z0-9][a-z0-9-]{0,99}$/.test(args.id), 'Invalid library skill id')
+      return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_skills","get",${luaString(args.id)})))`
     case 'getPlayerStatus':
       noExtra(args, ['player_name'])
       return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_player_status",${luaString(factorioName(args.player_name))})))`

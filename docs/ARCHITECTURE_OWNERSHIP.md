@@ -1,6 +1,6 @@
 # NPC architecture ownership
 
-This document records the current single-NPC ownership boundaries on `experiment/jev-agent-architecture`. It is a runtime contract, not a migration wish list: provider differences are documented as they exist today, and adapters are added only when a provider actually needs the capability.
+This document records the current single-NPC ownership boundaries in the shared `main` codebase ([mode selection](HARNESS_MODES.md)). It is a runtime contract, not a migration wish list: provider differences are documented as they exist today, and adapters are added only when a provider actually needs the capability.
 
 ## Canonical Factorio contract
 
@@ -30,11 +30,11 @@ Do not force parser identity or duplicate an adapter just to make two provider s
 
 ## Runtime state authority
 
-The opt-in [external-harness experiment](EXTERNAL_HARNESS.md) has a separate
+The [external harness](EXTERNAL_HARNESS.md) is one selectable lifecycle with a
 local stdio entrypoint. An external agent owns its planning and task tracking;
 the provider-free operator owns a durable operation journal, and reuses the
 runtime-v8 policy, v2 native admission wrapper and exact receipt reconciliation.
-It does not launch, replace or alter either existing autonomous runtime. Its
+It does not launch a built-in provider. Pursuit reuses the same operator runtime, NativeBridge, tool catalog and dispatcher; plan retains its committed-plan lifecycle. Its
 strict subset and exclusions are recorded under `external_harness` in the
 contract manifest; the original two provider surfaces remain unchanged.
 

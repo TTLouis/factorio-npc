@@ -23,6 +23,7 @@
 // a few seconds so a single flicker does not decide a goal.
 
 import type { LuaEntity, LuaForce, LuaSurface } from 'factorio:runtime'
+import { evaluate_starter_acceptance } from './starter_base_acceptance'
 import { hand_work_since } from './hand_work'
 import { find_world_entities } from './npc_vision'
 
@@ -30,6 +31,7 @@ export const WORLD_CONDITION_KINDS: Record<string, boolean> = {
   entity_working: true,
   electric_network_satisfied: true,
   production_rate: true,
+  automated_starter_base: true,
 }
 
 // Bounds: a goal check never scans more than this many entities, and a
@@ -259,6 +261,7 @@ function evaluate_production_rate(force: LuaForce, request: Record<string, unkno
 
 /** Undefined for any other kind. `actor_mining`: the NPC's body is mining now. */
 export function evaluate_world_condition(force: LuaForce, kind: unknown, request: Record<string, unknown>, actor_mining: boolean) {
+  if (kind === 'automated_starter_base') return evaluate_starter_acceptance(force, request)
   if (kind === 'entity_working') return evaluate_entity_working(force, request)
   if (kind === 'electric_network_satisfied') return evaluate_electric_network_satisfied(force, request)
   if (kind === 'production_rate') return evaluate_production_rate(force, request, actor_mining)

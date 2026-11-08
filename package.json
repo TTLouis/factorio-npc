@@ -21,6 +21,10 @@
   ],
   "scripts": {
     "dev": "pnpm dev:packages",
+    "harness": "node tools/harness/cli.mjs",
+    "harness:external": "node tools/harness/cli.mjs --mode external",
+    "harness:plan": "node tools/harness/cli.mjs --mode plan",
+    "harness:pursuit": "node tools/harness/cli.mjs --mode pursuit",
     "build": "pnpm build:packages",
     "build:packages": "pnpm -r --filter=./packages/* run build",
     "dev:packages": "pnpm -r --filter=./packages/* run dev",

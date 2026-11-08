@@ -823,7 +823,13 @@ function admissionVerdict(state, { operations, preflight, actor } = {}) {
   // standing_auto grant. A player_task grant (every player objective gets one at admission) records the request itself and does not
   // turn the gates on: the player's own request is their approval. Reserved-container exclusion applies to every goal.
   // Separately, an asset or material explicitly listed in ANY active grant of the goal is always protected, grant-backed or not.
-  const grantBacked = Boolean(plan?.replacement) || auth.grants.some(grant => grant.status === GRANT_STATUS.ACTIVE
+  const revision = plan?.working_revision
+  if (plan?.working_revision_unsupported || (Object.hasOwn(plan ?? {}, 'working_revision') && (!revision || revision.version !== 1))
+    || revision && !checkGrant(auth, state.goal, { grant_id: revision.grant_id, grant_revision: revision.grant_revision,
+    actor_id: actor?.actor_id, actor_epoch: actor?.actor_epoch }).ok) {
+    return { ok: false, code: ADMISSION_REFUSAL.AUTHORIZATION_STALE, reason: 'working_revision_grant_stale', operation_index: 0 }
+  }
+  const grantBacked = Boolean(plan?.replacement || revision) || auth.grants.some(grant => grant.status === GRANT_STATUS.ACTIVE
     && grant.goal_id === goalId
     && grant.mandate_kind === MANDATE_KIND.STANDING_AUTO)
   const listedGrants = auth.grants.filter(grant => grant.status === GRANT_STATUS.ACTIVE && grant.goal_id === goalId)

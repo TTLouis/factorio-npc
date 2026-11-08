@@ -742,7 +742,7 @@ function console_window_buttons(player: LuaPlayer): console_ui.ConsoleWindowButt
   const projects_open = project_ui.projects_ui_is_open(player.index)
   const debug_open = debug_ui.debug_ui_is_open(player.index)
   return [
-    { name: ui_constants.SKILLS_BUTTON_NAME, icon: 'learn', open: skills_open, tooltip: skills_open ? 'Close area learning.' : 'Area learning and saved skill candidates, in their own window.' },
+    { name: ui_constants.SKILLS_BUTTON_NAME, icon: 'learn', open: skills_open, tooltip: skills_open ? 'Close knowledge, skills and area learning.' : 'Browse knowledge and skills by type and complexity level, or learn from an area.' },
     { name: project_ui.PROJECTS_BUTTON_NAME, icon: 'history', open: projects_open, tooltip: projects_open ? 'Close old tasks.' : 'Old tasks: history, conversations and evidence.' },
     { name: debug_ui.DEBUG_BUTTON_NAME, icon: 'debug', open: debug_open, tooltip: debug_open ? 'Close diagnostics.' : 'SGLuna runtime diagnostics, provider usage, actor state and execution activity.' },
   ]

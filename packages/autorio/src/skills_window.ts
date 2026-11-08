@@ -21,6 +21,9 @@ export const SKILLS_WINDOW = {
   list_frame: 'sgluna_skills_list_frame',
   list_count: 'sgluna_skills_list_count',
   list: 'sgluna_skills_list',
+  library: 'sgluna_library_profile',
+  type_filter: 'sgluna_library_type_filter',
+  level_filter: 'sgluna_library_level_filter',
   detail_frame: 'sgluna_skills_detail_frame',
   detail_header: 'sgluna_skills_detail_header',
   detail_title: 'sgluna_skills_detail_title',
@@ -42,7 +45,8 @@ export const SKILLS_WINDOW = {
   edit_statuses: ['observed', 'candidate', 'deprecated'] as SkillStatus[],
 }
 
-interface SkillsWindowState { selected: Record<number, string>, editing: Record<number, string>, errors: Record<number, string> }
+interface LibraryFilter { type: 'all' | 'knowledge' | 'skill', level: number }
+interface SkillsWindowState { selected: Record<number, string>, editing: Record<number, string>, errors: Record<number, string>, filters?: Record<number, LibraryFilter> }
 declare const storage: { sgluna_skills_window?: SkillsWindowState }
 
 function window_state(): SkillsWindowState | undefined { return storage.sgluna_skills_window }
@@ -60,7 +64,16 @@ export function selected_skill_id(player_index: number, list: SkillDefinition[] 
 export function editing_skill_id(player_index: number) { return window_state()?.editing[player_index] ?? '' }
 function edit_error(player_index: number) { return window_state()?.errors[player_index] ?? '' }
 
-function skill_list_caption(skill: SkillDefinition) { return `${skill.name} · ${skill.status} r${skill.revision}` }
+function skill_list_caption(skill: SkillDefinition) {
+  const label = skill.content_type === 'knowledge' ? 'K' : 'S'
+  return `${label}${skill.level !== undefined ? ` L${skill.level}` : ''} · ${skill.name} · ${skill.status} r${skill.revision}`
+}
+
+export function filtered_library_entries(list: SkillDefinition[], filter: LibraryFilter = { type: 'all', level: -1 }) {
+  return list.filter(entry => (filter.type === 'all' || (entry.content_type ?? 'skill') === filter.type)
+    && (filter.level === -1 || (filter.level === -2 ? entry.level === undefined : entry.level === filter.level)))
+    .sort((left, right) => (left.level ?? 8) - (right.level ?? 8) || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+}
 
 function flow_text(flows: SkillDefinition['inputs']) {
   return flows.map(flow => `${flow.item}${flow.amount !== undefined ? ` x${flow.amount}` : ''}${flow.role !== undefined ? ` (${flow.role})` : ''}`).join(', ')
@@ -71,6 +84,8 @@ export function skill_detail_rows(skill: SkillDefinition): Array<[string, string
   const summary = skills.skill_ui_summary(skill)
   const rows: Array<[string, string]> = [
     ['ID', skill.id],
+    ['TYPE', skill.content_type === 'knowledge' ? 'Knowledge: explicit on-demand reference; never skill autoload or execution guidance. Not live facts or an execution grant.' : 'Skill: a reusable method; not an execution or completion grant.'],
+    ['LEVEL', skill.level !== undefined ? `L${skill.level} complexity; availability and verification are separate.` : 'Unleveled legacy or personal entry.'],
     ['KIND', `${skill.kind} · stage ${skill.stage} · ${skill.status} · revision ${skill.revision}`],
     ['SOURCE', `${skill.source.kind}${skill.source.evidence_refs.length > 0 ? ` · ${skill.source.evidence_refs.join(', ')}` : ''}`],
     ['SUMMARY', skill.summary],
@@ -86,7 +101,17 @@ export function skill_detail_rows(skill: SkillDefinition): Array<[string, string
     ['CONFIDENCE', `${skill.confidence.level}${skill.confidence.basis.length > 0 ? ` · ${skill.confidence.basis.join(' ')}` : ''}`],
     ['EXAMPLES', skill.examples.map(example => `${example.summary}${example.notes !== undefined ? ` — ${example.notes}` : ''}`).join('\n')],
   ]
-  return rows.filter(([, value]) => value.length > 0)
+  if (skill.guidance !== undefined) {
+    rows.splice(5, 0,
+      ['USE WHEN', skill.guidance.when_to_use], ['SKIP WHEN', skill.guidance.when_to_skip],
+      ['LIVE CHECKS', skill.guidance.live_checks.join('\n')],
+      ['METHOD', skill.guidance.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')],
+      ['DONE WHEN', skill.guidance.completion.join('\n')],
+      ['CAPABILITIES', skill.guidance.required_capabilities.length > 0 ? `Required, not assumed available:\n${skill.guidance.required_capabilities.join('\n')}` : 'Use only current admitted tools and live observations.'],
+      ['RELATED', skill.guidance.related_ids.join(', ')],
+    )
+  }
+  return rows.filter(([key, value]) => value.length > 0 && (skill.content_type !== 'knowledge' || !['KIND', 'INPUTS', 'OUTPUTS', 'NEEDS', 'MACHINES', 'LINKS', 'RULES', 'PARAMS', 'CHECKED', 'CONFIDENCE'].includes(key)))
 }
 
 /**
@@ -128,11 +153,12 @@ function refresh_learning(section: LuaGuiElement) {
   section.tags = { signature }
 }
 
-function refresh_list(frame: LuaGuiElement, list: SkillDefinition[], selected_id: string) {
+function refresh_list(frame: LuaGuiElement, list: SkillDefinition[], selected_id: string, filter: LibraryFilter) {
   const count = frame[SKILLS_WINDOW.list_count]
   const box = frame[SKILLS_WINDOW.list] as any
   if (!count?.valid || !box?.valid) return false
-  const caption = `${list.length}`
+  const knowledge = list.filter(entry => entry.content_type === 'knowledge').length
+  const caption = `${knowledge} knowledge · ${list.length - knowledge} skills`
   if (count.caption !== caption) count.caption = caption
   const items = list.map(skill_list_caption)
   const ids = list.map(skill => skill.id)
@@ -141,6 +167,12 @@ function refresh_list(frame: LuaGuiElement, list: SkillDefinition[], selected_id
   let selected_index = 0
   for (let index = 0; index < ids.length; index++) if (ids[index] === selected_id) selected_index = index + 1
   if (box.selected_index !== selected_index) box.selected_index = selected_index
+  const profile = frame[SKILLS_WINDOW.library] as DropDownGuiElement
+  const types = frame[SKILLS_WINDOW.type_filter] as DropDownGuiElement
+  const levels = frame[SKILLS_WINDOW.level_filter] as DropDownGuiElement
+  profile.selected_index = skills.curated_library_profile() === 'leveled' ? 2 : 1
+  types.selected_index = filter.type === 'knowledge' ? 2 : filter.type === 'skill' ? 3 : 1
+  levels.selected_index = filter.level === -1 ? 1 : filter.level === -2 ? 10 : filter.level + 2
   return true
 }
 
@@ -178,11 +210,12 @@ function refresh_detail(frame: LuaGuiElement, skill: SkillDefinition | undefined
   const edit = header?.valid ? header[SKILLS_WINDOW.edit] : undefined
   const export_button = header?.valid ? header[SKILLS_WINDOW.export] : undefined
   if (!flow?.valid || !title?.valid || !edit?.valid || !export_button?.valid) return false
-  const caption = skill?.name ?? 'Skill Detail'
+  const caption = skill?.name ?? 'Library Detail'
   if (title.caption !== caption) title.caption = caption
   const enabled = skill !== undefined && !editing
   if (edit.enabled !== enabled) edit.enabled = enabled
   if (export_button.enabled !== enabled) export_button.enabled = enabled
+  export_button.tooltip = skill?.content_type === 'knowledge' ? 'Export knowledge.json and KNOWLEDGE.md under script-output/sgluna-knowledge.' : 'Export skill.json and SKILL.md under script-output/sgluna-skills.'
   const signature = skill === undefined ? '' : `${skill.id}#${skill.revision}#${editing ? 'edit' : 'view'}`
   if (flow.tags.signature === signature) {
     const error_label = editing ? flow[SKILLS_WINDOW.edit_error] : undefined
@@ -190,7 +223,7 @@ function refresh_detail(frame: LuaGuiElement, skill: SkillDefinition | undefined
     return true
   }
   flow.clear()
-  if (skill === undefined) flow.add({ type: 'label', caption: 'No skills yet. Use LEARN AREA, or let SGLuna learn from finished goals.' })
+  if (skill === undefined) flow.add({ type: 'label', caption: 'No entries match these filters. Select another type or level.' })
   else if (editing) render_edit_form(flow, skill, error)
   else for (const [key, value] of skill_detail_rows(skill)) add_detail_row(flow, key, value)
   flow.tags = { signature }
@@ -201,13 +234,16 @@ function build_columns(body: LuaGuiElement) {
   const columns = body.add({ type: 'flow', name: SKILLS_WINDOW.columns, direction: 'horizontal' }); columns.style.horizontal_spacing = 12; columns.style.vertical_align = 'top'
   const list_frame = columns.add({ type: 'frame', name: SKILLS_WINDOW.list_frame, direction: 'vertical', style: 'inside_shallow_frame' }); list_frame.style.width = SKILLS_WINDOW.list_width; list_frame.style.height = SKILLS_WINDOW.height
   const list_header = list_frame.add({ type: 'frame', direction: 'horizontal', style: 'subheader_frame' }); list_header.style.horizontally_stretchable = true
-  list_header.add({ type: 'label', caption: 'SKILLS', style: 'subheader_caption_label' })
+  list_header.add({ type: 'label', caption: 'KNOWLEDGE & SKILLS', style: 'subheader_caption_label' })
   const list_spacer = list_header.add({ type: 'empty-widget' }); list_spacer.style.horizontally_stretchable = true
   list_frame.add({ type: 'label', name: SKILLS_WINDOW.list_count, caption: '', style: 'grey_label' })
-  const box = list_frame.add({ type: 'list-box', name: SKILLS_WINDOW.list, items: [], tags: { signature: '', ids: [] } }); box.style.horizontally_stretchable = true; box.style.vertically_stretchable = true; box.style.maximal_height = SKILLS_WINDOW.height - 60
+  list_frame.add({ type: 'drop-down', name: SKILLS_WINDOW.library, items: ['Basic curated library', 'Leveled library · foundations included'], selected_index: 1, tooltip: 'The leveled library incorporates all basic patterns as classified methods. Keeps personal edits, learned entries and committed-plan instruction snapshots.' }).style.horizontally_stretchable = true
+  list_frame.add({ type: 'drop-down', name: SKILLS_WINDOW.type_filter, items: ['All entry types', 'Knowledge', 'Skills'], selected_index: 1 }).style.horizontally_stretchable = true
+  list_frame.add({ type: 'drop-down', name: SKILLS_WINDOW.level_filter, items: ['All levels', 'L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'Unleveled'], selected_index: 1, tooltip: 'Complexity only. A level does not establish availability or verification.' }).style.horizontally_stretchable = true
+  const box = list_frame.add({ type: 'list-box', name: SKILLS_WINDOW.list, items: [], tags: { signature: '', ids: [] } }); box.style.horizontally_stretchable = true; box.style.vertically_stretchable = true; box.style.maximal_height = SKILLS_WINDOW.height - 160
   const detail_frame = columns.add({ type: 'frame', name: SKILLS_WINDOW.detail_frame, direction: 'vertical', style: 'inside_shallow_frame' }); detail_frame.style.width = SKILLS_WINDOW.detail_width; detail_frame.style.height = SKILLS_WINDOW.height
   const header = detail_frame.add({ type: 'frame', name: SKILLS_WINDOW.detail_header, direction: 'horizontal', style: 'subheader_frame' }); header.style.horizontally_stretchable = true; header.style.vertical_align = 'center'
-  header.add({ type: 'label', name: SKILLS_WINDOW.detail_title, caption: 'Skill Detail', style: 'subheader_caption_label' })
+  header.add({ type: 'label', name: SKILLS_WINDOW.detail_title, caption: 'Library Detail', style: 'subheader_caption_label' })
   const spacer = header.add({ type: 'empty-widget' }); spacer.style.horizontally_stretchable = true
   header.add({ type: 'button', name: SKILLS_WINDOW.edit, caption: 'EDIT', tooltip: 'Edit the name, summary or status. Saving makes a new revision.' })
   header.add({ type: 'button', name: SKILLS_WINDOW.export, caption: 'EXPORT', style: 'confirm_button', tooltip: 'Export skill.json and SKILL.md under script-output/sgluna-skills.' })
@@ -229,7 +265,7 @@ function window_parts(player: LuaPlayer) {
   const columns = body?.valid ? body[SKILLS_WINDOW.columns] : undefined
   const list_frame = columns?.valid ? columns[SKILLS_WINDOW.list_frame] : undefined
   const detail_frame = columns?.valid ? columns[SKILLS_WINDOW.detail_frame] : undefined
-  if (!learning_section?.valid || !list_frame?.valid || !detail_frame?.valid) return undefined
+  if (!learning_section?.valid || !list_frame?.valid || !detail_frame?.valid || !list_frame[SKILLS_WINDOW.type_filter]?.valid) return undefined
   return { learning_section, list_frame, detail_frame }
 }
 
@@ -252,9 +288,10 @@ export function render_skills_window(player: LuaPlayer, open: boolean) {
   if (parts === undefined) { build_window(player); parts = window_parts(player) }
   if (parts === undefined) return
   refresh_learning(parts.learning_section)
-  const list = skills.list_skill_definitions()
+  const filter = window_state()?.filters?.[player.index] ?? { type: 'all' as const, level: -1 }
+  const list = filtered_library_entries(skills.list_skill_definitions(), filter)
   const selected_id = selected_skill_id(player.index, list)
-  refresh_list(parts.list_frame, list, selected_id)
+  refresh_list(parts.list_frame, list, selected_id, filter)
   const skill = list.find(value => value.id === selected_id)
   refresh_detail(parts.detail_frame, skill, skill !== undefined && editing_skill_id(player.index) === skill.id, edit_error(player.index))
 }
@@ -297,13 +334,13 @@ function save_edit(player: LuaPlayer) {
 export function handle_skills_window_click(player: LuaPlayer, element_name: string) {
   const names = SKILLS_WINDOW
   if (element_name === names.edit) {
-    const id = selected_skill_id(player.index)
+    const id = selected_skill_id(player.index, filtered_library_entries(skills.list_skill_definitions(), window_state()?.filters?.[player.index]))
     if (id.length > 0) { const state = ensure_window_state(); state.editing[player.index] = id; delete state.errors[player.index] }
   }
   else if (element_name === names.cancel) { const state = ensure_window_state(); delete state.editing[player.index]; delete state.errors[player.index] }
   else if (element_name === names.save) save_edit(player)
   else if (element_name === names.export) {
-    const id = selected_skill_id(player.index)
+    const id = selected_skill_id(player.index, filtered_library_entries(skills.list_skill_definitions(), window_state()?.filters?.[player.index]))
     if (id.length > 0) skills.handle_skill_export_click(player, skills.skill_export_button_name(id))
   }
   else return false
@@ -313,6 +350,22 @@ export function handle_skills_window_click(player: LuaPlayer, element_name: stri
 
 /** Handle a list-box selection. Returns true when it was the skills list. */
 export function handle_skills_window_selection(player: LuaPlayer, element: LuaGuiElement) {
+  if (element.name === SKILLS_WINDOW.library || element.name === SKILLS_WINDOW.type_filter || element.name === SKILLS_WINDOW.level_filter) {
+    const state = ensure_window_state()
+    if (state.filters === undefined) state.filters = {}
+    const filter = state.filters[player.index] ?? { type: 'all' as const, level: -1 }
+    const index = (element as DropDownGuiElement).selected_index
+    if (element.name === SKILLS_WINDOW.library) {
+      skills.select_curated_library(index === 2 ? 'leveled' : 'basic')
+      filter.type = 'all'; filter.level = -1
+    }
+    else if (element.name === SKILLS_WINDOW.type_filter) filter.type = index === 2 ? 'knowledge' : index === 3 ? 'skill' : 'all'
+    else filter.level = index === 1 ? -1 : index === 10 ? -2 : index - 2
+    state.filters[player.index] = filter
+    delete state.editing[player.index]; delete state.errors[player.index]
+    render_skills_window(player, true)
+    return true
+  }
   if (element.name !== SKILLS_WINDOW.list) return false
   const ids = element.tags.ids as string[] | undefined
   const index = (element as any).selected_index - 1

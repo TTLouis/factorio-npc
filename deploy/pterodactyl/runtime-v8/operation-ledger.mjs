@@ -106,6 +106,7 @@ export function conflictingOperation(state, proposed) {
     // acquisition with the same signature (including a zero-yield attempt).
     // Ordinary model batches and all transfer/mixed batches retain the fence.
     if (gatherRecovery && record.reason === 'exact_terminal_gather_cancelled') continue
+    if (record.reason === 'factory_lifecycle_residual_reconciled' && proposed.factoryLifecycleRecoveryKeys?.includes(record.operation_key)) continue
     if (record.effect === EFFECT.PARTIAL_KNOWN && record.plan_id === proposed.planId && record.step_id === proposed.stepId
       && record.signature === operationSignature(proposed.operations)) {
       return { refuse: true, reason: 'terminal_partial_batch_replay', operation_key: record.operation_key,

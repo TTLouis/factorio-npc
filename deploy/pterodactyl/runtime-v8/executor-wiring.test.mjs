@@ -394,7 +394,7 @@ function hardLimitWorld({ executorTokens, softLimit = { planner: 1_000_000, exec
 }
 
 test('C8: past the hard limit (2x soft) an executor is restaged fresh at the next STEP close, with a byte-identical plan block, and not again at the slice close', async () => {
-  const world = hardLimitWorld({ executorTokens: 8000 }) // soft 3500, hard 7000
+  const world = hardLimitWorld({ executorTokens: 10000 }) // soft 3500, hard 7000
   await world.run()
 
   const rows = world.rows('context.restaged')
@@ -407,7 +407,7 @@ test('C8: past the hard limit (2x soft) an executor is restaged fresh at the nex
   const decisions = world.rows('context.step_close_decision')
   assert.equal(decisions[0].data.restage, true)
   assert.equal(decisions[0].data.checkpoint, 'C8')
-  assert.equal(decisions[0].data.size_tokens, 8000, 'the provider-reported prompt tokens of the executor round')
+  assert.equal(decisions[0].data.size_tokens, 10000, 'the provider-reported prompt tokens of the executor round')
   assert.equal(decisions[0].data.hard_limit_tokens, 7000)
   assert.equal(decisions[0].data.closed_steps, 1)
   assert.equal(decisions[0].request_id, decisions[0].data.request_id)
@@ -430,15 +430,15 @@ test('C8: past the hard limit (2x soft) an executor is restaged fresh at the nex
 })
 
 test('C8: below the hard limit there is no restage at a step close, however far past the soft limit', async () => {
-  const world = hardLimitWorld({ executorTokens: 4500, softLimit: { planner: 1_000_000, executor: 4000 } }) // the receipt-refreshed packet stays below hard 8000
+  const world = hardLimitWorld({ executorTokens: 5000, softLimit: { planner: 1_000_000, executor: 4500 } }) // the receipt-refreshed packet with explicit reference tool schemas stays below hard 9000
   await world.run()
 
   assert.deepEqual(world.rows('context.restaged').map(row => `${row.data.role}:${row.data.checkpoint}`), ['executor:C3', 'executor:C3'], 'only the two plan commits')
   const [decision] = world.rows('context.step_close_decision')
   assert.equal(decision.data.restage, false)
   assert.equal(decision.data.reason, 'no_restage_needed')
-  assert.ok(decision.data.size_tokens > 4000 && decision.data.size_tokens <= 8000, `past soft, not past hard: ${decision.data.size_tokens}`)
-  assert.equal(decision.data.soft_limit_tokens, 4000)
+  assert.ok(decision.data.size_tokens > 4500 && decision.data.size_tokens <= 9000, `past soft, not past hard: ${decision.data.size_tokens}`)
+  assert.equal(decision.data.soft_limit_tokens, 4500)
   // One conversation carried the slice: the executor round after the close still holds its own earlier exchange.
   assert.equal(world.calls[2].messages.some(message => textOf(message).startsWith('[MOD] Autorio operation batch completed')), true)
   assert.equal(textOf(stepBlock(world.calls[2].messages)), '', 'the closed step block is superseded without restaging')
@@ -919,10 +919,10 @@ test('5b: a stale retry of a restage (the same lineage moved on) still clears th
 })
 
 // 5c: the silent stall. An active goal a restart finds with no plan at all.
-async function goalAdmittedNoPlan() {
+async function goalAdmittedNoPlan(options = {}) {
   const file = stateFile()
   const game = new FakeFactorio()
-  const first = harness({ game, script: [() => { throw new Error('fetch failed') }], agentOptions: { stateFile: file } })
+  const first = harness({ game, script: [() => { throw new Error('fetch failed') }], agentOptions: { stateFile: file, ...options } })
   await assert.rejects(first.say(), /fetch failed/)
   await first.agent.persistQueue
   const planning = first.memory.planningState(KEY)
@@ -1367,6 +1367,7 @@ test('issue 2: an executor reply while no plan is committed is ignored whatever 
   agent.active = true
   agent.traceRequest = { id: 'req_executor_authoring', seq: 0, usage: {} }
   const plansBefore = world.memory.planningState(KEY).plans.length
+  const effortBefore = structuredClone(world.memory.planningState(KEY).goal.effort)
   const mutationsBefore = world.game.mutations.length
 
   const result = await agent.commitPlan({ chatMessage: '', plan: ['Author my own slice'], currentStep: 0, operations: [gather('coal', 9)], roadmapNodeIds: ['node_power'] })
@@ -1374,6 +1375,7 @@ test('issue 2: an executor reply while no plan is committed is ignored whatever 
   const [ignored] = world.rows('executor.plan_semantics_ignored')
   assert.ok(ignored)
   assert.equal(ignored.data.reason, 'executor_cannot_author_plan:plan_status_COMPLETED')
+  assert.deepEqual(world.memory.planningState(KEY).goal.effort, effortBefore, 'ignored executor reply cannot consume goal effort')
   assert.equal(ignored.data.role, 'executor')
   assert.ok(ignored.request_id)
   assert.equal(world.memory.planningState(KEY).plans.length, plansBefore, 'no draft was created')
@@ -1790,4 +1792,27 @@ test('nit: a deferred slice wake persists the state and tells the UI the goal is
   const update = liveAgentEvent('executor.slice_wake_deferred', activity.find(item => item.event === 'executor.slice_wake_deferred').data)
   assert.equal(update.phase, 'waiting')
   assert.match(update.detail, /waiting for Resume/)
+})
+
+
+test('reconciled restart actively redrives the same pre-plan goal while explicit pause stays stopped', async () => {
+  const { file, game, goalId, objective } = await goalAdmittedNoPlan({ replacementWake: true })
+  const second = harness({ game, script: [() => plannerSlice()], agentOptions: { stateFile: file, replacementWake: true } })
+  await second.agent.loadPersistentState()
+  const { session } = chatSession(second.agent)
+  session.session = 'reconciled-fixture'; session.startupReconciledSession = session.session
+  session.ensureAuthorization = async () => ({})
+  await session.announceStartupGoal('before_first_plan')
+  assert.equal(second.calls.length, 1)
+  assert.equal(second.memory.planningState(KEY).goal.goal_id, goalId)
+  assert.equal(second.memory.planningState(KEY).run.paused, false)
+  assert.ok(second.calls[0].messages.some(message => textOf(message) === `[CHAT] TTLouis: ${objective}`))
+  assert.equal(second.rows('runtime.active_goal_redriven').length, 1)
+  const third = harness({ game, script: [], agentOptions: { stateFile: file } })
+  await third.agent.loadPersistentState()
+  third.memory.pausePlan(KEY, 'operator_pause', { pause_class: 'operator_pause' })
+  const stopped = chatSession(third.agent).session
+  stopped.session = 'reconciled-fixture'; stopped.startupReconciledSession = stopped.session
+  assert.equal(stopped.queueStartupGoalNotice(), false)
+  assert.equal(third.calls.length, 0)
 })

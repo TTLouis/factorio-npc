@@ -656,6 +656,12 @@ export function entity_geometry_for_actor(actor: ControlledActor, unit_number: n
     actor_id: actor.status_snapshot().actor_id,
     actor_surface_index: actor.surface.index,
     actor_force_index: actor.force.index,
+    preservation_capability: {
+      supported_type: fluid_box_count <= MAX_FLUID_STORAGES
+        && fluid_storages.every(storage => (storage.prototypes as unknown[]).length > 0),
+      proof_required: 'fresh_identity_scope_and_routes',
+      container_stock_frozen: false,
+    },
     item_io: inserter
       ? {
           pickup_position: entity.pickup_position,

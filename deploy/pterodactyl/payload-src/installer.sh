@@ -13,8 +13,8 @@ else
 fi
 NODE_VERSION="v24.21.0"
 PNPM_VERSION="10.30.1"
-SGLUNA_REF="2865d1b47eab22ccd71c6d243f3ef3c0de90f68e"
-REVISION="2026-10-17.topology.2"
+SGLUNA_REF="87f2b94b69c19f109783a26c0cd34b5809487da0"
+REVISION="2026-11-08.shared-harness-modes"
 DEPLOYMENT_REVISION="sgluna-deploy-v8-npc-staging"
 WORK=""
 
@@ -157,18 +157,20 @@ cp -a "$WORK/source/packages/autorio/dist/." "$APP/autorio/"
 
 log 'Copying v8 supervisor, shared policy, and prompt'
 cp "$WORK/source/packages/autorio/src/fixtures/leveled-library-v1.json" "$APP/src/runtime-v8/leveled-library-v1.json"
-for file in quantity-compiler.mjs material-ledger.mjs production-task.mjs production-task-runtime.mjs direct-feed-bootstrap.mjs direct-feed-bootstrap-runtime.mjs production-repair.mjs gather-recovery.mjs entity-refresh.mjs contract-prediction.mjs contract-obligations.mjs contract-obligation-runtime.mjs preservation-recovery.mjs executor-progress-audit.mjs explicit-resume.mjs explicit-resume-state.mjs next-slice-state.mjs next-slice-liveness.mjs controller-liveness.mjs tick-sprint.mjs agent-roles.mjs role-contracts.mjs agent-context.mjs handoff-packet.mjs handoff-format.mjs decision-budgets.mjs inventory-facts.mjs topology-context.mjs observation-rate.mjs placement-candidates-render.mjs placement-region.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs completion-finalization.mjs targeted-observation.mjs luna-step-contracts.mjs planning-state.mjs authorization.mjs refusal-class.mjs pause-class.mjs batch-stock.mjs batch-footprint.mjs replacement-wake.mjs task-ledger.mjs operation-reconciliation.mjs operation-ledger.mjs reserve-command.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs world-entity-tool.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs method-library.mjs machine-delivery.mjs goal-definition.mjs goal-reading.mjs goal-requirements.mjs skill-offers.mjs plan-time-estimate.mjs usage-ledger.mjs unchanged-fact-reads.mjs post-batch-facts.mjs production-wait.mjs prompt-prefix.mjs context-references.mjs lifecycle.mjs dsml-tool-calls.mjs control-json-repair.mjs responsiveness.mjs npc-agent-loop.mjs; do
+for file in harness-modes.mjs harness-cli.mjs external-harness-cli.mjs pursuit-cli.mjs operator-runtime.mjs operator-native-bridge.mjs operator-mcp-server.mjs operator-loop.mjs operator-provider.mjs operator-tool-surface.mjs pursuit-supervisor.mjs goal-effort.mjs factory-reassignment.mjs board-plan-alignment.mjs factory-cell-use.mjs factory-cell-use-recovery.mjs factory-cell-delivery.mjs factory-cell-delivery-window.mjs factory-cell-lifecycle.mjs factory-cell-lifecycle-runtime.mjs factory-cell-lifecycle-controller.mjs factory-cell-intent.mjs factory-cell-enrollment.mjs factory-placement-provenance.mjs factory-cell-observation.mjs factory-cell-tools.mjs factory-registry.mjs factory-dependencies.mjs factory-registry-runtime.mjs quantity-compiler.mjs material-ledger.mjs bg-stock-dependency.mjs bg-production-binding.mjs production-task.mjs production-task-runtime.mjs direct-feed-bootstrap.mjs direct-feed-bootstrap-runtime.mjs production-repair.mjs gather-recovery.mjs entity-refresh.mjs contract-prediction.mjs contract-obligations.mjs contract-obligation-runtime.mjs preservation-recovery.mjs executor-progress-audit.mjs explicit-resume.mjs explicit-resume-state.mjs next-slice-state.mjs next-slice-liveness.mjs controller-liveness.mjs tick-sprint.mjs agent-roles.mjs role-contracts.mjs agent-context.mjs handoff-packet.mjs handoff-format.mjs decision-budgets.mjs inventory-facts.mjs topology-context.mjs observation-rate.mjs placement-candidates-render.mjs placement-region.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs completion-finalization.mjs targeted-observation.mjs luna-step-contracts.mjs planning-state.mjs authorization.mjs refusal-class.mjs pause-class.mjs batch-stock.mjs batch-footprint.mjs replacement-wake.mjs task-ledger.mjs operation-reconciliation.mjs operation-ledger.mjs reserve-command.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs world-entity-tool.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs method-library.mjs canonical-library-tools.mjs machine-delivery.mjs owner-goal-intake.mjs goal-definition.mjs goal-reading.mjs goal-requirements.mjs skill-offers.mjs agent-notebook.mjs knowledge-retrieval.mjs plan-time-estimate.mjs usage-ledger.mjs unchanged-fact-reads.mjs post-batch-facts.mjs production-wait.mjs prompt-prefix.mjs context-references.mjs lifecycle.mjs dsml-tool-calls.mjs control-json-repair.mjs responsiveness.mjs npc-agent-loop.mjs; do
   cp "$WORK/source/deploy/pterodactyl/runtime-v8/$file" "$APP/src/runtime-v8/$file"
 done
 for file in structured-policy.mjs supervisor-adapter.mjs npc-agent-loop.mjs tick-sprint-policy.mjs native-admission-journal.mjs; do
   cp "$WORK/source/deploy/pterodactyl/staging/$file" "$APP/src/staging/$file"
 done
+cp "$WORK/source/deploy/pterodactyl/runtime-v8/replace-journal-windows.ps1" "$APP/src/runtime-v8/replace-journal-windows.ps1"
 cp "$WORK/source/packages/agent/src/llm/prompt.md" "$APP/src/prompt.md"
 cp "$WORK/source/LICENSE" "$APP/UPSTREAM-LICENSE"
 for file in "$APP/src/runtime-v8/"*.mjs "$APP/src/staging/"*.mjs; do node --check "$file"; done
 SGLUNA_SUPERVISOR_VERIFY="$APP/src/runtime-v8/supervisor.mjs" node --input-type=module <<'VERIFY_RUNTIME_IMPORTS'
 import { pathToFileURL } from 'node:url'
-await import(pathToFileURL(process.env.SGLUNA_SUPERVISOR_VERIFY).href)
+const supervisor = pathToFileURL(process.env.SGLUNA_SUPERVISOR_VERIFY)
+for (const entry of ['supervisor.mjs', 'harness-cli.mjs', 'external-harness-cli.mjs', 'pursuit-cli.mjs']) await import(new URL(entry, supervisor).href)
 VERIFY_RUNTIME_IMPORTS
 
 FACTORIO_REQUEST="${FACTORIO_VERSION:-2.1.24}"
@@ -228,7 +230,14 @@ export PATH="$APP/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sb
 export TMPDIR="$ROOT/.sgluna/tmp"
 mkdir -p "$TMPDIR"
 cd "$ROOT"
-exec "$APP/node/bin/node" "$APP/src/runtime-v8/supervisor.mjs"
+# Legacy server startup defaults to plan. Other modes connect to an already
+# running prepared Factorio host; they never silently launch the plan loop.
+export SGLUNA_HARNESS_MODE="${SGLUNA_HARNESS_MODE:-plan}"
+if [[ "$SGLUNA_HARNESS_MODE" == pursuit ]]; then
+  [[ -n "${SGLUNA_PURSUIT_PROFILE:-}" ]] || { echo '[SGLuna] SGLUNA_PURSUIT_PROFILE required for pursuit mode' >&2; exit 78; }
+  exec "$APP/node/bin/node" "$APP/src/runtime-v8/harness-cli.mjs" --profile "$SGLUNA_PURSUIT_PROFILE"
+fi
+exec "$APP/node/bin/node" "$APP/src/runtime-v8/harness-cli.mjs"
 START_SGLUNA
 chmod 755 "$APP/start-sgluna.sh"
 
@@ -292,8 +301,14 @@ const names = [
   'autorio/info.json',
   'factorio/bin/x64/factorio',
 ]
+// Cover every shipped shared module and non-JavaScript runtime dependency.
+for (const directory of ['runtime-v8', 'staging']) {
+  for (const name of (await fs.readdir(path.join(root, 'src', directory))).sort()) {
+    if (/\.(mjs|json|ps1)$/.test(name)) names.push(`src/${directory}/${name}`)
+  }
+}
 const files = {}
-for (const name of names) {
+for (const name of new Set(names)) {
   const bytes = await fs.readFile(path.join(root, name))
   files[name] = crypto.createHash('sha256').update(bytes).digest('hex')
 }

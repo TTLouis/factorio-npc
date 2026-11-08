@@ -1,3 +1,4 @@
+import { restoreGoalEffort, spendGoalEffort, creditGoalEffort } from './goal-effort.mjs'
 import { EXPLICIT_RESUME_LIMIT, restoreExplicitResume } from './explicit-resume-state.mjs'
 import { completedSliceAnchor, nextSliceTransition, restoreNextSlice, stepProgressMark } from './next-slice-state.mjs'
 // Durable planning state: Goal / Roadmap Shelf / Active Plan.
@@ -28,6 +29,7 @@ import { authoredCompletionContractSupported, completionContractSupported, sanit
 import { obligationContractContext, storedObligations, normalizeObligationProof, obligationProofOwned, obligationProofOrigin, obligationContractMatches, contractDefectShape, preservedProofMatches, effectivePreservationProof, normalizeFluidAdmission, normalizeFluidCertificate, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
 import { MAX_REPLACEMENTS_PER_GOAL } from './replacement-wake.mjs'
 import { storedExecutionGuidance } from './role-contracts.mjs'
+import { factoryCellIntentPreserved, validFactoryCellIntentStep } from './factory-cell-intent.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   authorizationHasContent,
@@ -310,7 +312,7 @@ export const DEADLOCK_REPEATED_FAILURE_LIMIT = 3
 export const PROSE_ONLY_STEP_OPERATION_CEILING = 12
 // After an executor review the planner gets one in-turn round per step; this bounds how many steps of one goal can
 // claim it, so review rounds never become an unbounded planner loop.
-export const MAX_REVIEW_CONTINUATIONS_PER_GOAL = 8
+export const MAX_REVIEW_CONTINUATIONS_PER_GOAL = 64
 // The planner's reply to that review round, kept per step so a restage that discards the conversation still hands it on.
 export const MAX_REVIEW_NOTES_CHARS = 1200
 
@@ -366,6 +368,10 @@ export const STEERING_HOLD_REASON = Object.freeze({
 
 export const PLANNING_EVENT = Object.freeze({
   GOAL_ACCEPTED: 'GOAL_ACCEPTED',
+  WORKING_PLAN_REVISED: 'WORKING_PLAN_REVISED',
+  GOAL_EFFORT_SPENT: 'GOAL_EFFORT_SPENT',
+  GOAL_NATIVE_PROGRESS: 'GOAL_NATIVE_PROGRESS',
+  GOAL_ACCEPTANCE_BOUND: 'GOAL_ACCEPTANCE_BOUND',
   ROADMAP_REVISED: 'ROADMAP_REVISED',
   // Advisory steering evaluated at a safe planning boundary (roadmap 4.3).
   STEERING_EVALUATED: 'STEERING_EVALUATED',
@@ -587,7 +593,7 @@ function text(value, max = 500) {
 
 function reviewContinuationSteps(value) {
   if (!Array.isArray(value)) return []
-  return [...new Set(value.map(stepId => text(stepId, 200)).filter(Boolean))].slice(0, MAX_REVIEW_CONTINUATIONS_PER_GOAL)
+  return [...new Set(value.map(stepId => text(stepId, 200)).filter(Boolean))].slice(-MAX_REVIEW_CONTINUATIONS_PER_GOAL)
 }
 
 // Planner review notes by step id, only for steps that claimed a review round (so the map is bounded by the same per-goal cap).
@@ -904,6 +910,8 @@ function sanitizeGoal(raw) {
     ...(Object.hasOwn(raw, 'argument_corrections') ? { argument_corrections: restoreArgumentCorrections(raw.argument_corrections, goalId, raw.created_at) } : {}),
     ...(satisfaction ? { satisfaction, satisfied_at: finiteNumber(raw.satisfied_at) ?? satisfaction.at } : {}),
     ...(definition ? { definition } : {}),
+    effort: restoreGoalEffort(raw.effort),
+    ...(raw.acceptance_bindings ? { acceptance_bindings: boundedJson(raw.acceptance_bindings) } : {}),
     ...(raw.fresh_context_recovery_used === true ? { fresh_context_recovery_used: true } : {}),
     ...(reviewContinuationSteps(raw.review_continuation_steps).length > 0 ? { review_continuation_steps: reviewContinuationSteps(raw.review_continuation_steps) } : {}),
     ...(Object.keys(reviewNotes(raw.review_notes, reviewContinuationSteps(raw.review_continuation_steps))).length > 0
@@ -1067,6 +1075,7 @@ function sanitizeStep(raw, { planId, planVersion, sequence, goalId, bindProof = 
   const contract = sanitizeOptionalCompletionContract(source.completion_contract, context)
   const pending = !contract && source.completion_mode === 'deterministic' && source.contract_status === 'pending'
   const binding = contract ? sanitizeContractBinding(source.contract_binding) : undefined
+  const guidance = storedExecutionGuidance(source.execution_guidance)
   return {
     step_id: stepId,
     ...(source.semantic_step_id || obligations ? { semantic_step_id: semanticStepId } : {}),
@@ -1075,7 +1084,7 @@ function sanitizeStep(raw, { planId, planVersion, sequence, goalId, bindProof = 
     ...(Object.hasOwn(source, 'obligations') || source.obligation_protocol === 1 ? { obligation_protocol: 1 } : {}),
     ...(obligations ? { obligations } : {}),
     ...(proof ? { obligation_proof: proof } : {}),
-    ...(storedExecutionGuidance(source.execution_guidance) ? { execution_guidance: storedExecutionGuidance(source.execution_guidance) } : {}),
+    ...(guidance ? { execution_guidance: guidance } : {}),
     ...(source.completion_mode === 'deterministic' || source.completion_mode === 'semantic'
       ? { completion_mode: source.completion_mode, ...(source.completion_mode === 'semantic' ? { semantic_rationale: text(source.semantic_rationale, 600) } : {}) }
       : {}),
@@ -2481,6 +2490,12 @@ Object.assign(HANDLERS, {
       carriedForwardEvidence: inheritedLineage?.carried_forward_evidence ?? [],
     })
     if (plan.steps.length === 0) return state
+    if (plan.steps.some(step => !validFactoryCellIntentStep(step))) return state
+    const predecessor = getPlan(state, plan.derived_from_plan_id)
+    if (predecessor && plan.steps.some(step => {
+      const original = predecessor.steps.find(row => (row.semantic_step_id ?? row.step_id) === (step.semantic_step_id ?? step.step_id))
+      return original && !factoryCellIntentPreserved(original, step)
+    })) return state
     // Re-authoring a replacement draft must not shed the grant check: lineage is preserved, and the commit
     // refuses it if the steps drifted from what the grant was classified against.
     if (inheritedLineage?.replacement) plan.replacement = inheritedLineage.replacement
@@ -2507,6 +2522,12 @@ Object.assign(HANDLERS, {
     // executable.
     if (event.runtime_validation?.passed !== true) return state
     if (plan.steps.length === 0) return state
+    if (plan.steps.some(step => !validFactoryCellIntentStep(step))) return state
+    const predecessor = getPlan(state, plan.derived_from_plan_id)
+    if (predecessor && plan.steps.some(step => {
+      const original = predecessor.steps.find(row => (row.semantic_step_id ?? row.step_id) === (step.semantic_step_id ?? step.step_id))
+      return original && !factoryCellIntentPreserved(original, step)
+    })) return state
     // The step that runs first must carry its checkpoint. Later steps may still be pending.
     if (isStepContractPending(plan.steps[plan.active_step_index])) return state
     if (plan.steps.some(step => step.obligation_protocol === 1 && (!step.obligations || !step.obligation_proof
@@ -2518,6 +2539,8 @@ Object.assign(HANDLERS, {
     // A replacement plan commits only while its grant is still current (MW1): the revision it was authorized under,
     // the goal, the actor epoch and the steps that were classified. Refused, it stays an uncommitted DRAFT and the
     // refusal is recorded for the trace; nothing else about the state moves.
+    if (plan.working_revision && !checkGrant(authorizationOf(state), state.goal, {
+      ...event.grant_check, grant_id: plan.working_revision.grant_id, grant_revision: plan.working_revision.grant_revision }).ok) return state
     if (plan.replacement) {
       const verdict = checkReplacementAtCommit(state, plan, event.grant_check)
       if (!verdict.ok) {
@@ -2680,6 +2703,7 @@ Object.assign(HANDLERS, {
     const index = plan.active_step_index
     const step = plan.steps[index]
     if (!step || text(event.step_id, 200) !== step.step_id) return state
+    if (!validFactoryCellIntentStep(step)) return state
     // A step with no bound contract cannot close, by runtime evidence or by a semantic claim.
     if (isStepContractPending(step)) return state
 
@@ -3161,6 +3185,10 @@ Object.assign(HANDLERS, {
     }
 
     const predecessor = getPlan(state, predecessorId)
+    if (Array.isArray(event.steps) && event.steps.some(step => {
+      const original = predecessor.steps.find(row => (row.semantic_step_id ?? row.step_id) === (step.semantic_step_id ?? step.step_id))
+      return original && !factoryCellIntentPreserved(original, step)
+    })) return state
     if (predecessor.blocker?.kind === 'contract_defect') {
       const active = predecessor.steps[predecessor.active_step_index]
       const suffix = predecessor.steps.slice(predecessor.active_step_index)
@@ -3417,14 +3445,65 @@ Object.assign(HANDLERS, {
     }
   },
 
+  [PLANNING_EVENT.GOAL_ACCEPTANCE_BOUND](state, event, now) {
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE || state.run?.paused
+      || event.goal_id !== state.goal.goal_id || event.native_validated !== true
+      || !state.goal.definition?.done_when?.some(row => row.kind === 'automated_starter_base')
+      || !checkGrant(authorizationOf(state), state.goal, event.grant_check).ok) return state
+    return { ...state, goal: { ...state.goal, acceptance_bindings: clone(event.bindings), updated_at: now }, updated_at: now }
+  },
+
+  [PLANNING_EVENT.GOAL_EFFORT_SPENT](state, event, now) {
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE || state.run?.paused
+      || event.goal_id !== state.goal.goal_id) return state
+    const effort = spendGoalEffort(state.goal.effort, event.blocker)
+    return effort ? { ...state, goal: { ...state.goal, effort, updated_at: now }, updated_at: now } : state
+  },
+
+  [PLANNING_EVENT.GOAL_NATIVE_PROGRESS](state, event, now) {
+    const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE || state.run?.paused
+      || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
+      || event.plan_id !== plan?.plan_id || event.step_id !== step?.step_id || !step?.completion_contract) return state
+    const effort = creditGoalEffort(state.goal.effort, step.completion_contract, event.facts)
+    return { ...state, goal: { ...state.goal, effort, updated_at: now }, updated_at: now }
+  },
+
+  [PLANNING_EVENT.WORKING_PLAN_REVISED](state, event, now) {
+    const prior = getActivePlan(state)
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE || state.run?.paused
+      || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(prior?.status)
+      || event.plan_id !== prior.plan_id || event.plan_version !== prior.plan_version
+      || event.step_id !== prior.steps[prior.active_step_index]?.step_id
+      || state.operation_ledger?.records?.length || state.run?.condition_wait?.state === 'active'
+      || event.native_idle !== true || event.runtime_validation?.passed !== true
+      || !state.goal.review_continuation_steps?.includes(event.step_id)
+      || !checkGrant(authorizationOf(state), state.goal, event.grant_check).ok) return state
+    const sequence = nextSequence(state)
+    const successor = createPlan(state, { now, sequence, planVersion: prior.plan_version + 1,
+      derivedFrom: prior.plan_id, steps: event.steps, roadmapNodeIds: prior.roadmap_node_ids,
+      developmentMode: prior.development_mode, origin: 'planner_working_revision' })
+    if (!successor.steps.length) return state
+    successor.working_revision = { version: 1, grant_id: event.grant_check.grant_id,
+      grant_revision: event.grant_check.grant_revision, predecessor_plan_id: prior.plan_id }
+    // Original steps, receipts, assignments and completed evidence remain in the
+    // predecessor. Only this pointer selects executable strategy.
+    return withReasoningReset({ ...state, sequence, active_plan_id: successor.plan_id,
+      plans: retainPlans([...state.plans.map(p => p.plan_id === prior.plan_id
+        ? withStatus({ ...p, superseded_by_plan_id: successor.plan_id }, PLAN_STATUS.SUPERSEDED, { now, reason: 'planner_working_revision' }) : p), successor], successor.plan_id, state.goal),
+      updated_at: now, log: logEntry(state, { type: event.type, at: now, plan_id: successor.plan_id,
+        derived_from_plan_id: prior.plan_id, request_id: event.request_id })
+    }, { now, eventType: event.type, reason: 'planner_working_revision' })
+  },
+
   [PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED](state, event, now) {
     const stepId = text(event.step_id, 200)
     const claimed = reviewContinuationSteps(state.goal?.review_continuation_steps)
     if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE || event.goal_id !== state.goal.goal_id
-      || !stepId || claimed.includes(stepId) || claimed.length >= MAX_REVIEW_CONTINUATIONS_PER_GOAL) return state
+      || !stepId || getActivePlan(state)?.steps?.[getActivePlan(state)?.active_step_index]?.step_id !== stepId) return state
     return {
       ...state,
-      goal: { ...state.goal, review_continuation_steps: [...claimed, stepId], updated_at: now },
+      goal: { ...state.goal, review_continuation_steps: [...claimed.filter(id => id !== stepId), stepId].slice(-MAX_REVIEW_CONTINUATIONS_PER_GOAL), updated_at: now },
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED, at: now, goal_id: state.goal.goal_id, step_id: stepId }),
     }
@@ -3745,7 +3824,7 @@ Object.assign(HANDLERS, {
     const appended = incoming.map(entry => ({ ...entry, seq: ++seq }))
     const nextLedger = appended.length === 0
       ? ledger
-      : { ...ledger, [stepId]: [...held, ...appended].slice(-RECEIPT_LEDGER_LIMITS.perStep) }
+      : { ...ledger, [stepId]: compactActiveReceiptLedger([...held, ...appended]) }
     const seeded = plan.execution.receipts_seeded === true || seeding
     return {
       ...withPlan(state, plan.plan_id, current => ({
@@ -4222,6 +4301,24 @@ export function activeStepVerifiedOperationNames(state) {
     .flatMap(entry => entry.verified_operation_names ?? []))]
 }
 
+// Retain a correlated witness for each verified operation while the step can
+// still execute. Repeated waits must not erase a prior mixed-checkpoint fact.
+// This preserves original entries, never unions names onto another receipt.
+function compactActiveReceiptLedger(entries) {
+  const cap = RECEIPT_LEDGER_LIMITS.perStep
+  if (entries.length <= cap) return entries
+  const selected = new Set(); const names = new Set()
+  for (let index = entries.length - 1; index >= 0 && selected.size < cap; index--) {
+    const row = entries[index]
+    if (row.kind !== 'deterministic_verification' || row.source !== 'runtime') continue
+    const unseen = (row.verified_operation_names ?? []).filter(name => !names.has(name))
+    if (!unseen.length) continue
+    selected.add(index); unseen.forEach(name => names.add(name))
+  }
+  for (let index = entries.length - 1; index >= 0 && selected.size < cap; index--) selected.add(index)
+  return entries.filter((_, index) => selected.has(index))
+}
+
 function runEventAllowed(state, event) {
   if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return false
   const goalId = text(event.goal_id, 120)
@@ -4339,6 +4436,12 @@ function restorePreservationProofs(raw, steps) {
   return restored
 }
 
+function validWorkingRevision(value) {
+  return value?.version === 1 && typeof value.grant_id === 'string' && value.grant_id.length > 0
+    && Number.isSafeInteger(value.grant_revision) && value.grant_revision > 0
+    && typeof value.predecessor_plan_id === 'string' && value.predecessor_plan_id.length > 0
+}
+
 function restorePlan(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const planId = text(raw.plan_id, 200)
@@ -4382,6 +4485,8 @@ function restorePlan(raw) {
           diverges_from_steering: raw.steering_at_draft.diverges_from_steering === true,
         }
       : null,
+    ...(Object.hasOwn(raw, 'working_revision') ? { working_revision: clone(raw.working_revision),
+      ...(!validWorkingRevision(raw.working_revision) ? { working_revision_unsupported: true } : {}) } : {}),
     status,
     steps,
     active_step_index: Number.isSafeInteger(raw.active_step_index)
@@ -4650,6 +4755,12 @@ export function restorePlanningState(raw) {
   }
   const activePlanId = text(raw.active_plan_id, 200)
   const plans = retainPlans(Array.isArray(raw.plans) ? raw.plans : [], activePlanId, raw.goal).map(restorePlan).filter(Boolean)
+  if (goal && raw.goal?.effort === undefined) {
+    const historical = plans.reduce((sum, plan) => sum + (plan.execution?.batches_attempted ?? 0), 0)
+      + (goal.review_continuation_steps?.length ?? 0) + (goal.replacements_accepted ?? 0)
+      + (Number.isSafeInteger(raw.run?.auto_resume?.goal_total) && raw.run.auto_resume.goal_total >= 0 ? raw.run.auto_resume.goal_total : raw.run?.auto_resume?.goal_total === undefined ? 0 : 24)
+    goal.effort = { ...restoreGoalEffort(undefined), spent: Math.min(24, historical), total: historical, migration: 'legacy_retained_counts_no_credit' }
+  }
   return {
     version: PLANNING_STATE_VERSION,
     sequence: Number.isSafeInteger(raw.sequence) ? raw.sequence : plans.length,

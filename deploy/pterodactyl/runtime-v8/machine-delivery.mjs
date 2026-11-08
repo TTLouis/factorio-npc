@@ -1,4 +1,5 @@
 import { luaString } from '../staging/structured-policy.mjs'
+import { spendContextCalls } from './agent-notebook.mjs'
 
 const key = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value)
 const unit = value => Number.isSafeInteger(value) && value > 0 && value < 1_000_000_000
@@ -41,3 +42,33 @@ export async function evaluateMachineDelivery(spec, command) {
 export const machineDeliveryToolDefinition = { type: 'function', function: { name: 'bindMachineDelivery',
   description: 'Select the exact newly placed destination chest for this finite machine-output goal. Goal metadata only; no world mutation. Selection is immutable. Use for automated output, or an exact successful target-item deposit selects the chest automatically.',
   parameters: { type: 'object', properties: { unit_number: { type: 'integer', minimum: 1, maximum: 999999999 } }, required: ['unit_number'], additionalProperties: false } } }
+
+export async function handleMachineDeliveryBinding(loop, message, prepared) {
+  if (!isValidatedMachineDeliveryBatch(prepared) || message?.tool_calls?.length !== 1
+    || JSON.stringify(message.tool_calls[0]) !== JSON.stringify(prepared[0].tool)) throw new Error('machine_delivery_requires_separate_binding')
+  if (loop.observationDecisionForced || loop.actionOmissionRepairActive) throw new Error('machine_delivery_unavailable_in_closed_or_targeted_recovery')
+  const entry = prepared[0]
+  // Goal metadata writes use the request-scoped context budget, never the
+  // observation cache, relevance gate or world-fact decision allowance.
+  spendContextCalls(loop, 1, 1)
+  await loop.assertCurrent()
+  const planningKey = loop.activePlanKey()
+  const goal = loop.memory.planningState(planningKey)?.goal
+  if (!goal?.definition?.done_when?.some(condition => condition.kind === 'machine_output_delivered')) throw new Error('machine_delivery_goal_unavailable')
+  const generation = loop.generation; const request = loop.traceRequest
+  const sequence = loop.agentContext?.conversationSeq; const lineage = loop.agentContext?.lineageSequence; const role = loop.agentContext?.role
+  const fence = async () => {
+    await loop.assertCurrent()
+    if (loop.generation !== generation || loop.traceRequest !== request || loop.memory.planningState(planningKey)?.goal?.goal_id !== goal.goal_id
+      || loop.agentContext?.conversationSeq !== sequence || loop.agentContext?.lineageSequence !== lineage || loop.agentContext?.role !== role) throw new Error('machine_delivery_binding_superseded')
+  }
+  await fence()
+  await loop.traceEvent('tool.call', { request_id: request?.id, tool_call_id: entry.tool.id, name: 'bindMachineDelivery', args: entry.args })
+  await fence()
+  const output = String(await loop.rcon.command(bindMachineDeliveryCommand({ acceptance_key: goal.goal_id, ...entry.args })))
+  await fence()
+  loop.messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: message.tool_calls }, { role: 'tool', tool_call_id: entry.tool.id, content: output })
+  if (request?.usage) { request.usage.tool_calls++; request.usage.tool_result_chars += output.length }
+  await loop.traceEvent('tool.result', { request_id: request?.id, tool_call_id: entry.tool.id, name: 'bindMachineDelivery', output, output_chars: output.length })
+  await loop.traceEvent('machine_delivery.binding', { request_id: request?.id, tool_call_id: entry.tool.id, args: entry.args, output })
+}

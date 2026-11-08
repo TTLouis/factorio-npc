@@ -64,6 +64,8 @@ export function deployment(overrides = {}) {
     mode: 'npc',
     actor_id: 18,
     actor_kind: 'standalone_character',
+    surface_index: 1,
+    force_index: 1,
     connected_players: 1,
     allowed: true,
     idle: true,
@@ -82,6 +84,7 @@ const TASK_TYPES_BY_OPERATION = {
   harvest_product: ['harvesting'],
   craft_item: ['crafting'],
   place_entity: ['placing'],
+  place_candidate: ['placing'],
   move_items: ['moving_items'],
   move_items_exact: ['moving_items'],
   supply_entity: ['moving_items'],
@@ -90,7 +93,7 @@ const TASK_TYPES_BY_OPERATION = {
 }
 
 export class FakeFactorio {
-  constructor({ inventory = {}, preflight } = {}) {
+  constructor({ inventory = {}, preflight, factoryWorldId = 'b6d48546-b5ce-45aa-9d21-b83c232c271b' } = {}) {
     this.status = deployment()
     this.inventory = { ...inventory }
     this.preflight = preflight ?? (() => ({ ok: true }))
@@ -133,6 +136,13 @@ export class FakeFactorio {
     // What autorio_skills.get returns per skill id, so getSkillDetails can
     // load task-local skill context.
     this.skills = {}
+    // Explicit synthetic engine state. Unknown members have no capability;
+    // tests must script native recipe/endpoint/flow facts, never infer them
+    // from an intended job or from a requested observation locator.
+    this.factoryWorldId = factoryWorldId
+    this.factoryMembers = new Map()
+    this.factoryObservations = []
+    this.factoryTerminalBatchReceipts = new Map()
   }
 
   // Fails the last admitted batch the way Autorio reports it: the failing
@@ -154,6 +164,9 @@ export class FakeFactorio {
       Object.assign(this.cancelledBatch, { started_count: failedTaskIndex + 1, tasks_started: failedTaskIndex + 1,
         ...(placing ? { failed_task_index: failedTaskIndex } : {}) })
     }
+    // Retain the exact emitted object so injected missing/bad fields remain missing/bad on later polls.
+    this.factoryTerminalBatchReceipts.set(this.cancelledBatch.batch_ref, this.cancelledBatch)
+    if (this.factoryTerminalBatchReceipts.size > 64) this.factoryTerminalBatchReceipts.delete(this.factoryTerminalBatchReceipts.keys().next().value)
     this.lastBasicResult = { operation_id: this.batchId, tick, actor_id: this.status.actor_id, accepted: true, completed: false, ...result }
     this.taskState = 'idle'
     this.queueLength = 0
@@ -211,17 +224,47 @@ export class FakeFactorio {
     }
 
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
+    if (/remote\.call\(["']autorio_actor["'],["']status["']/.test(text)) return JSON.stringify({
+      mode: this.status.mode, actor: { actor_id: this.status.actor_id, kind: this.status.actor_kind, valid: this.status.allowed === true },
+      surface_index: this.status.surface_index, force_index: this.status.force_index,
+    })
+    if (/remote\.call\(["']sgluna_factory["'],["']world_identity["']/.test(text)) return JSON.stringify({
+      schema_version: 1, ok: Boolean(this.factoryWorldId), code: this.factoryWorldId ? 'ok' : 'world_unbound', world_id: this.factoryWorldId,
+    })
+    if (/remote\.call\(["']sgluna_factory["'],["']bind_world_id["']/.test(text)) {
+      const world = /bind_world_id["'],\s*["']([^"']+)["']/.exec(text)?.[1]
+      if (!this.factoryWorldId && /^[a-f0-9-]{36}$/i.test(world ?? '')) this.factoryWorldId = world
+      return JSON.stringify({ schema_version: 1, ok: this.factoryWorldId === world, world_id: this.factoryWorldId })
+    }
+    if (/remote\.call\(["']sgluna_factory["'],["']observe["']/.test(text)) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      const request = JSON.parse(encoded.replace(/\\(.)/g, '$1'))
+      this.factoryObservations.push(structuredClone(request))
+      const matches = request.world_id === this.factoryWorldId && request.actor_id === this.status.actor_id
+        && request.surface_index === this.status.surface_index && request.force_index === this.status.force_index
+      return JSON.stringify({ ...request, ok: matches, code: matches ? 'ok' : 'synthetic_factory_owner_mismatch', tick: this.gameTick,
+        members: request.members.map(locator => {
+          const scripted = this.factoryMembers.get(locator.unit_number)
+          const exact = scripted?.locator && ['unit_number', 'name', 'surface_index', 'force_index'].every(key => scripted.locator[key] === locator[key])
+            && scripted.locator.position?.x === locator.position.x && scripted.locator.position?.y === locator.position.y
+          return exact ? structuredClone(scripted) : { locator, state: 'unknown', code: 'synthetic_member_not_scripted' }
+        }) })
+    }
     if (text.includes('remote.call("autorio_operations","status")')) {
+      const last = this.batchId > 0 && this.cancelledBatch?.batch_id !== this.batchId
+        ? { batch_id: this.batchId, batch_generation: this.generation ?? 1, batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}`,
+            task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick: 600 + this.batchId }
+        : undefined
+      if (last && this.taskState === 'idle' && this.queueLength === 0 && !this.factoryTerminalBatchReceipts.has(last.batch_ref)) this.factoryTerminalBatchReceipts.set(last.batch_ref, { ...last, state: 'completed' })
+      if (this.factoryTerminalBatchReceipts.size > 64) this.factoryTerminalBatchReceipts.delete(this.factoryTerminalBatchReceipts.keys().next().value)
       return JSON.stringify({
         task_state: this.taskState,
         batch_generation: this.generation ?? 1,
-        receipt_journal: this.cancelledBatch ? [{ ...this.cancelledBatch, state: 'cancelled' }] : [],
+        receipt_journal: [...this.factoryTerminalBatchReceipts.values()].map(row => ({ ...row, state: row.state ?? 'cancelled' })),
         queue_empty: this.queueLength === 0,
         queue_length: this.queueLength,
         admission_journal: this.admissionJournal(),
-        last_completed_batch: this.batchId > 0 && this.cancelledBatch?.batch_id !== this.batchId
-          ? { batch_id: this.batchId, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick: 600 + this.batchId }
-          : undefined,
+        last_completed_batch: last,
         last_cancelled_batch: this.cancelledBatch,
         basic_operation: this.batchId > 0 ? { last_result: this.lastBasicResult ?? { operation_id: this.batchId, code: 'completed', completed: true } } : undefined,
       })
@@ -308,6 +351,19 @@ export class FakeFactorio {
         .flatMap(([, name]) => TASK_TYPES_BY_OPERATION[name] ?? ['waiting'])
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
       this.onMutation?.(text)
+      // Qualify only a newly scripted successful native placement from this
+      // exact admitted batch. Reading old status never mints missing custody.
+      const placement = this.lastBasicResult
+      const admission = this.admissions.at(-1)
+      if (placement?.type === 'placing' && placement.accepted === true && placement.completed === true && placement.code === 'completed'
+        && placement.actor_id === this.status.actor_id && placement.tick === 600 + this.batchId
+        && admission?.batch_id === this.batchId && admission.slots.length === 1
+        && ['place_entity', 'place_candidate'].includes(admission.slots[0].operation)
+        && Number.isSafeInteger(placement.placed_unit_number) && placement.entity_name && placement.placed_position) {
+        this.lastBasicResult = { actor_kind: this.status.actor_kind, placed_world_id: this.factoryWorldId,
+          placed_force_index: this.status.force_index, placed_batch_id: this.batchId,
+          placed_batch_generation: this.generation ?? 1, placed_batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}`, ...placement }
+      }
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
     }
     this.unknown.push(text.slice(0, 160))
@@ -335,6 +391,27 @@ export class FakeFactorio {
       return { ...record, state: this.taskState === 'idle' && record.batch_id <= this.batchId ? 'completed' : 'admitted' }
     })
   }
+}
+
+// Synthetic fixture instruction after a real shared placement settlement.
+// Assignment is explicit test data; the retained receipt and canonical scope
+// still pass the production registry facade unchanged.
+export function assignScriptedFactoryPlacement(agent, game, key, unit, { products, kind = 'item', native }) {
+  const memory = agent.memory
+  if (memory.getFactoryOperationalRegistry().cells.some(cell => cell.members.some(member => member.unit_number === unit))) return
+  const receipt = memory.snapshot().factory_placement_receipts?.find(row => row.unit_number === unit)
+  assert.ok(receipt, `fixture assignment requires retained placement ${unit}`)
+  const locator = Object.fromEntries(['unit_number', 'name', 'position', 'surface_index', 'force_index'].map(field => [field, receipt[field]]))
+  game.factoryMembers.set(unit, { ...structuredClone(native), locator, state: 'observed' })
+  const runtime = memory.createFactoryRegistryRuntime(key, () => ({ world_id: game.factoryWorldId,
+    surface_index: game.status.surface_index, force_index: game.status.force_index,
+    actor_id: agent.epoch.actor_id, actor_epoch: agent.epoch.epoch, session_id: agent.epoch.session,
+    request_id: agent.traceRequest.id, native_idle: game.taskState === 'idle' && game.queueLength === 0, pending: false, uncertain: false }))
+  const scope = runtime.scope()
+  const member = runtime.recordPlacement({ ...locator, provenance: { receipt_id: receipt.receipt_id } }, scope)
+  runtime.registerCell({ surface_index: locator.surface_index, force_index: locator.force_index, origin: runtime.origin(), members: [member],
+    assignment: { products, purpose: 'Explicit synthetic fixture assignment after native placement', method: 'Scripted native capability' },
+    ports: products.map((resource, index) => ({ port_id: `output-${index}`, direction: 'output', kind, resource })) }, scope)
 }
 
 // Preferred live answers for every choice question family Jev can be asked.

@@ -331,7 +331,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 2,
+    revision: 3,
     id: 'belt-side-load-merge',
     name: 'Belt Side-Load Merge',
     kind: 'logistics',

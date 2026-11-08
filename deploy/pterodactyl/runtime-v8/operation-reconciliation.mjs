@@ -1,4 +1,3 @@
-export const TERMINAL_TRANSFER_REFUSAL_CAUSES = Object.freeze(['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item'])
 // MW2b operation reconciliation (docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md section 3: "No blind replay of a command whose
 // acknowledgement was lost, and no uncertain operation counted as successful").
 //
@@ -365,6 +364,10 @@ function canonicalJson(value) {
   if (isRecord(value)) return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
   return JSON.stringify(value ?? null)
 }
+
+// Native zero-movement causes that prove an exact transfer target refused the item without moving any of it.
+// Mirrors operation_admission.ts terminal_transfer_refusal.
+export const TERMINAL_TRANSFER_REFUSAL_CAUSES = Object.freeze(['target_rejects_item', 'target_full', 'input_slot_holds_other_item', 'no_input_inventory_for_item'])
 
 // The full canonical batch is bound to its admission with a collision-resistant digest.
 export function operationSignature(operations) {

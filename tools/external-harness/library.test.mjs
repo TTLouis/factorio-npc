@@ -132,7 +132,7 @@ test('MCP paired streams deliver typed library content and validate enum before 
   const replies = []
   let buffer = ''
   output.on('data', chunk => { buffer += chunk; while (buffer.includes('\n')) { const n = buffer.indexOf('\n'); replies.push(JSON.parse(buffer.slice(0, n))); buffer = buffer.slice(n + 1) } })
-  const runtime = Object.fromEntries(['capabilities', 'context', 'observe', 'submit', 'get', 'cancel', 'resume'].map(key => [key, () => { throw new Error(`Forbidden ${key}`) }]))
+  const runtime = Object.fromEntries(['bindMachineDelivery', 'capabilities', 'context', 'observe', 'submit', 'get', 'cancel', 'resume'].map(key => [key, () => { throw new Error(`Forbidden ${key}`) }]))
   runtime.library = readLibrary
   const server = startMcpServer({ runtime, input, output, error: new PassThrough() })
   t.after(server.stop)
@@ -153,7 +153,7 @@ test('actual process adapter reads the library from a fake read-only backend wit
   const serverUrl = new URL('./mcp-server.mjs', import.meta.url).href
   const libraryUrl = new URL('./library.mjs', import.meta.url).href
   const code = `import {startMcpServer} from ${JSON.stringify(serverUrl)}; import {readLibrary} from ${JSON.stringify(libraryUrl)};
-const runtime=Object.fromEntries(['capabilities','context','observe','submit','get','cancel','resume'].map(key=>[key,()=>{throw new Error('world forbidden')} ]));runtime.library=readLibrary;await startMcpServer({runtime}).done;`
+const runtime=Object.fromEntries(['bindMachineDelivery','capabilities','context','observe','submit','get','cancel','resume'].map(key=>[key,()=>{throw new Error('world forbidden')} ]));runtime.library=readLibrary;await startMcpServer({runtime}).done;`
   await withMcpClient(async client => {
     assert.match(client.initialize.result.instructions, /electricity FIRST/)
     const r = await client.request('tools/call', { name: 'factorio_library', arguments: { kind: 'skill', action: 'search', query: 'electricity' } })

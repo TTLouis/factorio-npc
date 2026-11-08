@@ -1,0 +1,79 @@
+{
+  "source": "34c43507df01223478f2ca286cd8214ce7c89d04",
+  "note": "Exact selected original terminal rows only; full historical logs stay sealed locally.",
+  "a": [
+    {
+      "schema": 1,
+      "ts": "2026-10-29T02:55:50.299Z",
+      "seq": 540,
+      "event": "contract.preservation_refused",
+      "request_id": "req_mvsxzwt4_1",
+      "turn": 9,
+      "actor_id": 13,
+      "epoch": 1,
+      "data": {
+        "preflight_code": "batch_stock_unverified_dependency",
+        "refusal_class": "argument",
+        "operation_index": 1,
+        "operation_name": "supply_entity",
+        "semantic_step_id": "goal_1ldgbah_1_p4_v1_s1_1edayyr",
+        "prior_claims": [
+          {
+            "reason": "batch_stock_unverified_dependency",
+            "request_id": "req_mvsxzwt4_1",
+            "at": 1793242237620,
+            "operation_index": 2,
+            "operation_name": "supply_entity"
+          }
+        ],
+        "in_memory_retries": 0,
+        "retry_limit": 1,
+        "ledger_claims": 1,
+        "ledger_claim_cap": 64,
+        "code": "argument_correction_limit_exhausted",
+        "category": "exhausted",
+        "stage": "correction",
+        "pause_class": "guard",
+        "retryable": false,
+        "goal_id": "goal_1ldgbah_1",
+        "plan_id": "goal_1ldgbah_1_p4",
+        "step_id": "goal_1ldgbah_1_p4_v1_s1_1edayyr",
+        "disposition": "classified_guard_pause"
+      }
+    }
+  ],
+  "b": [
+    {
+      "schema": 1,
+      "ts": "2026-10-29T03:21:29.218Z",
+      "seq": 1317,
+      "event": "production.pause",
+      "request_id": "recovery_mvsyn0bj",
+      "turn": 31,
+      "actor_id": 24,
+      "epoch": 1,
+      "data": {
+        "plan_id": "goal_0b66w4y_1_p11",
+        "step_id": "goal_0b66w4y_1_p11_v1_s1_1f0yj5o",
+        "reason": "production_producer_unbound:copper-plate",
+        "transitions": 0,
+        "recoveries": 0
+      }
+    },
+    {
+      "schema": 1,
+      "ts": "2026-10-29T03:21:29.234Z",
+      "seq": 1318,
+      "event": "production.paused",
+      "request_id": "recovery_mvsyn0bj",
+      "turn": 31,
+      "actor_id": 24,
+      "epoch": 1,
+      "data": {
+        "reason": "production_producer_unbound:copper-plate",
+        "plan_id": "goal_0b66w4y_1_p11",
+        "step_id": "goal_0b66w4y_1_p11_v1_s1_1f0yj5o"
+      }
+    }
+  ]
+}

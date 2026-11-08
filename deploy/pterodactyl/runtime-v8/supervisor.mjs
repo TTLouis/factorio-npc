@@ -1,3 +1,4 @@
+import { requireHarnessMode } from './harness-modes.mjs'
 import { inspectNextSliceLiveness, nextSliceControlView, nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice } from './next-slice-liveness.mjs'
 import { captureDecisionBudgets, decisionBudgetOwner, ownsDecisionBudgets, restoreDecisionBudgets } from './decision-budgets.mjs'
 import { inspectControllerLiveness } from './controller-liveness.mjs'
@@ -36,6 +37,8 @@ import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, sele
 import { resolveAgentRole } from './agent-roles.mjs'
 import { CONTINUATION_WORDS, NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
+import { armMachineDeliveryCommand } from './machine-delivery.mjs'
+import { sanitizeOwnerGoal } from './owner-goal-intake.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { lockedRecipeSummary } from './goal-requirements.mjs'
 import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
@@ -2666,7 +2669,7 @@ export class Session {
     const fresh = cached?.key === cacheKey && now - cached.at < GOAL_UI_REFRESH_MS
     if (definition && !fresh) {
       let evaluation
-      try { evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command), { samples: 1 }) }
+      try { evaluation = await evaluateGoalDefinition({ ...definition, acceptance_key: goal.goal_id }, command => this.rcon.command(command), { samples: 1 }) }
       catch { evaluation = undefined }
       this.goalUiCache = { key: cacheKey, at: now, evaluation }
     }
@@ -2682,7 +2685,7 @@ export class Session {
     const goal = planning?.goal
     let evaluation
     if (goal?.status === GOAL_STATUS.ACTIVE && goal.definition) {
-      try { evaluation = await evaluateGoalDefinition(goal.definition, command => this.rcon.command(command), { samples: 1 }) }
+      try { evaluation = await evaluateGoalDefinition({ ...goal.definition, acceptance_key: goal.goal_id }, command => this.rcon.command(command), { samples: 1 }) }
       catch { evaluation = undefined }
     }
     const lines = formatGoalStatus({
@@ -3901,6 +3904,24 @@ export class Session {
   }
 
   async announceStartupGoal(kind) {
+    const key = `npc:${this.npcId}`
+    const planning = this.agent.memory?.planningState?.(key)
+    if (planning?.goal?.definition?.source === 'user'
+      && planning.goal.definition.done_when?.some(condition => condition.kind === 'machine_output_delivered')) {
+      await this.agent.traceEvent?.('runtime.owner_goal_held', { goal_id: planning.goal.goal_id, reason: 'explicit_owner_start_required', model_woken: false })
+      return
+    }
+    const goal = this.agent.redrivableGoalWithoutPlan?.(key, { startupRecovery: true })
+    if (goal && planning?.run?.paused !== true && this.startupReconciledSession === this.session) {
+      await this.ensureAuthorization()
+      const native = await this.agent.readInteractionTaskStatus()
+      if (native?.task_state === 'idle' && native.queue_length === 0
+        && !this.agent.memory.pendingOperation?.(key) && !this.agent.active
+        && this.agent.redrivableGoalWithoutPlan?.(key, { startupRecovery: true })?.goal_id === goal.goal_id) {
+        await this.agent.traceEvent?.('runtime.active_goal_redriven', { goal_id: goal.goal_id, reason: kind, reconciled: true })
+        return this.agent.request('continue', { sender: goal.owner, startupRecovery: true })
+      }
+    }
     const requestId = `recovery_${Date.now().toString(36)}`
     const goalId = this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id
     if (kind === 'before_first_plan') {
@@ -4066,19 +4087,50 @@ export class Session {
     const stop = control === 'stop'
     if (stop) this.agent.cancel('user_stop_immediate')
     const received = this.currentActorCorrelation() // what the request arrived under: an intake retry is fenced to it
+    const stopAgent = this.agent
+    const stopKey = stopAgent.activePlanKey?.()
+    const completedStop = stop ? stopAgent.memory?.completedGoalControl?.(stopKey) : undefined
+    const stopGoalIdentity = () => stopAgent.memory?.planningState?.(stopKey)?.goal?.goal_id ?? stopAgent.memory?.completedGoalControl?.(stopKey)?.goal_id
+    const stopGoal = stopGoalIdentity()
+    const stopSession = this.lastStatus?.session
+    const stopEpoch = JSON.stringify(stopAgent.epoch)
+    const ownsStop = () => this.agent === stopAgent && this.cancelGeneration === generation
+      && this.currentActorCorrelation().actor_id === received.actor_id && this.currentActorCorrelation().epoch === received.epoch
+      && this.lastStatus?.session === stopSession && JSON.stringify(stopAgent.epoch) === stopEpoch
+      && stopAgent.activePlanKey?.() === stopKey && stopGoalIdentity() === stopGoal
     this.queueEvent(async () => {
       try {
         if (stop) {
-          const state = typeof this.agent.pausePersistentPlan === 'function'
-            ? await this.agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
-            : undefined
-          if (state) await this.syncTaskBoardUi(state)
+          if (!ownsStop()) return
+          let state, saveError
+          try {
+            state = completedStop && typeof stopAgent.pauseCompletedGoalControl === 'function'
+              ? await stopAgent.pauseCompletedGoalControl(completedStop, { ...received, session: stopSession }, ownsStop, () => this.rawStatus())
+              : typeof stopAgent.pausePersistentPlan === 'function'
+                ? await stopAgent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
+                : undefined
+          } catch (error) { saveError = error }
+          // A storage failure must not leave this owner's native work running.
+          // A superseded stop must not cancel the replacement actor/goal either.
+          if (!ownsStop()) { if (saveError) this.log('Superseded stop save failed; replacement owner retained'); return }
           await this.ensureAuthorization()
+          if (!ownsStop()) { if (saveError) this.log('Superseded stop save failed; replacement owner retained'); return }
           await this.rcon.command('/silent-command remote.call("sgluna_deployment","cancel")')
+          if (!ownsStop()) return
+          if (saveError) throw saveError
+          if (state) await this.syncTaskBoardUi(state)
+          if (!ownsStop()) return
           await this.printChat(pauseChatLine(state, { cancelledWork: true }))
           return
         }
         await this.processPlayerRequest(sender, text, { received, generation })
+      }
+      catch (error) {
+        // Rejected awaits need the same ownership fence as successful returns.
+        // Generic queue failure recovery acts on the current goal, so an old
+        // stop must not send its late authorization/native/UI error there.
+        if (!stop || ownsStop()) throw error
+        this.log('Superseded stop failed; replacement owner retained')
       }
       finally {
         if (typeof onSettled === 'function') await onSettled()
@@ -4091,6 +4143,39 @@ export class Session {
   // `intake` is the running intake retry when this is one (its failure may schedule the next attempt instead of being reported).
   // `generation` is cancelGeneration as the request started; `isCancelled` (an intake retry's token) is checked after each await
   // before the request reaches the agent, so a stop in that window is not lost.
+  async acceptOwnerGoal(raw) {
+    check(this.ready && !this.stopping && this.agent && this.rcon, 'Session is not ready for owner goal intake')
+    const spec = sanitizeOwnerGoal(raw)
+    const generation = this.cancelGeneration; const agent = this.agent
+    const current = () => check(!this.stopping && this.agent === agent && this.cancelGeneration === generation, 'Owner goal intake cancelled or superseded')
+    // Let startup notices settle before installing a goal they might otherwise
+    // misclassify as an abandoned pre-plan goal and automatically redrive.
+    await this.eventQueue; current()
+    await this.ensureAuthorization(); current()
+    const accepted = await agent.acceptOwnerGoal(spec); current()
+    const target = spec.definition.done_when[0]
+    const armed = JSON.parse(String(await this.rcon.command(armMachineDeliveryCommand({ acceptance_key: spec.acceptanceKey,
+      item_name: target.item_name, minimum: target.minimum, producer_type: 'furnace' }))).trim())
+    current()
+    check(armed?.ok === true && armed.acceptance_key === spec.acceptanceKey && armed.item_name === target.item_name
+      && armed.minimum === target.minimum && armed.armed_tick !== undefined, 'Owner goal native arming failed')
+    this.ownerGoalReady = { goalId: spec.goalId, generation, agent, consumed: false }
+    await this.syncTaskBoardUi(); current()
+    return { ...accepted, nativeAcceptance: armed }
+  }
+
+  async runOwnerGoal({ goalId } = {}) {
+    const accepted = this.ownerGoalReady
+    check(this.ready && !this.stopping && accepted && !accepted.consumed && accepted.goalId === goalId
+      && this.agent === accepted.agent && this.cancelGeneration === accepted.generation, 'Owner goal is not ready to start')
+    accepted.consumed = true
+    const result = await accepted.agent.runOwnerGoal({ goalId })
+    const finalized = await finalizeCompletedTaskBoundary(this, result)
+    if (!finalized) await this.syncTaskBoardUi()
+    if (result?.chatMessage) await this.printChat(result.chatMessage)
+    return result
+  }
+
   async processPlayerRequest(sender, text, { received, intake, generation, isCancelled } = {}) {
     const cancelled = () => isCancelled?.() === true
     if (cancelled()) return null
@@ -4278,7 +4363,8 @@ export async function verifyManifest(app) {
   return manifest
 }
 
-async function main() {
+export async function main(_args = [], env = process.env) {
+  requireHarnessMode('plan', env)
   check(os.arch() === 'x64', 'SGLuna Pterodactyl v8 requires amd64')
   const root = path.resolve(process.env.CONTAINER_ROOT || '/home/container')
   const app = installedAppRoot()

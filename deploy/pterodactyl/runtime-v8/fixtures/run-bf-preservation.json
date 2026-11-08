@@ -1,0 +1,390 @@
+{
+  "source_sha": "3a1827ae5face33f619289ddcd8a290b380cc7e6",
+  "a_step": {
+    "step_id": "goal_0dwj5os_1_p22_v1_s1_050o5dg",
+    "semantic_step_id": "goal_0dwj5os_1_p22_v1_s1_050o5dg",
+    "description": "Replace the eleven north-facing belts at x=67.5, y=-14.5 through -4.5 with eleven south-facing belts, preserving the existing coal and copper machines and both coal inserters.",
+    "completion_contract": {
+      "mode": "all",
+      "requirements": [
+        {
+          "id": "obligation_1",
+          "kind": "entity_count",
+          "prototype": "transport-belt",
+          "minimum": 11,
+          "radius": 6,
+          "anchor": {
+            "x": 67.5,
+            "y": -9.5
+          }
+        },
+        {
+          "id": "obligation_2",
+          "kind": "authoritative_operation_receipt",
+          "operation_name": "execute_construction_plan"
+        },
+        {
+          "id": "obligation_3",
+          "kind": "entity_exists",
+          "unit_number": 37
+        },
+        {
+          "id": "obligation_4",
+          "kind": "entity_exists",
+          "unit_number": 38
+        },
+        {
+          "id": "obligation_5",
+          "kind": "entity_exists",
+          "unit_number": 39
+        },
+        {
+          "id": "obligation_6",
+          "kind": "entity_exists",
+          "unit_number": 40
+        },
+        {
+          "id": "obligation_7",
+          "kind": "entity_exists",
+          "unit_number": 42
+        },
+        {
+          "id": "obligation_8",
+          "kind": "entity_exists",
+          "unit_number": 44
+        }
+      ],
+      "confidence": 0
+    },
+    "obligation_protocol": 1,
+    "obligations": {
+      "outcome": {
+        "mode": "all",
+        "requirements": [
+          {
+            "id": "requirement_1",
+            "kind": "entity_count",
+            "prototype": "transport-belt",
+            "minimum": 11,
+            "radius": 6,
+            "anchor": {
+              "x": 67.5,
+              "y": -9.5
+            }
+          },
+          {
+            "id": "requirement_2",
+            "kind": "authoritative_operation_receipt",
+            "operation_name": "execute_construction_plan"
+          }
+        ],
+        "confidence": 0
+      },
+      "preserve": [
+        37,
+        38,
+        39,
+        40,
+        42,
+        44
+      ]
+    },
+    "obligation_proof": {
+      "version": 1,
+      "intent_signature": "ae2ec585a04fa35255466b3923e77f78ce771528303d83ad7d2e9d057ba6c6d7",
+      "actor_id": 22,
+      "actor_epoch": 1,
+      "request_id": "recovery_mvsqskia",
+      "captured_at": 1793231640049,
+      "preserved": [
+        {
+          "entity": {
+            "unit_number": 37,
+            "name": "burner-mining-drill",
+            "type": "mining-drill",
+            "position": {
+              "x": 64,
+              "y": 10
+            },
+            "direction": 0
+          },
+          "actor_id": 22,
+          "surface_index": 1,
+          "force_index": 1,
+          "item_io": {
+            "drop_position": {
+              "x": 63.5,
+              "y": 8.703125
+            },
+            "drop_target": {
+              "unit_number": 38,
+              "name": "stone-furnace",
+              "type": "furnace",
+              "position": {
+                "x": 64,
+                "y": 8
+              },
+              "direction": 0
+            }
+          }
+        },
+        {
+          "entity": {
+            "unit_number": 38,
+            "name": "stone-furnace",
+            "type": "furnace",
+            "position": {
+              "x": 64,
+              "y": 8
+            },
+            "direction": 0
+          },
+          "actor_id": 22,
+          "surface_index": 1,
+          "force_index": 1
+        },
+        {
+          "entity": {
+            "unit_number": 39,
+            "name": "burner-mining-drill",
+            "type": "mining-drill",
+            "position": {
+              "x": 80,
+              "y": -10
+            },
+            "direction": 0
+          },
+          "actor_id": 22,
+          "surface_index": 1,
+          "force_index": 1,
+          "item_io": {
+            "drop_position": {
+              "x": 79.5,
+              "y": -11.296875
+            },
+            "drop_target": {
+              "unit_number": 40,
+              "name": "burner-mining-drill",
+              "type": "mining-drill",
+              "position": {
+                "x": 80,
+                "y": -12
+              },
+              "direction": 8
+            }
+          }
+        },
+        {
+          "entity": {
+            "unit_number": 40,
+            "name": "burner-mining-drill",
+            "type": "mining-drill",
+            "position": {
+              "x": 80,
+              "y": -12
+            },
+            "direction": 8
+          },
+          "actor_id": 22,
+          "surface_index": 1,
+          "force_index": 1,
+          "item_io": {
+            "drop_position": {
+              "x": 80.5,
+              "y": -10.703125
+            },
+            "drop_target": {
+              "unit_number": 39,
+              "name": "burner-mining-drill",
+              "type": "mining-drill",
+              "position": {
+                "x": 80,
+                "y": -10
+              },
+              "direction": 0
+            }
+          }
+        },
+        {
+          "entity": {
+            "unit_number": 42,
+            "name": "burner-inserter",
+            "type": "inserter",
+            "position": {
+              "x": 78.5,
+              "y": -10.5
+            },
+            "direction": 4
+          },
+          "actor_id": 22,
+          "surface_index": 1,
+          "force_index": 1,
+          "item_io": {
+            "drop_position": {
+              "x": 77.30078125,
+              "y": -10.5
+            },
+            "drop_target": {
+              "unit_number": 41,
+              "name": "wooden-chest",
+              "type": "container",
+              "position": {
+                "x": 77.5,
+                "y": -10.5
+              },
+              "direction": 0
+            },
+            "pickup_position": {
+              "x": 79.5,
+              "y": -10.5
+            },
+            "pickup_target": {
+              "unit_number": 39,
+              "name": "burner-mining-drill",
+              "type": "mining-drill",
+              "position": {
+                "x": 80,
+                "y": -10
+              },
+              "direction": 0
+            }
+          }
+        },
+        {
+          "entity": {
+            "unit_number": 44,
+            "name": "burner-inserter",
+            "type": "inserter",
+            "position": {
+              "x": 77.5,
+              "y": -11.5
+            },
+            "direction": 8
+          },
+          "actor_id": 22,
+          "surface_index": 1,
+          "force_index": 1,
+          "item_io": {
+            "drop_position": {
+              "x": 77.5,
+              "y": -12.69921875
+            },
+            "drop_target": {
+              "unit_number": 43,
+              "name": "transport-belt",
+              "type": "transport-belt",
+              "position": {
+                "x": 77.5,
+                "y": -12.5
+              },
+              "direction": 0
+            },
+            "pickup_position": {
+              "x": 77.5,
+              "y": -10.5
+            },
+            "pickup_target": {
+              "unit_number": 41,
+              "name": "wooden-chest",
+              "type": "container",
+              "position": {
+                "x": 77.5,
+                "y": -10.5
+              },
+              "direction": 0
+            }
+          }
+        }
+      ],
+      "binding": {
+        "goal_id": "goal_0dwj5os_1",
+        "plan_id": "goal_0dwj5os_1_p22",
+        "plan_version": 1,
+        "step_id": "goal_0dwj5os_1_p22_v1_s1_050o5dg",
+        "semantic_step_id": "goal_0dwj5os_1_p22_v1_s1_050o5dg"
+      }
+    },
+    "execution_guidance": {
+      "approach": "Re-observe the eleven belts; recover them, then validate and execute all eleven exact replacements facing south (direction 8). Inspect both end connections afterward.",
+      "rationale": "Live topology shows the existing section carries items north. Reusing its eleven belts avoids crafting an extra parallel route.",
+      "constraints": [
+        "Preserve the coal and copper machines and both inserters.",
+        "Revalidate after removing belts; do not clear other structures.",
+        "Verify actual belt topology; delivery remains unproven."
+      ],
+      "skillIds": [],
+      "materialSupply": null
+    },
+    "completion_mode": "deterministic",
+    "contract_status": "bound",
+    "completion_confidence": "grounded",
+    "reduced_confidence": false
+  },
+  "a_reply": {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_s5ZBLEFxMt5EdGDaXK0KcR9I",
+        "type": "function",
+        "function": {
+          "name": "submitPlan",
+          "arguments": "{\"stepId\":\"goal_0dwj5os_1_p22_v1_s1_050o5dg\",\"operations\":[{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":46}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":47}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":48}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":49}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":50}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":51}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":52}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":53}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":54}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":55}},{\"name\":\"mine_entity_exact\",\"args\":{\"unit_number\":43}}]}"
+        }
+      }
+    ]
+  },
+  "b_reply": {
+    "role": "assistant",
+    "content": "{\"chatMessage\":\"The coal drill is producing into the chest, but its fuel is not yet self-replenishing. I\u2019ll collect its accumulated coal for the next bootstrap work without disturbing the drill or chest.\",\"plan\":[\"Collect at least 3 coal from the coal drill\u2019s output chest while preserving the drill and chest.\"],\"currentStep\":0,\"operations\":[],\"roadmapNodeIds\":[\"fuel\"],\"developmentMode\":\"vertical\",\"stepCompletions\":[{\"kind\":\"deterministic\",\"checkpoint\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":3}]},\"obligations\":{\"outcome\":{\"mode\":\"all\",\"requirements\":[{\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":3}]},\"preserve\":[29,30]}}],\"executionGuidance\":[{\"approach\":\"Reobserve the exact chest and drill, then collect at least 3 coal from the chest.\",\"rationale\":\"The observed chest held 3 coal; collection makes the running bootstrap useful while a self-fueling route remains unresolved.\",\"constraints\":[\"Preserve the drill and chest.\",\"Do not claim the fuel supply is self-replenishing.\"],\"skillIds\":[\"skill-parallel-production-scheduling\"],\"materialSupply\":null}]}",
+    "tool_calls": null
+  },
+  "notice": "Original issued replies and committed step extracted from sealed Run BF closeout. Native implicit fresh geometry was not retained; tests explicitly substitute unchanged native projection of stored proof.",
+  "terminal_events": {
+    "a": [
+      {
+        "schema": 1,
+        "ts": "2026-10-28T23:56:52.541Z",
+        "seq": 77,
+        "event": "contract.defect_refused",
+        "request_id": "recovery_mvsrwhxq",
+        "turn": 2,
+        "actor_id": 22,
+        "epoch": 1,
+        "data": {
+          "goal_id": "goal_0dwj5os_1",
+          "plan_id": "goal_0dwj5os_1_p22",
+          "plan_version": 1,
+          "step_id": "goal_0dwj5os_1_p22_v1_s1_050o5dg",
+          "semantic_step_id": "goal_0dwj5os_1_p22_v1_s1_050o5dg",
+          "request_id": "recovery_mvsrwhxq",
+          "trigger": "native_completion",
+          "reason": "preservation_baseline_changed",
+          "disposition": "classified_guard_pause"
+        }
+      }
+    ],
+    "b": [
+      {
+        "schema": 1,
+        "ts": "2026-10-28T23:18:45.909Z",
+        "seq": 653,
+        "event": "goal.paused",
+        "request_id": "recovery_mvsqedei",
+        "turn": 9,
+        "actor_id": 15,
+        "epoch": 1,
+        "data": {
+          "request_id": "recovery_mvsqedei",
+          "cause": "preservation_type_unsupported",
+          "pause_reason": "preservation_type_unsupported: provider_jev_recovery_route_failed: preservation_type_unsupported",
+          "pause_class": "guard",
+          "provider_failure": false,
+          "source": "next_slice_settlement",
+          "goal_id": "goal_04moy41_1",
+          "resume": "Resume or say continue"
+        }
+      }
+    ]
+  }
+}
