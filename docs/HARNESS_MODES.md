@@ -95,6 +95,11 @@ pursuit's in-process tools use the **same catalog object, argument validation
 and dispatcher**. The old tools-directory paths are compatibility wrappers.
 The installer ships this complete module set, library export and Windows helper
 once and includes them in its integrity manifest.
+Installed `start-sgluna.sh` verifies that manifest before importing any selected
+lifecycle or opening native/provider connections. A damaged or unreadable
+release stops with `release_integrity_failed`; success emits no stdout. Source
+CLI use retains its existing setup requirements and does not require an installed
+manifest. Direct plan-supervisor startup keeps its own manifest check.
 
 Plan's `NpcAgentLoop` and `Session` additionally enforce committed-plan authority,
 placement provenance, factory-cell enrollment, step preservation and recovery
