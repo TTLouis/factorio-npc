@@ -16,11 +16,12 @@ dated records say what has been verified.
 | Understand SGLuna and its limits | [Project overview](../README.md), [current status](NPC_AGENT_HARNESS_STATUS.md) |
 | Run a server | [Docker](../deploy/docker/README.md) or [Pterodactyl](../deploy/pterodactyl/README.md) |
 | Set up an external AI harness | [Portable automatic setup](EXTERNAL_HARNESS_SETUP.md), [local MCP runtime/tools](EXTERNAL_HARNESS.md) |
+| Select external, plan or pursuit | [Shared mode methods, startup and defaults](HARNESS_MODES.md) |
 | See demonstrated external-harness progress | [Latest proofs and in-game screenshots](proofs/README.md), [release notes](releases/external-harness-v0.1.0-pre.1.md) |
 | Make a first contribution or report a bug | [Contributing](../CONTRIBUTING.md) |
 | Work with a coding agent | [AGENTS.md](../AGENTS.md) |
 | Choose tests and a supported environment | [Testing](TESTING.md) |
-| Scope, review and integrate a task | [Development workflow](DEVELOPMENT_WORKFLOW.md) |
+| Choose a branch, review and integrate a task | [Branch rules and development workflow](DEVELOPMENT_WORKFLOW.md#branches-and-integration-target) |
 | Understand the project contract | [SPEC.md](../SPEC.md) |
 
 ## Shared contracts
@@ -37,9 +38,11 @@ These apply to the NPC whichever line controls it.
 
 ## Built-in planner and Jev contracts
 
-These describe the `experiment/jev-agent-architecture` line. Their presence on
-`main` does not mean `main` runs the built-in planner. Several are approved
-designs that are only partly built; each page's status line says how far.
+Plan mode and optional Jev support are available in the shared `main` codebase.
+These references also contain historical experiments and approved designs that
+are only partly built; each page's status and recorded candidate delimit its
+claims. Their presence does not make every proposal implemented, or require an
+experiment checkout to run the current planner.
 
 | Area | Reference |
 | --- | --- |

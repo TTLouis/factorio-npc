@@ -21,11 +21,14 @@ See [current status](docs/NPC_AGENT_HARNESS_STATUS.md) for known limits and
 
 ## Choose the right source
 
-External-harness pull requests target **`main`**. Start a small task branch
+External, plan, pursuit and shared-runtime pull requests target **`main`**.
+These are runtime modes, not separate installation branches. Start a small task branch
 from its current head, using `<type>/<task-slug>`: `docs/setup-guide`,
-`fix/inventory-refresh` or `test/crafting-restart`, for example. The internal
-planner/Jev experiment remains on `experiment/jev-agent-architecture`; changes
-to that experiment are separate from the external-harness workflow.
+`fix/inventory-refresh` or `test/crafting-restart`, for example. Optional Jev
+support in plan mode does not require an experiment branch. Legacy built-in
+harness refs preserve historical candidates; use an experiment ref only for an
+explicitly scoped experiment, with its own acceptance and integration decision.
+See the [branch rules](docs/DEVELOPMENT_WORKFLOW.md#branches-and-integration-target).
 
 In an independent clone, fetch/check out `main` before creating
 your task branch. In the owner's shared workspace, first follow the parent
