@@ -44,9 +44,15 @@ def run(client: Rcon, results: Path) -> None:
         )
 
     def custody_snapshot(target_id: int, context: str) -> dict:
+        # Ordinary buildings are not necessarily indexed by get-by-unit-number.
+        # As in entity_reference.identity_at, the position only scopes the scan;
+        # an entity counts as present only when its exact identity still matches.
         return json_command(
-            f"/silent-command local a=game.get_entity_by_unit_number({actor_id}); assert(a and a.valid); "
-            f"local target=game.get_entity_by_unit_number({target_id}); "
+            "/silent-command local s=game.surfaces[1]; local a=nil; "
+            f"for _,e in pairs(s.find_entities_filtered{{name='character'}}) do if e.valid and e.unit_number=={actor_id} then a=e end end; assert(a); "
+            f"local p={{x={fixture['chest_position']['x']},y={fixture['chest_position']['y']}}}; local target=nil; "
+            "for _,e in pairs(a.surface.find_entities_filtered{name='wooden-chest',position=p,radius=0.25,force=a.force}) do "
+            f"if e.valid and e.unit_number=={target_id} then target=e end end; "
             "rcon.print(helpers.table_to_json({target_exists=target~=nil and target.valid,"
             "wooden_chest=a.get_main_inventory().get_item_count('wooden-chest'),position=a.position}))",
             context,
@@ -62,7 +68,9 @@ def run(client: Rcon, results: Path) -> None:
             f"assert(d.allowed and d.idle and d.actor_id=={actor_id} "
             f"and d.epoch=={deployment['epoch']} and d.session=={deployment['session']!r}); "
             "assert(remote.call('sgluna_deployment','authorize',d.epoch)); "
-            "local a=game.get_entity_by_unit_number(d.actor_id); assert(a and a.valid); "
+            "local s=game.get_surface(d.surface_index); assert(s and s.valid); local a=nil; "
+            "for _,e in pairs(s.find_entities_filtered{name='character'}) do if e.valid and e.unit_number==d.actor_id then a=e end end; "
+            "assert(a and a.force.index==d.force_index); "
             "local world=remote.call('sgluna_factory','world_identity'); "
             f"assert(world.ok and world.world_id=={world_id!r}); "
             "local journal=remote.call('autorio_operation_admission','status'); "
