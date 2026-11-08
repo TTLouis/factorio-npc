@@ -166,6 +166,23 @@ test('strict completed operation receipts are eligible for deterministic verific
   })
 })
 
+test('exact resource correction uses one correlated completed mining task and never admission, busy, stale or failed basic work', () => {
+  const state = planState({ last_operations: ['mine_resource_at {"resource_name":"coal","x":10.5,"y":0.5,"count":1}'] })
+  const receipt = completedReceipt({ taskTypes: ['mining'] })
+  assert.deepEqual(verifyDeterministicReceipt(state, receipt), { verified: true, batchId: 7, taskTypes: ['mining'], operationNames: ['mine_resource_at'] })
+  for (const patch of [{ outcome: 'admitted' }, { task_state: 'mining' }, { queue_length: 1 },
+    { task_count: 2 }, { task_types: ['waiting'] }, { task_types: ['walking_to_entity', 'mining'], task_count: 2 },
+    { correlation: { goal_id: 'other-goal' } }, { correlation: { step_id: 'other-step' } },
+    { outcome: 'failed', basic_operation: { type: 'mining', accepted: false, completed: false, code: 'mining_rejected' } }]) {
+    const changed = { ...receipt, summary: JSON.stringify({ ...JSON.parse(receipt.summary), ...patch }) }
+    assert.equal(verifyDeterministicReceipt(state, changed).verified, false, JSON.stringify(patch))
+  }
+  const failedBasic = { ...receipt, kind: 'operation_error_receipt', summary: JSON.stringify({ ...JSON.parse(receipt.summary),
+    outcome: 'failed', basic_operation: { type: 'mining', accepted: false, completed: false, code: 'mining_rejected' } }) }
+  assert.equal(verifyDeterministicReceipt(state, failedBasic).verified, false)
+  assert.equal(state.task_board.active_index, 2, 'task receipt alone never advances semantic progress')
+})
+
 test('successful entity transfers require a real positive-effect moving-items receipt', () => {
   const state = planState({
     last_operations: ['move_items_exact {"item_name":"coal","unit_number":99,"max_count":10,"to_entity":true}'],

@@ -1396,7 +1396,10 @@ test('run BB lane C: provider_failure follows the pause class and the failure co
   assert.equal(isProviderFailurePause({ pause_class: 'system' }, 'checkpoint_requires_active_step: x'), false)
   // Genuine provider pauses stay provider failures.
   assert.equal(isProviderFailurePause({ pause_class: 'transport', pause_subkind: 'timeout' }, 'provider_transient: Provider timed out'), true)
-  assert.equal(isProviderFailurePause(guard, 'request_failed: Provider HTTP 400'), true)
+  assert.equal(isProviderFailurePause(guard, 'request_failed: Provider HTTP 400'), false, 'declared guard ownership overrides a generic request_failed fallback')
+  assert.equal(isProviderFailurePause(guard, 'request_failed: invalid_planner_review after partial_unknown; provider HTTP 200'), false)
+  assert.equal(isProviderFailurePause({ pause_class: 'model_recoverable' }, 'request_failed: invalid_planner_review'), false)
+  assert.equal(isProviderFailurePause({}, 'request_failed: Provider HTTP 400'), true, 'legacy unclassified provider failures retain fallback attribution')
   for (const code of ['provider_recovery_exhausted', 'provider_action_omission_repair_failed', 'provider_semantic_alignment_failed', 'provider_output_budget_exhausted']) {
     assert.equal(isProviderFailurePause({ pause_class: 'model_recoverable' }, `${code}: x`), true, code)
   }
@@ -1419,12 +1422,13 @@ test('run BB lane C: the stranded-plan pause of a guard error keeps the guard co
   assert.equal(row.cause, 'argument_correction_limit_exhausted')
   assert.equal(row.pause_class, 'guard')
   assert.equal(await session.considerPauseForAutoResume(), null, 'a guard pause waits for a player Resume')
-  // A genuinely unplaced request failure still reads as request_failed and as a provider failure, as before.
+  // Unstructured provider-looking text is classified as a guard fallback;
+  // unlike a typed transport/provider code it cannot establish provider failure.
   const other = await startedAgent()
   other.agent.traceRequest = null
   await pauseStrandedPlanAfterRequestError(sessionFor(other.agent).session, new Error('Provider HTTP 400; request will not be retried automatically'))
   const generic = recoveryRows(other.events, 'goal.paused').at(-1)
-  assert.deepEqual([generic.cause, generic.provider_failure], ['request_failed', true])
+  assert.deepEqual([generic.cause, generic.provider_failure], ['request_failed', false])
 })
 
 // --- Run BB lane B on the real supervisor and agent ---------------------------------------------------------------------------

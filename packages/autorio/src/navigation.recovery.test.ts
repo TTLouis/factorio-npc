@@ -37,6 +37,33 @@ beforeEach(() => {
 })
 
 describe('physical navigation recovery', () => {
+  it('keeps a queued gather search in its admitted origin disk after a preceding gather moved the actor', () => {
+    const f = fixture()
+    ;(globalThis as any).prototypes.entity.coal = { type: 'resource' }
+    Object.assign(f.target, { name: 'coal', type: 'resource', amount: 100 })
+    f.surface.find_entities_filtered.mockImplementation((args: any) => args.area ? []
+      : args.position.x === 0 && args.position.y === 0 && args.radius === 64 ? [f.target] : [])
+    expect(f.controller.submit_resource('coal', 64)).toBe(true)
+    f.position.x = 100
+    f.controller.tick(f.actor)
+    expect(f.surface.find_entities_filtered).toHaveBeenCalledWith(expect.objectContaining({ position: { x: 0, y: 0 }, radius: 64, name: 'coal' }))
+    expect(f.surface.request_path).toHaveBeenCalledTimes(1)
+    expect(f.manager.player_state.parameters_walk_to_entity!.target).toBe(f.target)
+    expect(f.manager.player_state.parameters_walk_to_entity!.search_radius).toBe(64)
+  })
+
+  it('preserves ordinary actor-relative navigation while resource search origin is gather-specific', () => {
+    const f = fixture()
+    ;(globalThis as any).prototypes.entity.coal = { type: 'resource' }
+    f.surface.find_entities_filtered.mockImplementation((args: any) => args.area ? []
+      : args.position.x === 0 ? [f.target] : [])
+    expect(f.controller.submit('coal', 64)).toBe(true)
+    f.position.x = 100
+    f.controller.tick(f.actor)
+    expect(f.surface.request_path).not.toHaveBeenCalled()
+    expect(f.controller.status().last_result?.code).toBe('no_target')
+  })
+
   it('detects physical no-displacement substantially before the old ten-second timeout', () => {
     const f = fixture()
     f.controller.submit('steel-chest', 40)

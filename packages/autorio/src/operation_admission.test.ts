@@ -81,6 +81,23 @@ describe('AR terminal partial gather accounting', () => {
     ;(globalThis as any).storage = saved
     expect(f.admission.status().records[0].state).toBe('partial')
   })
+  it('settles the exact sequential-gather navigation miss without declaring the batch complete', () => {
+    const f = fixture()
+    f.receipt.reason = 'navigation_no_target'
+    f.receipt.tasks_started = 3
+    expect(f.admission.status().records[0]).toMatchObject({ state: 'partial', error: 'exact_terminal_gather_cancelled', ok: false })
+  })
+  it.each(['wrong_task_boundary', 'missing_started', 'duplicate', 'opaque_reason'] as const)('retains navigation-miss %s uncertainty', mode => {
+    const f = fixture()
+    f.receipt.reason = 'navigation_no_target'; f.receipt.tasks_started = 3
+    if (mode === 'wrong_task_boundary') f.receipt.tasks_started = 2
+    if (mode === 'missing_started') f.receipt.tasks_started = 0
+    if (mode === 'duplicate') f.status().receipt_journal.push({ ...f.receipt })
+    if (mode === 'opaque_reason') f.receipt.reason = 'navigation_unknown'
+    const record = (globalThis as any).storage.sgluna_operation_admissions[0]
+    expect(terminal_gather_cancellation(record, f.status() as any)).toBe(false)
+    expect(f.admission.status().records[0].state).not.toBe('partial')
+  })
   it.each(['mixed', 'receipt_mismatch', 'generation', 'extra_tasks'] as const)('leaves %s uncertain', (mode) => {
     const f = fixture()
     const record = (globalThis as any).storage.sgluna_operation_admissions[0]
@@ -93,7 +110,7 @@ describe('AR terminal partial gather accounting', () => {
   })
 })
 function actor() {
-  return { is_valid: true, force: { index: 1 }, character: { valid: true }, status_snapshot: () => ({ actor_id: 7 }) } as unknown as ControlledActor
+  return { is_valid: true, position: { x: 0, y: 0 }, surface: { index: 1 }, force: { index: 1 }, character: { valid: true }, status_snapshot: () => ({ actor_id: 7 }) } as unknown as ControlledActor
 }
 beforeEach(() => {
   ;(globalThis as any).storage = {}

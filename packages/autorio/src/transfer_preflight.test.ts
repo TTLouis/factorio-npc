@@ -352,6 +352,7 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     held = actor_with({ 'iron-ore': 50 })
     ;(held.actor as any).surface = { index: 1 }
     ;(held.actor as any).force = { index: 1 }
+    ;(held.actor as any).status_snapshot = () => ({ actor_id: 42, kind: 'standalone_character', valid: true })
     current_target = undefined
     ;(globalThis as any).game.get_entity_by_unit_number = () => current_target
     ;(globalThis as any).game.get_player = () => undefined
@@ -462,12 +463,14 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
   })
 
   it('admits a live resource source and rejects depleted sources and invalid gather radius', () => {
+    ;(held.actor as any).position = { x: 0, y: 0 }
     ;(globalThis as any).prototypes.entity['copper-ore'] = { type: 'resource' }
     const source = { valid: true, name: 'copper-ore', amount: 75, position: { x: 1.5, y: 2.5 } }
     const scan = vi.fn(() => [source])
     ;(held.actor as any).surface.find_entities_filtered = scan
     expect(preflight('gather_resource', { resource_name: 'copper-ore', count: 75, search_radius: 8 }))
-      .toMatchObject({ ok: true, resource_search: { radius: 8, position: source.position, amount: 75 } })
+      .toMatchObject({ ok: true, resource_search: { radius: 8, position: source.position, amount: 75,
+        origin: { x: 0, y: 0 }, surface_index: 1, force_index: 1, actor_id: 42, tick: 100 } })
     source.amount = 0
     expect(preflight('gather_resource', { resource_name: 'copper-ore', search_radius: 8 })).toMatchObject({ ok: false, code: 'resource_source_not_found' })
     scan.mockClear()
@@ -568,7 +571,13 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
 
   it('does not apply the transfer facts to other exact operations, and stale targets still reject first', () => {
     current_target = exact(15)
-    expect(preflight('rotate_entity', { unit_number: 15 })).toMatchObject({ ok: true, field: 'unit_number' })
+    // The shared hydraulic guard needs current visibility and native proof that
+    // this fixture's solid furnace has no fluid boxes before accepting rotation.
+    ;(held.actor.force as any).is_chunk_visible = () => true
+    ;(current_target as any).prototype = { fluidbox_prototypes: [] }
+    ;(current_target as any).fluids_count = 0
+    const rotation = preflight('rotate_entity', { unit_number: 15 })
+    expect(rotation, JSON.stringify(rotation)).toMatchObject({ ok: true, field: 'unit_number' })
     expect(preflight('rotate_entity', { unit_number: 15 }).transfer).toBeUndefined()
 
     current_target = undefined

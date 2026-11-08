@@ -80,6 +80,7 @@ export function deployment(overrides = {}) {
 // Mirrors the strict receipt task types Autorio reports per admitted operation.
 const TASK_TYPES_BY_OPERATION = {
   gather_resource: ['walking_to_entity', 'mining'],
+  mine_resource_at: ['mining'],
   mine_entity: ['mining'],
   harvest_product: ['harvesting'],
   craft_item: ['crafting'],
